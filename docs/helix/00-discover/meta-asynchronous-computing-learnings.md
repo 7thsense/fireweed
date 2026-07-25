@@ -37,21 +37,21 @@ queue's flexibility advantages and lifecycle/index cost as their price.
 
 ## HELIX Usage
 
-This resource informs pqueue's product boundary and integration guidance. Use it to preserve the PRD's
+This resource informs fireweed's product boundary and integration guidance. Use it to preserve the PRD's
 non-goal for downstream rate enforcement, to keep worker execution policy out of the queue engine, and to
-explain when a stream is a better primitive than pqueue.
+explain when a stream is a better primitive than fireweed.
 
 ## Authority Boundary
 
-The post describes Meta's wider Async platform, not a requirement that pqueue build a scheduler, worker
+The post describes Meta's wider Async platform, not a requirement that fireweed build a scheduler, worker
 runtime, push transport, or multi-source ingestion framework. It supports a clean extension boundary:
-pqueue owns durable ordered work state; callers or adjacent routing components own compute admission and
+fireweed owns durable ordered work state; callers or adjacent routing components own compute admission and
 downstream policy.
 
 ## Review Checklist
 
 - [x] Source URL and access date are present
 - [x] Summary is concise and source-faithful
-- [x] Findings are relevant to pqueue discovery
+- [x] Findings are relevant to fireweed discovery
 - [x] HELIX usage is specific
 - [x] Boundary prevents over-applying the source

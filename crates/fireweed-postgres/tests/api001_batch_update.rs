@@ -1,7 +1,7 @@
 //! Focused live-Postgres proofs for API-001 `BatchUpdate`.
 //!
 //! Run with:
-//! `PQUEUE_PG_TEST_URL=postgres://postgres:pq@127.0.0.1:5433/postgres cargo test -p fireweed-postgres --test api001_batch_update`
+//! `FIREWEED_PG_TEST_URL=postgres://postgres:fireweed@127.0.0.1:5433/postgres cargo test -p fireweed-postgres --test api001_batch_update`
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,18 +21,18 @@ use fireweed_postgres::PostgresRelationalBackend;
 fn fresh_schema() -> String {
     static N: AtomicU64 = AtomicU64::new(0);
     format!(
-        "pq_api001_update_{}_{}",
+        "fireweed_api001_update_{}_{}",
         std::process::id(),
         N.fetch_add(1, Ordering::SeqCst)
     )
 }
 
 fn pg_url(test: &str) -> Option<String> {
-    match std::env::var("PQUEUE_PG_TEST_URL") {
+    match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) => Some(url),
         Err(_) => {
             eprintln!(
-                "POSTGRES API-001 BATCH UPDATE SKIPPED ({test}) — set PQUEUE_PG_TEST_URL to a live DB"
+                "POSTGRES API-001 BATCH UPDATE SKIPPED ({test}) — set FIREWEED_PG_TEST_URL to a live DB"
             );
             None
         }
@@ -331,9 +331,9 @@ fn batch_update_preserves_order_and_idempotency_across_mixed_outcomes() {
             .unwrap();
         let row = client
             .query_one(
-                "SELECT metadata,(SELECT array_agg(gate_key ORDER BY gate_key) FROM pqueue_item_gates g \
+                "SELECT metadata,(SELECT array_agg(gate_key ORDER BY gate_key) FROM fireweed_item_gates g \
                  WHERE g.tenant_id=i.tenant_id AND g.queue_id=i.queue_id AND g.item_id=i.item_id) \
-                 FROM pqueue_items i WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
+                 FROM fireweed_items i WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
                 &[&shard.tenant_id.as_str(), &shard.queue_id.as_str(), &ids[2].to_string()],
             )
             .unwrap();
@@ -432,8 +432,8 @@ fn stale_epoch_and_snapshot_tail_rebuild_preserve_batch_update_replay() {
         let before: (i64, i64, i64, String) = {
             let row = client
                 .query_one(
-                    "SELECT c.next_seq,(SELECT COUNT(*) FROM pqueue_commands p WHERE p.tenant=c.tenant AND p.queue=c.queue), \
-                            i.item_version,i.fields FROM relational_cursor c JOIN pqueue_items i \
+                    "SELECT c.next_seq,(SELECT COUNT(*) FROM fireweed_commands p WHERE p.tenant=c.tenant AND p.queue=c.queue), \
+                            i.item_version,i.fields FROM relational_cursor c JOIN fireweed_items i \
                             ON i.tenant_id=c.tenant AND i.queue_id=c.queue \
                       WHERE c.tenant=$1 AND c.queue=$2 AND i.item_id=$3",
                     &[&shard.tenant_id.as_str(), &shard.queue_id.as_str(), &ids[0].to_string()],
@@ -457,8 +457,8 @@ fn stale_epoch_and_snapshot_tail_rebuild_preserve_batch_update_replay() {
         );
         let row = client
             .query_one(
-                "SELECT c.next_seq,(SELECT COUNT(*) FROM pqueue_commands p WHERE p.tenant=c.tenant AND p.queue=c.queue), \
-                        i.item_version,i.fields FROM relational_cursor c JOIN pqueue_items i \
+                "SELECT c.next_seq,(SELECT COUNT(*) FROM fireweed_commands p WHERE p.tenant=c.tenant AND p.queue=c.queue), \
+                        i.item_version,i.fields FROM relational_cursor c JOIN fireweed_items i \
                         ON i.tenant_id=c.tenant AND i.queue_id=c.queue \
                   WHERE c.tenant=$1 AND c.queue=$2 AND i.item_id=$3",
                 &[&shard.tenant_id.as_str(), &shard.queue_id.as_str(), &ids[0].to_string()],

@@ -18,13 +18,13 @@ ddx:
 **Title**: The backend is the orthogonal product `LogStore × ProjectionStore × ControlPlane`, assembled by one generic `ComposedBackend`
 **Status**: Accepted, superseded in part by ADR-015 (the synchronous `Backend::write(f)` and
 `std::sync::Mutex<Inner<L, P>>` mechanism only). The generic `ComposedBackend<L, P, C>` is
-implemented in `crates/pqueue-engine/src/compose.rs` and the `objectlog/hybrid` composition shipped;
+implemented in `crates/fireweed-engine/src/compose.rs` and the `objectlog/hybrid` composition shipped;
 remaining phased work tracks as beads)
 **Related**: ADR-001 (CQRS log/projection), ADR-007 (hexagonal & two interfaces), ADR-008 (queue as
 shard unit & two projection families — **superseded in part**, see below), ADR-009 (engine-enforced
 coordination), TD-001 (backend contracts / conformance capability classes), TD-003 (ownership & epoch
 fencing), TD-007 (durability), ADR-015 (full-async storage boundaries). Conformance harness:
-`crates/pqueue-conformance`.
+`crates/fireweed-conformance`.
 
 ## Context
 
@@ -32,13 +32,13 @@ Every driven backend today is a **monolith**. `MemoryBackend`, `SqliteBackend`, 
 `PostgresBackend`, and the two relational backends each bundle a specific command **log** with a specific
 **projection** and re-implement *every* engine port over that pair. The orchestration logic (claim,
 push, upsert, finalize, renew, reassign, purge, update-fields, reclaim, tick) is then duplicated almost
-verbatim across crates: compare `pqueue-memory/src/lib.rs` and `pqueue-sqlite/src/lib.rs` — they differ
+verbatim across crates: compare `fireweed-memory/src/lib.rs` and `fireweed-sqlite/src/lib.rs` — they differ
 **only** in the log substrate (an in-memory `LogData` vs durable sqlite rows) and where the epoch lives.
 Everything else — pre-validate against the projection, mint ids from `QueueCounters`, build the envelope,
 append+apply atomically, render the result from the projection — is byte-for-byte identical.
 
 That duplication is the root cost ADR-007 set out to remove ("one shared in-memory projection + swappable
-log stores") but never finished: the projection state machine *was* extracted into `pqueue-projection`
+log stores") but never finished: the projection state machine *was* extracted into `fireweed-projection`
 (`ProjectionData`, `LogData`, `commit`), yet the **assembly** of log + projection into a backend was left
 per-crate. ADR-008 then framed storage as **two projection families** (in-memory log-replay vs
 DB-authoritative relational — a label ADR-013 has since retired; the relational projection is a
@@ -67,7 +67,7 @@ per-backend re-implementation of the orchestration ports — those live once, ge
 
 ### `objectlog/hybrid-*` projection contracts
 
-`PQUEUE_LOG_BACKEND=objectlog` with a hybrid projection has two named contracts.
+`FIREWEED_LOG_BACKEND=objectlog` with a hybrid projection has two named contracts.
 The old unqualified `objectlog/hybrid` spelling is not precise enough for
 governing requirements:
 
@@ -84,7 +84,7 @@ Both modes compose the generic segmented object-log group commit runtime with a
 `HybridProjectionStore`:
 
 ```
-ComposedBackend<pqueue_objectlog::ObjectLog, HybridProjectionStore, InProcessControlPlane>
+ComposedBackend<fireweed_objectlog::ObjectLog, HybridProjectionStore, InProcessControlPlane>
 ```
 
 The hybrid projection is one `ProjectionStore` axis, not a new backend monolith.
@@ -187,7 +187,7 @@ budget.
 ### Robustness is a **checked invariant**, not a per-backend property
 
 Any `L × P × C` is a backend the instant it type-checks, but it is only **correct** once it passes the
-TD-001 conformance suite (`pqueue-conformance`). The suite is the contract; composition is the mechanism.
+TD-001 conformance suite (`fireweed-conformance`). The suite is the contract; composition is the mechanism.
 This ADR's Phase 1 proves the principle by re-expressing two existing monoliths as compositions and running
 the *identical* shared suite against them.
 
@@ -303,7 +303,7 @@ ownership; epoch fencing) are unchanged.
 ## Decision note (2026-07-08, DDx B3.6): retain `SqliteRelationalBackend` after composed parity
 
 **Decision.** `SqliteRelationalBackend` (the monolithic DB-authoritative sqlite relational backend,
-`crates/pqueue-sqlite/src/relational.rs:4165`) is **retained**, not retired, at this time. This closes DDx
+`crates/fireweed-sqlite/src/relational.rs:4165`) is **retained**, not retired, at this time. This closes DDx
 B3.6 ("retire or justify … after composed parity") on the **justify** branch.
 
 **Why the original keep-reason is gone but retirement is still not clean.** ADR-012 kept the sqlite
@@ -312,39 +312,39 @@ relational monolith as the *sole owner* of the relational-class capabilities —
 **ported those onto the composition** (`ComposedBackend<SqliteRelational, SqliteRelational,
 InProcessControlPlane>`, aliased `ComposedSqliteRelationalBackend`, built by
 `composed_sqlite_relational_in_memory()` / `composed_sqlite_relational(path)` at
-`crates/pqueue-sqlite/src/relational.rs:9809-9829`), delegating to the relational-capable `ProjectionStore`
+`crates/fireweed-sqlite/src/relational.rs:9809-9829`), delegating to the relational-capable `ProjectionStore`
 axis. So the *original* justification for the monolith no longer holds. Retirement is nonetheless declined
 because it is **broad and would drop live coverage**, not a clean drop-in:
 
 - **Only one production (non-test) construction site exists** — the benchmark harness
-  `crates/pqueue-bench/src/main.rs:295` (`run_sqlite_relational`), which deliberately measures the
+  `crates/fireweed-bench/src/main.rs:295` (`run_sqlite_relational`), which deliberately measures the
   DB-authoritative monolith as a *distinct backend family* from the composed sqlite-log path. Every other
   construction site is `#[cfg(test)]` / a `tests/` target.
 - **Two conformance suites run against the monolith and are mirrored nowhere on the composed relational
   path:** `adr011_typed_conformance_suite!` and `claimed_item_shape_conformance_tests!(@whole_cohort …)`
-  (`crates/pqueue-sqlite/tests/relational_conformance.rs:121-122`). The whole-cohort claim-*shape* arm is
+  (`crates/fireweed-sqlite/tests/relational_conformance.rs:121-122`). The whole-cohort claim-*shape* arm is
   explicitly monolith-only today (`relational_conformance.rs:129`). Retiring the monolith would silently
   delete this coverage unless the suites are first re-homed onto `composed_sqlite_relational_in_memory()`.
 - **The monolith is the DB-authoritative reference oracle for BQ-13 head-to-head cross-family parity**
-  (`crates/pqueue-sqlite/tests/cross_family_parity.rs:20-22`, `scenarios::cross_family_core_parity`). It is
+  (`crates/fireweed-sqlite/tests/cross_family_parity.rs:20-22`, `scenarios::cross_family_core_parity`). It is
   an *independent* relational implementation (no log/projection composition machinery), which is precisely
   what makes it a trustworthy differential oracle against the in-memory family. Re-homing that role onto the
   composed relational backend would cross-check the composition against itself, weakening the differential.
 - **Blast radius:** retirement means deleting the ~4,000-line struct plus its ~24 port impls
   (`relational.rs:5871`–`8101`) and migrating/re-homing ~5,000 lines across six test targets
   (`relational_conformance.rs`, `relational_commit.rs`, `relational_reconnect.rs`, `cross_family_parity.rs`,
-  the `commit_transition_scenario_tests` in `pqueue-conformance/src/scenarios.rs`, and the in-file unit-test
+  the `commit_transition_scenario_tests` in `fireweed-conformance/src/scenarios.rs`, and the in-file unit-test
   module `relational.rs:9931`+). That is a high-risk, broad change, not the low-risk deletion B3.6 targets.
 
 **What composed parity DOES now cover** (so the monolith carries no *unique feature*, only unique *coverage /
 oracle* duties): the full `core_suite!(@atomic)` at parity with the monolith
 (`relational_conformance.rs:130-134`); rich cohort / whole-group / same-group claim **selection**,
-active-scope **discovery**, and **gates** (`crates/pqueue-sqlite/tests/composed_relational_parity.rs`);
+active-scope **discovery**, and **gates** (`crates/fireweed-sqlite/tests/composed_relational_parity.rs`);
 durable recovery-on-open (`composed_relational_reconnect.rs`, `durable_reconnect_suite!`); terminal reap
 (`composed_relational_terminal_reap.rs`); and every orchestration port generically — including
 `CommitTransitionPort`, `RecoveryReadPort`, `HotProjectionQueryPort`, `IndexQueryPort`,
 `HistoricalProjectionRead`, and `ReclaimDriver` — implemented once on `ComposedBackend`
-(`crates/pqueue-engine/src/compose.rs:3217`, `3430`, `3067`, `2910`, `2824`, `2639`).
+(`crates/fireweed-engine/src/compose.rs:3217`, `3430`, `3067`, `2910`, `2824`, `2639`).
 
 **Tracked follow-up condition for eventual retirement (ADR-012 Phase 5, "remove the remaining monoliths").**
 Retire `SqliteRelationalBackend` once ALL of the following hold, so no coverage or oracle guarantee is lost:
@@ -353,7 +353,7 @@ Retire `SqliteRelationalBackend` once ALL of the following hold, so no coverage 
    relational module in `relational_conformance.rs`).
 2. BQ-13 head-to-head `cross_family_core_parity` runs with a relational representative whose independence
    from the composition is either preserved or explicitly accepted as no longer needed.
-3. The `pqueue-bench` `run_sqlite_relational` shape is repointed at (or dropped in favor of) the composed
+3. The `fireweed-bench` `run_sqlite_relational` shape is repointed at (or dropped in favor of) the composed
    relational constructor.
 Then delete the `SqliteRelationalBackend` struct and its port impls, keeping the reusable free-function SQL
 internals the composed `SqliteRelational` axis already depends on.

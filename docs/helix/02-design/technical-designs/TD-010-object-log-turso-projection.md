@@ -48,7 +48,7 @@ In scope:
 
 - async storage-axis migration required to call a native-async projection without blocking;
 - a driver-neutral relational schema/codec/query substrate shared by SQLite and Turso;
-- `pqueue-turso`, pinned to Turso 0.7.0 in ordinary local WAL mode;
+- `fireweed-turso`, pinned to Turso 0.7.0 in ordinary local WAL mode;
 - feature-gated `objectlog/turso` server composition;
 - full relational differential, cancellation, replay, reopen, and server conformance.
 
@@ -72,7 +72,7 @@ whose manifest remains the acknowledged-command authority.
 - Async axes use shared receivers. `AsyncComposedBackend` takes a typed `SeparateReplayCommit` strategy
   for object-log profiles plus an injected runtime-neutral owned-task dispatcher; it never holds an
   axis-wide async mutex or infers append/apply sequencing from a durability enum.
-- Shared SQL, schema, codecs, and typed rows live in `pqueue-relational`; Turso never depends on the
+- Shared SQL, schema, codecs, and typed rows live in `fireweed-relational`; Turso never depends on the
   SQLite adapter and the schema is not copied.
 - `TursoProjectionStore` owns `turso::Database` plus a connection/transaction coordinator using
   `tokio::sync` primitives. The first implementation serializes writes to match the reference projection,
@@ -96,23 +96,23 @@ build size require an exact pin and a focused validation lane.
 - **Changes**: introduce native async axes, typed raw commit/fault controls, whole-transaction blocking
   adapters, explicit atomic-versus-replay commit strategies, injected owned-task dispatch, per-queue
   mutation gates, async recovery/inspection, and staged removal of the legacy sync seam.
-- **Files**: `crates/pqueue-engine/src/port.rs`, `crates/pqueue-engine/src/compose.rs`,
-  `crates/pqueue-engine/src/lib.rs`, conformance fault/scenario modules.
+- **Files**: `crates/fireweed-engine/src/port.rs`, `crates/fireweed-engine/src/compose.rs`,
+  `crates/fireweed-engine/src/lib.rs`, conformance fault/scenario modules.
 
 ### New: driver-neutral relational substrate
 
 - **Purpose**: one exact schema and one set of encodings/query constants for SQLite and Turso.
 - **Interfaces**: pure owned values in; SQL text, bound values, and typed rows out.
-- **Files**: `crates/pqueue-relational/src/{lib,schema,codec,row}.rs`.
+- **Files**: `crates/fireweed-relational/src/{lib,schema,codec,row}.rs`.
 
 The extraction must be behavior-preserving for SQLite before Turso consumes it. Driver transaction and
 row APIs remain in their adapter crates.
 
-### New: `pqueue-turso`
+### New: `fireweed-turso`
 
 - **Purpose**: native-async local derived projection.
 - **Interfaces**: async projection/read/recovery axes from TD-001.
-- **Files**: `crates/pqueue-turso/src/{lib,config,apply,query,error}.rs` and `tests/**`.
+- **Files**: `crates/fireweed-turso/src/{lib,config,apply,query,error}.rs` and `tests/**`.
 
 `open` performs, consumes, and verifies individual settings for WAL, synchronous normal (`1`), and busy
 timeout `5000`. It does not send the rusqlite PRAGMA batch through `execute_batch`, because the probe proved
@@ -125,7 +125,7 @@ that call can report failure after changing journal mode.
 - Add a feature-gated Turso alias/profile and await create, replay, apply, read, recovery, and shutdown.
 - Ack only after object-log manifest commit and the profile's required Turso response barrier. A lost
   response is resolved from the durable log/request outcome.
-- **Files**: `crates/pqueue-server/src/object_log_sqlite.rs`, server configuration and tests.
+- **Files**: `crates/fireweed-server/src/object_log_sqlite.rs`, server configuration and tests.
 
 ### Modified: blocking reference adapters
 
@@ -143,7 +143,7 @@ that call can report failure after changing journal mode.
 | Storage traits | ADR-015 / TD-001 | Runtime-neutral `Send` futures; no Tokio type crosses into domain ports. |
 
 The exact environment/config spellings are owned by the existing server configuration surface. The
-implementation uses `PQUEUE_PROJECTION_BACKEND=turso` and `PQUEUE_TURSO_PROJECTION_PATH` only if those
+implementation uses `FIREWEED_PROJECTION_BACKEND=turso` and `FIREWEED_TURSO_PROJECTION_PATH` only if those
 names pass the server's existing compatibility and validation conventions.
 
 ## Data Model Changes
@@ -157,7 +157,7 @@ upgrade refuses a newer/unknown schema until the compatibility probe and migrati
 | From | To | Method | Data |
 |------|----|--------|------|
 | `AsyncComposedBackend` / segmented backend | `SeparateReplayCommit` + async storage axes | owned dispatched task | typed commands, positions, expected epoch, replay outcome |
-| `pqueue-turso` | Turso 0.7 local database | async driver | relational schema, transactions, queries |
+| `fireweed-turso` | Turso 0.7 local database | async driver | relational schema, transactions, queries |
 | object log | Turso projection | ordered replay/apply | sealed committed batches |
 | server config | feature-gated composition | validated construction | projection kind and local path |
 
@@ -220,7 +220,7 @@ upgrade refuses a newer/unknown schema until the compatibility probe and migrati
    reference composition/memory.
 3. Wrap blocking SQLite/object-log/Postgres transactions and remove composition-root blocking shims.
 4. Extract the driver-neutral relational substrate with SQLite parity.
-5. Implement and differentially test `pqueue-turso`.
+5. Implement and differentially test `fireweed-turso`.
 6. Wire feature-gated object-log + Turso server profile and focused CI/render validation.
 7. Remove the remaining legacy synchronous axes after repository-wide conformance passes.
 

@@ -10,13 +10,13 @@
 # (immune to this sandbox's host->pod sustained-loopback signal-16 kill).
 #
 # For each owner count K in {2,4,8}: deploy K independent fireweed-service Deployments+Services (segmented
-# object_log_sqlite_projection, distinct PQUEUE_NODE_ID, DISJOINT PQUEUE_BOOTSTRAP_QUEUES, emptyDir
+# object_log_sqlite_projection, distinct FIREWEED_NODE_ID, DISJOINT FIREWEED_BOOTSTRAP_QUEUES, emptyDir
 # medium=Memory tmpfs), run a load Job that drives the workload + proves one-owner-per-queue, collect the
 # measured RESULT json. Three full sweeps; each sweep folds its 2/4/8 results into one E2 ledger row
 # (release-tier only when all four bars hold). Reliable pass == all sweeps release-tier.
 set -euo pipefail
 
-CLUSTER=${CLUSTER:-pqueue-e2}
+CLUSTER=${CLUSTER:-fireweed-e2}
 IMAGE=${IMAGE:-fireweed-service:e2}
 SERVER_CPU_LIMIT=${SERVER_CPU_LIMIT:-1300m}
 SERVER_CPU_REQUEST=${SERVER_CPU_REQUEST:-1000m}
@@ -78,7 +78,7 @@ build_and_load() {
 # Emit a server Deployment+Service for one owner into stdout.
 server_manifest() {
   local ns=$1 k=$2 idx=$3
-  local name="pq-o${idx}"
+  local name="fireweed-o${idx}"
   local node_id=$((idx + 1))
   local queues=""
   for ((j = 0; j < QUEUES_PER_OWNER; j++)); do
@@ -100,7 +100,7 @@ spec:
       labels: { app: ${name} }
     spec:
       containers:
-        - name: pqueue
+        - name: fireweed
           image: ${IMAGE}
           imagePullPolicy: Never
           ports: [ { containerPort: 8080 } ]
@@ -108,18 +108,18 @@ spec:
             requests: { cpu: "${SERVER_CPU_REQUEST}", memory: "256Mi" }
             limits: { cpu: "${SERVER_CPU_LIMIT}", memory: "1Gi" }
           env:
-            - { name: PQUEUE_LOG_BACKEND, value: "objectlog" }
-            - { name: PQUEUE_PROJECTION_BACKEND, value: "sqlite" }
-            - { name: PQUEUE_OBJECT_LOG_MODE, value: "segmented" }
-            - { name: PQUEUE_SEGMENT_TARGET_BYTES, value: "${SEG_TARGET_BYTES}" }
-            - { name: PQUEUE_SEGMENT_MAX_LATENCY_MS, value: "${SEG_LATENCY_MS}" }
-            - { name: PQUEUE_WORKER_THREADS, value: "${WORKER_THREADS}" }
-            - { name: PQUEUE_NODE_ID, value: "${node_id}" }
-            - { name: PQUEUE_OBJECT_LOG_ROOT, value: "/data/olog" }
-            - { name: PQUEUE_SQLITE_PROJECTION_PATH, value: "/data/proj.db" }
-            - { name: PQUEUE_LISTEN_ADDR, value: "0.0.0.0:8080" }
-            - { name: PQUEUE_BOOTSTRAP_QUEUES, value: "${queues}" }
-            - { name: PQUEUE_RECLAIM_INTERVAL_MS, value: "60000" }
+            - { name: FIREWEED_LOG_BACKEND, value: "objectlog" }
+            - { name: FIREWEED_PROJECTION_BACKEND, value: "sqlite" }
+            - { name: FIREWEED_OBJECT_LOG_MODE, value: "segmented" }
+            - { name: FIREWEED_SEGMENT_TARGET_BYTES, value: "${SEG_TARGET_BYTES}" }
+            - { name: FIREWEED_SEGMENT_MAX_LATENCY_MS, value: "${SEG_LATENCY_MS}" }
+            - { name: FIREWEED_WORKER_THREADS, value: "${WORKER_THREADS}" }
+            - { name: FIREWEED_NODE_ID, value: "${node_id}" }
+            - { name: FIREWEED_OBJECT_LOG_ROOT, value: "/data/olog" }
+            - { name: FIREWEED_SQLITE_PROJECTION_PATH, value: "/data/proj.db" }
+            - { name: FIREWEED_LISTEN_ADDR, value: "0.0.0.0:8080" }
+            - { name: FIREWEED_BOOTSTRAP_QUEUES, value: "${queues}" }
+            - { name: FIREWEED_RECLAIM_INTERVAL_MS, value: "60000" }
           readinessProbe:
             tcpSocket: { port: 8080 }
             periodSeconds: 1
@@ -151,7 +151,7 @@ spec_json() {
       qs+="\"t1:o${k}n${idx}q${j}\""
     done
     [[ -n "$nodes" ]] && nodes+=","
-    nodes+="{\"addr\":\"pq-o${idx}.${ns}.svc.cluster.local:8080\",\"queues\":[${qs}]}"
+    nodes+="{\"addr\":\"fireweed-o${idx}.${ns}.svc.cluster.local:8080\",\"queues\":[${qs}]}"
   done
   printf '{"owners":%d,"nodes":[%s]}' "$k" "$nodes"
 }
@@ -220,7 +220,7 @@ run_count() {
     server_manifest "$ns" "$k" "$idx" | kubectl apply -f - >&2
   done
   for ((idx = 0; idx < k; idx++)); do
-    kubectl -n "$ns" rollout status deploy/"pq-o${idx}" --timeout=120s >&2
+    kubectl -n "$ns" rollout status deploy/"fireweed-o${idx}" --timeout=120s >&2
   done
   kubectl -n "$ns" create configmap loadgen-spec \
     --from-literal=spec.json="$(spec_json "$ns" "$k")" >&2

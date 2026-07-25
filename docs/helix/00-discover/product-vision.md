@@ -11,7 +11,7 @@ ddx:
 
 ## Mission Statement
 
-pqueue is a batch-centric state-machine queue engine for applications that need
+fireweed is a batch-centric state-machine queue engine for applications that need
 ordered, recoverable work execution at scale. It provides one external
 transaction contract across local memory, SQLite, Postgres, and object-log
 deployment profiles: accepted mutations are durable and visible, rejected
@@ -22,16 +22,16 @@ idempotent writes, durable claims, batch execution, and no lost work.
 
 ## Positioning
 
-For engineers building high-volume scheduling and execution systems, pqueue is a
+For engineers building high-volume scheduling and execution systems, fireweed is a
 durable queue that orders eligible work by a queue-defined priority model and
 maps that workflow onto the right backing store without exposing the storage
 protocol to callers. Unlike FIFO queues with scheduler logic layered around them,
-pqueue makes priority, eligibility, claim leases, retries, final state, and
+fireweed makes priority, eligibility, claim leases, retries, final state, and
 transaction integrity part of the queue contract.
 
 ## Vision
 
-When pqueue succeeds, applications have one dependable primitive for accepting,
+When fireweed succeeds, applications have one dependable primitive for accepting,
 ordering, claiming, retrying, and completing work.
 
 **North Star**: Every accepted item is durably executed according to its queue's
@@ -77,6 +77,6 @@ idempotently, claim compatible batches of eligible items, and record outcomes.
 ## Why Now
 
 Seventh Sense needs a shared queue backbone for several scheduled and
-queue-like systems, but the underlying problem is general. Defining pqueue as a
+queue-like systems, but the underlying problem is general. Defining fireweed as a
 general durable priority queue now prevents Seventh Sense-specific table and
 worker assumptions from becoming the core product contract.

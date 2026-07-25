@@ -64,7 +64,7 @@ existing broad GitHub Actions kind matrix will not gain a Turso dimension.
 
 | Type | Impact |
 |------|--------|
-| Positive | pqueue gains a Rust-native SQL projection without rewriting its relational model as KV structures. |
+| Positive | fireweed gains a Rust-native SQL projection without rewriting its relational model as KV structures. |
 | Positive | The adapter exercises ADR-015 with a genuinely native-async store. |
 | Negative | Turso is pre-1.0 and its compatibility surface must be re-probed on every upgrade. |
 | Negative | Cold builds are materially larger; Turso stays out of the default multi-kind matrix. |

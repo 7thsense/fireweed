@@ -100,7 +100,7 @@ async stores await their drivers inside the owned task.
 |--------|------|------|------------|
 | Sequential async append then apply | Simple generic composition | Cannot provide atomic-store rollback; cancellation can strand append-only state | Rejected |
 | One global async mutex around log and projection | Preserves coarse ordering | Serializes unrelated queues and hides adapter concurrency | Rejected |
-| Spawn directly with Tokio inside `pqueue-engine` | Straightforward cancellation ownership | Violates runtime-neutral domain boundary and makes embedded runtimes non-portable | Rejected |
+| Spawn directly with Tokio inside `fireweed-engine` | Straightforward cancellation ownership | Violates runtime-neutral domain boundary and makes embedded runtimes non-portable | Rejected |
 | **Injected commit strategy plus owned-task dispatcher** | Makes atomicity, replay ordering, runtime ownership, and capacity explicit | Adds construction types and adapter-specific implementations | **Selected** |
 
 ## Consequences
@@ -108,7 +108,7 @@ async stores await their drivers inside the owned task.
 | Type | Impact |
 |------|--------|
 | Positive | Atomic and eventual-apply profiles cannot be accidentally composed through the wrong commit sequence. |
-| Positive | Started-commit cancellation semantics are enforceable without a Tokio dependency in `pqueue-engine`. |
+| Positive | Started-commit cancellation semantics are enforceable without a Tokio dependency in `fireweed-engine`. |
 | Positive | Shared receivers and adapter-owned concurrency permit unrelated queues to progress. |
 | Negative | Memory, blocking, and native-async profiles require explicit strategy and dispatcher wiring. |
 | Negative | The additive migration carries legacy composition until every profile has an explicit strategy. |
@@ -150,5 +150,5 @@ async stores await their drivers inside the owned task.
 - `docs/helix/02-design/adr/ADR-015-full-async-storage-boundaries.md`
 - `docs/helix/02-design/technical-designs/TD-001-storage-architecture-backend-contracts.md`
 - `docs/helix/02-design/technical-designs/TD-010-object-log-turso-projection.md`
-- `crates/pqueue-engine/src/async_store.rs`
-- `crates/pqueue-engine/src/commit.rs`
+- `crates/fireweed-engine/src/async_store.rs`
+- `crates/fireweed-engine/src/commit.rs`

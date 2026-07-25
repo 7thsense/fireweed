@@ -44,9 +44,9 @@ COPY --from=builder /build/target/release/fireweed-verify-ledger /usr/local/bin/
 USER fireweed
 
 # Default runtime configuration; override per deployment via Helm values.
-ENV PQUEUE_LISTEN_ADDR=0.0.0.0:8080 \
-    PQUEUE_LOG_BACKEND=objectlog \
-    PQUEUE_PROJECTION_BACKEND=inmemory
+ENV FIREWEED_LISTEN_ADDR=0.0.0.0:8080 \
+    FIREWEED_LOG_BACKEND=objectlog \
+    FIREWEED_PROJECTION_BACKEND=inmemory
 
 # RESP service listens here.
 EXPOSE 8080

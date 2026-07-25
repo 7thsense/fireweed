@@ -24,31 +24,31 @@
 //!
 //! ## ENV-GATING (mirrors the postgres E0/E1 baseline + the MinIO substrate test)
 //!
-//! Gated on `PQUEUE_S3_TEST_ENDPOINT`; absent it, a LOUD skip prints and the test returns green (the E3
+//! Gated on `FIREWEED_S3_TEST_ENDPOINT`; absent it, a LOUD skip prints and the test returns green (the E3
 //! evidence is DEFERRED, never a hidden/fabricated pass). The two perf lanes:
 //!   - SMOKE (default, any reachable MinIO): MEASURES + reports + emits SMOKE-tier rows. Bars are NOT
 //!     hard-failed (a small resident over a casual endpoint is not a valid release perf environment).
-//!   - PERF (`PQUEUE_PERF_ENV=1` AND the release resident shape `PQUEUE_E3_RESIDENT=10000000`): hard-asserts
+//!   - PERF (`FIREWEED_PERF_ENV=1` AND the release resident shape `FIREWEED_E3_RESIDENT=10000000`): hard-asserts
 //!     the bars and emits RELEASE-tier rows only when they are met.
 //!
 //! ## Running it (orbstack networking — this host cannot reach docker PUBLISHED ports; use the container IP)
 //!
 //! ```text
-//! docker run -d --name pqe3-minio -e MINIO_ROOT_USER=minioadmin \
+//! docker run -d --name fireweed-e3-minio -e MINIO_ROOT_USER=minioadmin \
 //!     -e MINIO_ROOT_PASSWORD=minioadmin minio/minio server /data
-//! IP=$(docker inspect pqe3-minio --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+//! IP=$(docker inspect fireweed-e3-minio --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
 //! # routine live smoke (small resident, fast):
-//! PQUEUE_S3_TEST_ENDPOINT="http://$IP:9000" \
+//! FIREWEED_S3_TEST_ENDPOINT="http://$IP:9000" \
 //!     cargo test -p fireweed-server --release --test performance_object_log_e3_live_tests -- --nocapture
 //! # the full TP-002 E3 RELEASE shape (10M-item snapshot-tail recovery; hard-fails the bars):
-//! PQUEUE_PERF_ENV=1 PQUEUE_E3_RESIDENT=10000000 PQUEUE_S3_TEST_ENDPOINT="http://$IP:9000" \
+//! FIREWEED_PERF_ENV=1 FIREWEED_E3_RESIDENT=10000000 FIREWEED_S3_TEST_ENDPOINT="http://$IP:9000" \
 //!     cargo test -p fireweed-server --release --test performance_object_log_e3_live_tests -- --nocapture
 //! ```
 //!
-//! Optional overrides: `PQUEUE_S3_TEST_BUCKET` (default `pqueue-test`), `PQUEUE_S3_TEST_ACCESS_KEY` /
-//! `PQUEUE_S3_TEST_SECRET_KEY` (default `minioadmin`), `PQUEUE_E3_LOAD_BATCH` (items per push command during
-//! the recovery-load phase, default 1000), `PQUEUE_E3_ACK_PUSHES` (pushes per ack-latency config, default
-//! 100000), `PQUEUE_E3_ACK_CONCURRENCY` (concurrent push tasks, default 384), `PQUEUE_E3_LOAD_CONCURRENCY`
+//! Optional overrides: `FIREWEED_S3_TEST_BUCKET` (default `fireweed-test`), `FIREWEED_S3_TEST_ACCESS_KEY` /
+//! `FIREWEED_S3_TEST_SECRET_KEY` (default `minioadmin`), `FIREWEED_E3_LOAD_BATCH` (items per push command during
+//! the recovery-load phase, default 1000), `FIREWEED_E3_ACK_PUSHES` (pushes per ack-latency config, default
+//! 100000), `FIREWEED_E3_ACK_CONCURRENCY` (concurrent push tasks, default 384), `FIREWEED_E3_LOAD_CONCURRENCY`
 //! (concurrent recovery-load tasks, default 8).
 
 use std::collections::BTreeMap;
@@ -152,8 +152,8 @@ fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std:
     use fireweed_conformance::{envelope, item};
     use fireweed_engine::{PushCommand, QueueCommand};
 
-    let postgres_url = std::env::var("PQUEUE_E3_POSTGRES_POINTER_DATABASE_URL")
-        .expect("governed no-CAS proof requires PQUEUE_E3_POSTGRES_POINTER_DATABASE_URL");
+    let postgres_url = std::env::var("FIREWEED_E3_POSTGRES_POINTER_DATABASE_URL")
+        .expect("governed no-CAS proof requires FIREWEED_E3_POSTGRES_POINTER_DATABASE_URL");
     let raw_objects: Arc<dyn BlobStore> = Arc::new(
         S3BlobStore::new(
             &s3.endpoint,
@@ -521,7 +521,7 @@ fn projection_path(label: &str) -> String {
         .unwrap_or(0);
     std::env::temp_dir()
         .join(format!(
-            "pqueue-e3-{label}-{}-{n}-{nanos}.db",
+            "fireweed-e3-{label}-{}-{n}-{nanos}.db",
             std::process::id()
         ))
         .to_str()
@@ -1608,11 +1608,13 @@ async fn run_release_load_shape_calibration(
 #[ignore = "requires live MinIO release-shape batching calibration"]
 async fn e3_release_load_shape_calibration() {
     let s3 = S3Env {
-        endpoint: std::env::var("PQUEUE_S3_TEST_ENDPOINT").expect("live MinIO endpoint"),
-        bucket: std::env::var("PQUEUE_S3_TEST_BUCKET")
-            .unwrap_or_else(|_| "pqueue-e3-load-calibration".into()),
-        access: std::env::var("PQUEUE_S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into()),
-        secret: std::env::var("PQUEUE_S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into()),
+        endpoint: std::env::var("FIREWEED_S3_TEST_ENDPOINT").expect("live MinIO endpoint"),
+        bucket: std::env::var("FIREWEED_S3_TEST_BUCKET")
+            .unwrap_or_else(|_| "fireweed-e3-load-calibration".into()),
+        access: std::env::var("FIREWEED_S3_TEST_ACCESS_KEY")
+            .unwrap_or_else(|_| "minioadmin".into()),
+        secret: std::env::var("FIREWEED_S3_TEST_SECRET_KEY")
+            .unwrap_or_else(|_| "minioadmin".into()),
     };
     S3BlobStore::new(
         &s3.endpoint,
@@ -1709,9 +1711,9 @@ where
     // The target is below four exact governed load commands with serialized-byte margin. Eight callers
     // can therefore drive a size seal without depending on host timing or the latency flusher.
     let cfg = SegmentConfig::new(RELEASE_LOAD_SEGMENT_TARGET_BYTES, 10_000).unwrap();
-    let load_concurrency = env_u64("PQUEUE_E3_LOAD_CONCURRENCY", 8).max(1);
+    let load_concurrency = env_u64("FIREWEED_E3_LOAD_CONCURRENCY", 8).max(1);
     let (store, recorder) = s3.instrumented_store(true);
-    let verification_chunk_items = env_u64("PQUEUE_E3_VERIFY_CHUNK_ITEMS", 512).clamp(1, 512);
+    let verification_chunk_items = env_u64("FIREWEED_E3_VERIFY_CHUNK_ITEMS", 512).clamp(1, 512);
 
     let load_resident = if requires_snapshot {
         resident.saturating_sub(1)
@@ -1862,7 +1864,7 @@ where
         verification_chunk_items,
     )
     .await;
-    let recovery_max_tail = env_u64("PQUEUE_RECOVERY_MAX_TAIL_COMMANDS", 1_000_000);
+    let recovery_max_tail = env_u64("FIREWEED_RECOVERY_MAX_TAIL_COMMANDS", 1_000_000);
     let recovery_stats = backend2
         .recovery_probe(&shard)
         .expect("production recovery telemetry");
@@ -2737,15 +2739,15 @@ fn profile_row(
             serde_json::json!(result.bar_met),
         );
     }
-    let storage_topology = std::env::var("PQUEUE_E3_STORAGE_TOPOLOGY").unwrap_or_else(|_| {
+    let storage_topology = std::env::var("FIREWEED_E3_STORAGE_TOPOLOGY").unwrap_or_else(|_| {
         "operator-provided live S3-compatible endpoint; storage medium not declared".into()
     });
     let topology_id =
-        std::env::var("PQUEUE_E3_STORAGE_TOPOLOGY_ID").unwrap_or_else(|_| "undeclared".into());
-    let durability_claim =
-        std::env::var("PQUEUE_E3_STORAGE_DURABILITY_CLAIM").unwrap_or_else(|_| "undeclared".into());
+        std::env::var("FIREWEED_E3_STORAGE_TOPOLOGY_ID").unwrap_or_else(|_| "undeclared".into());
+    let durability_claim = std::env::var("FIREWEED_E3_STORAGE_DURABILITY_CLAIM")
+        .unwrap_or_else(|_| "undeclared".into());
     let source_revision =
-        std::env::var("PQUEUE_E3_SOURCE_REVISION").unwrap_or_else(|_| "undeclared".into());
+        std::env::var("FIREWEED_E3_SOURCE_REVISION").unwrap_or_else(|_| "undeclared".into());
     values.insert("storage_topology_id".into(), serde_json::json!(topology_id));
     values.insert(
         "storage_durability_claim".into(),
@@ -2755,7 +2757,7 @@ fn profile_row(
 
     fireweed_release::LedgerRow {
         suite: "performance_object_log_e3_live_tests".into(),
-        command: "PQUEUE_E3_MINIO_CONTAINER=<fresh-minio-container> PQUEUE_S3_TEST_ENDPOINT=http://<minio-ip>:9000 scripts/perf/tp002-e3-minio.sh".into(),
+        command: "FIREWEED_E3_MINIO_CONTAINER=<fresh-minio-container> FIREWEED_S3_TEST_ENDPOINT=http://<minio-ip>:9000 scripts/perf/tp002-e3-minio.sh".into(),
         backend_profile: profile_run.backend_profile.into(),
         scale,
         seed: 0,
@@ -2781,11 +2783,11 @@ fn profile_row(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn performance_object_log_e3_live_tests() {
-    let Ok(endpoint) = std::env::var("PQUEUE_S3_TEST_ENDPOINT") else {
+    let Ok(endpoint) = std::env::var("FIREWEED_S3_TEST_ENDPOINT") else {
         eprintln!(
             "\n================================================================\n\
              TP-002 E3 LIVE OBJECT-LOG HARNESS SKIPPED (performance_object_log_e3_live_tests)\n\
-             set PQUEUE_S3_TEST_ENDPOINT=http://<container-ip>:9000 to run it.\n\
+             set FIREWEED_S3_TEST_ENDPOINT=http://<container-ip>:9000 to run it.\n\
              (this host cannot reach docker PUBLISHED ports; use the MinIO container IP)\n\
              The E3 matrix evidence is DEFERRED, not a hidden pass.\n\
              ================================================================\n"
@@ -2794,9 +2796,11 @@ async fn performance_object_log_e3_live_tests() {
     };
     let s3 = S3Env {
         endpoint,
-        bucket: std::env::var("PQUEUE_S3_TEST_BUCKET").unwrap_or_else(|_| "pqueue-test".into()),
-        access: std::env::var("PQUEUE_S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into()),
-        secret: std::env::var("PQUEUE_S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into()),
+        bucket: std::env::var("FIREWEED_S3_TEST_BUCKET").unwrap_or_else(|_| "fireweed-test".into()),
+        access: std::env::var("FIREWEED_S3_TEST_ACCESS_KEY")
+            .unwrap_or_else(|_| "minioadmin".into()),
+        secret: std::env::var("FIREWEED_S3_TEST_SECRET_KEY")
+            .unwrap_or_else(|_| "minioadmin".into()),
     };
     S3BlobStore::new(
         &s3.endpoint,
@@ -2809,16 +2813,16 @@ async fn performance_object_log_e3_live_tests() {
     .create_bucket()
     .expect("create/ensure bucket");
 
-    let perf_env = std::env::var("PQUEUE_PERF_ENV").is_ok();
-    let resident = env_u64("PQUEUE_E3_RESIDENT", 4_000);
-    let load_batch = env_u64("PQUEUE_E3_LOAD_BATCH", 1_000).max(1);
-    let ack_pushes = env_u64("PQUEUE_E3_ACK_PUSHES", 100_000).max(1);
-    let ack_concurrency = env_u64("PQUEUE_E3_ACK_CONCURRENCY", 384).max(1);
-    let load_concurrency = env_u64("PQUEUE_E3_LOAD_CONCURRENCY", 8).max(1);
+    let perf_env = std::env::var("FIREWEED_PERF_ENV").is_ok();
+    let resident = env_u64("FIREWEED_E3_RESIDENT", 4_000);
+    let load_batch = env_u64("FIREWEED_E3_LOAD_BATCH", 1_000).max(1);
+    let ack_pushes = env_u64("FIREWEED_E3_ACK_PUSHES", 100_000).max(1);
+    let ack_concurrency = env_u64("FIREWEED_E3_ACK_CONCURRENCY", 384).max(1);
+    let load_concurrency = env_u64("FIREWEED_E3_LOAD_CONCURRENCY", 8).max(1);
     let release_shape = resident >= RELEASE_RESIDENT;
     let require_bars = perf_env && release_shape;
     if require_bars {
-        let source_revision = std::env::var("PQUEUE_E3_SOURCE_REVISION")
+        let source_revision = std::env::var("FIREWEED_E3_SOURCE_REVISION")
             .expect("release E3 evidence requires an exact committed source revision");
         assert!(
             source_revision.len() == 40
@@ -2826,12 +2830,12 @@ async fn performance_object_log_e3_live_tests() {
             "release E3 source revision must be a full 40-character Git SHA"
         );
         assert_eq!(
-            std::env::var("PQUEUE_E3_STORAGE_TOPOLOGY_ID").as_deref(),
+            std::env::var("FIREWEED_E3_STORAGE_TOPOLOGY_ID").as_deref(),
             Ok("minio-tmpfs-8g"),
             "release E3 evidence requires wrapper-verified MinIO /data tmpfs topology"
         );
         assert_eq!(
-            std::env::var("PQUEUE_E3_STORAGE_DURABILITY_CLAIM").as_deref(),
+            std::env::var("FIREWEED_E3_STORAGE_DURABILITY_CLAIM").as_deref(),
             Ok("excluded"),
             "tmpfs evidence must exclude object-store host durability/restart claims"
         );
@@ -2842,10 +2846,10 @@ async fn performance_object_log_e3_live_tests() {
         assert_eq!(load_concurrency, RELEASE_LOAD_CONCURRENCY);
         let _ = assert_release_load_preflight();
         assert_eq!(
-            env_u64("PQUEUE_RECOVERY_MAX_TAIL_COMMANDS", 1_000_000),
+            env_u64("FIREWEED_RECOVERY_MAX_TAIL_COMMANDS", 1_000_000),
             1_000_000
         );
-        let fence_output = std::env::var("PQUEUE_E3_FENCE_EVIDENCE_OUT").expect(
+        let fence_output = std::env::var("FIREWEED_E3_FENCE_EVIDENCE_OUT").expect(
             "release E3 requires an output path for executed Postgres-pointer fence evidence",
         );
         let fence_s3 = s3.clone();
@@ -2993,13 +2997,13 @@ async fn performance_object_log_e3_live_tests() {
     if !release_shape {
         println!(
             "  NOTE: resident {resident} < release shape {RELEASE_RESIDENT}; the full TP-002 E3 release \
-             measurement is PQUEUE_PERF_ENV=1 PQUEUE_E3_RESIDENT=10000000 (this run is a smaller resident)."
+             measurement is FIREWEED_PERF_ENV=1 FIREWEED_E3_RESIDENT=10000000 (this run is a smaller resident)."
         );
     }
     if !perf_env && !runs.iter().all(|run| run.bars_met) {
         eprintln!(
             "NOTE: an E3 bar was not met in this (non-perf) environment — recorded as SMOKE evidence. The \
-             bars are hard-enforced only under PQUEUE_PERF_ENV + the release resident shape."
+             bars are hard-enforced only under FIREWEED_PERF_ENV + the release resident shape."
         );
     }
 
@@ -3031,10 +3035,12 @@ async fn performance_object_log_e3_live_tests() {
 #[ignore = "requires live MinIO and Postgres release-fence endpoints"]
 fn e3_release_fence_proofs_only() {
     let s3 = S3Env {
-        endpoint: std::env::var("PQUEUE_S3_TEST_ENDPOINT").expect("live MinIO endpoint"),
-        bucket: std::env::var("PQUEUE_S3_TEST_BUCKET").unwrap_or_else(|_| "pqueue-test".into()),
-        access: std::env::var("PQUEUE_S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into()),
-        secret: std::env::var("PQUEUE_S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into()),
+        endpoint: std::env::var("FIREWEED_S3_TEST_ENDPOINT").expect("live MinIO endpoint"),
+        bucket: std::env::var("FIREWEED_S3_TEST_BUCKET").unwrap_or_else(|_| "fireweed-test".into()),
+        access: std::env::var("FIREWEED_S3_TEST_ACCESS_KEY")
+            .unwrap_or_else(|_| "minioadmin".into()),
+        secret: std::env::var("FIREWEED_S3_TEST_SECRET_KEY")
+            .unwrap_or_else(|_| "minioadmin".into()),
     };
     S3BlobStore::new(
         &s3.endpoint,
@@ -3047,8 +3053,8 @@ fn e3_release_fence_proofs_only() {
     .create_bucket()
     .expect("create/ensure bucket");
     let source_revision =
-        std::env::var("PQUEUE_E3_SOURCE_REVISION").expect("exact source revision");
-    let output = std::env::var("PQUEUE_E3_FENCE_EVIDENCE_OUT").expect("fence evidence path");
+        std::env::var("FIREWEED_E3_SOURCE_REVISION").expect("exact source revision");
+    let output = std::env::var("FIREWEED_E3_FENCE_EVIDENCE_OUT").expect("fence evidence path");
     prove_postgres_pointer_fence(&s3, &source_revision, std::path::Path::new(&output));
 }
 

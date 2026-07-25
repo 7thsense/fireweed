@@ -107,16 +107,16 @@ async fn coordinated_owner_acquires_and_operates() {
     let clock = Arc::new(ManualClock::at(0));
     let cp: Arc<dyn QueueControlPlane> =
         Arc::new(InMemoryControlPlane::new(ControlPlaneConfig::default()));
-    let pq = RuntimeCore::with_control_plane_in_process(
+    let fireweed = RuntimeCore::with_control_plane_in_process(
         backend.clone(),
         clock.clone(),
         OwnerId::new("owner-A").unwrap(),
         cp.clone(),
     );
 
-    pq.create_queue(qdef()).await.unwrap();
-    pq.push(&qkey(), item(5)).await.unwrap();
-    assert_eq!(pq.metrics(&qkey()).await.unwrap().pending, 1);
+    fireweed.create_queue(qdef()).await.unwrap();
+    fireweed.push(&qkey(), item(5)).await.unwrap();
+    assert_eq!(fireweed.metrics(&qkey()).await.unwrap().pending, 1);
 
     // The control plane records this instance as the live active owner at a granted (>= 1) epoch.
     let res = cp.resolve_queue_owner(&qkey(), clock.now()).unwrap();

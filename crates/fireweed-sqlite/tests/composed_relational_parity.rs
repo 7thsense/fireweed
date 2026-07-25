@@ -90,7 +90,7 @@ fn claim_req_compat(
 // ---------------------------------------------------------------------------
 
 /// `whole_cohort` on the composed relational backend selects the complete cohort, leases it via a
-/// `CohortClaim` (flipping `pqueue_cohorts` to leased), and returns the API-001 cohort response shape.
+/// `CohortClaim` (flipping `fireweed_cohorts` to leased), and returns the API-001 cohort response shape.
 #[tokio::test]
 async fn composed_relational_whole_cohort_claim_selects_and_leases() {
     let b = composed_sqlite_relational_in_memory().unwrap();
@@ -268,7 +268,7 @@ async fn composed_log_replay_accepts_non_item_claim_units() {
 }
 
 /// REGRESSION (fencing/rollback discipline): a rich claim that gets FENCED (stale epoch) must leave no
-/// durable side effect — in particular the in-transaction `pqueue_group_summary` refresh performed during
+/// durable side effect — in particular the in-transaction `fireweed_group_summary` refresh performed during
 /// candidate selection must be ROLLED BACK, not committed. Discovery now derives exact eligibility from
 /// live item rows, so this storage-invariant regression uses a private file-backed database and inspects the
 /// summary row directly before and after the fenced claim.
@@ -297,7 +297,7 @@ async fn composed_relational_fenced_rich_claim_leaves_group_summary_unchanged() 
             .unwrap()
             .query_row(
                 "SELECT oldest_eligible_at, eligible_item_count, rep_item_id \
-                 FROM pqueue_group_summary \
+                 FROM fireweed_group_summary \
                  WHERE tenant_id=?1 AND queue_id=?2 AND group_key='g1'",
                 rusqlite::params![shard().tenant_id.as_str(), shard().queue_id.as_str()],
                 |row| {
@@ -339,7 +339,7 @@ async fn composed_relational_fenced_rich_claim_leaves_group_summary_unchanged() 
     assert_eq!(
         summary(),
         stale,
-        "a fenced rich claim must not durably refresh pqueue_group_summary"
+        "a fenced rich claim must not durably refresh fireweed_group_summary"
     );
     drop(b);
     std::fs::remove_file(path).unwrap();

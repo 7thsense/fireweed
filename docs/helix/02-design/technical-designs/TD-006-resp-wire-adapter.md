@@ -30,36 +30,36 @@ ddx:
 
 ## Purpose
 
-Define the launch RESP surface for pqueue after the hexagonal cutover.
+Define the launch RESP surface for fireweed after the hexagonal cutover.
 
 The launch decision is intentionally narrower than earlier drafts, but no longer
 stock-only:
 
-- RESP is a pqueue-native server that speaks a **stock Redis Streams-compatible worker subset**.
-- RESP also exposes a small **pqueue-native live item read subset** (`PQ.MGET`, `PQ.HGETALL`,
-  `PQ.HMGET`) so clients can use pqueue as hot structured storage while work is still in queue
+- RESP is a fireweed-native server that speaks a **stock Redis Streams-compatible worker subset**.
+- RESP also exposes a small **fireweed-native live item read subset** (`FW.MGET`, `FW.HGETALL`,
+  `FW.HMGET`) so clients can use fireweed as hot structured storage while work is still in queue
   ownership.
-- The Rust library is the full-power interface for pqueue-specific control, inspection, filtered claim,
+- The Rust library is the full-power interface for fireweed-specific control, inspection, filtered claim,
   gates, cohorts, rich finalize dispositions, and operator repair.
 - Custom RESP mutation commands remain out of scope for launch; finalize variants beyond `XACK`, gate
   mutation, repair, and queue administration stay library-only.
 
 This TD exists to prevent accidental half-interfaces: every API-001/API-002 operation is classified
-as `RESP-stock`, `RESP-pqueue-native-read`, `library-only-intentional`, or `n/a`, and both the stock
-Redis-compatible behavior and the pqueue-native live read behavior are specified enough for
+as `RESP-stock`, `RESP-fireweed-native-read`, `library-only-intentional`, or `n/a`, and both the stock
+Redis-compatible behavior and the fireweed-native live read behavior are specified enough for
 conformance tests.
 
 ## 1. Implementation Model
 
-pqueue is a **native server that speaks RESP**, not Redis and not a Redis module.
+fireweed is a **native server that speaks RESP**, not Redis and not a Redis module.
 
 Consequences:
 
-- pqueue owns command semantics for the subset it implements.
-- pqueue owns authentication and authorization for RESP connections.
+- fireweed owns command semantics for the subset it implements.
+- fireweed owns authentication and authorization for RESP connections.
 - RESP compatibility means stock Redis Streams clients can run the unfiltered worker hot path without
-  custom commands; applications that need live hot-item reads use the explicit `PQ.*` command names.
-- Redis clients must treat returned batches as opaque work sets; pqueue delivery order is priority
+  custom commands; applications that need live hot-item reads use the explicit `FW.*` command names.
+- Redis clients must treat returned batches as opaque work sets; fireweed delivery order is priority
   order, not stream-id order.
 
 ## 1A. Queue Routing and Ownership (normative)
@@ -81,7 +81,7 @@ NOT queue-addressed and are out of scope for the RESP worker surface (library-on
 | Single owner of record | The authoritative current owner of a queue is the `active_owner` recorded in the TD-003 control-plane authority record (returned by `resolve_queue_owner`), NOT a value each node recomputes independently. The deterministic HRW/rendezvous placement function (TD-003) is how the control plane *selects* a target owner; the wire redirect always names the recorded `active_owner`. Routing therefore converges on one source of truth and cannot enter a persistent two-node `-MOVED` loop from divergent membership views (a divergence is a TD-003 liveness concern resolved by the authority record, not a routing-safety problem). |
 | Serve only under a live current-epoch lease | A node MUST serve a queue-addressed command only while it holds a live TD-003 lease for the queue at the current epoch. A node that does not — never owned it, or was deposed and has learned so via a failed renew (`queue-epoch-stale`, TD-003) — MUST redirect, not serve. |
 | MOVED on miss | A node that will not serve a queue it does not currently own MUST reply `-MOVED <slot> <owner-endpoint>` naming the recorded `active_owner`. A stock cluster-aware client updates its routing table and retries against the owner (the standard Redis Cluster client loop). **Authorization is checked first**: a principal not authorized for the queue receives `-NOPERM` (§7) and never a `-MOVED`, so a redirect never leaks a queue's existence or placement across a tenant boundary. |
-| Slot mapping (stock-client compatibility) | pqueue presents the Redis Cluster 16384-slot space so stock clients bootstrap and parse redirects unmodified: `slot = crc16(routing_key) % 16384`, `routing_key = "{" + tenant_id + "/" + queue_id + "}"` (a Redis hash-tag, so the client's own key→slot computation matches). A `CLUSTER SLOTS` / `CLUSTER SHARDS` response advertises the current slot→owner view for bootstrap. The slot is a **routing hint only**: ownership is per-queue, so two queues sharing a slot MAY have different owners; the per-queue `-MOVED` corrects the client, which updates its table. Because a worker drains one queue, redirect churn is one-time per queue, not per command. |
+| Slot mapping (stock-client compatibility) | fireweed presents the Redis Cluster 16384-slot space so stock clients bootstrap and parse redirects unmodified: `slot = crc16(routing_key) % 16384`, `routing_key = "{" + tenant_id + "/" + queue_id + "}"` (a Redis hash-tag, so the client's own key→slot computation matches). A `CLUSTER SLOTS` / `CLUSTER SHARDS` response advertises the current slot→owner view for bootstrap. The slot is a **routing hint only**: ownership is per-queue, so two queues sharing a slot MAY have different owners; the per-queue `-MOVED` corrects the client, which updates its table. Because a worker drains one queue, redirect churn is one-time per queue, not per command. |
 
 ### Staleness safety (what the fence does and does not cover)
 
@@ -119,8 +119,8 @@ the drain command split.
 
 ## 2. Container Entry Contract
 
-RESP entries are flat field/value pairs. pqueue reserves fields used by API-001 and returns additional
-reserved fields in claim replies and `PQ.*` reads. Non-reserved `XADD` field/value pairs are stored as
+RESP entries are flat field/value pairs. fireweed reserves fields used by API-001 and returns additional
+reserved fields in claim replies and `FW.*` reads. Non-reserved `XADD` field/value pairs are stored as
 the item's structured field map.
 
 | Reserved field | Direction | Meaning |
@@ -144,7 +144,7 @@ The RESP entry id is the wire `item_id`. `client_item_key` is not the entry id; 
 logical replacement/idempotency key.
 
 `XADD` MUST reject non-reserved user fields whose names collide with read-only/system fields returned by
-`PQ.*` (`item_id`, `item_version`, `lifecycle_state`, `attempt_count`, `group_key`, `not_before`) or
+`FW.*` (`item_id`, `item_version`, `lifecycle_state`, `attempt_count`, `group_key`, `not_before`) or
 with parsed request fields (`client_item_key`, `priority`, `payload`). User field names MUST be UTF-8.
 
 ## 3. RESP Stock Command Surface
@@ -156,7 +156,7 @@ Adds a pending item.
 Rules:
 
 - If `client_item_key` is absent, the call always appends.
-- If `client_item_key` collides with a pending item on an atomic backend, pqueue performs atomic
+- If `client_item_key` collides with a pending item on an atomic backend, fireweed performs atomic
   pending-item replacement: old id is superseded, a new monotonic id is returned, and `XLEN` nets
   unchanged.
 - If the key collides with **claimed (leased, non-terminal)** work, the call returns
@@ -168,7 +168,7 @@ Rules:
   TD-004 proves deterministic apply-time re-validation with ack-after-apply. Until that proof lands,
   they also return `-ERR fireweed unavailable`.
 - Non-reserved field/value pairs are stored as structured item fields. `payload` is stored separately as
-  the existing opaque payload slot. Claims and `PQ.*` reads return both.
+  the existing opaque payload slot. Claims and `FW.*` reads return both.
 
 ### `XREADGROUP ... STREAMS <queue> >`
 
@@ -179,7 +179,7 @@ Rules:
 - Delivery is priority-ordered over the backend's declared consistency class.
 - Claim tracking is per item. There is no single `last-delivered-id` cursor that determines future
   eligibility.
-- Returned entries include pqueue reserved reply fields. Stock clients ignore fields they do not use.
+- Returned entries include fireweed reserved reply fields. Stock clients ignore fields they do not use.
 - Filtered claim, whole-cohort claim, explicit gate fences, and request-id claim replay are library-only.
 
 ### `XACK`
@@ -224,27 +224,27 @@ Rules:
 - `XDEL` of active or terminal work follows the engine's lifecycle rules; invalid state returns
   `-ERR fireweed invalid` rather than silently violating delivery invariants.
 
-## 3A. pqueue-native Live Item Reads
+## 3A. fireweed-native Live Item Reads
 
-These commands intentionally emulate useful Redis hash read shapes without making pqueue a Redis hash
-keyspace. They read **live pqueue items** addressed by `client_item_key` within one queue. "Live" means
+These commands intentionally emulate useful Redis hash read shapes without making fireweed a Redis hash
+keyspace. They read **live fireweed items** addressed by `client_item_key` within one queue. "Live" means
 the item is still queue-owned active work: `Pending` or `Leased`, not terminal, not purged, and not
 superseded. Leased items are returned because they are still in queue ownership until finalization.
 
-### `PQ.MGET <queue> <client_item_key> [client_item_key ...]`
+### `FW.MGET <queue> <client_item_key> [client_item_key ...]`
 
 Returns an array aligned with the requested keys. Each live item is rendered as
 `[item_id, [field, value, ...]]`, the same entry-shaped body used by `XREADGROUP`; a missing,
 terminal, purged, or superseded key returns nil in that array position.
 
-### `PQ.HGETALL <queue> <client_item_key>`
+### `FW.HGETALL <queue> <client_item_key>`
 
 Returns a flat `[field, value, ...]` array for one live item. A non-live key returns an empty array,
-matching Redis `HGETALL`'s missing-key shape. Returned fields include pqueue system fields
+matching Redis `HGETALL`'s missing-key shape. Returned fields include fireweed system fields
 (`item_id`, `client_item_key`, `item_version`, `lifecycle_state`, `priority`, `attempt_count`,
 `payload` when present, `group_key`/`not_before` when present) followed by user fields.
 
-### `PQ.HMGET <queue> <client_item_key> <field> [field ...]`
+### `FW.HMGET <queue> <client_item_key> <field> [field ...]`
 
 Returns an array aligned with requested field names. Missing fields, or a non-live item, return nil in
 the corresponding position. System fields and user fields are addressable by name.
@@ -279,8 +279,8 @@ interface. The RESP launch contract is the stock worker hot path.
 | Fail/retry/release/rearm | library-only-intentional | pass |
 | Reclaim expired | pass (`XCLAIM`/`XAUTOCLAIM`) | pass |
 | Pending/depth inspection | pass (`XPENDING`/`XLEN`/`XINFO`) | pass |
-| Live item multi-get by `client_item_key` | pass (`PQ.MGET`) | pass |
-| Live item field reads | pass (`PQ.HGETALL`/`PQ.HMGET`) | pass |
+| Live item multi-get by `client_item_key` | pass (`FW.MGET`) | pass |
+| Live item field reads | pass (`FW.HGETALL`/`FW.HMGET`) | pass |
 | Rich metrics and active scopes | library-only-intentional | pass |
 | Basic delete | pass (`XDEL`) | pass |
 | Force purge | library-only-intentional | pass |
@@ -305,8 +305,8 @@ Launch custom RESP commands are read-only and scoped to live item access.
    Pure lagging-projection profiles still return `-ERR fireweed unavailable` for pending-item
    replacement; `objectlog/hybrid-strict` and `objectlog/hybrid-async` lift that ban only after they
    prove deterministic apply-time re-validation with ack-after-apply in TD-004.
-7. **`PQ.H*` commands are pqueue live-item reads, not Redis hashes.** They emulate Redis hash read
-   response shapes over pqueue's structured item fields. They do not create independent hash keys, and
+7. **`FW.H*` commands are fireweed live-item reads, not Redis hashes.** They emulate Redis hash read
+   response shapes over fireweed's structured item fields. They do not create independent hash keys, and
    data disappears from the live view when the queue item completes, fails, is purged, or is superseded.
 
 ## 7. Canonical Errors
@@ -345,9 +345,9 @@ Run each applicable test against the RESP adapter with at least one pinned off-t
 
 These are not part of the launch surface:
 
-- whether a single custom `PQFIN` command is worth adding for atomic rich finalize over RESP;
+- whether a single custom command is worth adding for atomic rich finalize over RESP;
 - whether a read-only custom metrics command is useful enough to duplicate library inspection;
-- whether Redis ACL category compatibility should be broadened beyond pqueue's launch authorization
+- whether Redis ACL category compatibility should be broadened beyond fireweed's launch authorization
   model.
 
 Any post-launch custom command must update this TD, the capability matrix, and the conformance suite

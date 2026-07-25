@@ -12,7 +12,7 @@ numbers, the one-owner proof, and the exact commands are in
 The characterization below (raw-docker bridge containers + a host driver) stands as the record of WHY the
 co-located ceiling existed and how the kind topology removed it. **Resolved:** 2026-06-29.
 
-> The original raw-docker harness (`crates/pqueue-bench/tests/performance_multi_node_object_log_e2_tests.rs`)
+> The original raw-docker harness (`crates/fireweed-bench/tests/performance_multi_node_object_log_e2_tests.rs`)
 > and its measured ceiling are preserved verbatim below. The hypothesized backend follow-up (decoupling the
 > SQLite apply from the coord mutex) was implemented and measured to **regress** ingest (Finding 4) — the
 > ceiling was confirmed to be the shared box (CPU), not the backend's locking — so the resolution came from
@@ -22,30 +22,30 @@ co-located ceiling existed and how the kind topology removed it. **Resolved:** 2
 ## Delivered in this pass (Part B)
 
 1. **Containerized, robust harness** —
-   `crates/pqueue-bench/tests/performance_multi_node_object_log_e2_tests.rs`. Each owner node is now an
-   independent `pqueue-service` **docker container on the bridge** (was host processes on loopback — see
-   Finding 1), segmented group-commit mode, tmpfs `/data`, distinct `PQUEUE_NODE_ID`, disjoint
-   `PQUEUE_BOOTSTRAP_QUEUES`, reached by container IP. A `Drop` guard force-removes every container. The run
+   `crates/fireweed-bench/tests/performance_multi_node_object_log_e2_tests.rs`. Each owner node is now an
+   independent `fireweed-service` **docker container on the bridge** (was host processes on loopback — see
+   Finding 1), segmented group-commit mode, tmpfs `/data`, distinct `FIREWEED_NODE_ID`, disjoint
+   `FIREWEED_BOOTSTRAP_QUEUES`, reached by container IP. A `Drop` guard force-removes every container. The run
    measures INGEST and CLAIM+FINALIZE as **two separate** per-queue throughputs (mirroring the postgres E0
    baseline, which holds ingest and claim+finalize each to the floor), in two sequential spawn→barrier→work→
    join phases (no post-work barrier, so a worker failure surfaces as a clean test failure, never a hang).
-   It self-skips loudly without `PQUEUE_E2_MULTINODE=1` and emits `evidence_tier=release` rows ONLY on a full
+   It self-skips loudly without `FIREWEED_E2_MULTINODE=1` and emits `evidence_tier=release` rows ONLY on a full
    pass (smoke otherwise).
 
 2. **Four real server perf fixes** that made the single-node segmented backend genuinely fast (all land under
    `[ddx-pqueue-b5af53fb]`, all keep `cargo test --workspace` green):
-   - `pqueue-resp`: **set `TCP_NODELAY`** on every accepted RESP connection. Without it, the small-reply
+   - `fireweed-resp`: **set `TCP_NODELAY`** on every accepted RESP connection. Without it, the small-reply
      request/response loop pairs with the peer's delayed-ACK and stalls a connection ~40 ms/command over a
      real (non-loopback) bridge link — ~25 items/s. (RESP is a small-message protocol; Nagle must be off.)
-   - `pqueue-objectlog` (`segmented.rs`): **`recover_manifest` now reads only the manifest TAIL** instead of
+   - `fireweed-objectlog` (`segmented.rs`): **`recover_manifest` now reads only the manifest TAIL** instead of
      listing+parsing every manifest object on every seal, and **`LocalFsBlobStore::list` walks only the
      prefix subtree** instead of the whole root. The old code made a sustained push **O(n²)** in the segment
      count; a single queue's seal rate jumped from ~240/s to ~2,400/s. `read_all` still does a full scan for
-     recovery (semantics unchanged; all `pqueue-objectlog` tests, incl. MinIO CAS/fence + recovery, pass).
-   - `pqueue-sqlite`: the projection store now opens with **`journal_mode=WAL` + `synchronous=NORMAL`** (the
+     recovery (semantics unchanged; all `fireweed-objectlog` tests, incl. MinIO CAS/fence + recovery, pass).
+   - `fireweed-sqlite`: the projection store now opens with **`journal_mode=WAL` + `synchronous=NORMAL`** (the
      projection is rebuildable from the durable object log, so this trades nothing the log does not already
      guarantee) — cheaper per-segment commit.
-   - `pqueue-server`: new **`PQUEUE_WORKER_THREADS`** knob caps each node's tokio worker pool (default = one
+   - `fireweed-server`: new **`FIREWEED_WORKER_THREADS`** knob caps each node's tokio worker pool (default = one
      per core). Essential when many owner containers are co-located on one host, where the default per-process
      `num_cpus` pool oversubscribes the shared cores.
 
@@ -99,7 +99,7 @@ The two paths want OPPOSITE thread budgets, and 8 owner containers + the load dr
   the prior claim applied to the projection before it selects candidates — a correctness requirement, not
   just durability), so it *needs MORE worker threads* and starves at W=2.
 
-No single `PQUEUE_WORKER_THREADS` setting clears BOTH per-queue floors at 8 owners: the box's sustained
+No single `FIREWEED_WORKER_THREADS` setting clears BOTH per-queue floors at 8 owners: the box's sustained
 ingest ceiling at W≥3 is ~17–22k/s (≈2,100–2,750/queue, at/just under floor), while at W=2 the force-sealed
 claim path collapses to ~1,900/queue. The architecture scales (ingest is near-linear 2→8 in every regime;
 one-owner-per-queue holds), and single-node throughput is well over floor — the wall is **8 servers + driver
@@ -148,7 +148,7 @@ server's `ensure_epoch` had no per-queue serialization on the cold-start (`Unass
 concurrent first-writes to an unowned queue could **each** acquire — double-bumping the epoch and fencing the
 laggard with `-ERR fireweed epoch_stale`. Rare under the slow apply-under-mutex path (the first push finishes
 its acquire before the second resolves), it surfaces reliably under any faster ingest path. **Fix
-(`crates/pqueue-server/src/lib.rs`):** a per-queue acquire gate serializes the cold-start acquisition (taken
+(`crates/fireweed-server/src/lib.rs`):** a per-queue acquire gate serializes the cold-start acquisition (taken
 ONLY on the unowned path — the hot already-owned path stays lock-free); a concurrent first-writer that loses
 the gate re-resolves and reuses the winner's session. Whole workspace test suite green.
 
@@ -157,18 +157,18 @@ the gate re-resolves and reuses the winner's session. Whole workspace test suite
 The old "Completion path" called for a backend CPU-efficiency follow-up: **cut the per-item CPU of a seal**
 (the segment was JSON-serialized) and offer an in-memory projection. Both landed.
 
-**Fix A — kill the double serialization (`crates/pqueue-objectlog/src/segmented.rs`).** The substrate used to
+**Fix A — kill the double serialization (`crates/fireweed-objectlog/src/segmented.rs`).** The substrate used to
 serialize every command **twice** in verbose JSON: once per command just to *measure* its buffered size
 (`serde_json::to_vec(env).len()`, bytes discarded), and again to serialize the whole batch on seal
 (`to_json(&segment)`). Now each envelope is encoded **once** with `postcard` (compact binary, serde-native)
 when it is buffered; `buffered_bytes` is the length of the kept bytes (free, no throwaway serialize); and the
-sealed segment is the **framed length-prefixed concatenation** of those kept bytes — `[magic "PQSG"][u8 ver=2]
+sealed segment is the **framed length-prefixed concatenation** of those kept bytes — `[magic "FWSG"][u8 ver=2]
 [u64 epoch][u64 first_seq][u32 count][ (u32 len, bytes)… ]` — with **no re-serialize on seal**. The
 per-segment FNV checksum now covers the records-blob region and is verified before any record is decoded on
 `read_all`. The per-command envelope **clone** on the enqueue critical section is also gone (the envelope is
 moved into the coordinator's `pending` and enqueued into the buffer by reference). `postcard` is added
 `default-features = false, features = ["alloc"]` — its only new transitive crate beyond the workspace baseline
-is `cobs` (serde/thiserror are already in-tree). All `pqueue-objectlog` tests stay green (round-trip,
+is `cobs` (serde/thiserror are already in-tree). All `fireweed-objectlog` tests stay green (round-trip,
 ack-after-commit, epoch-fence, recovery, **live MinIO CAS/fence**).
 
 **Fix B — in-memory projection over the segmented log (new fast backend,
@@ -176,7 +176,7 @@ ack-after-commit, epoch-fence, recovery, **live MinIO CAS/fence**).
 backend, but the per-segment projection write is a cheap in-memory `ProjectionData::apply_command` per
 command instead of a batched SQLite transaction. Durable boundary is unchanged (the sealed segment + manifest
 entry); the projection is a derived view **rebuilt by `read_all` replay** in `create_queue` on open. Wired
-config-flagged: `PQUEUE_OBJECT_LOG_MODE=segmented` + `PQUEUE_PROJECTION_BACKEND=inmemory` selects it (the file
+config-flagged: `FIREWEED_OBJECT_LOG_MODE=segmented` + `FIREWEED_PROJECTION_BACKEND=inmemory` selects it (the file
 `ObjectLogBackend` remains the `objectlog`+`inmemory`+`file` path). **Recovery verified live:** push 3,000
 items → `XLEN 3000`; restart the container against the **same** volume → `XLEN 3000` (replayed from the log).
 

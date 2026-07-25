@@ -107,53 +107,53 @@ fn no_entity_item(priority: i64) -> NewItem {
 /// The queue must remain empty (nothing appended).
 #[tokio::test]
 async fn schema_validation_push_invalid_entity_rejected() {
-    let pq = make();
+    let fireweed = make();
     let q = qkey();
-    pq.create_queue(typed_def()).await.unwrap();
+    fireweed.create_queue(typed_def()).await.unwrap();
 
-    let err = pq.push(&q, invalid_item(1)).await.unwrap_err();
+    let err = fireweed.push(&q, invalid_item(1)).await.unwrap_err();
     assert!(
         matches!(err, EngineError::EntitySchemaViolation(_)),
         "expected EntitySchemaViolation, got {err:?}"
     );
 
     // Queue must be empty.
-    let items = pq.peek(&q, 10).await.unwrap();
+    let items = fireweed.peek(&q, 10).await.unwrap();
     assert!(items.is_empty(), "rejected push must not append anything");
 }
 
 /// A push with a valid entity document succeeds.
 #[tokio::test]
 async fn schema_validation_push_valid_entity_accepted() {
-    let pq = make();
+    let fireweed = make();
     let q = qkey();
-    pq.create_queue(typed_def()).await.unwrap();
+    fireweed.create_queue(typed_def()).await.unwrap();
 
-    pq.push(&q, valid_item(1)).await.unwrap();
+    fireweed.push(&q, valid_item(1)).await.unwrap();
 
-    let items = pq.peek(&q, 10).await.unwrap();
+    let items = fireweed.peek(&q, 10).await.unwrap();
     assert_eq!(items.len(), 1, "valid push must appear in queue");
 }
 
 /// A typed queue with no entity_document in the item is allowed (document is optional).
 #[tokio::test]
 async fn schema_validation_push_no_entity_on_typed_queue_accepted() {
-    let pq = make();
+    let fireweed = make();
     let q = qkey();
-    pq.create_queue(typed_def()).await.unwrap();
+    fireweed.create_queue(typed_def()).await.unwrap();
 
-    pq.push(&q, no_entity_item(1)).await.unwrap();
+    fireweed.push(&q, no_entity_item(1)).await.unwrap();
 
-    let items = pq.peek(&q, 10).await.unwrap();
+    let items = fireweed.peek(&q, 10).await.unwrap();
     assert_eq!(items.len(), 1);
 }
 
 /// A schema-less queue accepts any entity document (byte-identical behaviour).
 #[tokio::test]
 async fn schema_validation_schemaless_queue_accepts_any_entity() {
-    let pq = make();
+    let fireweed = make();
     let q = qkey();
-    pq.create_queue(base_def()).await.unwrap();
+    fireweed.create_queue(base_def()).await.unwrap();
 
     // Even something that would fail the typed queue schema is accepted.
     let item = NewItem {
@@ -161,9 +161,9 @@ async fn schema_validation_schemaless_queue_accepts_any_entity() {
         entity: Some(json!({"totally": "unstructured"})),
         ..Default::default()
     };
-    pq.push(&q, item).await.unwrap();
+    fireweed.push(&q, item).await.unwrap();
 
-    let items = pq.peek(&q, 10).await.unwrap();
+    let items = fireweed.peek(&q, 10).await.unwrap();
     assert_eq!(items.len(), 1);
 }
 
@@ -173,26 +173,27 @@ async fn schema_validation_schemaless_queue_accepts_any_entity() {
 /// Replaying the same request_id with a valid entity must succeed (not hit a stale "seen" record).
 #[tokio::test]
 async fn schema_validation_push_with_request_id_no_idempotency_entry_on_failure() {
-    let pq = make();
+    let fireweed = make();
     let q = qkey();
-    pq.create_queue(typed_def()).await.unwrap();
+    fireweed.create_queue(typed_def()).await.unwrap();
     let rid = RequestId::new("req-1").unwrap();
 
     // First attempt with invalid entity — must fail.
-    let err = pq
+    let err = fireweed
         .push_with_request_id(&q, rid.clone(), invalid_item(1))
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::EntitySchemaViolation(_)));
 
     // Queue must be empty — no partial append.
-    assert!(pq.peek(&q, 10).await.unwrap().is_empty());
+    assert!(fireweed.peek(&q, 10).await.unwrap().is_empty());
 
     // Replay with the same request_id but a valid entity — must succeed (no stale record).
-    pq.push_with_request_id(&q, rid, valid_item(1))
+    fireweed
+        .push_with_request_id(&q, rid, valid_item(1))
         .await
         .unwrap();
-    let items = pq.peek(&q, 10).await.unwrap();
+    let items = fireweed.peek(&q, 10).await.unwrap();
     assert_eq!(items.len(), 1, "valid retry after schema failure must push");
 }
 
@@ -201,16 +202,16 @@ async fn schema_validation_push_with_request_id_no_idempotency_entry_on_failure(
 /// upsert (replace_if_pending) with an invalid entity is rejected before any state change.
 #[tokio::test]
 async fn schema_validation_upsert_invalid_entity_rejected() {
-    let pq = make();
+    let fireweed = make();
     let q = qkey();
-    pq.create_queue(typed_def()).await.unwrap();
+    fireweed.create_queue(typed_def()).await.unwrap();
 
     // First push a valid item so upsert has something to replace.
-    let _id = pq.push(&q, valid_item(1)).await.unwrap();
+    let _id = fireweed.push(&q, valid_item(1)).await.unwrap();
     let ckey = ClientItemKey::new("k1").unwrap();
 
     // Upsert with an invalid entity.
-    let err = pq
+    let err = fireweed
         .upsert(
             &q,
             ckey.clone(),
@@ -235,14 +236,14 @@ async fn schema_validation_upsert_invalid_entity_rejected() {
 async fn schema_validation_update_fields_invalid_entity_rejected() {
     use std::collections::BTreeMap;
 
-    let pq = make();
+    let fireweed = make();
     let q = qkey();
-    pq.create_queue(typed_def()).await.unwrap();
+    fireweed.create_queue(typed_def()).await.unwrap();
 
-    let id = pq.push(&q, valid_item(5)).await.unwrap();
+    let id = fireweed.push(&q, valid_item(5)).await.unwrap();
     // Claim so update_fields is legal (atomic backends require leased for update_fields? check)
-    // Actually update_fields works on pending items in pqueue. Let's just try.
-    let err = pq
+    // Actually update_fields works on pending items in fireweed. Let's just try.
+    let err = fireweed
         .update_fields(
             &q,
             id,
@@ -265,14 +266,14 @@ async fn schema_validation_update_fields_invalid_entity_rejected() {
 /// after a failed push must still receive counter=0 (the next unused slot in the queue).
 #[tokio::test]
 async fn schema_validation_invalid_push_does_not_consume_item_counter() {
-    let pq = make();
+    let fireweed = make();
     let q = qkey();
-    pq.create_queue(typed_def()).await.unwrap();
+    fireweed.create_queue(typed_def()).await.unwrap();
 
-    let err = pq.push(&q, invalid_item(1)).await.unwrap_err();
+    let err = fireweed.push(&q, invalid_item(1)).await.unwrap_err();
     assert!(matches!(err, EngineError::EntitySchemaViolation(_)));
 
-    let id = pq.push(&q, valid_item(1)).await.unwrap();
+    let id = fireweed.push(&q, valid_item(1)).await.unwrap();
     assert_eq!(
         id.counter(),
         0,
@@ -283,18 +284,18 @@ async fn schema_validation_invalid_push_does_not_consume_item_counter() {
 /// An invalid push_with_request_id must NOT advance the item-id counter.
 #[tokio::test]
 async fn schema_validation_invalid_push_with_request_id_does_not_consume_item_counter() {
-    let pq = make();
+    let fireweed = make();
     let q = qkey();
-    pq.create_queue(typed_def()).await.unwrap();
+    fireweed.create_queue(typed_def()).await.unwrap();
     let rid = RequestId::new("r1").unwrap();
 
-    let err = pq
+    let err = fireweed
         .push_with_request_id(&q, rid, invalid_item(1))
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::EntitySchemaViolation(_)));
 
-    let id = pq.push(&q, valid_item(1)).await.unwrap();
+    let id = fireweed.push(&q, valid_item(1)).await.unwrap();
     assert_eq!(
         id.counter(),
         0,
@@ -306,14 +307,14 @@ async fn schema_validation_invalid_push_with_request_id_does_not_consume_item_co
 /// After a per-entry rejection, the next valid push must receive the next sequential counter slot.
 #[tokio::test]
 async fn schema_validation_invalid_commit_lifecycle_item_does_not_consume_item_counter() {
-    let pq = make();
+    let fireweed = make();
     let q = qkey();
-    pq.create_queue(typed_def()).await.unwrap();
+    fireweed.create_queue(typed_def()).await.unwrap();
 
     // Push one valid item (counter=0) and claim it.
-    let input_id = pq.push(&q, valid_item(1)).await.unwrap();
+    let input_id = fireweed.push(&q, valid_item(1)).await.unwrap();
     assert_eq!(input_id.counter(), 0);
-    let claimed: Vec<ClaimedItem> = pq.claim(&q, 1, 60_000).await.unwrap();
+    let claimed: Vec<ClaimedItem> = fireweed.claim(&q, 1, 60_000).await.unwrap();
     assert_eq!(claimed.len(), 1);
     let ci = &claimed[0];
     let claim_ref = ClaimRef {
@@ -324,7 +325,7 @@ async fn schema_validation_invalid_commit_lifecycle_item_does_not_consume_item_c
     };
 
     // Commit with an invalid lifecycle item — the entry must be per-entry rejected.
-    let outcomes = pq
+    let outcomes = fireweed
         .commit(
             &q,
             CommitRequest {
@@ -351,7 +352,7 @@ async fn schema_validation_invalid_commit_lifecycle_item_does_not_consume_item_c
 
     // The input item is still leased (the entry was rejected — nothing finalized).
     // Push a new valid item; it must get counter=1 (not counter=2 or higher).
-    let next_id = pq.push(&q, valid_item(3)).await.unwrap();
+    let next_id = fireweed.push(&q, valid_item(3)).await.unwrap();
     assert_eq!(
         next_id.counter(),
         1,
@@ -364,12 +365,12 @@ async fn schema_validation_invalid_commit_lifecycle_item_does_not_consume_item_c
 async fn schema_validation_update_fields_valid_entity_accepted() {
     use std::collections::BTreeMap;
 
-    let pq = make();
+    let fireweed = make();
     let q = qkey();
-    pq.create_queue(typed_def()).await.unwrap();
+    fireweed.create_queue(typed_def()).await.unwrap();
 
-    let id = pq.push(&q, valid_item(5)).await.unwrap();
-    let new_ver = pq
+    let id = fireweed.push(&q, valid_item(5)).await.unwrap();
+    let new_ver = fireweed
         .update_fields(
             &q,
             id,

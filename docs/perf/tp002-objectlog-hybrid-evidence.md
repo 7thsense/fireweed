@@ -4,7 +4,7 @@
 (release-grade evidence, closed gaps), `pqueue-8e5e7846` (100k ack p99 fix),
 `pqueue-d6453cdd` (100k/1M/10M release evidence run), `pqueue-864b1c74`
 (1M+ recovery-replay-gap bug, filed by `pqueue-d6453cdd`). **Date:** 2026-07-01.
-**Suite:** `crates/pqueue-server/tests/performance_object_log_hybrid_tests.rs`.
+**Suite:** `crates/fireweed-server/tests/performance_object_log_hybrid_tests.rs`.
 
 This evidence covers the hybrid-async contract: the `objectlog/hybrid` profile
 emitted by the test binary runs its projection apply asynchronously (SQLite may
@@ -12,7 +12,7 @@ lag) while success remains legal only after object-log manifest commit plus
 synchronous memory apply/render. It compares hybrid with `objectlog/inmemory`
 and `objectlog/sqlite` under the same local segmented object-log config. The
 smoke lane is release-safe by default and writes a JSONL ledger row when
-`PQUEUE_LEDGER_DIR` points at `docs/perf/evidence`; the release lane writes to
+`FIREWEED_LEDGER_DIR` points at `docs/perf/evidence`; the release lane writes to
 `docs/perf/evidence/hybrid-scale`.
 
 Both lanes now emit `bars_met=true` with all gates active. The 10k release lane
@@ -54,8 +54,8 @@ high-water alone, is not release evidence.
 ## Smoke command
 
 ```text
-PQUEUE_LEDGER_DIR="$PWD/docs/perf/evidence" \
-  cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests \
+FIREWEED_LEDGER_DIR="$PWD/docs/perf/evidence" \
+  cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests \
   performance_object_log_hybrid_smoke -- --nocapture
 ```
 
@@ -93,9 +93,9 @@ count); those recovery paths are exercised at scale in the release lane below.
 The 10M resident release command is implemented as an ignored test:
 
 ```text
-PQUEUE_LEDGER_DIR="$PWD/docs/perf/evidence" PQUEUE_PERF_ENV=1 \
-  PQUEUE_HYBRID_RESIDENT=10000000 \
-  cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests \
+FIREWEED_LEDGER_DIR="$PWD/docs/perf/evidence" FIREWEED_PERF_ENV=1 \
+  FIREWEED_HYBRID_RESIDENT=10000000 \
+  cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests \
   performance_object_log_hybrid_release_10m -- --ignored --nocapture
 ```
 
@@ -148,9 +148,9 @@ missed the hot-path gate at `bars_met=false`. After the hot-path fix
 attribution gates (`c93d991`, child `pqueue-21d63f09`), the same lane passes:
 
 ```text
-PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 \
-  PQUEUE_HYBRID_RESIDENT=10000 \
-  cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests \
+FIREWEED_LEDGER_DIR=docs/perf/evidence/hybrid-scale FIREWEED_PERF_ENV=1 \
+  FIREWEED_HYBRID_RESIDENT=10000 \
+  cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests \
   performance_object_log_hybrid_release_10m -- --ignored --nocapture
 ```
 
@@ -224,7 +224,7 @@ overhead.
 This lane proves the hybrid hot path, restart recovery, and disk-loss
 reconstruction at 10k resident with every gate green. The full 10M run remains
 the target for a provisioned perf host; the command above with
-`PQUEUE_HYBRID_RESIDENT=10000000` drives it unchanged.
+`FIREWEED_HYBRID_RESIDENT=10000000` drives it unchanged.
 
 ## 100k / 1M / 10M release evidence (`pqueue-d6453cdd`)
 
@@ -235,8 +235,8 @@ real release scale.
 ### 100k — PASS
 
 ```text
-PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=100000 \
-  cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests \
+FIREWEED_LEDGER_DIR=docs/perf/evidence/hybrid-scale FIREWEED_PERF_ENV=1 FIREWEED_HYBRID_RESIDENT=100000 \
+  cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests \
   performance_object_log_hybrid_release_10m -- --ignored --nocapture
 ```
 
@@ -251,8 +251,8 @@ Snapshot: `docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release
 ### 1M — PASS after packed object-storage append (`pqueue-c23f74c9`)
 
 ```text
-PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=1000000 \
-  cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests \
+FIREWEED_LEDGER_DIR=docs/perf/evidence/hybrid-scale FIREWEED_PERF_ENV=1 FIREWEED_HYBRID_RESIDENT=1000000 \
+  cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests \
   performance_object_log_hybrid_release_10m -- --ignored --nocapture
 ```
 
@@ -288,8 +288,8 @@ The 10M preflight was rerun after packed appends and after removing manifest
 listing from the normal seal path:
 
 ```text
-PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=10000000 \
-  timeout 15m cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests \
+FIREWEED_LEDGER_DIR=docs/perf/evidence/hybrid-scale FIREWEED_PERF_ENV=1 FIREWEED_HYBRID_RESIDENT=10000000 \
+  timeout 15m cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests \
   performance_object_log_hybrid_release_10m -- --ignored --nocapture
 ```
 
@@ -320,8 +320,8 @@ instead of repeatedly scanning/filtering the reserved prefix.
 The 10M preflight was rerun after the projection cursor optimization:
 
 ```text
-PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=10000000 \
-  timeout 15m cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests \
+FIREWEED_LEDGER_DIR=docs/perf/evidence/hybrid-scale FIREWEED_PERF_ENV=1 FIREWEED_HYBRID_RESIDENT=10000000 \
+  timeout 15m cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests \
   performance_object_log_hybrid_release_10m -- --ignored --nocapture
 ```
 
@@ -329,7 +329,7 @@ Result: **timeout at 15m**, no 10M ledger row emitted. The hot path moved again:
 early samples no longer showed `ProjectionData::eligible_candidates` as the top
 CPU bucket. Later samples showed the run inside `ComposedBackend::recover`,
 dominated by `SegmentedObjectLog::read_from` /
-`pqueue_objectlog::segmented::parse_segment_object` and serde deserialization of
+`fireweed_objectlog::segmented::parse_segment_object` and serde deserialization of
 large push segments.
 
 Representative post-cursor CPU sample:
@@ -352,8 +352,8 @@ The 1M release workload was rerun after the bounded object-log recovery read,
 memory-first hybrid recovery, and allocation-path reductions:
 
 ```text
-PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=1000000 \
-  cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests \
+FIREWEED_LEDGER_DIR=docs/perf/evidence/hybrid-scale FIREWEED_PERF_ENV=1 FIREWEED_HYBRID_RESIDENT=1000000 \
+  cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests \
   performance_object_log_hybrid_release_10m -- --ignored --nocapture
 ```
 
@@ -389,8 +389,8 @@ and using it from the `LogStore` adapter so recovery pages fetch only the
 segments needed for the requested command window:
 
 ```text
-PQUEUE_LEDGER_DIR=docs/perf/evidence/hybrid-scale PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=10000000 \
-  timeout 15m cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests \
+FIREWEED_LEDGER_DIR=docs/perf/evidence/hybrid-scale FIREWEED_PERF_ENV=1 FIREWEED_HYBRID_RESIDENT=10000000 \
+  timeout 15m cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests \
   performance_object_log_hybrid_release_10m -- --ignored --nocapture
 ```
 
@@ -398,7 +398,7 @@ Result: **timeout at 15m**, no 10M ledger row emitted. Focused tests now prove
 the object-log recovery property directly:
 
 ```text
-cargo test -p pqueue-objectlog --test segmented_s3_substrate_tests -- --nocapture
+cargo test -p fireweed-objectlog --test segmented_s3_substrate_tests -- --nocapture
 ```
 
 The added tests count segment-object GETs and verify that:

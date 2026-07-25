@@ -1239,12 +1239,12 @@ async fn TestSqliteDeletedManifestErrorPreservesGuarantees() {
     std::fs::remove_dir_all(&root).ok();
 }
 
-/// TestSqlitePropagationPqueueC33c367eInteractionRecorded: pqueue-c33c367e
+/// TestSqlitePropagationFireweedC33c367eInteractionRecorded: pqueue-c33c367e
 /// interaction is evaluated before landing and the SQLite propagation conclusion
 /// is recorded for release notes handoff.
 #[test]
 #[allow(non_snake_case)]
-fn TestSqlitePropagationPqueueC33c367eInteractionRecorded() {
+fn TestSqlitePropagationFireweedC33c367eInteractionRecorded() {
     // pqueue-c33c367e evaluation conclusion for SQLite propagation:
     //
     // The deferred server acquire-runtime wiring (pqueue-c33c367e) does NOT
@@ -1503,12 +1503,12 @@ async fn TestSqliteFloorHeadReplayPreservesFailClosedBoundary() {
     }
 }
 
-/// TestSqlitePqueueC33c367eInteractionRecorded: pqueue-c33c367e interaction is
+/// TestSqliteFireweedC33c367eInteractionRecorded: pqueue-c33c367e interaction is
 /// evaluated before landing and the SQLite-specific conclusion is available in
 /// release notes or the repo's release-note source.
 #[test]
 #[allow(non_snake_case)]
-fn TestSqlitePqueueC33c367eInteractionRecorded() {
+fn TestSqliteFireweedC33c367eInteractionRecorded() {
     // pqueue-c33c367e evaluation conclusion for SQLite retained floor/head replay:
     //
     // The deferred server acquire-runtime wiring (pqueue-c33c367e) does NOT

@@ -32,7 +32,7 @@ it is not a production scheduler, a replacement for integration tests, or a proo
   simulation runtime dependency is introduced.
 - Every failure prints a replayable seed and compact operation trace; shrinking preserves the violated invariant.
 - The model oracle is independent of production transition code.
-- Put the pure model in a test-support crate that cannot depend on `pqueue-engine` or `pqueue-objectlog`;
+- Put the pure model in a test-support crate that cannot depend on `fireweed-engine` or `fireweed-objectlog`;
   it defines its own minimal identifiers/state rather than importing domain transition types. Production code
   and its adapter are the system under test.
 - Named cut points sit at durable boundaries, not arbitrary source lines.
@@ -83,7 +83,7 @@ success is represented as a durable effect followed by `Err` for recovery resolu
 
 ## Spike Result and Evidence (2026-07-18): GO with conditions
 
-The spike is retained. `pqueue-sim-support` has no dependencies and provides the runtime-free model,
+The spike is retained. `fireweed-sim-support` has no dependencies and provides the runtime-free model,
 seeded generator, stable trace renderer, invariant predicates, and deterministic shrinker. The
 `deterministic_storage_simulation` adapter applies the same operations to the real synchronous
 `SegmentedObjectLog` over a phase-addressed scripted versioned `BlobStore`; it compares model predicates and
@@ -93,10 +93,10 @@ after-segment, candidate-before-head, manifest-before-ack, owner-reassignment, a
 
 Focused evidence on Rust 1.92, local in-memory object store, seed `0x5eed`, trace schema/harness v2:
 
-- `cargo test -p pqueue-sim-support`: 5 passed, including distinct invariant negative controls, per-record
+- `cargo test -p fireweed-sim-support`: 5 passed, including distinct invariant negative controls, per-record
   floor/suffix behavior, 100 byte-identical replays, generated crash
   operations, and invariant-identity-preserving shrink.
-- `cargo test -p pqueue-objectlog --test deterministic_storage_simulation`: 8 passed, including 128
+- `cargo test -p fireweed-objectlog --test deterministic_storage_simulation`: 8 passed, including 128
   independently seeded 48-operation production/model traces with generated crashes.
 - Typed JSONL corpus: committed-time manifest corruption; incomplete-delete plus stale compatibility-cache
   authority; stale writer; delete-before-advance; ambiguous-create retry; acknowledged loss; next-read hiding.

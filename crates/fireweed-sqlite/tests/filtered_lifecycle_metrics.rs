@@ -39,7 +39,7 @@ async fn composed_sqlite_filtered_metrics_survive_reopen() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("pqueue-filtered-metrics-{nonce}.sqlite"));
+    let path = std::env::temp_dir().join(format!("fireweed-filtered-metrics-{nonce}.sqlite"));
     let path_string = path.to_string_lossy().into_owned();
     fireweed_conformance::scenarios::filtered_lifecycle_metrics_are_exact_and_read_only(|| {
         composed_sqlite_backend(&path_string).expect("open composed sqlite")

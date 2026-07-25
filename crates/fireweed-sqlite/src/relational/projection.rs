@@ -36,7 +36,7 @@ type FinalizeValidationRow = (
 );
 type CohortValidationRow = (String, String, i64, i64, Option<Vec<u8>>);
 
-pub(crate) const EXPIRED_LEASES_BOUNDED_SQL: &str = "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+pub(crate) const EXPIRED_LEASES_BOUNDED_SQL: &str = "SELECT item_id FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
      AND lifecycle_state='Leased' AND cohort_size IS NULL AND fenced=0 AND superseded=0 \
      AND lease_expires_at IS NOT NULL AND lease_expires_at<?3 ORDER BY item_id LIMIT ?4";
 
@@ -74,7 +74,7 @@ impl SqliteProjectionStore {
                 continue;
             }
             let state: Option<String> = st(g.conn.query_row(
-                "SELECT lifecycle_state FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                "SELECT lifecycle_state FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
                 params![tenant, queue, id.to_string()], |row| row.get(0)).optional())?;
             if let Some(state) = state {
                 fireweed_engine::validate_purge_force(
@@ -110,7 +110,7 @@ impl SqliteProjectionStore {
                 .conn
                 .query_row(
                     "SELECT lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash \
-                     FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                     FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
                     params![tenant, queue, target.item_id.to_string()],
                     |row| {
                         Ok((
@@ -165,7 +165,7 @@ impl SqliteProjectionStore {
         let cohort: Option<CohortValidationRow> = st(tx
             .query_row(
                 "SELECT group_key,state,cohort_size,member_count,cohort_lease_token_hash \
-                 FROM pqueue_cohorts WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3",
+                 FROM fireweed_cohorts WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3",
                 params![tenant, queue, target.cohort_id.as_str()],
                 |row| {
                     Ok((
@@ -195,7 +195,7 @@ impl SqliteProjectionStore {
         }
         let mut statement = st(tx.prepare(
             "SELECT item_id,lifecycle_state,fenced,superseded,lease_expires_at,retry_count,max_attempts \
-             FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
+             FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
              AND cohort_size IS NOT NULL AND superseded=0 \
              AND lifecycle_state NOT IN ('Complete','Failed') ORDER BY priority_sort,created_seq",
         ))?;
@@ -287,7 +287,7 @@ impl SqliteProjectionStore {
                 let row: Option<FinalizeValidationRow> = st(tx
                     .query_row(
                         "SELECT lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash,item_version,retry_count,max_attempts \
-                         FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                         FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
                         params![tenant, queue, target.item_id.to_string()],
                         |row| {
                             Ok((
@@ -384,7 +384,7 @@ impl SqliteProjectionStore {
             let occupied: Option<i64> = st(g
                 .conn
                 .query_row(
-                    "SELECT 1 FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+                    "SELECT 1 FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
                      AND (item_id=?3 OR (client_item_key=?4 AND superseded=0)) LIMIT 1",
                     params![tenant, queue, item_id, client_key],
                     |row| row.get(0),
@@ -396,7 +396,7 @@ impl SqliteProjectionStore {
             let retained_until: Option<i64> = st(g
                 .conn
                 .query_row(
-                    "SELECT expires_at FROM pqueue_item_key_retention \
+                    "SELECT expires_at FROM fireweed_item_key_retention \
                      WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3",
                     params![tenant, queue, client_key],
                     |row| row.get(0),
@@ -447,7 +447,7 @@ impl SqliteProjectionStore {
                 // count too: they are still Pending/Leased members of that group, while terminal and
                 // superseded generations do not consume the cap.
                 let existing: i64 = st(g.conn.query_row(
-                    "SELECT COUNT(*) FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+                    "SELECT COUNT(*) FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
                      AND group_key=?3 AND superseded=0 AND lifecycle_state IN ('Pending','Leased')",
                     params![tenant, queue, group],
                     |row| row.get(0),
@@ -462,7 +462,7 @@ impl SqliteProjectionStore {
             let existing: Option<(i64, i64, String, Option<i64>)> = st(g
                 .conn
                 .query_row(
-                    "SELECT cohort_size,member_count,state,retention_until FROM pqueue_cohorts \
+                    "SELECT cohort_size,member_count,state,retention_until FROM fireweed_cohorts \
                      WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3",
                     params![tenant, queue, group],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -524,7 +524,7 @@ impl SqliteProjectionStore {
             .conn
             .query_row(
                 "SELECT request_fingerprint,response_payload,expires_at \
-                 FROM pqueue_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+                 FROM fireweed_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
                  AND operation=?3 AND request_id=?4",
                 params![
                     tenant,
@@ -731,7 +731,7 @@ impl SqliteProjectionStore {
     }
 
     /// Restart recovery for the object-log backends' item-id mint counter: seed `counters` past every item
-    /// id already materialized in the snapshot (`pqueue_items`), so a push after a snapshot-tail reopen never
+    /// id already materialized in the snapshot (`fireweed_items`), so a push after a snapshot-tail reopen never
     /// re-mints an id that the full-genesis replay would have observed. Safe because the object_log_sqlite
     /// backends never delete item rows (purge / replace-pending are `Unavailable` on the eventual-apply
     /// class), so the persisted items are the complete minted set up to the high-water; the bounded tail

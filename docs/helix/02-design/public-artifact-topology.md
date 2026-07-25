@@ -2,17 +2,16 @@
 ddx:
   id: public-artifact-topology
   depends_on:
-    - adr-020-public-namespace-and-compatibility
+    - adr-023-pre-release-fireweed-namespace-cutover
     - adr-engine-enforced-coordination-and-encapsulated-library-surface
   status: accepted
 ---
 
-# Fireweed Queue public artifact topology
+# Fireweed public artifact topology
 
 This document defines the target publication boundary for the first Fireweed
-Queue preview, `v0.20.0`. It uses the target Fireweed names from ADR-020 even
-while manifests and release automation still use `pqueue` compatibility names.
-It does not authorize a mechanical rename.
+preview, `v0.20.0`. ADR-023 makes these Fireweed coordinates the only supported
+coordinates across manifests, release automation, storage, and wire surfaces.
 
 ## Classification rules
 
@@ -96,8 +95,8 @@ The facade's minimum feature contract is:
 
 ## Non-Cargo release artifacts
 
-These are target coordinates. The `pqueue`-named equivalents remain temporary
-compatibility aliases during the cutover.
+These are the only supported release coordinates. ADR-023 forbids retired-name
+aliases, compatibility binaries, and dual-published artifacts.
 
 <!-- markdownlint-disable MD013 -->
 | Artifact | Target coordinate | Built from | Publication and feature policy |
@@ -108,7 +107,7 @@ compatibility aliases during the cutover.
 | Checksums | `SHA256SUMS` | Every downloadable release asset | GitHub Release; generated again after the final artifact is added. |
 | Image evidence | `fireweed-service-image.txt` | Immutable GHCR digest and both tags | GitHub Release; must identify the exact source commit. |
 | Chart evidence | `fireweed-helm-chart.txt` | Packaged chart name, version, and digest | GitHub Release; must identify `v0.20.0`. |
-| Source archive | GitHub-generated `v0.20.0` source archives | Tagged repository tree | GitHub Release; historical `pqueue` paths may remain for traceability. |
+| Source archive | GitHub-generated `v0.20.0` source archives | Tagged repository tree | GitHub Release; immutable audit identifiers may remain only where rewriting would falsify history. |
 <!-- markdownlint-enable MD013 -->
 
 `Dockerfile`, `Dockerfile.prebuilt`, `Dockerfile.e2`, `docker-compose.yml`, the

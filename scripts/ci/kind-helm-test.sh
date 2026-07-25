@@ -12,8 +12,8 @@ CLUSTER_NAME=""
 RELEASE_NAME="fireweed"
 NAMESPACE="fireweed"
 IMAGE="fireweed-service:ci"
-IMAGE_CONTEXT="${PQUEUE_KIND_IMAGE_CONTEXT:-${REPO_ROOT}}"
-IMAGE_DOCKERFILE="${PQUEUE_KIND_IMAGE_DOCKERFILE:-}"
+IMAGE_CONTEXT="${FIREWEED_KIND_IMAGE_CONTEXT:-${REPO_ROOT}}"
+IMAGE_DOCKERFILE="${FIREWEED_KIND_IMAGE_DOCKERFILE:-}"
 TIMEOUT="180s"
 SMOKE_PORT="18080"
 KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-}"
@@ -71,7 +71,7 @@ OPTIONS:
   --dry-run                Print the planned commands and values without
                            checking tools or creating a cluster.
   --cluster-name <name>    kind cluster name. Defaults to a disposable
-                           pqueue-<log>-<projection>-<pid> name.
+                           fireweed-<log>-<projection>-<pid> name.
   --release-name <name>    Helm release name. Default: fireweed.
   --namespace <name>       Kubernetes namespace. Default: fireweed.
   --image <repo:tag>       Image to build, load, and install. Default: fireweed-service:ci.
@@ -149,9 +149,9 @@ PG_PROJECTION_SECRET_KEY="database-url"
 # In-cluster throwaway postgres coordinates (Deployment/Service applied by deploy_in_cluster_postgres).
 PG_IN_CLUSTER_IMAGE="postgres:16"
 PG_IN_CLUSTER_HOST="fireweed-ci-postgres"
-PG_IN_CLUSTER_USER="pqueue"
-PG_IN_CLUSTER_PASSWORD="pqueue"
-PG_IN_CLUSTER_DB="pqueue"
+PG_IN_CLUSTER_USER="fireweed"
+PG_IN_CLUSTER_PASSWORD="fireweed"
+PG_IN_CLUSTER_DB="fireweed"
 
 # True when this smoke needs a database (the postgres log axis).
 needs_in_cluster_postgres() {
@@ -553,7 +553,7 @@ smoke_resp() {
     echo "RESP smoke passed"
 }
 
-# Durable-backend restart recovery: push an item, restart the pqueue Deployment, and prove the item is
+# Durable-backend restart recovery: push an item, restart the fireweed Deployment, and prove the item is
 # recovered after restart. Runs for the durable log axes (objectlog and postgres); the in-memory-only
 # combos have nothing durable to recover, so it is a no-op there.
 smoke_durable_restart_runtime() {

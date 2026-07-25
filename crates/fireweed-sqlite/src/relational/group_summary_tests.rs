@@ -1,4 +1,4 @@
-//! White-box tests for `pqueue_group_summary` maintenance — they read the summary table directly
+//! White-box tests for `fireweed_group_summary` maintenance — they read the summary table directly
 //! (it has no read port yet; BQ-14 consumes it), driving state through the public ports.
 use super::*;
 
@@ -134,7 +134,7 @@ fn summary(b: &SqliteRelationalBackend, group: &str) -> Option<(Option<i64>, i64
     g.conn
         .query_row(
             "SELECT oldest_eligible_at, eligible_item_count, rep_item_id \
-                 FROM pqueue_group_summary WHERE tenant_id='t1' AND queue_id='q1' AND group_key=?1",
+                 FROM fireweed_group_summary WHERE tenant_id='t1' AND queue_id='q1' AND group_key=?1",
             params![group],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
@@ -447,7 +447,7 @@ fn complete_count(b: &SqliteRelationalBackend) -> i64 {
     let g = b.inner.lock().unwrap();
     g.conn
         .query_row(
-            "SELECT COUNT(*) FROM pqueue_items \
+            "SELECT COUNT(*) FROM fireweed_items \
                  WHERE tenant_id='t1' AND queue_id='q1' AND lifecycle_state='Complete'",
             [],
             |r| r.get(0),
@@ -461,7 +461,7 @@ fn terminal_pos(b: &SqliteRelationalBackend) -> (i64, i64) {
     let g = b.inner.lock().unwrap();
     g.conn
         .query_row(
-            "SELECT terminal_command_epoch, last_command_sequence FROM pqueue_items \
+            "SELECT terminal_command_epoch, last_command_sequence FROM fireweed_items \
                  WHERE tenant_id='t1' AND queue_id='q1' LIMIT 1",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
@@ -689,12 +689,12 @@ async fn commit_cohort_expired(b: &SqliteRelationalBackend, group: &str, now: Ut
     .unwrap();
 }
 
-/// BQ-11d: `pqueue_group_summary` is durable — it survives a reopen with the recovered representative,
+/// BQ-11d: `fireweed_group_summary` is durable — it survives a reopen with the recovered representative,
 /// because it is a DB table maintained in-transaction, not in-process state.
 #[tokio::test]
 async fn group_summary_survives_reopen() {
     let path = std::env::temp_dir()
-        .join(format!("pqueue-rel-gs-reopen-{}.db", std::process::id()))
+        .join(format!("fireweed-rel-gs-reopen-{}.db", std::process::id()))
         .to_str()
         .unwrap()
         .to_string();

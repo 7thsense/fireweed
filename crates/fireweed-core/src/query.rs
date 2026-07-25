@@ -2,7 +2,7 @@
 //! range-scan, grouped/bucketed aggregation, bounded mutation, and claim-by-query over a queue's
 //! declared indexes.
 //!
-//! pqueue MUST remain domain-neutral (API-004 Purpose): these types carry no Snorri/Cayce vocabulary,
+//! fireweed MUST remain domain-neutral (API-004 Purpose): these types carry no Snorri/Cayce vocabulary,
 //! only the generic filter/order/bucket/mutation shapes the contract defines. Every request type here
 //! is a bounded, declared-index-constrained shape — never an arbitrary caller-supplied expression
 //! (API-004 Non-Goals).
@@ -63,7 +63,7 @@ pub struct OrderField {
     pub direction: SortDirection,
 }
 
-/// Opaque cursor pagination token (API-004 Cursor Ordering / Cursor Invalidation). pqueue mints and
+/// Opaque cursor pagination token (API-004 Cursor Ordering / Cursor Invalidation). fireweed mints and
 /// interprets the contents; callers pass it back verbatim.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct QueryCursor(pub String);
@@ -72,7 +72,7 @@ pub struct QueryCursor(pub String);
 /// equality filters on a leading prefix and a range on the next field.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RangeScanRequest {
-    /// The declared index to scan. `None` lets pqueue select a matching declared index.
+    /// The declared index to scan. `None` lets fireweed select a matching declared index.
     pub index: Option<String>,
     pub filters: Vec<QueryFilter>,
     pub order_by: Vec<OrderField>,
@@ -297,7 +297,7 @@ pub struct DeclaredBucketSegmentResponse {
 pub struct BoundedMutationRequest {
     pub index: Option<String>,
     pub filters: Vec<QueryFilter>,
-    /// Replaces only the named fields on each matched record; never interpreted by pqueue beyond type
+    /// Replaces only the named fields on each matched record; never interpreted by fireweed beyond type
     /// validation against the record's entity schema (API-004: "caller data, uninterpreted").
     pub set_fields: BTreeMap<String, TypedValue>,
     /// Bounds the rows examined per internal execution step (API-004 Aggregate Limits

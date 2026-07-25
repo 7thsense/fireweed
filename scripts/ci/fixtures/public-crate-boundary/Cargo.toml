@@ -26,25 +26,25 @@ name = "backend-accessor"
 path = "src/backend_accessor.rs"
 
 [[bin]]
-name = "legacy-generic-facade"
-path = "src/legacy_pqueue.rs"
+name = "rejected-retired-generic-facade"
+path = "src/rejected_retired_generic_facade.rs"
 
 [[bin]]
-name = "legacy-embedded-facade"
-path = "src/legacy_embedded_pqueue.rs"
+name = "rejected-retired-embedded-facade"
+path = "src/rejected_retired_embedded_facade.rs"
 
 [[bin]]
-name = "legacy-lib-backend"
-path = "src/legacy_lib_backend.rs"
+name = "rejected-retired-lib-backend"
+path = "src/rejected_retired_lib_backend.rs"
 
 [[bin]]
-name = "legacy-embedded-handle"
-path = "src/legacy_embedded_handle.rs"
+name = "rejected-retired-embedded-handle"
+path = "src/rejected_retired_embedded_handle.rs"
 
 [[bin]]
-name = "legacy-generic-constructor"
-path = "src/legacy_pqueue_new.rs"
+name = "rejected-retired-generic-constructor"
+path = "src/rejected_retired_generic_constructor.rs"
 
 [[bin]]
-name = "legacy-embedded-config"
-path = "src/legacy_embedded_config.rs"
+name = "rejected-retired-embedded-config"
+path = "src/rejected_retired_embedded_config.rs"

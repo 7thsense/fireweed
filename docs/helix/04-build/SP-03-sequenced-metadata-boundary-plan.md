@@ -78,7 +78,7 @@ while preserving authority markers, winner mirroring, and fail-closed total-auth
 
 ## Implementation Evidence
 
-`pqueue-engine::sequenced_metadata` owns the reusable types, so `ComposedBackend` enforces floor publication
+`fireweed-engine::sequenced_metadata` owns the reusable types, so `ComposedBackend` enforces floor publication
 before deletion without depending on the adapter. The segmented adapter uses retained create-only publication
 for authority/compatibility heads and a private, proof-minted completed-prefix token before watermark
 advancement; no downstream crate can forge it. Watermark publication is typed as `DeletionWatermarkClass`,

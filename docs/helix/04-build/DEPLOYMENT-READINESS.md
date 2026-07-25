@@ -24,7 +24,7 @@ ddx:
 
 ## Scope
 
-This document is the production deployment readiness contract for the pqueue
+This document is the production deployment readiness contract for the fireweed
 BUILD-001 release line. Runtime and Helm configuration are expressed as two
 storage axes:
 
@@ -42,9 +42,9 @@ rendering, and CI evidence actually cover.
 > (`v0.19.6`, …). Version-specific docs under `docs/releases/` and `docs/perf/` are
 > historical snapshots of the version in their filename and are not statements about the current line.
 
-The v0.19.6 release packaging ships the `pqueue-service` RESP binary, container
+The v0.19.6 release packaging ships the `fireweed-service` RESP binary, container
 image, Helm chart, binary archive, checksums, and release evidence. The service
-runtime (`crates/pqueue-server/src/env_config.rs`) currently wires these
+runtime (`crates/fireweed-server/src/env_config.rs`) currently wires these
 executable combinations:
 
 | Log backend | Projection backend | Runtime status |
@@ -54,7 +54,7 @@ executable combinations:
 | `objectlog` | `turso` | Wired behind the `turso-projection` feature; local-file recovery and authoritative object-log rebuild are covered by the focused Turso lane. |
 | `objectlog` | `hybrid` | Wired (TD-004 hot-memory-over-durable-SQLite; shipped v0.6.0). |
 | `objectlog` | `hybrid-strict` | Experimental runtime path (SQLite durable before memory apply). Env/direct-config only; intentionally not chart-selectable or production-supported. |
-| `objectlog` | `hybrid-async` | Wired (deferred async SQLite checkpoint with `PQUEUE_HYBRID_ASYNC_*` debt/backpressure thresholds). |
+| `objectlog` | `hybrid-async` | Wired (deferred async SQLite checkpoint with `FIREWEED_HYBRID_ASYNC_*` debt/backpressure thresholds). |
 | `postgres` | `inmemory` | Wired behind the `postgres` cargo feature (in the CI kind matrix). |
 | `postgres` | `sqlite` | Wired behind the `postgres` cargo feature (in the CI kind matrix). |
 | `postgres` | `postgres` | Wired behind the `postgres` cargo feature (in the CI kind matrix). |
@@ -96,10 +96,10 @@ public support claims.
 
 Runtime wiring is authorization to exercise and improve the profile; it is not
 authorization to advertise support. The current evidence proves only that
-`PQUEUE_LOG_BACKEND=objectlog` plus
-`PQUEUE_PROJECTION_BACKEND=hybrid-strict` selects the strict runtime with its
+`FIREWEED_LOG_BACKEND=objectlog` plus
+`FIREWEED_PROJECTION_BACKEND=hybrid-strict` selects the strict runtime with its
 SQLite path and that non-object-log pairings fail closed. The chart still omits
-`hybrid-strict` from `charts/pqueue/values.schema.json`; the PVC, ConfigMap, and
+`hybrid-strict` from `charts/fireweed/values.schema.json`; the PVC, ConfigMap, and
 Deployment templates do not include it; and the Helm, live-`kind`, deployment,
 and release/tag matrices do not exercise it.
 
@@ -129,8 +129,8 @@ Release readiness requires:
 
 - chart schema and templates that expose `storage.log.backend` and
   `storage.projection.backend`;
-- rendered environment variables `PQUEUE_LOG_BACKEND` and
-  `PQUEUE_PROJECTION_BACKEND`;
+- rendered environment variables `FIREWEED_LOG_BACKEND` and
+  `FIREWEED_PROJECTION_BACKEND`;
 - Secret references for Postgres log and projection URLs when those axes choose
   `postgres`;
 - object-log storage path/configuration when the log axis chooses `objectlog`;
@@ -144,12 +144,12 @@ Release readiness requires:
   resolve exactly once by `request_id`.
 - CI and tag releases provision a live Postgres service and run
   `ac_txn_contract_matrix_postgres_storage_pairs` plus
-  `ac_txn_6_postgres_storage_pair_parity` with `PQUEUE_PG_TEST_URL` set, so the
+  `ac_txn_6_postgres_storage_pair_parity` with `FIREWEED_PG_TEST_URL` set, so the
   exact `postgres/sqlite` and `postgres/postgres` rows cannot pass by skip. Each
   job deletes both tracked JSONL outputs, reruns the tests, asserts that both
   regenerated files are non-empty, and only then invokes the verifier. Stale
   repository evidence cannot satisfy the live proof step.
-- `pqueue-verify-transaction-evidence` consumes the two exact-pair JSONL files
+- `fireweed-verify-transaction-evidence` consumes the two exact-pair JSONL files
   and requires AC-TXN-1/2/3/6 for both profiles. Missing, duplicate, failed,
   partial, coverage-GAP, and all whole-row N/A results fail closed. Capability
   limits may be recorded only as assertion context inside a passing AC row. The
@@ -165,16 +165,16 @@ cloud-provider hardening.
 
 A release must publish:
 
-- container image `ghcr.io/<owner>/pqueue-service:<version>` plus
-  `ghcr.io/<owner>/pqueue-service:sha-<commit>`;
-- Helm chart package `pqueue-<version>.tgz`;
-- binary archives `pqueue-<version>-<target-triple>.tar.gz`;
+- container image `ghcr.io/<owner>/fireweed-service:<version>` plus
+  `ghcr.io/<owner>/fireweed-service:sha-<commit>`;
+- Helm chart package `fireweed-<version>.tgz`;
+- binary archives `fireweed-<version>-<target-triple>.tar.gz`;
 - `SHA256SUMS`;
-- release evidence files `pqueue-service-image.txt`,
-  `pqueue-helm-chart.txt`, and deployment proof output.
+- release evidence files `fireweed-service-image.txt`,
+  `fireweed-helm-chart.txt`, and deployment proof output.
 
-The binary archive must include the real `pqueue-service` runtime and
-`pqueue-verify-ledger`. It must not package placeholder binaries or stale
+The binary archive must include the real `fireweed-service` runtime and
+`fireweed-verify-ledger`. It must not package placeholder binaries or stale
 service names.
 
 ## CI Gates
@@ -185,7 +185,7 @@ The release CI surface must include:
   and strict verification-ledger validation;
 - Helm chart lint/render checks for every storage combination listed in the
   chart CI values;
-- a negative check that `PQUEUE_BACKEND_PROFILE` is absent from rendered Helm
+- a negative check that `FIREWEED_BACKEND_PROFILE` is absent from rendered Helm
   output;
 - live `kind` Helm smokes for `objectlog` + `inmemory`, `objectlog` + `sqlite`,
   `objectlog` + `hybrid`, and `objectlog` + `hybrid-async`, including RESP
@@ -273,7 +273,7 @@ The storage axes reserve Postgres for both the log and projection sides:
 Postgres can target self-managed Postgres or a managed Postgres endpoint such as
 Databricks Lakebase when the runtime adapter is wired. Lakebase is
 Postgres-wire compatible. Connection setup belongs to
-`pqueue-postgres::connect`:
+`fireweed-postgres::connect`:
 
 - TLS is required for Lakebase. The connector supports native TLS behind the
   `tls` Cargo feature. The stock release binary is built without optional
@@ -294,8 +294,8 @@ provider-specific Lakebase certification.
 This section settles the scope for the Snorri authoritative vectorized claimed-work
 commit boundary (`CommitTransitionPort`, epic pqueue-2201fd37 — **CLOSED**) on the postgres
 storage axis. **Status (2026-07): `PostgresRelationalBackend` now IMPLEMENTS `CommitTransitionPort`**
-(`crates/pqueue-postgres/src/relational.rs:3800`, with `commit_transition_*` tests). The log-replay
-`PostgresBackend` (`crates/pqueue-postgres/src/lib.rs`) still inherits the `Unavailable` default
+(`crates/fireweed-postgres/src/relational.rs:3800`, with `commit_transition_*` tests). The log-replay
+`PostgresBackend` (`crates/fireweed-postgres/src/lib.rs`) still inherits the `Unavailable` default
 (commit-transition is a relational-family capability). The rebuildable-from-log migration bead
 `pqueue-3c5aa2e0` is closed.
 
@@ -318,22 +318,22 @@ storage axis. **Status (2026-07): `PostgresRelationalBackend` now IMPLEMENTS `Co
   wire the unified backend; the storage-axis names alone do not imply it.
 - `PostgresBackend` (log-replay) is out of scope. It already refuses every
   relational-only feature at the port default (`SetGatesPort`, `ReschedulePort`,
-  `DiscoveryPort` all stay `Unavailable`; `crates/pqueue-postgres/src/lib.rs:906-917`),
+  `DiscoveryPort` all stay `Unavailable`; `crates/fireweed-postgres/src/lib.rs:906-917`),
   and sqlite's own C9 parity landed only on `SqliteRelationalBackend`, never on
   the plain sqlite log adapter. Postgres mirrors that split.
 
 **(b) Postgres schema for side records and instance fences**, mirroring
-sqlite-relational (`crates/pqueue-sqlite/src/relational.rs:234-245`), applying
+sqlite-relational (`crates/fireweed-sqlite/src/relational.rs:234-245`), applying
 this crate's existing postgres-vs-sqlite type convention (`BLOB`→`BYTEA`,
-`INTEGER`→`BIGINT`, e.g. `pqueue_request_idempotency.expires_at`):
+`INTEGER`→`BIGINT`, e.g. `fireweed_request_idempotency.expires_at`):
 
 ```sql
-CREATE TABLE IF NOT EXISTS pqueue_side_records (
+CREATE TABLE IF NOT EXISTS fireweed_side_records (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, key BYTEA NOT NULL, payload BYTEA NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, key)
 );
 
-CREATE TABLE IF NOT EXISTS pqueue_instance_fences (
+CREATE TABLE IF NOT EXISTS fireweed_instance_fences (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, instance_key BYTEA NOT NULL, fence BIGINT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, instance_key)
 );
@@ -344,7 +344,7 @@ lookup/upsert by primary key only, opaque `key`/`payload`/`instance_key`/`fence`
 bytes, no claimable/eligible/peekable surface. No additional indexes.
 
 **(c) Request-id retained idempotency: reuse the existing
-`pqueue_request_idempotency` table** (`crates/pqueue-postgres/src/relational.rs:187-197`);
+`fireweed_request_idempotency` table** (`crates/fireweed-postgres/src/relational.rs:187-197`);
 no new table.
 
 - That table is already keyed `(tenant_id, queue_id, operation, request_id)`, so
@@ -352,7 +352,7 @@ no new table.
   `IDEMPOTENCY_OPERATION_COMMIT` constant), not a new table.
 - Postgres's existing table lacks sqlite's `command_positions` column. That
   column is not required for the commit-transition read path: sqlite's
-  `check_commit_idempotency` (`crates/pqueue-sqlite/src/relational.rs:561-593`)
+  `check_commit_idempotency` (`crates/fireweed-sqlite/src/relational.rs:561-593`)
   decodes the retained record from `response_payload` alone. Adding
   `command_positions` (or an equivalent) to the postgres table is deferred to
   whichever later change wires `RecoveryReadPort`'s authoritative recovery reads
@@ -375,12 +375,12 @@ the current release, the live Kubernetes proof pairs it with
 
 The object-log release path must prove:
 
-- the chart renders `PQUEUE_LOG_BACKEND=objectlog`;
-- the chart renders `PQUEUE_PROJECTION_BACKEND=<projection backend>`;
+- the chart renders `FIREWEED_LOG_BACKEND=objectlog`;
+- the chart renders `FIREWEED_PROJECTION_BACKEND=<projection backend>`;
 - object-log root/configuration is present for the container runtime;
 - the deployed service writes through the configured object-log runtime path;
 - after a rollout restart, acknowledged state can be read back through RESP.
-- the configured `PQUEUE_SEGMENT_MAX_LATENCY_MS` / commit-latency-bound value is
+- the configured `FIREWEED_SEGMENT_MAX_LATENCY_MS` / commit-latency-bound value is
   included in release evidence;
 - TP-003 `AC-TXN-*` passes for the claimed projection backend; and
 - TP-002 E3 reports the latency/cost/recovery curve for that projection backend.
@@ -396,7 +396,7 @@ Release-readiness verification for the current boundary is:
 
 ```sh
 bash scripts/ci/release-gate.sh
-cargo run -p pqueue-release --bin pqueue-verify-transaction-evidence -- \
+cargo run -p fireweed-release --bin fireweed-verify-transaction-evidence -- \
   --evidence docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl \
   --evidence docs/perf/evidence/tp003-ac-txn-parity-postgres-storage-pairs.jsonl
 bash scripts/ci/helm-gate.sh

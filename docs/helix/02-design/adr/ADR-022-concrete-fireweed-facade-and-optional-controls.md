@@ -4,7 +4,7 @@ ddx:
   depends_on:
     - api-native-client-interface
     - adr-engine-enforced-coordination-and-encapsulated-library-surface
-    - adr-020-public-namespace-and-compatibility
+    - adr-023-pre-release-fireweed-namespace-cutover
   status: accepted
 ---
 
@@ -12,12 +12,12 @@ ddx:
 
 | Date | Status | Deciders | Related | Confidence |
 | --- | --- | --- | --- | --- |
-| 2026-07-24 | Accepted | Project maintainers | API-001, API-004, API-005, ADR-009, ADR-020 | High |
+| 2026-07-24 | Accepted | Project maintainers | API-001, API-004, API-005, ADR-009, ADR-023 | High |
 
 ## Context
 
-The renamed crate still exposes `Pqueue<B>`, `EmbeddedPqueue<B>`, and the
-`LibBackend` bound. A downstream application therefore carries Fireweed's
+The crate still exposes a generic `Fireweed<B>`, a profile-specific embedded
+wrapper, and the `LibBackend` bound. A downstream application therefore carries Fireweed's
 backend choice through its own public types. Snorri demonstrates the cost: its
 state-store adapter is generic over `B: LibBackend`, keeps a local
 `Plain`/`Embedded` enum, imports a second core crate, and duplicates projection
@@ -40,9 +40,9 @@ until it becomes an operations framework.
 ### One concrete handle
 
 The supported Rust entry point is a concrete, non-generic `Fireweed` type.
-Callers do not name, provide, or retain a backend type. `Pqueue`,
-`EmbeddedPqueue`, `LibBackend`, raw backend constructors, and `Pqueue::new` are
-not part of the supported external surface.
+Callers do not name, provide, or retain a backend type. Generic facade forms,
+profile-specific embedded wrappers, `LibBackend`, raw backend constructors, and
+the generic raw constructor are not part of the supported external surface.
 
 `Fireweed` retains the native queue operations as inherent methods. Renaming
 the handle must not also force Snorri or another consumer to import traits just
@@ -125,7 +125,7 @@ governing interface specification.
 
 | Option | Pros | Cons | Evaluation |
 | --- | --- | --- | --- |
-| Keep `Pqueue<B>` and `EmbeddedPqueue<B>` public | No internal dispatch layer; no first-party migration | Every consumer carries Fireweed backend types and normalizes profile-specific wrappers | Rejected: preserves the consumer problem this decision exists to remove |
+| Keep `Fireweed<B>` and profile-specific embedded wrappers public | No internal dispatch layer; no first-party migration | Every consumer carries Fireweed backend types and normalizes profile-specific wrappers | Rejected: preserves the consumer problem this decision exists to remove |
 | Erase the storage ports behind `dyn LibBackend` | One internal representation | Existing RPITIT and associated projection types make the storage ports non-object-safe | Rejected: would turn an interface refactor into a storage-port redesign |
 | Expose one concrete `Fireweed` through a private high-level dispatch seam | Backend choice is private; operation semantics remain at the existing facade | Requires explicit forwarding coverage and a public-API closure gate | Selected: solves downstream encapsulation without redesigning storage ports |
 | Put queue operations on optional component objects | Makes composition visible in the type graph | Forces capability branching for ordinary queue use and confuses projection maintenance with queue authority | Rejected: optional controls are narrower than the queue interface |
@@ -149,7 +149,7 @@ governing interface specification.
 | Risk | Prob | Impact | Mitigation |
 | --- | --- | --- | --- |
 | The erased facade forwards only the Snorri slice and silently drops existing public methods | M | H | API-005 names the full method closure; TP-004 compares a normalized public-API baseline and compiles representative calls from every family |
-| Legacy Rust symbols become a second supported interface | M | H | Make them unavailable to external crates; ADR-020 package/name aliases do not authorize legacy Rust facade or configuration types |
+| Retired Rust symbols become a second supported interface | M | H | Make them unavailable to external crates; ADR-023 forbids facade, configuration, and package aliases |
 | Backend identity leaks back into consumer control flow | L | H | Backend/projection choice is accepted only during construction; the live facade exposes behavior and optional controls, not composition introspection |
 | Projection maintenance is detached from the owning runtime | L | H | Return a borrowed `ProjectionControl<'_>`; do not expose an owned cloneable lifecycle handle |
 
@@ -165,7 +165,7 @@ governing interface specification.
 ## Superseded guidance
 
 This ADR supersedes ADR-009 only where ADR-009 rejects a concrete runtime
-handle and accepts `Pqueue<impl LibBackend>` as the consumer-facing type. It
+handle and accepts `Fireweed<impl LibBackend>` as the consumer-facing type. It
 does not change ADR-009's coordination, fencing, publication-topology, or
 authorization decisions.
 
@@ -185,4 +185,4 @@ boundary and does not override a practice recorded in
   binding contract.
 - `docs/helix/03-test/test-plans/TP-004-fireweed-facade-and-snorri-acceptance.md`
   — executable acceptance gates.
-- `../snorri/crates/snorri-pqueue/src/lib.rs` — acceptance-client inventory.
+- `../snorri/crates/snorri-fireweed/src/lib.rs` — acceptance-client inventory.

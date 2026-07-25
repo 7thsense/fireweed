@@ -115,7 +115,7 @@ fn lifecycle_snapshot(path: &str) -> Vec<LifecycleSnapshotRow> {
     let mut stmt = conn
         .prepare(
             "SELECT item_id, lifecycle_state, CAST(item_version AS INTEGER), lease_expires_at, worker_id \
-             FROM pqueue_items ORDER BY item_id",
+             FROM fireweed_items ORDER BY item_id",
         )
         .unwrap();
     let rows = stmt
@@ -235,7 +235,7 @@ async fn claim_by_query_excludes_leased_terminal_superseded_and_future_rows() {
 #[tokio::test]
 async fn claim_by_query_reopen_does_not_reissue_terminal_or_live_lease() {
     let path = std::env::temp_dir().join(format!(
-        "pqueue-claim-by-query-reopen-{}-{}.db",
+        "fireweed-claim-by-query-reopen-{}-{}.db",
         std::process::id(),
         std::thread::current().name().unwrap_or("test")
     ));
@@ -288,7 +288,7 @@ async fn claim_by_query_reopen_does_not_reissue_terminal_or_live_lease() {
 #[tokio::test]
 async fn record_kind_transition_claim_is_atomic_for_mixed_rows_and_decode_errors() {
     let path = std::env::temp_dir().join(format!(
-        "pqueue-claim-by-query-mixed-{}-{}.db",
+        "fireweed-claim-by-query-mixed-{}-{}.db",
         std::process::id(),
         std::thread::current().name().unwrap_or("test")
     ));
@@ -354,7 +354,7 @@ async fn record_kind_transition_claim_is_atomic_for_mixed_rows_and_decode_errors
         ),
     ] {
         conn.execute(
-            &format!("UPDATE pqueue_items SET {column}={corrupt_value} WHERE item_id=?1"),
+            &format!("UPDATE fireweed_items SET {column}={corrupt_value} WHERE item_id=?1"),
             [ids[0].to_string()],
         )
         .unwrap();
@@ -377,7 +377,7 @@ async fn record_kind_transition_claim_is_atomic_for_mixed_rows_and_decode_errors
             "{request_id} must roll back before mutating any lease"
         );
         conn.execute(
-            &format!("UPDATE pqueue_items SET {column}={restored_value} WHERE item_id=?1"),
+            &format!("UPDATE fireweed_items SET {column}={restored_value} WHERE item_id=?1"),
             [ids[0].to_string()],
         )
         .unwrap();
@@ -422,7 +422,7 @@ async fn record_kind_transition_claim_is_atomic_for_mixed_rows_and_decode_errors
 #[tokio::test]
 async fn claim_by_query_validates_and_durably_replays_the_api_envelope() {
     let path = std::env::temp_dir().join(format!(
-        "pqueue-claim-by-query-replay-{}-{}.db",
+        "fireweed-claim-by-query-replay-{}-{}.db",
         std::process::id(),
         std::thread::current().name().unwrap_or("test")
     ));
@@ -506,7 +506,7 @@ async fn claim_by_query_validates_and_durably_replays_the_api_envelope() {
     let worker: String = rusqlite::Connection::open(&path)
         .unwrap()
         .query_row(
-            "SELECT worker_id FROM pqueue_items WHERE item_id=?1",
+            "SELECT worker_id FROM fireweed_items WHERE item_id=?1",
             [first.items[0].item_id.to_string()],
             |row| row.get(0),
         )

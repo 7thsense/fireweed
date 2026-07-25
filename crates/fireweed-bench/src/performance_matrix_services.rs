@@ -49,7 +49,7 @@ impl SecretRedactor {
                 // substring scan cannot distinguish a leak from the project
                 // name; URL-authority and forbidden-field scans remain active.
                 .filter(|password| {
-                    !["fireweed", "pqueue", "postgres", "garage"]
+                    !["fireweed", "fireweed", "postgres", "garage"]
                         .contains(&password.to_ascii_lowercase().as_str())
                 })
             {
@@ -121,7 +121,7 @@ fn redact_url_authorities(message: &str) -> String {
 
 pub fn derived_objectlog_schema(namespace: &str) -> String {
     let digest = Sha256::digest(namespace.as_bytes());
-    format!("pq_{}", hex(&digest[..30]))
+    format!("fireweed_{}", hex(&digest[..30]))
 }
 
 pub fn derived_plain_schema(namespace: &str) -> String {

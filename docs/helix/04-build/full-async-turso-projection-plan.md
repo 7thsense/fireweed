@@ -51,13 +51,13 @@ new broad Actions matrix dimensions; release/push activity.
 
 | Slice | Area | Depends On | Validation Gate |
 |-------|------|------------|-----------------|
-| AT-01 | Typed raw commit request, owned-task lifecycle, and cancellation faults (`pqueue-engine`, conformance fault modules) | None | engine fault tests; cancellation before/start/during commit |
-| AT-02 | `AsyncLogStore`, `AsyncProjectionStore`, `AsyncControlPlane` plus explicit immediate/blocking adapters (`pqueue-engine`) | AT-01 | compile-time `Send` future tests; no blanket impl |
-| AT-03 | Async `ComposedBackend`, typed commit strategies, owned-task dispatcher, queue-local gates, and memory/reference projection (`pqueue-engine`, `pqueue-projection`, `pqueue-memory`) | AT-02 | engine/projection/memory conformance; AC-TXN-11 |
-| AT-04 | SQLite whole-transaction adapter (`pqueue-sqlite`) | AT-03 | SQLite tests plus single-thread heartbeat |
+| AT-01 | Typed raw commit request, owned-task lifecycle, and cancellation faults (`fireweed-engine`, conformance fault modules) | None | engine fault tests; cancellation before/start/during commit |
+| AT-02 | `AsyncLogStore`, `AsyncProjectionStore`, `AsyncControlPlane` plus explicit immediate/blocking adapters (`fireweed-engine`) | AT-01 | compile-time `Send` future tests; no blanket impl |
+| AT-03 | Async `ComposedBackend`, typed commit strategies, owned-task dispatcher, queue-local gates, and memory/reference projection (`fireweed-engine`, `fireweed-projection`, `fireweed-memory`) | AT-02 | engine/projection/memory conformance; AC-TXN-11 |
+| AT-04 | SQLite whole-transaction adapter (`fireweed-sqlite`) | AT-03 | SQLite tests plus single-thread heartbeat |
 | AT-05 | Object-log/Postgres whole-transaction adapters and composition-root consumer migration | AT-03 | object-log, Postgres, server focused tests; heartbeat |
-| AT-06 | Driver-neutral relational schema/codecs/rows (`pqueue-relational`, SQLite imports) | AT-04 | SQLite relational/conformance byte-for-byte parity |
-| AT-07 | Native-async Turso schema/apply/query/recovery (`pqueue-turso`) | AT-06 | exact probe regressions and adapter unit tests |
+| AT-06 | Driver-neutral relational schema/codecs/rows (`fireweed-relational`, SQLite imports) | AT-04 | SQLite relational/conformance byte-for-byte parity |
+| AT-07 | Native-async Turso schema/apply/query/recovery (`fireweed-turso`) | AT-06 | exact probe regressions and adapter unit tests |
 | AT-08 | Full SQLite/Turso differential, reopen, cancellation, and concurrency conformance | AT-07 | AC-TURSO-1..4 |
 | AT-09 | Feature-gated object-log + Turso server configuration/profile | AT-05, AT-08 | AC-TURSO-5; end-to-end recovery/reopen |
 | AT-10 | Legacy sync seam removal and focused CI/config validation | AT-04, AT-05, AT-09 | structural search, AC-TURSO-6, clippy, workspace tests, HELIX validation |

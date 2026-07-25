@@ -3,7 +3,7 @@ ddx:
   id: tp-fireweed-facade-and-snorri-acceptance
   depends_on:
     - api-fireweed-rust-facade
-    - adr-020-public-namespace-and-compatibility
+    - adr-023-pre-release-fireweed-namespace-cutover
   status: accepted
 ---
 
@@ -26,7 +26,7 @@ release artifacts, and runtime-hardening work not exposed by API-005
 
 | Level | Coverage target | Priority |
 | --- | --- | --- |
-| Contract compile | 100% of API-005 constructors, Snorri methods, named types, and forbidden legacy Rust names | P0 |
+| Contract compile | 100% of API-005 constructors, Snorri methods, named types, and forbidden retired Rust names | P0 |
 | Fireweed integration | The same capability-complete operation suite succeeds through every supported constructor | P0 |
 | Million-cycle parity | Insert 1,000,000, batch-update 500,000, and read/verify 1,000,000 through every supported constructor | P0 |
 | Downstream integration | All five Snorri feature combinations compile against one concrete type | P0 |
@@ -38,7 +38,7 @@ release artifacts, and runtime-hardening work not exposed by API-005
 
 Fireweed integration tests use unique temporary SQLite/object-log paths and
 synthetic queue/item identifiers. PostgreSQL tests use the existing
-`PQUEUE_PG_TEST_URL` gate and unique schemas. No production or customer data is
+`FIREWEED_PG_TEST_URL` gate and unique schemas. No production or customer data is
 required.
 
 ## Coverage requirements
@@ -49,7 +49,7 @@ required.
 | API-005 Snorri named types | 100% importable from `fireweed` | 100% | single-package fixture blocks |
 | Construction-only composition boundary | 100% of enabled constructors | 100% | public-API and compile-fail tests block |
 | Per-constructor operation parity | Every inherent `Fireweed` method family succeeds; zero construction-dependent `Unavailable` results | 100% | shared conformance matrix blocks |
-| Legacy Rust facade/config names | 0 externally constructible | 0 | compile-fail fixture blocks |
+| Retired Rust facade/config names | 0 externally constructible | 0 | compile-fail fixture blocks |
 
 ## Fireweed gates
 
@@ -59,9 +59,9 @@ required.
 3. The fixture names every API-005 input/output type required by Snorri without
    depending on `fireweed-core` or `fireweed-engine`.
 4. Compile-fail fixtures reject attempts to construct with a raw backend or use
-   `Pqueue`, `Pqueue::new`, `EmbeddedPqueue`, `EmbeddedHandle`, `LibBackend`,
-   or any `Embedded*` configuration name. ADR-020 package aliases do not exempt
-   these Rust symbols.
+   a retired root/configuration type, `EmbeddedHandle`, `LibBackend`, a generic
+   raw constructor, or any `Embedded*` configuration name. ADR-023 permits no
+   alias exemption for these Rust symbols.
 5. One shared suite creates a queue, appends, claims, mutates, commits, queries,
    and finalizes through every supported constructor. It MUST include
    `batch_update` and `live_items`; `Unavailable`, a skip, or substituting a
@@ -121,28 +121,28 @@ named DTO. Merely compiling the Snorri slice is insufficient.
 ## Snorri gates
 
 The sibling Snorri checkout is the acceptance client. Its migration removes
-the `pqueue` and `pqueue-core` dependencies, adds only `fireweed`, replaces
-`PqueueStateStore<B>` with a non-generic store holding `Arc<Fireweed>`, and
-deletes its `Plain`/`Embedded` handle enum.
+the direct `fireweed-core` dependency and any backend-specific Fireweed package,
+retains only `fireweed`, replaces its generic state store with a non-generic
+`FireweedStateStore` holding `Arc<Fireweed>`, and deletes its `Plain`/`Embedded`
+handle enum.
 
 Before running any Snorri command, the acceptance record MUST prove dependency
 identity. Pre-release testing uses a path dependency on
 `../fireweed/crates/fireweed` or an exact Fireweed commit revision. Release
 testing uses the exact v0.20 tag from the public `telepathdata/fireweed`
 repository. `cargo tree` and `Cargo.lock` evidence MUST show package `fireweed`
-at the intended path, revision, or tagged git source; the old
-`7thsense-pqueue` source is a hard failure even if compilation succeeds from
-cache.
+at the intended path, revision, or tagged git source; any other repository
+source is a hard failure even if compilation succeeds from cache.
 
 Compile each feature profile independently before `--all-features`:
 
 ```sh
-cargo check --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features memory
-cargo check --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features sqlite
-cargo check --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features postgres
-cargo check --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features objectlog,sqlite
-cargo check --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features objectlog,postgres
-cargo check --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --all-features
+cargo check --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features memory
+cargo check --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features sqlite
+cargo check --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features postgres
+cargo check --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features objectlog,sqlite
+cargo check --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features objectlog,postgres
+cargo check --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --all-features
 ```
 
 Required local semantic tests cover memory conformance, SQLite commit and
@@ -152,14 +152,14 @@ documented test database variable is available and are otherwise recorded as
 not run.
 
 ```sh
-cargo test --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features memory,conformance -- --list | rg '^tests::pqueue_memory_state_store_conformance_executes: test$'
-cargo test --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features memory,conformance tests::pqueue_memory_state_store_conformance_executes -- --exact --nocapture
-cargo test --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features sqlite sqlite_public_facade_commits_authoritative_transition -- --nocapture
-cargo test --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features sqlite hot_projection_sqlite_visibility_business_cases -- --nocapture
-cargo test --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features objectlog,sqlite objectlog_sqlite_delete_and_rehydrate -- --nocapture
-cargo test --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features objectlog,sqlite objectlog_sqlite_worker_reassignment_recovers_deleted_projection -- --nocapture
-cargo test --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features postgres postgres_public_facade_is_env_gated_and_capability_checked -- --nocapture
-cargo test --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features objectlog,postgres objectlog_postgres_delete_and_rehydrate -- --nocapture
+cargo test --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features memory,conformance -- --list | rg '^tests::fireweed_memory_state_store_conformance_executes: test$'
+cargo test --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features memory,conformance tests::fireweed_memory_state_store_conformance_executes -- --exact --nocapture
+cargo test --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features sqlite sqlite_public_facade_commits_authoritative_transition -- --nocapture
+cargo test --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features sqlite hot_projection_sqlite_visibility_business_cases -- --nocapture
+cargo test --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features objectlog,sqlite objectlog_sqlite_delete_and_rehydrate -- --nocapture
+cargo test --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features objectlog,sqlite objectlog_sqlite_worker_reassignment_recovers_deleted_projection -- --nocapture
+cargo test --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features postgres postgres_public_facade_is_env_gated_and_capability_checked -- --nocapture
+cargo test --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features objectlog,postgres objectlog_postgres_delete_and_rehydrate -- --nocapture
 ```
 
 Each targeted command MUST report at least one executed test. A successful
@@ -225,7 +225,7 @@ environment-gated row may be skipped there.
 | Snorri resolves its old git pin | High | Record `cargo tree` and lockfile source before accepting results |
 | Only the Snorri slice is forwarded | High | Full normalized public-API closure blocks independently |
 | A method exists on `Fireweed` but only some constructors install it | Critical | Shared per-constructor suite and million-cycle gate treat `Unavailable` as failure |
-| Compile-fail and compatibility policy disagree | High | API-005 makes legacy Rust types unavailable; ADR-020 aliases are package-only |
+| Compile-fail and namespace policy disagree | High | API-005 makes retired Rust types unavailable; ADR-023 permits no package aliases |
 | PostgreSQL is silently skipped | Medium | Report as `not run`; never count as a pass |
 | Garage credentials leak into evidence | High | Source host-managed secrets and reject credential values in logs |
 

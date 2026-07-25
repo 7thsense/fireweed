@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn parses_libpq_url_sslmode_and_default_lifetime() {
         let config = PostgresConnectConfig::new(
-            "postgres://postgres:pq@localhost:5432/postgres?sslmode=disable",
+            "postgres://postgres:fireweed@localhost:5432/postgres?sslmode=disable",
         );
 
         assert_eq!(config.parsed_ssl_mode().unwrap(), PostgresSslMode::Disable);
@@ -310,7 +310,7 @@ mod tests {
     #[test]
     fn required_ssl_fails_before_no_tls_connection_attempt() {
         let result = connect(PostgresConnectConfig::new(
-            "postgres://postgres:pq@localhost/postgres?sslmode=require",
+            "postgres://postgres:fireweed@localhost/postgres?sslmode=require",
         ));
 
         assert!(matches!(result, Err(EngineError::Unavailable)));

@@ -7,7 +7,7 @@ scripts/perf/tp002-e2-density-kind.sh
 ```
 
 The command builds the revision's `Dockerfile.e2` image, deploys one
-`pqueue-service` pod to kind with the durable local object-log authority and
+`fireweed-service` pod to kind with the durable local object-log authority and
 the governed direct SQLite projection, and provisions 1,001 queues
 through the generated bootstrap
 inventory (`density:q0` through `density:q1000`). `density:q1000` is the hot
@@ -23,7 +23,7 @@ release gates. The 64 GiB bound covers the canonical ingest plus durable
 claim/finalize command streams and their object-log metadata without relying on
 unbounded node storage. This one-node diagnostic excludes pod or node failover,
 so it makes no persistence claim beyond the live deployment.
-The wrapper does not set the retired `PQUEUE_OBJECT_LOG_MODE` pseudo-axis. The
+The wrapper does not set the retired `FIREWEED_OBJECT_LOG_MODE` pseudo-axis. The
 row identifies the exact `object_log_sqlite_projection` success barrier and
 does not relabel a hybrid projection as direct SQLite evidence.
 
@@ -63,13 +63,13 @@ zero lost items, duplicate transitions, empty post-reseed claims, and
 queue-global progress violations.
 
 The run writes
-`target/pqueue-ledger/tp002-e2-density-kind.jsonl`. Its row records the exact
+`target/fireweed-ledger/tp002-e2-density-kind.jsonl`. Its row records the exact
 command, Git revision and image digest, seed, measured duration, one-node kind
 topology and node image, host/node/container CPU and RAM descriptions,
 active/progress-eligible queue counts, both hot throughput rates, maximum
 progress latency and violations, and both noisy-neighbor retention percentages.
 The wrapper retains the latest Job object plus load/server logs under
-`target/pqueue-ledger/tp002-e2-density-kind-diagnostics/` before deleting its
+`target/fireweed-ledger/tp002-e2-density-kind-diagnostics/` before deleting its
 namespace. Only the top-level wrapper process owns cleanup; background log and
 sampler subshells cannot fire the namespace-deletion trap.
 The load generator emits explicit `HOT_START` and `HOT_END` phase markers.
@@ -90,11 +90,11 @@ The governed maxima are four Tokio workers, 32 connections, and 64 live tasks;
 these limits are fixed in the semantic validator rather than selected by the
 run. The snapshot reporter is disabled in normal service deployments and is
 enabled only by the density Deployment's explicit
-`PQUEUE_RUNTIME_RESOURCE_METRICS_PATH`. The focused validator is:
+`FIREWEED_RUNTIME_RESOURCE_METRICS_PATH`. The focused validator is:
 
 ```sh
 cargo run -p fireweed-release --bin fireweed-verify-density-evidence -- \
-  target/pqueue-ledger/tp002-e2-density-kind.jsonl
+  target/fireweed-ledger/tp002-e2-density-kind.jsonl
 ```
 
 The validator requires release scale/tier, `bars_met=true`, exactly 1,001

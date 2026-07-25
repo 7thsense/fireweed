@@ -1,7 +1,7 @@
 //! Postgres-specific durability: the projection is a derived view; the LOG (in postgres tables) is the
 //! source of truth. These tests reconnect to the SAME schema and assert the committed state is
 //! reconstructed by replaying the durable log — the property the shared conformance suite (a fresh schema
-//! per scenario) cannot exercise. Env-gated on `PQUEUE_PG_TEST_URL`; LOUD skip if absent.
+//! per scenario) cannot exercise. Env-gated on `FIREWEED_PG_TEST_URL`; LOUD skip if absent.
 
 use std::collections::{BTreeMap, HashSet};
 use std::process::Command;
@@ -23,13 +23,13 @@ use fireweed_engine::{
 use fireweed_postgres::{PostgresBackend, PostgresRelationalBackend};
 
 fn pg_url() -> Option<String> {
-    std::env::var("PQUEUE_PG_TEST_URL").ok()
+    std::env::var("FIREWEED_PG_TEST_URL").ok()
 }
 
 fn fresh_schema(tag: &str) -> String {
     static N: AtomicU64 = AtomicU64::new(0);
     format!(
-        "pq_dura_{}_{}_{}",
+        "fireweed_dura_{}_{}_{}",
         tag,
         std::process::id(),
         N.fetch_add(1, Ordering::SeqCst)
@@ -39,7 +39,7 @@ fn fresh_schema(tag: &str) -> String {
 #[test]
 fn projection_rebuilds_from_durable_log_on_reconnect() {
     let Some(url) = pg_url() else {
-        eprintln!("POSTGRES DURABILITY SKIPPED (rebuild) — set PQUEUE_PG_TEST_URL to a live DB");
+        eprintln!("POSTGRES DURABILITY SKIPPED (rebuild) — set FIREWEED_PG_TEST_URL to a live DB");
         return;
     };
     futures::executor::block_on(projection_rebuilds_from_durable_log_on_reconnect_inner(url));
@@ -104,7 +104,9 @@ async fn projection_rebuilds_from_durable_log_on_reconnect_inner(url: String) {
 #[test]
 fn orchestration_writes_after_reconnect_do_not_collide() {
     let Some(url) = pg_url() else {
-        eprintln!("POSTGRES DURABILITY SKIPPED (recollide) — set PQUEUE_PG_TEST_URL to a live DB");
+        eprintln!(
+            "POSTGRES DURABILITY SKIPPED (recollide) — set FIREWEED_PG_TEST_URL to a live DB"
+        );
         return;
     };
     futures::executor::block_on(orchestration_writes_after_reconnect_do_not_collide_inner(
@@ -152,22 +154,22 @@ async fn orchestration_writes_after_reconnect_do_not_collide_inner(url: String) 
 
 #[test]
 fn atomic_queue_create_child_process() {
-    if std::env::var("PQUEUE_PG_ATOMIC_CREATE_CHILD")
+    if std::env::var("FIREWEED_PG_ATOMIC_CREATE_CHILD")
         .ok()
         .as_deref()
         != Some("1")
     {
         return;
     }
-    let url = std::env::var("PQUEUE_PG_TEST_URL").expect("child url");
-    let schema = std::env::var("PQUEUE_PG_ATOMIC_SCHEMA").expect("child schema");
-    let backend = std::env::var("PQUEUE_PG_ATOMIC_BACKEND").expect("child backend");
-    let child_id = std::env::var("PQUEUE_PG_ATOMIC_CHILD_ID").expect("child id");
-    let incompatible = std::env::var("PQUEUE_PG_ATOMIC_INCOMPATIBLE")
+    let url = std::env::var("FIREWEED_PG_TEST_URL").expect("child url");
+    let schema = std::env::var("FIREWEED_PG_ATOMIC_SCHEMA").expect("child schema");
+    let backend = std::env::var("FIREWEED_PG_ATOMIC_BACKEND").expect("child backend");
+    let child_id = std::env::var("FIREWEED_PG_ATOMIC_CHILD_ID").expect("child id");
+    let incompatible = std::env::var("FIREWEED_PG_ATOMIC_INCOMPATIBLE")
         .ok()
         .as_deref()
         == Some("1");
-    let exercise_loser = std::env::var("PQUEUE_PG_ATOMIC_EXERCISE_LOSER")
+    let exercise_loser = std::env::var("FIREWEED_PG_ATOMIC_EXERCISE_LOSER")
         .ok()
         .as_deref()
         == Some("1");
@@ -186,7 +188,7 @@ fn atomic_queue_create_child_process() {
 #[test]
 fn postgres_queue_create_is_atomic_across_processes() {
     let url = pg_url().expect(
-        "mandatory PostgreSQL atomic-create gate requires PQUEUE_PG_TEST_URL to point at a live DB",
+        "mandatory PostgreSQL atomic-create gate requires FIREWEED_PG_TEST_URL to point at a live DB",
     );
 
     run_atomic_create_process_scenario(&url, "native");
@@ -674,17 +676,17 @@ fn spawn_atomic_child(
         .arg("--exact")
         .arg("atomic_queue_create_child_process")
         .arg("--nocapture")
-        .env("PQUEUE_PG_TEST_URL", url)
-        .env("PQUEUE_PG_ATOMIC_CREATE_CHILD", "1")
-        .env("PQUEUE_PG_ATOMIC_SCHEMA", schema)
-        .env("PQUEUE_PG_ATOMIC_BACKEND", backend)
-        .env("PQUEUE_PG_ATOMIC_CHILD_ID", format!("{backend}-{index}"))
+        .env("FIREWEED_PG_TEST_URL", url)
+        .env("FIREWEED_PG_ATOMIC_CREATE_CHILD", "1")
+        .env("FIREWEED_PG_ATOMIC_SCHEMA", schema)
+        .env("FIREWEED_PG_ATOMIC_BACKEND", backend)
+        .env("FIREWEED_PG_ATOMIC_CHILD_ID", format!("{backend}-{index}"))
         .env(
-            "PQUEUE_PG_ATOMIC_INCOMPATIBLE",
+            "FIREWEED_PG_ATOMIC_INCOMPATIBLE",
             if incompatible { "1" } else { "0" },
         )
         .env(
-            "PQUEUE_PG_ATOMIC_EXERCISE_LOSER",
+            "FIREWEED_PG_ATOMIC_EXERCISE_LOSER",
             if exercise_loser { "1" } else { "0" },
         )
         .spawn()

@@ -1,5 +1,5 @@
 //! Redis-Cluster slot routing + CLUSTER bootstrap (TD-006 §1A). So a STOCK cluster-aware client bootstraps
-//! against pqueue and computes the SAME slot the server does, this implements the exact Redis algorithm:
+//! against fireweed and computes the SAME slot the server does, this implements the exact Redis algorithm:
 //! `slot = crc16(hashtag(key)) % 16384`, with the standard hash-tag rule (`{...}` selects the substring to
 //! hash). The canonical per-queue routing key is `{tenant/queue}` (TD-006), a hash-tag so co-locating a
 //! tenant's queues is possible and the client's key→slot matches the server's.

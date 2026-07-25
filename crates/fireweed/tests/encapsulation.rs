@@ -9,12 +9,11 @@
 use std::sync::Arc;
 
 use fireweed::{
-    CohortPolicy, CreateQueue, EligibilityPolicy, EmbeddedDurabilityConfig, EmbeddedHandle,
-    EmbeddedObjectLogConfig, EmbeddedProjectionConfig, EmbeddedRecoveryAction,
-    EmbeddedRecoveryPolicy, EmbeddedResponseBarrier, EmbeddedSecret, EmbeddedSegmentConfig,
-    EngineError, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-    PriorityTieBreaker, PriorityValue, QueueCreationPolicy, QueueDefinition, QueueId, QueueKey,
-    RecurrencePolicy, RetryPolicy, TenantId,
+    CohortPolicy, CommitResponseBarrier, ComposedStorageConfig, CreateQueue, EligibilityPolicy,
+    ObjectLogConfig, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
+    PriorityTieBreaker, PriorityValue, ProjectionRecoveryAction, ProjectionRecoveryPolicy,
+    ProjectionStoreConfig, QueueCreationPolicy, QueueDefinition, QueueId, QueueKey,
+    RecurrencePolicy, RetryPolicy, SecretValue, SegmentSettings, TenantId,
 };
 use fireweed_memory::ManualClock;
 
@@ -59,7 +58,7 @@ fn sqlite_test_path(test_name: &str) -> String {
         .as_nanos();
     std::env::temp_dir()
         .join(format!(
-            "pqueue-{test_name}-{}-{nonce}.sqlite",
+            "fireweed-{test_name}-{}-{nonce}.sqlite",
             std::process::id()
         ))
         .to_string_lossy()
@@ -70,24 +69,24 @@ fn retain_static<T: 'static>(value: T) -> Arc<T> {
     Arc::new(value)
 }
 
-fn embedded_config(inputs: &mut [String]) -> EmbeddedDurabilityConfig {
-    EmbeddedDurabilityConfig {
-        object_log: EmbeddedObjectLogConfig::S3Compatible {
+fn composed_storage_config(inputs: &mut [String]) -> ComposedStorageConfig {
+    ComposedStorageConfig {
+        object_log: ObjectLogConfig::S3Compatible {
             endpoint: std::mem::take(&mut inputs[0]),
             bucket: std::mem::take(&mut inputs[1]),
             region: std::mem::take(&mut inputs[2]),
-            access_key_id: EmbeddedSecret::new(std::mem::take(&mut inputs[3])),
-            secret_access_key: EmbeddedSecret::new(std::mem::take(&mut inputs[4])),
+            access_key_id: SecretValue::new(std::mem::take(&mut inputs[3])),
+            secret_access_key: SecretValue::new(std::mem::take(&mut inputs[4])),
             allow_insecure_http: true,
         },
-        projection: EmbeddedProjectionConfig::Postgres {
-            url: EmbeddedSecret::new(std::mem::take(&mut inputs[5])),
+        projection: ProjectionStoreConfig::Postgres {
+            url: SecretValue::new(std::mem::take(&mut inputs[5])),
         },
-        response_barrier: EmbeddedResponseBarrier::Strict,
-        segments: EmbeddedSegmentConfig::new(8 * 1024 * 1024, 20).unwrap(),
+        response_barrier: CommitResponseBarrier::Strict,
+        segments: SegmentSettings::new(8 * 1024 * 1024, 20).unwrap(),
         namespace: std::mem::take(&mut inputs[6]),
-        recovery: EmbeddedRecoveryPolicy {
-            incompatible_projection: EmbeddedRecoveryAction::FailClosed,
+        recovery: ProjectionRecoveryPolicy {
+            incompatible_projection: ProjectionRecoveryAction::FailClosed,
             verify_checksums: true,
             max_tail_commands: 10_000,
         },
@@ -95,7 +94,7 @@ fn embedded_config(inputs: &mut [String]) -> EmbeddedDurabilityConfig {
 }
 
 #[test]
-fn embedded_durability_config_is_owned_and_opaque() {
+fn composed_storage_config_is_owned_and_secret_safe() {
     let mut inputs = vec![
         "http://127.0.0.1:9000".to_owned(),
         "queue-log".to_owned(),
@@ -105,7 +104,7 @@ fn embedded_durability_config_is_owned_and_opaque() {
         "postgres://user:password@localhost/projection".to_owned(),
         "integration-test".to_owned(),
     ];
-    let config = embedded_config(&mut inputs);
+    let config = composed_storage_config(&mut inputs);
     drop(inputs);
 
     let debug = format!("{config:?}");
@@ -115,70 +114,22 @@ fn embedded_durability_config_is_owned_and_opaque() {
     assert!(debug.contains("queue-log"));
     config.validate().unwrap();
 
-    let local = EmbeddedDurabilityConfig {
-        object_log: EmbeddedObjectLogConfig::Local {
+    let local = ComposedStorageConfig {
+        object_log: ObjectLogConfig::Local {
             root: "local-log".into(),
         },
-        projection: EmbeddedProjectionConfig::Sqlite {
+        projection: ProjectionStoreConfig::Sqlite {
             path: "projection.sqlite".into(),
         },
-        response_barrier: EmbeddedResponseBarrier::AsyncProjection,
-        segments: EmbeddedSegmentConfig::new(1024, 5).unwrap(),
+        response_barrier: CommitResponseBarrier::AsyncProjection,
+        segments: SegmentSettings::new(1024, 5).unwrap(),
         namespace: "local-test".to_owned(),
-        recovery: EmbeddedRecoveryPolicy {
-            incompatible_projection: EmbeddedRecoveryAction::RehydrateProjection,
+        recovery: ProjectionRecoveryPolicy {
+            incompatible_projection: ProjectionRecoveryAction::RebuildProjection,
             ..Default::default()
         },
     };
     local.validate().unwrap();
-}
-
-#[tokio::test]
-async fn embedded_lifecycle_rejects_unsupported_operations() {
-    let mut inputs = vec![
-        "http://127.0.0.1:9000".to_owned(),
-        "queue-log".to_owned(),
-        "us-east-1".to_owned(),
-        "access".to_owned(),
-        "secret".to_owned(),
-        "postgres://projection".to_owned(),
-        "integration-test".to_owned(),
-    ];
-    let handle = embedded_config(&mut inputs).into_handle().unwrap();
-    assert_eq!(
-        handle.verify_projection().await,
-        Err(EngineError::Unavailable)
-    );
-    assert_eq!(
-        handle.delete_projection().await,
-        Err(EngineError::Unavailable)
-    );
-    assert_eq!(
-        handle.rehydrate_projection().await,
-        Err(EngineError::Unavailable)
-    );
-}
-
-#[tokio::test]
-async fn embedded_handle_is_static_and_opaque() {
-    fn retain_opaque(value: EmbeddedHandle) -> Arc<EmbeddedHandle> {
-        Arc::new(value)
-    }
-
-    let mut inputs = vec![
-        "http://127.0.0.1:9000".to_owned(),
-        "queue-log".to_owned(),
-        "us-east-1".to_owned(),
-        "access".to_owned(),
-        "secret".to_owned(),
-        "postgres://projection".to_owned(),
-        "integration-test".to_owned(),
-    ];
-    let handle = retain_opaque(embedded_config(&mut inputs).into_handle().unwrap());
-    drop(inputs);
-
-    assert_eq!(handle.lifecycle_capabilities(), Default::default());
-    assert!(format!("{handle:?}").starts_with("EmbeddedHandle"));
 }
 
 #[test]
@@ -226,31 +177,33 @@ fn facade_exports_queue_definition_construction_surface() {
 /// The blessed construction path: `fireweed::open_memory` yields a usable handle with no concrete backend
 /// type named by the caller (the returned type is `RuntimeCore<impl LibBackend>`).
 #[tokio::test]
-async fn open_memory_builds_a_usable_pqueue() {
-    let pq = fireweed::open_memory(Arc::new(ManualClock::at(0)));
-    pq.create_queue(qdef()).await.unwrap();
-    pq.push(
-        &qkey(),
-        fireweed::NewItem {
-            priority: Some(PriorityValue::Int64(5)),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-    let claimed = pq.claim(&qkey(), 10, 1_000).await.unwrap();
+async fn open_memory_builds_a_usable_fireweed() {
+    let fireweed = fireweed::open_memory(Arc::new(ManualClock::at(0)));
+    fireweed.create_queue(qdef()).await.unwrap();
+    fireweed
+        .push(
+            &qkey(),
+            fireweed::NewItem {
+                priority: Some(PriorityValue::Int64(5)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let claimed = fireweed.claim(&qkey(), 10, 1_000).await.unwrap();
     assert_eq!(claimed.len(), 1, "open_memory handle claims normally");
 }
 
 /// The blessed sqlite path builds and round-trips too.
 #[tokio::test]
-async fn open_sqlite_builds_a_usable_pqueue() {
-    let pq = fireweed::open_sqlite(":memory:", Arc::new(ManualClock::at(0))).unwrap();
-    pq.create_queue(qdef()).await.unwrap();
-    pq.push(&qkey(), fireweed::NewItem::default())
+async fn open_sqlite_builds_a_usable_fireweed() {
+    let fireweed = fireweed::open_sqlite(":memory:", Arc::new(ManualClock::at(0))).unwrap();
+    fireweed.create_queue(qdef()).await.unwrap();
+    fireweed
+        .push(&qkey(), fireweed::NewItem::default())
         .await
         .unwrap();
-    assert_eq!(pq.metrics(&qkey()).await.unwrap().pending, 1);
+    assert_eq!(fireweed.metrics(&qkey()).await.unwrap().pending, 1);
 }
 
 /// Rust 2024 return-position `impl Trait` must not capture the borrowed path: the backend owns all
@@ -259,16 +212,17 @@ async fn open_sqlite_builds_a_usable_pqueue() {
 async fn open_sqlite_retained_handle_owns_path() {
     let path = sqlite_test_path("retained-handle-owns-path");
     let cleanup_path = std::path::PathBuf::from(&path);
-    let pq =
+    let fireweed =
         retain_static(fireweed::open_sqlite(path.as_str(), Arc::new(ManualClock::at(0))).unwrap());
     drop(path);
 
-    pq.create_queue(qdef()).await.unwrap();
-    pq.push(&qkey(), fireweed::NewItem::default())
+    fireweed.create_queue(qdef()).await.unwrap();
+    fireweed
+        .push(&qkey(), fireweed::NewItem::default())
         .await
         .unwrap();
-    assert_eq!(pq.metrics(&qkey()).await.unwrap().pending, 1);
-    drop(pq);
+    assert_eq!(fireweed.metrics(&qkey()).await.unwrap().pending, 1);
+    drop(fireweed);
     std::fs::remove_file(cleanup_path).unwrap();
 }
 
@@ -278,15 +232,16 @@ async fn open_sqlite_retained_handle_owns_path() {
 async fn open_sqlite_owned_path_reopens_after_all_handles_drop() {
     let path = sqlite_test_path("owned-path-reopens");
     {
-        let pq = retain_static(
+        let fireweed = retain_static(
             fireweed::open_sqlite(path.as_str(), Arc::new(ManualClock::at(0))).unwrap(),
         );
-        pq.create_queue(qdef()).await.unwrap();
-        pq.push(&qkey(), fireweed::NewItem::default())
+        fireweed.create_queue(qdef()).await.unwrap();
+        fireweed
+            .push(&qkey(), fireweed::NewItem::default())
             .await
             .unwrap();
-        let second_handle = Arc::clone(&pq);
-        drop(pq);
+        let second_handle = Arc::clone(&fireweed);
+        drop(fireweed);
         assert_eq!(second_handle.metrics(&qkey()).await.unwrap().pending, 1);
     }
 

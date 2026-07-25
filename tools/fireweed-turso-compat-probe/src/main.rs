@@ -41,7 +41,7 @@ fn relational_schema() -> &'static str {
 
 fn item_insert(id: &str, key: &str, priority_hex: &str, created_seq: u64) -> String {
     format!(
-        "INSERT INTO pqueue_items(tenant_id,queue_id,item_id,client_item_key,lifecycle_state,\
+        "INSERT INTO fireweed_items(tenant_id,queue_id,item_id,client_item_key,lifecycle_state,\
          priority,priority_sort,not_before,eligible_since,group_key,cohort_size,recurrence_until,\
          payload,fields,metadata,entity_document,retry_count,item_version,lease_token_hash,\
          lease_expires_at,worker_id,last_command_sequence,created_at,updated_at,terminal_at,\
@@ -80,7 +80,7 @@ async fn turso_projection_state(
     let mut lease_rows = conn
         .query(
             "SELECT lifecycle_state,lease_token_hash,lease_expires_at,worker_id,retry_count,\
-             item_version,last_command_sequence FROM pqueue_items WHERE item_id='item-a'",
+             item_version,last_command_sequence FROM fireweed_items WHERE item_id='item-a'",
             (),
         )
         .await?;
@@ -98,7 +98,7 @@ async fn turso_projection_state(
         last_command_sequence: lease.get(6)?,
     };
     Ok(ProjectionState {
-        item_count: scalar_i64(conn, "SELECT COUNT(*) FROM pqueue_items").await?,
+        item_count: scalar_i64(conn, "SELECT COUNT(*) FROM fireweed_items").await?,
         cursor: scalar_i64(
             conn,
             "SELECT next_seq FROM relational_cursor WHERE tenant='t' AND queue='q'",
@@ -107,7 +107,7 @@ async fn turso_projection_state(
         eligible: text_rows(conn, eligible_sql).await?,
         index_items: text_rows(
             conn,
-            "SELECT item_id FROM pqueue_item_index WHERE tenant_id='t' AND queue_id='q' \
+            "SELECT item_id FROM fireweed_item_index WHERE tenant_id='t' AND queue_id='q' \
              AND index_name='probe' AND index_key>=X'10' ORDER BY index_key,item_id",
         )
         .await?,
@@ -127,7 +127,7 @@ fn rusqlite_projection_state(
 ) -> rusqlite::Result<ProjectionState> {
     let lease = conn.query_row(
         "SELECT lifecycle_state,lease_token_hash,lease_expires_at,worker_id,retry_count,\
-         item_version,last_command_sequence FROM pqueue_items WHERE item_id='item-a'",
+         item_version,last_command_sequence FROM fireweed_items WHERE item_id='item-a'",
         [],
         |row| {
             Ok(LeaseState {
@@ -142,7 +142,7 @@ fn rusqlite_projection_state(
         },
     )?;
     Ok(ProjectionState {
-        item_count: conn.query_row("SELECT COUNT(*) FROM pqueue_items", [], |row| row.get(0))?,
+        item_count: conn.query_row("SELECT COUNT(*) FROM fireweed_items", [], |row| row.get(0))?,
         cursor: conn.query_row(
             "SELECT next_seq FROM relational_cursor WHERE tenant='t' AND queue='q'",
             [],
@@ -151,7 +151,7 @@ fn rusqlite_projection_state(
         eligible: rusqlite_text_rows(conn, eligible_sql)?,
         index_items: rusqlite_text_rows(
             conn,
-            "SELECT item_id FROM pqueue_item_index WHERE tenant_id='t' AND queue_id='q' \
+            "SELECT item_id FROM fireweed_item_index WHERE tenant_id='t' AND queue_id='q' \
              AND index_name='probe' AND index_key>=X'10' ORDER BY index_key,item_id",
         )?,
         lease,
@@ -254,13 +254,13 @@ async fn run_turso(
     tx.execute(item_insert("item-c", "key-c", "03", 3), ())
         .await?;
     tx.execute(
-        "INSERT INTO pqueue_item_index(tenant_id,queue_id,index_name,index_key,item_id) \
+        "INSERT INTO fireweed_item_index(tenant_id,queue_id,index_name,index_key,item_id) \
          VALUES('t','q','probe',X'10','item-a')",
         (),
     )
     .await?;
     tx.execute(
-        "INSERT INTO pqueue_group_summary(tenant_id,queue_id,group_key,oldest_eligible_at,\
+        "INSERT INTO fireweed_group_summary(tenant_id,queue_id,group_key,oldest_eligible_at,\
          rep_progress_guard_sort,rep_priority_sort,rep_created_at,rep_item_id,eligible_item_count,\
          at_risk_count,updated_at) VALUES('t','q','g',1,NULL,X'01',2,'item-b',2,0,4) \
          ON CONFLICT(tenant_id,queue_id,group_key) DO UPDATE SET \
@@ -269,7 +269,7 @@ async fn run_turso(
     )
     .await?;
     tx.execute(
-        "UPDATE pqueue_items SET lifecycle_state='Leased',lease_token_hash=X'A1B2',\
+        "UPDATE fireweed_items SET lifecycle_state='Leased',lease_token_hash=X'A1B2',\
          lease_expires_at=1000,worker_id='worker-a',retry_count=retry_count+1,\
          item_version=item_version+1,updated_at=4,last_command_sequence=4 \
          WHERE tenant_id='t' AND queue_id='q' AND item_id='item-a'",
@@ -283,19 +283,19 @@ async fn run_turso(
     .await?;
     tx.commit().await?;
 
-    let eligible_sql = "SELECT item_id FROM pqueue_items WHERE tenant_id='t' AND queue_id='q' \
+    let eligible_sql = "SELECT item_id FROM fireweed_items WHERE tenant_id='t' AND queue_id='q' \
         AND lifecycle_state='Pending' AND superseded=0 AND cohort_size IS NULL \
         AND (not_before IS NULL OR not_before<=10) AND eligible_since IS NOT NULL \
-        AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+        AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
           ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
-          WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
-          AND ig.item_id=pqueue_items.item_id) ORDER BY priority_sort,created_seq LIMIT 10";
+          WHERE ig.tenant_id=fireweed_items.tenant_id AND ig.queue_id=fireweed_items.queue_id \
+          AND ig.item_id=fireweed_items.item_id) ORDER BY priority_sort,created_seq LIMIT 10";
     let eligible = text_rows(&conn, eligible_sql).await?;
     assert_eq!(eligible, ["item-b", "item-c"]);
     assert_eq!(
         text_rows(
             &conn,
-            "WITH candidates AS (SELECT item_id FROM pqueue_items WHERE tenant_id='t' \
+            "WITH candidates AS (SELECT item_id FROM fireweed_items WHERE tenant_id='t' \
              AND queue_id='q' ORDER BY priority_sort,created_seq LIMIT 1) SELECT item_id FROM candidates"
         )
         .await?,
@@ -335,7 +335,7 @@ async fn run_turso(
     assert_eq!(
         scalar_i64(
             &conn,
-            "SELECT COUNT(*) FROM pqueue_items WHERE item_id='rolled-back'"
+            "SELECT COUNT(*) FROM fireweed_items WHERE item_id='rolled-back'"
         )
         .await?,
         0
@@ -450,7 +450,7 @@ async fn run_turso(
     assert_eq!(
         text_rows(
             &reopened_conn,
-            "SELECT item_id FROM pqueue_items WHERE tenant_id='t' AND queue_id='q' \
+            "SELECT item_id FROM fireweed_items WHERE tenant_id='t' AND queue_id='q' \
              AND client_item_key='same-key' AND superseded=0"
         )
         .await?,
@@ -492,12 +492,12 @@ fn run_rusqlite(path: &str) -> Result<ProjectionState, Box<dyn std::error::Error
     tx.execute(&item_insert("item-b", "key-b", "01", 2), [])?;
     tx.execute(&item_insert("item-c", "key-c", "03", 3), [])?;
     tx.execute(
-        "INSERT INTO pqueue_item_index(tenant_id,queue_id,index_name,index_key,item_id) \
+        "INSERT INTO fireweed_item_index(tenant_id,queue_id,index_name,index_key,item_id) \
          VALUES('t','q','probe',X'10','item-a')",
         [],
     )?;
     tx.execute(
-        "UPDATE pqueue_items SET lifecycle_state='Leased',lease_token_hash=X'A1B2',\
+        "UPDATE fireweed_items SET lifecycle_state='Leased',lease_token_hash=X'A1B2',\
          lease_expires_at=1000,worker_id='worker-a',retry_count=retry_count+1,\
          item_version=item_version+1,updated_at=4,last_command_sequence=4 \
          WHERE tenant_id='t' AND queue_id='q' AND item_id='item-a'",
@@ -508,7 +508,7 @@ fn run_rusqlite(path: &str) -> Result<ProjectionState, Box<dyn std::error::Error
         [],
     )?;
     tx.commit()?;
-    let eligible_sql = "SELECT item_id FROM pqueue_items WHERE tenant_id='t' AND queue_id='q' \
+    let eligible_sql = "SELECT item_id FROM fireweed_items WHERE tenant_id='t' AND queue_id='q' \
         AND lifecycle_state='Pending' AND superseded=0 AND cohort_size IS NULL \
         AND (not_before IS NULL OR not_before<=10) AND eligible_since IS NOT NULL \
         ORDER BY priority_sort,created_seq LIMIT 10";
@@ -536,7 +536,7 @@ fn run_rusqlite(path: &str) -> Result<ProjectionState, Box<dyn std::error::Error
         [],
     )?;
     rollback.rollback()?;
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM pqueue_items", [], |row| row.get(0))?;
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM fireweed_items", [], |row| row.get(0))?;
     let cursor: i64 = conn.query_row(
         "SELECT next_seq FROM relational_cursor WHERE tenant='t' AND queue='q'",
         [],
@@ -558,7 +558,7 @@ fn run_rusqlite(path: &str) -> Result<ProjectionState, Box<dyn std::error::Error
     println!("rusqlite.exact_pragma_batch=pass");
     println!("rusqlite.schema_batch_lifecycle_index_cursor_eligible_rollback_reopen=pass");
     let winner: String = reopened.query_row(
-        "SELECT item_id FROM pqueue_items WHERE tenant_id='t' AND queue_id='q' \
+        "SELECT item_id FROM fireweed_items WHERE tenant_id='t' AND queue_id='q' \
          AND client_item_key='same-key' AND superseded=0",
         [],
         |row| row.get(0),
@@ -584,7 +584,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("decision=no-go-current-adapter");
     println!(
         "reason=The governing current-port stop rule rejects an adapter that would require changing \
-         pqueue's synchronous ProjectionStore unit of work or adding a blocking database actor."
+         fireweed's synchronous ProjectionStore unit of work or adding a blocking database actor."
     );
     Ok(())
 }

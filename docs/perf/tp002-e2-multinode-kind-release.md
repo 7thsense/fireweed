@@ -25,7 +25,7 @@ kind enforces two fixes that turn that ceiling into a reproducible pass:
    owner counts, per-pod throughput is constant — so aggregate scales **linearly** 2 → 4 → 8 and the 8/2
    ratio lands near **4×** by construction (well clear of the 3.5× bar), instead of collapsing as the box
    saturated.
-2. **A LEAN, SEPARATED, IN-CLUSTER load generator.** The load is a single in-cluster `Job` (`pqueue-loadgen
+2. **A LEAN, SEPARATED, IN-CLUSTER load generator.** The load is a single in-cluster `Job` (`fireweed-loadgen
    run`) with a **bounded** CPU limit (`2000m`), driving the workload **pod → pod over Service ClusterIP**.
    Bounding the driver's CPU frees the cores the old fat host driver was stealing, so each server pod gets
    enough CPU (~1.2–1.3 effective cores) to clear the per-queue floor. Driving pod→pod also sidesteps this
@@ -34,18 +34,18 @@ kind enforces two fixes that turn that ceiling into a reproducible pass:
 
 ## Topology
 
-- **Server pods (per owner):** the `pqueue:e2` image (`Dockerfile.e2` — production `pqueue-service` +
-  `pqueue-loadgen` in one image) as an independent `Deployment(replicas=1)` + `Service`, in
-  `object_log_sqlite_projection` **segmented group-commit** mode (`PQUEUE_LOG_BACKEND=objectlog`,
-  `PQUEUE_PROJECTION_BACKEND=sqlite`, `PQUEUE_OBJECT_LOG_MODE=segmented`), with the object-log root + sqlite
-  projection on an **`emptyDir medium: Memory`** tmpfs (`/data`), a distinct `PQUEUE_NODE_ID`, a **disjoint**
-  `PQUEUE_BOOTSTRAP_QUEUES` set (one queue per owner; ownership disjoint by construction), and tuning
-  `PQUEUE_SEGMENT_TARGET_BYTES=262144`, `PQUEUE_SEGMENT_MAX_LATENCY_MS=1`, `PQUEUE_WORKER_THREADS=2`. CPU
+- **Server pods (per owner):** the `fireweed:e2` image (`Dockerfile.e2` — production `fireweed-service` +
+  `fireweed-loadgen` in one image) as an independent `Deployment(replicas=1)` + `Service`, in
+  `object_log_sqlite_projection` **segmented group-commit** mode (`FIREWEED_LOG_BACKEND=objectlog`,
+  `FIREWEED_PROJECTION_BACKEND=sqlite`, `FIREWEED_OBJECT_LOG_MODE=segmented`), with the object-log root + sqlite
+  projection on an **`emptyDir medium: Memory`** tmpfs (`/data`), a distinct `FIREWEED_NODE_ID`, a **disjoint**
+  `FIREWEED_BOOTSTRAP_QUEUES` set (one queue per owner; ownership disjoint by construction), and tuning
+  `FIREWEED_SEGMENT_TARGET_BYTES=262144`, `FIREWEED_SEGMENT_MAX_LATENCY_MS=1`, `FIREWEED_WORKER_THREADS=2`. CPU
   **request `1000m` / limit `1300m`**, memory request `256Mi` / limit `1Gi`, `imagePullPolicy: Never`, TCP
   readiness probe on `8080`.
-- **Load generator:** an in-cluster `Job` (`pqueue-loadgen run`, CPU **limit `2000m`** / request `1000m`)
+- **Load generator:** an in-cluster `Job` (`fireweed-loadgen run`, CPU **limit `2000m`** / request `1000m`)
   reading its `RunSpec` from a `ConfigMap`-mounted `spec.json`. It speaks raw RESP over `std::net::TcpStream`
-  to each owner Service (`pq-o<idx>.<ns>.svc.cluster.local:8080`), drives the workload — pipelined `XADD`
+  to each owner Service (`fireweed-o<idx>.<ns>.svc.cluster.local:8080`), drives the workload — pipelined `XADD`
   ingest, `XREADGROUP >` claim, `XACK` finalize — at owner counts 2/4/8 with `8` concurrent connections per
   queue, `pipe=1000`, `batch=1000`, `12000` items per queue, and prints one measured `RESULT {json}` line
   per owner count.
@@ -88,7 +88,7 @@ row must carry, not a lucky run at the floor edge.
 Release-tier rows (one per sweep), `backend_profile="object_log_sqlite_projection"`,
 `scale="release"`, `evidence_tier="release"`, `measurements.tp002_evidence_ids=["E2"]`:
 `docs/perf/evidence/tp002-e2-multinode-kind-release.jsonl`. The governed authority is exactly three rows,
-one each for unique sweeps 1, 2, and 3. Every row is strict-validated by `pqueue_release`, and the verifier
+one each for unique sweeps 1, 2, and 3. Every row is strict-validated by `fireweed_release`, and the verifier
 rejects missing, duplicate, extra, mixed-revision, or mixed-configuration sweeps. Validation also happens
 at emit time (the generator's `emit-row` refuses to write a release row unless every bar holds).
 
@@ -100,9 +100,9 @@ bash scripts/perf/tp002-e2-kind.sh
 #   LOADGEN_CPU_LIMIT=2000m WORKER_THREADS=2 SEG_LATENCY_MS=1 SEG_TARGET_BYTES=262144
 #   ITEMS_PER_QUEUE=12000 CONNS_PER_QUEUE=8 PIPE=1000 BATCH=1000 QUEUES_PER_OWNER=1 SWEEPS=3
 # Teardown (the harness leaves the cluster up for inspection; delete it + the image when done):
-kind delete cluster --name pqueue-e2 && docker rmi pqueue:e2
+kind delete cluster --name fireweed-e2 && docker rmi fireweed:e2
 ```
 
 Harness sources: `scripts/perf/tp002-e2-kind.sh` (orchestrator + manifest generation),
-`crates/pqueue-loadgen/` (the in-cluster RESP load generator + `emit-row` ledger emitter), `Dockerfile.e2`
+`crates/fireweed-loadgen/` (the in-cluster RESP load generator + `emit-row` ledger emitter), `Dockerfile.e2`
 (the service + loadgen image).

@@ -41,10 +41,10 @@ projection, in one file, with no object store and no Postgres control plane.
 
 In scope:
 
-- A durable `LogStore` over a SQLite `pqueue_command_log` table (WAL + fsync ack
+- A durable `LogStore` over a SQLite `fireweed_command_log` table (WAL + fsync ack
   boundary), reusing the TD-001 command-envelope / `CommandPosition` model.
 - Reuse of the existing full item-lifecycle projection `SqliteProjectionStore`
-  (`pqueue-sqlite`, `projection.rs`) as the `ProjectionStore`, unchanged from
+  (`fireweed-sqlite`, `projection.rs`) as the `ProjectionStore`, unchanged from
   object-log mode. (This is the full `ProjectionStore` — not the group/cohort
   `SqliteProjection` in `lib.rs` used by object-log group-summary materialization.)
 - A SQLite `ControlPlaneStore` (queue definitions, queue-owner assignment +
@@ -74,7 +74,7 @@ Out of scope:
 `sqlite` is a **log-projection backend** (ADR-001) where both halves live in one
 SQLite database file:
 
-- `LogStore` — appends serialized `CommandEnvelope`s to `pqueue_command_log`
+- `LogStore` — appends serialized `CommandEnvelope`s to `fireweed_command_log`
   `(tenant_id, queue_id, sequence, backend_epoch, checksum, payload,
   created_at)`, `PRIMARY KEY (tenant_id, queue_id, sequence)`. The
   durable ack boundary is the committed SQLite transaction under WAL with
@@ -86,8 +86,8 @@ SQLite database file:
 - `ProjectionStore` — the existing `SqliteProjectionStore` (`projection.rs`,
   the full item-lifecycle projection), applied only from committed log rows
   (unchanged semantics from TD-004).
-- `ControlPlaneStore` — `pqueue_queue` (validated `QueueDefinition`) and
-  `pqueue_queue_owner` (queue → epoch) tables in the same database.
+- `ControlPlaneStore` — `fireweed_queue` (validated `QueueDefinition`) and
+  `fireweed_queue_owner` (queue → epoch) tables in the same database.
 - `SnapshotStore` — optional/no-op for v1: the projection is persisted in the
   same file and is always current with the log (atomic append+apply), so there is
   no replay to accelerate. A compaction/checkpoint may be added later but is not
@@ -123,7 +123,7 @@ SQLite database file:
 
 ## Backend Profile
 
-`PQUEUE_BACKEND_PROFILE=sqlite` with a single config value: the database file
+`FIREWEED_BACKEND_PROFILE=sqlite` with a single config value: the database file
 path (and a `synchronous` strictness knob). No object store, no Postgres. This is
 the profile an embedded host (7snx) selects for durable single-file operation.
 
@@ -140,13 +140,13 @@ the profile an embedded host (7snx) selects for durable single-file operation.
   inherited from TD-004, which a single-file atomic backend does not require.)
   The reopen-recovery guarantee is therefore "reopen the file → committed state is
   present", verified by a reopen test.
-- **Retention**: pruning of terminal/applied `pqueue_command_log` rows is
+- **Retention**: pruning of terminal/applied `fireweed_command_log` rows is
   **deferred** (future work, tracked by a follow-up bead). The log table is not
   pruned in v1; durability and reopen recovery do not depend on retention.
 
 ## Completion Evidence (to be produced by build beads)
 
-- `cargo test -p pqueue-sqlite` passes the new durable `LogStore`/`ControlPlaneStore`
+- `cargo test -p fireweed-sqlite` passes the new durable `LogStore`/`ControlPlaneStore`
   unit tests.
 - `sqlite` passes the shared TD-001 backend conformance suite (parity with
   `postgres_native` and `object_log_sqlite_projection`).

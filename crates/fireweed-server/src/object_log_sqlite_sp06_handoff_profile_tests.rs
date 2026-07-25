@@ -163,7 +163,7 @@ impl TmpDir {
     fn new(label: &str) -> Self {
         static N: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "pqueue-sp06-{label}-{}-{}",
+            "fireweed-sp06-{label}-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));

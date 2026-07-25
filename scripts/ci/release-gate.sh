@@ -70,7 +70,7 @@ ${CARGO} run -p fireweed-release --bin fireweed-verify-transaction-evidence -- \
     --evidence "${REPO_ROOT}/docs/perf/evidence/tp003-ac-txn-parity-postgres-storage-pairs.jsonl"
 
 # A clean ledger directory so stale pre-migration rows in the retained
-# target/pqueue-ledger evidence path can
+# target/fireweed-ledger evidence path can
 # never satisfy the gate. Every suite is pointed at this dir via the env var
 # that fireweed_release::ledger_path() honors.
 FIREWEED_LEDGER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fireweed-ledger.XXXXXX")"

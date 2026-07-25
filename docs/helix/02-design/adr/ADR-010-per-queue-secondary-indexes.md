@@ -21,16 +21,16 @@ ddx:
 
 ## 1. Context
 
-pqueue items already carry a structured field map `fields: BTreeMap<String, Bytes>` on every record
-(`crates/pqueue-projection/src/lib.rs:47`, surfaced through `LiveItemView` at
-`crates/pqueue-engine/src/port.rs:121`, and mutable in place via `update_fields` / FAC-1). Today the only
+fireweed items already carry a structured field map `fields: BTreeMap<String, Bytes>` on every record
+(`crates/fireweed-projection/src/lib.rs:47`, surfaced through `LiveItemView` at
+`crates/fireweed-engine/src/port.rs:121`, and mutable in place via `update_fields` / FAC-1). Today the only
 content-addressable lookup is by `client_item_key` (`ProjectionData::by_key`,
-`crates/pqueue-projection/src/lib.rs:272`, `lookup_by_key` at `:674`). There is no way to ask "which item
+`crates/fireweed-projection/src/lib.rs:272`, `lookup_by_key` at `:674`). There is no way to ask "which item
 has `fields["external_id"] == X`" except a full scan, and no way to *enforce* that at most one live item
 carries a given field value.
 
 The projection already maintains exactly one derived index — the priority-ordered eligibility set `elig`
-(`eligible: BTreeSet<EligKey>`, `crates/pqueue-projection/src/lib.rs:274`) — using a **maintain-on-apply**
+(`eligible: BTreeSet<EligKey>`, `crates/fireweed-projection/src/lib.rs:274`) — using a **maintain-on-apply**
 pattern: every mutating arm of `apply_command` (`:346`) keeps `elig` in sync inside the same unit of work
 (`insert_pending` at `:291`, `transition` at `:320`, the `ReplacePending`/`PurgeItems` arms at `:470`/`:547`).
 This ADR adds **secondary indexes over configured fields** that follow the *same* pattern, so every backend
@@ -41,10 +41,10 @@ that shares `ProjectionData` gets them for free, read-after-write, with no new I
 - **Per-queue only.** An index belongs to one queue; there is no cross-queue lookup. This is a natural fit:
   one queue == one owner == one `ProjectionData` (ADR-008).
 - **Over configured item FIELDS.** Index keys are built from one or more named entries of the item `fields`
-  map. pqueue stays **domain-agnostic** — indexes are generic over field *names* and opaque *bytes* values.
+  map. fireweed stays **domain-agnostic** — indexes are generic over field *names* and opaque *bytes* values.
   No tenant/job/run or any cayce concept is modeled.
 - **Unique AND non-unique.** Unique = a push/upsert/update that would create a duplicate key fails atomically
-  with `EngineError::Conflict` (`crates/pqueue-engine/src/error.rs`), committing nothing. Non-unique =
+  with `EngineError::Conflict` (`crates/fireweed-engine/src/error.rs`), committing nothing. Non-unique =
   lookup returns all matching items.
 - A lookup returns enough to identify items: `(client_item_key, item_id, item_version)`.
 - Maintained atomically on **push, upsert (`replace_if_pending`), `update_fields`, purge**; **read-after-write
@@ -59,9 +59,9 @@ Add a per-queue, declaration-driven set of secondary indexes maintained by the p
    `create_queue`.
 2. **In-memory maintenance** lives in `ProjectionData` as a name-keyed set of composite-key maps, maintained
    in the same `apply_command` arms that already maintain `elig`, with a **pre-commit uniqueness validator**
-   mirroring `update_fields_validate` (`crates/pqueue-projection/src/lib.rs:714`).
+   mirroring `update_fields_validate` (`crates/fireweed-projection/src/lib.rs:714`).
 3. **Query** is a new read port returning `(client_item_key, item_id, item_version)` for exact composite-key
-   match (unique-get and non-unique-lookup), surfaced as facade methods on `Pqueue`.
+   match (unique-get and non-unique-lookup), surfaced as facade methods on `Fireweed`.
 4. **Relational parity** (later phase) realizes the same indexes as a side index table with a partial unique
    constraint, returning identical results; proven by shared conformance scenarios run across both families.
 
@@ -69,11 +69,11 @@ Add a per-queue, declaration-driven set of secondary indexes maintained by the p
 
 ## 3. Declaration model (`QueueDefinition`)
 
-Add a new field to `QueueDefinition` (`crates/pqueue-core/src/domain.rs:555`) and to the construction in
+Add a new field to `QueueDefinition` (`crates/fireweed-core/src/domain.rs:555`) and to the construction in
 `CreateQueue::validate` (`:580`-`:781`):
 
 ```rust
-// pqueue-core/src/domain.rs (sketch — NOT written by this ADR)
+// fireweed-core/src/domain.rs (sketch — NOT written by this ADR)
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IndexSpec {
     /// Unique index name within the queue (the lookup handle).
@@ -127,14 +127,14 @@ key = for each field name in spec.fields:  be_u32(value.len()) || value_bytes
 
 Length-prefixing makes the encoding **unambiguous** (no separator can collide with field content — bytes are
 arbitrary), order-sensitive (matching `fields` order), and total/`Ord` as a `Vec<u8>`. Field *values* are
-hashed/compared as **raw bytes** — no normalization, casing, or trimming (pqueue is domain-agnostic; a
+hashed/compared as **raw bytes** — no normalization, casing, or trimming (fireweed is domain-agnostic; a
 consumer that wants case-insensitivity normalizes before writing the field). Exact-match only; this encoding
 intentionally does **not** support prefix/range scans in v1 (deferred, §8).
 
 ### 4.2 State
 
 ```rust
-// pqueue-projection/src/lib.rs (sketch)
+// fireweed-projection/src/lib.rs (sketch)
 type CompositeKey = Vec<u8>;
 
 enum SecondaryIndex {
@@ -153,11 +153,11 @@ pub struct ProjectionData {
 
 - Unique: `key -> item_id` (one live item).
 - Non-unique: `key -> BTreeSet<ItemId>` (all matching items; `BTreeSet` gives deterministic, monotonic-id
-  ordering for the returned list — `ItemId` is `Ord`, `crates/pqueue-core/src/domain.rs:109`).
+  ordering for the returned list — `ItemId` is `Ord`, `crates/fireweed-core/src/domain.rs:109`).
 
 ### 4.3 Construction (signature change + ripple)
 
-`ProjectionData::new` (`crates/pqueue-projection/src/lib.rs:280`) gains the specs:
+`ProjectionData::new` (`crates/fireweed-projection/src/lib.rs:280`) gains the specs:
 
 ```rust
 pub fn new(priority_model: PriorityModel, index_specs: Vec<IndexSpec>) -> Self
@@ -165,10 +165,10 @@ pub fn new(priority_model: PriorityModel, index_specs: Vec<IndexSpec>) -> Self
 
 Every construction site passes `definition.secondary_indexes.clone()` — all four log-replay backends already
 hold `definition` at the call:
-- `crates/pqueue-memory/src/lib.rs:608` (create) — and any rebuild path,
-- `crates/pqueue-postgres/src/lib.rs:233` and `:862`,
-- `crates/pqueue-objectlog/src/lib.rs:269` and `:750`,
-- `crates/pqueue-sqlite/src/lib.rs:234` and `:838`.
+- `crates/fireweed-memory/src/lib.rs:608` (create) — and any rebuild path,
+- `crates/fireweed-postgres/src/lib.rs:233` and `:862`,
+- `crates/fireweed-objectlog/src/lib.rs:269` and `:750`,
+- `crates/fireweed-sqlite/src/lib.rs:234` and `:838`.
 
 Because the index specs come from the **`QueueDefinition`** (durable in the control plane / `queues`
 table), not from the command log, a **log-replay rebuild** reconstructs the indexes correctly: the backend
@@ -190,7 +190,7 @@ this record (§3 sparse rule); else emit `(name, encode(values))`.
 
 ## 5. Maintenance hooks (which `apply_command` arm touches which index)
 
-All maintenance happens inside `apply_command` (`crates/pqueue-projection/src/lib.rs:346`), in the same UoW
+All maintenance happens inside `apply_command` (`crates/fireweed-projection/src/lib.rs:346`), in the same UoW
 as the existing `elig` updates, so it is atomic and read-after-write with the command's other effects. Two
 private helpers added next to `insert_pending`/`transition`:
 
@@ -216,7 +216,7 @@ state) in a key, which *would* make terminal transitions move the key.
 
 ### 5.1 Unique-conflict: validate before commit (no rollback)
 
-The module INVARIANT (`crates/pqueue-projection/src/lib.rs:17`-`:20`) is that `apply_command` is infallible —
+The module INVARIANT (`crates/fireweed-projection/src/lib.rs:17`-`:20`) is that `apply_command` is infallible —
 `commit` (`:248`) appends to the log *before* applying and never rolls back, so any command that can be
 rejected MUST be pre-validated. Unique-index conflict is exactly such a case. Add validators mirroring
 `update_fields_validate` (`:714`), called by the backend ports *before* `commit_locked`:
@@ -239,7 +239,7 @@ pub fn replace_pending_index_validate(
 ```
 
 Backends wire these next to their existing pre-validation, e.g.:
-- `MemoryBackend::push` (`crates/pqueue-memory/src/lib.rs:293`) and `replace_if_pending` (`:204`) call the
+- `MemoryBackend::push` (`crates/fireweed-memory/src/lib.rs:293`) and `replace_if_pending` (`:204`) call the
   matching validator before `commit_locked` (`:154`).
 - `MemoryBackend::update_fields` (`:459`) already calls `update_fields_validate` at `:474`; it adds a call to
   `update_fields_index_validate` in the same guarded block.
@@ -253,7 +253,7 @@ no divergence" contract as finalize/renew.
 
 ## 6. Query port + facade method
 
-A new read port (sibling of `ProjectionRead`, `crates/pqueue-engine/src/port.rs:142`):
+A new read port (sibling of `ProjectionRead`, `crates/fireweed-engine/src/port.rs:142`):
 
 ```rust
 /// One hit from a secondary-index lookup — enough to identify and re-read the item.
@@ -281,7 +281,7 @@ pub trait IndexQueryPort: Send + Sync {
 
 `key_values.len()` must equal `spec.fields.len()` (else `EngineError::Invalid`); the port encodes them with
 the §4.1 rule and probes the map. Backing methods on `ProjectionData` (read side, near `lookup_by_key` at
-`crates/pqueue-projection/src/lib.rs:674`):
+`crates/fireweed-projection/src/lib.rs:674`):
 
 ```rust
 pub fn index_get_unique(&self, index_name: &str, key_values: &[Bytes]) -> EngineResult<Option<IndexHit>>;
@@ -291,7 +291,7 @@ pub fn index_lookup(&self, index_name: &str, key_values: &[Bytes]) -> EngineResu
 Each resolves `ItemId`s through `self.items` to read `client_item_key` + `item_version`, so a hit always
 carries the *current* version (read-after-write).
 
-**Facade** on `Pqueue<B>` (`crates/pqueue/src/lib.rs`, near `live_item` at `:519`), adding `IndexQueryPort`
+**Facade** on `Fireweed<B>` (`crates/fireweed/src/lib.rs`, near `live_item` at `:519`), adding `IndexQueryPort`
 to the `LibBackend` bound (`:37`) and `ConformanceCore`:
 
 ```rust
@@ -310,13 +310,13 @@ These are pure reads (no epoch/fence — like `peek`/`live_item` at `:513`/`:519
 
 ## 7. Relational (SQL) realization — later phase
 
-The relational family (`crates/pqueue-sqlite/src/relational.rs`, postgres analogue) has **no** shared
-`ProjectionData`; the `pqueue_items` table *is* the projection and `apply_command_sql`
-(`crates/pqueue-sqlite/src/relational.rs:610`) is the apply. Realize the indexes as a **side index table**
+The relational family (`crates/fireweed-sqlite/src/relational.rs`, postgres analogue) has **no** shared
+`ProjectionData`; the `fireweed_items` table *is* the projection and `apply_command_sql`
+(`crates/fireweed-sqlite/src/relational.rs:610`) is the apply. Realize the indexes as a **side index table**
 maintained in the same transaction:
 
 ```sql
-CREATE TABLE IF NOT EXISTS pqueue_item_indexes (
+CREATE TABLE IF NOT EXISTS fireweed_item_indexes (
     tenant_id TEXT NOT NULL,
     queue_id  TEXT NOT NULL,
     index_name TEXT NOT NULL,
@@ -327,12 +327,12 @@ CREATE TABLE IF NOT EXISTS pqueue_item_indexes (
     PRIMARY KEY (tenant_id, queue_id, index_name, item_id)
 );
 -- UNIQUE indexes get a partial unique constraint so a duplicate key violates atomically:
-CREATE UNIQUE INDEX IF NOT EXISTS pqueue_item_indexes_uniq
-    ON pqueue_item_indexes (tenant_id, queue_id, index_name, index_key)
+CREATE UNIQUE INDEX IF NOT EXISTS fireweed_item_indexes_uniq
+    ON fireweed_item_indexes (tenant_id, queue_id, index_name, index_key)
     WHERE /* index_name is one of the queue's UNIQUE specs */;
 ```
 
-Maintenance is added to the same `apply_command_sql` arms that already touch `pqueue_items`:
+Maintenance is added to the same `apply_command_sql` arms that already touch `fireweed_items`:
 - `Push` / `ReplacePending` insert (`insert_item` at `:397`) → INSERT the covering rows; ReplacePending
   DELETEs the superseded item's rows first.
 - `UpdateFields` (`:687`-`:740`) already read-merge-writes the `fields` JSON; in the same statement-group it
@@ -345,7 +345,7 @@ matching the in-memory pre-validate contract). Optionally also pre-`SELECT` to r
 relying on the driver error mapping; either way the observable result is identical.
 
 **Lookups:** `index_get_unique` / `index_lookup` become `SELECT client_item_key, item_id, item_version FROM
-pqueue_item_indexes WHERE tenant=? AND queue=? AND index_name=? AND index_key=? ORDER BY item_id`. Read-
+fireweed_item_indexes WHERE tenant=? AND queue=? AND index_name=? AND index_key=? ORDER BY item_id`. Read-
 after-write holds within the transaction.
 
 The encoding bytes (§4.1) are **shared** between families so a key computed in memory and a key stored in SQL
@@ -355,8 +355,8 @@ are byte-identical — this is what lets the conformance suite assert the two fa
 
 ## 8. Conformance strategy
 
-Add shared scenarios in `crates/pqueue-conformance/src/scenarios.rs` (alongside `update_fields_merges_and_cas`
-at `:53`), gated behind a new `ConformanceCore` bound `+ IndexQueryPort` (`crates/pqueue-conformance/src/lib.rs:74`),
+Add shared scenarios in `crates/fireweed-conformance/src/scenarios.rs` (alongside `update_fields_merges_and_cas`
+at `:53`), gated behind a new `ConformanceCore` bound `+ IndexQueryPort` (`crates/fireweed-conformance/src/lib.rs:74`),
 and register them in `core_suite!` (`:268`). Each scenario builds a queue whose `QueueDefinition` declares an
 index (a new `index_bearing_queue()` helper variant of the existing `shard()` def), so the SAME scenario runs
 on the in-memory family (`conformance_suite!`) and — in the later phase — the relational family
@@ -392,7 +392,7 @@ indexes rebuild correctly after a reopen/replay (§4.3).
 - In-memory conformance scenarios 1-6 (§8).
 
 **Phase 2 — relational parity.**
-- `pqueue_item_indexes` side table + maintenance in `apply_command_sql` arms + lookups for sqlite and
+- `fireweed_item_indexes` side table + maintenance in `apply_command_sql` arms + lookups for sqlite and
   postgres relational backends (§7); same scenarios run cross-family (§8).
 
 **Deferred (explicitly out of scope until asked):** prefix/range lookups (exact-match only in v1); native

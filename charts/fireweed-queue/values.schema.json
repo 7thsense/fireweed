@@ -509,7 +509,7 @@
             "hybridAsync": {
               "type": "object",
               "additionalProperties": false,
-              "description": "Async-apply debt/backpressure/poison thresholds for the objectlog/hybrid-async projection profile (rendered as PQUEUE_HYBRID_ASYNC_* only when projection.backend is hybrid-async). Every bound MUST be > 0 (a zero bound is instantly backpressured).",
+              "description": "Async-apply debt/backpressure/poison thresholds for the objectlog/hybrid-async projection profile (rendered as FIREWEED_HYBRID_ASYNC_* only when projection.backend is hybrid-async). Every bound MUST be > 0 (a zero bound is instantly backpressured).",
               "required": [
                 "applyLagMaxCommands",
                 "applyDebtMaxBytes",

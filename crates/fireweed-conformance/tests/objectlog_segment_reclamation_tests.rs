@@ -47,7 +47,7 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 fn base_dir(tag: &str) -> std::path::PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     std::env::temp_dir().join(format!(
-        "pqueue-seg-reclaim-{tag}-{}-{n}",
+        "fireweed-seg-reclaim-{tag}-{}-{n}",
         std::process::id()
     ))
 }
@@ -1571,8 +1571,8 @@ async fn TestHybridAsyncBehindImageRetainedFloorHeadReplayRecovery() {
 // Focused source assertion (AC 2 — TestHybridAsyncSharedFixtureNoFalseClaim):
 // proves the two TestHybridAsync* scenarios consume the shared fixture through
 // the `support` module, not the local helpers. If `base_dir` falls back to the
-// local helper (prefix "pqueue-seg-reclaim-") instead of the shared fixture
-// (prefix "pqueue-hybrid-async-"), the path-prefix assertion fails.
+// local helper (prefix "fireweed-seg-reclaim-") instead of the shared fixture
+// (prefix "fireweed-hybrid-async-"), the path-prefix assertion fails.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1581,14 +1581,14 @@ fn TestHybridAsyncSharedFixtureNoFalseClaim() {
     let path = support::base_dir("source-assert");
     let path_str = path.to_string_lossy();
     assert!(
-        path_str.contains("pqueue-hybrid-async-"),
+        path_str.contains("fireweed-hybrid-async-"),
         "TestHybridAsync* scenarios must consume shared fixture (base_dir prefix \
-         'pqueue-hybrid-async-'); got {path_str} (would be local fallback)"
+         'fireweed-hybrid-async-'); got {path_str} (would be local fallback)"
     );
     assert!(
-        !path_str.contains("pqueue-seg-reclaim-"),
+        !path_str.contains("fireweed-seg-reclaim-"),
         "TestHybridAsync* scenarios must NOT consume local base_dir (prefix \
-         'pqueue-seg-reclaim-'); got {path_str}"
+         'fireweed-seg-reclaim-'); got {path_str}"
     );
 
     // Verify the support module exposes all key helpers the scenarios need.

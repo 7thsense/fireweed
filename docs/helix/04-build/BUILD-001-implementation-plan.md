@@ -57,7 +57,7 @@ ddx:
 
 ## Scope
 
-This is the canonical build sequencing artifact for pqueue's first
+This is the canonical build sequencing artifact for fireweed's first
 implementation. It translates the PRD, API contracts, ADRs, TDs, and test plans
 into bounded implementation slices and DDx beads. It does not add product or
 design decisions; when a slice needs a decision not present in the governing
@@ -86,15 +86,15 @@ scope.
 - SQS-shaped compatibility adapter.
 - Hosted dashboard.
 - Kafka/Redpanda and DynamoDB backend implementations.
-- Seventh Sense migration design from existing tables into pqueue commands.
+- Seventh Sense migration design from existing tables into fireweed commands.
 - Production `progress_bound_ms` value selection; tests use configured fixture
   bounds until the external SLA lands.
-  <!-- pqueue-deferral: progress_bound_ms; owner=Erik; reason="external production SLA input pending"; recheck=2026-07-15 -->
+  <!-- fireweed-deferral: progress_bound_ms; owner=Erik; reason="external production SLA input pending"; recheck=2026-07-15 -->
 
 ## Shared Constraints
 
-- Rust workspace and crate dependency flow follow ADR-003. `pqueue-core` remains
-  runtime-free and has no pqueue crate dependencies.
+- Rust workspace and crate dependency flow follow ADR-003. `fireweed-core` remains
+  runtime-free and has no fireweed crate dependencies.
 - `#![forbid(unsafe_code)]` is enforced in all initial crates; any exception
   needs a later ADR/TD.
 - The native API is API-001. API-002 is a designed P1 operator surface: it is
@@ -117,42 +117,42 @@ scope.
 - AC-CLAIM-6 is split by product surface: active/expired/stale-token renewal is
   P0 and owned by B-041; fenced-after-operator renewal is P1 and owned by B-100
   with INV-11. P0 ledger evidence must not claim the operator-fenced assertion.
-- Product E2E smoke (`PQUEUE_E2E_SCALE=smoke`) is a per-PR gate once a suite
+- Product E2E smoke (`FIREWEED_E2E_SCALE=smoke`) is a per-PR gate once a suite
   exists. Release E2E uses the row-specific release shapes in TP-003 §3.11.
 
 ## Implementation Slices
 
 | Slice | Area | Governing Artifacts | Depends On | Validation Gate | Notes |
 |-------|------|---------------------|------------|-----------------|-------|
-| B-001 | Workspace and CI foundation | ADR-003, TP-003 §5 | None | `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace` | Creates the Rust toolchain, ADR-003 initial crates (`pqueue-core`, `pqueue-storage`, `pqueue-postgres`, `pqueue-service`, `pqueue-client`), CI scaffolding, dependency policy, unsafe denial, and coverage/property/fuzz placeholders. The second-backend crates are added later by B-080. |
-| B-010 | Core API/domain types | API-001, API-002, ADR-004 | B-001 | `cargo test -p pqueue-core core_domain_tests` | IDs, queue definitions, priority values, metadata, group/cohort/recurrence config, API result/error types; includes CreateQueue shape validations for mutually exclusive recurrence/cohort fields, `completion_bound_ms <= progress_bound_ms`, `group_co_residency` preconditions, and shard-count policy fields. |
-| B-011 | Core priority and ordering | PRD FR-2..FR-8, API-001, TP-003 AC-CORE-1 | B-010 | `cargo test -p pqueue-core core_priority_model_tests` | Includes timestamp and non-timestamp priority models so pqueue is not timestamp-only. |
-| B-012 | Core lifecycle, idempotency, retry, eligibility | API-001, TP-003 AC-CORE-2..4, AC-CLAIM-3 | B-010 | `cargo test -p pqueue-core core_lifecycle_transition_tests core_idempotency_tests core_eligibility_precedence_tests core_recurrence_rearm_tests` | Establishes the pure state machine before storage. AC-CLAIM-3 coverage here is the pure Eligibility Precedence evaluator; dynamic gate runtime coverage completes in B-050. |
-| B-020 | Storage traits and conformance harness | TD-001, TP-003 §4 | B-010..B-012 | `cargo test -p pqueue-storage storage_conformance --no-default-features` | Defines `LogStore`, `ProjectionStore`, `SnapshotStore`, `ControlPlaneStore`, command envelopes, positions, fixtures, and a reference in-memory backend so the conformance harness is executable before real backends exist. |
-| B-021 | Fault-injection harness | TP-003 §2, §3.10, §3.11 | B-020 | `cargo test -p pqueue-storage fault_injection_harness_tests` | Shared replay, partial-append, deterministic failure scheduler, commit/apply/response crash points, and reusable worker/service process-kill hooks used by AC-TXN-1..6, AC-CLAIM-2, AC-SHARD-3, AC-E2E-2/3/5/7. |
-| B-030 | Postgres control plane | TD-002, ADR-002 | B-020 | `cargo test -p pqueue-postgres postgres_schema_migration_tests postgres_transaction_flow_tests` | Queue definitions, tenant scope, backend profile, shard assignments, assignment epochs, and CreateQueue cross-field enforcement. Single-shard reference mode gets a static initial assignment and epoch so B-041 can fence appends before the TD-003 ownership lifecycle lands. |
-| B-040 | Postgres-native append/projection/write path | TD-001, TD-002, API-001 | B-030 | `cargo test -p pqueue-postgres postgres_transaction_flow_tests` | `BatchPush`, `BatchUpdate`, command/idempotency records, terminal retention basics. |
-| B-041 | Postgres-native claim/renew/finalize path | TD-002, TP-003 AC-CLAIM-1..5, AC-CLAIM-6 base renewal | B-040, B-021 | `cargo test -p pqueue-postgres postgres_concurrency_claim_tests`; `cargo test -p pqueue-storage storage_conformance_claim_tests storage_conformance_progress_tests` | Single active lease, lease renewal for active/expired/stale tokens, expiry redelivery, strict/bounded-relaxed claim, finalize outcomes, and progress-bound guards. Operator-fenced lease renewal belongs to B-100. Lease-expiry/background paths use bounded shared workers. |
-| B-042 | Postgres-native durability/idempotency/replay | TD-001, TD-002, TP-003 INV-5, INV-10 | B-041 | `cargo test -p pqueue-storage storage_conformance_durability_tests` | Kill-after-ack, replay response, request conflict, retention windows. |
-| B-043 | Canonical per-group summary projection | TD-001, TD-002, ADR-004, TP-003 AC-DISC-1 single-shard basis, AC-OBS-1 postgres basis | B-041 | `cargo test -p pqueue-postgres storage_conformance_progress_tests storage_conformance_discovery_tests` | Creates and maintains the single `pqueue_group_summary` projection for push/update/claim/finalize/retry mutation paths, exact `oldest_eligible_at`, bounded approximate counts, and shard-scoped keys. B-050/B-053 extend summary maintenance for gate flips, rearm, and purge. |
-| B-044 | Retention, compaction, and GC correctness | TD-001, TD-002, PRD FR-22/38/39 | B-042, B-043 | `cargo test -p pqueue-postgres postgres_retention_tests` | Request-idempotency, item-key, terminal, command-log, tombstone, and audit-window retention; deletes only when replay/audit windows permit; GC uses bounded shared workers. |
-| B-060 | API-001 service and client foundation | API-001, ADR-002, TP-003 AC-SEC-1..2 | B-041 | `cargo test -p pqueue-service service_api_error_semantics_tests service_auth_tenant_tests`; `cargo test -p pqueue-client` | HTTP/JSON app foundation, auth context, tenant isolation, lease-token hashing, shared route/handler scaffolding, and client facade used by feature slices. |
-| B-050 | Dynamic gates and eligibility projections | API-001, TD-002, TP-003 AC-GATE-1..2, AC-LAT-2 | B-043, B-060 | `cargo test -p pqueue-postgres storage_conformance_gate_tests`; `cargo test -p pqueue-service service_gate_tests`; `cargo test -p pqueue-client` | `SetGates`, gate anti-join, no item-row rewrite, exact oldest-eligible behavior, API-001 route/handler/client binding, and timing hooks for AC-LAT-2 gate-flip latency; gate/summary background recompute uses bounded shared workers. |
-| B-051 | Group batching and per-group summary consumers | ADR-004, API-001, TD-002, TP-003 AC-GRP-1..2 | B-043, B-050, B-060 | `cargo test -p pqueue-postgres storage_conformance_group_batching_tests postgres_group_coresidency_tests`; `cargo test -p pqueue-service service_group_batching_tests`; `cargo test -p pqueue-client` | `group_co_residency`, whole-group atomic claim, `same_group_key` as item filter, API-001 claim-option route/handler/client binding, and use of the canonical summary projection. |
-| B-052 | Cohort claims | API-001, ADR-004, TD-002, TP-003 AC-COH-1..2 | B-051, B-060 | `cargo test -p pqueue-postgres storage_conformance_cohort_tests`; `cargo test -p pqueue-service service_cohort_tests`; `cargo test -p pqueue-client` | Complete cohort atomic lease, incomplete expiry, no member leakage, and API-001 cohort route/handler/client binding. |
-| B-053 | Recurring queues and native purge | API-001, TD-002, TP-003 AC-REC-1..3 | B-041, B-043, B-060 | `cargo test -p pqueue-core core_recurrence_rearm_tests`; `cargo test -p pqueue-storage storage_conformance_durability_tests`; `cargo test -p pqueue-service service_recurrence_purge_tests`; `cargo test -p pqueue-client` | `rearm`, per-cycle retry reset, idle metrics, `PurgeItems`, tombstone/replay safety, API-001 recurrence/purge route/handler/client binding, and summary recompute for rearmed/purged items. |
-| B-054 | Active-scope discovery and metrics | API-001, TD-002, TD-003, TP-003 AC-DISC-1 single-shard, AC-OBS-1 postgres profile, AC-LAT-3 | B-043, B-050..B-053, B-060 | `cargo test -p pqueue-storage storage_conformance_discovery_tests`; `cargo test -p pqueue-service service_discovery_tests service_metrics_ground_truth_tests` | Single-shard Top-N ranking, exact oldest age, bounded count lag, auth-filtered service discovery, and query-plan assertions for no full scan; summary aggregation uses bounded shared workers. Cross-shard portions of AC-DISC-1 and AC-DISC-2 are owned by B-072. |
-| B-061 | Product E2E smoke harness | TP-001, TP-003 §3.11 | B-060, B-054, B-021 | `PQUEUE_BACKEND_PROFILE=postgres_native PQUEUE_E2E_SCALE=smoke cargo test -p pqueue-service --test product_workflows -- --ignored` | Implements shared `product_workflows` binary, env knobs, ledger output, seeds, smoke fixture scale, and service/worker fault hooks for crash-recovery workflows. |
-| B-062 | Benchmark and scale evidence harness | TP-001 performance suites, TP-002 E0..E2, TP-003 AC-LAT-1..4 | B-060, B-054 | `cargo test -p pqueue-service performance_batch_operation_tests performance_hot_queue_10m_tests`; release: `performance_single_deployment_baseline_tests` | Creates perf/scale runners, env knobs, seeds, instance/profile ledger fields, AC-LAT micro-bars, query-plan capture, and the E1/E2 measurement framework. E0/E1 runners declare a positive `progress_bound_ms`, verify its persisted queue-definition value, and record zero accepted-to-claim and discovery-age violations against that declaration; rates and percentiles remain topology-bound capacity observations. Full E2 execution waits for B-071/B-081. |
-| B-070 | Shard ownership lifecycle | TD-003, TD-001, TP-003 AC-SHARD-3 | B-030, B-021 | `cargo test -p pqueue-storage sharding_assignment_fencing_tests sharding_rebalance_drain_tests` | Owner registry, worker registration/heartbeat, target-vs-active owner, acquire/renew/begin-drain/release shard lease, stale-epoch reject, graceful/interrupted drain, recovery hooks. |
-| B-072 | Multi-shard claim, progress, discovery, and command convergence | TD-003, TD-001, TP-003 AC-SHARD-1..2, AC-DISC-1 cross-shard, AC-DISC-2 | B-070, B-054, B-021 | `cargo test -p pqueue-storage cross_shard_progress_tests storage_conformance_multi_shard_tests multi_shard_claim_order_replay_tests` | Fan-out claim, deterministic k-way merge, cross-shard queue-global progress aggregation, stalled-shard visibility, non-co-resident group aggregation across shards, cross-shard active-scope discovery, claim-intent partial-failure/replay convergence, envelope-scope request expiry, and queue-scoped multi-shard command convergence for `SetGates` and native `PurgeItems` spans. |
-| B-071 | Queue density resource model | ADR-003, TD-003, TP-002 E2 | B-072, B-062 | `cargo test -p pqueue-storage queue_density_single_node_tests -- --ignored` | Bounded shared pools/sweepers and LRU handles; no one task/loop/connection per queue/shard. |
-| B-080 | Object-log durable log and SQLite projection | TD-004, TD-001, TP-003 §4 | B-072 | `cargo test -p pqueue-objectlog object_log_commit_recovery_tests`; `cargo test -p pqueue-sqlite sqlite_projection_tests` | Adds `pqueue-objectlog` and `pqueue-sqlite` workspace crates per TD-001 step 6. Implements group commit, manifest CAS/current epoch fence, Postgres manifest-pointer fallback for no-CAS stores, production rejection of one-object-per-command, config rejection/fallback for stores without required conditional-write behavior, apply-before-return, replay response, SQLite projection, and cross-shard command convergence visibility gates. |
-| B-081 | Object-log conformance parity, metrics, product smoke, and recovery | TD-004, TP-002 E3, TP-003 AC-OBS-1 and AC-TXN-1..6 object-log profiles | B-080, B-062, B-061 | `cargo test -p pqueue-storage storage_conformance_multi_shard_tests --features object-log`; `cargo test -p pqueue-objectlog object_log_commit_recovery_tests`; `PQUEUE_BACKEND_PROFILE=object_log_sqlite_projection PQUEUE_E2E_SCALE=smoke cargo test -p pqueue-service --test product_workflows -- --ignored`; release: E3 benchmark + AC-TXN matrix | Snapshot + log-tail recovery, bounded apply lag, object-log latency/cost/recovery evidence, fallback-fence E3 row, transaction-contract crash-point matrix, multi-shard command convergence, object-log metrics ground truth, product-E2E smoke matrix extension, and parity with the shared TD-001 conformance suite. |
-| B-090 | P0 product workflow release gates | PRD, TP-003 AC-E2E-1..6, AC-E2E-8..9, INV-1..10 | B-061, B-062, B-071, B-080, B-081 | `PQUEUE_E2E_SCALE=release cargo test -p pqueue-service --test product_workflows -- --ignored`; `cargo test -p pqueue-service seventh_sense_validation_tests invariant_stress_matrix_tests -- --ignored`; release: TP-002 E0-E3, `performance_cross_queue_scale_out_tests` (the ADR-008 replacement for the retired `performance_multi_shard_scale_out_tests`), `recurrence_scale_both_profiles_tests` | Scheduled action, group batching, cohort, recurring, crash recovery, noisy neighbor, generic priority, downstream pacing, Seventh-Sense-shaped subset, recurrence under scale on both backend profiles, and INV-1..10 under the TP-003 §2 stress matrix. |
-| B-110 | Standalone durable sqlite backend (TD-005) | TD-005, ADR-006, TP-001 TD-005 row | B-080 | `cargo test -p pqueue-sqlite`; `cargo test -p pqueue-sqlite --test shared_conformance --test embedder_delivery_conformance --test sqlite_backend_tests`; `cargo test -p pqueue-service --lib runtime` | Unified single-transaction `SqliteBackend` (atomic append+apply on one connection, one WAL fsync ack boundary, strict read-after-write), atomic `claim` (single `attempts` increment; `batch_claim` omitted from the surface), epoch bootstrap + bump-on-open fencing, single-writer ownership (second opener rejected), no-replay reopen recovery, the `sqlite` `BackendProfile` wired into the service config/readiness (config-plumbing; the service does not yet construct/serve the backend), shared conformance parity with the in-memory reference, and the embedder delivery-adapter conformance suite. `client_item_key` convergence is the embedder adapter's responsibility (pqueue converges by `item_id`). The 7snx host switch off the in-memory backend (bead pqueue-a4846118) is a deferred cross-repo follow-up (requires publishing pqueue + bumping the git rev). |
-| B-100 | API-002 operator surface | API-002, ADR-002, TP-003 AC-OP-1..9, AC-CLAIM-6 operator-fenced renewal, INV-11 | B-060, B-050..B-053, B-021 | `cargo test -p pqueue-service operator_repair_tests operator_redrive_tests operator_purge_tests operator_async_operation_tests operator_auth_denied_path_tests` | P1 operator support: pause/resume, repair, redrive, bulk purge/archive, async ops, inspection/auth, and rejection of stale/fenced lease renewals after operator mutation. |
-| B-101 | Operator product workflow gate | API-002, TP-003 AC-E2E-7 | B-100, B-061 | `PQUEUE_E2E_SCALE=release cargo test -p pqueue-service --test product_workflows operator_repair_redrive_e2e -- --ignored` | Required before claiming operator-enabled product surface verified. |
+| B-001 | Workspace and CI foundation | ADR-003, TP-003 §5 | None | `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace` | Creates the Rust toolchain, ADR-003 initial crates (`fireweed-core`, `fireweed-storage`, `fireweed-postgres`, `fireweed-service`, `fireweed-client`), CI scaffolding, dependency policy, unsafe denial, and coverage/property/fuzz placeholders. The second-backend crates are added later by B-080. |
+| B-010 | Core API/domain types | API-001, API-002, ADR-004 | B-001 | `cargo test -p fireweed-core core_domain_tests` | IDs, queue definitions, priority values, metadata, group/cohort/recurrence config, API result/error types; includes CreateQueue shape validations for mutually exclusive recurrence/cohort fields, `completion_bound_ms <= progress_bound_ms`, `group_co_residency` preconditions, and shard-count policy fields. |
+| B-011 | Core priority and ordering | PRD FR-2..FR-8, API-001, TP-003 AC-CORE-1 | B-010 | `cargo test -p fireweed-core core_priority_model_tests` | Includes timestamp and non-timestamp priority models so fireweed is not timestamp-only. |
+| B-012 | Core lifecycle, idempotency, retry, eligibility | API-001, TP-003 AC-CORE-2..4, AC-CLAIM-3 | B-010 | `cargo test -p fireweed-core core_lifecycle_transition_tests core_idempotency_tests core_eligibility_precedence_tests core_recurrence_rearm_tests` | Establishes the pure state machine before storage. AC-CLAIM-3 coverage here is the pure Eligibility Precedence evaluator; dynamic gate runtime coverage completes in B-050. |
+| B-020 | Storage traits and conformance harness | TD-001, TP-003 §4 | B-010..B-012 | `cargo test -p fireweed-storage storage_conformance --no-default-features` | Defines `LogStore`, `ProjectionStore`, `SnapshotStore`, `ControlPlaneStore`, command envelopes, positions, fixtures, and a reference in-memory backend so the conformance harness is executable before real backends exist. |
+| B-021 | Fault-injection harness | TP-003 §2, §3.10, §3.11 | B-020 | `cargo test -p fireweed-storage fault_injection_harness_tests` | Shared replay, partial-append, deterministic failure scheduler, commit/apply/response crash points, and reusable worker/service process-kill hooks used by AC-TXN-1..6, AC-CLAIM-2, AC-SHARD-3, AC-E2E-2/3/5/7. |
+| B-030 | Postgres control plane | TD-002, ADR-002 | B-020 | `cargo test -p fireweed-postgres postgres_schema_migration_tests postgres_transaction_flow_tests` | Queue definitions, tenant scope, backend profile, shard assignments, assignment epochs, and CreateQueue cross-field enforcement. Single-shard reference mode gets a static initial assignment and epoch so B-041 can fence appends before the TD-003 ownership lifecycle lands. |
+| B-040 | Postgres-native append/projection/write path | TD-001, TD-002, API-001 | B-030 | `cargo test -p fireweed-postgres postgres_transaction_flow_tests` | `BatchPush`, `BatchUpdate`, command/idempotency records, terminal retention basics. |
+| B-041 | Postgres-native claim/renew/finalize path | TD-002, TP-003 AC-CLAIM-1..5, AC-CLAIM-6 base renewal | B-040, B-021 | `cargo test -p fireweed-postgres postgres_concurrency_claim_tests`; `cargo test -p fireweed-storage storage_conformance_claim_tests storage_conformance_progress_tests` | Single active lease, lease renewal for active/expired/stale tokens, expiry redelivery, strict/bounded-relaxed claim, finalize outcomes, and progress-bound guards. Operator-fenced lease renewal belongs to B-100. Lease-expiry/background paths use bounded shared workers. |
+| B-042 | Postgres-native durability/idempotency/replay | TD-001, TD-002, TP-003 INV-5, INV-10 | B-041 | `cargo test -p fireweed-storage storage_conformance_durability_tests` | Kill-after-ack, replay response, request conflict, retention windows. |
+| B-043 | Canonical per-group summary projection | TD-001, TD-002, ADR-004, TP-003 AC-DISC-1 single-shard basis, AC-OBS-1 postgres basis | B-041 | `cargo test -p fireweed-postgres storage_conformance_progress_tests storage_conformance_discovery_tests` | Creates and maintains the single `fireweed_group_summary` projection for push/update/claim/finalize/retry mutation paths, exact `oldest_eligible_at`, bounded approximate counts, and shard-scoped keys. B-050/B-053 extend summary maintenance for gate flips, rearm, and purge. |
+| B-044 | Retention, compaction, and GC correctness | TD-001, TD-002, PRD FR-22/38/39 | B-042, B-043 | `cargo test -p fireweed-postgres postgres_retention_tests` | Request-idempotency, item-key, terminal, command-log, tombstone, and audit-window retention; deletes only when replay/audit windows permit; GC uses bounded shared workers. |
+| B-060 | API-001 service and client foundation | API-001, ADR-002, TP-003 AC-SEC-1..2 | B-041 | `cargo test -p fireweed-service service_api_error_semantics_tests service_auth_tenant_tests`; `cargo test -p fireweed-client` | HTTP/JSON app foundation, auth context, tenant isolation, lease-token hashing, shared route/handler scaffolding, and client facade used by feature slices. |
+| B-050 | Dynamic gates and eligibility projections | API-001, TD-002, TP-003 AC-GATE-1..2, AC-LAT-2 | B-043, B-060 | `cargo test -p fireweed-postgres storage_conformance_gate_tests`; `cargo test -p fireweed-service service_gate_tests`; `cargo test -p fireweed-client` | `SetGates`, gate anti-join, no item-row rewrite, exact oldest-eligible behavior, API-001 route/handler/client binding, and timing hooks for AC-LAT-2 gate-flip latency; gate/summary background recompute uses bounded shared workers. |
+| B-051 | Group batching and per-group summary consumers | ADR-004, API-001, TD-002, TP-003 AC-GRP-1..2 | B-043, B-050, B-060 | `cargo test -p fireweed-postgres storage_conformance_group_batching_tests postgres_group_coresidency_tests`; `cargo test -p fireweed-service service_group_batching_tests`; `cargo test -p fireweed-client` | `group_co_residency`, whole-group atomic claim, `same_group_key` as item filter, API-001 claim-option route/handler/client binding, and use of the canonical summary projection. |
+| B-052 | Cohort claims | API-001, ADR-004, TD-002, TP-003 AC-COH-1..2 | B-051, B-060 | `cargo test -p fireweed-postgres storage_conformance_cohort_tests`; `cargo test -p fireweed-service service_cohort_tests`; `cargo test -p fireweed-client` | Complete cohort atomic lease, incomplete expiry, no member leakage, and API-001 cohort route/handler/client binding. |
+| B-053 | Recurring queues and native purge | API-001, TD-002, TP-003 AC-REC-1..3 | B-041, B-043, B-060 | `cargo test -p fireweed-core core_recurrence_rearm_tests`; `cargo test -p fireweed-storage storage_conformance_durability_tests`; `cargo test -p fireweed-service service_recurrence_purge_tests`; `cargo test -p fireweed-client` | `rearm`, per-cycle retry reset, idle metrics, `PurgeItems`, tombstone/replay safety, API-001 recurrence/purge route/handler/client binding, and summary recompute for rearmed/purged items. |
+| B-054 | Active-scope discovery and metrics | API-001, TD-002, TD-003, TP-003 AC-DISC-1 single-shard, AC-OBS-1 postgres profile, AC-LAT-3 | B-043, B-050..B-053, B-060 | `cargo test -p fireweed-storage storage_conformance_discovery_tests`; `cargo test -p fireweed-service service_discovery_tests service_metrics_ground_truth_tests` | Single-shard Top-N ranking, exact oldest age, bounded count lag, auth-filtered service discovery, and query-plan assertions for no full scan; summary aggregation uses bounded shared workers. Cross-shard portions of AC-DISC-1 and AC-DISC-2 are owned by B-072. |
+| B-061 | Product E2E smoke harness | TP-001, TP-003 §3.11 | B-060, B-054, B-021 | `FIREWEED_BACKEND_PROFILE=postgres_native FIREWEED_E2E_SCALE=smoke cargo test -p fireweed-service --test product_workflows -- --ignored` | Implements shared `product_workflows` binary, env knobs, ledger output, seeds, smoke fixture scale, and service/worker fault hooks for crash-recovery workflows. |
+| B-062 | Benchmark and scale evidence harness | TP-001 performance suites, TP-002 E0..E2, TP-003 AC-LAT-1..4 | B-060, B-054 | `cargo test -p fireweed-service performance_batch_operation_tests performance_hot_queue_10m_tests`; release: `performance_single_deployment_baseline_tests` | Creates perf/scale runners, env knobs, seeds, instance/profile ledger fields, AC-LAT micro-bars, query-plan capture, and the E1/E2 measurement framework. E0/E1 runners declare a positive `progress_bound_ms`, verify its persisted queue-definition value, and record zero accepted-to-claim and discovery-age violations against that declaration; rates and percentiles remain topology-bound capacity observations. Full E2 execution waits for B-071/B-081. |
+| B-070 | Shard ownership lifecycle | TD-003, TD-001, TP-003 AC-SHARD-3 | B-030, B-021 | `cargo test -p fireweed-storage sharding_assignment_fencing_tests sharding_rebalance_drain_tests` | Owner registry, worker registration/heartbeat, target-vs-active owner, acquire/renew/begin-drain/release shard lease, stale-epoch reject, graceful/interrupted drain, recovery hooks. |
+| B-072 | Multi-shard claim, progress, discovery, and command convergence | TD-003, TD-001, TP-003 AC-SHARD-1..2, AC-DISC-1 cross-shard, AC-DISC-2 | B-070, B-054, B-021 | `cargo test -p fireweed-storage cross_shard_progress_tests storage_conformance_multi_shard_tests multi_shard_claim_order_replay_tests` | Fan-out claim, deterministic k-way merge, cross-shard queue-global progress aggregation, stalled-shard visibility, non-co-resident group aggregation across shards, cross-shard active-scope discovery, claim-intent partial-failure/replay convergence, envelope-scope request expiry, and queue-scoped multi-shard command convergence for `SetGates` and native `PurgeItems` spans. |
+| B-071 | Queue density resource model | ADR-003, TD-003, TP-002 E2 | B-072, B-062 | `cargo test -p fireweed-storage queue_density_single_node_tests -- --ignored` | Bounded shared pools/sweepers and LRU handles; no one task/loop/connection per queue/shard. |
+| B-080 | Object-log durable log and SQLite projection | TD-004, TD-001, TP-003 §4 | B-072 | `cargo test -p fireweed-objectlog object_log_commit_recovery_tests`; `cargo test -p fireweed-sqlite sqlite_projection_tests` | Adds `fireweed-objectlog` and `fireweed-sqlite` workspace crates per TD-001 step 6. Implements group commit, manifest CAS/current epoch fence, Postgres manifest-pointer fallback for no-CAS stores, production rejection of one-object-per-command, config rejection/fallback for stores without required conditional-write behavior, apply-before-return, replay response, SQLite projection, and cross-shard command convergence visibility gates. |
+| B-081 | Object-log conformance parity, metrics, product smoke, and recovery | TD-004, TP-002 E3, TP-003 AC-OBS-1 and AC-TXN-1..6 object-log profiles | B-080, B-062, B-061 | `cargo test -p fireweed-storage storage_conformance_multi_shard_tests --features object-log`; `cargo test -p fireweed-objectlog object_log_commit_recovery_tests`; `FIREWEED_BACKEND_PROFILE=object_log_sqlite_projection FIREWEED_E2E_SCALE=smoke cargo test -p fireweed-service --test product_workflows -- --ignored`; release: E3 benchmark + AC-TXN matrix | Snapshot + log-tail recovery, bounded apply lag, object-log latency/cost/recovery evidence, fallback-fence E3 row, transaction-contract crash-point matrix, multi-shard command convergence, object-log metrics ground truth, product-E2E smoke matrix extension, and parity with the shared TD-001 conformance suite. |
+| B-090 | P0 product workflow release gates | PRD, TP-003 AC-E2E-1..6, AC-E2E-8..9, INV-1..10 | B-061, B-062, B-071, B-080, B-081 | `FIREWEED_E2E_SCALE=release cargo test -p fireweed-service --test product_workflows -- --ignored`; `cargo test -p fireweed-service seventh_sense_validation_tests invariant_stress_matrix_tests -- --ignored`; release: TP-002 E0-E3, `performance_cross_queue_scale_out_tests` (the ADR-008 replacement for the retired `performance_multi_shard_scale_out_tests`), `recurrence_scale_both_profiles_tests` | Scheduled action, group batching, cohort, recurring, crash recovery, noisy neighbor, generic priority, downstream pacing, Seventh-Sense-shaped subset, recurrence under scale on both backend profiles, and INV-1..10 under the TP-003 §2 stress matrix. |
+| B-110 | Standalone durable sqlite backend (TD-005) | TD-005, ADR-006, TP-001 TD-005 row | B-080 | `cargo test -p fireweed-sqlite`; `cargo test -p fireweed-sqlite --test shared_conformance --test embedder_delivery_conformance --test sqlite_backend_tests`; `cargo test -p fireweed-service --lib runtime` | Unified single-transaction `SqliteBackend` (atomic append+apply on one connection, one WAL fsync ack boundary, strict read-after-write), atomic `claim` (single `attempts` increment; `batch_claim` omitted from the surface), epoch bootstrap + bump-on-open fencing, single-writer ownership (second opener rejected), no-replay reopen recovery, the `sqlite` `BackendProfile` wired into the service config/readiness (config-plumbing; the service does not yet construct/serve the backend), shared conformance parity with the in-memory reference, and the embedder delivery-adapter conformance suite. `client_item_key` convergence is the embedder adapter's responsibility (fireweed converges by `item_id`). The 7snx host switch off the in-memory backend (bead pqueue-a4846118) is a deferred cross-repo follow-up (requires publishing fireweed + bumping the git rev). |
+| B-100 | API-002 operator surface | API-002, ADR-002, TP-003 AC-OP-1..9, AC-CLAIM-6 operator-fenced renewal, INV-11 | B-060, B-050..B-053, B-021 | `cargo test -p fireweed-service operator_repair_tests operator_redrive_tests operator_purge_tests operator_async_operation_tests operator_auth_denied_path_tests` | P1 operator support: pause/resume, repair, redrive, bulk purge/archive, async ops, inspection/auth, and rejection of stale/fenced lease renewals after operator mutation. |
+| B-101 | Operator product workflow gate | API-002, TP-003 AC-E2E-7 | B-100, B-061 | `FIREWEED_E2E_SCALE=release cargo test -p fireweed-service --test product_workflows operator_repair_redrive_e2e -- --ignored` | Required before claiming operator-enabled product surface verified. |
 
 ## Product E2E Coverage Map
 
@@ -178,8 +178,8 @@ B-101 for P1/operator workflows.
 The B-061 implementation should create one independently addressable test case
 per suite above, not a single all-purpose scenario. Product E2E beads created
 from this plan must name the suite they extend in `suite:<name>` labels and
-must run with at least `PQUEUE_BACKEND_PROFILE=postgres_native`,
-`PQUEUE_E2E_SCALE=smoke`, and a fixed `PQUEUE_E2E_SEED`.
+must run with at least `FIREWEED_BACKEND_PROFILE=postgres_native`,
+`FIREWEED_E2E_SCALE=smoke`, and a fixed `FIREWEED_E2E_SEED`.
 
 ## Invariant Stress Ownership
 
@@ -217,11 +217,11 @@ not relevant to that sub-behavior.
 
 | Sub-Bead Scope | TP-003 Coverage | Validation |
 |----------------|-----------------|------------|
-| Fan-out claim and deterministic k-way merge | AC-SHARD-1, INV-6 | `cargo test -p pqueue-storage storage_conformance_multi_shard_tests multi_shard_claim_order_replay_tests` |
-| Cross-shard progress and stalled-shard visibility | AC-SHARD-2, INV-4 | `cargo test -p pqueue-storage cross_shard_progress_tests` |
-| Cross-shard active-scope discovery | AC-DISC-1 cross-shard | `cargo test -p pqueue-storage storage_conformance_discovery_tests` |
-| Non-co-resident group aggregation | AC-DISC-2 | `cargo test -p pqueue-storage storage_conformance_discovery_tests storage_conformance_group_batching_tests` |
-| Claim-intent replay and multi-shard command convergence | INV-2, INV-5, INV-10 | `cargo test -p pqueue-storage multi_shard_claim_order_replay_tests storage_conformance_multi_shard_tests` |
+| Fan-out claim and deterministic k-way merge | AC-SHARD-1, INV-6 | `cargo test -p fireweed-storage storage_conformance_multi_shard_tests multi_shard_claim_order_replay_tests` |
+| Cross-shard progress and stalled-shard visibility | AC-SHARD-2, INV-4 | `cargo test -p fireweed-storage cross_shard_progress_tests` |
+| Cross-shard active-scope discovery | AC-DISC-1 cross-shard | `cargo test -p fireweed-storage storage_conformance_discovery_tests` |
+| Non-co-resident group aggregation | AC-DISC-2 | `cargo test -p fireweed-storage storage_conformance_discovery_tests storage_conformance_group_batching_tests` |
+| Claim-intent replay and multi-shard command convergence | INV-2, INV-5, INV-10 | `cargo test -p fireweed-storage multi_shard_claim_order_replay_tests storage_conformance_multi_shard_tests` |
 
 ## Object-Log Sub-Decomposition
 
@@ -230,37 +230,37 @@ beads rather than filed as one object-log task.
 
 | Sub-Bead Scope | Owning Slice | Validation |
 |----------------|--------------|------------|
-| Group commit, manifest CAS, and epoch fencing | B-080 | `cargo test -p pqueue-objectlog object_log_commit_recovery_tests` |
-| No-CAS fallback and invalid production config rejection | B-080 | `cargo test -p pqueue-objectlog object_log_commit_recovery_tests` |
-| SQLite projection, apply-before-return, and bounded apply lag hooks | B-080 | `cargo test -p pqueue-sqlite sqlite_projection_tests` |
-| Cross-shard command convergence visibility | B-080 | `cargo test -p pqueue-storage storage_conformance_multi_shard_tests --features object-log` |
-| Shared conformance parity and AC-OBS-1 object-log metrics | B-081 | `cargo test -p pqueue-storage storage_conformance_multi_shard_tests --features object-log`; `cargo test -p pqueue-service service_metrics_ground_truth_tests` |
-| Product E2E smoke matrix extension | B-081 | `PQUEUE_BACKEND_PROFILE=object_log_sqlite_projection PQUEUE_E2E_SCALE=smoke cargo test -p pqueue-service --test product_workflows -- --ignored` |
+| Group commit, manifest CAS, and epoch fencing | B-080 | `cargo test -p fireweed-objectlog object_log_commit_recovery_tests` |
+| No-CAS fallback and invalid production config rejection | B-080 | `cargo test -p fireweed-objectlog object_log_commit_recovery_tests` |
+| SQLite projection, apply-before-return, and bounded apply lag hooks | B-080 | `cargo test -p fireweed-sqlite sqlite_projection_tests` |
+| Cross-shard command convergence visibility | B-080 | `cargo test -p fireweed-storage storage_conformance_multi_shard_tests --features object-log` |
+| Shared conformance parity and AC-OBS-1 object-log metrics | B-081 | `cargo test -p fireweed-storage storage_conformance_multi_shard_tests --features object-log`; `cargo test -p fireweed-service service_metrics_ground_truth_tests` |
+| Product E2E smoke matrix extension | B-081 | `FIREWEED_BACKEND_PROFILE=object_log_sqlite_projection FIREWEED_E2E_SCALE=smoke cargo test -p fireweed-service --test product_workflows -- --ignored` |
 | E3 object-log latency/cost/recovery evidence | B-081 | TP-002 E3 release benchmark and `object_log_latency_cost_matrix_tests` |
 
 ## Release-Gate Sub-Decomposition
 
 B-090 should create one release-gate bead per P0/core product workflow plus
 separate aggregate evidence beads. Each release E2E bead must enumerate the
-`PQUEUE_BACKEND_PROFILE` and topology matrix required by TP-003 §3.11; commands
+`FIREWEED_BACKEND_PROFILE` and topology matrix required by TP-003 §3.11; commands
 below are suite selectors, not the complete profile matrix. B-101 owns the
 P1/operator release workflow.
 
 | Sub-Bead Scope | Owning Slice | Validation |
 |----------------|--------------|------------|
-| AC-E2E-1 release scheduled action delivery | B-090 | `PQUEUE_E2E_SCALE=release cargo test -p pqueue-service --test product_workflows product_workflow_scheduled_action_delivery_e2e -- --ignored` |
-| AC-E2E-2 release Marketo group batching | B-090 | `PQUEUE_E2E_SCALE=release cargo test -p pqueue-service --test product_workflows product_workflow_marketo_group_batching_e2e -- --ignored` |
-| AC-E2E-3 release callback cohort | B-090 | `PQUEUE_E2E_SCALE=release cargo test -p pqueue-service --test product_workflows product_workflow_callback_cohort_e2e -- --ignored` |
-| AC-E2E-4 release jobs/connectors recurring | B-090 | `PQUEUE_E2E_SCALE=release cargo test -p pqueue-service --test product_workflows product_workflow_jobs_connectors_recurring_e2e -- --ignored` |
-| AC-E2E-5 release crash recovery | B-090 | `PQUEUE_E2E_SCALE=release cargo test -p pqueue-service --test product_workflows product_workflow_worker_crash_recovery_e2e -- --ignored` |
-| AC-E2E-6 release noisy-neighbor scale | B-090 | `PQUEUE_E2E_SCALE=release cargo test -p pqueue-service --test product_workflows product_workflow_noisy_neighbor_scale_e2e -- --ignored` |
-| AC-E2E-8 release generic priority and bounded-relaxed | B-090 | `PQUEUE_E2E_SCALE=release cargo test -p pqueue-service --test product_workflows product_workflow_generic_priority_bounded_relaxed_e2e -- --ignored` |
-| AC-E2E-9 release downstream pacing non-goal | B-090 | `PQUEUE_E2E_SCALE=release cargo test -p pqueue-service --test product_workflows product_workflow_downstream_pacing_non_goal_e2e -- --ignored` |
-| Seventh-Sense-shaped product subset | B-090 | `cargo test -p pqueue-service seventh_sense_validation_tests -- --ignored` |
-| INV-1..10 stress matrix | B-090 | `cargo test -p pqueue-service invariant_stress_matrix_tests -- --ignored` |
+| AC-E2E-1 release scheduled action delivery | B-090 | `FIREWEED_E2E_SCALE=release cargo test -p fireweed-service --test product_workflows product_workflow_scheduled_action_delivery_e2e -- --ignored` |
+| AC-E2E-2 release Marketo group batching | B-090 | `FIREWEED_E2E_SCALE=release cargo test -p fireweed-service --test product_workflows product_workflow_marketo_group_batching_e2e -- --ignored` |
+| AC-E2E-3 release callback cohort | B-090 | `FIREWEED_E2E_SCALE=release cargo test -p fireweed-service --test product_workflows product_workflow_callback_cohort_e2e -- --ignored` |
+| AC-E2E-4 release jobs/connectors recurring | B-090 | `FIREWEED_E2E_SCALE=release cargo test -p fireweed-service --test product_workflows product_workflow_jobs_connectors_recurring_e2e -- --ignored` |
+| AC-E2E-5 release crash recovery | B-090 | `FIREWEED_E2E_SCALE=release cargo test -p fireweed-service --test product_workflows product_workflow_worker_crash_recovery_e2e -- --ignored` |
+| AC-E2E-6 release noisy-neighbor scale | B-090 | `FIREWEED_E2E_SCALE=release cargo test -p fireweed-service --test product_workflows product_workflow_noisy_neighbor_scale_e2e -- --ignored` |
+| AC-E2E-8 release generic priority and bounded-relaxed | B-090 | `FIREWEED_E2E_SCALE=release cargo test -p fireweed-service --test product_workflows product_workflow_generic_priority_bounded_relaxed_e2e -- --ignored` |
+| AC-E2E-9 release downstream pacing non-goal | B-090 | `FIREWEED_E2E_SCALE=release cargo test -p fireweed-service --test product_workflows product_workflow_downstream_pacing_non_goal_e2e -- --ignored` |
+| Seventh-Sense-shaped product subset | B-090 | `cargo test -p fireweed-service seventh_sense_validation_tests -- --ignored` |
+| INV-1..10 stress matrix | B-090 | `cargo test -p fireweed-service invariant_stress_matrix_tests -- --ignored` |
 | TP-002 E2 cross-queue scale-out | B-090 | `performance_cross_queue_scale_out_tests` (replaces the retired `performance_multi_shard_scale_out_tests` under the ADR-008 reframe); if the published multiple is unresolved, stop for a doc update instead of inventing it. Re-measured live post-ADR-008 on kind, 2026-07-08: `docs/perf/evidence/tp002-e2-cross-queue-remeasured.jsonl` |
 | TP-002 E0-E3 aggregate evidence | B-090 | TP-002 release benchmark commands for E0, E1, E2, and E3 |
-| AC-E2E-7 operator repair/redrive | B-101 | `PQUEUE_E2E_SCALE=release cargo test -p pqueue-service --test product_workflows product_workflow_operator_repair_redrive_e2e -- --ignored` |
+| AC-E2E-7 operator repair/redrive | B-101 | `FIREWEED_E2E_SCALE=release cargo test -p fireweed-service --test product_workflows product_workflow_operator_repair_redrive_e2e -- --ignored` |
 
 ## Issue Decomposition
 
@@ -285,8 +285,8 @@ dependency order, follow the `Depends On` column.
 - This build plan: `build-implementation-plan`
 - Nearest governing artifact via `--set spec-id=<ddx-id>`
 - TP-003 `AC-*` / `INV-*` IDs in the bead description and acceptance criteria
-- Exact command(s) to run, including `PQUEUE_BACKEND_PROFILE`,
-  `PQUEUE_E2E_SCALE`, and seed when relevant
+- Exact command(s) to run, including `FIREWEED_BACKEND_PROFILE`,
+  `FIREWEED_E2E_SCALE`, and seed when relevant
 
 **Dependency rules**:
 
@@ -298,7 +298,7 @@ dependency order, follow the `Depends On` column.
 - Product workflow crash-recovery and any service/worker process-kill beads
   depend on B-021 directly or through B-061.
 - Object-log product workflow smoke depends on B-081 and reuses the B-061
-  harness with `PQUEUE_BACKEND_PROFILE=object_log_sqlite_projection`.
+  harness with `FIREWEED_BACKEND_PROFILE=object_log_sqlite_projection`.
 - AC-E2E-6 release beads depend on B-062, B-071, B-080, and B-081.
 - Operator beads are P1 and depend on the P0 service/storage foundations, but
   they are not dependencies of the P0/core v1 release gate.
@@ -367,18 +367,18 @@ Completion evidence as of 2026-06-16:
   repointed to the release epic after that closed bead was pruned from the tracker.)
 - `bash scripts/ci/release-gate.sh --require-tp002-evidence E0,E1,E2,E3 --tp002-e0e1-source pqueue-7e2b3132 --tp002-e2-source pqueue-9afd88cc,pqueue-76d92a33 --tp002-e3-source pqueue-b1abd895,pqueue-472a09d4`
   passes from source-backed evidence and regenerates
-  `target/pqueue-ledger/product_validation.jsonl`.
+  `target/fireweed-ledger/product_validation.jsonl`.
 - Local deployment validation passed for both committed backend profiles:
   `local_postgres_deployment_smoke_tests` with Docker cleanup and
   `local_object_log_deployment_smoke_tests`.
 - Product workflow smoke validation passed for both
   `postgres_native` (seed 1701) and `object_log_sqlite_projection` (seed 1801),
-  with emitted workflow ledgers validated by `pqueue-verify-ledger --strict`.
+  with emitted workflow ledgers validated by `fireweed-verify-ledger --strict`.
 
 Addendum as of v0.11.0 (2026-07): TP-002 E2 was reframed to cross-queue
 scale-out (ADR-008) and re-measured live on a multi-node kind cluster; the
 current E2 evidence is `docs/perf/evidence/tp002-e2-cross-queue-remeasured.jsonl`
-(validates via `pqueue-verify-ledger --strict --require-evidence E2`). The
+(validates via `fireweed-verify-ledger --strict --require-evidence E2`). The
 released runtime additionally ships the TD-004 hybrid projection profiles
 (`objectlog/hybrid`, `objectlog/hybrid-strict`, `objectlog/hybrid-async`) beyond
 the BUILD-001 committed profiles above; their gates are owned by TP-003 §4.1 and

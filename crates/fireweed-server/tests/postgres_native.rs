@@ -4,9 +4,9 @@
 //!
 //! * **No-DB (always runs under `--features postgres`)** — backend selection, wrapper construction, and the
 //!   runtime wiring up to the connection point, exercised via the connection-error path. No
-//!   `PQUEUE_PG_TEST_URL` required: it points `start()` at a refused port and asserts a clean `Err` (no
+//!   `FIREWEED_PG_TEST_URL` required: it points `start()` at a refused port and asserts a clean `Err` (no
 //!   panic, no hang) — proving the sync `connect` ran off the reactor inside `spawn_blocking`.
-//! * **Live smoke (env-gated on `PQUEUE_PG_TEST_URL`, LOUD-skips otherwise)** — boots the server wired to
+//! * **Live smoke (env-gated on `FIREWEED_PG_TEST_URL`, LOUD-skips otherwise)** — boots the server wired to
 //!   `Backend::PostgresNative`, drives push/claim/ack over RESP with a stock Redis client, asserts it works.
 #![cfg(feature = "postgres")]
 
@@ -87,7 +87,7 @@ fn postgres_native_backend_variant_is_selectable() {
 }
 
 /// No-DB config-parse proof (acceptance 2): the composition-root config layer accepts the EXACT env names
-/// the Helm Lakebase profile renders — the `PQUEUE_POSTGRES_LOG_DATABASE_URL` DSN Secret (a libpq URL with a
+/// the Helm Lakebase profile renders — the `FIREWEED_POSTGRES_LOG_DATABASE_URL` DSN Secret (a libpq URL with a
 /// native password and `sslmode=require`) plus the Databricks service-principal credential-injection envs —
 /// and resolves them to `Backend::PostgresNative` with a TLS-requiring DSN and a credential provider. No
 /// live DB: it asserts over the resolved config only.
@@ -97,13 +97,13 @@ fn postgres_native_backend_variant_is_selectable() {
 #[cfg(feature = "tls")]
 #[test]
 fn lakebase_env_resolves_to_postgres_native_with_tls_and_databricks_credentials() {
-    // Exactly what the chart's deployment.yaml (PQUEUE_POSTGRES_LOG_DATABASE_URL Secret) + a Databricks
+    // Exactly what the chart's deployment.yaml (FIREWEED_POSTGRES_LOG_DATABASE_URL Secret) + a Databricks
     // service-principal Secret render into the container env.
     let env: BTreeMap<String, String> = [
-        ("PQUEUE_LOG_BACKEND", "postgres"),
-        ("PQUEUE_PROJECTION_BACKEND", "inmemory"),
+        ("FIREWEED_LOG_BACKEND", "postgres"),
+        ("FIREWEED_PROJECTION_BACKEND", "inmemory"),
         (
-            "PQUEUE_POSTGRES_LOG_DATABASE_URL",
+            "FIREWEED_POSTGRES_LOG_DATABASE_URL",
             "postgres://app:native-password@instance.lakebase.cloud:5432/databricks_postgres?sslmode=require",
         ),
         ("DATABRICKS_HOST", "https://example.cloud.databricks.com"),
@@ -134,14 +134,14 @@ fn lakebase_env_resolves_to_postgres_native_with_tls_and_databricks_credentials(
 }
 
 /// A libpq `key=value` DSN (no Databricks creds — native-password Secret only) is accepted too, and a bare
-/// `PQUEUE_PG_URL` is the local/dev fallback when the Lakebase Secret env is absent.
+/// `FIREWEED_PG_URL` is the local/dev fallback when the Lakebase Secret env is absent.
 ///
 /// The key=value DSN carries `sslmode=require`, so this resolve only succeeds on a `tls` build; gate it.
 #[cfg(feature = "tls")]
 #[test]
 fn keyvalue_dsn_and_pg_url_fallback_are_accepted_without_credentials() {
     let keyvalue: BTreeMap<String, String> = [(
-        "PQUEUE_POSTGRES_LOG_DATABASE_URL".to_string(),
+        "FIREWEED_POSTGRES_LOG_DATABASE_URL".to_string(),
         "host=instance.lakebase.cloud port=5432 user=app password=native-password \
          dbname=db sslmode=require"
             .to_string(),
@@ -162,29 +162,23 @@ fn keyvalue_dsn_and_pg_url_fallback_are_accepted_without_credentials() {
     );
 
     let fallback: BTreeMap<String, String> = [(
-        "PQUEUE_PG_URL".to_string(),
+        "FIREWEED_PG_URL".to_string(),
         "postgres://postgres:pw@localhost:5432/db?sslmode=disable".to_string(),
     )]
     .into_iter()
     .collect();
     assert!(matches!(
-        resolve_postgres_log(&fallback).expect("PQUEUE_PG_URL fallback resolves"),
+        resolve_postgres_log(&fallback).expect("FIREWEED_PG_URL fallback resolves"),
         LogSpec::Postgres { .. }
     ));
 }
 
 #[test]
-fn fireweed_postgres_url_wins_the_pqueue_compatibility_alias() {
-    let env: BTreeMap<String, String> = [
-        (
-            "PQUEUE_PG_URL".to_string(),
-            "postgres://legacy.invalid/db?sslmode=disable".to_string(),
-        ),
-        (
-            "FIREWEED_PG_URL".to_string(),
-            "postgres://fireweed.invalid/db?sslmode=disable".to_string(),
-        ),
-    ]
+fn fireweed_postgres_url_is_authoritative() {
+    let env: BTreeMap<String, String> = [(
+        "FIREWEED_PG_URL".to_string(),
+        "postgres://fireweed.invalid/db?sslmode=disable".to_string(),
+    )]
     .into_iter()
     .collect();
     let LogSpec::Postgres { url, .. } = resolve_postgres_log(&env).unwrap() else {
@@ -210,7 +204,7 @@ fn blocking_backend_pool_constructor_compiles_for_composed_postgres_backend() {
 #[test]
 fn require_dsn_fails_closed_without_tls_feature() {
     let env: BTreeMap<String, String> = [(
-        "PQUEUE_PG_URL".to_string(),
+        "FIREWEED_PG_URL".to_string(),
         "postgres://app:pw@instance.lakebase.cloud:5432/db?sslmode=require".to_string(),
     )]
     .into_iter()
@@ -262,16 +256,16 @@ async fn postgres_native_start_reports_connection_error_off_reactor() {
 /// PostgreSQL while A was still sleeping, not a host-speed or quiet-host threshold.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_native_one_instance_pool_progresses_other_queue_during_pg_sleep() {
-    let Ok(base_url) = std::env::var("PQUEUE_PG_TEST_URL") else {
-        eprintln!("POSTGRES NATIVE POOL E0 SKIPPED — set PQUEUE_PG_TEST_URL to a live DB");
+    let Ok(base_url) = std::env::var("FIREWEED_PG_TEST_URL") else {
+        eprintln!("POSTGRES NATIVE POOL E0 SKIPPED — set FIREWEED_PG_TEST_URL to a live DB");
         return;
     };
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let schema = format!("pq_pool_0b249abb_{}_{}", std::process::id(), unique);
-    let application_name = format!("pq_pool_0b249abb_{}", std::process::id());
+    let schema = format!("fireweed_pool_0b249abb_{}_{}", std::process::id(), unique);
+    let application_name = format!("fireweed_pool_0b249abb_{}", std::process::id());
     let pool_size = 2usize;
     let queue_a = "pool_a";
     let queue_a_key = QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new(queue_a).unwrap());
@@ -478,18 +472,18 @@ async fn postgres_native_one_instance_pool_progresses_other_queue_during_pg_slee
     server.shutdown_and_drain(Duration::from_secs(10)).await;
 }
 
-/// Live smoke: env-gated on `PQUEUE_PG_TEST_URL`. Boots the server over `Backend::PostgresNative` and drives
+/// Live smoke: env-gated on `FIREWEED_PG_TEST_URL`. Boots the server over `Backend::PostgresNative` and drives
 /// push -> claim -> ack over RESP with a stock Redis client. LOUD-skips when no DB is configured.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_native_live_push_claim_ack_over_resp() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
         eprintln!(
-            "POSTGRES NATIVE SERVER SMOKE SKIPPED (push/claim/ack) — set PQUEUE_PG_TEST_URL to a live DB"
+            "POSTGRES NATIVE SERVER SMOKE SKIPPED (push/claim/ack) — set FIREWEED_PG_TEST_URL to a live DB"
         );
         return;
     };
     // A unique search_path so reruns and parallel suites never collide on the shared queue tables.
-    let schema = format!("pq_native_{}", std::process::id());
+    let schema = format!("fireweed_native_{}", std::process::id());
     let url = if url.contains("?options=") || url.contains("&options=") {
         url
     } else if url.contains('?') {

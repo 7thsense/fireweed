@@ -116,7 +116,7 @@
 //! the durable SQLite apply (`BeforeSqliteApply`), and one strictly inside the deferred async SQLite
 //! checkpoint (`DuringAsyncSqliteApply`, installed + triggered via `flush_deferred` in AC-TXN-5A). AC-TXN-5 is
 //! now `pass`: bead pqueue-da1965d7 WIRED the `objectlog/hybrid-strict` server profile
-//! (`PQUEUE_PROJECTION_BACKEND=hybrid-strict`, `HybridProjectionStore::with_strict_apply`), and
+//! (`FIREWEED_PROJECTION_BACKEND=hybrid-strict`, `HybridProjectionStore::with_strict_apply`), and
 //! `ac_txn_5_hybrid_strict_poison_on_real_server_path` drives all four clauses (SQLite-failure/no-success +
 //! tail replay, SQLite-commit-then-memory-fail poison fail-closed, restart rehydration from the SQLite
 //! ProjectionImage, request-id replay/conflict) through that real group-commit composed write pipeline
@@ -197,7 +197,7 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 fn base_dir(profile: &str) -> std::path::PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     std::env::temp_dir().join(format!(
-        "pqueue-ac-txn-{profile}-{}-{n}",
+        "fireweed-ac-txn-{profile}-{}-{n}",
         std::process::id()
     ))
 }
@@ -318,7 +318,7 @@ fn postgres_schema(prefix: &str, run: u64, tag: &str, axis: &str) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     tag.hash(&mut hasher);
     format!(
-        "pq_{prefix}_{}_{}_{}_{:016x}",
+        "fireweed_{prefix}_{}_{}_{}_{:016x}",
         std::process::id(),
         run,
         axis,
@@ -1690,7 +1690,7 @@ async fn ac_txn_5_hybrid_strict_poison_replay_scenario() -> AcOutcome {
     // Real-server-path coverage (bead pqueue-da1965d7): the AfterSqliteCommitBeforeMemoryApply poison instant
     // above is struck on `HybridProjectionStore::apply` (`apply_durable_then_memory`, SQLite-first) — the
     // direct ProjectionStore view. The SAME SQLite-first ordering is now WIRED as the `objectlog/hybrid-strict`
-    // server profile (`PQUEUE_PROJECTION_BACKEND=hybrid-strict`, `HybridProjectionStore::with_strict_apply`),
+    // server profile (`FIREWEED_PROJECTION_BACKEND=hybrid-strict`, `HybridProjectionStore::with_strict_apply`),
     // and `ac_txn_5_hybrid_strict_poison_on_real_server_path` drives all four clauses through that real
     // group-commit composed write pipeline (`apply_live_owned` → strict `apply_durable_then_memory`). So this
     // cut is no longer verified at the ProjectionStore layer ONLY — the prior real-server-path GAP is closed.
@@ -1720,7 +1720,7 @@ async fn ac_txn_5_hybrid_strict_poison_replay() {
 // ordering ran. This scenario instead drives every clause through the REAL `objectlog/hybrid-strict` server
 // write pipeline: a group-commit `ComposedBackend<ObjectLog, HybridProjectionStore, InProcessControlPlane>`
 // with `with_strict_apply(true)` (the exact composition `fireweed-server` builds for
-// `PQUEUE_PROJECTION_BACKEND=hybrid-strict`). Pushes go through `push_with_request_id`, so the sealed batch
+// `FIREWEED_PROJECTION_BACKEND=hybrid-strict`). Pushes go through `push_with_request_id`, so the sealed batch
 // is applied by the composed group-commit distribute path (`apply_live_owned` → strict
 // `apply_durable_then_memory`), and the fault cuts land on that real pipeline. Assertions are on PROJECTED
 // STATE (`metrics`/`live_items`), never log-row counts, and restart is a real drop+reopen at the same root.
@@ -1815,7 +1815,7 @@ async fn strict_push(
 
 /// **AC-TXN-5 on the real server write path** (bead pqueue-da1965d7, TP-003 §3.10 row 210,
 /// `objectlog/hybrid-strict`). Drives the wired hybrid-strict composition — the composition `fireweed-server`
-/// builds for `PQUEUE_PROJECTION_BACKEND=hybrid-strict` — and proves ALL four clauses on that real pipeline:
+/// builds for `FIREWEED_PROJECTION_BACKEND=hybrid-strict` — and proves ALL four clauses on that real pipeline:
 ///
 /// 1. **SQLite failure → no success + tail replays.** A `BeforeSqliteApply` fault aborts the durable SQLite
 ///    apply: the push returns no success, the store stays healthy (no poison), and because the object-log
@@ -2108,7 +2108,7 @@ async fn ac_txn_5_hybrid_strict_poison_on_real_server_path() {
 }
 
 /// Open the REAL `objectlog/hybrid-async` composed backend at `root` with the TD-004 debt monitor ARMED —
-/// the exact composition `fireweed-server` builds for `PQUEUE_PROJECTION_BACKEND=hybrid-async`
+/// the exact composition `fireweed-server` builds for `FIREWEED_PROJECTION_BACKEND=hybrid-async`
 /// (`open_objectlog_hybrid_backend(.., strict=false, Some(thresholds))` → `HybridProjectionStore::open(..)
 /// .with_deferred_flush_chunk(..).with_async_monitor(thresholds)`), recovery-on-open. `flush_chunk` bounds
 /// how many deferred commands one `flush_deferred` drains so a drain test can step the backlog down one
@@ -4833,13 +4833,13 @@ async fn ac_txn_contract_matrix() {
 /// nothing and cannot be mistaken for release evidence.
 #[tokio::test]
 async fn e3_governed_transaction_evidence_matrix() {
-    let Ok(output) = std::env::var("PQUEUE_E3_TRANSACTION_EVIDENCE_OUT") else {
-        eprintln!("E3 transaction evidence skipped — set PQUEUE_E3_TRANSACTION_EVIDENCE_OUT");
+    let Ok(output) = std::env::var("FIREWEED_E3_TRANSACTION_EVIDENCE_OUT") else {
+        eprintln!("E3 transaction evidence skipped — set FIREWEED_E3_TRANSACTION_EVIDENCE_OUT");
         return;
     };
-    let revision = std::env::var("PQUEUE_E3_SOURCE_REVISION")
+    let revision = std::env::var("FIREWEED_E3_SOURCE_REVISION")
         .expect("E3 transaction evidence requires source revision");
-    let recorded_at = std::env::var("PQUEUE_E3_RECORDED_AT")
+    let recorded_at = std::env::var("FIREWEED_E3_RECORDED_AT")
         .expect("E3 transaction evidence requires an externally recorded RFC3339 timestamp");
     let mut rows = Vec::new();
     let mut failures = Vec::new();
@@ -4956,14 +4956,14 @@ async fn e3_governed_transaction_evidence_matrix() {
 }
 
 /// Postgres rows run in a SEPARATE non-tokio test because the sync postgres client panics under a tokio
-/// runtime (see `fireweed-postgres/tests/conformance.rs`). Env-gated on `PQUEUE_PG_TEST_URL`; LOUD-skips
+/// runtime (see `fireweed-postgres/tests/conformance.rs`). Env-gated on `FIREWEED_PG_TEST_URL`; LOUD-skips
 /// when absent. Postgres composed-log is atomic + in-memory projection, so it carries the same
 /// documented request_id-across-restart gap as sqlite-log.
 #[test]
 fn ac_txn_contract_matrix_postgres() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
         eprintln!(
-            "AC-TXN POSTGRES SKIPPED (external_transaction_contract_matrix_tests) — set PQUEUE_PG_TEST_URL to a live DB"
+            "AC-TXN POSTGRES SKIPPED (external_transaction_contract_matrix_tests) — set FIREWEED_PG_TEST_URL to a live DB"
         );
         return;
     };
@@ -4975,7 +4975,7 @@ fn ac_txn_contract_matrix_postgres() {
         let run = COUNTER.fetch_add(1, Ordering::SeqCst);
         move |tag: &str| {
             let sch = format!(
-                "pq_actxn_{prefix}_{}_{run}_{}",
+                "fireweed_actxn_{prefix}_{}_{run}_{}",
                 std::process::id(),
                 tag.replace('-', "_")
             );
@@ -5042,9 +5042,9 @@ fn ac_txn_contract_matrix_postgres() {
 /// projection: every checkpoint drops and reconnects both configured durable axes.
 #[test]
 fn ac_txn_contract_matrix_postgres_storage_pairs() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
         eprintln!(
-            "AC-TXN POSTGRES STORAGE-PAIR MATRIX SKIPPED — set PQUEUE_PG_TEST_URL to a live DB"
+            "AC-TXN POSTGRES STORAGE-PAIR MATRIX SKIPPED — set FIREWEED_PG_TEST_URL to a live DB"
         );
         return;
     };
@@ -5133,9 +5133,9 @@ fn ac_txn_contract_matrix_postgres_storage_pairs() {
 /// behavior after both sides reopen.
 #[test]
 fn ac_txn_6_postgres_storage_pair_parity() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
         eprintln!(
-            "AC-TXN-6 POSTGRES STORAGE-PAIR PARITY SKIPPED — set PQUEUE_PG_TEST_URL to a live DB"
+            "AC-TXN-6 POSTGRES STORAGE-PAIR PARITY SKIPPED — set FIREWEED_PG_TEST_URL to a live DB"
         );
         return;
     };

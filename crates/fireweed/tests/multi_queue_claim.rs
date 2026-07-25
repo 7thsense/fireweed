@@ -60,15 +60,15 @@ fn target(queue: QueueKey, max: usize) -> MultiQueueClaimTarget {
 #[tokio::test]
 async fn memory_claims_share_time_and_preserve_input_order() {
     let clock = Arc::new(ManualClock::at(17));
-    let pq = fireweed::open_memory(clock);
+    let fireweed = fireweed::open_memory(clock);
     let a = queue("a");
     let b = queue("b");
     for (key, id) in [(&a, "a"), (&b, "b")] {
-        pq.create_queue(definition(id)).await.unwrap();
-        pq.push(key, NewItem::default()).await.unwrap();
+        fireweed.create_queue(definition(id)).await.unwrap();
+        fireweed.push(key, NewItem::default()).await.unwrap();
     }
 
-    let results = pq
+    let results = fireweed
         .claim_across_queues(
             vec![target(b.clone(), 1), target(a.clone(), 1)],
             MultiQueueClaimLimits::default(),
@@ -89,13 +89,13 @@ async fn memory_claims_share_time_and_preserve_input_order() {
 
 #[tokio::test]
 async fn structural_and_definition_preflight_have_no_claim_effects() {
-    let pq = fireweed::open_memory(Arc::new(ManualClock::at(0)));
+    let fireweed = fireweed::open_memory(Arc::new(ManualClock::at(0)));
     let a = queue("a");
     let b = queue("b");
-    pq.create_queue(definition("a")).await.unwrap();
-    pq.create_queue(definition("b")).await.unwrap();
-    pq.push(&a, NewItem::default()).await.unwrap();
-    pq.push(&b, NewItem::default()).await.unwrap();
+    fireweed.create_queue(definition("a")).await.unwrap();
+    fireweed.create_queue(definition("b")).await.unwrap();
+    fireweed.push(&a, NewItem::default()).await.unwrap();
+    fireweed.push(&b, NewItem::default()).await.unwrap();
 
     let invalid_calls = [
         vec![target(a.clone(), 0)],
@@ -107,35 +107,38 @@ async fn structural_and_definition_preflight_have_no_claim_effects() {
     ];
     for targets in invalid_calls {
         assert!(matches!(
-            pq.claim_across_queues(targets, MultiQueueClaimLimits::default())
+            fireweed
+                .claim_across_queues(targets, MultiQueueClaimLimits::default())
                 .await,
             Err(EngineError::Invalid(_))
         ));
     }
     assert!(matches!(
-        pq.claim_across_queues(
-            vec![target(a.clone(), 1)],
-            MultiQueueClaimLimits {
-                max_targets: 17,
-                max_total_items: 1024
-            },
-        )
-        .await,
+        fireweed
+            .claim_across_queues(
+                vec![target(a.clone(), 1)],
+                MultiQueueClaimLimits {
+                    max_targets: 17,
+                    max_total_items: 1024
+                },
+            )
+            .await,
         Err(EngineError::Invalid(
             "multi-queue claim max_targets exceeds fixed ceiling"
         ))
     ));
     assert!(matches!(
-        pq.claim_across_queues(
-            vec![target(a.clone(), 1), target(b.clone(), 101)],
-            MultiQueueClaimLimits::default(),
-        )
-        .await,
+        fireweed
+            .claim_across_queues(
+                vec![target(a.clone(), 1), target(b.clone(), 101)],
+                MultiQueueClaimLimits::default(),
+            )
+            .await,
         Err(EngineError::BatchTooLarge)
     ));
 
-    assert_eq!(pq.metrics(&a).await.unwrap().pending, 1);
-    assert_eq!(pq.metrics(&b).await.unwrap().pending, 1);
+    assert_eq!(fireweed.metrics(&a).await.unwrap().pending, 1);
+    assert_eq!(fireweed.metrics(&b).await.unwrap().pending, 1);
 }
 
 struct RecordingControlPlane {
@@ -262,13 +265,13 @@ async fn coordinated_acquisition_is_sorted_and_runtime_failures_are_per_target()
     setup.push(&b, NewItem::default()).await.unwrap();
 
     let cp_trait: Arc<dyn QueueControlPlane> = cp.clone();
-    let pq = RuntimeCore::with_control_plane_in_process(
+    let fireweed = RuntimeCore::with_control_plane_in_process(
         backend,
         clock.clone(),
         OwnerId::new("owner-a").unwrap(),
         cp_trait,
     );
-    let first = pq
+    let first = fireweed
         .claim_across_queues(
             vec![target(b.clone(), 1), target(a.clone(), 1)],
             MultiQueueClaimLimits::default(),
@@ -277,7 +280,7 @@ async fn coordinated_acquisition_is_sorted_and_runtime_failures_are_per_target()
         .unwrap();
     assert_eq!(*cp.acquisitions.lock().unwrap(), vec![a.clone(), b.clone()]);
     assert!(matches!(
-        pq.ownership(&a).await.unwrap(),
+        fireweed.ownership(&a).await.unwrap(),
         Ownership::Mine { epoch: Some(1) }
     ));
     assert_eq!(
@@ -286,13 +289,13 @@ async fn coordinated_acquisition_is_sorted_and_runtime_failures_are_per_target()
     );
 
     // Refill, mark only `b` draining, and prove the other target still commits.
-    pq.push(&a, NewItem::default()).await.unwrap();
-    pq.push(&b, NewItem::default()).await.unwrap();
+    fireweed.push(&a, NewItem::default()).await.unwrap();
+    fireweed.push(&b, NewItem::default()).await.unwrap();
     let owner_b = OwnerId::new("owner-b").unwrap();
     cp.register_owner(&owner_b, clock.now()).unwrap();
     cp.begin_drain(&b, 1, &owner_b, clock.now()).unwrap();
-    pq.renew_owned().unwrap();
-    let partial = pq
+    fireweed.renew_owned().unwrap();
+    let partial = fireweed
         .claim_across_queues(
             vec![target(b.clone(), 1), target(a.clone(), 1)],
             MultiQueueClaimLimits::default(),
@@ -306,14 +309,15 @@ async fn coordinated_acquisition_is_sorted_and_runtime_failures_are_per_target()
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn durable_relational_backend_claims_each_target() {
-    let pq = fireweed::open_sqlite_relational(":memory:", Arc::new(ManualClock::at(5))).unwrap();
+    let fireweed =
+        fireweed::open_sqlite_relational(":memory:", Arc::new(ManualClock::at(5))).unwrap();
     let a = queue("durable-a");
     let b = queue("durable-b");
     for (key, id) in [(&a, "durable-a"), (&b, "durable-b")] {
-        pq.create_queue(definition(id)).await.unwrap();
-        pq.push(key, NewItem::default()).await.unwrap();
+        fireweed.create_queue(definition(id)).await.unwrap();
+        fireweed.push(key, NewItem::default()).await.unwrap();
     }
-    let results = pq
+    let results = fireweed
         .claim_across_queues(
             vec![target(a, 1), target(b, 1)],
             MultiQueueClaimLimits::default(),

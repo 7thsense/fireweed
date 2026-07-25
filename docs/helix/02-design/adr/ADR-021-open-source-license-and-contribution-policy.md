@@ -2,21 +2,21 @@
 ddx:
   id: adr-021-open-source-license-and-contribution-policy
   depends_on:
-    - adr-020-public-namespace-and-compatibility
+    - adr-023-pre-release-fireweed-namespace-cutover
   links:
-    - {kind: informed_by, to: adr-020-public-namespace-and-compatibility}
+    - {kind: informed_by, to: adr-023-pre-release-fireweed-namespace-cutover}
   status: accepted
 ---
 
-# ADR-021: Open-source license and contribution policy for Fireweed Queue
+# ADR-021: Open-source license and contribution policy for Fireweed
 
 | Date | Status | Deciders | Related |
 |------|--------|----------|---------|
-| 2026-07-23 | Accepted | Project maintainers | ADR-020, public-namespace-migration |
+| 2026-07-23 | Accepted | Project maintainers | ADR-023, public-namespace-migration |
 
 ## Context
 
-Fireweed Queue is being published as a maintainer-developed open-source project.
+Fireweed is being published as a maintainer-developed open-source project.
 The repository metadata already selects the dual-license expression
 `MIT OR Apache-2.0`, and the public preview boundary treats the project as an
 externally named product with a controlled support posture.
@@ -31,7 +31,7 @@ the current operating model:
 - no CLA or DCO is required while code contributions remain closed;
 - security reports must use the private security-reporting route, not public
   issues;
-- generic contributor notices must use the collective Fireweed Queue wording
+- generic contributor notices must use the collective Fireweed wording
   without trying to split personal and company ownership.
 
 This ADR records the policy. It does not make external GitHub setting changes
@@ -39,7 +39,7 @@ itself.
 
 ## Decision
 
-Adopt `MIT OR Apache-2.0` as the outbound license for Fireweed Queue and keep
+Adopt `MIT OR Apache-2.0` as the outbound license for Fireweed and keep
 the project in an issues-only contribution posture.
 
 Decision owner: Project maintainers.
@@ -131,7 +131,7 @@ If packaging, redistribution, or a downstream dependency requires a NOTICE file
 or equivalent notices section, maintainers must include the required third-party
 notices and attribution text.
 
-The notice text should use the collective label `Fireweed Queue contributors`
+The notice text should use the collective label `Fireweed contributors`
 for generic contributor notices. Do not split that wording into personal versus
 company ownership unless a specific legal notice requires it.
 

@@ -1,6 +1,6 @@
 # CAS-safe manifest compaction vs. the O(1) seal hot path — DESIGN ANALYSIS
 
-Bead: `pqueue-8928baec` · Scope: `crates/pqueue-objectlog/src/segmented.rs` · HEAD: `v0.13.0`
+Bead: `pqueue-8928baec` · Scope: `crates/fireweed-objectlog/src/segmented.rs` · HEAD: `v0.13.0`
 Status: **DESIGN ONLY** (no code changed). All citations are `file:line` at `v0.13.0`.
 
 ---
@@ -51,12 +51,12 @@ hold `(committed_epoch, next_manifest_index)` frozen indefinitely.
 **Where the caller's `expected_epoch` comes from — two very different regimes:**
 
 - **RESP + control-plane path (the intended production wiring).** `expected_epoch_for_write`
-  (pqueue-resp/src/lib.rs:485, 652, 953, …) calls `OwnershipRuntime::ensure_epoch`
-  (pqueue-server/src/lib.rs:938-1009) on **every write**. `ensure_epoch` does a
+  (fireweed-resp/src/lib.rs:485, 652, 953, …) calls `OwnershipRuntime::ensure_epoch`
+  (fireweed-server/src/lib.rs:938-1009) on **every write**. `ensure_epoch` does a
   `cp_resolve` against the control plane; if a *different* owner is active it returns
   `Err(Unavailable)` (lib.rs:974) and the write never reaches `seal`. The control-plane lease
   carries a TTL: `lease_ttl_ms` default **15_000**, `heartbeat_ttl_ms` default **5_000**
-  (pqueue-engine/src/control_plane.rs:284-285). So a cooperative, CP-reachable owner is
+  (fireweed-engine/src/control_plane.rs:284-285). So a cooperative, CP-reachable owner is
   re-gated per write and cannot serve after a peer takeover propagates.
 
 - **Raw `append` / compose path.** `ObjectLog::append` (compose_log.rs:136-166) forwards whatever
@@ -76,7 +76,7 @@ owner" — which is exactly *why* the manifest CAS, not the lock, is the fence.
 
 ### 1.2 Is the item `lease`/`lease_expires_at` relevant? No.
 
-Every `lease_expires_at` in `pqueue-projection` / `pqueue-postgres` (e.g. projection lib.rs:76,
+Every `lease_expires_at` in `fireweed-projection` / `fireweed-postgres` (e.g. projection lib.rs:76,
 102, 2287-2308; relational.rs:271, 652) is the **consumer/item XCLAIM lease** — it governs when a
 *claimed item* can be re-delivered, not when a *writer* must re-acquire. It does **not** bound
 writer-cache staleness. The writer-relevant TTL is the control-plane `lease_ttl_ms` in §1.1, and it

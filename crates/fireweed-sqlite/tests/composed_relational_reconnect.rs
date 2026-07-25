@@ -3,7 +3,7 @@
 //!
 //! The DB-authoritative projection needs no log replay (its `apply` wrote durably in the same transaction),
 //! so the composition's `recover()` only repopulates the in-process control plane from the durable `queues`
-//! catalog and re-seeds the id-mint counters from `pqueue_items`. Mirrors the monolith's
+//! catalog and re-seeds the id-mint counters from `fireweed_items`. Mirrors the monolith's
 //! `relational_reconnect.rs`. The db path is keyed by the test's thread id.
 
 use fireweed_conformance::{claim_req, qdef, shard, ts};
@@ -23,7 +23,7 @@ thread_local! {
 fn db_path() -> String {
     std::env::temp_dir()
         .join(format!(
-            "pqueue-composed-relational-reconnect-{:?}.db",
+            "fireweed-composed-relational-reconnect-{:?}.db",
             std::thread::current().id()
         ))
         .to_str()
@@ -47,7 +47,7 @@ fireweed_conformance::durable_reconnect_suite!(make);
 fn unique_path(tag: &str) -> String {
     std::env::temp_dir()
         .join(format!(
-            "pqueue-composed-relational-reconnect-{}-{}.db",
+            "fireweed-composed-relational-reconnect-{}-{}.db",
             std::process::id(),
             tag
         ))
@@ -127,9 +127,9 @@ fn composed_relational_recovery_seeds_counters() {
     );
 }
 
-/// Terminal-item reaping deletes durable `pqueue_items` rows (the mint-counter authority for this
+/// Terminal-item reaping deletes durable `fireweed_items` rows (the mint-counter authority for this
 /// DB-authoritative backend), so recovery must restore the id-mint floor from the durable
-/// `pqueue_id_high_water` high-water, NOT only from surviving rows — otherwise reaping ALL rows and reopening
+/// `fireweed_id_high_water` high-water, NOT only from surviving rows — otherwise reaping ALL rows and reopening
 /// on the SAME epoch re-mints a reaped id (ADR-009 id-uniqueness). Regression guard for the unified relational
 /// family (bead pqueue-41bf00d7, codex review), the analogue of the hybrid-async guard.
 #[test]

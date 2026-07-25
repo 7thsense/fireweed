@@ -110,12 +110,6 @@ mod test_active_scope_routing;
 #[path = "../tests/coordination.rs"]
 mod test_coordination;
 #[cfg(test)]
-#[path = "../tests/embedded_objectlog_postgres.rs"]
-mod test_embedded_objectlog_postgres;
-#[cfg(test)]
-#[path = "../tests/embedded_objectlog_sqlite.rs"]
-mod test_embedded_objectlog_sqlite;
-#[cfg(test)]
 #[path = "../tests/encapsulation.rs"]
 mod test_encapsulation;
 #[cfg(test)]
@@ -127,6 +121,12 @@ mod test_hot_projection_queries;
 #[cfg(test)]
 #[path = "../tests/multi_queue_claim.rs"]
 mod test_multi_queue_claim;
+#[cfg(test)]
+#[path = "../tests/objectlog_postgres_composition.rs"]
+mod test_objectlog_postgres_composition;
+#[cfg(test)]
+#[path = "../tests/objectlog_sqlite_composition.rs"]
+mod test_objectlog_sqlite_composition;
 #[cfg(test)]
 #[path = "../tests/postgres_constructors.rs"]
 mod test_postgres_constructors;
@@ -602,12 +602,12 @@ impl Clock for SystemClock {
     }
 }
 
-/// An owned secret used by embedded durability configuration. Its value is redacted from `Debug` and has
+/// An owned secret used by composed storage configuration. Its value is redacted from `Debug` and has
 /// no public accessor; the composition root consumes it internally.
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct EmbeddedSecret(String);
+pub(crate) struct SecretValue(String);
 
-impl EmbeddedSecret {
+impl SecretValue {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
@@ -617,15 +617,15 @@ impl EmbeddedSecret {
     }
 }
 
-impl fmt::Debug for EmbeddedSecret {
+impl fmt::Debug for SecretValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("EmbeddedSecret(<redacted>)")
+        f.write_str("SecretValue(<redacted>)")
     }
 }
 
-/// Authoritative command-log storage selected by an embedded deployment.
+/// Authoritative command-log storage selected by an composed deployment.
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) enum EmbeddedObjectLogConfig {
+pub(crate) enum ObjectLogConfig {
     Local {
         root: PathBuf,
     },
@@ -633,13 +633,13 @@ pub(crate) enum EmbeddedObjectLogConfig {
         endpoint: String,
         bucket: String,
         region: String,
-        access_key_id: EmbeddedSecret,
-        secret_access_key: EmbeddedSecret,
+        access_key_id: SecretValue,
+        secret_access_key: SecretValue,
         allow_insecure_http: bool,
     },
 }
 
-impl fmt::Debug for EmbeddedObjectLogConfig {
+impl fmt::Debug for ObjectLogConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Local { root } => f.debug_struct("Local").field("root", root).finish(),
@@ -662,19 +662,19 @@ impl fmt::Debug for EmbeddedObjectLogConfig {
     }
 }
 
-/// Disposable materialized projection selected by an embedded deployment.
+/// Disposable materialized projection selected by an composed deployment.
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) enum EmbeddedProjectionConfig {
+pub(crate) enum ProjectionStoreConfig {
     Sqlite {
         path: PathBuf,
     },
     /// The URL may contain credentials and is therefore redacted from diagnostics.
     Postgres {
-        url: EmbeddedSecret,
+        url: SecretValue,
     },
 }
 
-impl fmt::Debug for EmbeddedProjectionConfig {
+impl fmt::Debug for ProjectionStoreConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Sqlite { path } => f.debug_struct("Sqlite").field("path", path).finish(),
@@ -686,9 +686,9 @@ impl fmt::Debug for EmbeddedProjectionConfig {
     }
 }
 
-/// The acknowledgement barrier for embedded object-log compositions.
+/// The acknowledgement barrier for composed object-log compositions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EmbeddedResponseBarrier {
+pub(crate) enum CommitResponseBarrier {
     /// Success requires both the authoritative manifest and durable projection.
     Strict,
     /// Success requires the authoritative manifest and hot projection; durable projection apply may lag.
@@ -697,12 +697,12 @@ pub(crate) enum EmbeddedResponseBarrier {
 
 /// Group-commit segment settings for the authoritative object log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct EmbeddedSegmentConfig {
+pub(crate) struct SegmentSettings {
     pub target_bytes: usize,
     pub max_latency_ms: u64,
 }
 
-impl EmbeddedSegmentConfig {
+impl SegmentSettings {
     pub fn new(target_bytes: usize, max_latency_ms: u64) -> EngineResult<Self> {
         if target_bytes == 0 || max_latency_ms == 0 {
             return Err(EngineError::Invalid(
@@ -718,24 +718,24 @@ impl EmbeddedSegmentConfig {
 
 /// Action taken when a disposable projection is absent or incompatible with the authoritative log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EmbeddedRecoveryAction {
+pub(crate) enum ProjectionRecoveryAction {
     FailClosed,
     /// Delete only the disposable projection namespace and rebuild from authoritative history.
-    RehydrateProjection,
+    RebuildProjection,
 }
 
-/// Recovery bounds and validation policy for an embedded durability composition.
+/// Recovery bounds and validation policy for an composed storage composition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct EmbeddedRecoveryPolicy {
-    pub incompatible_projection: EmbeddedRecoveryAction,
+pub(crate) struct ProjectionRecoveryPolicy {
+    pub incompatible_projection: ProjectionRecoveryAction,
     pub verify_checksums: bool,
     pub max_tail_commands: u64,
 }
 
-impl Default for EmbeddedRecoveryPolicy {
+impl Default for ProjectionRecoveryPolicy {
     fn default() -> Self {
         Self {
-            incompatible_projection: EmbeddedRecoveryAction::FailClosed,
+            incompatible_projection: ProjectionRecoveryAction::FailClosed,
             verify_checksums: true,
             max_tail_commands: 1_000_000,
         }
@@ -756,8 +756,8 @@ use sha2::{Digest, Sha256};
 
 #[cfg(all(feature = "objectlog", feature = "postgres"))]
 fn derived_postgres_schema_name(namespace: &str) -> String {
-    const PREFIX: &str = "fw_";
-    const HASH_BYTES: usize = 30;
+    const PREFIX: &str = "fireweed_";
+    const HASH_BYTES: usize = 27;
 
     let digest = Sha256::digest(namespace.as_bytes());
     let mut schema = String::with_capacity(PREFIX.len() + HASH_BYTES * 2);
@@ -768,46 +768,24 @@ fn derived_postgres_schema_name(namespace: &str) -> String {
     schema
 }
 
-/// Fully owned public configuration for an embedded authoritative-log plus disposable-projection pair.
-/// Concrete adapter types remain private and credential-bearing fields are redacted from `Debug`.
-///
-/// ```text
-/// use std::{path::PathBuf, sync::Arc};
-/// use fireweed::{
-///     EmbeddedDurabilityConfig, EmbeddedObjectLogConfig, EmbeddedProjectionConfig,
-///     EmbeddedRecoveryPolicy, EmbeddedResponseBarrier, EmbeddedSegmentConfig,
-/// };
-///
-/// let root = String::from("./object-log");
-/// let projection = String::from("./projection.sqlite");
-/// let config = EmbeddedDurabilityConfig {
-///     object_log: EmbeddedObjectLogConfig::Local { root: PathBuf::from(root) },
-///     projection: EmbeddedProjectionConfig::Sqlite { path: PathBuf::from(projection) },
-///     response_barrier: EmbeddedResponseBarrier::Strict,
-///     segments: EmbeddedSegmentConfig::new(8 * 1024 * 1024, 20)?,
-///     namespace: "example".to_owned(),
-///     recovery: EmbeddedRecoveryPolicy::default(),
-/// };
-/// let handle = Arc::new(config.into_handle()?);
-/// # let _: Arc<fireweed::EmbeddedHandle> = handle;
-/// # Ok::<(), fireweed::EngineError>(())
-/// ```
+/// Private normalized configuration for a composed authoritative-log plus
+/// disposable-projection pair. Public callers use [`ObjectLogRuntimeConfig`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct EmbeddedDurabilityConfig {
-    pub object_log: EmbeddedObjectLogConfig,
-    pub projection: EmbeddedProjectionConfig,
-    pub response_barrier: EmbeddedResponseBarrier,
-    pub segments: EmbeddedSegmentConfig,
+pub(crate) struct ComposedStorageConfig {
+    pub object_log: ObjectLogConfig,
+    pub projection: ProjectionStoreConfig,
+    pub response_barrier: CommitResponseBarrier,
+    pub segments: SegmentSettings,
     pub namespace: String,
-    pub recovery: EmbeddedRecoveryPolicy,
+    pub recovery: ProjectionRecoveryPolicy,
 }
 
 #[derive(Clone, PartialEq, Eq)]
-pub struct ConfigSecret(EmbeddedSecret);
+pub struct ConfigSecret(SecretValue);
 
 impl ConfigSecret {
     pub fn new(value: impl Into<String>) -> Self {
-        Self(EmbeddedSecret::new(value))
+        Self(SecretValue::new(value))
     }
 }
 
@@ -852,7 +830,7 @@ pub struct SegmentConfig {
 
 impl SegmentConfig {
     pub fn new(target_bytes: usize, max_latency_ms: u64) -> EngineResult<Self> {
-        EmbeddedSegmentConfig::new(target_bytes, max_latency_ms)?;
+        SegmentSettings::new(target_bytes, max_latency_ms)?;
         Ok(Self {
             target_bytes,
             max_latency_ms,
@@ -875,7 +853,7 @@ pub struct RecoveryPolicy {
 
 impl Default for RecoveryPolicy {
     fn default() -> Self {
-        let current = EmbeddedRecoveryPolicy::default();
+        let current = ProjectionRecoveryPolicy::default();
         Self {
             incompatible_projection: RecoveryAction::FailClosed,
             verify_checksums: current.verify_checksums,
@@ -919,10 +897,10 @@ pub struct PostgresRuntimeConfig {
 }
 
 impl ObjectLogRuntimeConfig {
-    fn into_embedded(self) -> EmbeddedDurabilityConfig {
-        EmbeddedDurabilityConfig {
+    fn into_storage_config(self) -> ComposedStorageConfig {
+        ComposedStorageConfig {
             object_log: match self.object_log {
-                ObjectLogStorage::Local { root } => EmbeddedObjectLogConfig::Local { root },
+                ObjectLogStorage::Local { root } => ObjectLogConfig::Local { root },
                 ObjectLogStorage::S3Compatible {
                     endpoint,
                     bucket,
@@ -930,7 +908,7 @@ impl ObjectLogRuntimeConfig {
                     access_key_id,
                     secret_access_key,
                     allow_insecure_http,
-                } => EmbeddedObjectLogConfig::S3Compatible {
+                } => ObjectLogConfig::S3Compatible {
                     endpoint,
                     bucket,
                     region,
@@ -940,25 +918,25 @@ impl ObjectLogRuntimeConfig {
                 },
             },
             projection: match self.projection {
-                ProjectionConfig::Sqlite { path } => EmbeddedProjectionConfig::Sqlite { path },
+                ProjectionConfig::Sqlite { path } => ProjectionStoreConfig::Sqlite { path },
                 ProjectionConfig::Postgres { url } => {
-                    EmbeddedProjectionConfig::Postgres { url: url.0 }
+                    ProjectionStoreConfig::Postgres { url: url.0 }
                 }
             },
             response_barrier: match self.response_barrier {
-                ResponseBarrier::Strict => EmbeddedResponseBarrier::Strict,
-                ResponseBarrier::AsyncProjection => EmbeddedResponseBarrier::AsyncProjection,
+                ResponseBarrier::Strict => CommitResponseBarrier::Strict,
+                ResponseBarrier::AsyncProjection => CommitResponseBarrier::AsyncProjection,
             },
-            segments: EmbeddedSegmentConfig {
+            segments: SegmentSettings {
                 target_bytes: self.segments.target_bytes,
                 max_latency_ms: self.segments.max_latency_ms,
             },
             namespace: self.namespace,
-            recovery: EmbeddedRecoveryPolicy {
+            recovery: ProjectionRecoveryPolicy {
                 incompatible_projection: match self.recovery.incompatible_projection {
-                    RecoveryAction::FailClosed => EmbeddedRecoveryAction::FailClosed,
+                    RecoveryAction::FailClosed => ProjectionRecoveryAction::FailClosed,
                     RecoveryAction::RebuildProjection => {
-                        EmbeddedRecoveryAction::RehydrateProjection
+                        ProjectionRecoveryAction::RebuildProjection
                     }
                 },
                 verify_checksums: self.recovery.verify_checksums,
@@ -968,11 +946,11 @@ impl ObjectLogRuntimeConfig {
     }
 
     pub fn validate(&self) -> EngineResult<()> {
-        self.clone().into_embedded().validate()
+        self.clone().into_storage_config().validate()
     }
 }
 
-impl EmbeddedDurabilityConfig {
+impl ComposedStorageConfig {
     pub fn validate(&self) -> EngineResult<()> {
         if self.namespace.trim().is_empty() {
             return Err(EngineError::Invalid(
@@ -980,12 +958,12 @@ impl EmbeddedDurabilityConfig {
             ));
         }
         match &self.object_log {
-            EmbeddedObjectLogConfig::Local { root } if root.as_os_str().is_empty() => {
+            ObjectLogConfig::Local { root } if root.as_os_str().is_empty() => {
                 return Err(EngineError::Invalid(
                     "local object-log root must not be empty",
                 ));
             }
-            EmbeddedObjectLogConfig::S3Compatible {
+            ObjectLogConfig::S3Compatible {
                 endpoint,
                 bucket,
                 region,
@@ -1005,12 +983,12 @@ impl EmbeddedDurabilityConfig {
             _ => {}
         }
         match &self.projection {
-            EmbeddedProjectionConfig::Sqlite { path } if path.as_os_str().is_empty() => {
+            ProjectionStoreConfig::Sqlite { path } if path.as_os_str().is_empty() => {
                 return Err(EngineError::Invalid(
                     "SQLite projection path must not be empty",
                 ));
             }
-            EmbeddedProjectionConfig::Postgres { url } if url.is_empty() => {
+            ProjectionStoreConfig::Postgres { url } if url.is_empty() => {
                 return Err(EngineError::Invalid(
                     "PostgreSQL projection URL must not be empty",
                 ));
@@ -1024,117 +1002,79 @@ impl EmbeddedDurabilityConfig {
         }
         Ok(())
     }
-
-    /// Move this configuration into the opaque lifecycle ownership boundary.
-    ///
-    /// Backend-specific follow-up beads install concrete lifecycle behavior. Until then capabilities are
-    /// false and every operation rejects fail-closed instead of claiming an unperformed repair.
-    #[allow(dead_code)] // Retained for crate-internal compatibility tests after the v0.20 facade closure.
-    pub fn into_handle(self) -> EngineResult<EmbeddedHandle> {
-        self.validate()?;
-        Ok(EmbeddedHandle {
-            inner: Arc::new(EmbeddedHandleInner {
-                _config: self,
-                lifecycle: Box::new(UnsupportedEmbeddedLifecycle),
-            }),
-        })
-    }
 }
 
-/// Projection lifecycle operations supported by an [`EmbeddedHandle`].
+/// Projection lifecycle operations supported by an [`ProjectionLifecycleHandle`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct EmbeddedLifecycleCapabilities {
+pub(crate) struct ProjectionLifecycleCapabilities {
     pub verify_projection: bool,
     pub delete_projection: bool,
-    pub rehydrate_projection: bool,
+    pub rebuild_projection: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct EmbeddedProjectionVerification {
+pub(crate) struct ProjectionVerificationState {
     pub compatible: bool,
     pub projection_sequence: u64,
     pub authoritative_sequence: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct EmbeddedRehydration {
+pub(crate) struct ProjectionRebuildState {
     pub snapshot_used: bool,
     pub tail_commands_replayed: u64,
     pub projection_sequence: u64,
 }
 
-struct EmbeddedHandleInner {
-    _config: EmbeddedDurabilityConfig,
-    lifecycle: Box<dyn EmbeddedLifecycle>,
+struct ProjectionLifecycleHandleInner {
+    _config: ComposedStorageConfig,
+    lifecycle: Box<dyn ProjectionLifecycle>,
 }
 
-type EmbeddedLifecycleFuture<'a, T> = Pin<Box<dyn Future<Output = EngineResult<T>> + Send + 'a>>;
+type ProjectionLifecycleFuture<'a, T> = Pin<Box<dyn Future<Output = EngineResult<T>> + Send + 'a>>;
 
-trait EmbeddedLifecycle: Send + Sync {
-    fn capabilities(&self) -> EmbeddedLifecycleCapabilities;
+trait ProjectionLifecycle: Send + Sync {
+    fn capabilities(&self) -> ProjectionLifecycleCapabilities;
     #[allow(dead_code)] // Exercised by crate-internal lifecycle tests for async projection flushing.
     fn buffered_group_commit_commands(&self) -> Option<usize> {
         None
     }
-    fn verify_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedProjectionVerification>;
-    fn delete_projection(&self) -> EmbeddedLifecycleFuture<'_, ()>;
-    fn rehydrate_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedRehydration>;
+    fn verify_projection(&self) -> ProjectionLifecycleFuture<'_, ProjectionVerificationState>;
+    fn delete_projection(&self) -> ProjectionLifecycleFuture<'_, ()>;
+    fn rebuild_projection(&self) -> ProjectionLifecycleFuture<'_, ProjectionRebuildState>;
     fn shutdown(&mut self);
 }
 
-#[allow(dead_code)] // Used by the crate-internal unsupported-lifecycle construction seam.
-struct UnsupportedEmbeddedLifecycle;
-
-impl EmbeddedLifecycle for UnsupportedEmbeddedLifecycle {
-    fn capabilities(&self) -> EmbeddedLifecycleCapabilities {
-        EmbeddedLifecycleCapabilities::default()
-    }
-
-    fn verify_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedProjectionVerification> {
-        Box::pin(async { Err(EngineError::Unavailable) })
-    }
-
-    fn delete_projection(&self) -> EmbeddedLifecycleFuture<'_, ()> {
-        Box::pin(async { Err(EngineError::Unavailable) })
-    }
-
-    fn rehydrate_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedRehydration> {
-        Box::pin(async { Err(EngineError::Unavailable) })
-    }
-
-    fn shutdown(&mut self) {}
-}
-
-impl Drop for EmbeddedHandleInner {
+impl Drop for ProjectionLifecycleHandleInner {
     fn drop(&mut self) {
         self.lifecycle.shutdown();
     }
 }
 
-/// Opaque, cloneable ownership boundary for embedded durability lifecycle state.
+/// Opaque, cloneable ownership boundary for composed storage lifecycle state.
 ///
 /// The handle owns its configuration and, when a concrete composition is installed, its background
 /// flusher/checkpoint lifecycle. Dropping the last clone is the shutdown boundary. No concrete adapter
 /// type appears in the public signature.
 #[derive(Clone)]
-pub(crate) struct EmbeddedHandle {
-    inner: Arc<EmbeddedHandleInner>,
+pub(crate) struct ProjectionLifecycleHandle {
+    inner: Arc<ProjectionLifecycleHandleInner>,
 }
 
-impl fmt::Debug for EmbeddedHandle {
+impl fmt::Debug for ProjectionLifecycleHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("EmbeddedHandle")
+        f.debug_struct("ProjectionLifecycleHandle")
             .field("capabilities", &self.lifecycle_capabilities())
             .finish_non_exhaustive()
     }
 }
 
-impl EmbeddedHandle {
-    pub fn lifecycle_capabilities(&self) -> EmbeddedLifecycleCapabilities {
+impl ProjectionLifecycleHandle {
+    pub fn lifecycle_capabilities(&self) -> ProjectionLifecycleCapabilities {
         self.inner.lifecycle.capabilities()
     }
 
-    /// Number of accepted commands waiting for a group-commit seal, when the embedded composition
+    /// Number of accepted commands waiting for a group-commit seal, when the composed storage
     /// exposes that observation. This is a diagnostic synchronization seam, not a durability barrier;
     /// lifecycle operations remain responsible for quiescing accepted writes.
     #[doc(hidden)]
@@ -1143,7 +1083,7 @@ impl EmbeddedHandle {
         self.inner.lifecycle.buffered_group_commit_commands()
     }
 
-    pub async fn verify_projection(&self) -> EngineResult<EmbeddedProjectionVerification> {
+    pub async fn verify_projection(&self) -> EngineResult<ProjectionVerificationState> {
         if !self.lifecycle_capabilities().verify_projection {
             return Err(EngineError::Unavailable);
         }
@@ -1157,36 +1097,36 @@ impl EmbeddedHandle {
         self.inner.lifecycle.delete_projection().await
     }
 
-    pub async fn rehydrate_projection(&self) -> EngineResult<EmbeddedRehydration> {
-        if !self.lifecycle_capabilities().rehydrate_projection {
+    pub async fn rebuild_projection(&self) -> EngineResult<ProjectionRebuildState> {
+        if !self.lifecycle_capabilities().rebuild_projection {
             return Err(EngineError::Unavailable);
         }
-        self.inner.lifecycle.rehydrate_projection().await
+        self.inner.lifecycle.rebuild_projection().await
     }
 }
 
-/// An embedded runtime paired with its opaque durability lifecycle handle.
+/// A composed runtime paired with its opaque durability lifecycle handle.
 ///
 /// Private composition helper that pairs the internal runtime with its projection lifecycle handle.
 #[doc(hidden)]
-pub(crate) struct EmbeddedRuntime<B> {
+pub(crate) struct ComposedRuntime<B> {
     runtime: RuntimeCore<B>,
-    lifecycle: EmbeddedHandle,
+    lifecycle: ProjectionLifecycleHandle,
 }
 
 #[allow(dead_code)] // Private wrapper retained solely for internal regression coverage.
-impl<B> EmbeddedRuntime<B> {
-    pub fn lifecycle_capabilities(&self) -> EmbeddedLifecycleCapabilities {
+impl<B> ComposedRuntime<B> {
+    pub fn lifecycle_capabilities(&self) -> ProjectionLifecycleCapabilities {
         self.lifecycle.lifecycle_capabilities()
     }
 
-    /// See [`EmbeddedHandle::buffered_group_commit_commands`].
+    /// See [`ProjectionLifecycleHandle::buffered_group_commit_commands`].
     #[doc(hidden)]
     pub fn buffered_group_commit_commands(&self) -> Option<usize> {
         self.lifecycle.buffered_group_commit_commands()
     }
 
-    pub async fn verify_projection(&self) -> EngineResult<EmbeddedProjectionVerification> {
+    pub async fn verify_projection(&self) -> EngineResult<ProjectionVerificationState> {
         self.lifecycle.verify_projection().await
     }
 
@@ -1194,11 +1134,11 @@ impl<B> EmbeddedRuntime<B> {
         self.lifecycle.delete_projection().await
     }
 
-    pub async fn rehydrate_projection(&self) -> EngineResult<EmbeddedRehydration> {
-        self.lifecycle.rehydrate_projection().await
+    pub async fn rebuild_projection(&self) -> EngineResult<ProjectionRebuildState> {
+        self.lifecycle.rebuild_projection().await
     }
 
-    pub fn lifecycle_handle(&self) -> EmbeddedHandle {
+    pub fn lifecycle_handle(&self) -> ProjectionLifecycleHandle {
         self.lifecycle.clone()
     }
 
@@ -1210,7 +1150,7 @@ impl<B> EmbeddedRuntime<B> {
     }
 }
 
-impl<B> Deref for EmbeddedRuntime<B> {
+impl<B> Deref for ComposedRuntime<B> {
     type Target = RuntimeCore<B>;
 
     fn deref(&self) -> &Self::Target {
@@ -1291,7 +1231,7 @@ fn validate_objectlog_postgres_catalog(
 impl ObjectLogPostgresLifecycle {
     fn verify_backend(
         backend: &ObjectLogPostgresBackend,
-    ) -> EngineResult<EmbeddedProjectionVerification> {
+    ) -> EngineResult<ProjectionVerificationState> {
         use fireweed_engine::{LogStore, ProjectionStore};
 
         let projection = backend.with_projection(Clone::clone);
@@ -1316,17 +1256,17 @@ impl ObjectLogPostgresLifecycle {
                     .map_or(0, |position| position.sequence),
             );
         }
-        Ok(EmbeddedProjectionVerification {
+        Ok(ProjectionVerificationState {
             compatible,
             projection_sequence,
             authoritative_sequence,
         })
     }
 
-    fn rehydrate_backend(
+    fn rebuilde_backend(
         backend: &ObjectLogPostgresBackend,
         max_tail_commands: u64,
-    ) -> EngineResult<EmbeddedRehydration> {
+    ) -> EngineResult<ProjectionRebuildState> {
         use fireweed_engine::{LogStore, ProjectionStore};
 
         let mut projection = backend.with_projection(Clone::clone);
@@ -1342,7 +1282,7 @@ impl ObjectLogPostgresLifecycle {
                 replay.extend(page.entries);
                 if replay.len() as u64 > max_tail_commands {
                     return Err(EngineError::Storage(format!(
-                        "projection rehydrate exceeds configured tail bound {}",
+                        "projection rebuilde exceeds configured tail bound {}",
                         max_tail_commands
                     )));
                 }
@@ -1358,7 +1298,7 @@ impl ObjectLogPostgresLifecycle {
             projection.apply_recovery(&positions, &commands)?;
         }
         let verification = Self::verify_backend(backend)?;
-        Ok(EmbeddedRehydration {
+        Ok(ProjectionRebuildState {
             snapshot_used: false,
             tail_commands_replayed: replay.len() as u64,
             projection_sequence: verification.projection_sequence,
@@ -1367,20 +1307,20 @@ impl ObjectLogPostgresLifecycle {
 }
 
 #[cfg(all(feature = "objectlog", feature = "postgres"))]
-impl EmbeddedLifecycle for ObjectLogPostgresLifecycle {
-    fn capabilities(&self) -> EmbeddedLifecycleCapabilities {
-        EmbeddedLifecycleCapabilities {
+impl ProjectionLifecycle for ObjectLogPostgresLifecycle {
+    fn capabilities(&self) -> ProjectionLifecycleCapabilities {
+        ProjectionLifecycleCapabilities {
             verify_projection: true,
             delete_projection: true,
-            rehydrate_projection: true,
+            rebuild_projection: true,
         }
     }
 
-    fn verify_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedProjectionVerification> {
+    fn verify_projection(&self) -> ProjectionLifecycleFuture<'_, ProjectionVerificationState> {
         let backend = Arc::clone(
             self.backend
                 .as_ref()
-                .expect("embedded postgres lifecycle is active"),
+                .expect("object-log postgres lifecycle is active"),
         );
         Box::pin(
             self.executor
@@ -1388,27 +1328,27 @@ impl EmbeddedLifecycle for ObjectLogPostgresLifecycle {
         )
     }
 
-    fn delete_projection(&self) -> EmbeddedLifecycleFuture<'_, ()> {
+    fn delete_projection(&self) -> ProjectionLifecycleFuture<'_, ()> {
         let backend = Arc::clone(
             self.backend
                 .as_ref()
-                .expect("embedded postgres lifecycle is active"),
+                .expect("object-log postgres lifecycle is active"),
         );
         Box::pin(self.executor.run(move || {
             backend.with_projection(fireweed_postgres::PostgresRelational::delete_projection)
         }))
     }
 
-    fn rehydrate_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedRehydration> {
+    fn rebuild_projection(&self) -> ProjectionLifecycleFuture<'_, ProjectionRebuildState> {
         let backend = Arc::clone(
             self.backend
                 .as_ref()
-                .expect("embedded postgres lifecycle is active"),
+                .expect("object-log postgres lifecycle is active"),
         );
         let max_tail_commands = self.max_tail_commands;
         Box::pin(
             self.executor
-                .run(move || Self::rehydrate_backend(backend.as_ref(), max_tail_commands)),
+                .run(move || Self::rebuilde_backend(backend.as_ref(), max_tail_commands)),
         )
     }
 
@@ -1421,7 +1361,7 @@ impl EmbeddedLifecycle for ObjectLogPostgresLifecycle {
             // `postgres::Client::drop` drives its private runtime. Keep the final
             // backend drop off any ambient Tokio runtime just as construction is.
             let _ = std::thread::Builder::new()
-                .name("fireweed-embedded-postgres-drop".to_owned())
+                .name("fireweed-objectlog-postgres-drop".to_owned())
                 .spawn(move || drop(backend))
                 .and_then(|thread| {
                     thread
@@ -1506,7 +1446,7 @@ fn verify_objectlog_sqlite_axes(
     log: &fireweed_objectlog::ObjectLog,
     projection: &fireweed_sqlite::HybridProjectionStore,
     require_online: bool,
-) -> EngineResult<EmbeddedProjectionVerification> {
+) -> EngineResult<ProjectionVerificationState> {
     use fireweed_engine::{LogStore, ProjectionStore};
 
     if require_online && projection.durable_projection_offline() {
@@ -1574,7 +1514,7 @@ fn verify_objectlog_sqlite_axes(
                 .map_or(0, |position| position.sequence),
         );
     }
-    Ok(EmbeddedProjectionVerification {
+    Ok(ProjectionVerificationState {
         compatible: true,
         projection_sequence,
         authoritative_sequence,
@@ -1585,7 +1525,7 @@ fn verify_objectlog_sqlite_axes(
 impl ObjectLogSqliteLifecycle {
     fn verify_backend(
         backend: &ObjectLogSqliteBackend,
-    ) -> EngineResult<EmbeddedProjectionVerification> {
+    ) -> EngineResult<ProjectionVerificationState> {
         backend
             .with_quiesced_log_and_projection_mut(|log, projection| {
                 // Async writes may have advanced the authoritative log while their bounded SQLite
@@ -1610,10 +1550,10 @@ impl ObjectLogSqliteLifecycle {
             })
     }
 
-    fn rehydrate_backend(
+    fn rebuilde_backend(
         backend: &ObjectLogSqliteBackend,
         max_tail_commands: u64,
-    ) -> EngineResult<EmbeddedRehydration> {
+    ) -> EngineResult<ProjectionRebuildState> {
         use fireweed_engine::LogStore;
 
         backend.with_quiesced_log_and_projection_mut(|log, projection| {
@@ -1631,7 +1571,7 @@ impl ObjectLogSqliteLifecycle {
                     replayed = replayed.saturating_add(page.entries.len() as u64);
                     if replayed > max_tail_commands {
                         return Err(EngineError::Storage(format!(
-                            "projection rehydrate exceeds configured tail bound {}",
+                            "projection rebuilde exceeds configured tail bound {}",
                             max_tail_commands
                         )));
                     }
@@ -1658,7 +1598,7 @@ impl ObjectLogSqliteLifecycle {
             }
             let verification = verify_objectlog_sqlite_axes(log, projection, false)?;
             projection.finish_durable_rebuild();
-            Ok(EmbeddedRehydration {
+            Ok(ProjectionRebuildState {
                 snapshot_used: false,
                 tail_commands_replayed: replayed,
                 projection_sequence: verification.projection_sequence,
@@ -1668,12 +1608,12 @@ impl ObjectLogSqliteLifecycle {
 }
 
 #[cfg(all(feature = "objectlog", feature = "sqlite"))]
-impl EmbeddedLifecycle for ObjectLogSqliteLifecycle {
-    fn capabilities(&self) -> EmbeddedLifecycleCapabilities {
-        EmbeddedLifecycleCapabilities {
+impl ProjectionLifecycle for ObjectLogSqliteLifecycle {
+    fn capabilities(&self) -> ProjectionLifecycleCapabilities {
+        ProjectionLifecycleCapabilities {
             verify_projection: true,
             delete_projection: true,
-            rehydrate_projection: true,
+            rebuild_projection: true,
         }
     }
 
@@ -1681,7 +1621,7 @@ impl EmbeddedLifecycle for ObjectLogSqliteLifecycle {
         Some(self.backend.buffered_group_commit_commands())
     }
 
-    fn verify_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedProjectionVerification> {
+    fn verify_projection(&self) -> ProjectionLifecycleFuture<'_, ProjectionVerificationState> {
         let backend = Arc::clone(&self.backend);
         Box::pin(
             self.executor
@@ -1689,7 +1629,7 @@ impl EmbeddedLifecycle for ObjectLogSqliteLifecycle {
         )
     }
 
-    fn delete_projection(&self) -> EmbeddedLifecycleFuture<'_, ()> {
+    fn delete_projection(&self) -> ProjectionLifecycleFuture<'_, ()> {
         let backend = Arc::clone(&self.backend);
         Box::pin(self.executor.run(move || {
             backend.with_quiesced_log_and_projection_mut(|_, projection| {
@@ -1698,12 +1638,12 @@ impl EmbeddedLifecycle for ObjectLogSqliteLifecycle {
         }))
     }
 
-    fn rehydrate_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedRehydration> {
+    fn rebuild_projection(&self) -> ProjectionLifecycleFuture<'_, ProjectionRebuildState> {
         let backend = Arc::clone(&self.backend);
         let max_tail_commands = self.max_tail_commands;
         Box::pin(
             self.executor
-                .run(move || Self::rehydrate_backend(backend.as_ref(), max_tail_commands)),
+                .run(move || Self::rebuilde_backend(backend.as_ref(), max_tail_commands)),
         )
     }
 
@@ -1716,8 +1656,8 @@ impl EmbeddedLifecycle for ObjectLogSqliteLifecycle {
 }
 
 #[cfg(feature = "objectlog")]
-fn open_embedded_object_log(
-    config: &EmbeddedDurabilityConfig,
+fn open_composed_object_log(
+    config: &ComposedStorageConfig,
     authoritative: bool,
 ) -> EngineResult<fireweed_objectlog::ObjectLog> {
     use fireweed_objectlog::segmented::{
@@ -1729,8 +1669,8 @@ fn open_embedded_object_log(
         config.segments.max_latency_ms,
     )?;
     let raw: Arc<dyn BlobStore> = match &config.object_log {
-        EmbeddedObjectLogConfig::Local { root } => Arc::new(LocalFsBlobStore::open(root)?),
-        EmbeddedObjectLogConfig::S3Compatible {
+        ObjectLogConfig::Local { root } => Arc::new(LocalFsBlobStore::open(root)?),
+        ObjectLogConfig::S3Compatible {
             endpoint,
             bucket,
             region,
@@ -1903,9 +1843,9 @@ fn add_millis(ts: UtcTimestamp, millis: u64) -> UtcTimestamp {
 ///
 /// ```no_run
 /// # use fireweed::{ClaimAt, EngineResult, Fireweed, QueueKey, UtcTimestamp};
-/// # async fn f(pq: &Fireweed, queue: &QueueKey, tick: UtcTimestamp) -> EngineResult<()> {
+/// # async fn f(fireweed: &Fireweed, queue: &QueueKey, tick: UtcTimestamp) -> EngineResult<()> {
 /// // Work scheduled for `tick`, leased for 60s against the real clock.
-/// let due = pq.claim_at(queue, ClaimAt::new(100, 60_000).eligibility_time(tick)).await?;
+/// let due = fireweed.claim_at(queue, ClaimAt::new(100, 60_000).eligibility_time(tick)).await?;
 /// # let _ = due;
 /// # Ok(())
 /// # }
@@ -3253,7 +3193,7 @@ impl<B: LibBackend> RuntimeCore<B> {
 
     /// The backend's authoritative-commit capability descriptors (epic pqueue-2201fd37, ADR-009). A consumer
     /// (Snorri) reads these BEFORE activation and rejects a backend that does not advertise the guarantees it
-    /// needs (e.g. `atomic_transition_commit`). The composed embedded backends derive these descriptors from
+    /// needs (e.g. `atomic_transition_commit`). The composed backends derive these descriptors from
     /// the authoritative object log and the projection's transition support. `queue` is accepted for
     /// signature stability — the capability set is backend-wide.
     pub fn commit_capabilities(&self, _queue: &QueueKey) -> EngineResult<CommitCapabilities> {
@@ -3920,16 +3860,16 @@ pub fn open_objectlog(
     )))
 }
 
-/// Open an authoritative object log with a disposable PostgreSQL projection behind the public embedded
+/// Open an authoritative object log with a disposable PostgreSQL projection behind the public Fireweed
 /// facade. The projection is verified against the log before serving, group-commit is flushed by an owned
 /// background thread, and dropping the last lifecycle handle shuts that thread down.
 ///
 /// This constructor requires both the `objectlog` and `postgres` features. The SQLite projection variant
-/// uses its dedicated `open_embedded_sqlite` constructor.
+/// uses its dedicated `open_composed_sqlite` constructor.
 #[cfg(all(feature = "objectlog", feature = "postgres"))]
 #[doc(hidden)]
-pub(crate) fn open_embedded(
-    config: EmbeddedDurabilityConfig,
+pub(crate) fn open_composed_postgres(
+    config: ComposedStorageConfig,
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed> {
     if tokio::runtime::Handle::try_current().is_ok() {
@@ -3937,25 +3877,25 @@ pub(crate) fn open_embedded(
             "open_objectlog_postgres cannot run inside a Tokio runtime; use open_objectlog_postgres_async",
         ));
     }
-    open_embedded_postgres_blocking(config, clock).map(EmbeddedRuntime::into_fireweed)
+    open_objectlog_postgres_blocking(config, clock).map(ComposedRuntime::into_fireweed)
 }
 
-/// Async-safe variant of [`open_embedded`] for callers already running on Tokio.
+/// Async-safe variant of [`open_composed_postgres`] for callers already running on Tokio.
 ///
 /// PostgreSQL connection setup and teardown are kept on ordinary OS threads because the synchronous
 /// PostgreSQL client owns a private runtime.
 #[cfg(all(feature = "objectlog", feature = "postgres"))]
 #[doc(hidden)]
-pub(crate) async fn open_embedded_async(
-    config: EmbeddedDurabilityConfig,
+pub(crate) async fn open_composed_postgres_async(
+    config: ComposedStorageConfig,
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed> {
-    tokio::task::spawn_blocking(move || open_embedded_postgres_blocking(config, clock))
+    tokio::task::spawn_blocking(move || open_objectlog_postgres_blocking(config, clock))
         .await
         .map_err(|error| {
             EngineError::Storage(format!("object-log PostgreSQL open task failed: {error}"))
         })?
-        .map(EmbeddedRuntime::into_fireweed)
+        .map(ComposedRuntime::into_fireweed)
 }
 
 /// Open an authoritative object log with a disposable PostgreSQL projection.
@@ -3964,7 +3904,7 @@ pub fn open_objectlog_postgres(
     config: ObjectLogRuntimeConfig,
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed> {
-    open_embedded(config.into_embedded(), clock)
+    open_composed_postgres(config.into_storage_config(), clock)
 }
 
 /// Async-safe variant of [`open_objectlog_postgres`].
@@ -3973,35 +3913,35 @@ pub async fn open_objectlog_postgres_async(
     config: ObjectLogRuntimeConfig,
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed> {
-    open_embedded_async(config.into_embedded(), clock).await
+    open_composed_postgres_async(config.into_storage_config(), clock).await
 }
 
 #[cfg(all(feature = "objectlog", feature = "postgres"))]
-fn open_embedded_postgres_blocking(
-    config: EmbeddedDurabilityConfig,
+fn open_objectlog_postgres_blocking(
+    config: ComposedStorageConfig,
     clock: Arc<dyn Clock>,
-) -> EngineResult<EmbeddedRuntime<blocking_backend::BlockingLibBackend<ObjectLogPostgresBackend>>> {
+) -> EngineResult<ComposedRuntime<blocking_backend::BlockingLibBackend<ObjectLogPostgresBackend>>> {
     use fireweed_engine::{ComposedBackend, InProcessControlPlane};
 
     config.validate()?;
-    if config.response_barrier != EmbeddedResponseBarrier::Strict {
+    if config.response_barrier != CommitResponseBarrier::Strict {
         return Err(EngineError::Unavailable);
     }
     let projection = match &config.projection {
-        EmbeddedProjectionConfig::Postgres { url } => {
+        ProjectionStoreConfig::Postgres { url } => {
             fireweed_postgres::PostgresRelational::connect_in_schema(
                 &url.0,
                 &derived_postgres_schema_name(&config.namespace),
             )?
         }
-        EmbeddedProjectionConfig::Sqlite { .. } => return Err(EngineError::Unavailable),
+        ProjectionStoreConfig::Sqlite { .. } => return Err(EngineError::Unavailable),
     };
-    let log = open_embedded_object_log(&config, true)?;
+    let log = open_composed_object_log(&config, true)?;
 
     if let Err(error) = validate_objectlog_postgres_catalog(&log, &projection) {
         match config.recovery.incompatible_projection {
-            EmbeddedRecoveryAction::FailClosed => return Err(error),
-            EmbeddedRecoveryAction::RehydrateProjection => projection.delete_projection()?,
+            ProjectionRecoveryAction::FailClosed => return Err(error),
+            ProjectionRecoveryAction::RebuildProjection => projection.delete_projection()?,
         }
     }
     let backend = ComposedBackend::new(log, projection, InProcessControlPlane::new())
@@ -4016,7 +3956,7 @@ fn open_embedded_postgres_blocking(
     let weak_backend = Arc::downgrade(&backend);
     let thread_stop = Arc::clone(&stop);
     let flusher = std::thread::Builder::new()
-        .name(format!("fireweed-embedded-{}", config.namespace))
+        .name(format!("fireweed-composed-{}", config.namespace))
         .spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
                 std::thread::sleep(std::time::Duration::from_millis(flush_interval));
@@ -4032,8 +3972,8 @@ fn open_embedded_postgres_blocking(
             }
         })
         .map_err(|error| EngineError::Storage(error.to_string()))?;
-    let lifecycle = EmbeddedHandle {
-        inner: Arc::new(EmbeddedHandleInner {
+    let lifecycle = ProjectionLifecycleHandle {
+        inner: Arc::new(ProjectionLifecycleHandleInner {
             _config: config.clone(),
             lifecycle: Box::new(ObjectLogPostgresLifecycle {
                 backend: Some(Arc::clone(&backend)),
@@ -4044,32 +3984,32 @@ fn open_embedded_postgres_blocking(
             }),
         }),
     };
-    Ok(EmbeddedRuntime {
+    Ok(ComposedRuntime {
         runtime: RuntimeCore::new(Arc::new(blocking_backend), clock),
         lifecycle,
     })
 }
 
-/// Open an authoritative object log with a disposable SQLite projection behind the public embedded
+/// Open an authoritative object log with a disposable SQLite projection behind the public Fireweed
 /// facade. Both local filesystem and S3-compatible object stores use the same production segmented-log
-/// path. [`EmbeddedResponseBarrier::Strict`] makes SQLite durable before success is visible;
-/// [`EmbeddedResponseBarrier::AsyncProjection`] acknowledges after the manifest and hot projection, with
+/// path. [`CommitResponseBarrier::Strict`] makes SQLite durable before success is visible;
+/// [`CommitResponseBarrier::AsyncProjection`] acknowledges after the manifest and hot projection, with
 /// the owned background flusher checkpointing SQLite.
 ///
 /// The SQLite file is a disposable cache: the returned lifecycle handle can verify it, delete it in place,
 /// and rebuild it exactly from authoritative object-log history without changing the live hot projection.
 #[cfg(all(feature = "objectlog", feature = "sqlite"))]
 #[doc(hidden)]
-pub(crate) fn open_embedded_sqlite(
-    config: EmbeddedDurabilityConfig,
+pub(crate) fn open_composed_sqlite(
+    config: ComposedStorageConfig,
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed> {
     use fireweed_engine::{ComposedBackend, InProcessControlPlane};
 
     config.validate()?;
     let projection_path = match &config.projection {
-        EmbeddedProjectionConfig::Sqlite { path } => path,
-        EmbeddedProjectionConfig::Postgres { .. } => return Err(EngineError::Unavailable),
+        ProjectionStoreConfig::Sqlite { path } => path,
+        ProjectionStoreConfig::Postgres { .. } => return Err(EngineError::Unavailable),
     };
     let projection_path = projection_path.to_str().ok_or(EngineError::Invalid(
         "SQLite projection path must be valid UTF-8",
@@ -4080,20 +4020,20 @@ pub(crate) fn open_embedded_sqlite(
         std::fs::create_dir_all(parent).map_err(|error| EngineError::Storage(error.to_string()))?;
     }
     let mut projection = fireweed_sqlite::HybridProjectionStore::open(projection_path)?
-        .with_strict_apply(config.response_barrier == EmbeddedResponseBarrier::Strict);
-    if config.response_barrier == EmbeddedResponseBarrier::AsyncProjection {
+        .with_strict_apply(config.response_barrier == CommitResponseBarrier::Strict);
+    if config.response_barrier == CommitResponseBarrier::AsyncProjection {
         projection =
             projection.with_async_monitor(fireweed_sqlite::HybridAsyncThresholds::default());
     }
-    let log = open_embedded_object_log(
+    let log = open_composed_object_log(
         &config,
-        config.response_barrier == EmbeddedResponseBarrier::Strict,
+        config.response_barrier == CommitResponseBarrier::Strict,
     )?;
 
     if let Err(error) = validate_objectlog_sqlite_catalog(&log, projection.sqlite()) {
         match config.recovery.incompatible_projection {
-            EmbeddedRecoveryAction::FailClosed => return Err(error),
-            EmbeddedRecoveryAction::RehydrateProjection => {
+            ProjectionRecoveryAction::FailClosed => return Err(error),
+            ProjectionRecoveryAction::RebuildProjection => {
                 projection.sqlite().reset_projection()?
             }
         }
@@ -4110,7 +4050,7 @@ pub(crate) fn open_embedded_sqlite(
     let weak_backend = Arc::downgrade(&backend);
     let thread_stop = Arc::clone(&stop);
     let flusher = std::thread::Builder::new()
-        .name(format!("fireweed-embedded-{}", config.namespace))
+        .name(format!("fireweed-composed-{}", config.namespace))
         .spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
                 std::thread::sleep(std::time::Duration::from_millis(flush_interval));
@@ -4127,8 +4067,8 @@ pub(crate) fn open_embedded_sqlite(
             }
         })
         .map_err(|error| EngineError::Storage(error.to_string()))?;
-    let lifecycle = EmbeddedHandle {
-        inner: Arc::new(EmbeddedHandleInner {
+    let lifecycle = ProjectionLifecycleHandle {
+        inner: Arc::new(ProjectionLifecycleHandleInner {
             _config: config.clone(),
             lifecycle: Box::new(ObjectLogSqliteLifecycle {
                 backend: Arc::clone(&backend),
@@ -4139,7 +4079,7 @@ pub(crate) fn open_embedded_sqlite(
             }),
         }),
     };
-    Ok(EmbeddedRuntime {
+    Ok(ComposedRuntime {
         runtime: RuntimeCore::new(Arc::new(blocking_backend), clock),
         lifecycle,
     }
@@ -4152,7 +4092,7 @@ pub fn open_objectlog_sqlite(
     config: ObjectLogRuntimeConfig,
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed> {
-    open_embedded_sqlite(config.into_embedded(), clock)
+    open_composed_sqlite(config.into_storage_config(), clock)
 }
 
 /// Open a **sole-owner** PostgreSQL-backed Fireweed handle (log-replay class) at `url`. Requires the `postgres`
@@ -4346,7 +4286,7 @@ mod tests {
         let bounded = Arc::new(crate::blocking_backend::BlockingLibBackend::new(raw)?);
         let executor = bounded.executor();
         let control_plane = Arc::new(InMemoryControlPlane::default());
-        let pq = RuntimeCore::with_owned_control_plane_executor(
+        let fireweed = RuntimeCore::with_owned_control_plane_executor(
             bounded,
             Arc::new(SystemClock),
             OwnerId::new("coordinated-owner").unwrap(),
@@ -4356,14 +4296,14 @@ mod tests {
         let definition = query_definition();
         let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
 
-        pq.create_queue(definition).await?;
-        pq.push(&queue, NewItem::default()).await?;
+        fireweed.create_queue(definition).await?;
+        fireweed.push(&queue, NewItem::default()).await?;
 
         assert!(matches!(
-            pq.ownership(&queue).await?,
+            fireweed.ownership(&queue).await?,
             super::Ownership::Mine { epoch: Some(epoch) } if epoch >= 1
         ));
-        assert_eq!(pq.metrics(&queue).await?.pending, 1);
+        assert_eq!(fireweed.metrics(&queue).await?.pending, 1);
         Ok(())
     }
 
@@ -4378,9 +4318,9 @@ mod tests {
             let backend = Arc::clone(&bounded);
             let barrier = Arc::clone(&barrier);
             handles.push(std::thread::spawn(move || {
-                let pq = RuntimeCore::new(backend, Arc::new(SystemClock));
+                let fireweed = RuntimeCore::new(backend, Arc::new(SystemClock));
                 barrier.wait();
-                futures::executor::block_on(pq.create_queue(query_definition()))
+                futures::executor::block_on(fireweed.create_queue(query_definition()))
             }));
         }
 
@@ -4412,11 +4352,11 @@ mod tests {
             let backend = Arc::clone(&bounded);
             let barrier = Arc::clone(&barrier);
             handles.push(std::thread::spawn(move || {
-                let pq = RuntimeCore::new(backend, Arc::new(SystemClock));
+                let fireweed = RuntimeCore::new(backend, Arc::new(SystemClock));
                 let mut definition = query_definition();
                 definition.ordering_mode = OrderingMode::BoundedRelaxed;
                 barrier.wait();
-                futures::executor::block_on(pq.create_queue(definition))
+                futures::executor::block_on(fireweed.create_queue(definition))
             }));
         }
 
@@ -4462,14 +4402,14 @@ mod tests {
 
         let control_plane = Arc::new(InMemoryControlPlane::default());
         let owner = OwnerId::new("cancelled-waiter-owner").unwrap();
-        let pq = RuntimeCore::with_owned_control_plane_executor(
+        let fireweed = RuntimeCore::with_owned_control_plane_executor(
             bounded,
             Arc::new(SystemClock),
             owner.clone(),
             control_plane.clone(),
             executor,
         );
-        let mut session = Box::pin(pq.session_epoch(&queue));
+        let mut session = Box::pin(fireweed.session_epoch(&queue));
         assert!(matches!(session.as_mut().poll(&mut context), Poll::Pending));
         drop(session);
 
@@ -4478,7 +4418,7 @@ mod tests {
             release_tx.send(()).unwrap();
         });
         let drop_started = Instant::now();
-        drop(pq);
+        drop(fireweed);
         assert!(
             drop_started.elapsed() < Duration::from_millis(100),
             "final coordinated-handle drop joined a blocked durable-I/O worker"
@@ -4562,7 +4502,7 @@ mod tests {
 
     #[cfg(all(feature = "objectlog", feature = "postgres"))]
     #[test]
-    fn embedded_postgres_schema_name_is_legal_bounded_and_deterministic() {
+    fn objectlog_postgres_schema_name_is_legal_bounded_and_deterministic() {
         let namespaces = vec![
             "short".to_string(),
             "punctuation-heavy:-/namespace.with spaces".to_string(),
@@ -4579,7 +4519,7 @@ mod tests {
                     .chars()
                     .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
             );
-            assert!(schema.starts_with("pq_"));
+            assert!(schema.starts_with("fireweed_"));
             assert!(
                 seen.insert(schema.clone()),
                 "schema derivation collided for {namespace:?}"
@@ -4590,7 +4530,7 @@ mod tests {
 
     #[cfg(feature = "objectlog")]
     #[test]
-    fn embedded_object_log_namespace_encoding_stays_hex_bytes() {
+    fn object_log_namespace_encoding_stays_hex_bytes() {
         assert_eq!(super::object_log_namespace("a-b:/é"), "612d623a2fc3a9");
     }
 
@@ -4706,9 +4646,9 @@ mod tests {
             ..Default::default()
         };
         let pushed = setup.push_batch(&shard, vec![due, later]).await?;
-        let pq = RuntimeCore::new(backend, Arc::new(PanicClock::new()));
+        let fireweed = RuntimeCore::new(backend, Arc::new(PanicClock::new()));
 
-        let claimed = pq
+        let claimed = fireweed
             .claim_by_query_at(
                 &shard,
                 query_request("explicit-times"),
@@ -4728,11 +4668,11 @@ mod tests {
     #[tokio::test]
     async fn facade_enforces_persisted_push_and_claim_batch_limits() -> EngineResult<()> {
         let backend = Arc::new(fireweed_memory::composed_memory_backend());
-        let pq = RuntimeCore::new(backend, Arc::new(SystemClock));
+        let fireweed = RuntimeCore::new(backend, Arc::new(SystemClock));
         let mut definition = query_definition();
         definition.max_push_batch_size = 2;
         definition.max_claim_batch_size = 2;
-        pq.create_queue(definition).await?;
+        fireweed.create_queue(definition).await?;
         let shard = fireweed_engine::QueueKey::new(
             TenantId::new("t1").unwrap(),
             QueueId::new("q1").unwrap(),
@@ -4740,16 +4680,17 @@ mod tests {
 
         let too_many = vec![NewItem::default(), NewItem::default(), NewItem::default()];
         assert_eq!(
-            pq.push_batch(&shard, too_many).await.unwrap_err(),
+            fireweed.push_batch(&shard, too_many).await.unwrap_err(),
             crate::EngineError::BatchTooLarge
         );
-        pq.push_batch(&shard, vec![NewItem::default(), NewItem::default()])
+        fireweed
+            .push_batch(&shard, vec![NewItem::default(), NewItem::default()])
             .await?;
         assert_eq!(
-            pq.claim(&shard, 3, 1_000).await.unwrap_err(),
+            fireweed.claim(&shard, 3, 1_000).await.unwrap_err(),
             crate::EngineError::BatchTooLarge
         );
-        assert_eq!(pq.claim(&shard, 2, 1_000).await?.len(), 2);
+        assert_eq!(fireweed.claim(&shard, 2, 1_000).await?.len(), 2);
         Ok(())
     }
 }

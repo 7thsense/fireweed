@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Barrier};
 
 fn tmp_root(tag: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("pqueue-objlog-dur-{tag}-{}", std::process::id()))
+    std::env::temp_dir().join(format!("fireweed-objlog-dur-{tag}-{}", std::process::id()))
 }
 
 fn queue_dir(root: &std::path::Path, key: &fireweed_engine::QueueKey) -> std::path::PathBuf {

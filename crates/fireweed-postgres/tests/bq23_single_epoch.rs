@@ -2,7 +2,7 @@
 //! `acquire_queue_lease` advances the storage append-fence epoch in the same transaction as the owner row.
 //! `acquire_and_fence` then reuses that already-bound epoch instead of double-incrementing it.
 //!
-//! Env-gated on `PQUEUE_PG_TEST_URL` (LOUD-skips without a DB). A NON-tokio executor
+//! Env-gated on `FIREWEED_PG_TEST_URL` (LOUD-skips without a DB). A NON-tokio executor
 //! (`futures::executor::block_on`) drives the sync postgres client.
 
 use std::future::Future;
@@ -38,8 +38,8 @@ fn fresh_schema() -> String {
 
 /// (backend, cp) sharing one fresh schema, or `None` when no DB is configured (LOUD skip at the call site).
 fn pair(name: &str) -> Option<(PostgresBackend, PostgresControlPlane)> {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
-        eprintln!("BND-1 SKIPPED ({name}) — set PQUEUE_PG_TEST_URL to a live DB");
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
+        eprintln!("BND-1 SKIPPED ({name}) — set FIREWEED_PG_TEST_URL to a live DB");
         return None;
     };
     let schema = fresh_schema();

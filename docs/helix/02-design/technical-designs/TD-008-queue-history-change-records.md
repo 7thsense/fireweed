@@ -24,7 +24,7 @@ ddx:
 **Decision authority**: ADR-013 (log as single source of truth)
 **Cross-repo**: niflheim durable-ingest HTTP endpoint (consumer); cayce CONTRACT-013 uses the same
 ingest path for SES exhaust, so delivery history lands beside delivery exhaust; fjord, embedded in
-pqueue-server, as the Kafka-protocol change-log interface provider (see "Delivery interfaces" and
+fireweed-server, as the Kafka-protocol change-log interface provider (see "Delivery interfaces" and
 ADR-014).
 
 > **Reviewed against ADR-014 revision (2026-07): no change to this design.** ADR-014 now specifies
@@ -35,10 +35,10 @@ ADR-014).
 
 ## Scope
 
-pqueue emits **item-lifecycle change records** derived from the committed log — the change log. The
+fireweed emits **item-lifecycle change records** derived from the committed log — the change log. The
 first consumer binding is at-least-once delivery to niflheim's durable-ingest endpoint, default-on
 with per-queue opt-out; a Kafka-protocol consumer interface is a required second binding (see
-"Delivery interfaces"). niflheim owns history and Delta projection. pqueue does **not** write
+"Delivery interfaces"). niflheim owns history and Delta projection. fireweed does **not** write
 Parquet/Delta. The terminal retention default rises so items linger long enough to (a) satisfy
 idempotency windows and (b) guarantee a terminal item is never reaped before its terminal change
 record is durably emitted.
@@ -75,7 +75,7 @@ These hold for **every** delivery binding, current and future:
 
 ## Emission seam
 
-**Not** on the commit path. `commit_locked_batch` (`crates/pqueue-engine/src/compose.rs:1346-1366`)
+**Not** on the commit path. `commit_locked_batch` (`crates/fireweed-engine/src/compose.rs:1346-1366`)
 never blocks on, observes, or fails because of emission. Emission is a **committed-log tail consumer
 with its own durable cursor**, structurally identical to recovery replay (`compose.rs:1207` reads
 `LogStore::read_from`) and the hybrid-async SQLite apply worker (TD-004 §"Ordered batching and SQLite
@@ -92,20 +92,20 @@ trait ChangeRecordSink: Send + Sync {
 }
 ```
 
-The runtime-bearing crate (`pqueue-server`, which owns tokio — `crates/pqueue-server/Cargo.toml:33`)
+The runtime-bearing crate (`fireweed-server`, which owns tokio — `crates/fireweed-server/Cargo.toml:33`)
 drives an interval task (modeled on `flush_tick`/`try_flush_deferred_projection`,
 `compose.rs:1061,1099`): read `read_from(shard, emission_cursor, limit)`, map each committed
 `CommandEnvelope` to `ChangeRecord`s, call `sink.emit`, and only then advance a **durable** per-queue
 `emission_cursor` (persisted like `high_water`). At-least-once falls out: a crash before cursor
 advance re-emits; the receiver dedupes.
 
-**HTTP client policy**: consistent with `crates/pqueue-objectlog/Cargo.toml:29` (no reqwest/hyper by
+**HTTP client policy**: consistent with `crates/fireweed-objectlog/Cargo.toml:29` (no reqwest/hyper by
 design; the S3 client is hand-rolled SigV4), the niflheim sink is a lean hand-rolled POST over the
 existing tokio `net` stack. No heavy SDK.
 
 ## Which transitions emit
 
-Every mutating `QueueCommand` is already in the log (`crates/pqueue-engine/src/command.rs:49-60`), so
+Every mutating `QueueCommand` is already in the log (`crates/fireweed-engine/src/command.rs:49-60`), so
 the tail consumer sees all of them. Emit one `ChangeRecord` per affected item for: `Push` (→Pending),
 `Claim` (→Leased), `RenewLease`, `Finalize` (→Terminal complete/fail — the high-value record for cayce
 delivery history), `LeaseExpired`, retry/release/rearm (→Pending), `UpdateFields`, `PurgeItems`
@@ -140,15 +140,15 @@ The change log has one seam (`ChangeRecordSink` over the committed-log tail) and
 bindings. Two are in contract:
 
 1. **niflheim durable-ingest (HTTP push)** — the current binding, specified throughout this TD: a
-   lean hand-rolled POST driven by the `pqueue-server` interval task.
+   lean hand-rolled POST driven by the `fireweed-server` interval task.
 2. **Kafka-protocol consumer interface (required)** — product requirement (2026-07-05, provider
    decided 2026-07-06): downstream consumers must be able to subscribe to the change log with stock
-   Kafka clients, and **pqueue must own the surface**. ADR-014 settles the provider/shape choice:
-   **fjord, embedded** in `pqueue-server` behind the delivery seam, serves the change topics
+   Kafka clients, and **fireweed must own the surface**. ADR-014 settles the provider/shape choice:
+   **fjord, embedded** in `fireweed-server` behind the delivery seam, serves the change topics
    (metadata, fetch, consumer groups, committed offsets, fan-out) so the surface exists in every
    deployment without operating a second system. Each `(tenant_id, queue_id)` change stream is a
    single-partition topic so per-queue order is preserved (CL-4). The normative record contract
-   (record key = `"{item_id}:{backend_epoch}:{sequence}"` — unique across fan-out; `pq-*` headers;
+   (record key = `"{item_id}:{backend_epoch}:{sequence}"` — unique across fan-out; `fireweed-*` headers;
    `ChangeRecord` payload; consumer dedupe-window and offset-commit obligations) is pinned in
    ADR-014. On failover, re-emission may assign a later Kafka offset to the same logical record; the
    offset stream never regresses and the record key is the dedupe identity. Retention: on
@@ -172,17 +172,17 @@ bindings. Two are in contract:
   telemetry-surfaced metric (`emission_lag_commands`, `emission_oldest_unemitted_age_ms`), modeled on
   the TD-004 async-apply debt metrics.
 - **Default-on with opt-out**: `emit_change_records: bool` (default `true`) on `QueueDefinition`
-  (`crates/pqueue-core/src/domain.rs:629-632` region, `#[serde(default)]` for back-compat like
+  (`crates/fireweed-core/src/domain.rs:629-632` region, `#[serde(default)]` for back-compat like
   `terminal_retention_ms`). Branches default to `false` (TD-009).
 
 ## Retention default change
 
 `default_terminal_retention_ms()` rises from `60_000` (1 minute) to `3_600_000` (1 hour)
-(`crates/pqueue-core/src/domain.rs:652-653`). Rationale: 1 hour covers request-id/client-item-key
+(`crates/fireweed-core/src/domain.rs:652-653`). Rationale: 1 hour covers request-id/client-item-key
 idempotency retry windows and gives the emission consumer a wide catch-up margin before terminal reap;
 it deliberately does **not** go to days because terminal items inflate the resident projection set
 linearly (in-RAM `ProjectionData` for the log-replay family; table+index rows for relational). With
-niflheim owning long-term history, pqueue needs only a short operational tail. Per-queue override
+niflheim owning long-term history, fireweed needs only a short operational tail. Per-queue override
 remains.
 
 **Reap/emission frontier coupling (the subtlest rule in this TD)**: on a queue with
@@ -205,8 +205,8 @@ from history. On an opted-out queue only the retention condition applies.
 
 ## Kafka interface decision
 
-The change-log Kafka surface is provided by **fjord, embedded in pqueue-server**
-(product-owner decision 2026-07-06): pqueue owns the interface, so the surface
+The change-log Kafka surface is provided by **fjord, embedded in fireweed-server**
+(product-owner decision 2026-07-06): fireweed owns the interface, so the surface
 exists in every deployment. The load-bearing rules are the boundary invariants
 (feed-forward only, never on the commit path, separate storage namespace,
 swappable at the seam with fjord idling when an external Kafka is used), the

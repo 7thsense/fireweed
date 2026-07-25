@@ -10,9 +10,9 @@ The release image entrypoint is `fireweed-service`, the RESP server built from
 | `FIREWEED_LISTEN_ADDR` | no | `0.0.0.0:8080` | RESP listen address. |
 | `FIREWEED_LOG_BACKEND` | no | `objectlog` | Log backend axis: `objectlog`, `postgres`, `sqlite`, or `memory`. |
 | `FIREWEED_PROJECTION_BACKEND` | no | `inmemory` | Projection backend axis: `inmemory`, `sqlite`, `hybrid`, `hybrid-async`, or `postgres`. |
-| `FIREWEED_OBJECT_LOG_ROOT` | when log is `objectlog` | `/var/lib/pqueue/object-log` | Local object-log root. |
-| `FIREWEED_SQLITE_LOG_PATH` | when log is `sqlite` | `/var/lib/pqueue/pqueue-log.db` | Local SQLite log path. |
-| `FIREWEED_SQLITE_PROJECTION_PATH` | when projection is `sqlite`, `hybrid`, or `hybrid-async` | `/var/lib/pqueue/pqueue-projection.db` | Local SQLite materialized projection path for `objectlog/sqlite`, the SQLite-first durable image for `objectlog/hybrid`, and the asynchronous durable checkpoint image for `objectlog/hybrid-async`. |
+| `FIREWEED_OBJECT_LOG_ROOT` | when log is `objectlog` | `/var/lib/fireweed/object-log` | Local object-log root. |
+| `FIREWEED_SQLITE_LOG_PATH` | when log is `sqlite` | `/var/lib/fireweed/fireweed-log.db` | Local SQLite log path. |
+| `FIREWEED_SQLITE_PROJECTION_PATH` | when projection is `sqlite`, `hybrid`, or `hybrid-async` | `/var/lib/fireweed/fireweed-projection.db` | Local SQLite materialized projection path for `objectlog/sqlite`, the SQLite-first durable image for `objectlog/hybrid`, and the asynchronous durable checkpoint image for `objectlog/hybrid-async`. |
 | `FIREWEED_OBJECT_LOG_MODE` | no | `file` | `objectlog` substrate: `file` (per-command) or `segmented` (group-commit, the production form). |
 | `FIREWEED_SEGMENT_TARGET_BYTES` | no | `262144` | `segmented`: byte-size seal trigger. |
 | `FIREWEED_SEGMENT_MAX_LATENCY_MS` | no | `20` | `segmented`: latency seal trigger and implementation of the object-log commit-latency-bound knob (`max_commit_latency_ms`). Lower values reduce mutation latency and increase object/log request cost; higher values improve batch density and increase latency. This knob must not weaken transaction integrity. |
@@ -32,10 +32,9 @@ The release image entrypoint is `fireweed-service`, the RESP server built from
 | `FIREWEED_BOOTSTRAP_GENERATED_PREFIX` | no | `q` | Queue prefix for generated bootstrap queues (`q0`, `q1`, … with the default). |
 | `FIREWEED_RECLAIM_INTERVAL_MS` | no | `1000` | Reclaim tick interval. |
 
-The v0.20.0 runtime also accepts matching `PQUEUE_*` names as temporary
-compatibility aliases; when both forms are set, `FIREWEED_*` wins. The
-`/var/lib/pqueue` paths and `pqueue_*` database identifiers are intentionally
-retained persistence names, not public product coordinates.
+The runtime accepts only the documented `FIREWEED_*` configuration namespace.
+Persistent paths use `/var/lib/fireweed`, and database identifiers use the
+`fireweed_*` namespace.
 
 The current server composition root wires `memory/inmemory`, `sqlite/inmemory`,
 `objectlog/inmemory`, `objectlog/sqlite`, `objectlog/hybrid`, and
@@ -63,10 +62,8 @@ unsupported-storage message.
 
 Lakebase is a **real runtime path**, not render-only: build the service image with the
 `tls` feature and point it at the rendered DSN. The Helm postgres/Lakebase profile
-currently renders the DSN Secret through the temporary
-`PQUEUE_POSTGRES_LOG_DATABASE_URL` compatibility alias (consumed in preference to
-`FIREWEED_PG_URL`). The chart deployment owner removes that alias when the rendered
-environment migration lands. A `key=value` or URL DSN with `sslmode=require` connects over the
+renders the DSN Secret as `FIREWEED_POSTGRES_LOG_DATABASE_URL`, which takes precedence
+over the local-development `FIREWEED_PG_URL` fallback. A `key=value` or URL DSN with `sslmode=require` connects over the
 native-tls connector; an `sslmode=require` DSN on a non-tls build fails closed at
 startup (it never silently downgrades to plaintext). When `DATABRICKS_HOST` and the
 service-principal (`DATABRICKS_CLIENT_ID`/`DATABRICKS_CLIENT_SECRET`) or PAT

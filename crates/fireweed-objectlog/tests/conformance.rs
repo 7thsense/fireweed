@@ -8,7 +8,7 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn tmp_root() -> std::path::PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let p = std::env::temp_dir().join(format!("pqueue-objlog-conf-{}-{n}", std::process::id()));
+    let p = std::env::temp_dir().join(format!("fireweed-objlog-conf-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&p);
     p
 }
@@ -35,13 +35,13 @@ async fn commit_transition_shared_scenario_declines_for_objectlog() {
     .await;
 }
 
-/// ADR-012 Phase 1b-i: the SAME shared eventual-apply suite against the COMPOSED object-log backend
+/// ADR-012: the complete shared suite against the composed object-log backend
 /// (`ComposedBackend<ObjectLog, InMemoryProjection, InProcessControlPlane>` over the production segmented
-/// group-commit substrate). Passing identically to the monolith above proves the orthogonal composition is
-/// faithful before the monolith is removed (Phase 2).
+/// group-commit substrate). Its prevalidated command boundary provides the complete mutation contract even
+/// though projection application follows the durable append.
 mod composed {
     use super::tmp_root;
-    fireweed_conformance::eventual_apply_suite!(|| fireweed_objectlog::composed_objectlog_backend(
+    fireweed_conformance::conformance_suite!(|| fireweed_objectlog::composed_objectlog_backend(
         tmp_root()
     )
     .expect("compose object log"));

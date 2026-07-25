@@ -10,7 +10,6 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let url = value_after(&args, "--url")
         .or_else(|| std::env::var("FIREWEED_PG_URL").ok())
-        .or_else(|| std::env::var("PQUEUE_PG_URL").ok())
         .unwrap_or_else(|| {
             eprintln!("usage: fireweed-postgres-migrate --url URL [--schema NAME] [--batch-size N] [--max-batches N]");
             std::process::exit(2);

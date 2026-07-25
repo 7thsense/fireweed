@@ -1,4 +1,4 @@
-//! Typed secondary-index behavior exercised through the public `pqueue` facade:
+//! Typed secondary-index behavior exercised through the public `fireweed` facade:
 //! numeric ordering, boolean and datetime encoding, compound keys, sparse omission,
 //! unique-conflict atomicity, key moves on update/replace, and purge removal.
 
@@ -126,20 +126,20 @@ fn key(parts: &[&str]) -> Vec<Vec<u8>> {
     parts.iter().map(|p| p.as_bytes().to_vec()).collect()
 }
 
-async fn new_pq() -> RuntimeCore<ComposedMemoryBackend> {
+async fn new_fireweed() -> RuntimeCore<ComposedMemoryBackend> {
     let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
-    let pq = RuntimeCore::new(backend, clock);
-    pq.create_queue(queue_definition()).await.unwrap();
-    pq
+    let fireweed = RuntimeCore::new(backend, clock);
+    fireweed.create_queue(queue_definition()).await.unwrap();
+    fireweed
 }
 
-async fn new_sqlite_relational_pq() -> RuntimeCore<SqliteRelationalBackend> {
+async fn new_sqlite_relational_fireweed() -> RuntimeCore<SqliteRelationalBackend> {
     let backend = Arc::new(SqliteRelationalBackend::in_memory().unwrap());
     let clock = Arc::new(ManualClock::at(0));
-    let pq = RuntimeCore::new(backend, clock);
-    pq.create_queue(queue_definition()).await.unwrap();
-    pq
+    let fireweed = RuntimeCore::new(backend, clock);
+    fireweed.create_queue(queue_definition()).await.unwrap();
+    fireweed
 }
 
 fn score_key(value: i64) -> Vec<u8> {
@@ -202,10 +202,10 @@ fn compound_key(region: &str, zone: i64) -> Vec<u8> {
 
 #[tokio::test]
 async fn secondary_indexes_typed_integer_boolean_datetime_and_compound_semantics_work() {
-    let pq = new_pq().await;
+    let fireweed = new_fireweed().await;
     let q = qkey();
 
-    let score_2 = pq
+    let score_2 = fireweed
         .push(
             &q,
             item(json!({
@@ -219,7 +219,7 @@ async fn secondary_indexes_typed_integer_boolean_datetime_and_compound_semantics
         )
         .await
         .unwrap();
-    let score_10 = pq
+    let score_10 = fireweed
         .push(
             &q,
             item(json!({
@@ -238,11 +238,11 @@ async fn secondary_indexes_typed_integer_boolean_datetime_and_compound_semantics
     let key_10 = score_key(10);
     assert!(key_2 < key_10, "axon integer keys sort numerically");
 
-    let active_false = pq
+    let active_false = fireweed
         .query_index_unique(&q, "by_active", key(&["false"]))
         .await
         .unwrap();
-    let active_true = pq
+    let active_true = fireweed
         .query_index_unique(&q, "by_active", key(&["true"]))
         .await
         .unwrap();
@@ -250,7 +250,7 @@ async fn secondary_indexes_typed_integer_boolean_datetime_and_compound_semantics
     assert_eq!(active_true.expect("true is indexed").item_id, score_10);
     assert!(boolean_key(false) < boolean_key(true));
 
-    let due = pq
+    let due = fireweed
         .query_index(&q, "by_due_at", key(&["2026-06-30T12:00:00Z"]))
         .await
         .unwrap();
@@ -262,7 +262,7 @@ async fn secondary_indexes_typed_integer_boolean_datetime_and_compound_semantics
         "datetime keys canonicalize equivalent instants"
     );
 
-    let compound = pq
+    let compound = fireweed
         .query_index(&q, "by_region_zone", key(&["us-east", "7"]))
         .await
         .unwrap();
@@ -285,10 +285,10 @@ async fn secondary_indexes_typed_integer_boolean_datetime_and_compound_semantics
 
 #[tokio::test]
 async fn secondary_indexes_missing_fields_remain_sparse() {
-    let pq = new_pq().await;
+    let fireweed = new_fireweed().await;
     let q = qkey();
 
-    let _with_external = pq
+    let _with_external = fireweed
         .push(
             &q,
             item(json!({
@@ -302,7 +302,7 @@ async fn secondary_indexes_missing_fields_remain_sparse() {
         )
         .await
         .unwrap();
-    let sparse = pq
+    let sparse = fireweed
         .push(
             &q,
             item(json!({
@@ -316,7 +316,7 @@ async fn secondary_indexes_missing_fields_remain_sparse() {
         .await
         .unwrap();
 
-    let hit = pq
+    let hit = fireweed
         .query_index_unique(&q, "by_external_id", key(&["A"]))
         .await
         .unwrap()
@@ -326,12 +326,13 @@ async fn secondary_indexes_missing_fields_remain_sparse() {
         "missing external_id stays out of the index"
     );
     assert!(
-        pq.query_index_unique(&q, "by_external_id", key(&["missing"]))
+        fireweed
+            .query_index_unique(&q, "by_external_id", key(&["missing"]))
             .await
             .unwrap()
             .is_none()
     );
-    let region_hits = pq
+    let region_hits = fireweed
         .query_index(&q, "by_region_zone", key(&["us-east", "7"]))
         .await
         .unwrap();
@@ -340,10 +341,10 @@ async fn secondary_indexes_missing_fields_remain_sparse() {
 
 #[tokio::test]
 async fn secondary_indexes_unique_conflicts_are_atomic_for_push_update_and_replace() {
-    let pq = new_pq().await;
+    let fireweed = new_fireweed().await;
     let q = qkey();
 
-    let original = pq
+    let original = fireweed
         .push(
             &q,
             item(json!({
@@ -358,7 +359,7 @@ async fn secondary_indexes_unique_conflicts_are_atomic_for_push_update_and_repla
         .await
         .unwrap();
 
-    let push_err = pq
+    let push_err = fireweed
         .push(
             &q,
             item(json!({
@@ -374,21 +375,22 @@ async fn secondary_indexes_unique_conflicts_are_atomic_for_push_update_and_repla
         .unwrap_err();
     assert_eq!(push_err, fireweed::EngineError::Conflict);
 
-    let stable = pq
+    let stable = fireweed
         .query_index_unique(&q, "by_external_id", key(&["DUP"]))
         .await
         .unwrap()
         .expect("original still indexed");
     assert_eq!(stable.item_id, original);
     assert_eq!(
-        pq.query_index(&q, "by_region_zone", key(&["us-east", "7"]))
+        fireweed
+            .query_index(&q, "by_region_zone", key(&["us-east", "7"]))
             .await
             .unwrap()
             .len(),
         1
     );
 
-    let other = pq
+    let other = fireweed
         .push(
             &q,
             item(json!({
@@ -403,7 +405,7 @@ async fn secondary_indexes_unique_conflicts_are_atomic_for_push_update_and_repla
         .await
         .unwrap();
 
-    let update_err = pq
+    let update_err = fireweed
         .update_fields(
             &q,
             other,
@@ -423,7 +425,8 @@ async fn secondary_indexes_unique_conflicts_are_atomic_for_push_update_and_repla
         .unwrap_err();
     assert_eq!(update_err, fireweed::EngineError::Conflict);
     assert_eq!(
-        pq.query_index_unique(&q, "by_external_id", key(&["DUP"]))
+        fireweed
+            .query_index_unique(&q, "by_external_id", key(&["DUP"]))
             .await
             .unwrap()
             .unwrap()
@@ -431,7 +434,8 @@ async fn secondary_indexes_unique_conflicts_are_atomic_for_push_update_and_repla
         original
     );
     assert_eq!(
-        pq.query_index_unique(&q, "by_external_id", key(&["OTHER"]))
+        fireweed
+            .query_index_unique(&q, "by_external_id", key(&["OTHER"]))
             .await
             .unwrap()
             .unwrap()
@@ -442,10 +446,10 @@ async fn secondary_indexes_unique_conflicts_are_atomic_for_push_update_and_repla
 
 #[tokio::test]
 async fn secondary_indexes_update_fields_and_replace_move_the_indexed_entry() {
-    let pq = new_pq().await;
+    let fireweed = new_fireweed().await;
     let q = qkey();
 
-    let original = pq
+    let original = fireweed
         .push(
             &q,
             item(json!({
@@ -460,7 +464,7 @@ async fn secondary_indexes_update_fields_and_replace_move_the_indexed_entry() {
         .await
         .unwrap();
 
-    let new_version = pq
+    let new_version = fireweed
         .update_fields(
             &q,
             original,
@@ -480,12 +484,13 @@ async fn secondary_indexes_update_fields_and_replace_move_the_indexed_entry() {
         .unwrap();
     assert_eq!(new_version, 2);
     assert!(
-        pq.query_index_unique(&q, "by_external_id", key(&["OLD"]))
+        fireweed
+            .query_index_unique(&q, "by_external_id", key(&["OLD"]))
             .await
             .unwrap()
             .is_none()
     );
-    let moved = pq
+    let moved = fireweed
         .query_index_unique(&q, "by_external_id", key(&["NEW"]))
         .await
         .unwrap()
@@ -494,21 +499,22 @@ async fn secondary_indexes_update_fields_and_replace_move_the_indexed_entry() {
     assert_eq!(moved.item_version, 2);
 
     let client_key = ClientItemKey::new("ck-1").unwrap();
-    pq.upsert(
-        &q,
-        client_key.clone(),
-        item(json!({
-            "score": 3,
-            "active": true,
-            "due_at": "2026-06-30T12:00:00Z",
-            "region": "us-east",
-            "zone": 7,
-            "external_id": "V1"
-        })),
-    )
-    .await
-    .unwrap();
-    let outcome = pq
+    fireweed
+        .upsert(
+            &q,
+            client_key.clone(),
+            item(json!({
+                "score": 3,
+                "active": true,
+                "due_at": "2026-06-30T12:00:00Z",
+                "region": "us-east",
+                "zone": 7,
+                "external_id": "V1"
+            })),
+        )
+        .await
+        .unwrap();
+    let outcome = fireweed
         .upsert(
             &q,
             client_key,
@@ -528,12 +534,13 @@ async fn secondary_indexes_update_fields_and_replace_move_the_indexed_entry() {
         other => panic!("expected replace, got {other:?}"),
     };
     assert!(
-        pq.query_index_unique(&q, "by_external_id", key(&["V1"]))
+        fireweed
+            .query_index_unique(&q, "by_external_id", key(&["V1"]))
             .await
             .unwrap()
             .is_none()
     );
-    let moved = pq
+    let moved = fireweed
         .query_index_unique(&q, "by_external_id", key(&["V2"]))
         .await
         .unwrap()
@@ -543,10 +550,10 @@ async fn secondary_indexes_update_fields_and_replace_move_the_indexed_entry() {
 
 #[tokio::test]
 async fn secondary_indexes_purge_removes_the_index_entry() {
-    let pq = new_pq().await;
+    let fireweed = new_fireweed().await;
     let q = qkey();
 
-    let id = pq
+    let id = fireweed
         .push(
             &q,
             item(json!({
@@ -561,16 +568,18 @@ async fn secondary_indexes_purge_removes_the_index_entry() {
         .await
         .unwrap();
 
-    pq.purge(&q, [id], false).await.unwrap();
+    fireweed.purge(&q, [id], false).await.unwrap();
 
     assert!(
-        pq.query_index_unique(&q, "by_external_id", key(&["GONE"]))
+        fireweed
+            .query_index_unique(&q, "by_external_id", key(&["GONE"]))
             .await
             .unwrap()
             .is_none()
     );
     assert!(
-        pq.query_index(&q, "by_region_zone", key(&["us-east", "7"]))
+        fireweed
+            .query_index(&q, "by_region_zone", key(&["us-east", "7"]))
             .await
             .unwrap()
             .is_empty()
@@ -582,10 +591,10 @@ async fn secondary_indexes_purge_removes_the_index_entry() {
 /// from every typed index it belonged to.
 #[tokio::test]
 async fn secondary_indexes_update_fields_none_entity_preserves_typed_index() {
-    let pq = new_pq().await;
+    let fireweed = new_fireweed().await;
     let q = qkey();
 
-    let id = pq
+    let id = fireweed
         .push(
             &q,
             item(json!({
@@ -601,13 +610,13 @@ async fn secondary_indexes_update_fields_none_entity_preserves_typed_index() {
         .unwrap();
 
     // entity: None means "leave unchanged"; item must stay in all typed indexes
-    let new_version = pq
+    let new_version = fireweed
         .update_fields(&q, id, BTreeMap::new(), PayloadUpdate::Keep, None, None)
         .await
         .unwrap();
     assert_eq!(new_version, 2, "version bumps even on no-op entity");
 
-    let hit = pq
+    let hit = fireweed
         .query_index_unique(&q, "by_external_id", key(&["keep-me"]))
         .await
         .unwrap()
@@ -616,13 +625,14 @@ async fn secondary_indexes_update_fields_none_entity_preserves_typed_index() {
     assert_eq!(hit.item_version, 2);
 
     // A second entity-None update must also keep the index intact
-    let v3 = pq
+    let v3 = fireweed
         .update_fields(&q, id, BTreeMap::new(), PayloadUpdate::Keep, None, None)
         .await
         .unwrap();
     assert_eq!(v3, 3);
     assert_eq!(
-        pq.query_index_unique(&q, "by_external_id", key(&["keep-me"]))
+        fireweed
+            .query_index_unique(&q, "by_external_id", key(&["keep-me"]))
             .await
             .unwrap()
             .unwrap()
@@ -636,10 +646,10 @@ async fn secondary_indexes_update_fields_none_entity_preserves_typed_index() {
 /// (`b"123"` → `Number(123)`), causing a type mismatch against the stored `String("123")` key.
 #[tokio::test]
 async fn secondary_indexes_string_typed_field_with_numeric_looking_value_is_queryable() {
-    let pq = new_pq().await;
+    let fireweed = new_fireweed().await;
     let q = qkey();
 
-    let id = pq
+    let id = fireweed
         .push(
             &q,
             item(json!({
@@ -655,7 +665,7 @@ async fn secondary_indexes_string_typed_field_with_numeric_looking_value_is_quer
         .unwrap();
 
     // b"123" as lookup bytes for a String-typed field must match the stored string "123"
-    let hit = pq
+    let hit = fireweed
         .query_index_unique(&q, "by_external_id", key(&["123"]))
         .await
         .unwrap()
@@ -663,14 +673,14 @@ async fn secondary_indexes_string_typed_field_with_numeric_looking_value_is_quer
     assert_eq!(hit.item_id, id);
 }
 
-/// Bug #3: legacy `IndexSpec` (byte-field) indexes must round-trip arbitrary bytes without
+/// Bug #3: untyped `IndexSpec` byte-field indexes must round-trip arbitrary bytes without
 /// loss. Previously the encoding used `from_utf8_lossy`, so byte sequences that are invalid
 /// UTF-8 were silently mangled; the new length-prefix encoding is byte-exact.
 #[tokio::test]
-async fn secondary_indexes_legacy_index_is_byte_exact_for_invalid_utf8() {
+async fn secondary_indexes_untyped_index_is_byte_exact_for_invalid_utf8() {
     let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
-    let pq = RuntimeCore::new(backend, clock);
+    let fireweed = RuntimeCore::new(backend, clock);
 
     let def = QueueDefinition {
         secondary_indexes: vec![IndexSpec {
@@ -682,12 +692,12 @@ async fn secondary_indexes_legacy_index_is_byte_exact_for_invalid_utf8() {
         emit_change_records: true,
         ..queue_definition()
     };
-    pq.create_queue(def).await.unwrap();
+    fireweed.create_queue(def).await.unwrap();
     let q = qkey();
 
     // 0xff 0x00 0xfe is not valid UTF-8
     let raw: Bytes = Bytes::from_static(&[0xff, 0x00, 0xfe]);
-    let id = pq
+    let id = fireweed
         .push(
             &q,
             NewItem {
@@ -703,7 +713,7 @@ async fn secondary_indexes_legacy_index_is_byte_exact_for_invalid_utf8() {
         .unwrap();
 
     // Lookup with the exact same bytes must find the item
-    let hits = pq
+    let hits = fireweed
         .query_index(&q, "by_raw", vec![raw.to_vec()])
         .await
         .unwrap();
@@ -712,7 +722,7 @@ async fn secondary_indexes_legacy_index_is_byte_exact_for_invalid_utf8() {
 
     // The lossy replacement encoding (U+FFFD sequences) must NOT match the byte-exact entry
     let lossy_string = String::from_utf8_lossy(&raw).into_owned();
-    let lossy_hits = pq
+    let lossy_hits = fireweed
         .query_index(&q, "by_raw", vec![lossy_string.into_bytes()])
         .await
         .unwrap();
@@ -727,28 +737,29 @@ async fn secondary_indexes_legacy_index_is_byte_exact_for_invalid_utf8() {
 /// `index_validate_push` which passes `entity_document` to the typed-index check.
 #[tokio::test]
 async fn secondary_indexes_upsert_insert_typed_unique_conflict_is_rejected() {
-    let pq = new_pq().await;
+    let fireweed = new_fireweed().await;
     let q = qkey();
 
     // Push an item that occupies external_id "TAKEN" in the typed unique index.
-    pq.push(
-        &q,
-        item(json!({
-            "score": 1,
-            "active": false,
-            "due_at": "2026-06-30T12:00:00Z",
-            "region": "us-east",
-            "zone": 1,
-            "external_id": "TAKEN"
-        })),
-    )
-    .await
-    .unwrap();
+    fireweed
+        .push(
+            &q,
+            item(json!({
+                "score": 1,
+                "active": false,
+                "due_at": "2026-06-30T12:00:00Z",
+                "region": "us-east",
+                "zone": 1,
+                "external_id": "TAKEN"
+            })),
+        )
+        .await
+        .unwrap();
 
     // A fresh upsert (no prior entry for this client_item_key) that tries to claim the same
     // typed-unique key must be rejected with Conflict.
     let fresh_key = ClientItemKey::new("new-key-1").unwrap();
-    let err = pq
+    let err = fireweed
         .upsert(
             &q,
             fresh_key,
@@ -770,7 +781,7 @@ async fn secondary_indexes_upsert_insert_typed_unique_conflict_is_rejected() {
     );
 
     // The original holder must still be indexed.
-    let hit = pq
+    let hit = fireweed
         .query_index_unique(&q, "by_external_id", key(&["TAKEN"]))
         .await
         .unwrap()
@@ -791,12 +802,12 @@ async fn secondary_indexes_sqlite_log_replay_upsert_insert_and_update_typed_uniq
 
     let backend = Arc::new(composed_sqlite_backend_in_memory().expect("sqlite in-memory"));
     let clock = Arc::new(ManualClock::at(0));
-    let pq = RuntimeCore::new(backend, clock);
-    pq.create_queue(queue_definition()).await.unwrap();
+    let fireweed = RuntimeCore::new(backend, clock);
+    fireweed.create_queue(queue_definition()).await.unwrap();
     let q = qkey();
 
     // Push an item occupying external_id "SLOT".
-    let original = pq
+    let original = fireweed
         .push(
             &q,
             item(json!({
@@ -813,7 +824,7 @@ async fn secondary_indexes_sqlite_log_replay_upsert_insert_and_update_typed_uniq
 
     // Fresh upsert-insert with a colliding typed-unique key must be Conflict.
     let fresh_key = ClientItemKey::new("new-sqlite-key").unwrap();
-    let insert_err = pq
+    let insert_err = fireweed
         .upsert(
             &q,
             fresh_key,
@@ -835,7 +846,7 @@ async fn secondary_indexes_sqlite_log_replay_upsert_insert_and_update_typed_uniq
     );
 
     // Push another item for the update_fields conflict check.
-    let other = pq
+    let other = fireweed
         .push(
             &q,
             item(json!({
@@ -851,7 +862,7 @@ async fn secondary_indexes_sqlite_log_replay_upsert_insert_and_update_typed_uniq
         .unwrap();
 
     // update_fields that would move `other` into the typed-unique slot held by `original`.
-    let update_err = pq
+    let update_err = fireweed
         .update_fields(
             &q,
             other,
@@ -877,7 +888,8 @@ async fn secondary_indexes_sqlite_log_replay_upsert_insert_and_update_typed_uniq
 
     // Both items remain in their original indexed positions.
     assert_eq!(
-        pq.query_index_unique(&q, "by_external_id", key(&["SLOT"]))
+        fireweed
+            .query_index_unique(&q, "by_external_id", key(&["SLOT"]))
             .await
             .unwrap()
             .unwrap()
@@ -885,7 +897,8 @@ async fn secondary_indexes_sqlite_log_replay_upsert_insert_and_update_typed_uniq
         original
     );
     assert_eq!(
-        pq.query_index_unique(&q, "by_external_id", key(&["OTHER"]))
+        fireweed
+            .query_index_unique(&q, "by_external_id", key(&["OTHER"]))
             .await
             .unwrap()
             .unwrap()
@@ -903,26 +916,27 @@ async fn secondary_indexes_sqlite_log_replay_upsert_insert_and_update_typed_uniq
 /// cannot be bypassed by passing arbitrary bytes through the raw-byte `query_index*` overloads.
 #[tokio::test]
 async fn secondary_indexes_raw_bytes_invalid_for_typed_index_are_rejected() {
-    let pq = new_pq().await;
+    let fireweed = new_fireweed().await;
     let q = qkey();
 
     // Push one item so the index is populated and non-trivially exercised.
-    pq.push(
-        &q,
-        item(json!({
-            "score": 42,
-            "active": true,
-            "due_at": "2026-06-30T12:00:00Z",
-            "region": "us-east",
-            "zone": 1,
-            "external_id": "guard"
-        })),
-    )
-    .await
-    .unwrap();
+    fireweed
+        .push(
+            &q,
+            item(json!({
+                "score": 42,
+                "active": true,
+                "due_at": "2026-06-30T12:00:00Z",
+                "region": "us-east",
+                "zone": 1,
+                "external_id": "guard"
+            })),
+        )
+        .await
+        .unwrap();
 
     // b"not-a-number" is not valid JSON — the Integer-typed "by_score" index rejects it.
-    let err = pq
+    let err = fireweed
         .query_index_unique(&q, "by_score", vec![b"not-a-number".to_vec()])
         .await
         .unwrap_err();
@@ -933,7 +947,7 @@ async fn secondary_indexes_raw_bytes_invalid_for_typed_index_are_rejected() {
     );
 
     // b"maybe" is not valid JSON boolean — the Boolean-typed "by_active" index rejects it.
-    let err = pq
+    let err = fireweed
         .query_index_unique(&q, "by_active", vec![b"maybe".to_vec()])
         .await
         .unwrap_err();
@@ -944,13 +958,13 @@ async fn secondary_indexes_raw_bytes_invalid_for_typed_index_are_rejected() {
     );
 
     // Valid bytes for the same fields succeed — the validation is type-specific, not blanket rejection.
-    let hit = pq
+    let hit = fireweed
         .query_index_unique(&q, "by_score", vec![serde_json::to_vec(&42i64).unwrap()])
         .await
         .unwrap();
     assert!(hit.is_some(), "valid JSON number bytes resolve correctly");
 
-    let hit = pq
+    let hit = fireweed
         .query_index_unique(&q, "by_active", vec![b"true".to_vec()])
         .await
         .unwrap();
@@ -964,10 +978,10 @@ async fn secondary_indexes_raw_bytes_invalid_for_typed_index_are_rejected() {
 /// 3. An unknown name returns `EngineError::Invalid`.
 #[tokio::test]
 async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
-    let pq = new_pq().await;
+    let fireweed = new_fireweed().await;
     let q = qkey();
 
-    let id = pq
+    let id = fireweed
         .push(
             &q,
             item(json!({
@@ -984,7 +998,7 @@ async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
         .unwrap();
 
     // query_index_unique_typed resolves by QueueIndex.name ("by_score") with a serde_json::Value.
-    let hit = pq
+    let hit = fireweed
         .query_index_unique_typed(&q, "by_score", &[serde_json::json!(99i64)])
         .await
         .unwrap()
@@ -992,7 +1006,7 @@ async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
     assert_eq!(hit.item_id, id, "typed query resolves the correct item");
 
     // query_index_typed (non-unique) works the same way.
-    let hits = pq
+    let hits = fireweed
         .query_index_typed(
             &q,
             "by_due_at",
@@ -1003,7 +1017,7 @@ async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].item_id, id);
 
-    let hits = pq
+    let hits = fireweed
         .query_index_typed(
             &q,
             "by_due_at",
@@ -1017,7 +1031,7 @@ async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
         "numeric epoch-nanos datetime values accepted by axon-esf must query the same instant"
     );
 
-    let hits = pq
+    let hits = fireweed
         .query_index_typed(&q, "by_ratio", &[serde_json::json!(1.5)])
         .await
         .unwrap();
@@ -1025,7 +1039,7 @@ async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
     assert_eq!(hits[0].item_id, id);
 
     // Compound typed index: two-value key.
-    let hits = pq
+    let hits = fireweed
         .query_index_typed(
             &q,
             "by_region_zone",
@@ -1037,7 +1051,7 @@ async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
     assert_eq!(hits[0].item_id, id);
 
     // An unknown index name must return EngineError::Invalid regardless of the query method used.
-    let err = pq
+    let err = fireweed
         .query_index_unique_typed(&q, "no_such_index", &[serde_json::json!(99i64)])
         .await
         .unwrap_err();
@@ -1046,7 +1060,7 @@ async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
         fireweed::EngineError::Invalid("unknown secondary index"),
         "unknown index name must return EngineError::Invalid"
     );
-    let err = pq
+    let err = fireweed
         .query_index_typed(&q, "no_such_index", &[serde_json::json!("x")])
         .await
         .unwrap_err();
@@ -1056,7 +1070,7 @@ async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
         "unknown index name on non-unique path must also return EngineError::Invalid"
     );
 
-    let err = pq
+    let err = fireweed
         .query_index_unique_typed(&q, "by_score", &[serde_json::json!("99")])
         .await
         .unwrap_err();
@@ -1064,7 +1078,7 @@ async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
         matches!(err, fireweed::EngineError::Invalid(_)),
         "string JSON must be rejected for Integer typed indexes"
     );
-    let err = pq
+    let err = fireweed
         .query_index_typed(&q, "by_due_at", &[serde_json::json!(false)])
         .await
         .unwrap_err();
@@ -1072,7 +1086,7 @@ async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
         matches!(err, fireweed::EngineError::Invalid(_)),
         "boolean JSON must be rejected for Datetime typed indexes"
     );
-    let err = pq
+    let err = fireweed
         .query_index_typed(&q, "by_ratio", &[serde_json::json!("1.5")])
         .await
         .unwrap_err();
@@ -1081,7 +1095,7 @@ async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
         "string JSON must be rejected for Float typed indexes"
     );
 
-    let err = pq
+    let err = fireweed
         .query_index_unique_typed(
             &q,
             "by_due_at",
@@ -1096,12 +1110,12 @@ async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
     );
 
     // The typed query result is byte-for-byte equivalent to the raw-byte path with correct bytes.
-    let raw_hit = pq
+    let raw_hit = fireweed
         .query_index_unique(&q, "by_external_id", key(&["typed-query-test"]))
         .await
         .unwrap()
         .expect("raw-byte query finds the same item");
-    let typed_hit = pq
+    let typed_hit = fireweed
         .query_index_unique_typed(
             &q,
             "by_external_id",
@@ -1118,10 +1132,10 @@ async fn secondary_indexes_typed_value_query_and_name_based_resolution() {
 
 #[tokio::test]
 async fn secondary_indexes_typed_query_relational_error_precedence_is_explicit() {
-    let pq = new_sqlite_relational_pq().await;
+    let fireweed = new_sqlite_relational_fireweed().await;
     let q = qkey();
 
-    let err = pq
+    let err = fireweed
         .query_index_unique_typed(
             &q,
             "by_due_at",
@@ -1135,7 +1149,7 @@ async fn secondary_indexes_typed_query_relational_error_precedence_is_explicit()
         "facade uniqueness validation should run before relational backend availability"
     );
 
-    let hits = pq
+    let hits = fireweed
         .query_index_typed(&q, "by_score", &[serde_json::json!(99i64)])
         .await
         .unwrap();

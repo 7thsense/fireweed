@@ -1,16 +1,16 @@
 //! TP-002 **E0 portable per-queue progress/capacity contract + E1 single-deployment envelope** evidence on `postgres_native`
 //! (TD-002, the DB-authoritative `PostgresRelationalBackend`).
 //!
-//! ENV-GATED on `PQUEUE_PG_TEST_URL` (a live database). Without it the test prints a LOUD skip and returns —
+//! ENV-GATED on `FIREWEED_PG_TEST_URL` (a live database). Without it the test prints a LOUD skip and returns —
 //! a green run is then VISIBLY partial (the E0/E1 evidence is DEFERRED, never a hidden/fabricated pass), and
 //! no release claim is produced for the skipped live-DB run.
 //!
 //! To run live:
-//!   docker run -d --name pq-pg -p 5433:5432 -e POSTGRES_PASSWORD=pq postgres:16
-//!   PQUEUE_PG_TEST_URL=postgres://postgres:pq@127.0.0.1:5433/postgres \
+//!   docker run -d --name fireweed-pg -p 5433:5432 -e POSTGRES_PASSWORD=fireweed postgres:16
+//!   FIREWEED_PG_TEST_URL=postgres://postgres:fireweed@127.0.0.1:5433/postgres \
 //!     cargo test -p fireweed-server --features postgres --test performance_single_deployment_baseline_tests -- --nocapture
 //!   # the full E1 resident shape (10M retained terminal rows) is the heavier release configuration:
-//!   PQUEUE_E1_RESIDENT=10000000 PQUEUE_PG_TEST_URL=... cargo test ... --release
+//!   FIREWEED_E1_RESIDENT=10000000 FIREWEED_PG_TEST_URL=... cargo test ... --release
 //!
 //! WHAT THIS MEASURES (when a DB is present): on ONE postgres deployment, one queue —
 //!   - E0: exact concurrent push/claim/finalize progress to a 10M retained-terminal checkpoint.
@@ -21,7 +21,7 @@
 //!   - SMOKE (default, any DB): MEASURES + reports + emits SMOKE-tier ledger rows (recorded + gate-visible,
 //!     but never satisfy a release E0/E1 requirement). Exact outcomes, configured progress, and bounded-resource
 //!     invariants are asserted. Capacity rates and percentiles are reported without becoming host-speed gates.
-//!   - PERF (`PQUEUE_PERF_ENV=1`, a provisioned instance): emits RELEASE-tier rows only when exact outcomes,
+//!   - PERF (`FIREWEED_PERF_ENV=1`, a provisioned instance): emits RELEASE-tier rows only when exact outcomes,
 //!     the explicitly declared and persisted progress bound, declared topology, full shape, and bounded resources
 //!     are all measured and met.
 //!
@@ -32,9 +32,9 @@
 //! A row's `exit_status` is always 0 (the measurement run completed; the strict verifier requires it) and so
 //! carries NO pass/fail signal — pass/fail lives in `measurements.bars_met` and `evidence_tier`.
 //!
-//! Defaults are small (`PQUEUE_E1_RESIDENT`, default 1000) so a routine run is short. The relational backend
+//! Defaults are small (`FIREWEED_E1_RESIDENT`, default 1000) so a routine run is short. The relational backend
 //! drives configured batches through set-based downstream primitives; the full release shape
-//! (`PQUEUE_E1_RESIDENT=10000000 PQUEUE_E1_FULL=1`) is the provisioned perf-env run. Wall-clock capacity
+//! (`FIREWEED_E1_RESIDENT=10000000 FIREWEED_E1_FULL=1`) is the provisioned perf-env run. Wall-clock capacity
 //! remains visible without becoming a host-speed gate.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -86,12 +86,12 @@ impl RunCaps {
             Err(_) => default,
         };
         let keys = [
-            "PQUEUE_E0E1_THREAD_CAP",
-            "PQUEUE_E0E1_RSS_CAP_BYTES",
-            "PQUEUE_E0E1_CONNECTION_CAP",
-            "PQUEUE_E0E1_WORKER_CAP",
-            "PQUEUE_E0E1_PENDING_ITEM_CAP",
-            "PQUEUE_E0E1_IN_FLIGHT_CAP",
+            "FIREWEED_E0E1_THREAD_CAP",
+            "FIREWEED_E0E1_RSS_CAP_BYTES",
+            "FIREWEED_E0E1_CONNECTION_CAP",
+            "FIREWEED_E0E1_WORKER_CAP",
+            "FIREWEED_E0E1_PENDING_ITEM_CAP",
+            "FIREWEED_E0E1_IN_FLIGHT_CAP",
         ];
         Self {
             threads: read(keys[0], 64),
@@ -464,7 +464,7 @@ fn insert_measured_contract(
         (
             "postgres_instance_class".into(),
             serde_json::json!(
-                std::env::var("PQUEUE_PG_INSTANCE_CLASS").unwrap_or_else(|_| "local-smoke".into())
+                std::env::var("FIREWEED_PG_INSTANCE_CLASS").unwrap_or_else(|_| "local-smoke".into())
             ),
         ),
         (
@@ -491,7 +491,7 @@ fn insert_measured_contract(
         (
             "postgres_cpu_limit".into(),
             serde_json::json!(
-                std::env::var("PQUEUE_PG_CPU_LIMIT")
+                std::env::var("FIREWEED_PG_CPU_LIMIT")
                     .ok()
                     .and_then(|v| v.parse::<u64>().ok())
                     .unwrap_or(1)
@@ -500,7 +500,7 @@ fn insert_measured_contract(
         (
             "postgres_memory_limit_bytes".into(),
             serde_json::json!(
-                std::env::var("PQUEUE_PG_MEMORY_LIMIT_BYTES")
+                std::env::var("FIREWEED_PG_MEMORY_LIMIT_BYTES")
                     .ok()
                     .and_then(|v| v.parse::<u64>().ok())
                     .unwrap_or(caps.rss_bytes)
@@ -509,14 +509,14 @@ fn insert_measured_contract(
         (
             "postgres_iops_profile".into(),
             serde_json::json!(
-                std::env::var("PQUEUE_PG_IOPS_PROFILE")
+                std::env::var("FIREWEED_PG_IOPS_PROFILE")
                     .unwrap_or_else(|_| "local-unspecified".into())
             ),
         ),
         (
             "postgres_storage_class".into(),
             serde_json::json!(
-                std::env::var("PQUEUE_PG_STORAGE_CLASS")
+                std::env::var("FIREWEED_PG_STORAGE_CLASS")
                     .unwrap_or_else(|_| "local-filesystem".into())
             ),
         ),
@@ -532,11 +532,11 @@ fn insert_measured_contract(
             "topology_declared".into(),
             serde_json::json!(
                 caps.explicitly_declared && [
-                    "PQUEUE_PG_INSTANCE_CLASS",
-                    "PQUEUE_PG_CPU_LIMIT",
-                    "PQUEUE_PG_MEMORY_LIMIT_BYTES",
-                    "PQUEUE_PG_IOPS_PROFILE",
-                    "PQUEUE_PG_STORAGE_CLASS",
+                    "FIREWEED_PG_INSTANCE_CLASS",
+                    "FIREWEED_PG_CPU_LIMIT",
+                    "FIREWEED_PG_MEMORY_LIMIT_BYTES",
+                    "FIREWEED_PG_IOPS_PROFILE",
+                    "FIREWEED_PG_STORAGE_CLASS",
                 ]
                 .iter()
                 .all(|key| std::env::var(key).is_ok())
@@ -570,20 +570,20 @@ fn insert_measured_contract(
 fn fresh_schema() -> String {
     static N: AtomicU64 = AtomicU64::new(0);
     format!(
-        "pq_e0e1_{}_{}",
+        "fireweed_e0e1_{}_{}",
         std::process::id(),
         N.fetch_add(1, Ordering::SeqCst)
     )
 }
 
 fn checkout_provenance() -> (String, String, bool, String, bool) {
-    let explicit_root = std::env::var_os("PQUEUE_SOURCE_ROOT").map(std::path::PathBuf::from);
+    let explicit_root = std::env::var_os("FIREWEED_SOURCE_ROOT").map(std::path::PathBuf::from);
     let probe_dir = explicit_root
         .clone()
         .unwrap_or_else(|| std::env::current_dir().expect("resolve current directory"));
     let probe_dir = probe_dir
         .canonicalize()
-        .expect("canonicalize PQUEUE_SOURCE_ROOT");
+        .expect("canonicalize FIREWEED_SOURCE_ROOT");
     let run = |directory: &std::path::Path, args: &[&str]| {
         let output = std::process::Command::new("git")
             .arg("-C")
@@ -602,7 +602,7 @@ fn checkout_provenance() -> (String, String, bool, String, bool) {
     if explicit_root.is_some() {
         assert_eq!(
             root_path, probe_dir,
-            "PQUEUE_SOURCE_ROOT must be the producing repository root"
+            "FIREWEED_SOURCE_ROOT must be the producing repository root"
         );
     }
     let revision = run(&root_path, &["rev-parse", "HEAD"]);
@@ -713,7 +713,7 @@ fn representative_batch_update(ids: &[ItemId], request_sequence: u64) -> BatchUp
 }
 
 async fn push_batch(
-    pq: &Fireweed,
+    fireweed: &Fireweed,
     shard: &QueueKey,
     base: u64,
     n: u64,
@@ -723,20 +723,22 @@ async fn push_batch(
     let items = (0..n)
         .map(|k| representative_item(base + k, k + 1 == n))
         .collect();
-    pq.push_batch(shard, items)
+    fireweed
+        .push_batch(shard, items)
         .await
         .expect("facade push_batch")
 }
 
 /// Claim up to `n` eligible items from `shard`, returning their ids.
 async fn claim(
-    pq: &Fireweed,
+    fireweed: &Fireweed,
     shard: &QueueKey,
     n: usize,
     operations: &OperationProbe,
 ) -> Vec<ItemId> {
     let _operation = operations.begin();
-    pq.claim(shard, n, 3_600_000)
+    fireweed
+        .claim(shard, n, 3_600_000)
         .await
         .expect("facade claim")
         .into_iter()
@@ -745,9 +747,15 @@ async fn claim(
 }
 
 /// Finalize-complete the given ids on `shard`.
-async fn finalize(pq: &Fireweed, shard: &QueueKey, ids: &[ItemId], operations: &OperationProbe) {
+async fn finalize(
+    fireweed: &Fireweed,
+    shard: &QueueKey,
+    ids: &[ItemId],
+    operations: &OperationProbe,
+) {
     let _operation = operations.begin();
-    pq.ack(shard, ids.iter().copied())
+    fireweed
+        .ack(shard, ids.iter().copied())
         .await
         .expect("facade ack");
 }
@@ -818,7 +826,7 @@ fn single_deployment_evidence_row(
     values.insert("bars_met".into(), serde_json::json!(passed));
     fireweed_release::LedgerRow {
         suite: "performance_single_deployment_baseline_tests".into(),
-        command: "PQUEUE_PERF_ENV=1 PQUEUE_E1_RESIDENT=10000000 PQUEUE_E0E1_PROGRESS_BOUND_MS=<declared> PQUEUE_PG_TEST_URL=… cargo test -p fireweed-server --features postgres --test performance_single_deployment_baseline_tests".into(),
+        command: "FIREWEED_PERF_ENV=1 FIREWEED_E1_RESIDENT=10000000 FIREWEED_E0E1_PROGRESS_BOUND_MS=<declared> FIREWEED_PG_TEST_URL=… cargo test -p fireweed-server --features postgres --test performance_single_deployment_baseline_tests".into(),
         backend_profile: "postgres_native".into(),
         scale: if full_shape { "release".into() } else { "baseline".into() },
         seed: 0,
@@ -875,15 +883,15 @@ fn nonpassing_e0_row_remains_identified_smoke_evidence() {
 
 #[test]
 fn production_wrapper_batches_10k_through_native_ports() {
-    let Ok(observer_url) = std::env::var("PQUEUE_PG_TEST_URL") else {
-        eprintln!("POSTGRES WRAPPER 10K BATCH PROOF SKIPPED — set PQUEUE_PG_TEST_URL");
+    let Ok(observer_url) = std::env::var("FIREWEED_PG_TEST_URL") else {
+        eprintln!("POSTGRES WRAPPER 10K BATCH PROOF SKIPPED — set FIREWEED_PG_TEST_URL");
         return;
     };
     let schema = fresh_schema();
-    let application_name = format!("pqueue_e0_batch_proof_{}", std::process::id());
+    let application_name = format!("fireweed_e0_batch_proof_{}", std::process::id());
     let separator = if observer_url.contains('?') { '&' } else { '?' };
     let pool_url = format!("{observer_url}{separator}application_name={application_name}_pool");
-    let pq = open_postgres_runtime(
+    let fireweed = open_postgres_runtime(
         PostgresRuntimeConfig {
             url: ConfigSecret::new(pool_url),
             schema: Some(schema),
@@ -901,28 +909,29 @@ fn production_wrapper_batches_10k_through_native_ports() {
         .build()
         .expect("build batch-proof runtime");
     runtime.block_on(async {
-        pq.create_queue(big_qdef("batch-proof", "hot", 60_000))
+        fireweed
+            .create_queue(big_qdef("batch-proof", "hot", 60_000))
             .await
             .unwrap();
         let operations = OperationProbe::default();
         let mut push_sizes = Vec::new();
         for base in (0..10_000).step_by(1_000) {
-            let ids = push_batch(&pq, &shard, base, 1_000, &operations).await;
+            let ids = push_batch(&fireweed, &shard, base, 1_000, &operations).await;
             push_sizes.push(ids.len());
         }
         let mut claim_sizes = Vec::new();
         let mut finalize_sizes = Vec::new();
         while claim_sizes.iter().sum::<usize>() < 10_000 {
-            let ids = claim(&pq, &shard, 1_000, &operations).await;
+            let ids = claim(&fireweed, &shard, 1_000, &operations).await;
             assert!(!ids.is_empty(), "10K batch proof must keep making progress");
             claim_sizes.push(ids.len());
-            finalize(&pq, &shard, &ids, &operations).await;
+            finalize(&fireweed, &shard, &ids, &operations).await;
             finalize_sizes.push(ids.len());
         }
         assert_eq!(push_sizes, vec![1_000; 10]);
         assert_eq!(claim_sizes, vec![1_000; 10]);
         assert_eq!(finalize_sizes, vec![1_000; 10]);
-        let metrics = pq.metrics(&shard).await.unwrap();
+        let metrics = fireweed.metrics(&shard).await.unwrap();
         assert_eq!(
             (metrics.pending, metrics.leased, metrics.complete),
             (0, 0, 10_000)
@@ -932,9 +941,9 @@ fn production_wrapper_batches_10k_through_native_ports() {
 
 #[test]
 fn performance_single_deployment_baseline_tests() {
-    let Ok(observer_url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+    let Ok(observer_url) = std::env::var("FIREWEED_PG_TEST_URL") else {
         eprintln!(
-            "POSTGRES E0/E1 SINGLE-DEPLOYMENT BASELINE SKIPPED — set PQUEUE_PG_TEST_URL to a live DB. \
+            "POSTGRES E0/E1 SINGLE-DEPLOYMENT BASELINE SKIPPED — set FIREWEED_PG_TEST_URL to a live DB. \
              Portable correctness, configured-progress, bounded-resource, and capacity evidence is \
              DEFERRED (not measured), not a hidden pass."
         );
@@ -942,37 +951,37 @@ fn performance_single_deployment_baseline_tests() {
     };
     // A designated PERF environment may emit RELEASE-tier evidence. Without it, this is a SMOKE lane that
     // measures the same invariants but never satisfies a release gate. Host speed never decides either lane.
-    let perf_env = std::env::var("PQUEUE_PERF_ENV").is_ok();
-    let progress_bound_value = std::env::var("PQUEUE_E0E1_PROGRESS_BOUND_MS");
+    let perf_env = std::env::var("FIREWEED_PERF_ENV").is_ok();
+    let progress_bound_value = std::env::var("FIREWEED_E0E1_PROGRESS_BOUND_MS");
     let progress_bound_explicit = progress_bound_value.is_ok();
     let progress_bound_ms = match progress_bound_value {
         Ok(value) => value
             .parse::<u64>()
             .ok()
             .filter(|value| *value > 0)
-            .expect("PQUEUE_E0E1_PROGRESS_BOUND_MS must be a positive integer"),
+            .expect("FIREWEED_E0E1_PROGRESS_BOUND_MS must be a positive integer"),
         Err(_) if perf_env => {
-            panic!("release evidence requires explicit PQUEUE_E0E1_PROGRESS_BOUND_MS")
+            panic!("release evidence requires explicit FIREWEED_E0E1_PROGRESS_BOUND_MS")
         }
         Err(_) => SMOKE_PROGRESS_BOUND_MS,
     };
     // Small fast defaults (the relational backend issues per-item INSERT round-trips, so large batches over a
     // network bridge are slow); the real release shape is env-scaled. Default resident keeps a routine run short.
-    let resident: u64 = std::env::var("PQUEUE_E1_RESIDENT")
+    let resident: u64 = std::env::var("FIREWEED_E1_RESIDENT")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1_000);
     let load_batch = CONFIGURED_MAX_BATCH_SIZE;
-    // Latency probe batch sizes: [1, 100] by default; the full release shape (+1000) needs PQUEUE_E1_FULL.
-    let full = perf_env || std::env::var("PQUEUE_E1_FULL").is_ok();
+    // Latency probe batch sizes: [1, 100] by default; the full release shape (+1000) needs FIREWEED_E1_FULL.
+    let full = perf_env || std::env::var("FIREWEED_E1_FULL").is_ok();
     let batch_sizes: &[u64] = if full { &[1, 100, 1000] } else { &[1, 100] };
 
     let schema = fresh_schema();
     let shard = sk("e0e1", "hot");
-    let application_name = format!("pqueue_e0e1_evidence_{}", std::process::id());
+    let application_name = format!("fireweed_e0e1_evidence_{}", std::process::id());
     let separator = if observer_url.contains('?') { '&' } else { '?' };
     let pool_url = format!("{observer_url}{separator}application_name={application_name}_pool");
-    let pq = Arc::new(
+    let fireweed = Arc::new(
         open_postgres_runtime(
             PostgresRuntimeConfig {
                 url: ConfigSecret::new(pool_url),
@@ -997,14 +1006,14 @@ fn performance_single_deployment_baseline_tests() {
     );
 
     runtime.clone().block_on(async {
-        pq.create_queue(big_qdef("e0e1", "hot", progress_bound_ms))
+        fireweed.create_queue(big_qdef("e0e1", "hot", progress_bound_ms))
             .await
             .unwrap();
-        let persisted = pq.queue_definition(&shard).await.unwrap();
+        let persisted = fireweed.queue_definition(&shard).await.unwrap();
         assert_eq!(persisted.max_push_batch_size, CONFIGURED_MAX_BATCH_SIZE);
         assert_eq!(persisted.max_claim_batch_size, CONFIGURED_MAX_BATCH_SIZE);
         assert_eq!(persisted.progress_bound_ms, progress_bound_ms);
-        let consumer_pq = Arc::clone(&pq);
+        let consumer_fireweed = Arc::clone(&fireweed);
 
         let hot_pool_partition = fireweed_engine::queue_worker_partition(&shard, 2);
         let (preflight_queue_id, preflight_shard) = (0..100)
@@ -1026,10 +1035,10 @@ fn performance_single_deployment_baseline_tests() {
             })
             .find(|(_, _, partition)| *partition != hot_pool_partition)
             .expect("two queue keys must cover both production pool members");
-        pq.create_queue(big_qdef("e0e1", &canary_queue_id, progress_bound_ms))
+        fireweed.create_queue(big_qdef("e0e1", &canary_queue_id, progress_bound_ms))
             .await
             .unwrap();
-        pq.create_queue(big_qdef("e0e1", &preflight_queue_id, progress_bound_ms))
+        fireweed.create_queue(big_qdef("e0e1", &preflight_queue_id, progress_bound_ms))
             .await
             .unwrap();
 
@@ -1059,7 +1068,7 @@ fn performance_single_deployment_baseline_tests() {
                    END IF;
                    RETURN NEW;
                  END $$;
-                 CREATE TRIGGER e0_pool_causal_gate BEFORE INSERT ON pqueue_items
+                 CREATE TRIGGER e0_pool_causal_gate BEFORE INSERT ON fireweed_items
                    FOR EACH ROW EXECUTE FUNCTION e0_pool_causal_gate();",
                 schema = gate_schema,
             ))
@@ -1070,14 +1079,14 @@ fn performance_single_deployment_baseline_tests() {
 
         let canary_causal_progress = std::thread::scope(|scope| {
             let hot = scope.spawn({
-                let pq = Arc::clone(&pq);
+                let fireweed = Arc::clone(&fireweed);
                 let preflight_shard = preflight_shard.clone();
                 let runtime = Arc::clone(&runtime);
                 move || {
                     let _runtime = runtime.enter();
                     let ops = OperationProbe::default();
                     futures::executor::block_on(push_batch(
-                        &pq,
+                        &fireweed,
                         &preflight_shard,
                         resident + 20_000,
                         1,
@@ -1086,7 +1095,7 @@ fn performance_single_deployment_baseline_tests() {
                 }
             });
             let canary = scope.spawn({
-                let pq = Arc::clone(&pq);
+                let fireweed = Arc::clone(&fireweed);
                 let canary_shard = canary_shard.clone();
                 let observer_url = observer_url.clone();
                 let application_name = application_name.clone();
@@ -1110,15 +1119,15 @@ fn performance_single_deployment_baseline_tests() {
                     }
                     let ops = OperationProbe::default();
                     let ids = futures::executor::block_on(push_batch(
-                        &pq,
+                        &fireweed,
                         &canary_shard,
                         resident + 10_000,
                         1,
                         &ops,
                     ));
-                    let claimed = futures::executor::block_on(claim(&pq, &canary_shard, 1, &ops));
+                    let claimed = futures::executor::block_on(claim(&fireweed, &canary_shard, 1, &ops));
                     futures::executor::block_on(finalize(
-                        &pq,
+                        &fireweed,
                         &canary_shard,
                         &claimed,
                         &ops,
@@ -1129,9 +1138,9 @@ fn performance_single_deployment_baseline_tests() {
             let hot_ids = hot.join().unwrap();
             let canary_ok = canary.join().unwrap();
             let ops = OperationProbe::default();
-            let hot_claimed = futures::executor::block_on(claim(&pq, &preflight_shard, 1, &ops));
+            let hot_claimed = futures::executor::block_on(claim(&fireweed, &preflight_shard, 1, &ops));
             futures::executor::block_on(finalize(
-                &pq,
+                &fireweed,
                 &preflight_shard,
                 &hot_claimed,
                 &ops,
@@ -1148,7 +1157,7 @@ fn performance_single_deployment_baseline_tests() {
             admin
                 .batch_execute(&format!(
                     "SET search_path TO {cleanup_schema};
-                     DROP TRIGGER e0_pool_causal_gate ON pqueue_items;
+                     DROP TRIGGER e0_pool_causal_gate ON fireweed_items;
                      DROP FUNCTION e0_pool_causal_gate();
                      DROP TABLE e0_pool_hold;"
                 ))
@@ -1171,7 +1180,7 @@ fn performance_single_deployment_baseline_tests() {
         let (producer_result, consumer_result, mut resources) =
             std::thread::scope(|scope| {
                 let producer = scope.spawn({
-                    let pq = Arc::clone(&pq);
+                    let fireweed = Arc::clone(&fireweed);
                     let shard = shard.clone();
                     let operations = Arc::clone(&operations);
                     let workers = Arc::clone(&workers);
@@ -1219,7 +1228,7 @@ fn performance_single_deployment_baseline_tests() {
                                 pending_peak.fetch_max(map.len() as u64, Ordering::SeqCst);
                             }
                             let ids = futures::executor::block_on(push_batch(
-                                &pq,
+                                &fireweed,
                                 &shard,
                                 result.accepted,
                                 n,
@@ -1279,7 +1288,7 @@ fn performance_single_deployment_baseline_tests() {
                 });
 
                 let consumer = scope.spawn({
-                let pq = Arc::clone(&consumer_pq);
+                let fireweed = Arc::clone(&consumer_fireweed);
                 let shard = shard.clone();
                 let operations = Arc::clone(&operations);
                 let workers = Arc::clone(&workers);
@@ -1346,7 +1355,7 @@ fn performance_single_deployment_baseline_tests() {
                             && !pending.lock().unwrap().is_empty()
                         {
                             let scopes = futures::executor::block_on(
-                                pq.discover_active_scopes(&shard, DiscoveryGranularity::Group),
+                                fireweed.discover_active_scopes(&shard, DiscoveryGranularity::Group),
                             )
                             .unwrap();
                             result.discovery_query_count += 1;
@@ -1362,7 +1371,7 @@ fn performance_single_deployment_baseline_tests() {
                         }
                         let claim_started = Instant::now();
                         let ids = futures::executor::block_on(claim(
-                            &pq,
+                            &fireweed,
                             &shard,
                             load_batch as usize,
                             &operations,
@@ -1440,19 +1449,19 @@ fn performance_single_deployment_baseline_tests() {
                         }
                         result.claimed += ids.len() as u64;
                         let finalize_started = Instant::now();
-                        futures::executor::block_on(finalize(&pq, &shard, &ids, &operations));
+                        futures::executor::block_on(finalize(&fireweed, &shard, &ids, &operations));
                         result.claim_finalize_operation_ns +=
                             finalize_started.elapsed().as_nanos() as u64;
                         result.finalized += ids.len() as u64;
                         result.finalize_batches += 1;
                         if result.finalized.is_multiple_of(100_000) || result.finalized == resident
                         {
-                            let metrics = futures::executor::block_on(pq.metrics(&shard)).unwrap();
-                            let cursor = futures::executor::block_on(pq.current_position(&shard))
+                            let metrics = futures::executor::block_on(fireweed.metrics(&shard)).unwrap();
+                            let cursor = futures::executor::block_on(fireweed.current_position(&shard))
                                 .unwrap()
                                 .sequence;
                             let scopes = futures::executor::block_on(
-                                pq.discover_active_scopes(&shard, DiscoveryGranularity::Group),
+                                fireweed.discover_active_scopes(&shard, DiscoveryGranularity::Group),
                             )
                             .unwrap();
                             result.discovery_query_count += 1;
@@ -1510,9 +1519,9 @@ fn performance_single_deployment_baseline_tests() {
         let producer_completion_ms = producer_result.push_operation_ns as f64 / 1_000_000.0;
         let claimant_completion_ms =
             consumer_result.claim_finalize_operation_ns as f64 / 1_000_000.0;
-        let checkpoint = pq.metrics(&shard).await.unwrap();
+        let checkpoint = fireweed.metrics(&shard).await.unwrap();
         finalized_samples.push(finalized);
-        cursor_samples.push(pq.current_position(&shard).await.unwrap().sequence);
+        cursor_samples.push(fireweed.current_position(&shard).await.unwrap().sequence);
         let sample_url = observer_url.clone();
         let sample_application = application_name.clone();
         resources = std::thread::spawn(move || {
@@ -1542,7 +1551,7 @@ fn performance_single_deployment_baseline_tests() {
 
         // E1 representative control/load/control probes against the retained ten-million-row state.
         let e1_started = Instant::now();
-        let base_cycles: usize = std::env::var("PQUEUE_E1_CYCLES")
+        let base_cycles: usize = std::env::var("FIREWEED_E1_CYCLES")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(if perf_env { 500 } else { 20 });
@@ -1568,13 +1577,13 @@ fn performance_single_deployment_baseline_tests() {
         // At the exact 10M resident checkpoint, submit a max-batch write and claim/finalize concurrently
         // to the same hot queue. Caller intervals overlap, while stable affinity and the queue gate serialize
         // their database transactions on the hot member. The separate canary proves cross-queue progress.
-        let control_seed = push_batch(&pq, &shard, next_id, 1_000, &operations).await;
+        let control_seed = push_batch(&fireweed, &shard, next_id, 1_000, &operations).await;
         next_id += 1_000;
         probe_push_batches += 1;
         probe_accepted += 1_000;
         probe_accepted_ids.extend(control_seed.iter().copied());
         let update_started = Instant::now();
-        let update_response = pq
+        let update_response = fireweed
             .batch_update(&shard, representative_batch_update(&control_seed, next_id))
             .await
             .expect("post-10M API-001 BatchUpdate");
@@ -1589,7 +1598,7 @@ fn performance_single_deployment_baseline_tests() {
         probe_update_item_calls += update_response.results.len() as u64;
         probe_update_batches += 1;
         actual_update_sizes.insert(update_response.results.len() as u64);
-        let active_pending_before = pq.metrics(&shard).await.unwrap().pending;
+        let active_pending_before = fireweed.metrics(&shard).await.unwrap().pending;
         let control_barrier = Arc::new(std::sync::Barrier::new(2));
         let control_operations = Arc::new(OperationProbe::default());
         let (
@@ -1598,7 +1607,7 @@ fn performance_single_deployment_baseline_tests() {
         ) = std::thread::scope(|scope| {
             let barrier = Arc::clone(&control_barrier);
             let producer_operations = Arc::clone(&control_operations);
-            let producer_pq = Arc::clone(&pq);
+            let producer_fireweed = Arc::clone(&fireweed);
             let producer_shard = shard.clone();
             let producer_runtime = Arc::clone(&runtime);
             let producer = scope.spawn(move || {
@@ -1606,7 +1615,7 @@ fn performance_single_deployment_baseline_tests() {
                 barrier.wait();
                 let started = Instant::now();
                 let ids = futures::executor::block_on(push_batch(
-                    &producer_pq,
+                    &producer_fireweed,
                     &producer_shard,
                     next_id,
                     1_000,
@@ -1616,7 +1625,7 @@ fn performance_single_deployment_baseline_tests() {
             });
             let barrier = Arc::clone(&control_barrier);
             let claimant_operations = Arc::clone(&control_operations);
-            let claimant_pq = Arc::clone(&consumer_pq);
+            let claimant_fireweed = Arc::clone(&consumer_fireweed);
             let claimant_shard = shard.clone();
             let claimant_runtime = Arc::clone(&runtime);
             let claimant = scope.spawn(move || {
@@ -1624,13 +1633,13 @@ fn performance_single_deployment_baseline_tests() {
                 barrier.wait();
                 let started = Instant::now();
                 let ids = futures::executor::block_on(claim(
-                    &claimant_pq,
+                    &claimant_fireweed,
                     &claimant_shard,
                     1_000,
                     &claimant_operations,
                 ));
                 futures::executor::block_on(finalize(
-                    &claimant_pq,
+                    &claimant_fireweed,
                     &claimant_shard,
                     &ids,
                     &claimant_operations,
@@ -1649,8 +1658,8 @@ fn performance_single_deployment_baseline_tests() {
         probe_accepted_ids.extend(control_write.iter().copied());
         probe_claimed_ids.extend(first_claim.iter().copied());
         probe_finalized_ids.extend(first_claim.iter().copied());
-        let second_claim = claim(&consumer_pq, &shard, 1_000, &operations).await;
-        finalize(&consumer_pq, &shard, &second_claim, &operations).await;
+        let second_claim = claim(&consumer_fireweed, &shard, 1_000, &operations).await;
+        finalize(&consumer_fireweed, &shard, &second_claim, &operations).await;
         probe_claim_batches += 1;
         probe_finalize_batches += 1;
         probe_claimed += second_claim.len() as u64;
@@ -1680,7 +1689,7 @@ fn performance_single_deployment_baseline_tests() {
             for _ in 0..cycles {
                 probe_push_batches += 1;
                 let t = Instant::now();
-                let pushed_ids = push_batch(&pq, &shard, next_id, bsz, &operations).await;
+                let pushed_ids = push_batch(&fireweed, &shard, next_id, bsz, &operations).await;
                 lat.entry(format!("push_b{bsz}_ms"))
                     .or_default()
                     .push(ms(t));
@@ -1690,7 +1699,7 @@ fn performance_single_deployment_baseline_tests() {
                 actual_push_sizes.insert(pushed_ids.len() as u64);
 
                 let t = Instant::now();
-                let response = pq
+                let response = fireweed
                     .batch_update(&shard, representative_batch_update(&pushed_ids, next_id))
                     .await
                     .expect("facade API-001 BatchUpdate");
@@ -1707,7 +1716,7 @@ fn performance_single_deployment_baseline_tests() {
                     .push(ms(t));
 
                 let t = Instant::now();
-                let ids = claim(&pq, &shard, bsz as usize, &operations).await;
+                let ids = claim(&fireweed, &shard, bsz as usize, &operations).await;
                 lat.entry(format!("claim_b{bsz}_ms"))
                     .or_default()
                     .push(ms(t));
@@ -1722,7 +1731,7 @@ fn performance_single_deployment_baseline_tests() {
                 actual_claim_sizes.insert(ids.len() as u64);
 
                 let t = Instant::now();
-                finalize(&pq, &shard, &ids, &operations).await;
+                finalize(&fireweed, &shard, &ids, &operations).await;
                 lat.entry(format!("finalize_b{bsz}_ms"))
                     .or_default()
                     .push(ms(t));
@@ -1731,7 +1740,7 @@ fn performance_single_deployment_baseline_tests() {
                 probe_finalized_ids.extend(ids.iter().copied());
                 actual_finalize_sizes.insert(ids.len() as u64);
             }
-            let metrics = pq.metrics(&shard).await.unwrap();
+            let metrics = fireweed.metrics(&shard).await.unwrap();
             assert_eq!(metrics.pending, 0, "probe cycles must fully finalize");
             let sample_url = observer_url.clone();
             let sample_application = application_name.clone();
@@ -1743,7 +1752,7 @@ fn performance_single_deployment_baseline_tests() {
             .expect("resource sample thread");
         }
         let oversize_push_rejected = matches!(
-            pq.push_batch(
+            fireweed.push_batch(
                 &shard,
                 (0..=CONFIGURED_MAX_BATCH_SIZE)
                     .map(|n| representative_item(next_id + n, false))
@@ -1753,11 +1762,11 @@ fn performance_single_deployment_baseline_tests() {
             Err(EngineError::BatchTooLarge)
         );
         let oversize_claim_rejected = matches!(
-            pq.claim(&shard, CONFIGURED_MAX_BATCH_SIZE as usize + 1, 1_000)
+            fireweed.claim(&shard, CONFIGURED_MAX_BATCH_SIZE as usize + 1, 1_000)
                 .await,
             Err(EngineError::BatchTooLarge)
         );
-        let post_probe = pq.metrics(&shard).await.unwrap();
+        let post_probe = fireweed.metrics(&shard).await.unwrap();
         let e1_elapsed = e1_started.elapsed();
         let probe_identity_exact = probe_accepted_ids.len() as u64 == probe_accepted
             && probe_accepted_ids == probe_claimed_ids
@@ -1837,7 +1846,7 @@ fn performance_single_deployment_baseline_tests() {
         let full_shape = resident == 10_000_000
             && batch_sizes == [1, 100, CONFIGURED_MAX_BATCH_SIZE]
             && batch_sizes.last() == Some(&CONFIGURED_MAX_BATCH_SIZE);
-        let source_revision = std::env::var("PQUEUE_SOURCE_REVISION").unwrap_or_default();
+        let source_revision = std::env::var("FIREWEED_SOURCE_REVISION").unwrap_or_default();
         let (
             checkout_root,
             checkout_revision,
@@ -1845,18 +1854,18 @@ fn performance_single_deployment_baseline_tests() {
             compile_source_root,
             compile_source_root_bound,
         ) = checkout_provenance();
-        let source_root_explicit = std::env::var_os("PQUEUE_SOURCE_ROOT").is_some();
+        let source_root_explicit = std::env::var_os("FIREWEED_SOURCE_ROOT").is_some();
         let revision_bound = source_revision == checkout_revision
             && checkout_clean
             && source_root_explicit
             && compile_source_root_bound;
         let topology_declared = caps.explicitly_declared
             && [
-                "PQUEUE_PG_INSTANCE_CLASS",
-                "PQUEUE_PG_CPU_LIMIT",
-                "PQUEUE_PG_MEMORY_LIMIT_BYTES",
-                "PQUEUE_PG_IOPS_PROFILE",
-                "PQUEUE_PG_STORAGE_CLASS",
+                "FIREWEED_PG_INSTANCE_CLASS",
+                "FIREWEED_PG_CPU_LIMIT",
+                "FIREWEED_PG_MEMORY_LIMIT_BYTES",
+                "FIREWEED_PG_IOPS_PROFILE",
+                "FIREWEED_PG_STORAGE_CLASS",
             ]
             .iter()
             .all(|key| std::env::var(key).is_ok());
@@ -1913,7 +1922,7 @@ fn performance_single_deployment_baseline_tests() {
         if full_shape {
             assert!(
                 revision_bound,
-                "full E0/E1 producer requires PQUEUE_SOURCE_REVISION=<exact HEAD>"
+                "full E0/E1 producer requires FIREWEED_SOURCE_REVISION=<exact HEAD>"
             );
         }
 
@@ -1923,7 +1932,7 @@ fn performance_single_deployment_baseline_tests() {
         // RELEASE-tier only when a perf env actually met the bar; otherwise SMOKE (recorded, gate-visible, but
         // never satisfies a release E0/E1 requirement). A failing/non-perf run is honest evidence, not fake.
         let env_note = format!(
-            "live postgres_native (TD-002 PostgresRelationalBackend), single deployment, resident={resident}, perf_env={perf_env}; the full TP-002 E1 shape is a provisioned instance with PQUEUE_E1_RESIDENT=10000000 + PQUEUE_PERF_ENV=1"
+            "live postgres_native (TD-002 PostgresRelationalBackend), single deployment, resident={resident}, perf_env={perf_env}; the full TP-002 E1 shape is a provisioned instance with FIREWEED_E1_RESIDENT=10000000 + FIREWEED_PERF_ENV=1"
         );
         let lost_items = producer_result
             .seen_ids

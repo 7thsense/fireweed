@@ -24,7 +24,7 @@ use fireweed_resp::{RespHooks, RouteDecision};
 use fireweed_server::{OwnershipRuntime, SegmentConfig, SegmentedObjectLogSqliteBackend};
 
 static UNIQUE: AtomicU64 = AtomicU64::new(0);
-const COORDINATION_TIMEOUT_ENV: &str = "PQUEUE_TEST_COORDINATION_TIMEOUT_SECS";
+const COORDINATION_TIMEOUT_ENV: &str = "FIREWEED_TEST_COORDINATION_TIMEOUT_SECS";
 const MAX_COORDINATION_TIMEOUT_SECS: u64 = 86_400;
 
 /// Optional operational deadlock watchdog around the complete live seam. Unset means no deadline.
@@ -177,17 +177,20 @@ fn stale_handoff_supervision_classifies_expiry_and_names_every_semantic_stage() 
 }
 
 fn live_env(label: &str) -> Option<(String, Arc<S3BlobStore>)> {
-    let Ok(pg) = std::env::var("PQUEUE_PG_TEST_URL") else {
-        eprintln!("{label} SKIPPED — set PQUEUE_PG_TEST_URL and PQUEUE_S3_TEST_ENDPOINT");
+    let Ok(pg) = std::env::var("FIREWEED_PG_TEST_URL") else {
+        eprintln!("{label} SKIPPED — set FIREWEED_PG_TEST_URL and FIREWEED_S3_TEST_ENDPOINT");
         return None;
     };
-    let Ok(endpoint) = std::env::var("PQUEUE_S3_TEST_ENDPOINT") else {
-        eprintln!("{label} SKIPPED — set PQUEUE_PG_TEST_URL and PQUEUE_S3_TEST_ENDPOINT");
+    let Ok(endpoint) = std::env::var("FIREWEED_S3_TEST_ENDPOINT") else {
+        eprintln!("{label} SKIPPED — set FIREWEED_PG_TEST_URL and FIREWEED_S3_TEST_ENDPOINT");
         return None;
     };
-    let bucket = std::env::var("PQUEUE_S3_TEST_BUCKET").unwrap_or_else(|_| "pqueue-test".into());
-    let access = std::env::var("PQUEUE_S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into());
-    let secret = std::env::var("PQUEUE_S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into());
+    let bucket =
+        std::env::var("FIREWEED_S3_TEST_BUCKET").unwrap_or_else(|_| "fireweed-test".into());
+    let access =
+        std::env::var("FIREWEED_S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into());
+    let secret =
+        std::env::var("FIREWEED_S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into());
     let store = S3BlobStore::new(&endpoint, &bucket, &access, &secret, "us-east-1")
         .expect("construct MinIO client");
     Some((pg, Arc::new(store)))
@@ -226,7 +229,7 @@ fn unique(label: &str) -> (String, QueueDefinition, QueueKey) {
     };
     let key = QueueKey::new(tenant, queue_id);
     (
-        format!("pq_own_{label}_{}_{}", std::process::id(), n),
+        format!("fireweed_own_{label}_{}_{}", std::process::id(), n),
         definition,
         key,
     )
@@ -244,7 +247,7 @@ fn projection_path(label: &str) -> String {
     let n = UNIQUE.fetch_add(1, Ordering::SeqCst);
     std::env::temp_dir()
         .join(format!(
-            "pqueue-own-{label}-{}-{n}.sqlite",
+            "fireweed-own-{label}-{}-{n}.sqlite",
             std::process::id()
         ))
         .to_string_lossy()

@@ -233,7 +233,7 @@ async fn turso_projection_image(store: &TursoRelational, shard: &QueueKey) -> Pr
 
     let gate_rows = store
         .query(
-            "SELECT item_id,gate_key FROM pqueue_item_gates WHERE tenant_id=?1 AND queue_id=?2 \
+            "SELECT item_id,gate_key FROM fireweed_item_gates WHERE tenant_id=?1 AND queue_id=?2 \
              ORDER BY item_id,gate_key",
             vec![tenant.clone(), queue.clone()],
         )
@@ -251,7 +251,7 @@ async fn turso_projection_image(store: &TursoRelational, shard: &QueueKey) -> Pr
         .query(
             "SELECT item_id,client_item_key,lifecycle_state,priority,not_before,eligible_since,group_key,cohort_size,payload,\
              fields,metadata,entity_document,retry_count,item_version,lease_expires_at,worker_id,\
-             fenced,superseded,max_attempts,created_seq FROM pqueue_items \
+             fenced,superseded,max_attempts,created_seq FROM fireweed_items \
              WHERE tenant_id=?1 AND queue_id=?2 ORDER BY created_seq,item_id",
             vec![tenant.clone(), queue.clone()],
         )
@@ -296,7 +296,7 @@ async fn turso_projection_image(store: &TursoRelational, shard: &QueueKey) -> Pr
     let mut side_records = BTreeMap::new();
     for row in store
         .query(
-            "SELECT key,payload FROM pqueue_side_records WHERE tenant_id=?1 AND queue_id=?2 ORDER BY key",
+            "SELECT key,payload FROM fireweed_side_records WHERE tenant_id=?1 AND queue_id=?2 ORDER BY key",
             vec![tenant.clone(), queue.clone()],
         )
         .await
@@ -310,7 +310,7 @@ async fn turso_projection_image(store: &TursoRelational, shard: &QueueKey) -> Pr
     let mut instance_fences = BTreeMap::new();
     for row in store
         .query(
-            "SELECT instance_key,fence FROM pqueue_instance_fences WHERE tenant_id=?1 AND queue_id=?2 ORDER BY instance_key",
+            "SELECT instance_key,fence FROM fireweed_instance_fences WHERE tenant_id=?1 AND queue_id=?2 ORDER BY instance_key",
             vec![tenant, queue],
         )
         .await

@@ -1,4 +1,4 @@
-/// The relational schema. `pqueue_items` is TD-002's item projection (sqlite-typed); `fenced`,
+/// The relational schema. `fireweed_items` is TD-002's item projection (sqlite-typed); `fenced`,
 /// `superseded`, and `max_attempts` are reference-projection columns mirroring the `FenceLease`/
 /// `UnfenceLease`, `ReplacePending`, and retry-exhaustion apply arms (the production postgres mode
 /// realizes fence via epoch and supersede via the `client_item_key` tombstone — see TD-002 note). The
@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS queues (
     pause_drain_intake INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (tenant, queue)
 );
-CREATE TABLE IF NOT EXISTS pqueue_items (
+CREATE TABLE IF NOT EXISTS fireweed_items (
     tenant_id TEXT NOT NULL,
     queue_id TEXT NOT NULL,
     item_id TEXT NOT NULL,
@@ -49,21 +49,21 @@ CREATE TABLE IF NOT EXISTS pqueue_items (
     created_seq INTEGER NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, item_id)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS pqueue_items_active_key
-    ON pqueue_items (tenant_id, queue_id, client_item_key) WHERE superseded = 0;
-CREATE INDEX IF NOT EXISTS pqueue_items_group_due_idx
-    ON pqueue_items (tenant_id, queue_id, lifecycle_state, group_key, not_before, priority_sort, created_seq)
+CREATE UNIQUE INDEX IF NOT EXISTS fireweed_items_active_key
+    ON fireweed_items (tenant_id, queue_id, client_item_key) WHERE superseded = 0;
+CREATE INDEX IF NOT EXISTS fireweed_items_group_due_idx
+    ON fireweed_items (tenant_id, queue_id, lifecycle_state, group_key, not_before, priority_sort, created_seq)
     WHERE group_key IS NOT NULL AND superseded = 0;
 -- B-011 exact read-only active-scope discovery. Unlike the group-summary indexes, this deliberately
 -- includes NULL group keys and covers the live eligibility-age aggregate without a resident-table scan.
-CREATE INDEX IF NOT EXISTS pqueue_items_active_scope_idx
-    ON pqueue_items (tenant_id, queue_id, group_key, eligible_since, not_before, item_id)
+CREATE INDEX IF NOT EXISTS fireweed_items_active_scope_idx
+    ON fireweed_items (tenant_id, queue_id, group_key, eligible_since, not_before, item_id)
     WHERE lifecycle_state = 'Pending' AND superseded = 0;
-CREATE INDEX IF NOT EXISTS pqueue_items_expired_lease_idx
-    ON pqueue_items (tenant_id, queue_id, lease_expires_at, item_id)
+CREATE INDEX IF NOT EXISTS fireweed_items_expired_lease_idx
+    ON fireweed_items (tenant_id, queue_id, lease_expires_at, item_id)
     WHERE lifecycle_state = 'Leased' AND cohort_size IS NULL AND fenced = 0 AND superseded = 0;
-CREATE INDEX IF NOT EXISTS pqueue_items_global_expired_lease_idx
-    ON pqueue_items (lease_expires_at, tenant_id, queue_id, item_id)
+CREATE INDEX IF NOT EXISTS fireweed_items_global_expired_lease_idx
+    ON fireweed_items (lease_expires_at, tenant_id, queue_id, item_id)
     WHERE lifecycle_state = 'Leased';
 CREATE TABLE IF NOT EXISTS relational_cursor (
     tenant TEXT NOT NULL, queue TEXT NOT NULL,
@@ -73,18 +73,18 @@ CREATE TABLE IF NOT EXISTS relational_cursor (
     PRIMARY KEY (tenant, queue)
 );
 -- Durable item-id high-water (ADR-009 mint-counter recovery floor). Terminal-item retention reaping now
--- DELETES item rows (objectlog/hybrid-async), so the surviving `pqueue_items` rows are no longer the complete
+-- DELETES item rows (objectlog/hybrid-async), so the surviving `fireweed_items` rows are no longer the complete
 -- minted set — a reopen that seeded `QueueCounters` only from survivors could re-mint a reaped id. Every reap
 -- advances this MONOTONIC per-queue high-water past the greatest id it deletes, and recovery observes it, so a
 -- push after reaping ALL rows still mints strictly past every previously-minted id. Stored as the raw
 -- `ItemId` (it encodes `(epoch, counter)`); recovery decodes + `QueueCounters::observe`s it, which is
 -- epoch-aware and only ever advances — a stale lower-epoch floor never lowers a fresh tenure.
-CREATE TABLE IF NOT EXISTS pqueue_id_high_water (
+CREATE TABLE IF NOT EXISTS fireweed_id_high_water (
     tenant TEXT NOT NULL, queue TEXT NOT NULL,
     item_id TEXT NOT NULL,
     PRIMARY KEY (tenant, queue)
 );
-CREATE TABLE IF NOT EXISTS pqueue_schema_migrations (
+CREATE TABLE IF NOT EXISTS fireweed_schema_migrations (
     migration_name TEXT NOT NULL PRIMARY KEY
 );
 CREATE TABLE IF NOT EXISTS relational_emission_cursor (
@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS relational_emission_cursor (
 -- whole-group selection + g4 discovery + per-group observability. `rep_progress_guard_sort` is NULL while
 -- the progress-guard derivation is deferred (parity with the strict claim ordering); pause is not modeled
 -- (the summary counts intrinsic eligibility, ignoring the queue-global pause gate — BQ-14 applies pause).
-CREATE TABLE IF NOT EXISTS pqueue_group_summary (
+CREATE TABLE IF NOT EXISTS fireweed_group_summary (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, group_key TEXT NOT NULL,
     oldest_eligible_at INTEGER,          -- NULL = no currently-eligible item
     rep_progress_guard_sort BLOB,
@@ -110,12 +110,12 @@ CREATE TABLE IF NOT EXISTS pqueue_group_summary (
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, group_key)
 );
--- BQ-11c: duplicate-push convergence across a purge (TD-002 §Idempotency `pqueue_item_key_retention`):
+-- BQ-11c: duplicate-push convergence across a purge (TD-002 §Idempotency `fireweed_item_key_retention`):
 -- when a TERMINAL item is purged, its `client_item_key` is retained until `client_item_key_retention_ms`
 -- elapses, so a re-push of the same key is still rejected as a duplicate (Terminal) rather than
 -- resurrecting the work. (A pending purge records no tombstone — its key is freely reusable, matching the
 -- log-replay family.)
-CREATE TABLE IF NOT EXISTS pqueue_item_key_retention (
+CREATE TABLE IF NOT EXISTS fireweed_item_key_retention (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, client_item_key TEXT NOT NULL,
     item_id TEXT NOT NULL, expires_at INTEGER NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, client_item_key)
@@ -123,7 +123,7 @@ CREATE TABLE IF NOT EXISTS pqueue_item_key_retention (
 -- BQ-11e: API-001 request-id replay for request-id-carrying relational operations. The first wired
 -- operation is BatchPush: same `(tenant,queue,operation,request_id)` + same fingerprint replays the stored
 -- response ids; a different fingerprint is `request-id-conflict`.
-CREATE TABLE IF NOT EXISTS pqueue_request_idempotency (
+CREATE TABLE IF NOT EXISTS fireweed_request_idempotency (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, operation TEXT NOT NULL,
     request_id TEXT NOT NULL,
     request_fingerprint BLOB NOT NULL,
@@ -133,36 +133,36 @@ CREATE TABLE IF NOT EXISTS pqueue_request_idempotency (
     created_at INTEGER NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, operation, request_id)
 );
-CREATE INDEX IF NOT EXISTS pqueue_request_idempotency_expiry_idx
-    ON pqueue_request_idempotency (expires_at);
+CREATE INDEX IF NOT EXISTS fireweed_request_idempotency_expiry_idx
+    ON fireweed_request_idempotency (expires_at);
 -- Reverse lookup for renewing retained ClaimByQuery responses.  Keeping this normalized edge avoids
 -- parsing or scanning the queue's complete replay history on every lease renewal.
-CREATE TABLE IF NOT EXISTS pqueue_claim_replay_items (
+CREATE TABLE IF NOT EXISTS fireweed_claim_replay_items (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, request_id TEXT NOT NULL, item_id TEXT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, request_id, item_id)
 );
-CREATE INDEX IF NOT EXISTS pqueue_claim_replay_items_item_idx
-    ON pqueue_claim_replay_items (tenant_id, queue_id, item_id, request_id);
-CREATE TRIGGER IF NOT EXISTS pqueue_claim_replay_items_insert
-AFTER INSERT ON pqueue_request_idempotency
+CREATE INDEX IF NOT EXISTS fireweed_claim_replay_items_item_idx
+    ON fireweed_claim_replay_items (tenant_id, queue_id, item_id, request_id);
+CREATE TRIGGER IF NOT EXISTS fireweed_claim_replay_items_insert
+AFTER INSERT ON fireweed_request_idempotency
 WHEN NEW.operation='claim_by_query'
 BEGIN
-    INSERT OR IGNORE INTO pqueue_claim_replay_items (tenant_id,queue_id,request_id,item_id)
+    INSERT OR IGNORE INTO fireweed_claim_replay_items (tenant_id,queue_id,request_id,item_id)
     SELECT NEW.tenant_id,NEW.queue_id,NEW.request_id,value
     FROM json_each(NEW.response_payload,'$.item_ids');
 END;
 -- One-time upgrade bridge for replay rows written before the normalized reverse index existed.  Normal
 -- steady-state opens hit the migration marker and do no replay-history work.
-INSERT OR IGNORE INTO pqueue_claim_replay_items (tenant_id,queue_id,request_id,item_id)
+INSERT OR IGNORE INTO fireweed_claim_replay_items (tenant_id,queue_id,request_id,item_id)
 SELECT r.tenant_id,r.queue_id,r.request_id,j.value
-FROM pqueue_request_idempotency r,json_each(r.response_payload,'$.item_ids') j
+FROM fireweed_request_idempotency r,json_each(r.response_payload,'$.item_ids') j
 WHERE r.operation='claim_by_query'
-  AND NOT EXISTS (SELECT 1 FROM pqueue_schema_migrations
+  AND NOT EXISTS (SELECT 1 FROM fireweed_schema_migrations
                   WHERE migration_name='claim_replay_items_v1');
-INSERT OR IGNORE INTO pqueue_schema_migrations (migration_name) VALUES ('claim_replay_items_v1');
+INSERT OR IGNORE INTO fireweed_schema_migrations (migration_name) VALUES ('claim_replay_items_v1');
 -- TD-002 §cohort lifecycle projection. The group_key is the logical cohort key; cohort_id is the stable
 -- generation identity returned to callers and changes only after terminal retention permits group reuse.
-CREATE TABLE IF NOT EXISTS pqueue_cohorts (
+CREATE TABLE IF NOT EXISTS fireweed_cohorts (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, group_key TEXT NOT NULL,
     cohort_id TEXT NOT NULL,
     cohort_size INTEGER NOT NULL,
@@ -176,37 +176,37 @@ CREATE TABLE IF NOT EXISTS pqueue_cohorts (
     created_at INTEGER NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, group_key)
 );
-CREATE INDEX IF NOT EXISTS pqueue_cohorts_claim_idx
-    ON pqueue_cohorts (tenant_id, queue_id, state)
+CREATE INDEX IF NOT EXISTS fireweed_cohorts_claim_idx
+    ON fireweed_cohorts (tenant_id, queue_id, state)
     WHERE state='complete';
-CREATE INDEX IF NOT EXISTS pqueue_cohorts_expiry_idx
-    ON pqueue_cohorts (tenant_id, queue_id, cohort_created_at)
+CREATE INDEX IF NOT EXISTS fireweed_cohorts_expiry_idx
+    ON fireweed_cohorts (tenant_id, queue_id, cohort_created_at)
     WHERE state IN ('forming','complete');
--- BQ-14d: gates (TD-002 §gate / API-001 g2). `pqueue_item_gates` is the item↔gate-key membership
--- (inserted on Push); `pqueue_gate_state` is the queue's BLOCKED gate keys (one row per blocked key,
+-- BQ-14d: gates (TD-002 §gate / API-001 g2). `fireweed_item_gates` is the item↔gate-key membership
+-- (inserted on Push); `fireweed_gate_state` is the queue's BLOCKED gate keys (one row per blocked key,
 -- maintained by SetGates). An item is gate-blocked (ineligible) iff any of its gate keys is in
--- pqueue_gate_state — the eligibility predicate anti-joins these (exact-on-read, O(blocked keys)).
-CREATE TABLE IF NOT EXISTS pqueue_item_gates (
+-- fireweed_gate_state — the eligibility predicate anti-joins these (exact-on-read, O(blocked keys)).
+CREATE TABLE IF NOT EXISTS fireweed_item_gates (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, item_id TEXT NOT NULL, gate_key TEXT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, item_id, gate_key)
 );
-CREATE TABLE IF NOT EXISTS pqueue_gate_state (
+CREATE TABLE IF NOT EXISTS fireweed_gate_state (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, gate_key TEXT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, gate_key)
 );
 -- C9 (epic pqueue-2201fd37): opaque NON-WORK side records written by the authoritative vectorized
--- claimed-work commit (Snorri StateStore boundary). Deliberately SEPARATE from `pqueue_items`: a side
+-- claimed-work commit (Snorri StateStore boundary). Deliberately SEPARATE from `fireweed_items`: a side
 -- record carries no lifecycle/lease/priority/eligibility, so it is never claimable, eligible, peekable, or
--- counted as work. `key`/`payload` are opaque bytes pqueue stores verbatim; the apply arm upserts by key.
-CREATE TABLE IF NOT EXISTS pqueue_side_records (
+-- counted as work. `key`/`payload` are opaque bytes fireweed stores verbatim; the apply arm upserts by key.
+CREATE TABLE IF NOT EXISTS fireweed_side_records (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, key BLOB NOT NULL, payload BLOB NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, key)
 );
 -- C6 (epic pqueue-2201fd37): caller-supplied opaque instance/state fences advanced by the authoritative
--- vectorized claimed-work commit (Snorri StateStore boundary). SEPARATE from `pqueue_items`: a fence carries
+-- vectorized claimed-work commit (Snorri StateStore boundary). SEPARATE from `fireweed_items`: a fence carries
 -- no lifecycle/lease and is never claimable/eligible/peekable. `instance_key` is opaque bytes; an absent key
 -- reads as fence 0 (the unset convention). The commit upserts the row to `next` only after validation.
-CREATE TABLE IF NOT EXISTS pqueue_instance_fences (
+CREATE TABLE IF NOT EXISTS fireweed_instance_fences (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, instance_key BLOB NOT NULL, fence INTEGER NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, instance_key)
 );
@@ -215,7 +215,7 @@ CREATE TABLE IF NOT EXISTS pqueue_instance_fences (
 -- logic before INSERT (SQL cannot express a per-name unique constraint on a single row). Rows are inserted
 -- on Push/ReplacePending/UpdateFields and deleted only on PurgeItems — terminal items keep their index
 -- rows so they are still findable (parity with in-memory projection).
-CREATE TABLE IF NOT EXISTS pqueue_item_index (
+CREATE TABLE IF NOT EXISTS fireweed_item_index (
     tenant_id TEXT NOT NULL,
     queue_id TEXT NOT NULL,
     index_name TEXT NOT NULL,
@@ -223,15 +223,15 @@ CREATE TABLE IF NOT EXISTS pqueue_item_index (
     item_id TEXT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, index_name, item_id)
 );
-CREATE INDEX IF NOT EXISTS pqueue_item_index_key_idx
-    ON pqueue_item_index (tenant_id, queue_id, index_name, index_key);
+CREATE INDEX IF NOT EXISTS fireweed_item_index_key_idx
+    ON fireweed_item_index (tenant_id, queue_id, index_name, index_key);
 -- API-004 hot scans use `(index_key,item_id)` as their stable keyset.  Keep both
 -- physical directions because reversing an ASC index also reverses `item_id`, while
 -- the public cursor contract always uses item id ascending as its final tiebreaker.
-CREATE INDEX IF NOT EXISTS pqueue_item_index_key_item_asc_idx
-    ON pqueue_item_index (tenant_id, queue_id, index_name, index_key ASC, item_id ASC);
-CREATE INDEX IF NOT EXISTS pqueue_item_index_key_item_desc_idx
-    ON pqueue_item_index (tenant_id, queue_id, index_name, index_key DESC, item_id ASC);
+CREATE INDEX IF NOT EXISTS fireweed_item_index_key_item_asc_idx
+    ON fireweed_item_index (tenant_id, queue_id, index_name, index_key ASC, item_id ASC);
+CREATE INDEX IF NOT EXISTS fireweed_item_index_key_item_desc_idx
+    ON fireweed_item_index (tenant_id, queue_id, index_name, index_key DESC, item_id ASC);
 -- objectlog/hybrid-async logical checkpoint lineage (bead pqueue-16b85e28, plan §Snapshot Authority).
 -- The async SQLite checkpoint worker records, per queue, the object-log lineage the durable SQLite
 -- projection was last advanced from: the LOGICAL high-water it reached (relational_cursor.next_seq at
@@ -241,7 +241,7 @@ CREATE INDEX IF NOT EXISTS pqueue_item_index_key_item_desc_idx
 -- a storage-file concern that reclaims WAL frames and never advances the command cursor. The row is
 -- upserted in the SAME transaction that advances the logical high-water, so recorded lineage can never be
 -- ahead of durably materialized projection state.
-CREATE TABLE IF NOT EXISTS pqueue_checkpoint_lineage (
+CREATE TABLE IF NOT EXISTS fireweed_checkpoint_lineage (
     tenant TEXT NOT NULL, queue TEXT NOT NULL,
     logical_high_water INTEGER NOT NULL,   -- relational_cursor.next_seq reached by this checkpoint
     source_epoch INTEGER NOT NULL,         -- object-log assignment epoch the batch was committed under
@@ -254,20 +254,20 @@ CREATE TABLE IF NOT EXISTS pqueue_checkpoint_lineage (
 
 /// Application tables owned by a disposable relational projection, in dependency-safe drop order.
 pub const OWNED_PROJECTION_TABLES: &[&str] = &[
-    "pqueue_checkpoint_lineage",
-    "pqueue_item_index",
-    "pqueue_instance_fences",
-    "pqueue_side_records",
-    "pqueue_gate_state",
-    "pqueue_item_gates",
-    "pqueue_cohorts",
-    "pqueue_claim_replay_items",
-    "pqueue_request_idempotency",
-    "pqueue_item_key_retention",
-    "pqueue_group_summary",
+    "fireweed_checkpoint_lineage",
+    "fireweed_item_index",
+    "fireweed_instance_fences",
+    "fireweed_side_records",
+    "fireweed_gate_state",
+    "fireweed_item_gates",
+    "fireweed_cohorts",
+    "fireweed_claim_replay_items",
+    "fireweed_request_idempotency",
+    "fireweed_item_key_retention",
+    "fireweed_group_summary",
     "relational_emission_cursor",
-    "pqueue_id_high_water",
-    "pqueue_items",
+    "fireweed_id_high_water",
+    "fireweed_items",
     "relational_cursor",
     "queues",
 ];

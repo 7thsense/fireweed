@@ -312,9 +312,9 @@ async fn accepted_push_full_chunk_materializes_items_gates_and_indexes() {
     .unwrap();
 
     for (table, expected) in [
-        ("pqueue_items", 47),
-        ("pqueue_item_gates", 47),
-        ("pqueue_item_index", 47),
+        ("fireweed_items", 47),
+        ("fireweed_item_gates", 47),
+        ("fireweed_item_index", 47),
     ] {
         assert_eq!(
             turso
@@ -328,7 +328,7 @@ async fn accepted_push_full_chunk_materializes_items_gates_and_indexes() {
     assert_eq!(
         turso
             .query(
-                "SELECT MIN(created_seq),MAX(created_seq) FROM pqueue_items",
+                "SELECT MIN(created_seq),MAX(created_seq) FROM fireweed_items",
                 vec![],
             )
             .await
@@ -457,7 +457,7 @@ async fn grouped_typed_cohort_lifecycle_is_atomic_and_refreshes_summary() {
     let cohort_id = CohortId::new("coh:cohort-a:10000000000").unwrap();
     let cohort = turso
         .query(
-            "SELECT cohort_id,cohort_size,member_count,state FROM pqueue_cohorts",
+            "SELECT cohort_id,cohort_size,member_count,state FROM fireweed_cohorts",
             vec![],
         )
         .await
@@ -473,7 +473,7 @@ async fn grouped_typed_cohort_lifecycle_is_atomic_and_refreshes_summary() {
     );
     assert_eq!(
         turso
-            .query("SELECT COUNT(*) FROM pqueue_item_index", vec![])
+            .query("SELECT COUNT(*) FROM fireweed_item_index", vec![])
             .await
             .unwrap()[0]
             .values,
@@ -482,7 +482,7 @@ async fn grouped_typed_cohort_lifecycle_is_atomic_and_refreshes_summary() {
     assert_eq!(
         turso
             .query(
-                "SELECT eligible_item_count FROM pqueue_group_summary WHERE group_key=?1",
+                "SELECT eligible_item_count FROM fireweed_group_summary WHERE group_key=?1",
                 vec![Value::Text(group.as_str().to_string())],
             )
             .await
@@ -555,7 +555,10 @@ async fn grouped_typed_cohort_lifecycle_is_atomic_and_refreshes_summary() {
     .unwrap();
     assert_eq!(
         turso
-            .query("SELECT DISTINCT lease_expires_at FROM pqueue_items", vec![],)
+            .query(
+                "SELECT DISTINCT lease_expires_at FROM fireweed_items",
+                vec![],
+            )
             .await
             .unwrap()[0]
             .values,
@@ -579,7 +582,7 @@ async fn grouped_typed_cohort_lifecycle_is_atomic_and_refreshes_summary() {
     .unwrap();
     assert_eq!(
         turso
-            .query("SELECT state,retention_until FROM pqueue_cohorts", vec![],)
+            .query("SELECT state,retention_until FROM fireweed_cohorts", vec![],)
             .await
             .unwrap()[0]
             .values,
@@ -591,7 +594,7 @@ async fn grouped_typed_cohort_lifecycle_is_atomic_and_refreshes_summary() {
     assert_eq!(
         turso
             .query(
-                "SELECT eligible_item_count FROM pqueue_group_summary",
+                "SELECT eligible_item_count FROM fireweed_group_summary",
                 vec![],
             )
             .await
@@ -643,7 +646,7 @@ async fn grouped_push_unique_conflict_and_cohort_expiry_roll_back_or_converge() 
     ));
     assert_eq!(
         turso
-            .query("SELECT COUNT(*) FROM pqueue_items", vec![])
+            .query("SELECT COUNT(*) FROM fireweed_items", vec![])
             .await
             .unwrap()[0]
             .values,
@@ -688,7 +691,7 @@ async fn grouped_push_unique_conflict_and_cohort_expiry_roll_back_or_converge() 
     .unwrap();
     let states = turso
         .query(
-            "SELECT item_id,lifecycle_state FROM pqueue_items ORDER BY item_id",
+            "SELECT item_id,lifecycle_state FROM fireweed_items ORDER BY item_id",
             vec![],
         )
         .await
@@ -699,7 +702,7 @@ async fn grouped_push_unique_conflict_and_cohort_expiry_roll_back_or_converge() 
     assert_eq!(
         turso
             .query(
-                "SELECT eligible_item_count FROM pqueue_group_summary WHERE group_key=?1",
+                "SELECT eligible_item_count FROM fireweed_group_summary WHERE group_key=?1",
                 vec![Value::Text(group.as_str().to_string())],
             )
             .await
@@ -710,7 +713,7 @@ async fn grouped_push_unique_conflict_and_cohort_expiry_roll_back_or_converge() 
     assert_eq!(
         turso
             .query(
-                "SELECT state,expire_command_pos,retention_until FROM pqueue_cohorts",
+                "SELECT state,expire_command_pos,retention_until FROM fireweed_cohorts",
                 vec![],
             )
             .await
@@ -741,7 +744,7 @@ async fn apply_turso(
 async fn group_summary_count(turso: &TursoRelational, group: &GroupKey) -> i64 {
     match &turso
         .query(
-            "SELECT eligible_item_count FROM pqueue_group_summary WHERE group_key=?1",
+            "SELECT eligible_item_count FROM fireweed_group_summary WHERE group_key=?1",
             vec![Value::Text(group.as_str().to_string())],
         )
         .await
@@ -1069,7 +1072,7 @@ async fn grouped_replace_is_rejected_before_projection_mutation() {
     assert_eq!(group_summary_count(&turso, &group).await, 1);
     assert_eq!(
         turso
-            .query("SELECT item_id,superseded FROM pqueue_items", vec![],)
+            .query("SELECT item_id,superseded FROM fireweed_items", vec![],)
             .await
             .unwrap()[0]
             .values,
@@ -1131,7 +1134,7 @@ async fn grouped_replace_is_rejected_before_projection_mutation() {
     assert_eq!(
         turso
             .query(
-                "SELECT superseded FROM pqueue_items WHERE item_id=?1",
+                "SELECT superseded FROM fireweed_items WHERE item_id=?1",
                 vec![Value::Text(ungrouped.to_string())],
             )
             .await
@@ -1193,7 +1196,7 @@ async fn typed_update_and_replace_preserve_unique_index_atomicity_and_replay() {
     .unwrap();
     let before_item = turso
         .query(
-            "SELECT fields,payload,entity_document FROM pqueue_items WHERE item_id=?1",
+            "SELECT fields,payload,entity_document FROM fireweed_items WHERE item_id=?1",
             vec![Value::Text(first.to_string())],
         )
         .await
@@ -1202,7 +1205,7 @@ async fn typed_update_and_replace_preserve_unique_index_atomicity_and_replay() {
         .clone();
     let before_index = turso
         .query(
-            "SELECT index_key FROM pqueue_item_index WHERE item_id=?1",
+            "SELECT index_key FROM fireweed_item_index WHERE item_id=?1",
             vec![Value::Text(first.to_string())],
         )
         .await
@@ -1237,7 +1240,7 @@ async fn typed_update_and_replace_preserve_unique_index_atomicity_and_replay() {
     assert_eq!(
         turso
             .query(
-                "SELECT fields,payload,entity_document FROM pqueue_items WHERE item_id=?1",
+                "SELECT fields,payload,entity_document FROM fireweed_items WHERE item_id=?1",
                 vec![Value::Text(first.to_string())],
             )
             .await
@@ -1248,7 +1251,7 @@ async fn typed_update_and_replace_preserve_unique_index_atomicity_and_replay() {
     assert_eq!(
         turso
             .query(
-                "SELECT index_key FROM pqueue_item_index WHERE item_id=?1",
+                "SELECT index_key FROM fireweed_item_index WHERE item_id=?1",
                 vec![Value::Text(first.to_string())],
             )
             .await
@@ -1290,7 +1293,7 @@ async fn typed_update_and_replace_preserve_unique_index_atomicity_and_replay() {
         .unwrap();
     let changed = turso
         .query(
-            "SELECT fields,payload,entity_document FROM pqueue_items WHERE item_id=?1",
+            "SELECT fields,payload,entity_document FROM fireweed_items WHERE item_id=?1",
             vec![Value::Text(first.to_string())],
         )
         .await
@@ -1304,7 +1307,7 @@ async fn typed_update_and_replace_preserve_unique_index_atomicity_and_replay() {
     );
     let changed_index = turso
         .query(
-            "SELECT index_key FROM pqueue_item_index WHERE item_id=?1",
+            "SELECT index_key FROM fireweed_item_index WHERE item_id=?1",
             vec![Value::Text(first.to_string())],
         )
         .await
@@ -1339,7 +1342,7 @@ async fn typed_update_and_replace_preserve_unique_index_atomicity_and_replay() {
     assert_eq!(
         turso
             .query(
-                "SELECT item_id FROM pqueue_item_index WHERE index_name='by_email' ORDER BY item_id",
+                "SELECT item_id FROM fireweed_item_index WHERE index_name='by_email' ORDER BY item_id",
                 vec![],
             )
             .await
@@ -1355,7 +1358,7 @@ async fn typed_update_and_replace_preserve_unique_index_atomicity_and_replay() {
     assert_eq!(
         turso
             .query(
-                "SELECT COUNT(*) FROM pqueue_item_gates WHERE item_id=?1 AND gate_key='replacement-gate'",
+                "SELECT COUNT(*) FROM fireweed_item_gates WHERE item_id=?1 AND gate_key='replacement-gate'",
                 vec![Value::Text(replacement.to_string())],
             )
             .await
@@ -1373,7 +1376,7 @@ async fn typed_update_and_replace_preserve_unique_index_atomicity_and_replay() {
 
     let second_before = turso
         .query(
-            "SELECT superseded,entity_document FROM pqueue_items WHERE item_id=?1",
+            "SELECT superseded,entity_document FROM fireweed_items WHERE item_id=?1",
             vec![Value::Text(second.to_string())],
         )
         .await
@@ -1382,7 +1385,7 @@ async fn typed_update_and_replace_preserve_unique_index_atomicity_and_replay() {
         .clone();
     let second_index_before = turso
         .query(
-            "SELECT index_key FROM pqueue_item_index WHERE item_id=?1",
+            "SELECT index_key FROM fireweed_item_index WHERE item_id=?1",
             vec![Value::Text(second.to_string())],
         )
         .await
@@ -1406,7 +1409,7 @@ async fn typed_update_and_replace_preserve_unique_index_atomicity_and_replay() {
     assert_eq!(
         turso
             .query(
-                "SELECT superseded,entity_document FROM pqueue_items WHERE item_id=?1",
+                "SELECT superseded,entity_document FROM fireweed_items WHERE item_id=?1",
                 vec![Value::Text(second.to_string())],
             )
             .await
@@ -1417,7 +1420,7 @@ async fn typed_update_and_replace_preserve_unique_index_atomicity_and_replay() {
     assert_eq!(
         turso
             .query(
-                "SELECT index_key FROM pqueue_item_index WHERE item_id=?1",
+                "SELECT index_key FROM fireweed_item_index WHERE item_id=?1",
                 vec![Value::Text(second.to_string())],
             )
             .await
@@ -1428,7 +1431,7 @@ async fn typed_update_and_replace_preserve_unique_index_atomicity_and_replay() {
     assert!(
         turso
             .query(
-                "SELECT item_id FROM pqueue_items WHERE item_id=?1",
+                "SELECT item_id FROM fireweed_items WHERE item_id=?1",
                 vec![Value::Text(conflict_replacement.to_string())],
             )
             .await
@@ -1828,9 +1831,9 @@ async fn configures_and_verifies_the_exact_shared_schema() {
         assert!(report.tables.iter().any(|actual| actual == table));
     }
     for index in [
-        "pqueue_items_active_key",
-        "pqueue_items_group_due_idx",
-        "pqueue_item_index_key_idx",
+        "fireweed_items_active_key",
+        "fireweed_items_group_due_idx",
+        "fireweed_item_index_key_idx",
     ] {
         assert!(report.indexes.iter().any(|actual| actual == index));
     }
@@ -1884,12 +1887,12 @@ async fn immediate_batch_rolls_back_every_statement_on_error() {
     let result = store
         .execute_immediate(&[
             RelationalStatement::new(
-                "INSERT INTO pqueue_side_records(tenant_id,queue_id,key,payload) \
+                "INSERT INTO fireweed_side_records(tenant_id,queue_id,key,payload) \
                  VALUES(?1,?2,?3,?4)",
                 vec!["t".into(), "q".into(), vec![1_u8].into(), vec![2_u8].into()],
             ),
             RelationalStatement::new(
-                "INSERT INTO pqueue_side_records(tenant_id,queue_id,key,payload) \
+                "INSERT INTO fireweed_side_records(tenant_id,queue_id,key,payload) \
                  VALUES(?1,?2,?3,?4)",
                 vec!["t".into(), "q".into(), vec![1_u8].into(), vec![3_u8].into()],
             ),
@@ -1898,7 +1901,7 @@ async fn immediate_batch_rolls_back_every_statement_on_error() {
     assert!(matches!(result, Err(TursoRelationalError::Database(_))));
 
     let rows = store
-        .query("SELECT COUNT(*) FROM pqueue_side_records", vec![])
+        .query("SELECT COUNT(*) FROM fireweed_side_records", vec![])
         .await
         .expect("count");
     assert_eq!(rows[0].values, vec![Value::Integer(0)]);
@@ -2239,7 +2242,7 @@ async fn lease_lifecycle_matches_sqlite_and_failed_batch_rolls_back_cursor_and_r
     .await;
     turso
         .execute(
-            "INSERT INTO pqueue_request_idempotency \
+            "INSERT INTO fireweed_request_idempotency \
              (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,\
               command_positions,expires_at,created_at) VALUES(?1,?2,'claim_by_query',?3,?4,?5,?6,?7,?8)",
             vec![
@@ -2302,7 +2305,7 @@ async fn lease_lifecycle_matches_sqlite_and_failed_batch_rolls_back_cursor_and_r
     assert_eq!(renewed[0].item_version, 3);
     let replay = turso
         .query(
-            "SELECT expires_at FROM pqueue_request_idempotency WHERE request_id=?1",
+            "SELECT expires_at FROM fireweed_request_idempotency WHERE request_id=?1",
             vec!["renewed-request".into()],
         )
         .await
@@ -3155,7 +3158,7 @@ async fn purge_retains_pending_leased_and_terminal_keys_like_async_sqlite() {
 
         let tombstone = turso
             .query(
-                "SELECT item_id,expires_at FROM pqueue_item_key_retention \
+                "SELECT item_id,expires_at FROM fireweed_item_key_retention \
                  WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3",
                 vec!["tenant".into(), "queue".into(), key.into()],
             )
@@ -3441,7 +3444,7 @@ async fn control_gate_update_replace_and_purge_match_sqlite() {
             .sequence,
         10
     );
-    let tombstone = turso.query("SELECT item_id,expires_at FROM pqueue_item_key_retention WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3", vec!["tenant".into(), "queue".into(), "purge-key".into()]).await.unwrap();
+    let tombstone = turso.query("SELECT item_id,expires_at FROM fireweed_item_key_retention WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3", vec!["tenant".into(), "queue".into(), "purge-key".into()]).await.unwrap();
     assert_eq!(tombstone[0].values[0], Value::Text(purged.to_string()));
     assert_eq!(tombstone[0].values[1], Value::Integer(80_000_000_000));
 

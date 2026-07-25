@@ -23,7 +23,7 @@ ddx:
 ## Scope
 
 This plan defines the scale evidence required to substantiate every horizontal-
-scale, write-rate, and hot-queue claim made across the pqueue frame and design.
+scale, write-rate, and hot-queue claim made across the fireweed frame and design.
 It is the canonical home for the scale evidence-record scheme (E0–E3), the
 benchmark pass bars, the requirement-coverage rows for the cross-queue scale-out
 mechanism, the named scale test suites, and the docs-lint scale-claim checklist.
@@ -98,7 +98,7 @@ Release-gate mapping as of 2026-06-16 (**pre-ADR-008 build record**):
 > of independent `object_log_sqlite_projection` owner pods (2/4/8 owners, one queue
 > per owner on disjoint bootstrap queues, CPU-limited server pods driven by a lean
 > in-cluster RESP load Job over Service ClusterIP; harness
-> `crates/pqueue-bench/tests/performance_cross_queue_scale_out_tests.rs` ::
+> `crates/fireweed-bench/tests/performance_cross_queue_scale_out_tests.rs` ::
 > `live_multi_node_object_log_sqlite_projection_e2` +
 > `scripts/perf/tp002-e2-kind.sh`). The historical run recorded:
 > (1) ingest aggregate non-decreasing **8,206 → 15,726 → 30,088 items/s** across
@@ -110,7 +110,7 @@ Release-gate mapping as of 2026-06-16 (**pre-ADR-008 build record**):
 > kind v0.32.0. (Build-provenance note: in this sandbox the source `Dockerfile.e2`
 > cannot authenticate the private git dependencies inside the Docker builder, so
 > the harness image was assembled from host-built release binaries via the
-> prebuilt-image path — `SKIP_BUILD=1` + `PQUEUE_E2_IMAGE` — which is a packaging
+> prebuilt-image path — `SKIP_BUILD=1` + `FIREWEED_E2_IMAGE` — which is a packaging
 > detail only; the binaries, backend, cluster topology, and load are identical to
 > the source-build path.) These absolute rates and ratios remain topology-bound
 > capacity evidence; current release qualification applies the portable E0/E2
@@ -135,7 +135,7 @@ E0–E3 rows remain useful build records, but they cannot make a later tag green
 For every release tag, the governed evidence commands MUST run from the exact
 40-character commit named by that tag and produce a new reviewed attestation.
 The tag gate supplies both the tag and resolved commit to
-`pqueue-verify-evidence-attestation`; a mismatch fails closed.
+`fireweed-verify-evidence-attestation`; a mismatch fails closed.
 
 The policy deliberately favors a simple, auditable rule over reviewed-range
 reuse: even a docs-only release commit invalidates the prior attestation. This
@@ -165,7 +165,7 @@ The Rust deserializer independently rejects unknown fields, and the semantic
 verifier enforces the cross-field and filesystem rules that JSON Schema cannot.
 
 Directory SHA-256 values use the canonical implementation in
-`pqueue_release::attestation::digest_path`: recursively sorted regular files,
+`fireweed_release::attestation::digest_path`: recursively sorted regular files,
 with relative names, lengths, and contents in the digest. Absolute paths,
 `..`, symlinks, missing inputs, duplicate bindings, malformed hashes, unknown
 schema fields, and digest drift are rejected. Therefore a code, harness,
@@ -175,7 +175,7 @@ attestation cannot silently reuse a green result.
 The enforcement command is:
 
 ```bash
-cargo run -p pqueue-release --bin pqueue-verify-evidence-attestation -- \
+cargo run -p fireweed-release --bin fireweed-verify-evidence-attestation -- \
   --manifest <attestation.json> --repo-root . \
   --tag "${RELEASE_TAG}" --commit "${RELEASE_COMMIT}"
 ```

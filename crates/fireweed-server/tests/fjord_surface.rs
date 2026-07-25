@@ -65,7 +65,7 @@ fn free_port() -> u16 {
 fn test_fjord_config() -> EmbeddedFjordConfig {
     EmbeddedFjordConfig {
         namespace_root: std::env::temp_dir().join(format!(
-            "pqueue-fjord-test-{}-{}",
+            "fireweed-fjord-test-{}-{}",
             std::process::id(),
             free_port()
         )),
@@ -189,7 +189,8 @@ fn no_c_kafka_client_dependency() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embedded_fjord_surface_uses_dedicated_namespace_root() {
-    let base = std::env::temp_dir().join(format!("pqueue-fjord-namespace-{}", std::process::id()));
+    let base =
+        std::env::temp_dir().join(format!("fireweed-fjord-namespace-{}", std::process::id()));
     let config = EmbeddedFjordConfig {
         namespace_root: base.join("fjord-state"),
         cluster_id: "fjord-test-cluster".to_string(),
@@ -438,7 +439,7 @@ fn kafka_surface_keeps_consumer_group_state_tenant_scoped() {
 /// The ADR-014 "Normative consumer contract", verified WITHOUT any Kafka client: change records are appended
 /// in-process to the embedded broker's shared Rust log and read back through the same log's fetch path (the
 /// exact Kafka v2 record batches an external consumer would receive). Asserts partition 0, monotonic
-/// offsets, stable idempotency keys, the JSON payload, and the pinned `pq-*` headers.
+/// offsets, stable idempotency keys, the JSON payload, and the pinned `fireweed-*` headers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fjord_surface_contract_verified_without_rdkafka() {
     let queue = queue_definition("tenant-a", "queue-a");
@@ -477,37 +478,37 @@ async fn fjord_surface_contract_verified_without_rdkafka() {
         assert_eq!(decoded.position.sequence, (idx + 1) as u64);
         assert_eq!(decoded, records[idx]);
 
-        // Headers: the ADR-014:116 pinned wire order (item-scoped records carry pq-item-id third).
+        // Headers: the ADR-014:116 pinned wire order (item-scoped records carry fireweed-item-id third).
         let header_keys: Vec<&str> = message.headers.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(
             header_keys,
             vec![
-                "pq-tenant-id",
-                "pq-queue-id",
-                "pq-item-id",
-                "pq-backend-epoch",
-                "pq-sequence",
-                "pq-command-kind",
+                "fireweed-tenant-id",
+                "fireweed-queue-id",
+                "fireweed-item-id",
+                "fireweed-backend-epoch",
+                "fireweed-sequence",
+                "fireweed-command-kind",
             ]
         );
         assert_eq!(
-            header_value(message, "pq-tenant-id"),
+            header_value(message, "fireweed-tenant-id"),
             Some(b"tenant-a".as_ref())
         );
         assert_eq!(
-            header_value(message, "pq-queue-id"),
+            header_value(message, "fireweed-queue-id"),
             Some(b"queue-a".as_ref())
         );
         assert_eq!(
-            header_value(message, "pq-item-id"),
+            header_value(message, "fireweed-item-id"),
             Some(format!("{}", idx + 1).as_bytes())
         );
         assert_eq!(
-            header_value(message, "pq-backend-epoch"),
+            header_value(message, "fireweed-backend-epoch"),
             Some(b"7".as_ref())
         );
         assert_eq!(
-            header_value(message, "pq-sequence"),
+            header_value(message, "fireweed-sequence"),
             Some(format!("{}", idx + 1).as_bytes())
         );
 
@@ -531,7 +532,7 @@ async fn fjord_surface_contract_verified_without_rdkafka() {
 /// embedded log, then consume it back over the embedded `HeimqServer`'s TCP Kafka fetch surface using the
 /// pure-Rust `rskafka` CONSUMER. This proves the broker actually serves the in-process appends over Kafka
 /// (not just that the bytes are stored), and asserts the same ADR-014 contract: partition 0, offset 0
-/// (monotonic), idempotency key `{item_id}:{backend_epoch}:{sequence}`, the pq-* headers with correct
+/// (monotonic), idempotency key `{item_id}:{backend_epoch}:{sequence}`, the fireweed-* headers with correct
 /// values, and the JSON payload. (The owner's "no socket on the write path" rule is upheld: the WRITE is the
 /// in-process append above; this TCP socket is a test CONSUMER only. rskafka returns headers as a `BTreeMap`,
 /// so header WIRE ORDER is verified by `fjord_surface_contract_verified_without_rdkafka`, not here.)
@@ -607,15 +608,15 @@ async fn fjord_surface_contract_verified_over_rskafka_consumer() {
     let decoded: ChangeRecord =
         serde_json::from_slice(payload).expect("payload is ChangeRecord json");
     assert_eq!(decoded, record);
-    // pq-* headers present with correct values (order not asserted here: rskafka returns a BTreeMap).
+    // fireweed-* headers present with correct values (order not asserted here: rskafka returns a BTreeMap).
     let header = |k: &str| consumed_record.headers.get(k).map(|v| v.as_slice());
     assert_eq!(consumed_record.headers.len(), 6);
-    assert_eq!(header("pq-tenant-id"), Some(b"tenant-a".as_ref()));
-    assert_eq!(header("pq-queue-id"), Some(b"queue-a".as_ref()));
-    assert_eq!(header("pq-item-id"), Some(b"1".as_ref()));
-    assert_eq!(header("pq-backend-epoch"), Some(b"7".as_ref()));
-    assert_eq!(header("pq-sequence"), Some(b"1".as_ref()));
-    assert_eq!(header("pq-command-kind"), Some(b"push".as_ref()));
+    assert_eq!(header("fireweed-tenant-id"), Some(b"tenant-a".as_ref()));
+    assert_eq!(header("fireweed-queue-id"), Some(b"queue-a".as_ref()));
+    assert_eq!(header("fireweed-item-id"), Some(b"1".as_ref()));
+    assert_eq!(header("fireweed-backend-epoch"), Some(b"7".as_ref()));
+    assert_eq!(header("fireweed-sequence"), Some(b"1".as_ref()));
+    assert_eq!(header("fireweed-command-kind"), Some(b"push".as_ref()));
 
     broker.abort();
 }

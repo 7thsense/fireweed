@@ -140,36 +140,43 @@ async fn objectlog_hybrid_recovery_hydrates_replays_tail_and_rebuilds_request_id
 async fn objectlog_hybrid_public_strict_failure_replay_and_request_id_conflict() {
     let root = tmp_root();
     let config = public_config(&root, 1_000);
-    let pq =
+    let fireweed =
         fireweed::open_objectlog_sqlite(config, Arc::new(fireweed_memory::ManualClock::at(1_000)))
             .unwrap();
     let queue = shard();
-    pq.create_queue(qdef()).await.unwrap();
+    fireweed.create_queue(qdef()).await.unwrap();
     let request = RequestId::new("public-strict-request").unwrap();
 
-    let first = pq
+    let first = fireweed
         .push_with_request_id(&queue, request.clone(), public_item(10))
         .await
         .unwrap();
-    let verification = pq.projection_control().unwrap().verify().await.unwrap();
+    let verification = fireweed
+        .projection_control()
+        .unwrap()
+        .verify()
+        .await
+        .unwrap();
     assert_eq!(
         verification.projection_sequence, verification.authoritative_sequence,
         "strict returned success is manifest-committed and SQLite-visible"
     );
     assert_eq!(
-        pq.push_with_request_id(&queue, request.clone(), public_item(10))
+        fireweed
+            .push_with_request_id(&queue, request.clone(), public_item(10))
             .await
             .unwrap(),
         first,
         "same request and body replay the original result"
     );
     assert!(matches!(
-        pq.push_with_request_id(&queue, request, public_item(11))
+        fireweed
+            .push_with_request_id(&queue, request, public_item(11))
             .await,
         Err(fireweed::EngineError::RequestIdConflict)
     ));
-    assert_eq!(pq.metrics(&queue).await.unwrap().pending, 1);
-    drop(pq);
+    assert_eq!(fireweed.metrics(&queue).await.unwrap().pending, 1);
+    drop(fireweed);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -177,21 +184,32 @@ async fn objectlog_hybrid_public_strict_failure_replay_and_request_id_conflict()
 async fn objectlog_hybrid_public_projection_behind_recovers_without_duplicates() {
     let root = tmp_root();
     let config = public_config(&root, 1_000);
-    let pq =
+    let fireweed =
         fireweed::open_objectlog_sqlite(config, Arc::new(fireweed_memory::ManualClock::at(1_000)))
             .unwrap();
     let queue = shard();
-    pq.create_queue(qdef()).await.unwrap();
-    let first = pq.push(&queue, public_item(10)).await.unwrap();
-    let second = pq.push(&queue, public_item(20)).await.unwrap();
-    let expected = pq.metrics(&queue).await.unwrap();
+    fireweed.create_queue(qdef()).await.unwrap();
+    let first = fireweed.push(&queue, public_item(10)).await.unwrap();
+    let second = fireweed.push(&queue, public_item(20)).await.unwrap();
+    let expected = fireweed.metrics(&queue).await.unwrap();
 
-    pq.projection_control().unwrap().delete().await.unwrap();
-    let rebuilt = pq.projection_control().unwrap().rebuild().await.unwrap();
+    fireweed
+        .projection_control()
+        .unwrap()
+        .delete()
+        .await
+        .unwrap();
+    let rebuilt = fireweed
+        .projection_control()
+        .unwrap()
+        .rebuild()
+        .await
+        .unwrap();
     assert_eq!(rebuilt.tail_commands_replayed, 2);
-    assert_eq!(pq.metrics(&queue).await.unwrap(), expected);
+    assert_eq!(fireweed.metrics(&queue).await.unwrap(), expected);
     assert_eq!(
-        pq.peek(&queue, 10)
+        fireweed
+            .peek(&queue, 10)
             .await
             .unwrap()
             .into_iter()
@@ -199,7 +217,7 @@ async fn objectlog_hybrid_public_projection_behind_recovers_without_duplicates()
             .collect::<Vec<_>>(),
         vec![first, second]
     );
-    drop(pq);
+    drop(fireweed);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -207,16 +225,28 @@ async fn objectlog_hybrid_public_projection_behind_recovers_without_duplicates()
 async fn objectlog_hybrid_public_interrupted_rebuild_recovers_on_reopen() {
     let root = tmp_root();
     let limited = public_config(&root, 1);
-    let pq =
+    let fireweed =
         fireweed::open_objectlog_sqlite(limited, Arc::new(fireweed_memory::ManualClock::at(1_000)))
             .unwrap();
     let queue = shard();
-    pq.create_queue(qdef()).await.unwrap();
-    let first = pq.push(&queue, public_item(10)).await.unwrap();
-    let second = pq.push(&queue, public_item(20)).await.unwrap();
-    pq.projection_control().unwrap().delete().await.unwrap();
-    assert!(pq.projection_control().unwrap().rebuild().await.is_err());
-    drop(pq);
+    fireweed.create_queue(qdef()).await.unwrap();
+    let first = fireweed.push(&queue, public_item(10)).await.unwrap();
+    let second = fireweed.push(&queue, public_item(20)).await.unwrap();
+    fireweed
+        .projection_control()
+        .unwrap()
+        .delete()
+        .await
+        .unwrap();
+    assert!(
+        fireweed
+            .projection_control()
+            .unwrap()
+            .rebuild()
+            .await
+            .is_err()
+    );
+    drop(fireweed);
 
     let reopened = fireweed::open_objectlog_sqlite(
         public_config(&root, 1_000),

@@ -21,7 +21,7 @@ ddx:
 
 ## Goal
 
-Make two existing pqueue capabilities explicit and testable:
+Make two existing fireweed capabilities explicit and testable:
 
 1. Extend the TP-002 E3 cost model with a workload-driven object-granularity model. Inputs are active queue
    count, per-queue command rate, downstream primitive batch size, encoded command bytes,
@@ -65,7 +65,7 @@ and traceability updates. Production protocol, storage topology, and durability 
 
 | Slice | Area | Governing artifacts | Depends on | Validation gate |
 |---|---|---|---|---|
-| SP08-1 | Workload-driven object granularity calculator and report | Product Vision, PRD goal 6/P0-16, TD-004 | None | `cargo test -p pqueue-release` |
+| SP08-1 | Workload-driven object granularity calculator and report | Product Vision, PRD goal 6/P0-16, TD-004 | None | `cargo test -p fireweed-release` |
 | SP08-2 | Deterministic acquire-to-fence/reassignment simulation using real control-plane and object-log transitions | PRD P0-11..15, ADR-008, TD-003, TD-004, SP-02 | None | `acquire_and_fence` returns no session before durable fence/confirmation; focused suite and Clippy pass |
 | SP08-3 | Traceability and release evidence integration | TP-002 E3, TP-003 section 3.11 | SP08-1, SP08-2 | `ddx doc validate`; focused release and simulation suites |
 
@@ -75,7 +75,7 @@ and traceability updates. Production protocol, storage topology, and durability 
 |---|---|---|
 | Economics | Derive object count and cost from active queues, per-queue rate, downstream batch size, encoded command size, target bytes, latency bound, lifetime recovery-index growth, and PUT amplification; show production defaults and sensitivity cases | Choosing one universal segment size; replacing measured E3 evidence |
 | Fault simulation | Exercise acquire, pending fence, durable fence confirmation, serving, owner expiry, reassignment, stale append, retry, recovery, and unrelated-queue progress | A deterministic Tokio runtime; consensus proof; new production coordination |
-| Sealed generation | Document what the paper mechanism does and when pqueue might need it | Implementation or architecture approval |
+| Sealed generation | Document what the paper mechanism does and when fireweed might need it | Implementation or architecture approval |
 
 ## Validation Plan
 

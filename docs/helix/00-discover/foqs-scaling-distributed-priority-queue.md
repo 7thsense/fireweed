@@ -46,7 +46,7 @@ multi-queue worker fan-in, delayed retry, and the boundary between queue storage
 ## Authority Boundary
 
 FOQS is an internal Meta system described at architecture level; the post is not a released protocol,
-compatibility target, or correctness specification. It does not override pqueue's batch result semantics,
+compatibility target, or correctness specification. It does not override fireweed's batch result semantics,
 mutable priority, idempotency, progress bounds, group/cohort claims, backend-independent transaction
 contract, or queue-defined eligibility. Any interface change belongs in API-001 after PRD framing.
 
@@ -54,6 +54,6 @@ contract, or queue-defined eligibility. Any interface change belongs in API-001 
 
 - [x] Source URL and access date are present
 - [x] Summary is concise and source-faithful
-- [x] Findings are relevant to pqueue discovery
+- [x] Findings are relevant to fireweed discovery
 - [x] HELIX usage is specific
 - [x] Boundary prevents over-applying the source

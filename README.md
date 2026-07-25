@@ -18,11 +18,11 @@ Fireweed has two public entry points:
 
 ## Status
 
-Fireweed Queue `v0.20.0` is a public preview. The Fireweed package, binary,
-container image, and Helm chart names are the public coordinates; `pqueue`
-names remain only where the
-[namespace policy](docs/helix/02-design/adr/ADR-020-public-namespace-and-compatibility.md)
-marks them as compatibility, persistence, wire, or historical identifiers.
+Fireweed Queue `v0.20.0` is a public preview. Fireweed names are authoritative
+across packages, binaries, configuration, storage identifiers, wire extensions,
+container images, and the Helm chart. The
+[namespace policy](docs/helix/02-design/adr/ADR-023-pre-release-fireweed-namespace-cutover.md)
+defines this one-way pre-release cutover.
 
 The preview includes the embedded Rust API, the RESP service, local development
 backends, and documented object-log/Postgres deployment compositions. Public
@@ -103,7 +103,7 @@ fail at startup instead of silently selecting another backend.
 
 ## Documentation
 
-- [Choosing a priority queue instead of a stream](docs/helix/01-frame/guides/choosing-pqueue.md)
+- [Choosing a priority queue instead of a stream](docs/helix/01-frame/guides/choosing-fireweed.md)
   explains the workload boundary.
 - [Rust facade source and crate documentation](crates/fireweed/src/lib.rs)
   covers embedded construction and worker lifecycle verbs.
@@ -111,15 +111,14 @@ fail at startup instead of silently selecting another backend.
   composes queue templates, grouped discovery, stateless dispersion, bounded
   multi-queue claims, and worker finalization over durable relational SQLite.
 - [Container runtime contract](docs/deployment/container-runtime-contract.md)
-  lists runtime settings, storage profiles, and retained compatibility names.
+  lists runtime settings and storage profiles.
 - [Operator deployment guide](docs/deployment/operator-guide.md) covers Helm,
   storage axes, upgrades, and verification.
 - [Release artifact verification](docs/deployment/operator-release-artifacts.md)
   covers images, charts, archives, and checksums.
 - [Operator microsite](docs/operator/index.html) provides an openable deployment
   reference.
-- [v0.20.0 release notes](docs/releases/v0.20.0.md) describe the Fireweed rename
-  and compatibility boundary.
+- [v0.20.0 release notes](docs/releases/v0.20.0.md) describe the Fireweed rename.
 
 For source development, the standard local gates are:
 
@@ -135,7 +134,7 @@ provisioned services; their linked guides name the required environment.
 ## Contributing
 
 Issues are welcome for bugs, feature requests, documentation problems, usage
-questions, and compatibility reports. Search existing documentation and issues
+questions, and interoperability reports. Search existing documentation and issues
 first, then include the Fireweed version, storage configuration, expected
 result, actual result, and a minimal reproduction.
 

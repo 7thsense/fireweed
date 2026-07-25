@@ -1,6 +1,6 @@
 //! Owned execution boundary for the synchronous durable library backends.
 //!
-//! Engine ports are async-shaped, but the embedded SQLite, object-log, and
+//! Engine ports are async-shaped, but the composed SQLite, object-log, and
 //! PostgreSQL implementations perform synchronous durable work when their
 //! futures are polled. This adapter transfers every complete port operation to
 //! a fixed set of owned OS workers before polling it. Queue affinity preserves
@@ -197,13 +197,13 @@ impl WorkerPool {
         });
         sender?.try_send(job).map_err(|error| match error {
             mpsc::TrySendError::Full(_) => EngineError::Backpressure {
-                resource: "embedded durable operations",
+                resource: "composed durable operations",
             },
             mpsc::TrySendError::Disconnected(_) => EngineError::Unavailable,
         })?;
         result_rx
             .await
-            .map_err(|_| EngineError::Storage("embedded durable operation worker stopped".into()))?
+            .map_err(|_| EngineError::Storage("composed durable operation worker stopped".into()))?
     }
 
     fn worker_count(&self) -> usize {

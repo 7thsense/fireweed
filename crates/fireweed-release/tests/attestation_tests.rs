@@ -10,8 +10,10 @@ const TAG: &str = "v9.8.7";
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 
 fn temp_repo(test: &str) -> PathBuf {
-    let root =
-        std::env::temp_dir().join(format!("pqueue-attestation-{test}-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "fireweed-attestation-{test}-{}",
+        std::process::id()
+    ));
     let _ = fs::remove_dir_all(&root);
     for directory in ["crates/app/src", "scripts/perf", "config", "evidence"] {
         fs::create_dir_all(root.join(directory)).unwrap();
@@ -177,8 +179,10 @@ fn symlinked_digest_ancestor_cannot_escape_repo_root() {
     use std::os::unix::fs::symlink;
 
     let root = temp_repo("symlink-ancestor");
-    let outside =
-        std::env::temp_dir().join(format!("pqueue-attestation-outside-{}", std::process::id()));
+    let outside = std::env::temp_dir().join(format!(
+        "fireweed-attestation-outside-{}",
+        std::process::id()
+    ));
     let _ = fs::remove_dir_all(&outside);
     fs::create_dir_all(&outside).unwrap();
     fs::write(outside.join("evidence.json"), "{}\n").unwrap();

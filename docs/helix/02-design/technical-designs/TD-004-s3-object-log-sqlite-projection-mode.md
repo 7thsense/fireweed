@@ -37,7 +37,7 @@ ddx:
 ## Scope
 
 This technical design defines the object-log local-projection profiles for
-pqueue. In these modes an S3-compatible object store is the durable command log,
+fireweed. In these modes an S3-compatible object store is the durable command log,
 a local in-memory, SQLite, or hybrid projection serves hot queue operations, the
 same object store holds periodic projection snapshots where configured, and
 Postgres remains the control plane. `object_log_inmemory_projection` is the fast
@@ -52,7 +52,7 @@ a whole queue is owned by exactly one node, so the object log, the manifest, and
 the local projection are all **per-`(tenant, queue)`**, and there is no
 intra-queue sharding or cross-shard command machinery.
 
-This backend exists to substantiate pqueue's horizontal-scale and cost claims with a profile whose
+This backend exists to substantiate fireweed's horizontal-scale and cost claims with a profile whose
 durable-commit cost scales with *segments*, not with *commands* (see ADR-001 napkin cost comparison).
 Horizontal scale is **cross-queue** (ADR-008): many queues across many owners.
 This is the cost-optimized counterpart to the latency-optimized
@@ -272,7 +272,7 @@ snapshots and monotonic deltas are the request/response byte and request-count s
 
 ### Segment format compatibility and integrity
 
-The segment header is `PQSG`, one version byte, `segment_epoch` (`u64` little-endian), and
+The segment header is `FWSG`, one version byte, `segment_epoch` (`u64` little-endian), and
 `first_sequence` (`u64` little-endian). V2 then stores `count` followed by repeated `length + canonical JSON`
 records. Its manifest `checksum` is FNV-1a over `count + records`. V3 stores `count`, repeated
 `length + payload_crc32c + canonical JSON`, and a final CRC32C over every preceding byte. Length fields are
@@ -305,7 +305,7 @@ records; configuration above the frame cap is rejected. These are also the gover
 operators must retain/upgrade or explicitly migrate any pre-release v2 object exceeding them before rollout.
 The two-pass decoder prevents attacker-controlled length/count fields from causing secondary allocations.
 
-Release N reads v2/v3 and defaults `PQUEUE_SEGMENT_WRITER_FORMAT=v2`; `v3` is an opt-in soak setting. Runtime
+Release N reads v2/v3 and defaults `FIREWEED_SEGMENT_WRITER_FORMAT=v2`; `v3` is an opt-in soak setting. Runtime
 rollback may emit v2 after v3, so replay, branch, retention, and recovery MUST accept arbitrary interleaving.
 Release N+1 may default to v3 only after mixed-history and performance evidence passes. Downgrading binaries
 below release N is unsupported while any v3 object remains retained. Committed objects are never rewritten.
@@ -540,7 +540,7 @@ without treating local SQLite as the command authority.
 
 | Element | Rule |
 |---------|------|
-| Image seam | `pqueue-projection` MUST define a typed `ProjectionImage` export/import contract covering queue definition, item lifecycle, lease state, secondary indexes, side records, instance fences, queue paused state, metrics, request-id replay records, and item-id counters. Partial images that only load pending items are invalid. |
+| Image seam | `fireweed-projection` MUST define a typed `ProjectionImage` export/import contract covering queue definition, item lifecycle, lease state, secondary indexes, side records, instance fences, queue paused state, metrics, request-id replay records, and item-id counters. Partial images that only load pending items are invalid. |
 | SQLite export | `SqliteProjectionStore::export_projection_image(queue)` MUST read the durable SQLite projection at its current applied logical high-water (`sqlite_high_water`) into `ProjectionImage`. WAL checkpoint/fsync state is not part of the exported high-water contract. |
 | Memory hydrate | `InMemoryProjection::hydrate_shard(definition, image)` MUST build memory to the exact same logical state before any hot read or validation method is served. |
 | High-water barrier | `HybridProjectionStore::recovery_high_water` MUST return SQLite's high-water only after the in-memory shard has been hydrated from that image. If hydration fails, is incomplete, or has not run, it MUST return `None` or fail closed so `ComposedBackend::recover` replays from genesis rather than skipping log history. |
@@ -612,7 +612,7 @@ idempotency, and use the unknown-outcome rules above in both hybrid modes.
 
 | Operation family | Covered mutations | Same `request_id` retry | Different fingerprint retry | Hybrid-async SQLite-lag note |
 |------------------|-------------------|-------------------------|-----------------------------|------------------------------|
-| Push | `BatchPush`, duplicate `client_item_key` convergence | Returns original item ids and accepted/rejected per-item results | `request-id-conflict` | SQLite may not yet contain `pqueue_request_idempotency`; replay MUST consult committed log or memory replay record |
+| Push | `BatchPush`, duplicate `client_item_key` convergence | Returns original item ids and accepted/rejected per-item results | `request-id-conflict` | SQLite may not yet contain `fireweed_request_idempotency`; replay MUST consult committed log or memory replay record |
 | Claim | `BatchClaim` including group/cohort claims | Returns same active lease set, or `request-expired` after all leases are inactive | `request-id-conflict` | Reservation-only attempts are not committed; committed claims replay from log even if SQLite lags |
 | Renew | `BatchRenewLeases` | Returns the same renewed lease expiry/version effects | `request-id-conflict` | Memory is authoritative for visible active lease state after success |
 | Finalize | `BatchFinalize` success/failure terminal transitions | Returns the original terminal result and item versions | `request-id-conflict` | SQLite lag MUST NOT allow a finalized item to be claimed again from memory |
@@ -635,8 +635,8 @@ its commit and the new owner re-drives on retry. The same applies to any other q
 ## SQLite Projection (normative mapping)
 
 The SQLite projection MUST represent the TD-001 logical projection records and MUST preserve the column
-semantics defined in TD-002 (`pqueue_items`, `pqueue_request_idempotency`, `pqueue_item_key_retention`,
-the gate-state table, the `pqueue_cohorts` projection, and the single per-group summary projection from
+semantics defined in TD-002 (`fireweed_items`, `fireweed_request_idempotency`, `fireweed_item_key_retention`,
+the gate-state table, the `fireweed_cohorts` projection, and the single per-group summary projection from
 MF-PROJ). It is the same logical projection as TD-002, materialized in SQLite instead of Postgres — both
 are members of the relational projection family (ADR-008), held identical by conformance. This is what
 makes conformance parity possible.
@@ -649,14 +649,14 @@ Differences from TD-002 that are normative for SQLite:
 | Applied position | The projection MUST persist its highest applied `sequence` (`last_command_sequence`) so apply is idempotent across restarts and replay. |
 | Claim transaction | `BatchClaim` candidate selection + reservation MUST occur atomically in a single SQLite write transaction (SQLite serializes writers), implementing the API-001 "Eligibility Precedence" predicate and the unified `ClaimPlan` (TD-001). Durable lease state appears only after `apply_committed` of the committed claim command. No second eligibility definition is introduced (MF4). |
 | Group co-residency by construction | Because the queue is the unit of sharding (ADR-008), all items of a `group_key` are in the queue's one SQLite db on its owner, so `whole_group` (G1 `compatibility.group_batching`) and `whole_cohort` (G6 `cohort_policy`) selection are evaluated locally and atomically with no co-residency flag and no routing. `same_group_key` remains an item-level domain filter, NOT `whole_group N=1` (MF1); `whole_cohort` MUST NOT be combined with `same_group_key`/`group_key` (G6). |
-| Recurring / rearm / purge | A recurring queue's `rearm` and in-band `PurgeItems` (G5) are ordinary committed commands applied by `apply_committed`: `rearm` releases lease state, sets `not_before` and `eligible_since = max(commit_time, not_before)`, resets per-cycle retry, and bumps `item_version` WITHOUT marking terminal; `PurgeItems` removes the item row (and, with `force`, the lease; a leased item without `force` returns `conflict`), writes a `client_item_key` tombstone, and recomputes the affected `pqueue_group_summary` row — all transcribed from TD-002 semantics, materialized in SQLite, and durable/replayable via the same pipeline. |
+| Recurring / rearm / purge | A recurring queue's `rearm` and in-band `PurgeItems` (G5) are ordinary committed commands applied by `apply_committed`: `rearm` releases lease state, sets `not_before` and `eligible_since = max(commit_time, not_before)`, resets per-cycle retry, and bumps `item_version` WITHOUT marking terminal; `PurgeItems` removes the item row (and, with `force`, the lease; a leased item without `force` returns `conflict`), writes a `client_item_key` tombstone, and recomputes the affected `fireweed_group_summary` row — all transcribed from TD-002 semantics, materialized in SQLite, and durable/replayable via the same pipeline. |
 | Lease expiry | Lease expiry MUST append a `LeaseExpired` command to the object log before expired items become claimable again (TD-001 / TD-002 parity), preserving the progress-bound clock per FR-11. Lazy expiry in the claim path plus a bounded, epoch-fenced sweeper is the expected implementation. |
-| Gate state | The queue's dynamic gate state (`gate_keys`/`SetGates`, G2) is materialized in SQLite as the gate-state table (TD-002 parity: `pqueue_gate_state` + the item→gate-key lookup). TD-004 introduces NO other gate mechanism. |
+| Gate state | The queue's dynamic gate state (`gate_keys`/`SetGates`, G2) is materialized in SQLite as the gate-state table (TD-002 parity: `fireweed_gate_state` + the item→gate-key lookup). TD-004 introduces NO other gate mechanism. |
 
 ### Per-group summary projection (MF-PROJ, normative)
 
-This backend maintains exactly ONE per-group summary projection, `pqueue_group_summary` (the reconciled
-name from MF-PROJ; the prior `pqueue_active_scope_summary` is folded into it). It is maintained
+This backend maintains exactly ONE per-group summary projection, `fireweed_group_summary` (the reconciled
+name from MF-PROJ; the prior `fireweed_active_scope_summary` is folded into it). It is maintained
 transactionally with item mutations inside the same SQLite write transaction. Its consistency model and
 gate-flip behavior are the canonical G2/MF-PROJ model; TD-004 references that model and does not
 introduce another.
@@ -674,11 +674,11 @@ This backend defends `whole_cohort` (G6 `cohort_policy`), not just Postgres/TD-0
 
 | Element | Rule |
 |---------|------|
-| SQLite cohort projection | The SQLite projection MUST materialize the same `pqueue_cohorts` logical record as TD-002, logical key `(tenant_id, queue_id, group_key)`, applied only from committed commands by `apply_committed` in `sequence` order. Because the queue is the unit of sharding (ADR-008), every command for a `group_key` lands in the queue's one SQLite db, so the cohort and all its members are local; `whole_cohort` claim, member exclusion, and expiry are evaluated in one SQLite write transaction (SQLite serializes writers, which is the lock unit standing in for the Postgres row lock). |
+| SQLite cohort projection | The SQLite projection MUST materialize the same `fireweed_cohorts` logical record as TD-002, logical key `(tenant_id, queue_id, group_key)`, applied only from committed commands by `apply_committed` in `sequence` order. Because the queue is the unit of sharding (ADR-008), every command for a `group_key` lands in the queue's one SQLite db, so the cohort and all its members are local; `whole_cohort` claim, member exclusion, and expiry are evaluated in one SQLite write transaction (SQLite serializes writers, which is the lock unit standing in for the Postgres row lock). |
 | Shared lease in SQLite | The cohort lease (`cohort_id`, `cohort_lease_token_hash`, lease expiry) is a projected record; renew/finalize/release/retry are applied as committed commands targeting `cohort_id`. No per-member lease rows are created for cohort members. The selected cohort row MUST be locked first and its completeness + per-member eligibility (Eligibility Precedence conditions 1–5) rechecked under that lock before leasing; a contended or under-lock-failing cohort is skipped, never partially leased (API-001 / G6). |
 | Expiry under replay-response | `CohortExpired` MUST be a committed command appended to the object log (the ack boundary) before any member is marked terminal in the SQLite projection, mirroring TD-002. Replay of the log MUST reproduce the exact terminal / `cohort-incomplete` outcome and the `expire_command_pos` ordering. The cohort liveness bound is enforced `<= progress_bound_ms` at `CreateQueue` time (G6); there is no second progress scope. |
-| Replay / recovery / snapshot | A snapshot at a committed `sequence` MUST include `pqueue_cohorts` rows (size, member_count, state, `cohort_created_at`, `first_eligible_at`, expire position, lease hash, `retention_until`); recovery = snapshot + log tail MUST reproduce: an in-flight `leased` cohort with its `cohort_lease_token`, a `forming` cohort's `member_count`, and a `terminal` cohort's `retention_until`. A replayed `whole_cohort` claim within the active lease MUST return the same member set + `cohort_lease_token` (idempotency parity with TD-002). |
-| Membership / counts | Cohort eligible-age / counts are NOT duplicated in `pqueue_cohorts`; they come from the single `pqueue_group_summary` (MF-PROJ). Recurring items MUST NOT be `whole_cohort` members (recurrence and cohort topology are mutually exclusive, ADR-004 / G5). |
+| Replay / recovery / snapshot | A snapshot at a committed `sequence` MUST include `fireweed_cohorts` rows (size, member_count, state, `cohort_created_at`, `first_eligible_at`, expire position, lease hash, `retention_until`); recovery = snapshot + log tail MUST reproduce: an in-flight `leased` cohort with its `cohort_lease_token`, a `forming` cohort's `member_count`, and a `terminal` cohort's `retention_until`. A replayed `whole_cohort` claim within the active lease MUST return the same member set + `cohort_lease_token` (idempotency parity with TD-002). |
+| Membership / counts | Cohort eligible-age / counts are NOT duplicated in `fireweed_cohorts`; they come from the single `fireweed_group_summary` (MF-PROJ). Recurring items MUST NOT be `whole_cohort` members (recurrence and cohort topology are mutually exclusive, ADR-004 / G5). |
 
 ## Snapshots (normative)
 
@@ -777,8 +777,8 @@ themselves.
 | Reject missing CAS | If the configured object store lacks a usable conditional-write primitive and the deployment has not selected the Postgres-manifest-pointer fallback, queue/backend configuration MUST be rejected with `invalid-request` (see "Object-Store Capability Requirements"). |
 | Window sanity | `segment_max_latency_ms` MUST be `> 0`; it is the implementation of the profile's `max_commit_latency_ms` / commit-latency-bound knob. The effective claim/ack latency budget MUST be documented to callers because it bounds API-001 commit latency for this profile. |
 | Snapshot vs recovery window | `log_recovery_window_ms` MUST be `>= snapshot_interval_ms` so an unexpired snapshot always exists before its covered segments can expire. |
-| Hybrid pairing | `PQUEUE_PROJECTION_BACKEND=hybrid-strict` and `PQUEUE_PROJECTION_BACKEND=hybrid-async` are supported only with `PQUEUE_LOG_BACKEND=objectlog` until other pairings are intentionally implemented and tested. `memory/hybrid-*`, `sqlite/hybrid-*`, and `postgres/hybrid-*` MUST fail closed at startup. |
-| Buffered-byte bounds | `PQUEUE_OBJECTLOG_BUFFERED_BYTES_GLOBAL` and `PQUEUE_OBJECTLOG_QUEUE_WAITING_BYTES` MUST be positive; the queue cap and optional `PQUEUE_OBJECTLOG_BUFFERED_BYTES_TENANT` MUST not exceed the global cap; and the segment target MUST not exceed the global cap. The composition root builds one node budget and injects it into every live object-log projection profile. |
+| Hybrid pairing | `FIREWEED_PROJECTION_BACKEND=hybrid-strict` and `FIREWEED_PROJECTION_BACKEND=hybrid-async` are supported only with `FIREWEED_LOG_BACKEND=objectlog` until other pairings are intentionally implemented and tested. `memory/hybrid-*`, `sqlite/hybrid-*`, and `postgres/hybrid-*` MUST fail closed at startup. |
+| Buffered-byte bounds | `FIREWEED_OBJECTLOG_BUFFERED_BYTES_GLOBAL` and `FIREWEED_OBJECTLOG_QUEUE_WAITING_BYTES` MUST be positive; the queue cap and optional `FIREWEED_OBJECTLOG_BUFFERED_BYTES_TENANT` MUST not exceed the global cap; and the segment target MUST not exceed the global cap. The composition root builds one node budget and injects it into every live object-log projection profile. |
 
 ## Runtime Wiring (normative)
 
@@ -786,7 +786,7 @@ themselves.
 object-log group-commit composition:
 
 ```
-ComposedBackend<pqueue_objectlog::ObjectLog, HybridProjectionStore, InProcessControlPlane>
+ComposedBackend<fireweed_objectlog::ObjectLog, HybridProjectionStore, InProcessControlPlane>
 ```
 
 The server composition root MUST open the segmented object-log axis through the
@@ -884,30 +884,30 @@ eligibility, FR-10).
 > intra-queue-shard partitioning and the cross-shard command binding are retired as targets.
 > **Update (2026-07-05): the re-scoping has since landed** — the codebase (workspace v0.8.0) is on the
 > per-queue ownership model throughout (`QueueKey { tenant_id, queue_id }`, no `shard_count`, per-queue
-> manifests in `pqueue-objectlog/src/segmented.rs`), so "later build phase" above is historical. This
+> manifests in `fireweed-objectlog/src/segmented.rs`), so "later build phase" above is historical. This
 > record is preserved as the historical PHASE-7 build attestation, not as the current per-queue target.
 
 As of 2026-06-16, the v1 `object_log_sqlite_projection` implementation is
-complete for the committed pqueue backend profile and is validated against the
+complete for the committed fireweed backend profile and is validated against the
 freestanding object-log abstraction plus SQLite projection. The durable
 offset→location index is provided by object-log's own `ManifestSequencer`
-(blob-persisted, rebuilt on reopen); `pqueue-objectlog` depends only on the
+(blob-persisted, rebuilt on reopen); `fireweed-objectlog` depends only on the
 freestanding `object-log` crate and no longer on fjord's internal coordinator.
 The validation boundary is:
 
-- `cargo +1.92.0 test -p pqueue-service local_object_log_deployment_smoke_tests -- --ignored --nocapture`
+- `cargo +1.92.0 test -p fireweed-service local_object_log_deployment_smoke_tests -- --ignored --nocapture`
   passes the local object-log deployment profile.
-- `cargo +1.92.0 test -p pqueue-objectlog object_log_commit_recovery_tests -- --nocapture`
+- `cargo +1.92.0 test -p fireweed-objectlog object_log_commit_recovery_tests -- --nocapture`
   passes group commit, replay, epoch fencing, object-store capability rejection,
   and Postgres manifest-pointer fallback checks.
-- `PQUEUE_BACKEND_PROFILE=object_log_sqlite_projection PQUEUE_E2E_SCALE=smoke PQUEUE_E2E_SEED=1801 cargo +1.92.0 test -p pqueue-service --test product_workflows -- --ignored --nocapture`
+- `FIREWEED_BACKEND_PROFILE=object_log_sqlite_projection FIREWEED_E2E_SCALE=smoke FIREWEED_E2E_SEED=1801 cargo +1.92.0 test -p fireweed-service --test product_workflows -- --ignored --nocapture`
   passes all nine product workflows and emits verification-ledger rows validated
-  by `pqueue-verify-ledger --strict`.
+  by `fireweed-verify-ledger --strict`.
 - `bash scripts/ci/release-gate.sh --require-tp002-evidence E0,E1,E2,E3 --tp002-e0e1-source pqueue-7e2b3132 --tp002-e2-source pqueue-9afd88cc,pqueue-76d92a33 --tp002-e3-source pqueue-b1abd895,pqueue-472a09d4`
   passes from source-backed DDx evidence and regenerates the aggregate
   `product_validation_tests` ledger.
 
-This proves the backend contract at the object-log layer used by pqueue.
+This proves the backend contract at the object-log layer used by fireweed.
 Provider-specific hardening against a live cloud S3 endpoint remains a deployment
 certification activity unless a future bead adds a concrete S3 adapter and
 credentials-backed acceptance run. That future activity must not be cited as a
@@ -1066,7 +1066,7 @@ keep conservative retention or disable the async profile, never to infer missing
 
 ## Review Checklist
 
-- [x] TD-001 traits map to object-log segments + SQLite projection + snapshot/replay + Postgres control plane (`pqueue-objectlog`, `pqueue-sqlite`, `local_object_log_deployment_smoke_tests`).
+- [x] TD-001 traits map to object-log segments + SQLite projection + snapshot/replay + Postgres control plane (`fireweed-objectlog`, `fireweed-sqlite`, `local_object_log_deployment_smoke_tests`).
 - [x] API-001 operations are preserved once a response returns; self read-after-write and bounded apply behavior are covered by product workflows and apply-before-return object-log tests.
 - [x] Ack occurs only after durable manifest commit (replay-response); operation's own effect is applied before return (`object_log_commit_recovery_tests_reopens_from_object_log_blob`, request-id replay tests).
 - [x] In-flight claim reservation prevents duplicate local claims; rollback/crash behavior is covered by object-log recovery and product crash-recovery workflows.
@@ -1075,7 +1075,7 @@ keep conservative retention or disable the async profile, never to infer missing
 - [x] Queue-scoped commands (`SetGates`) commit on the queue's single manifest — durable+visible atomically, no cross-shard convergence (ADR-008). (Prior-build `storage_conformance_multi_shard_tests` are retired as a target; the single-owner gate path is covered by product workflow gate rows.)
 - [x] Single per-group summary projection logical key `(tenant_id, queue_id, group_key)`; oldest-eligible is authoritative and counts may lag (`sqlite_projection_tests`, service metrics ground-truth tests).
 - [x] Gate flips use the G2 `gate_keys`/`SetGates` model plus exact-on-read anti-join; no second gate mechanism (`service_gate_tests`, storage gate conformance).
-- [x] Cohort (`pqueue_cohorts`) projection + shared lease + `CohortExpired`-before-terminal + replay parity are materialized in SQLite and covered by product callback cohort workflows.
+- [x] Cohort (`fireweed_cohorts`) projection + shared lease + `CohortExpired`-before-terminal + replay parity are materialized in SQLite and covered by product callback cohort workflows.
 - [x] One-object-per-command is rejected in production (`object_log_commit_recovery_tests_rejects_production_one_object_per_command_config`).
 - [x] Group co-residency by construction makes `whole_group` / `whole_cohort` owner-local; `same_group_key` stays item-level (`product_workflow_marketo_group_batching_e2e`, `product_workflow_callback_cohort_e2e`).
 - [x] Recurring `rearm` / in-band `PurgeItems` ride the pipeline as ordinary durable/replayable commands (`product_workflow_jobs_connectors_recurring_e2e`, recurrence/purge suites).

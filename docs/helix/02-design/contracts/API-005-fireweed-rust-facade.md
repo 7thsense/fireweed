@@ -13,7 +13,7 @@ ddx:
 **Type**: Rust binding contract
 **Version**: v0.20
 **Status**: accepted
-**Related**: API-001, API-004, ADR-009, ADR-020, ADR-022, TP-004
+**Related**: API-001, API-004, ADR-009, ADR-022, ADR-023, TP-004
 
 ## Purpose
 
@@ -47,12 +47,12 @@ impl Fireweed {
 lifecycle ownership are private. It is `Send + Sync`; callers may place it in
 an `Arc`. Clone semantics are not required for v0.20.
 
-The crate root must not require a downstream user to name `Pqueue`,
-`EmbeddedPqueue`, `LibBackend`, a concrete backend, or an internal workspace
-crate. `Pqueue`, `EmbeddedPqueue`, `LibBackend`, `EmbeddedHandle`, and
-`Pqueue::new` are Rust implementation names, not ADR-020 package/name aliases;
-they MUST be unavailable to an ordinary external crate when v0.20 ships.
-First-party tests use a crate-private construction seam.
+The crate root requires downstream users to name only `Fireweed` and public
+Fireweed DTOs. It must not require `LibBackend`, `EmbeddedHandle`, a concrete
+backend, a profile-specific wrapper, or an internal workspace crate. Generic
+facade forms, retired root/configuration types, raw backend constructors, and
+the generic raw constructor MUST be unavailable to an ordinary external crate
+when v0.20 ships. First-party tests use a crate-private construction seam.
 
 Storage authority, projection implementation, response-barrier choice, and
 coordination topology are construction inputs only. `Fireweed` exposes no
@@ -183,11 +183,10 @@ constructors additionally require `ResponseBarrier::Strict`; they return
 `EmbeddedSecret`, `EmbeddedObjectLogConfig`, `EmbeddedProjectionConfig`,
 `EmbeddedResponseBarrier`, `EmbeddedSegmentConfig`,
 `EmbeddedRecoveryAction`, `EmbeddedRecoveryPolicy`,
-`EmbeddedDurabilityConfig`, and the `open_embedded*` functions are not ADR-020
-compatibility aliases: ADR-020 covers package and product-name migration, not a
-second Rust facade. These Rust names MUST be replaced for v0.20 rather than
-promoted as supported aliases. Every constructor returns `Fireweed`; no
-profile-specific wrapper type is returned.
+`EmbeddedDurabilityConfig`, and the `open_embedded*` functions are not supported
+facade names. ADR-023 requires a hard pre-release cutover with no deprecated
+alias layer. These Rust names MUST be replaced for v0.20. Every constructor
+returns `Fireweed`; no profile-specific wrapper type is returned.
 
 ### Queue operations
 
@@ -217,7 +216,7 @@ MUST invoke every method family against every supported constructor, including
 one backend, compile-only forwarding, or an expected `Unavailable` result is
 not parity evidence.
 
-Iterator-taking compatibility methods may collect into `Vec<ItemId>` at the
+Iterator-taking convenience methods may collect into `Vec<ItemId>` at the
 erased boundary. This does not change their observable contract.
 
 `push_with_request_id`, `push_batch_with_request_id`, `commit`, and
@@ -343,7 +342,7 @@ operations. No Snorri public or private type may retain a `LibBackend` bound.
 
 The Snorri-critical method signatures MUST remain type-equivalent in parameter
 ownership and result shape to the v0.19.6 facade, with `Self` changed from
-`Pqueue<B>` to `Fireweed`. In particular:
+`Fireweed<B>` to `Fireweed`. In particular:
 
 ```rust
 pub async fn create_queue(&self, definition: QueueDefinition) -> EngineResult<CreateQueueOutcome>;
@@ -379,10 +378,10 @@ pub async fn declared_bucket_segment(&self, queue: &QueueKey, request: DeclaredB
 - API-001 and API-004 govern queue semantics. API-005 governs Rust ownership,
   names, signatures, construction, and export closure.
 - Returning `Fireweed` is a deliberate source break from inferred
-  `Pqueue<impl LibBackend>` return types. Migration guidance MUST show removal
+  `Fireweed<impl LibBackend>` return types. Migration guidance MUST show removal
   of downstream backend parameters.
-- The package aliases allowed by ADR-020 do not authorize the legacy Rust
-  facade types listed under Supported root.
+- ADR-023 forbids package aliases and retired Rust facade types; API-005 exposes
+  only the concrete `Fireweed` surface listed here.
 - Adding a `Fireweed` method or capability bit is compatible. Removing or
   changing a supported method or DTO requires a breaking pre-1.0 minor and
   migration guidance.

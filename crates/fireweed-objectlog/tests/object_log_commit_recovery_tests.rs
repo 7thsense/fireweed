@@ -104,7 +104,7 @@ impl BlobStore for FailingDeleteBlobStore {
 }
 
 fn tmp_root(tag: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("pqueue-objlog-e3-{tag}-{}", std::process::id()))
+    std::env::temp_dir().join(format!("fireweed-objlog-e3-{tag}-{}", std::process::id()))
 }
 
 fn sk(tenant: &str, queue: &str) -> fireweed_engine::QueueKey {
@@ -786,13 +786,13 @@ fn TestManifestWatermarkRecoveryKeepsPresentEntriesReadable() {
 /// Heavier FULL-GENESIS rebuild measurement (NOT the production snapshot+tail path — `rebuild_all` replays
 /// every object from seq 0). `#[ignore]` by default — run with
 /// `cargo test -p fireweed-objectlog object_log_e3_recovery_at_scale -- --ignored --nocapture`. Scale via
-/// `PQUEUE_E3_RECOVERY_ITEMS` (default 1,000,000). The true 10M-item-in-S3 SNAPSHOT+TAIL rebuild within a
+/// `FIREWEED_E3_RECOVERY_ITEMS` (default 1,000,000). The true 10M-item-in-S3 SNAPSHOT+TAIL rebuild within a
 /// stated recovery-window budget is the live object-log run (pqueue-2f9ebac3); here the local genesis-replay
 /// rate is REPORTED only and must not be extrapolated to the snapshot-bounded budget.
 #[tokio::test]
 #[ignore = "heavy recovery-at-scale measurement; run explicitly with --ignored"]
 async fn object_log_e3_recovery_at_scale() {
-    let items: u64 = std::env::var("PQUEUE_E3_RECOVERY_ITEMS")
+    let items: u64 = std::env::var("FIREWEED_E3_RECOVERY_ITEMS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1_000_000);

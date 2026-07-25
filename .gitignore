@@ -22,7 +22,7 @@ target/
 .agent/logs/
 .agent/sessions/
 
-# pqueue: transient worker/session + scratch artifacts (keep the worker's root clean)
+# Fireweed: transient worker/session + scratch artifacts (keep the worker's root clean)
 .ddx/harness-sessions/
 .ddx/dirty-root-guard.json
 .ddx/agent-logs/

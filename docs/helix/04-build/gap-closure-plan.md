@@ -1,4 +1,4 @@
-# pqueue Gap-Closure Plan (2026-07-08, rev 2 — post-codex + root-cause)
+# fireweed Gap-Closure Plan (2026-07-08, rev 2 — post-codex + root-cause)
 
 Restores a green, buildable, honestly-tested baseline, finishes the ADR-012 composed-backend
 architecture, then closes every outstanding vision, evidence, CI, and doc gap. Sequenced by
@@ -7,9 +7,9 @@ Rust-native acceptance criteria (gates are `rustup run 1.92.0 cargo build/test/c
 named snake_case `#[test]` fns; NO `go test`, NO `lefthook`).
 
 ## Verified current state (evidence-anchored)
-- `cargo build --workspace` FAILS: only `pqueue-server` pulls `rdkafka` (`Cargo.toml:30`,
+- `cargo build --workspace` FAILS: only `fireweed-server` pulls `rdkafka` (`Cargo.toml:30`,
   `features=["cmake-build"]`) → vendored librdkafka needs `curl/curl.h`+cmake. `--exclude
-  pqueue-server` builds in ~42s.
+  fireweed-server` builds in ~42s.
 - `cargo test --workspace` RED at HEAD. Root causes (verified, not inferred):
   - `callback_cohort_e2e` (`product_validation_tests.rs:1871`→panic 1920) and `noisy_neighbor_scale_e2e`
     (`:2157`→panic 2186): tests were pointed at `composed_sqlite_backend_in_memory()` by commit
@@ -46,10 +46,10 @@ named snake_case `#[test]` fns; NO `go test`, NO `lefthook`).
 ### rdkafka removal (split per codex; the embedded produce path has 5 real sub-problems)
 
 **B0.1a — Delete rdkafka dep + JSON payload path; introduce an in-process `ChangeRecordSink` seam.**
-- Remove `rdkafka` from `pqueue-server/Cargo.toml`; delete `Cargo.lock` entries; `rg rdkafka crates/`
+- Remove `rdkafka` from `fireweed-server/Cargo.toml`; delete `Cargo.lock` entries; `rg rdkafka crates/`
   returns zero. Replace the `FutureProducer` field/usage in `FjordChangeRecordSink`
   (`change_record_sink.rs:344,378,402`) with an in-process log handle (`Arc<dyn LogBackend>`).
-- AC: `rustup run 1.92.0 cargo build -p pqueue-server` succeeds on a box with NO libcurl-dev/cmake;
+- AC: `rustup run 1.92.0 cargo build -p fireweed-server` succeeds on a box with NO libcurl-dev/cmake;
   `rg -n rdkafka` finds nothing under `crates/` or `Cargo.lock`.
 
 **B0.1b — Share the embedded broker's log handle with the sink.**
@@ -65,7 +65,7 @@ named snake_case `#[test]` fns; NO `go test`, NO `lefthook`).
   and `LogBackend::append(topic, partition, records)` (`heimq-broker storage/mod.rs:107`) — there is NO
   `TopicLog::append(bytes)`. Build a Kafka RecordBatch encoder that sets, per ADR-014 §"Normative
   consumer contract" (`ADR-014:92`): record key `"{item_id}:{backend_epoch}:{sequence}"`, headers
-  (`pq-tenant-id`,`pq-queue-id`,`pq-item-id`,`pq-backend-epoch`,`pq-sequence`,`pq-command-kind`), and
+  (`fireweed-tenant-id`,`fireweed-queue-id`,`fireweed-item-id`,`fireweed-backend-epoch`,`fireweed-sequence`,`fireweed-command-kind`), and
   the TD-008 `ChangeRecord` JSON payload; single partition `0` per queue topic.
 - Ensure topics exist before first append: `FjordLog::append` returns `TopicNotFound` if absent
   (register/create via the shared `HeimqServer` startup, `create_topics`/`register_embedded_fjord_topics`
@@ -77,7 +77,7 @@ named snake_case `#[test]` fns; NO `go test`, NO `lefthook`).
 - `tests/fjord_surface.rs:557` asserts partition 0, monotonic offsets, stable idempotency keys, JSON
   payload, headers via an rdkafka consumer. Rewrite those assertions using a pure-Rust consumer
   (`rskafka`) OR the broker's in-process read API — preserving every contract assertion.
-- AC: `rustup run 1.92.0 cargo test -p pqueue-server` fjord-surface tests pass with zero rdkafka.
+- AC: `rustup run 1.92.0 cargo test -p fireweed-server` fjord-surface tests pass with zero rdkafka.
 
 **B0.1e — External-Kafka mode + config-mode split + ADR-014 thread.**
 - `ChangeRecordSinkConfig` requires an endpoint when enabled (`change_record_sink.rs:20,455,680`).
@@ -97,7 +97,7 @@ named snake_case `#[test]` fns; NO `go test`, NO `lefthook`).
   the unit from the queue def, then for non-item units delegates to the projection-axis selection and
   **emits `QueueCommand::CohortClaim`** (not the plain `Claim` it currently always builds at
   `compose.rs:2021-2054`) with cohort response fields, so the `CohortClaim` apply arm updates
-  `pqueue_cohorts` leased state (`relational.rs:2568-2592`); log-replay stores still return
+  `fireweed_cohorts` leased state (`relational.rs:2568-2592`); log-replay stores still return
   `Unavailable`.
 - AC: composed-relational conformance scenarios exercise **whole-cohort, whole-group, AND
   same_group_key** claim; `callback_cohort_e2e` passes on a composed relational backend.
@@ -130,10 +130,10 @@ named snake_case `#[test]` fns; NO `go test`, NO `lefthook`).
 - Validate the durable-cursor-store config BEFORE `spawn_embedded_fjord_broker` in `start()`
   (`lib.rs:1292-1356`); abort/await the broker task on the error path (no leak). Give the embedded
   broker an ephemeral port when not operator-pinned.
-- AC: `change_record_sink_rejected_without_durable_cursor_store` passes; `cargo test -p pqueue-server`
+- AC: `change_record_sink_rejected_without_durable_cursor_store` passes; `cargo test -p fireweed-server`
   is stable across 3 runs with default parallelism.
 
-**B0.7 — Verify the build-blocked recovery + hybrid tests (now that pqueue-server builds).**
+**B0.7 — Verify the build-blocked recovery + hybrid tests (now that fireweed-server builds).**
 - Run `object_log_sqlite::recovery_tests` ×3 and `performance_object_log_hybrid_tests` ×3. If green:
   close as verified. If red: root-cause + fix (separate bead — likely real logic).
 - AC: all six pass, or a follow-up fix bead is filed with the diagnosis.
@@ -145,12 +145,12 @@ named snake_case `#[test]` fns; NO `go test`, NO `lefthook`).
 ## Phase 1 — CI integrity & hygiene
 - **B1.1** Make the enforcing gate actually block: prove `scripts/ci/pr-gate.sh --mode enforcing`
   returns non-zero on a seeded failing test; ensure the job is a required check; get main green.
-- **B1.2** Export `PQUEUE_PG_TEST_URL` for the full `cargo test --workspace` CI step (not just the
+- **B1.2** Export `FIREWEED_PG_TEST_URL` for the full `cargo test --workspace` CI step (not just the
   single proof test) so the ~83 postgres tests actually run against the `postgres:16` service.
 - **B1.3** Add a MinIO/S3 CI lane so `segmented_s3_substrate_tests` execute (not skip).
 - **B1.4** Retire Go-style ACs + `lefthook` from the DDx AC generator (Rust idioms only); decide
   `go_root_test.go`+`go.mod` (wire into CI as an artifact-assertion job + fix the non-existent
-  `pqueue-kafka` reference, OR delete). No bead AC references `go test`/`lefthook` after this.
+  `fireweed-kafka` reference, OR delete). No bead AC references `go test`/`lefthook` after this.
 - **B1.5** Snake_case the ~53 `fn Test[A-Z]` Rust fns (or `#[allow]`), so `-D warnings` stays clean.
 - **B1.6** Document reproducible dev build (toolchain 1.92.0; post-B0.1 no system libs; fjord/heimq/
   object-log dep provenance).
@@ -191,7 +191,7 @@ named snake_case `#[test]` fns; NO `go test`, NO `lefthook`).
   ADR-012/TD-008 so the artifact stack matches the built reality.
 
 ## Execution order & method
-Phase 0 first, B0.1a→e before B0.7 (pqueue-server must build to verify). B0.2/B0.3/B0.4 are real engine
+Phase 0 first, B0.1a→e before B0.7 (fireweed-server must build to verify). B0.2/B0.3/B0.4 are real engine
 work — each gets a fresh-eyes/codex review before commit. Within a phase beads are largely independent
 (parallel sub-agents). Postgres/S3 ACs run against docker-compose (`postgres:16`) + a MinIO container.
 Gate every commit on `rustup run 1.92.0 cargo test`/`clippy` for the touched crate(s), full-workspace

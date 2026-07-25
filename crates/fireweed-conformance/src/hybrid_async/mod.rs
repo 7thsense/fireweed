@@ -37,7 +37,7 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 pub fn base_dir(tag: &str) -> std::path::PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     std::env::temp_dir().join(format!(
-        "pqueue-hybrid-async-{tag}-{}-{n}",
+        "fireweed-hybrid-async-{tag}-{}-{n}",
         std::process::id()
     ))
 }

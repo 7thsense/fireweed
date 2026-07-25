@@ -4,7 +4,7 @@
 //! and separate from the storage backends (ADR-008: "pluggable control plane"). It owns three things:
 //!
 //! 1. **The live owner set** — registered owner workers with a heartbeat; an owner is live while
-//!    `heartbeat_at + heartbeat_ttl_ms > now`. pqueue never discovers owners peer-to-peer.
+//!    `heartbeat_at + heartbeat_ttl_ms > now`. fireweed never discovers owners peer-to-peer.
 //! 2. **Deterministic assignment** — [`resolve_queue_owner`](QueueControlPlane::resolve_queue_owner)
 //!    computes the `target_owner` as a pure function of `((tenant, queue), live_owner_set)` via rendezvous
 //!    (highest-random-weight) hashing, so adding/removing one owner moves only `O(queues/owners)` queues.

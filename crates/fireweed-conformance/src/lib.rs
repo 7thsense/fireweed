@@ -46,12 +46,12 @@
 //! | `fireweed_sqlite::SqliteRelationalBackend` | relational (DB-authoritative) | atomic | `core_suite!(@atomic)` + `relational_reconnect_suite!` | `fireweed-sqlite/tests/relational_{conformance,reconnect}.rs` |
 //! | `fireweed_postgres::PostgresRelationalBackend` | relational (DB-authoritative) | atomic | core@atomic + relational-reconnect (env-gated) | `fireweed-postgres/tests/relational_conformance.rs` |
 //!
-//! Relational-only features (`pqueue_group_summary`, `pqueue_item_key_retention`) are deliberately OUT of
+//! Relational-only features (`fireweed_group_summary`, `fireweed_item_key_retention`) are deliberately OUT of
 //! the shared CORE class so the families stay identical on it. The two families are additionally held
 //! identical HEAD-TO-HEAD by [`scenarios::cross_family_core_parity`] (run sqlite-relational vs in-memory in
 //! `fireweed-sqlite/tests/cross_family_parity.rs`). PARITY EVIDENCE STATUS: sqlite-relational-vs-in-memory is
 //! validated locally; the postgres-relational half runs the identical class wiring but its live-DB
-//! evidence is env-gated on `PQUEUE_PG_TEST_URL` and deferred-with-reason where no database is present
+//! evidence is env-gated on `FIREWEED_PG_TEST_URL` and deferred-with-reason where no database is present
 //! (convergence-review I3).
 
 use std::collections::BTreeMap;

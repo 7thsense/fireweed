@@ -1,7 +1,7 @@
-# pqueue performance baseline — v0.3.0
+# fireweed performance baseline — v0.3.0
 
 **Date:** 2026-06-28
-**Harness:** `crates/pqueue-bench` (`pqueue-bench --workloads ingest,claim,lifecycle`), release build.
+**Harness:** `crates/fireweed-bench` (`fireweed-bench --workloads ingest,claim,lifecycle`), release build.
 **Machine:** OrbStack Linux VM on a macOS host — 12 vCPU, 94 GiB RAM, `rustc 1.92.0`. Postgres
 (`postgres` + `postgres_relational`) over the OrbStack bridge at `192.168.215.2:5432` (a few-ms RTT,
 synchronous client). Single in-process driver (`futures::executor::block_on`, single thread).
@@ -224,24 +224,24 @@ phase), not a per-batch percentile.
   synchronous single-connection client interacting with batch commit timing, not a steady-state number.
 - This baseline is single-threaded and in-process. It says nothing about multi-worker contention,
   multi-queue scale-out (see the TP-002 density workload), or real client/server network cost. Re-run with
-  `cargo run --release -p pqueue-bench` after any backend change to refresh.
+  `cargo run --release -p fireweed-bench` after any backend change to refresh.
 
 ## Reproduce
 
 ```
 # embedded + postgres log, full smoke scale (20k):
-PQUEUE_PG_TEST_URL=postgres://USER:PW@HOST:5432/DB \
-  cargo run --release -p pqueue-bench -- --items 20000 --batch 500 \
+FIREWEED_PG_TEST_URL=postgres://USER:PW@HOST:5432/DB \
+  cargo run --release -p fireweed-bench -- --items 20000 --batch 500 \
   --workloads ingest,claim,lifecycle --backends memory,sqlite,sqlite_relational,objectlog,postgres
 
 # postgres_relational alone, reduced scale (per-item write path):
-PQUEUE_PG_TEST_URL=postgres://USER:PW@HOST:5432/DB \
-  cargo run --release -p pqueue-bench -- --items 1000 --batch 200 \
+FIREWEED_PG_TEST_URL=postgres://USER:PW@HOST:5432/DB \
+  cargo run --release -p fireweed-bench -- --items 1000 --batch 200 \
   --workloads ingest,claim --backends postgres_relational
 
 # e2e correctness over every shape across all backends:
-PQUEUE_PG_TEST_URL=postgres://USER:PW@HOST:5432/DB \
-  cargo test --manifest-path crates/pqueue-bench/Cargo.toml --test e2e_shapes_tests
+FIREWEED_PG_TEST_URL=postgres://USER:PW@HOST:5432/DB \
+  cargo test --manifest-path crates/fireweed-bench/Cargo.toml --test e2e_shapes_tests
 ```
 
 

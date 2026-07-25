@@ -102,7 +102,7 @@ storage:
     backend: objectlog
     objectLog:
       store: local
-      root: /var/lib/pqueue/projection/object-log
+      root: /var/lib/fireweed/projection/object-log
       s3:
         endpoint: ""
         bucket: ""
@@ -118,12 +118,12 @@ storage:
   projection:
     backend: inmemory
     sqlite:
-      path: /var/lib/pqueue/projection/projection.db
+      path: /var/lib/fireweed/projection/projection.db
     # Used only by feature-enabled images selecting the objectlog/turso profile.
     turso:
-      path: /var/lib/pqueue/projection/projection.turso
+      path: /var/lib/fireweed/projection/projection.turso
     # Async-apply debt/backpressure/poison thresholds for the objectlog/hybrid-async profile. Rendered as
-    # PQUEUE_HYBRID_ASYNC_* env only when projection.backend is "hybrid-async". Defaults mirror the server's
+    # FIREWEED_HYBRID_ASYNC_* env only when projection.backend is "hybrid-async". Defaults mirror the server's
     # HybridAsyncThresholds::default(); every bound must be > 0 (a zero bound is instantly backpressured).
     hybridAsync:
       applyLagMaxCommands: 100000
@@ -135,7 +135,7 @@ storage:
       existingSecret: ""
       databaseUrlKey: database-url
   volume:
-    mountPath: /var/lib/pqueue/projection
+    mountPath: /var/lib/fireweed/projection
 
 persistence:
   enabled: true

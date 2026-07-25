@@ -20,7 +20,7 @@ ddx:
 
 ## Context
 
-pqueue is a high-performance, reliability-sensitive queue engine with durable
+fireweed is a high-performance, reliability-sensitive queue engine with durable
 storage, bounded memory requirements, and concurrency-heavy claim/lease paths.
 The concerns document selects Rust, but implementation needs explicit authority
 for workspace boundaries, toolchain policy, async runtime, dependency posture,
@@ -37,35 +37,35 @@ unsafe usage, and verification gates.
 
 ## Decision
 
-pqueue will be implemented as a Rust Cargo workspace using the latest stable
+fireweed will be implemented as a Rust Cargo workspace using the latest stable
 Rust toolchain at project creation time, pinned in `rust-toolchain.toml`.
 
 The workspace crates (as amended by ADR-007's hexagonal cutover, ADR-009's
 encapsulated surface, and ADR-012's composition; the original table named
-`pqueue-storage`/`pqueue-service`/`pqueue-client`, all since dissolved or
+`fireweed-storage`/`fireweed-service`/`fireweed-client`, all since dissolved or
 deleted) are:
 
 | Crate | Purpose |
 |-------|---------|
-| `pqueue-core` | API-001 domain types, validation, priority encoding, lifecycle state transitions, idempotency semantics, and errors. |
-| `pqueue-engine` | Ports, command envelopes/positions, ownership + fencing, and the generic `ComposedBackend` orchestration (ADR-012). |
-| `pqueue-projection` | Shared in-memory projection state machine (`ProjectionData`). |
-| `pqueue-conformance` | Backend-parameterized conformance harness (the behavioral contract). |
-| `pqueue-memory` / `pqueue-sqlite` / `pqueue-postgres` / `pqueue-objectlog` | Driven adapters per backend substrate. |
-| `pqueue-resp` | RESP wire driving adapter (TD-006). |
-| `pqueue` | The library facade — the only published crate (ADR-009). |
-| `pqueue-server` | Composition root binary (DI, ReclaimDriver ticker, ownership renewal, health probe). |
+| `fireweed-core` | API-001 domain types, validation, priority encoding, lifecycle state transitions, idempotency semantics, and errors. |
+| `fireweed-engine` | Ports, command envelopes/positions, ownership + fencing, and the generic `ComposedBackend` orchestration (ADR-012). |
+| `fireweed-projection` | Shared in-memory projection state machine (`ProjectionData`). |
+| `fireweed-conformance` | Backend-parameterized conformance harness (the behavioral contract). |
+| `fireweed-memory` / `fireweed-sqlite` / `fireweed-postgres` / `fireweed-objectlog` | Driven adapters per backend substrate. |
+| `fireweed-resp` | RESP wire driving adapter (TD-006). |
+| `fireweed` | The library facade — the only published crate (ADR-009). |
+| `fireweed-server` | Composition root binary (DI, ReclaimDriver ticker, ownership renewal, health probe). |
 
 The crate graph must flow inward (adapters → projection → engine → core;
 enforced by a dependency-direction test):
 
 ```text
-pqueue-server  -> all adapters, pqueue, pqueue-engine, pqueue-core
-pqueue / pqueue-resp -> pqueue-engine, pqueue-core (+ feature-gated adapters for pqueue)
-adapters (memory/sqlite/postgres/objectlog) -> pqueue-projection, pqueue-engine, pqueue-core
-pqueue-projection -> pqueue-engine, pqueue-core
-pqueue-engine   -> pqueue-core
-pqueue-core     -> no pqueue crate dependencies
+fireweed-server  -> all adapters, fireweed, fireweed-engine, fireweed-core
+fireweed / fireweed-resp -> fireweed-engine, fireweed-core (+ feature-gated adapters for fireweed)
+adapters (memory/sqlite/postgres/objectlog) -> fireweed-projection, fireweed-engine, fireweed-core
+fireweed-projection -> fireweed-engine, fireweed-core
+fireweed-engine   -> fireweed-core
+fireweed-core     -> no fireweed crate dependencies
 ```
 
 ## Toolchain
@@ -121,9 +121,9 @@ service or backend crates.
 
 The first implementation must include:
 
-- Unit tests for `pqueue-core` validation, priority encoding, lifecycle
+- Unit tests for `fireweed-core` validation, priority encoding, lifecycle
   transitions, idempotency, and retry rules.
-- Shared conformance tests in `pqueue-conformance`.
+- Shared conformance tests in `fireweed-conformance`.
 - Postgres integration tests for TD-002 scenarios.
 - Concurrency stress tests for duplicate claim prevention and stale lease
   handling.

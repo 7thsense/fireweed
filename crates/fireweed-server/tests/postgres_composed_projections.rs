@@ -7,7 +7,7 @@
 //! within a runtime"). These tests boot the full server over each combo and drive push → claim → finalize
 //! over RESP, proving the composition survives a real `#[tokio::test]` runtime end to end.
 //!
-//! Env-gated on `PQUEUE_PG_TEST_URL`; LOUD-skips (not silently) when no live database is configured.
+//! Env-gated on `FIREWEED_PG_TEST_URL`; LOUD-skips (not silently) when no live database is configured.
 #![cfg(feature = "postgres")]
 
 use fireweed_core::{
@@ -128,13 +128,13 @@ async fn push_claim_finalize_over_resp(addr: std::net::SocketAddr) {
 /// (no reactor-thread panic on the sync postgres `connect`/`recover`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_sqlite_combo_runs_under_tokio() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
         eprintln!(
-            "POSTGRES/SQLITE COMBO SMOKE SKIPPED (push/claim/finalize) — set PQUEUE_PG_TEST_URL to a live DB"
+            "POSTGRES/SQLITE COMBO SMOKE SKIPPED (push/claim/finalize) — set FIREWEED_PG_TEST_URL to a live DB"
         );
         return;
     };
-    let schema = format!("pq_pgsqlite_{}", std::process::id());
+    let schema = format!("fireweed_pgsqlite_{}", std::process::id());
     let scoped_url = url_with_schema(&url, &schema);
     create_schema(&url, &schema).await;
 
@@ -174,13 +174,13 @@ async fn postgres_sqlite_combo_runs_under_tokio() {
 /// Unified atomic postgres/postgres backend through the production fixed-pool selector.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_postgres_combo_runs_under_tokio() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
         eprintln!(
-            "POSTGRES/POSTGRES COMBO SMOKE SKIPPED (push/claim/finalize) — set PQUEUE_PG_TEST_URL to a live DB"
+            "POSTGRES/POSTGRES COMBO SMOKE SKIPPED (push/claim/finalize) — set FIREWEED_PG_TEST_URL to a live DB"
         );
         return;
     };
-    let schema = format!("pq_pgpg_atomic_{}", std::process::id());
+    let schema = format!("fireweed_pgpg_atomic_{}", std::process::id());
     let atomic_url = url_with_schema(&url, &schema);
     create_schema(&url, &schema).await;
 

@@ -1,4 +1,4 @@
-//! Shared harness primitives for the pqueue performance / e2e suite (TP-002 + data-shape baseline).
+//! Shared harness primitives for the fireweed performance / e2e suite (TP-002 + data-shape baseline).
 //!
 //! This library half holds the backend-agnostic pieces the binary (`src/main.rs`) and the e2e correctness
 //! test (`tests/e2e_shapes_tests.rs`) both build on:
@@ -333,7 +333,7 @@ impl OpStats {
 
 /// Push `items` items of `shape` into `q` in batches of `batch`, timing each `push_batch`.
 pub async fn ingest(
-    pq: &Fireweed,
+    fireweed: &Fireweed,
     q: &QueueKey,
     shape: &Shape,
     items: u64,
@@ -346,7 +346,7 @@ pub async fn ingest(
         let n = (items - done).min(batch as u64) as usize;
         let batch_items = make_batch(shape, done, n);
         let t = Instant::now();
-        pq.push_batch(q, batch_items).await.expect("push_batch");
+        fireweed.push_batch(q, batch_items).await.expect("push_batch");
         lat.push(t.elapsed());
         done += n as u64;
     }
@@ -360,7 +360,7 @@ pub async fn ingest(
 
 /// Drain up to `items` already-pending records: `claim`+`ack` in batches. Returns (claim, ack) stats.
 pub async fn claim_ack(
-    pq: &Fireweed,
+    fireweed: &Fireweed,
     q: &QueueKey,
     items: u64,
     batch: usize,
@@ -371,7 +371,7 @@ pub async fn claim_ack(
     let start = Instant::now();
     while drained < items {
         let tc = Instant::now();
-        let claimed = pq.claim(q, batch, 3_600_000).await.expect("claim");
+        let claimed = fireweed.claim(q, batch, 3_600_000).await.expect("claim");
         let cd = tc.elapsed();
         if claimed.is_empty() {
             break;
@@ -380,7 +380,7 @@ pub async fn claim_ack(
         let ids: Vec<ItemId> = claimed.iter().map(|c| c.item_id).collect();
         let n = ids.len() as u64;
         let ta = Instant::now();
-        pq.ack(q, ids).await.expect("ack");
+        fireweed.ack(q, ids).await.expect("ack");
         ack_lat.push(ta.elapsed());
         drained += n;
     }
@@ -403,7 +403,7 @@ pub async fn claim_ack(
 
 /// Claim up to `target` eligible items from `q` with `lease_ms`, in batches of `batch`.
 async fn claim_n(
-    pq: &Fireweed,
+    fireweed: &Fireweed,
     q: &QueueKey,
     target: u64,
     batch: usize,
@@ -412,7 +412,7 @@ async fn claim_n(
     let mut out = Vec::new();
     while (out.len() as u64) < target {
         let want = ((target - out.len() as u64).min(batch as u64)) as usize;
-        let got = pq.claim(q, want, lease_ms).await.expect("claim");
+        let got = fireweed.claim(q, want, lease_ms).await.expect("claim");
         if got.is_empty() {
             break;
         }
@@ -447,7 +447,7 @@ pub struct LifecycleStats {
 /// lease expiry. The harness sleeps once, past both the short lease and the nack backoff, before the
 /// reclaim + re-drain.
 pub async fn lifecycle(
-    pq: &Fireweed,
+    fireweed: &Fireweed,
     q: &QueueKey,
     shape: &Shape,
     items: u64,
@@ -468,12 +468,12 @@ pub async fn lifecycle(
     };
     macro_rules! metrics {
         () => {
-            pq.metrics(q).await.map_err(|e| format!("{e:?}"))?
+            fireweed.metrics(q).await.map_err(|e| format!("{e:?}"))?
         };
     }
 
     // --- push -------------------------------------------------------------
-    let push = ingest(pq, q, shape, items, batch).await;
+    let push = ingest(fireweed, q, shape, items, batch).await;
     let m = metrics!();
     check(
         m.pending == items,
@@ -491,7 +491,7 @@ pub async fn lifecycle(
 
     // --- claim (abandon slice under a SHORT lease, working set under a LONG lease) -------------
     let claim_start = Instant::now();
-    let abandon = claim_n(pq, q, abandon_n, batch, SHORT_LEASE_MS).await;
+    let abandon = claim_n(fireweed, q, abandon_n, batch, SHORT_LEASE_MS).await;
     check(
         abandon.len() as u64 == abandon_n,
         &format!(
@@ -499,7 +499,7 @@ pub async fn lifecycle(
             abandon.len()
         ),
     )?;
-    let working = claim_n(pq, q, ack_n + nack_n, batch, LONG_LEASE_MS).await;
+    let working = claim_n(fireweed, q, ack_n + nack_n, batch, LONG_LEASE_MS).await;
     let claim_wall = claim_start.elapsed();
     check(
         working.len() as u64 == ack_n + nack_n,
@@ -526,7 +526,7 @@ pub async fn lifecycle(
         for it in &sample {
             let mut ops = BTreeMap::new();
             ops.insert("bench_touch".to_string(), Some(Bytes::from_static(b"1")));
-            let new_ver = pq
+            let new_ver = fireweed
                 .update_fields(q, it.item_id, ops, PayloadUpdate::Keep, None, None)
                 .await
                 .map_err(|e| format!("update_fields: {e:?}"))?;
@@ -537,7 +537,7 @@ pub async fn lifecycle(
                     it.item_version
                 ),
             )?;
-            let live = pq
+            let live = fireweed
                 .live_item(q, it.client_item_key.clone())
                 .await
                 .map_err(|e| format!("live_item: {e:?}"))?
@@ -557,7 +557,7 @@ pub async fn lifecycle(
         if let Some(it) = working.first() {
             let mut ops = BTreeMap::new();
             ops.insert("bench_touch".to_string(), Some(Bytes::from_static(b"1")));
-            match pq
+            match fireweed
                 .update_fields(q, it.item_id, ops, PayloadUpdate::Keep, None, None)
                 .await
             {
@@ -584,12 +584,12 @@ pub async fn lifecycle(
         .map(|c| c.item_id)
         .collect();
     let ack_start = Instant::now();
-    pq.ack(q, ack_ids.clone())
+    fireweed.ack(q, ack_ids.clone())
         .await
         .map_err(|e| format!("ack: {e:?}"))?;
     let ack_wall = ack_start.elapsed();
     let not_before = Some(plus_ms(now_ts(), BACKOFF_MS));
-    pq.nack(q, nack_ids.clone(), Nack::Retry { not_before })
+    fireweed.nack(q, nack_ids.clone(), Nack::Retry { not_before })
         .await
         .map_err(|e| format!("nack-retry: {e:?}"))?;
 
@@ -612,7 +612,7 @@ pub async fn lifecycle(
     std::thread::sleep(Duration::from_millis(
         (SHORT_LEASE_MS + 80).max(BACKOFF_MS as u64 + 80),
     ));
-    let reclaimed = pq
+    let reclaimed = fireweed
         .reclaim_expired(q, None)
         .await
         .map_err(|e| format!("reclaim_expired: {e:?}"))?;
@@ -638,7 +638,7 @@ pub async fn lifecycle(
     )?;
 
     // --- round 2: the nacked (backoff elapsed) + reclaimed items are now claimable -----------
-    let round2 = claim_n(pq, q, nack_n + abandon_n, batch, LONG_LEASE_MS).await;
+    let round2 = claim_n(fireweed, q, nack_n + abandon_n, batch, LONG_LEASE_MS).await;
     check(
         round2.len() as u64 == nack_n + abandon_n,
         &format!(
@@ -647,7 +647,7 @@ pub async fn lifecycle(
         ),
     )?;
     let r2_ids: Vec<ItemId> = round2.iter().map(|c| c.item_id).collect();
-    pq.ack(q, r2_ids)
+    fireweed.ack(q, r2_ids)
         .await
         .map_err(|e| format!("round-2 ack: {e:?}"))?;
     let m = metrics!();

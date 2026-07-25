@@ -1626,7 +1626,7 @@ pub struct ProjectionData {
     /// Opaque non-work side records (Snorri authoritative-commit boundary, epic pqueue-2201fd37). Wholly
     /// SEPARATE from `items`/`eligible`/`by_key`: these are NOT claimable work — they never enter the
     /// eligibility index, do not appear in claim/peek/metrics-as-work, and survive input finalization. Both
-    /// key and payload are opaque bytes pqueue never interprets.
+    /// key and payload are opaque bytes fireweed never interprets.
     side_records: BTreeMap<Vec<u8>, Bytes>,
     /// Per-queue caller-supplied instance/state fences (Snorri authoritative-commit boundary, epic
     /// pqueue-2201fd37). `instance_key -> fence`; an absent key reads as `0` (unset). Wholly SEPARATE from the

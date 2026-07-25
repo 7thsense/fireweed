@@ -5,4 +5,4 @@ storage:
   projection:
     backend: turso
     turso:
-      path: /var/lib/pqueue/projection/test.turso
+      path: /var/lib/fireweed/projection/test.turso

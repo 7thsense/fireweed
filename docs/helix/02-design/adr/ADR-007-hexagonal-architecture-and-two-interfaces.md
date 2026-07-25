@@ -22,7 +22,7 @@ ddx:
 **ADR ID**: ADR-007
 **Title**: Hexagonal architecture and two interfaces (RESP + Rust library)
 **Status**: accepted (status updated 2026-07-05 — the migration this ADR specifies is built:
-service/client/kafka deleted; `pqueue-resp`, the `pqueue` facade, and `pqueue-server` shipped).
+service/client/kafka deleted; `fireweed-resp`, the `fireweed` facade, and `fireweed-server` shipped).
 Partial supersessions: the "one shared projection" consequence was retracted by ADR-008 and the
 projection framing further refined by ADR-012 (composition axes) and ADR-013 (log single source of
 truth).
@@ -32,9 +32,9 @@ TD-006 (RESP surface), TD-007 (durability), `docs/helix/04-build/hexagonal-migra
 
 ## Context
 
-pqueue began with an HTTP/REST native interface (API-001 HTTP binding), an HTTP client crate, and a
+fireweed began with an HTTP/REST native interface (API-001 HTTP binding), an HTTP client crate, and a
 Kafka producer wire adapter (ADR-005), over a CQRS log+projection storage layer. As the product
-focus narrowed to "pqueue as an embeddable priority work queue," three problems surfaced:
+focus narrowed to "fireweed as an embeddable priority work queue," three problems surfaced:
 
 1. **Interface sprawl.** Three partial driving surfaces (HTTP, Kafka, SDK) each re-expressed the
    native operations, none was authoritative, and domain logic (auth, idempotency, lease fencing,
@@ -51,9 +51,9 @@ is preferable to incremental patching.
 
 Adopt **hexagonal architecture (ports and adapters)** with **exactly two driving interfaces**:
 
-1. **A RESP wire adapter** — a pqueue-native server speaking a **stock Redis Streams-compatible
+1. **A RESP wire adapter** — a fireweed-native server speaking a **stock Redis Streams-compatible
    worker subset** (produce/claim/ack/reclaim), so off-the-shelf Redis clients drive the hot path
-   with no custom commands. Limited but contract-faithful ("pqueue-flavored Redis"); see TD-006.
+   with no custom commands. Limited but contract-faithful ("fireweed-flavored Redis"); see TD-006.
 2. **A Rust library** — the full-power interface for everything the RESP subset intentionally omits
    (filtered claim, gates, cohorts, rich finalize, mutable priority, operator repair).
 
@@ -61,16 +61,16 @@ The library is, by design, strictly more capable than the RESP surface; this asy
 not accidental. A CLI is a library consumer, not a third interface.
 
 Structure:
-- **Domain** (`pqueue-core` types + `pqueue-engine` execution/ports) depends on nothing outward and
+- **Domain** (`fireweed-core` types + `fireweed-engine` execution/ports) depends on nothing outward and
   defines all ports. The engine owns the single *logical* claim path, the migrated domain logic
   (auth/idempotency/fencing/pause/validation), and the `ReclaimDriver`.
-- **Driven adapters** (`pqueue-memory`, `-sqlite`, `-postgres`, `-objectlog`) implement the storage
+- **Driven adapters** (`fireweed-memory`, `-sqlite`, `-postgres`, `-objectlog`) implement the storage
   ports; classified by durability class (TD-007).
-- **Driving adapters** (`pqueue-resp`, `pqueue` library) and the **composition root**
-  (`pqueue-server`) are the only places that name concrete types.
+- **Driving adapters** (`fireweed-resp`, `fireweed` library) and the **composition root**
+  (`fireweed-server`) are the only places that name concrete types.
 - A dependency-direction test forbids any domain→adapter edge.
 
-The migration is a **clean cutover**: `pqueue-service`, `pqueue-client`, and `pqueue-kafka` are
+The migration is a **clean cutover**: `fireweed-service`, `fireweed-client`, and `fireweed-kafka` are
 deleted; no stubs, legacy fallbacks, or compatibility shims survive (see the migration plan).
 
 ## Consequences
@@ -90,7 +90,7 @@ deleted; no stubs, legacy fallbacks, or compatibility shims survive (see the mig
 **Negative / accepted costs:**
 - The RESP surface is deliberately limited; advanced capability requires the library (recorded
   asymmetry, capability matrix in TD-006).
-- "pqueue-flavored Redis" diverges from literal Redis in named, documented ways (priority delivery
+- "fireweed-flavored Redis" diverges from literal Redis in named, documented ways (priority delivery
   order, upsert `XADD`, lease-generation-fenced `XACK`); semantic contracts hold but bit-identical
   behavior does not (TD-006 §3).
 - The queue is the unit of sharding (ADR-008): a queue is owned by one node and horizontal scale is cross-queue (per-queue ownership + routing, TD-003/TD-006). There is no intra-queue/multi-shard coordination to build; the ports admit per-queue ownership and cross-queue distribution.
@@ -101,9 +101,9 @@ deleted; no stubs, legacy fallbacks, or compatibility shims survive (see the mig
 
 - **Keep HTTP/REST + SDKs.** Rejected: no client ecosystem, domain logic stranded in the transport
   crate, three partial surfaces.
-- **RESP-framed custom protocol (`PQ*` commands as the primary surface).** Rejected: forfeits stock
+- **RESP-framed custom commands as the primary surface.** Rejected: forfeits stock
   Redis client compatibility — the main reason to speak RESP at all.
-- **Faithful Redis only (FIFO, no priority/upsert).** Rejected: discards pqueue's core value
+- **Faithful Redis only (FIFO, no priority/upsert).** Rejected: discards fireweed's core value
   (priority, enforced uniqueness). The "semantic-contract fidelity" middle path keeps both, with
   documented flavor differences, and is validated by an off-the-shelf-client e2e suite.
 - **Incremental in-place refactor.** Rejected: pre-launch, a clean cutover avoids a permanent

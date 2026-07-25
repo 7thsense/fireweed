@@ -8,7 +8,7 @@ EXPECTED_REASON = "external production SLA input pending"
 EXPECTED_RECHECK = "2026-07-15"
 
 MARKER_RE = re.compile(
-    r"pqueue-deferral:\s*progress_bound_ms\s*;"
+    r"fireweed-deferral:\s*progress_bound_ms\s*;"
     r"\s*owner=(?P<owner>[^;]+)\s*;"
     r"\s*reason=\"(?P<reason>[^\"]+)\"\s*;"
     r"\s*recheck=(?P<recheck>\d{4}-\d{2}-\d{2})"
@@ -25,7 +25,7 @@ def lint(path: Path) -> list[str]:
     if mentions_progress_bound and mentions_deferral and not markers:
         errors.append(
             "progress_bound_ms deferral requires marker "
-            "pqueue-deferral: progress_bound_ms; owner=Erik; "
+            "fireweed-deferral: progress_bound_ms; owner=Erik; "
             'reason="external production SLA input pending"; recheck=2026-07-15'
         )
 

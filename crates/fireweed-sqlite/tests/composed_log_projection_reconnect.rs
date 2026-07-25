@@ -17,12 +17,12 @@ thread_local! {
 fn paths() -> (String, String) {
     let tid = format!("{:?}", std::thread::current().id());
     let log = std::env::temp_dir()
-        .join(format!("pqueue-composed-logproj-reconnect-{tid}.log.db"))
+        .join(format!("fireweed-composed-logproj-reconnect-{tid}.log.db"))
         .to_str()
         .unwrap()
         .to_string();
     let proj = std::env::temp_dir()
-        .join(format!("pqueue-composed-logproj-reconnect-{tid}.proj.db"))
+        .join(format!("fireweed-composed-logproj-reconnect-{tid}.proj.db"))
         .to_str()
         .unwrap()
         .to_string();

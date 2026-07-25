@@ -30,12 +30,12 @@ ADR-001 already declares the durable command log the source of truth
 (ADR-001-cqrs-log-projection-storage-model.md:123-130). The code has drifted into two contradictory
 durability contracts sharing one crate:
 
-- **Log-authoritative** (the CQRS intent): `crates/pqueue-postgres/src/lib.rs:6-13` — "the command LOG
+- **Log-authoritative** (the CQRS intent): `crates/fireweed-postgres/src/lib.rs:6-13` — "the command LOG
   is durable in postgres … The log rows are the source of truth (CQRS); the in-memory projection is a
   derived view that any reopen reconstructs." Write ordering is durable-first (`:14`).
-- **DB-authoritative** (the drift): `crates/pqueue-postgres/src/relational.rs:3,2767` — "a
-  **DB-authoritative** projection … `pqueue_items` is DB-authoritative"; on reconnect "The item
-  projection itself is already durable in `pqueue_items` — nothing to replay" (`:983-987`). The sqlite
+- **DB-authoritative** (the drift): `crates/fireweed-postgres/src/relational.rs:3,2767` — "a
+  **DB-authoritative** projection … `fireweed_items` is DB-authoritative"; on reconnect "The item
+  projection itself is already durable in `fireweed_items` — nothing to replay" (`:983-987`). The sqlite
   relational family shares this stance.
 
 ADR-008 legitimized the split as "two projection families." The cost has become visible: a projection
@@ -47,13 +47,13 @@ demonstrates the same discipline — the log/lake is the sole truth; row stores 
 ## Decision
 
 **The durable command log is the single, authoritative system of record for every queue. All
-projections — including the relational family (`pqueue_items` and peers) — are rebuildable, disposable
+projections — including the relational family (`fireweed_items` and peers) — are rebuildable, disposable
 views derived solely from the committed log via `ProjectionData::apply_command` /
 `ProjectionStore::apply`.** No projection may hold acknowledged state that is not reconstructable by
 replaying the log from genesis or from a snapshot at a committed `CommandPosition`.
 
 This ratifies the `ComposedBackend` recovery contract as the universal invariant:
-`recovery_high_water` (`crates/pqueue-engine/src/compose.rs:636`) plus tail replay (`:1196-1239`)
+`recovery_high_water` (`crates/fireweed-engine/src/compose.rs:636`) plus tail replay (`:1196-1239`)
 must be able to reconstruct any projection, and `resolve_recovery_start` (`:389-404`) governs trust in
 a projection's recorded high-water.
 
@@ -67,11 +67,11 @@ which an acknowledged command can be lost or can race its own visibility.
 
 ### What changes for the relational family
 
-1. The word "authoritative" applied to `pqueue_items` is retired. The relational projection becomes a
+1. The word "authoritative" applied to `fireweed_items` is retired. The relational projection becomes a
    **materialized cache with a persisted applied-high-water**, exactly like the sqlite hybrid
    projection's `sqlite_high_water`.
 2. The Postgres/sqlite relational backends MUST persist the durable command log (they already write
-   log rows + `high_water` — `crates/pqueue-postgres/src/lib.rs:105,241`) and MUST implement
+   log rows + `high_water` — `crates/fireweed-postgres/src/lib.rs:105,241`) and MUST implement
    `recovery_high_water` to return their applied position and replay the tail, rather than returning
    "nothing to replay" (`relational.rs:983-987`). The projection tables are truncatable and
    rebuildable from the log.
@@ -84,7 +84,7 @@ which an acknowledged command can be lost or can race its own visibility.
 
 Every production deployment MUST run with a durable command log. There is no supported log-less or
 projection-only durability posture, even where the projection store itself is highly durable (e.g. a
-managed Postgres projection): losing acknowledged data is never acceptable for the workloads pqueue
+managed Postgres projection): losing acknowledged data is never acceptable for the workloads fireweed
 serves, and a projection without a log cannot reproduce a prior state, cannot guarantee change-record
 emission, and leaves the acknowledgement path racing projection durability. An earlier draft of this
 ADR allowed a named, telemetry-surfaced degraded `null-log` mode; **that allowance is retired
@@ -112,9 +112,9 @@ decision were filed and are now **closed** (bead `pqueue-3c5aa2e0`, "Relational 
 migration", plus its five children):
 
 - Rework the relational backend recovery path so `recovery_high_water` returns the applied position and
-  replays the log tail instead of treating `pqueue_items` as durable truth — **done**; both the Postgres
-  and sqlite relational stores implement `recovery_high_water` and describe `pqueue_items` as a
-  rebuildable cache (e.g. `crates/pqueue-postgres/src/relational.rs:995,5040`).
+  replays the log tail instead of treating `fireweed_items` as durable truth — **done**; both the Postgres
+  and sqlite relational stores implement `recovery_high_water` and describe `fireweed_items` as a
+  rebuildable cache (e.g. `crates/fireweed-postgres/src/relational.rs:995,5040`).
 - Persist the relational family applied-high-water in both Postgres and sqlite relational projection
   implementations so they are rebuildable caches rather than authoritative stores — **done**.
 - Add migration coverage for branch-at-position, read-as-of-position, and change-record emission against
@@ -124,7 +124,7 @@ migration", plus its five children):
 One deliberately-scoped exception remains: ADR-012's decision note (2026-07-08, DDx B3.6) **retains** the
 monolithic DB-authoritative `SqliteRelationalBackend` as a differential test oracle and benchmark shape.
 That does not contradict this ADR — its only non-test construction site is the benchmark harness; it is
-not reachable through any production configuration surface (`PQUEUE_PROJECTION_BACKEND` composes every
+not reachable through any production configuration surface (`FIREWEED_PROJECTION_BACKEND` composes every
 projection axis, including `sqlite`/`postgres` relational, with a durable log), so the mandatory-log
 invariant holds. Its eventual retirement conditions are tracked in ADR-012.
 
@@ -142,6 +142,6 @@ invariant holds. Its eventual retirement conditions are tracked in ADR-012.
 Making the append-then-apply seam (`compose.rs:1346-1366`) the sole serialization point removes the
 relational family's "concurrency-correct by construction" story (`relational.rs:11-19`). The Postgres
 high-water guard and `MAX(seq)+1` append allocation carry a documented TOCTOU under connection pooling
-(`crates/pqueue-postgres/src/lib.rs:16-46`). **The TOCTOU fix is a hard prerequisite for this ADR to be
+(`crates/fireweed-postgres/src/lib.rs:16-46`). **The TOCTOU fix is a hard prerequisite for this ADR to be
 safe multi-node**; it was tracked as the blocking bead `pqueue-b59f4897` in this ADR's implementation
 chain and is now **closed** (verified as part of the rebuild-from-log migration, bead `pqueue-3c5aa2e0`).

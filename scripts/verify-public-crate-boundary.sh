@@ -75,12 +75,12 @@ expect_rejected_all() {
 expect_rejected raw-port 'trait `PushPort` is private'
 expect_rejected internal-crate 'use of unresolved module or unlinked crate `fireweed_engine`'
 expect_rejected backend-accessor 'no method named `backend`'
-expect_rejected legacy-generic-facade 'no `Pqueue` in the root' 'struct `Pqueue` is private'
-expect_rejected legacy-embedded-facade 'no `EmbeddedPqueue` in the root' 'struct `EmbeddedPqueue` is private'
-expect_rejected legacy-lib-backend 'no `LibBackend` in the root' 'trait `LibBackend` is private'
-expect_rejected legacy-embedded-handle 'no `EmbeddedHandle` in the root' 'struct `EmbeddedHandle` is private'
-expect_rejected legacy-generic-constructor 'no `Pqueue` in the root' 'struct `Pqueue` is private'
-expect_rejected_all legacy-embedded-config \
+expect_rejected rejected-retired-generic-facade 'no `Pqueue` in the root' 'struct `Pqueue` is private'
+expect_rejected rejected-retired-embedded-facade 'no `EmbeddedPqueue` in the root' 'struct `EmbeddedPqueue` is private'
+expect_rejected rejected-retired-lib-backend 'no `LibBackend` in the root' 'trait `LibBackend` is private'
+expect_rejected rejected-retired-embedded-handle 'no `EmbeddedHandle` in the root' 'struct `EmbeddedHandle` is private'
+expect_rejected rejected-retired-generic-constructor 'no `Pqueue` in the root' 'struct `Pqueue` is private'
+expect_rejected_all rejected-retired-embedded-config \
     'EmbeddedDurabilityConfig' \
     'EmbeddedObjectLogConfig' \
     'EmbeddedProjectionConfig' \
@@ -93,4 +93,4 @@ expect_rejected_all legacy-embedded-config \
     'open_embedded_async' \
     'open_embedded_sqlite'
 
-echo "public crate boundary valid: facade compiles; legacy facade, ports, internal crates, and backend access are unreachable"
+echo "public crate boundary valid: facade compiles; retired facade names, ports, internal crates, and backend access are unreachable"

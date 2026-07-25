@@ -34,7 +34,7 @@ if [[ "$tier" == "full" ]]; then
   preflight_dir=target/perf-matrix-preflight
   mkdir -p "$preflight_dir"
   FIREWEED_PG_TEST_URL="$FIREWEED_PERF_POSTGRES_URL" \
-    PQUEUE_PG_TEST_URL="$FIREWEED_PERF_POSTGRES_URL" \
+    FIREWEED_PG_TEST_URL="$FIREWEED_PERF_POSTGRES_URL" \
     cargo test -p fireweed-conformance --all-features \
     >"$preflight_dir/conformance.log" 2>&1
   FIREWEED_PERF_CONFORMANCE_SHA256=$(sha256sum "$preflight_dir/conformance.log" | awk '{print $1}')

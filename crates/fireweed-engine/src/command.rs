@@ -50,7 +50,7 @@ pub enum QueueCommand {
     ReplacePending(ReplacePendingCommand),
     /// In-place merge of a live (Pending or Leased) item's hot-storage `fields`/`payload` with no lifecycle
     /// change (FAC-1, ADR-009). The write side of the `LiveItemView` map; bumps `item_version`. Atomic
-    /// class only. Lets an owner-runtime keep compound per-item work state in pqueue instead of a shadow.
+    /// class only. Lets an owner-runtime keep compound per-item work state in fireweed instead of a shadow.
     UpdateFields(UpdateFieldsCommand),
     // --- ReclaimDriver-fired (TD-007 §3) ---
     LeaseExpired(LeaseExpiredCommand),
@@ -63,20 +63,20 @@ pub enum QueueCommand {
     PurgeItems(PurgeItemsCommand),
     /// Operator gate flip (BQ-14d, API-001 g2 `SetGates`): block or unblock the given gate keys for the
     /// queue. A blocked gate key makes every item carrying it ineligible (relational anti-join against
-    /// `pqueue_gate_state`); unblocking restores eligibility. A relational-mode feature — the in-memory
+    /// `fireweed_gate_state`); unblocking restores eligibility. A relational-mode feature — the in-memory
     /// family applies this as a no-op (it stores no gate state).
     SetGates(SetGatesCommand),
     /// Write bounded OPAQUE non-work side records (Snorri authoritative-commit boundary, ADR-009 / epic
     /// pqueue-2201fd37). Each record is a `key -> payload` pair stored in a projection map that is
     /// ENTIRELY SEPARATE from the work-item index: a side record is NOT claimable/peekable work, never
-    /// enters the eligibility index, `by_key`, or metrics-as-work, and survives input finalization. pqueue
+    /// enters the eligibility index, `by_key`, or metrics-as-work, and survives input finalization. fireweed
     /// treats both key and payload as opaque bytes (the consumer owns any meaning). Emitted only on the
     /// vectorized claimed-work commit path.
     WriteSideRecords(WriteSideRecordsCommand),
     /// Advance a caller-supplied OPAQUE instance/state fence (Snorri authoritative-commit boundary, ADR-009
     /// / epic pqueue-2201fd37). Sets the stored fence for `instance_key` to `next` — validated pre-commit
     /// (stored == `expected`, `next > expected`) so the apply is infallible. The fence map is SEPARATE from
-    /// the work-item projection (not claimable/peekable). `instance_key` is opaque bytes pqueue never
+    /// the work-item projection (not claimable/peekable). `instance_key` is opaque bytes fireweed never
     /// interprets. Emitted only on the vectorized claimed-work commit path.
     AdvanceInstanceFence(AdvanceInstanceFenceCommand),
 }
@@ -216,7 +216,7 @@ pub struct PushItem {
     pub metadata: Metadata,
     /// Declared cohort size (BQ-14c, TD-002 cohort formation): when set together with `group_key`, this
     /// item is a member of a cohort of `cohort_size` total members (the cohort key IS the `group_key`). The
-    /// relational projection forms `pqueue_cohorts` from these declarations and a `whole_cohort` claim is
+    /// relational projection forms `fireweed_cohorts` from these declarations and a `whole_cohort` claim is
     /// admissible once the cohort is complete (`member_count == cohort_size`). `None` = not a cohort member
     /// (the common case; the in-memory family does not form cohorts and ignores this field). A divergent
     /// `cohort_size` for the same `group_key` is a conflict (TD-002 §cohort).
@@ -224,7 +224,7 @@ pub struct PushItem {
     pub cohort_size: Option<u64>,
     /// Gate keys this item carries (BQ-14d, TD-002 §gate / API-001 g2). When ANY of these keys is in a
     /// `blocked` state for the queue (set via the `SetGates` command), the item is INELIGIBLE — the
-    /// relational eligibility predicate anti-joins item gate keys against `pqueue_gate_state`. Empty = no
+    /// relational eligibility predicate anti-joins item gate keys against `fireweed_gate_state`. Empty = no
     /// gates (the common case).
     ///
     /// SCOPE: gates are a RELATIONAL-mode feature only (like cohorts/group batching). The in-memory
@@ -426,7 +426,7 @@ pub struct PurgeItemsCommand {
 }
 
 /// One opaque non-work side record (Snorri authoritative-commit boundary). Both `key` and `payload` are
-/// OPAQUE bytes — pqueue stores them verbatim and never interprets them. Distinct from a work item: a side
+/// OPAQUE bytes — fireweed stores them verbatim and never interprets them. Distinct from a work item: a side
 /// record carries no lifecycle, lease, priority, or eligibility.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct SideRecord {

@@ -1,7 +1,7 @@
 //! ADR-012 P1b-ii: the CORE conformance class against the UNIFIED postgres-relational COMPOSITION
 //! (`ComposedBackend<PostgresRelational, PostgresRelational, InProcessControlPlane>` — one relational store
 //! on both the log and projection axes, so the generic `commit_locked` drives append+apply into ONE durable
-//! postgres transaction). **Env-gated** on a live database via `PQUEUE_PG_TEST_URL`.
+//! postgres transaction). **Env-gated** on a live database via `FIREWEED_PG_TEST_URL`.
 //!
 //! Each `make()` call gets a FRESH process-unique schema (the postgres analogue of a fresh `:memory:`
 //! sqlite store), so every backend the scenario builds is independent — matching how the sqlite unified
@@ -9,11 +9,11 @@
 //! NOT included here (it reopens shared durable state, which the in-process control plane does not retain);
 //! the monolithic `PostgresRelationalBackend` carries that class in `relational_conformance.rs`.
 //!
-//! If `PQUEUE_PG_TEST_URL` is ABSENT, every scenario prints a LOUD skip — a green run is then VISIBLY
+//! If `FIREWEED_PG_TEST_URL` is ABSENT, every scenario prints a LOUD skip — a green run is then VISIBLY
 //! partial (the unified postgres composition unverified against a live DB), never a hidden pass. Compiling
 //! this file already proves the composition satisfies `ConformanceCore`. To run live:
-//!   docker run -d --name pq-pg -p 5433:5432 -e POSTGRES_PASSWORD=pq postgres:16
-//!   PQUEUE_PG_TEST_URL=postgres://postgres:pq@127.0.0.1:5433/postgres cargo test -p fireweed-postgres \
+//!   docker run -d --name fireweed-pg -p 5433:5432 -e POSTGRES_PASSWORD=fireweed postgres:16
+//!   FIREWEED_PG_TEST_URL=postgres://postgres:fireweed@127.0.0.1:5433/postgres cargo test -p fireweed-postgres \
 //!     --test composed_relational_conformance
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,7 +23,7 @@ use fireweed_postgres::PostgresRelationalBackend;
 fn fresh_schema() -> String {
     static N: AtomicU64 = AtomicU64::new(0);
     format!(
-        "pq_crel_{}_{}",
+        "fireweed_crel_{}_{}",
         std::process::id(),
         N.fetch_add(1, Ordering::SeqCst)
     )
@@ -37,17 +37,17 @@ macro_rules! pg_composed {
         $(
             #[test]
             fn $name() {
-                match std::env::var("PQUEUE_PG_TEST_URL") {
+                match std::env::var("FIREWEED_PG_TEST_URL") {
                     Ok(url) => {
                         futures::executor::block_on(fireweed_conformance::scenarios::$name(move || {
                             let schema = fresh_schema();
                             PostgresRelationalBackend::connect_in_schema(&url, &schema)
-                                .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)")
+                                .expect("connect postgres (is FIREWEED_PG_TEST_URL a live DB?)")
                         }));
                     }
                     Err(_) => {
                         eprintln!(
-                            "POSTGRES UNIFIED COMPOSITION SKIPPED ({}) — set PQUEUE_PG_TEST_URL to a live DB",
+                            "POSTGRES UNIFIED COMPOSITION SKIPPED ({}) — set FIREWEED_PG_TEST_URL to a live DB",
                             stringify!($name)
                         );
                     }
@@ -98,21 +98,21 @@ pg_composed!(
 /// unified composition handles it in `core_suite!(@atomic)`.
 #[test]
 fn claimed_item_shape_includes_payload_fields_and_gate_keys_if_supported() {
-    match std::env::var("PQUEUE_PG_TEST_URL") {
+    match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) => {
             futures::executor::block_on(
                 fireweed_conformance::claimed_item_shape_includes_payload_fields_and_gate_keys_if_supported(
                     move || {
                         let schema = fresh_schema();
                         PostgresRelationalBackend::connect_in_schema(&url, &schema)
-                            .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)")
+                            .expect("connect postgres (is FIREWEED_PG_TEST_URL a live DB?)")
                     },
                 ),
             );
         }
         Err(_) => {
             eprintln!(
-                "POSTGRES UNIFIED COMPOSITION SKIPPED (claimed_item_shape_includes_payload_fields_and_gate_keys_if_supported) — set PQUEUE_PG_TEST_URL to a live DB"
+                "POSTGRES UNIFIED COMPOSITION SKIPPED (claimed_item_shape_includes_payload_fields_and_gate_keys_if_supported) — set FIREWEED_PG_TEST_URL to a live DB"
             );
         }
     }

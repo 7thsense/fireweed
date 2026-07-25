@@ -1,88 +1,135 @@
 {
-  "schema": "fireweed-public-identity-allowlist-v1",
-  "adr": "ADR-020",
-  "source_inventory": "docs/helix/02-design/public-namespace-migration.yaml",
+  "schema": "fireweed-public-identity-allowlist-v2",
+  "adr": "ADR-023",
   "entries": [
     {
-      "id": "rust-workspace-compatibility-crates",
-      "class": "temporary compatibility",
-      "path_pattern": "^(crates/fireweed(?:-[^/]+)?/.*|tools/fireweed-turso-compat-probe/.*)$",
-      "match_pattern": "(?i)\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b",
-      "reason": "Renamed Rust crates still contain ADR-020-governed PQUEUE_* configuration aliases, persisted pqueue_* identifiers, RESP pqueue tokens, and historical bead references; the dedicated namespace checks reject old packages/imports while permitting only declared [[bin]] compatibility aliases and requiring Fireweed-primary process environment reads.",
-      "owner_surface": "Rust runtime compatibility, persistence/wire identifiers, and audit references",
-      "removal_condition": "Remove after v0.20.0 consumers migrate from the declared binary and PQUEUE_* aliases and the configuration, protocol, persisted-data, and audit owners retire the remaining governed identifiers."
-    },
-    {
-      "id": "helm-runtime-compatibility",
-      "class": "persisted/wire",
-      "path_pattern": "^charts/fireweed-queue/.*$",
-      "match_pattern": "(?i)\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b",
-      "reason": "The Fireweed chart still renders ADR-020-governed runtime environment aliases and retained on-disk identifiers, and names historical bead IDs for auditability. The verifier evaluates identity tokens without surrounding path context, so this rule admits chart-local pqueue tokens while the dedicated deployment-coordinate layer independently rejects old chart, workload, image, label, package, and evidence coordinates.",
-      "owner_surface": "Helm runtime configuration, persisted paths, and audit references",
-      "removal_condition": "Remove after the configuration and persisted-data owners retire the remaining PQUEUE runtime aliases and pqueue storage identifiers."
-    },
-    {
-      "id": "github-workflow-compatibility",
-      "class": "temporary compatibility",
-      "path_pattern": "^\\.github/workflows/.*\\.yml$",
-      "match_pattern": "^PQUEUE_(?:PG_TEST_URL|S3_TEST_(?:ENDPOINT|ACCESS_KEY|SECRET_KEY))$|^pqueue-test$",
-      "reason": "The live Postgres and S3 test harnesses still read these v0.20.0 compatibility variables and the historical MinIO fixture bucket; checkout paths, Cargo coordinates, binaries, release variables, and public workflow labels have moved to Fireweed.",
-      "owner_surface": "GitHub Actions provisioned integration-test compatibility inputs",
-      "removal_condition": "Remove when every provisioned integration-test harness reads FIREWEED_* as its primary input and the retained MinIO fixture bucket is migrated."
-    },
-    {
-      "id": "deployment-docs-compatibility-and-persistence",
-      "class": "persisted/wire",
-      "path_pattern": "^docs/deployment/.*\\.md$",
-      "match_pattern": "(?i)\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b|7thsense-pqueue|github\\.com/telepathdata/7thsense-pqueue(?:\\.git)?",
-      "reason": "ADR-020 distinguishes operator-facing examples from retained on-disk and runtime wire identifiers such as /var/lib/pqueue and PQUEUE_* compatibility variables.",
-      "owner_surface": "Deployment and operator documentation",
-      "removal_condition": "Remove after public deployment examples use Fireweed coordinates and any retained pqueue storage or wire identifiers are covered by a separate data-migration ADR."
-    },
-    {
-      "id": "performance-and-release-audit-history",
+      "id": "namespace-decision-history",
       "class": "historical/audit",
-      "path_pattern": "^docs/(perf|releases)/.*$",
-      "match_pattern": "(?i)\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b",
-      "reason": "ADR-020 preserves historical release notes, evidence ledgers, benchmark commands, and audit artifacts without rewriting published history.",
-      "owner_surface": "Release evidence, performance evidence, and historical release notes",
-      "removal_condition": "Remove only if a later evidence-retention decision supersedes the no-history-rewrite policy for these tracked artifacts."
+      "paths": [
+        "docs/helix/02-design/adr/ADR-020-public-namespace-and-compatibility.md",
+        "docs/helix/02-design/adr/ADR-023-pre-release-fireweed-namespace-cutover.md"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "ADR-020 is the superseded namespace decision and ADR-023 must name the retired identity to prohibit it.",
+      "owner_surface": "Namespace decision history",
+      "removal_condition": "Retain while the supersession record is part of the governed ADR history."
     },
     {
-      "id": "helix-governance-history",
+      "id": "naming-analysis-history",
       "class": "historical/audit",
-      "path_pattern": "^docs/helix/.*$",
-      "match_pattern": "(?i)\\bQueueyard\\b|\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b|7thsense-pqueue|github\\.com/telepathdata/7thsense-pqueue(?:\\.git)?",
-      "reason": "ADR-020 keeps historical naming analysis, bead IDs, accepted decisions, and migration inventory visible for auditability.",
-      "owner_surface": "HELIX governance documents and ADR-020 migration inventory",
-      "removal_condition": "Remove only when ADR-020 is replaced by a new governance artifact that explicitly rewrites this tracked documentation policy."
+      "paths": [
+        "docs/helix/00-discover/name-and-positioning-analysis.md"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "The naming analysis records evaluated and rejected identities; rewriting those candidates would falsify the decision record.",
+      "owner_surface": "Product naming decision evidence",
+      "removal_condition": "Retain while the naming analysis remains an auditable decision input."
     },
     {
-      "id": "repository-root-runtime-compatibility",
-      "class": "temporary compatibility",
-      "path_pattern": "^(Cargo\\.toml|README\\.md|Dockerfile|Dockerfile\\.e2|Dockerfile\\.prebuilt|docker-compose\\.yml|\\.gitignore|deny\\.toml)$",
-      "match_pattern": "(?i)\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b",
-      "reason": "ADR-020 classifies current public docs, container image names, local service names, and runtime coordinates as temporary compatibility surfaces.",
-      "owner_surface": "Repository root public docs and runtime packaging",
-      "removal_condition": "Remove when root docs and runtime packaging advertise Fireweed coordinates and any old local names are covered by a dedicated compatibility note."
+      "id": "pre-fireweed-release-notes",
+      "class": "historical/audit",
+      "paths": [
+        "docs/releases/v0.6.0.md",
+        "docs/releases/v0.14.0.md",
+        "docs/releases/v0.15.0.md",
+        "docs/releases/v0.15.1.md",
+        "docs/releases/v0.16.0.md",
+        "docs/releases/v0.17.0.md",
+        "docs/releases/v0.17.1.md",
+        "docs/releases/v0.17.2.md",
+        "docs/releases/v0.17.3.md",
+        "docs/releases/v0.18.0.md",
+        "docs/releases/v0.19.0.md",
+        "docs/releases/v0.19.1.md",
+        "docs/releases/v0.19.2.md",
+        "docs/releases/v0.19.3.md",
+        "docs/releases/v0.19.4.md",
+        "docs/releases/v0.19.5.md",
+        "docs/releases/v0.19.6.md"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "These versioned notes describe releases made before the hard Fireweed cutover and are immutable release history.",
+      "owner_surface": "Published pre-cutover release record",
+      "removal_condition": "Retain while the corresponding pre-cutover release tags remain part of project history."
     },
     {
-      "id": "operational-scripts-compatibility",
-      "class": "temporary compatibility",
-      "path_pattern": "^scripts/(ci|dev|lakebase|perf|release)/.*$",
-      "match_pattern": "(?i)\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b|7thsense-pqueue|github\\.com/telepathdata/7thsense-pqueue(?:\\.git)?",
-      "reason": "ADR-020 lists release, perf, CI, and identity-guardrail scripts as consumers that must recognize old names during the migration window.",
-      "owner_surface": "CI, release, performance, and development scripts",
-      "removal_condition": "Remove when operational scripts invoke Fireweed coordinates only and no longer need old pqueue compatibility variables or binary names."
+      "id": "pre-fireweed-performance-evidence",
+      "class": "historical/audit",
+      "paths": [
+        "docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_100k.jsonl",
+        "docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_10m.jsonl",
+        "docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_1m.jsonl",
+        "docs/perf/evidence/performance_object_log_hybrid_smoke.jsonl",
+        "docs/perf/evidence/sp01-byte-admission-smoke.md",
+        "docs/perf/evidence/td008-terminal-reap-frontier.jsonl",
+        "docs/perf/evidence/tp002-e0-postgres-release-10m.jsonl",
+        "docs/perf/evidence/tp002-e1-postgres-release-10m.jsonl",
+        "docs/perf/evidence/tp002-e2-cross-queue-remeasured.jsonl",
+        "docs/perf/evidence/tp002-e2-density-durable.jsonl",
+        "docs/perf/evidence/tp002-e2-multinode-kind-release.jsonl",
+        "docs/perf/evidence/tp002-e2-multinode-smoke.jsonl",
+        "docs/perf/evidence/tp002-e2-objectlog-sqlite-failover-kind.json",
+        "docs/perf/evidence/tp002-e3-cost-model.jsonl",
+        "docs/perf/evidence/tp002-e3-objectlog-minio-historical-invalid.jsonl",
+        "docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl",
+        "docs/perf/evidence/tp003-ac-txn-matrix-postgres.jsonl",
+        "docs/perf/evidence/tp003-ac-txn-matrix.jsonl",
+        "docs/perf/evidence/tp003-ac-txn-parity-postgres-storage-pairs.jsonl"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "These files are captured command/result evidence from pre-cutover revisions; editing their recorded commands would falsify the evidence.",
+      "owner_surface": "Immutable pre-cutover performance evidence",
+      "removal_condition": "Retain while these evidence rows are kept for historical comparison and audit."
     },
     {
-      "id": "identity-guardrail-old-name-probes",
-      "class": "temporary compatibility",
-      "path_pattern": "^scripts/(verify-public-identity|test-public-identity-residue)\\.sh$",
-      "match_pattern": "(?i)\\bQueueyard\\b|\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b|7thsense-pqueue|github\\.com/telepathdata/7thsense-pqueue(?:\\.git)?",
-      "reason": "The ADR-020 residue gate and its tests must name each old identity class so they can reject newly introduced unapproved occurrences.",
-      "owner_surface": "Public identity residue guardrail",
-      "removal_condition": "Remove when the guardrail no longer tests old pqueue, PQUEUE, Queueyard, or 7thsense-pqueue residues because those classes have fully retired."
+      "id": "secret-scan-audit-fingerprint",
+      "class": "historical/audit",
+      "paths": [
+        ".gitleaksignore"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "The gitleaks fingerprint contains the original committed path as part of an immutable finding identity.",
+      "owner_surface": "Secret-scanning audit fingerprint",
+      "removal_condition": "Remove only if the historical gitleaks finding itself is retired."
+    },
+    {
+      "id": "pre-cutover-review-evidence",
+      "class": "historical/audit",
+      "paths": [
+        "docs/helix/04-build/reviews/SP-01-claude-fable-review.md",
+        "docs/helix/04-build/reviews/foqs-interface-adversarial-review.md"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "These model-review records quote pre-cutover implementation names and are retained as immutable review evidence.",
+      "owner_surface": "Pre-cutover adversarial review evidence",
+      "removal_condition": "Retain while the corresponding review records remain part of the governed audit trail."
+    },
+    {
+      "id": "identity-gate-negative-tests",
+      "class": "negative-test",
+      "paths": [
+        "scripts/verify-public-identity.sh",
+        "scripts/test-public-identity-residue.sh"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ(?:\\*|\\.[A-Za-z][A-Za-z0-9_.-]*)|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*|pq(?:[-_][A-Za-z0-9_-]+)?|PQ[A-Z*][A-Z0-9_*.-]*)",
+      "reason": "The verifier and its focused tests must spell each retired token class solely to prove that the class is rejected.",
+      "owner_surface": "Public identity negative-test guardrail",
+      "removal_condition": "Retain for as long as the hard-cutover residue gate protects the Fireweed namespace."
+    },
+    {
+      "id": "public-api-negative-compile-tests",
+      "class": "negative-test",
+      "paths": [
+        "scripts/verify-public-crate-boundary.sh",
+        "scripts/ci/fixtures/public-crate-boundary/Cargo.toml",
+        "scripts/ci/fixtures/public-crate-boundary/src/rejected_retired_embedded_facade.rs",
+        "scripts/ci/fixtures/public-crate-boundary/src/rejected_retired_generic_facade.rs",
+        "scripts/ci/fixtures/public-crate-boundary/src/rejected_retired_generic_constructor.rs"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "These exact compile-fail fixtures and their runner name retired Rust symbols only to prove that downstream code cannot use them.",
+      "owner_surface": "Public Rust API negative tests",
+      "removal_condition": "Retain while compile-fail coverage guards against reintroducing the retired facade."
     }
   ]
 }

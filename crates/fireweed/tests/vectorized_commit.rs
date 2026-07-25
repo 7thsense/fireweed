@@ -16,7 +16,7 @@ use fireweed::{
 use fireweed_core::{
     EligibilityPolicy, IndexDeclaration, IndexDef, IndexType, OrderingMode, PriorityDirection,
     PriorityModel, PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, QueueIndex,
-    RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp,
+    RecurrencePolicy, RetryPolicy, TenantId,
 };
 use fireweed_engine::QueueKey;
 use fireweed_memory::{ManualClock, composed_memory_backend};
@@ -64,9 +64,12 @@ fn item(priority: i64) -> NewItem {
 }
 
 /// Push one input item and claim it, returning the `ClaimRef` (id + lease token + version) the commit needs.
-async fn push_and_claim(pq: &RuntimeCore<impl fireweed::LibBackend>, q: &QueueKey) -> ClaimRef {
-    pq.push(q, item(10)).await.unwrap();
-    let claimed = pq.claim(q, 1, 60_000).await.unwrap();
+async fn push_and_claim(
+    fireweed: &RuntimeCore<impl fireweed::LibBackend>,
+    q: &QueueKey,
+) -> ClaimRef {
+    fireweed.push(q, item(10)).await.unwrap();
+    let claimed = fireweed.claim(q, 1, 60_000).await.unwrap();
     assert_eq!(claimed.len(), 1, "exactly one item claimed");
     let c = &claimed[0];
     ClaimRef {
@@ -112,7 +115,7 @@ fn claim_ref(item: &fireweed::ClaimedItem) -> ClaimRef {
 #[tokio::test]
 async fn multi_claim_commit_atomically_consumes_result_and_await_and_appends_continuation() {
     let backend = Arc::new(composed_memory_backend());
-    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
+    let fireweed = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     let mut definition = qdef(60_000);
     definition.typed_indexes = vec![QueueIndex {
@@ -123,17 +126,18 @@ async fn multi_claim_commit_atomically_consumes_result_and_await_and_appends_con
             unique: false,
         }),
     }];
-    pq.create_queue(definition).await.unwrap();
-    pq.push_batch(
-        &q,
-        vec![
-            indexed_item("result", "result-1", 10),
-            indexed_item("await", "await-1", 11),
-        ],
-    )
-    .await
-    .unwrap();
-    let claimed = pq.claim(&q, 2, 60_000).await.unwrap();
+    fireweed.create_queue(definition).await.unwrap();
+    fireweed
+        .push_batch(
+            &q,
+            vec![
+                indexed_item("result", "result-1", 10),
+                indexed_item("await", "await-1", 11),
+            ],
+        )
+        .await
+        .unwrap();
+    let claimed = fireweed.claim(&q, 2, 60_000).await.unwrap();
     assert_eq!(claimed.len(), 2);
     let primary = claim_ref(&claimed[0]);
     let additional = claim_ref(&claimed[1]);
@@ -154,25 +158,32 @@ async fn multi_claim_commit_atomically_consumes_result_and_await_and_appends_con
         }],
     };
 
-    let first = pq.commit_multi_claim(&q, request.clone()).await.unwrap();
-    let replay = pq.commit_multi_claim(&q, request.clone()).await.unwrap();
+    let first = fireweed
+        .commit_multi_claim(&q, request.clone())
+        .await
+        .unwrap();
+    let replay = fireweed
+        .commit_multi_claim(&q, request.clone())
+        .await
+        .unwrap();
     assert_eq!(replay, first);
     assert!(
         matches!(first.as_slice(), [EntryOutcome::Committed { lifecycle_item_ids }] if lifecycle_item_ids.len() == 1)
     );
-    let metrics = pq.metrics(&q).await.unwrap();
+    let metrics = fireweed.metrics(&q).await.unwrap();
     assert_eq!(
         (metrics.pending, metrics.leased, metrics.complete),
         (1, 0, 2)
     );
     assert_eq!(
-        pq.side_record(&q, b"instance/workflow-1")
+        fireweed
+            .side_record(&q, b"instance/workflow-1")
             .await
             .unwrap()
             .as_deref(),
         Some(b"revision-2".as_slice())
     );
-    let recovery = pq
+    let recovery = fireweed
         .explain_commit(&q, request_id.clone())
         .await
         .unwrap()
@@ -187,28 +198,34 @@ async fn multi_claim_commit_atomically_consumes_result_and_await_and_appends_con
     conflicting.entries[0].side_records[0].payload =
         fireweed::Bytes::copy_from_slice(b"different-revision");
     assert_eq!(
-        pq.commit_multi_claim(&q, conflicting).await.unwrap_err(),
+        fireweed
+            .commit_multi_claim(&q, conflicting)
+            .await
+            .unwrap_err(),
         EngineError::RequestIdConflict
     );
-    assert_eq!(pq.claim(&q, 10, 60_000).await.unwrap().len(), 1);
-    assert!(pq.claim(&q, 10, 60_000).await.unwrap().is_empty());
+    assert_eq!(fireweed.claim(&q, 10, 60_000).await.unwrap().len(), 1);
+    assert!(fireweed.claim(&q, 10, 60_000).await.unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn multi_claim_commit_rejects_atomically_when_any_claim_is_stale() {
-    let pq = RuntimeCore::new(
+    let fireweed = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     let q = qkey();
-    pq.create_queue(qdef(60_000)).await.unwrap();
-    pq.push_batch(&q, vec![item(10), item(11)]).await.unwrap();
-    let claimed = pq.claim(&q, 2, 60_000).await.unwrap();
+    fireweed.create_queue(qdef(60_000)).await.unwrap();
+    fireweed
+        .push_batch(&q, vec![item(10), item(11)])
+        .await
+        .unwrap();
+    let claimed = fireweed.claim(&q, 2, 60_000).await.unwrap();
     let primary = claim_ref(&claimed[0]);
     let mut stale = claim_ref(&claimed[1]);
     stale.item_version += 1;
 
-    let outcomes = pq
+    let outcomes = fireweed
         .commit_multi_claim(
             &q,
             MultiClaimCommitRequest {
@@ -233,13 +250,14 @@ async fn multi_claim_commit_rejects_atomically_when_any_claim_is_stale() {
         outcomes,
         vec![EntryOutcome::Rejected(EngineError::Conflict)]
     );
-    let metrics = pq.metrics(&q).await.unwrap();
+    let metrics = fireweed.metrics(&q).await.unwrap();
     assert_eq!(
         (metrics.pending, metrics.leased, metrics.complete),
         (0, 2, 0)
     );
     assert!(
-        pq.side_record(&q, b"instance/rejected")
+        fireweed
+            .side_record(&q, b"instance/rejected")
             .await
             .unwrap()
             .is_none()
@@ -252,14 +270,14 @@ async fn multi_claim_commit_rejects_atomically_when_any_claim_is_stale() {
 #[tokio::test]
 async fn commit_validates_writes_side_records_enqueues_lifecycle_and_finalizes() {
     let backend = Arc::new(composed_memory_backend());
-    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
+    let fireweed = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
-    pq.create_queue(qdef(60_000)).await.unwrap();
+    fireweed.create_queue(qdef(60_000)).await.unwrap();
 
-    let claim_ref = push_and_claim(&pq, &q).await;
+    let claim_ref = push_and_claim(&fireweed, &q).await;
     let input_id = claim_ref.item_id;
 
-    let outcomes = pq
+    let outcomes = fireweed
         .commit(
             &q,
             CommitRequest {
@@ -287,26 +305,26 @@ async fn commit_validates_writes_side_records_enqueues_lifecycle_and_finalizes()
     };
 
     // The input item is finalized (complete): exactly one complete, and it is no longer claimable.
-    let m = pq.metrics(&q).await.unwrap();
+    let m = fireweed.metrics(&q).await.unwrap();
     assert_eq!(m.complete, 1, "input claim finalized to complete");
     assert_eq!(m.leased, 0, "input no longer leased");
 
     // The lifecycle item is a normal pending claimable item (peekable + in metrics-as-work).
     assert_eq!(m.pending, 1, "the lifecycle item is pending work");
-    let peeked = pq.peek(&q, 10).await.unwrap();
+    let peeked = fireweed.peek(&q, 10).await.unwrap();
     assert_eq!(peeked.len(), 1, "exactly the lifecycle item is peekable");
     assert_eq!(peeked[0].item_id, lifecycle_id);
     assert_ne!(lifecycle_id, input_id, "lifecycle item is a fresh item");
 
     // The side record is readable but NOT claimable/peekable/metrics-as-work. Claim everything claimable:
     // only the lifecycle item comes back — never the side record.
-    let claimed = pq.claim(&q, 10, 60_000).await.unwrap();
+    let claimed = fireweed.claim(&q, 10, 60_000).await.unwrap();
     assert_eq!(claimed.len(), 1, "only the lifecycle item is claimable");
     assert_eq!(claimed[0].item_id, lifecycle_id);
 
     // Recovery invariant: the opaque side record survived input finalization and the subsequent claim, and
     // it is never counted as work (pending/leased/complete reflect only real work items).
-    let m2 = pq.metrics(&q).await.unwrap();
+    let m2 = fireweed.metrics(&q).await.unwrap();
     assert_eq!(
         (m2.pending, m2.leased, m2.complete),
         (0, 1, 1),
@@ -321,16 +339,16 @@ async fn commit_validates_writes_side_records_enqueues_lifecycle_and_finalizes()
 async fn commit_rejects_bad_lease_token_and_bad_version_without_writing() {
     // Wrong lease token.
     {
-        let pq = RuntimeCore::new(
+        let fireweed = RuntimeCore::new(
             Arc::new(composed_memory_backend()),
             Arc::new(ManualClock::at(0)),
         );
         let q = qkey();
-        pq.create_queue(qdef(60_000)).await.unwrap();
-        let mut claim_ref = push_and_claim(&pq, &q).await;
+        fireweed.create_queue(qdef(60_000)).await.unwrap();
+        let mut claim_ref = push_and_claim(&fireweed, &q).await;
         claim_ref.lease_token = fireweed::LeaseToken::new("not-the-real-token").unwrap();
 
-        let outcomes = pq
+        let outcomes = fireweed
             .commit(
                 &q,
                 CommitRequest {
@@ -350,7 +368,7 @@ async fn commit_rejects_bad_lease_token_and_bad_version_without_writing() {
             outcomes,
             vec![EntryOutcome::Rejected(EngineError::StaleLease)]
         );
-        let m = pq.metrics(&q).await.unwrap();
+        let m = fireweed.metrics(&q).await.unwrap();
         assert_eq!(
             (m.pending, m.leased, m.complete),
             (0, 1, 0),
@@ -360,16 +378,16 @@ async fn commit_rejects_bad_lease_token_and_bad_version_without_writing() {
 
     // Wrong item_version.
     {
-        let pq = RuntimeCore::new(
+        let fireweed = RuntimeCore::new(
             Arc::new(composed_memory_backend()),
             Arc::new(ManualClock::at(0)),
         );
         let q = qkey();
-        pq.create_queue(qdef(60_000)).await.unwrap();
-        let mut claim_ref = push_and_claim(&pq, &q).await;
+        fireweed.create_queue(qdef(60_000)).await.unwrap();
+        let mut claim_ref = push_and_claim(&fireweed, &q).await;
         claim_ref.item_version += 99;
 
-        let outcomes = pq
+        let outcomes = fireweed
             .commit(
                 &q,
                 CommitRequest {
@@ -389,7 +407,7 @@ async fn commit_rejects_bad_lease_token_and_bad_version_without_writing() {
             outcomes,
             vec![EntryOutcome::Rejected(EngineError::Conflict)]
         );
-        let m = pq.metrics(&q).await.unwrap();
+        let m = fireweed.metrics(&q).await.unwrap();
         assert_eq!(
             (m.pending, m.leased, m.complete),
             (0, 1, 0),
@@ -403,11 +421,11 @@ async fn commit_rejects_bad_lease_token_and_bad_version_without_writing() {
 #[tokio::test]
 async fn commit_request_id_replays_conflicts_and_expires() {
     let clock = Arc::new(ManualClock::at(0));
-    let pq = RuntimeCore::new(Arc::new(composed_memory_backend()), clock.clone());
+    let fireweed = RuntimeCore::new(Arc::new(composed_memory_backend()), clock.clone());
     let q = qkey();
-    pq.create_queue(qdef(1_000)).await.unwrap();
+    fireweed.create_queue(qdef(1_000)).await.unwrap();
 
-    let claim_ref = push_and_claim(&pq, &q).await;
+    let claim_ref = push_and_claim(&fireweed, &q).await;
     let rid = RequestId::new("txn-replay-1").unwrap();
     let request = |claim_ref: ClaimRef| CommitRequest {
         request_id: Some(rid.clone()),
@@ -420,7 +438,10 @@ async fn commit_request_id_replays_conflicts_and_expires() {
         }],
     };
 
-    let first = pq.commit(&q, request(claim_ref.clone())).await.unwrap();
+    let first = fireweed
+        .commit(&q, request(claim_ref.clone()))
+        .await
+        .unwrap();
     let lifecycle_id = match &first[0] {
         EntryOutcome::Committed { lifecycle_item_ids } => lifecycle_item_ids[0],
         other => panic!("expected Committed, got {other:?}"),
@@ -428,21 +449,24 @@ async fn commit_request_id_replays_conflicts_and_expires() {
 
     // Replay: identical body + request_id returns the SAME outcomes and does NOT double-write (the input is
     // not re-finalized, the side record / lifecycle item are not duplicated).
-    let replay = pq.commit(&q, request(claim_ref.clone())).await.unwrap();
+    let replay = fireweed
+        .commit(&q, request(claim_ref.clone()))
+        .await
+        .unwrap();
     assert_eq!(first, replay, "replay returns the prior per-entry outcomes");
-    let m = pq.metrics(&q).await.unwrap();
+    let m = fireweed.metrics(&q).await.unwrap();
     assert_eq!(
         (m.pending, m.leased, m.complete),
         (1, 0, 1),
         "replay did not enqueue a second lifecycle item or re-finalize"
     );
     // Only the original lifecycle item exists.
-    let peeked = pq.peek(&q, 10).await.unwrap();
+    let peeked = fireweed.peek(&q, 10).await.unwrap();
     assert_eq!(peeked.len(), 1);
     assert_eq!(peeked[0].item_id, lifecycle_id);
 
     // Different body, same request_id -> RequestIdConflict (whole call errors, nothing written).
-    let conflict = pq
+    let conflict = fireweed
         .commit(
             &q,
             CommitRequest {
@@ -460,14 +484,14 @@ async fn commit_request_id_replays_conflicts_and_expires() {
         .unwrap_err();
     assert_eq!(conflict, EngineError::RequestIdConflict);
     assert_eq!(
-        pq.metrics(&q).await.unwrap().pending,
+        fireweed.metrics(&q).await.unwrap().pending,
         1,
         "the conflicting body wrote nothing"
     );
 
     // Expired retained metadata executes fresh (does not replay). Claim a NEW input, commit it under a
     // fresh request_id, advance past retention, and re-submit the SAME body: it runs fresh.
-    let claim_ref2 = push_and_claim(&pq, &q).await;
+    let claim_ref2 = push_and_claim(&fireweed, &q).await;
     let rid2 = RequestId::new("txn-expire-1").unwrap();
     let body2 = |cr: ClaimRef| CommitRequest {
         request_id: Some(rid2.clone()),
@@ -479,12 +503,15 @@ async fn commit_request_id_replays_conflicts_and_expires() {
             instance_fence: None,
         }],
     };
-    let _ = pq.commit(&q, body2(claim_ref2.clone())).await.unwrap();
+    let _ = fireweed
+        .commit(&q, body2(claim_ref2.clone()))
+        .await
+        .unwrap();
     // The input is now complete; advance past the 1_000ms retention window.
     clock.set(5);
     // Re-submitting the same body+id after expiry no longer replays — it executes fresh and now rejects,
     // because the (already-finalized) input is terminal. A replay would have returned the prior Committed.
-    let after_expiry = pq.commit(&q, body2(claim_ref2)).await.unwrap();
+    let after_expiry = fireweed.commit(&q, body2(claim_ref2)).await.unwrap();
     assert_eq!(
         after_expiry,
         vec![EntryOutcome::Rejected(EngineError::Terminal)],
@@ -496,29 +523,32 @@ async fn commit_request_id_replays_conflicts_and_expires() {
 /// objectlog backend inherits the default `Unavailable`. (Capability descriptors are a follow-up; this just
 /// proves the port fails closed.)
 #[tokio::test]
-async fn commit_is_unavailable_on_a_non_atomic_backend() {
+async fn direct_objectlog_commit_is_available_and_observable() {
     let dir = std::env::temp_dir().join(format!(
-        "pqueue-commit-unavail-{}-{:?}",
+        "fireweed-commit-unavail-{}-{:?}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
     ));
-    let pq = fireweed::open_objectlog(&dir, Arc::new(ManualClock::at(0))).unwrap();
+    let fireweed = fireweed::open_objectlog(&dir, Arc::new(ManualClock::at(0))).unwrap();
     let q = qkey();
-    pq.create_queue(qdef(60_000)).await.unwrap();
-    let err = pq
+    fireweed.create_queue(qdef(60_000)).await.unwrap();
+    fireweed.push(&q, item(10)).await.unwrap();
+    let claimed = fireweed.claim(&q, 1, 60_000).await.unwrap();
+    let claimed = &claimed[0];
+    let outcomes = fireweed
         .commit(
             &q,
             CommitRequest {
                 request_id: None,
                 entries: vec![CommitEntry {
                     claim_ref: ClaimRef {
-                        item_id: fireweed::ItemId::from_u64(1),
-                        lease_token: fireweed::LeaseToken::new("t").unwrap(),
-                        lease_expires_at: UtcTimestamp::new(100, 0).unwrap(),
-                        item_version: 1,
+                        item_id: claimed.item_id,
+                        lease_token: claimed.lease_token.clone().unwrap(),
+                        lease_expires_at: claimed.lease_expires_at,
+                        item_version: claimed.item_version,
                     },
                     finalize: FinalizeKind::Complete,
                     side_records: vec![],
@@ -528,8 +558,16 @@ async fn commit_is_unavailable_on_a_non_atomic_backend() {
             },
         )
         .await
-        .unwrap_err();
-    assert_eq!(err, EngineError::Unavailable);
+        .unwrap();
+    assert!(matches!(
+        outcomes.as_slice(),
+        [EntryOutcome::Committed { .. }]
+    ));
+    let metrics = fireweed.metrics(&q).await.unwrap();
+    assert_eq!(
+        (metrics.pending, metrics.leased, metrics.complete),
+        (0, 0, 1)
+    );
 }
 
 /// C6: an entry advancing a caller-supplied instance fence `expected -> next` succeeds and the stored fence
@@ -538,14 +576,14 @@ async fn commit_is_unavailable_on_a_non_atomic_backend() {
 #[tokio::test]
 async fn commit_advances_validates_and_rejects_instance_fence() {
     let backend = Arc::new(composed_memory_backend());
-    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
+    let fireweed = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
-    pq.create_queue(qdef(60_000)).await.unwrap();
+    fireweed.create_queue(qdef(60_000)).await.unwrap();
     let key = b"instance/run-1".to_vec();
 
     // First transition: stored fence is unset (== 0). expected=0 -> next=1 commits and advances.
-    let cr1 = push_and_claim(&pq, &q).await;
-    let outcomes = pq
+    let cr1 = push_and_claim(&fireweed, &q).await;
+    let outcomes = fireweed
         .commit(
             &q,
             CommitRequest {
@@ -567,7 +605,7 @@ async fn commit_advances_validates_and_rejects_instance_fence() {
         .unwrap();
     assert!(matches!(outcomes[0], EntryOutcome::Committed { .. }));
     // The fence advanced to 1 (proven via the recovery read's instance tuple).
-    let rec = pq
+    let rec = fireweed
         .explain_commit(&q, RequestId::new("fence-1").unwrap())
         .await
         .unwrap()
@@ -576,9 +614,9 @@ async fn commit_advances_validates_and_rejects_instance_fence() {
 
     // STALE expected: the stored fence is now 1, but the caller presents expected=0 -> Conflict, nothing
     // written. Claim a fresh input so the claim_ref is otherwise valid.
-    let cr2 = push_and_claim(&pq, &q).await;
+    let cr2 = push_and_claim(&fireweed, &q).await;
     let input2 = cr2.item_id;
-    let stale = pq
+    let stale = fireweed
         .commit(
             &q,
             CommitRequest {
@@ -601,12 +639,13 @@ async fn commit_advances_validates_and_rejects_instance_fence() {
     assert_eq!(stale, vec![EntryOutcome::Rejected(EngineError::Conflict)]);
     // Nothing written: the side record is absent, the input2 is still leased, no lifecycle item enqueued.
     assert!(
-        pq.side_record(&q, b"state/should-not-write")
+        fireweed
+            .side_record(&q, b"state/should-not-write")
             .await
             .unwrap()
             .is_none()
     );
-    let m = pq.metrics(&q).await.unwrap();
+    let m = fireweed.metrics(&q).await.unwrap();
     assert_eq!(
         (m.pending, m.leased),
         (0, 1),
@@ -616,8 +655,8 @@ async fn commit_advances_validates_and_rejects_instance_fence() {
 
     // NON-MONOTONIC: stored fence is 1; present expected=1, next=1 (not strictly greater) -> Invalid. A fresh
     // claimed input gives an otherwise-valid claim_ref (input2 is still leased, so claim returns the new one).
-    let cr3 = push_and_claim(&pq, &q).await;
-    let nonmono = pq
+    let cr3 = push_and_claim(&fireweed, &q).await;
+    let nonmono = fireweed
         .commit(
             &q,
             CommitRequest {
@@ -649,14 +688,14 @@ async fn commit_advances_validates_and_rejects_instance_fence() {
 /// it; the eventual-apply objectlog backend advertises `atomic_transition_commit = false` so Snorri rejects
 /// it before activation.
 #[tokio::test]
-async fn capabilities_advertise_atomic_commit_on_memory_and_reject_objectlog() {
-    let pq = RuntimeCore::new(
+async fn capabilities_advertise_atomic_commit_on_memory_and_objectlog() {
+    let fireweed = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     let q = qkey();
-    pq.create_queue(qdef(60_000)).await.unwrap();
-    let caps = pq.commit_capabilities(&q).unwrap();
+    fireweed.create_queue(qdef(60_000)).await.unwrap();
+    let caps = fireweed.commit_capabilities(&q).unwrap();
     assert!(caps.atomic_transition_commit);
     assert!(caps.vectorized_commit);
     assert!(caps.lease_validation);
@@ -664,22 +703,25 @@ async fn capabilities_advertise_atomic_commit_on_memory_and_reject_objectlog() {
     assert!(caps.non_work_side_records);
     assert!(caps.authoritative_recovery_reads);
 
-    // objectlog: eventual-apply, no atomic transition boundary -> Snorri rejects it.
+    // The direct object-log composition uses the same atomic command envelope and
+    // must expose the full commit surface.
     let dir = std::env::temp_dir().join(format!(
-        "pqueue-caps-objlog-{}-{:?}",
+        "fireweed-caps-objlog-{}-{:?}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
     ));
-    let pqo = fireweed::open_objectlog(&dir, Arc::new(ManualClock::at(0))).unwrap();
-    pqo.create_queue(qdef(60_000)).await.unwrap();
-    let ocaps = pqo.commit_capabilities(&q).unwrap();
-    assert!(
-        !ocaps.atomic_transition_commit,
-        "objectlog must not advertise atomic commit"
-    );
+    let objectlog_fireweed = fireweed::open_objectlog(&dir, Arc::new(ManualClock::at(0))).unwrap();
+    objectlog_fireweed.create_queue(qdef(60_000)).await.unwrap();
+    let ocaps = objectlog_fireweed.commit_capabilities(&q).unwrap();
+    assert!(ocaps.atomic_transition_commit);
+    assert!(ocaps.vectorized_commit);
+    assert!(ocaps.lease_validation);
+    assert!(ocaps.retained_commit_idempotency);
+    assert!(ocaps.non_work_side_records);
+    assert!(ocaps.authoritative_recovery_reads);
 }
 
 /// Recovery (C8): after a successful commit (finalize input + write side record + advance a fence),
@@ -688,18 +730,18 @@ async fn capabilities_advertise_atomic_commit_on_memory_and_reject_objectlog() {
 /// finalized + not claimable; the side record is not claimable/peekable.
 #[tokio::test]
 async fn explain_commit_reconstructs_the_transition_and_side_records_are_non_work() {
-    let pq = RuntimeCore::new(
+    let fireweed = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     let q = qkey();
-    pq.create_queue(qdef(60_000)).await.unwrap();
-    let cr = push_and_claim(&pq, &q).await;
+    fireweed.create_queue(qdef(60_000)).await.unwrap();
+    let cr = push_and_claim(&fireweed, &q).await;
     let input_id = cr.item_id;
     let rid = RequestId::new("recover-1").unwrap();
     let instance_key = b"instance/run-1".to_vec();
 
-    let outcomes = pq
+    let outcomes = fireweed
         .commit(
             &q,
             CommitRequest {
@@ -724,7 +766,7 @@ async fn explain_commit_reconstructs_the_transition_and_side_records_are_non_wor
         other => panic!("expected Committed, got {other:?}"),
     };
 
-    let recovery = pq
+    let recovery = fireweed
         .explain_commit(&q, rid.clone())
         .await
         .unwrap()
@@ -752,15 +794,19 @@ async fn explain_commit_reconstructs_the_transition_and_side_records_are_non_wor
 
     // side_record(key) returns the bytes.
     assert_eq!(
-        pq.side_record(&q, b"audit/run-1").await.unwrap().as_deref(),
+        fireweed
+            .side_record(&q, b"audit/run-1")
+            .await
+            .unwrap()
+            .as_deref(),
         Some(&b"audit-bytes"[..])
     );
 
     // The input is finalized + not claimable; the side record is not claimable/peekable — only the lifecycle
     // item is claimable.
-    let m = pq.metrics(&q).await.unwrap();
+    let m = fireweed.metrics(&q).await.unwrap();
     assert_eq!(m.complete, 1, "input finalized");
-    let claimed = pq.claim(&q, 10, 60_000).await.unwrap();
+    let claimed = fireweed.claim(&q, 10, 60_000).await.unwrap();
     assert_eq!(claimed.len(), 1, "only the lifecycle item is claimable");
     assert_eq!(claimed[0].item_id, lifecycle_id);
     assert_ne!(

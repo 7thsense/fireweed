@@ -51,7 +51,7 @@ const DEFAULT_QUEUED_OPERATIONS_PER_QUEUE: usize = 32;
 
 fn global_operation_key(index: usize) -> QueueKey {
     QueueKey::new(
-        TenantId::new("pqueue-internal").expect("valid internal tenant"),
+        TenantId::new("fireweed-internal").expect("valid internal tenant"),
         QueueId::new(format!("blocking-global-{index}")).expect("valid internal queue"),
     )
 }
@@ -1346,7 +1346,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn production_wrapper_forwards_ten_1000_item_windows_to_segmented_group_commit() {
         let projection_path = std::env::temp_dir().join(format!(
-            "pqueue-ordered-wrapper-{}-{}.db",
+            "fireweed-ordered-wrapper-{}-{}.db",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1736,7 +1736,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn production_objectlog_sqlite_pool_allows_queue_b_while_queue_a_store_is_blocked() {
         let projection_path = std::env::temp_dir().join(format!(
-            "pqueue-segmented-sqlite-pool-{}-{}.db",
+            "fireweed-segmented-sqlite-pool-{}-{}.db",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1824,7 +1824,7 @@ mod tests {
         monitor: Option<crate::HybridAsyncThresholds>,
     ) {
         let path = std::env::temp_dir().join(format!(
-            "pqueue-{label}-pool-{}-{}.db",
+            "fireweed-{label}-pool-{}-{}.db",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

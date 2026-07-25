@@ -19,7 +19,7 @@ pub(crate) const IDEMPOTENCY_OPERATION_BATCH_UPDATE: &str = "batch_update";
 /// Advance the durable per-queue item-id high-water past the greatest of `reaped` (ADR-009 mint-counter
 /// recovery floor). MONOTONIC by `(epoch, counter)`: a reap that deletes only lower-id rows never lowers the
 /// stored floor. This is what keeps terminal-item reaping from re-minting a reaped id — the deleted rows are
-/// no longer in `pqueue_items`, but their ceiling is preserved here and restored by
+/// no longer in `fireweed_items`, but their ceiling is preserved here and restored by
 /// [`observe_id_high_water_sql`]. No-op when `reaped` is empty.
 pub(crate) fn advance_id_high_water_sql(
     tx: &Transaction<'_>,
@@ -35,11 +35,11 @@ pub(crate) fn advance_id_high_water_sql(
     };
     let (t, q) = parts(shard);
     st(tx.execute(
-        "INSERT INTO pqueue_id_high_water(tenant,queue,item_id) VALUES(?1,?2,?3) \
+        "INSERT INTO fireweed_id_high_water(tenant,queue,item_id) VALUES(?1,?2,?3) \
          ON CONFLICT(tenant,queue) DO UPDATE SET item_id=excluded.item_id \
-         WHERE length(excluded.item_id)>length(pqueue_id_high_water.item_id) \
-            OR (length(excluded.item_id)=length(pqueue_id_high_water.item_id) \
-                AND excluded.item_id>pqueue_id_high_water.item_id)",
+         WHERE length(excluded.item_id)>length(fireweed_id_high_water.item_id) \
+            OR (length(excluded.item_id)=length(fireweed_id_high_water.item_id) \
+                AND excluded.item_id>fireweed_id_high_water.item_id)",
         params![t, q, max_reaped.to_string()],
     ))?;
     Ok(())
@@ -70,7 +70,7 @@ pub(crate) fn recovery_id_high_water_sql(
     let (t, q) = parts(shard);
     let stored: Option<String> = st(conn
         .query_row(
-            "SELECT item_id FROM pqueue_id_high_water WHERE tenant=?1 AND queue=?2",
+            "SELECT item_id FROM fireweed_id_high_water WHERE tenant=?1 AND queue=?2",
             params![t, q],
             |row| row.get(0),
         )
@@ -82,12 +82,12 @@ pub(crate) fn recovery_id_high_water_sql(
 
 /// Restore the durable item-id high-water for EVERY queue into `counters` — the all-queues counterpart to
 /// [`observe_id_high_water_sql`] for the monolithic [`SqliteRelationalBackend`], whose restore scans the whole
-/// `pqueue_items` table in one pass rather than per shard. Inert when no reap has ever advanced a floor.
+/// `fireweed_items` table in one pass rather than per shard. Inert when no reap has ever advanced a floor.
 pub(crate) fn observe_all_id_high_water_sql(
     conn: &Connection,
     counters: &QueueCounters,
 ) -> EngineResult<()> {
-    let mut stmt = st(conn.prepare("SELECT tenant, queue, item_id FROM pqueue_id_high_water"))?;
+    let mut stmt = st(conn.prepare("SELECT tenant, queue, item_id FROM fireweed_id_high_water"))?;
     let rows = st(stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -133,7 +133,7 @@ pub(crate) fn read_checkpoint_lineage_sql(
     let row: Option<(i64, String, i64)> = st(conn
         .query_row(
             "SELECT source_epoch, source_segment, applied_commands \
-             FROM pqueue_checkpoint_lineage WHERE tenant=?1 AND queue=?2",
+             FROM fireweed_checkpoint_lineage WHERE tenant=?1 AND queue=?2",
             params![t, q],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -158,7 +158,7 @@ pub(crate) fn read_push_replay_sql(
     let (t, q) = parts(shard);
     let payload: Option<String> = st(conn
         .query_row(
-            "SELECT response_payload FROM pqueue_request_idempotency \
+            "SELECT response_payload FROM fireweed_request_idempotency \
              WHERE tenant_id=?1 AND queue_id=?2 AND operation=?3 AND request_id=?4",
             params![t, q, IDEMPOTENCY_OPERATION_PUSH, request_id.as_str()],
             |row| row.get(0),
@@ -192,7 +192,7 @@ pub(crate) fn persist_request_outcome_sql(
         let expires_at = request_expires_at(queues, shard, env.created_at)?;
         let (tenant, queue) = parts(shard);
         st(tx.execute(
-            "INSERT INTO pqueue_request_idempotency \
+            "INSERT INTO fireweed_request_idempotency \
              (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,\
               command_positions,expires_at,created_at) \
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) \
@@ -229,7 +229,7 @@ pub(crate) fn persist_request_outcome_sql(
         let expires_at = request_expires_at(queues, shard, env.created_at)?;
         let (tenant, queue) = parts(shard);
         st(tx.execute(
-            "INSERT INTO pqueue_request_idempotency \
+            "INSERT INTO fireweed_request_idempotency \
              (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,\
               command_positions,expires_at,created_at) \
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) \
@@ -272,7 +272,7 @@ pub(crate) fn persist_request_outcome_sql(
     let prior: Option<(Vec<u8>, String, i64)> = st(tx
         .query_row(
             "SELECT request_fingerprint,response_payload,expires_at \
-             FROM pqueue_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+             FROM fireweed_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
              AND operation=?3 AND request_id=?4",
             params![
                 tenant,
@@ -405,7 +405,7 @@ pub(crate) fn checkpoint_batch_sql(
     // from. Upserted in the SAME transaction, BEFORE the high-water write.
     let prior_applied: i64 = st(tx
         .query_row(
-            "SELECT applied_commands FROM pqueue_checkpoint_lineage WHERE tenant=?1 AND queue=?2",
+            "SELECT applied_commands FROM fireweed_checkpoint_lineage WHERE tenant=?1 AND queue=?2",
             params![t, q],
             |row| row.get(0),
         )
@@ -414,7 +414,7 @@ pub(crate) fn checkpoint_batch_sql(
     let total_applied = prior_applied + applied_this_batch as i64;
     let updated_at = ts_nanos(envelopes[envelopes.len() - 1].created_at);
     st(tx.execute(
-        "INSERT INTO pqueue_checkpoint_lineage \
+        "INSERT INTO fireweed_checkpoint_lineage \
          (tenant,queue,logical_high_water,source_epoch,source_segment,applied_commands,updated_at) \
          VALUES (?1,?2,?3,?4,?5,?6,?7) \
          ON CONFLICT(tenant,queue) DO UPDATE SET \
@@ -489,7 +489,7 @@ fn backfill_id_high_water_once(conn: &Connection) -> EngineResult<()> {
     st(conn.execute_batch("BEGIN IMMEDIATE"))?;
     let result = (|| -> EngineResult<()> {
         let complete: bool = st(conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pqueue_schema_migrations \
+            "SELECT EXISTS(SELECT 1 FROM fireweed_schema_migrations \
              WHERE migration_name='item_id_high_water_v2')",
             [],
             |row| row.get(0),
@@ -500,18 +500,18 @@ fn backfill_id_high_water_once(conn: &Connection) -> EngineResult<()> {
         // SQLite stores ItemId as canonical unsigned decimal text. Length then lexical order is numeric
         // order without signed-64-bit casts, so this backfills old databases containing the full u64 range.
         st(conn.execute_batch(
-            "INSERT INTO pqueue_id_high_water(tenant,queue,item_id) \
+            "INSERT INTO fireweed_id_high_water(tenant,queue,item_id) \
              SELECT tenant_id,queue_id,item_id FROM ( \
                SELECT tenant_id,queue_id,item_id, \
                  ROW_NUMBER() OVER (PARTITION BY tenant_id,queue_id \
                    ORDER BY length(item_id) DESC,item_id DESC) AS rank \
-               FROM pqueue_items \
+               FROM fireweed_items \
              ) WHERE rank=1 \
              ON CONFLICT(tenant,queue) DO UPDATE SET item_id=excluded.item_id \
-             WHERE length(excluded.item_id)>length(pqueue_id_high_water.item_id) \
-                OR (length(excluded.item_id)=length(pqueue_id_high_water.item_id) \
-                    AND excluded.item_id>pqueue_id_high_water.item_id); \
-             INSERT INTO pqueue_schema_migrations(migration_name) \
+             WHERE length(excluded.item_id)>length(fireweed_id_high_water.item_id) \
+                OR (length(excluded.item_id)=length(fireweed_id_high_water.item_id) \
+                    AND excluded.item_id>fireweed_id_high_water.item_id); \
+             INSERT INTO fireweed_schema_migrations(migration_name) \
              VALUES('item_id_high_water_v2');",
         ))?;
         Ok(())
@@ -600,7 +600,7 @@ pub(crate) fn export_projection_image_sql(
         "SELECT item_id,client_item_key,lifecycle_state,priority,not_before,eligible_since,group_key,cohort_size,payload,\
          fields,metadata,entity_document,retry_count,item_version,lease_expires_at,worker_id,fenced,\
          superseded,max_attempts,created_seq \
-         FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 ORDER BY created_seq,item_id",
+         FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 ORDER BY created_seq,item_id",
     ))?;
     let rows = st(stmt.query_map(params![t, q], |row| {
         Ok((
@@ -695,7 +695,7 @@ pub(crate) fn export_projection_image_sql(
 
     let mut side_records = BTreeMap::new();
     let mut stmt = st(conn.prepare(
-        "SELECT key,payload FROM pqueue_side_records \
+        "SELECT key,payload FROM fireweed_side_records \
          WHERE tenant_id=?1 AND queue_id=?2 ORDER BY key",
     ))?;
     let rows = st(stmt.query_map(params![t, q], |row| {
@@ -708,7 +708,7 @@ pub(crate) fn export_projection_image_sql(
 
     let mut instance_fences = BTreeMap::new();
     let mut stmt = st(conn.prepare(
-        "SELECT instance_key,fence FROM pqueue_instance_fences \
+        "SELECT instance_key,fence FROM fireweed_instance_fences \
          WHERE tenant_id=?1 AND queue_id=?2 ORDER BY instance_key",
     ))?;
     let rows = st(stmt.query_map(params![t, q], |row| {
@@ -720,7 +720,7 @@ pub(crate) fn export_projection_image_sql(
     }
     let mut blocked_gates = BTreeSet::new();
     let mut stmt = st(conn.prepare(
-        "SELECT gate_key FROM pqueue_gate_state \
+        "SELECT gate_key FROM fireweed_gate_state \
          WHERE tenant_id=?1 AND queue_id=?2 ORDER BY gate_key",
     ))?;
     let rows = st(stmt.query_map(params![t, q], |row| row.get::<_, String>(0)))?;

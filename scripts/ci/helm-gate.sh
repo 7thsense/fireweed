@@ -168,7 +168,7 @@ assert_no_fixture_credentials() {
     for forbidden in \
         "minioadmin" \
         "minioadmin-secret" \
-        "postgres://pqueue:pqueue@postgres:5432/pqueue"
+        "postgres://fireweed:fireweed@postgres:5432/fireweed"
     do
         assert_not_contains "$file" "$forbidden" "${description} fixture credential"
     done
@@ -177,24 +177,24 @@ assert_no_fixture_credentials() {
 assert_objectlog_inmemory_contract() {
     local rendered="$1"
 
-    assert_contains "$rendered" 'PQUEUE_LOG_BACKEND: "objectlog"' "objectlog log axis"
-    assert_contains "$rendered" 'PQUEUE_PROJECTION_BACKEND: "inmemory"' "in-memory projection axis"
-    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_ROOT: "/var/lib/pqueue/projection/object-log"' "object-log root"
+    assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "objectlog"' "objectlog log axis"
+    assert_contains "$rendered" 'FIREWEED_PROJECTION_BACKEND: "inmemory"' "in-memory projection axis"
+    assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_ROOT: "/var/lib/fireweed/projection/object-log"' "object-log root"
     assert_contains "$rendered" 'kind: PersistentVolumeClaim' "storage PVC"
     assert_contains "$rendered" 'name: storage' "storage volume"
-    assert_contains "$rendered" 'mountPath: "/var/lib/pqueue/projection"' "SQLite projection volume mount"
-    assert_not_contains "$rendered" 'PQUEUE_SQLITE_PROJECTION_PATH' "sqlite projection path"
-    assert_not_contains "$rendered" 'name: PQUEUE_POSTGRES_DATABASE_URL' "Postgres env"
+    assert_contains "$rendered" 'mountPath: "/var/lib/fireweed/projection"' "SQLite projection volume mount"
+    assert_not_contains "$rendered" 'FIREWEED_SQLITE_PROJECTION_PATH' "sqlite projection path"
+    assert_not_contains "$rendered" 'name: FIREWEED_POSTGRES_DATABASE_URL' "Postgres env"
     assert_no_fixture_credentials "$rendered" "object-log rendered manifest"
 }
 
 assert_objectlog_sqlite_contract() {
     local rendered="$1"
 
-    assert_contains "$rendered" 'PQUEUE_LOG_BACKEND: "objectlog"' "objectlog log axis"
-    assert_contains "$rendered" 'PQUEUE_PROJECTION_BACKEND: "sqlite"' "sqlite projection axis"
-    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_ROOT: "/var/lib/pqueue/projection/object-log"' "object-log root"
-    assert_contains "$rendered" 'PQUEUE_SQLITE_PROJECTION_PATH: "/var/lib/pqueue/projection/projection.db"' "sqlite projection path"
+    assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "objectlog"' "objectlog log axis"
+    assert_contains "$rendered" 'FIREWEED_PROJECTION_BACKEND: "sqlite"' "sqlite projection axis"
+    assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_ROOT: "/var/lib/fireweed/projection/object-log"' "object-log root"
+    assert_contains "$rendered" 'FIREWEED_SQLITE_PROJECTION_PATH: "/var/lib/fireweed/projection/projection.db"' "sqlite projection path"
     assert_contains "$rendered" 'kind: PersistentVolumeClaim' "storage PVC"
     assert_contains "$rendered" 'name: storage' "storage volume"
     assert_no_fixture_credentials "$rendered" "objectlog/sqlite rendered manifest"
@@ -203,10 +203,10 @@ assert_objectlog_sqlite_contract() {
 assert_objectlog_hybrid_contract() {
     local rendered="$1"
 
-    assert_contains "$rendered" 'PQUEUE_LOG_BACKEND: "objectlog"' "objectlog log axis"
-    assert_contains "$rendered" 'PQUEUE_PROJECTION_BACKEND: "hybrid"' "hybrid projection axis"
-    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_ROOT: "/var/lib/pqueue/projection/object-log"' "object-log root"
-    assert_contains "$rendered" 'PQUEUE_SQLITE_PROJECTION_PATH: "/var/lib/pqueue/projection/projection.db"' "hybrid sqlite projection path"
+    assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "objectlog"' "objectlog log axis"
+    assert_contains "$rendered" 'FIREWEED_PROJECTION_BACKEND: "hybrid"' "hybrid projection axis"
+    assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_ROOT: "/var/lib/fireweed/projection/object-log"' "object-log root"
+    assert_contains "$rendered" 'FIREWEED_SQLITE_PROJECTION_PATH: "/var/lib/fireweed/projection/projection.db"' "hybrid sqlite projection path"
     assert_contains "$rendered" 'kind: PersistentVolumeClaim' "storage PVC"
     assert_contains "$rendered" 'name: storage' "storage volume"
     assert_no_fixture_credentials "$rendered" "objectlog/hybrid rendered manifest"
@@ -215,19 +215,19 @@ assert_objectlog_hybrid_contract() {
 assert_objectlog_hybrid_async_contract() {
     local rendered="$1"
 
-    assert_contains "$rendered" 'PQUEUE_LOG_BACKEND: "objectlog"' "objectlog log axis"
-    assert_contains "$rendered" 'PQUEUE_PROJECTION_BACKEND: "hybrid-async"' "hybrid-async projection axis"
-    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_ROOT: "/var/lib/pqueue/projection/object-log"' "object-log root"
-    assert_contains "$rendered" 'PQUEUE_SQLITE_PROJECTION_PATH: "/var/lib/pqueue/projection/projection.db"' "hybrid-async sqlite projection path"
-    assert_contains "$rendered" 'PQUEUE_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS: "100000"' "hybrid-async command-lag bound"
-    assert_contains "$rendered" 'PQUEUE_HYBRID_ASYNC_APPLY_DEBT_MAX_BYTES: "536870912"' "hybrid-async byte-debt bound"
-    assert_contains "$rendered" 'PQUEUE_HYBRID_ASYNC_APPLY_QUEUE_DEPTH_MAX: "1024"' "hybrid-async queue-depth bound"
-    assert_contains "$rendered" 'PQUEUE_HYBRID_ASYNC_OLDEST_UNAPPLIED_MAX_MS: "60000"' "hybrid-async oldest-unapplied bound"
-    assert_contains "$rendered" 'PQUEUE_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD: "3"' "hybrid-async poison retry threshold"
+    assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "objectlog"' "objectlog log axis"
+    assert_contains "$rendered" 'FIREWEED_PROJECTION_BACKEND: "hybrid-async"' "hybrid-async projection axis"
+    assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_ROOT: "/var/lib/fireweed/projection/object-log"' "object-log root"
+    assert_contains "$rendered" 'FIREWEED_SQLITE_PROJECTION_PATH: "/var/lib/fireweed/projection/projection.db"' "hybrid-async sqlite projection path"
+    assert_contains "$rendered" 'FIREWEED_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS: "100000"' "hybrid-async command-lag bound"
+    assert_contains "$rendered" 'FIREWEED_HYBRID_ASYNC_APPLY_DEBT_MAX_BYTES: "536870912"' "hybrid-async byte-debt bound"
+    assert_contains "$rendered" 'FIREWEED_HYBRID_ASYNC_APPLY_QUEUE_DEPTH_MAX: "1024"' "hybrid-async queue-depth bound"
+    assert_contains "$rendered" 'FIREWEED_HYBRID_ASYNC_OLDEST_UNAPPLIED_MAX_MS: "60000"' "hybrid-async oldest-unapplied bound"
+    assert_contains "$rendered" 'FIREWEED_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD: "3"' "hybrid-async poison retry threshold"
     assert_contains "$rendered" 'kind: PersistentVolumeClaim' "storage PVC"
     assert_contains "$rendered" 'name: storage' "storage volume"
-    assert_contains "$rendered" 'mountPath: "/var/lib/pqueue/projection"' "hybrid-async projection volume mount"
-    assert_not_contains "$rendered" 'PQUEUE_BACKEND_PROFILE' "legacy profile env"
+    assert_contains "$rendered" 'mountPath: "/var/lib/fireweed/projection"' "hybrid-async projection volume mount"
+    assert_not_contains "$rendered" 'FIREWEED_BACKEND_PROFILE' "legacy profile env"
     assert_no_fixture_credentials "$rendered" "objectlog/hybrid-async rendered manifest"
 }
 
@@ -235,29 +235,29 @@ assert_shared_s3_postgres_control_plane_contract() {
     local rendered="$1"
 
     assert_contains "$rendered" 'replicas: 3' "shared profile replica count"
-    assert_contains "$rendered" 'PQUEUE_REPLICA_COUNT: "3"' "replica count env"
-    assert_contains "$rendered" 'PQUEUE_LOG_BACKEND: "objectlog"' "objectlog log axis"
-    assert_contains "$rendered" 'PQUEUE_CONTROL_PLANE: "postgres"' "postgres control-plane axis"
-    assert_contains "$rendered" 'PQUEUE_PROJECTION_BACKEND: "sqlite"' "sqlite projection axis"
-    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_STORE: "s3"' "shared object-log store selection"
-    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_S3_ENDPOINT: "https://s3.example.com"' "S3 endpoint"
-    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_S3_BUCKET: "fireweed-shared"' "S3 bucket"
-    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_S3_REGION: "us-east-1"' "S3 region"
-    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_S3_CREDENTIAL_SOURCE: "static"' "S3 credential source"
-    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_S3_ALLOW_INSECURE_HTTP: "false"' "S3 TLS setting"
-    assert_contains "$rendered" 'PQUEUE_CONTROL_PLANE_HEARTBEAT_TTL_MS: "5000"' "control-plane heartbeat ttl"
-    assert_contains "$rendered" 'PQUEUE_CONTROL_PLANE_LEASE_TTL_MS: "15000"' "control-plane lease ttl"
-    assert_contains "$rendered" 'PQUEUE_SQLITE_PROJECTION_PATH: "/var/lib/pqueue/projection/projection.db"' "pod-local SQLite path"
-    assert_contains "$rendered" 'name: PQUEUE_OBJECT_LOG_S3_ACCESS_KEY_ID' "S3 access key secret env"
-    assert_contains "$rendered" 'name: PQUEUE_OBJECT_LOG_S3_SECRET_ACCESS_KEY' "S3 secret key secret env"
-    assert_contains "$rendered" 'name: PQUEUE_POSTGRES_CONTROL_PLANE_DATABASE_URL' "postgres control-plane secret env"
-    assert_contains "$rendered" 'name: PQUEUE_ADVERTISE_ADDR' "pod-reachable endpoint env"
+    assert_contains "$rendered" 'FIREWEED_REPLICA_COUNT: "3"' "replica count env"
+    assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "objectlog"' "objectlog log axis"
+    assert_contains "$rendered" 'FIREWEED_CONTROL_PLANE: "postgres"' "postgres control-plane axis"
+    assert_contains "$rendered" 'FIREWEED_PROJECTION_BACKEND: "sqlite"' "sqlite projection axis"
+    assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_STORE: "s3"' "shared object-log store selection"
+    assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_S3_ENDPOINT: "https://s3.example.com"' "S3 endpoint"
+    assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_S3_BUCKET: "fireweed-shared"' "S3 bucket"
+    assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_S3_REGION: "us-east-1"' "S3 region"
+    assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE: "static"' "S3 credential source"
+    assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_S3_ALLOW_INSECURE_HTTP: "false"' "S3 TLS setting"
+    assert_contains "$rendered" 'FIREWEED_CONTROL_PLANE_HEARTBEAT_TTL_MS: "5000"' "control-plane heartbeat ttl"
+    assert_contains "$rendered" 'FIREWEED_CONTROL_PLANE_LEASE_TTL_MS: "15000"' "control-plane lease ttl"
+    assert_contains "$rendered" 'FIREWEED_SQLITE_PROJECTION_PATH: "/var/lib/fireweed/projection/projection.db"' "pod-local SQLite path"
+    assert_contains "$rendered" 'name: FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID' "S3 access key secret env"
+    assert_contains "$rendered" 'name: FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY' "S3 secret key secret env"
+    assert_contains "$rendered" 'name: FIREWEED_POSTGRES_CONTROL_PLANE_DATABASE_URL' "postgres control-plane secret env"
+    assert_contains "$rendered" 'name: FIREWEED_ADVERTISE_ADDR' "pod-reachable endpoint env"
     assert_contains "$rendered" 'fieldPath: status.podIP' "pod IP downward API"
     assert_contains "$rendered" 'value: "$(POD_IP):8080"' "pod-reachable endpoint value"
-    assert_contains "$rendered" 'name: PQUEUE_OWNER_ID' "full-width per-pod owner identity env"
+    assert_contains "$rendered" 'name: FIREWEED_OWNER_ID' "full-width per-pod owner identity env"
     assert_contains "$rendered" 'fieldPath: metadata.uid' "unique owner identity downward API"
-    assert_not_contains "$rendered" 'PQUEUE_OWNER_ID:' "static shared owner identity"
-    assert_not_contains "$rendered" 'PQUEUE_OBJECT_LOG_ROOT' "shared object-log root"
+    assert_not_contains "$rendered" 'FIREWEED_OWNER_ID:' "static shared owner identity"
+    assert_not_contains "$rendered" 'FIREWEED_OBJECT_LOG_ROOT' "shared object-log root"
     assert_not_contains "$rendered" 'kind: PersistentVolumeClaim' "shared PVC"
     assert_contains "$rendered" 'emptyDir: {}' "pod-local projection volume"
     assert_no_fixture_credentials "$rendered" "shared S3/postgres rendered manifest"
@@ -267,17 +267,17 @@ assert_postgres_contract() {
     local rendered="$1"
     local projection="$2"
 
-    assert_contains "$rendered" 'PQUEUE_LOG_BACKEND: "postgres"' "postgres log axis"
-    assert_contains "$rendered" "PQUEUE_PROJECTION_BACKEND: \"${projection}\"" "${projection} projection axis"
-    assert_contains "$rendered" 'name: PQUEUE_POSTGRES_LOG_DATABASE_URL' "postgres log env"
+    assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "postgres"' "postgres log axis"
+    assert_contains "$rendered" "FIREWEED_PROJECTION_BACKEND: \"${projection}\"" "${projection} projection axis"
+    assert_contains "$rendered" 'name: FIREWEED_POSTGRES_LOG_DATABASE_URL' "postgres log env"
     assert_contains "$rendered" 'secretKeyRef:' "postgres Secret reference"
     if [[ "$projection" == "postgres" ]]; then
-        assert_contains "$rendered" 'name: PQUEUE_POSTGRES_PROJECTION_DATABASE_URL' "postgres projection env"
+        assert_contains "$rendered" 'name: FIREWEED_POSTGRES_PROJECTION_DATABASE_URL' "postgres projection env"
     fi
     if [[ "$projection" == "sqlite" ]]; then
-        assert_contains "$rendered" 'PQUEUE_SQLITE_PROJECTION_PATH: "/var/lib/pqueue/projection/projection.db"' "sqlite projection path"
+        assert_contains "$rendered" 'FIREWEED_SQLITE_PROJECTION_PATH: "/var/lib/fireweed/projection/projection.db"' "sqlite projection path"
     fi
-    assert_not_contains "$rendered" 'PQUEUE_BACKEND_PROFILE' "legacy profile env"
+    assert_not_contains "$rendered" 'FIREWEED_BACKEND_PROFILE' "legacy profile env"
     assert_no_fixture_credentials "$rendered" "postgres rendered manifest"
 }
 
@@ -285,14 +285,14 @@ assert_lakebase_postgres_contract() {
     local rendered="$1"
 
     # The binary connects to Lakebase from the self-sufficient log DSN alone (host/port/db +
-    # sslmode=require in the Secret). It does NOT read PQUEUE_LAKEBASE_* metadata, and the only
+    # sslmode=require in the Secret). It does NOT read FIREWEED_LAKEBASE_* metadata, and the only
     # wired postgres combination is log=postgres + projection=inmemory, so the Lakebase profile
-    # renders neither PQUEUE_LAKEBASE_* nor a projection DSN.
+    # renders neither FIREWEED_LAKEBASE_* nor a projection DSN.
     assert_postgres_contract "$rendered" "inmemory"
-    assert_not_contains "$rendered" 'PQUEUE_LAKEBASE_' "Lakebase metadata env (binary ignores it)"
-    assert_not_contains "$rendered" 'name: PQUEUE_POSTGRES_PROJECTION_DATABASE_URL' "projection DSN env (binary ignores it)"
+    assert_not_contains "$rendered" 'FIREWEED_LAKEBASE_' "Lakebase metadata env (binary ignores it)"
+    assert_not_contains "$rendered" 'name: FIREWEED_POSTGRES_PROJECTION_DATABASE_URL' "projection DSN env (binary ignores it)"
     assert_contains "$rendered" 'name: DATABRICKS_HOST' "Databricks host Secret env"
-    assert_contains "$rendered" 'name: PQUEUE_DATABRICKS_DATABASE_INSTANCE_NAME' "Databricks instance Secret env"
+    assert_contains "$rendered" 'name: FIREWEED_DATABRICKS_DATABASE_INSTANCE_NAME' "Databricks instance Secret env"
     assert_contains "$rendered" 'name: DATABRICKS_CLIENT_ID' "Databricks service principal client id"
     assert_contains "$rendered" 'name: DATABRICKS_CLIENT_SECRET' "Databricks service principal client secret"
     assert_contains "$rendered" 'name: "fireweed-lakebase-dsn"' "Lakebase DSN Secret"
@@ -309,10 +309,10 @@ assert_generated_bootstrap_contract() {
         --set bootstrap.generated.tenant=density \
         --set bootstrap.generated.prefix=q >"$rendered"
 
-    assert_contains "$rendered" 'PQUEUE_BOOTSTRAP_GENERATED_COUNT: "1001"' "generated bootstrap count"
-    assert_contains "$rendered" 'PQUEUE_BOOTSTRAP_GENERATED_TENANT: "density"' "generated bootstrap tenant"
-    assert_contains "$rendered" 'PQUEUE_BOOTSTRAP_GENERATED_PREFIX: "q"' "generated bootstrap prefix"
-    assert_not_contains "$rendered" 'PQUEUE_BOOTSTRAP_QUEUES:' "explicit bootstrap list when generation is selected"
+    assert_contains "$rendered" 'FIREWEED_BOOTSTRAP_GENERATED_COUNT: "1001"' "generated bootstrap count"
+    assert_contains "$rendered" 'FIREWEED_BOOTSTRAP_GENERATED_TENANT: "density"' "generated bootstrap tenant"
+    assert_contains "$rendered" 'FIREWEED_BOOTSTRAP_GENERATED_PREFIX: "q"' "generated bootstrap prefix"
+    assert_not_contains "$rendered" 'FIREWEED_BOOTSTRAP_QUEUES:' "explicit bootstrap list when generation is selected"
     rm -f "$rendered"
 }
 

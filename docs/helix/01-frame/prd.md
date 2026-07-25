@@ -12,14 +12,14 @@ kind: product
 
 ## Summary
 
-pqueue is a durable priority queue engine for applications that need high-volume,
+fireweed is a durable priority queue engine for applications that need high-volume,
 ordered, recoverable work execution. A queue defines its priority model,
 ordering mode, progress bound, eligibility rules, and batching constraints.
 Clients push and update items idempotently, workers claim eligible items under a
 lease, and claimed items are finalized as complete, failed, retryable, or
 released.
 
-pqueue is also the transaction mapping layer for this centralized state-machine
+fireweed is also the transaction mapping layer for this centralized state-machine
 workflow. The native interface is batch-centric, and every storage profile MUST
 present the same external mutation contract: a successful response means the
 mutation is durable and visible through subsequent reads/claims, a rejected
@@ -89,7 +89,7 @@ queue with timestamp ordering as a first-class validation case.
    understand the resulting tradeoff between latency, batch density, and backing
    store request cost.
 7. Callers can depend on one transaction contract across all supported
-   implementation combinations without knowing whether pqueue uses memory,
+   implementation combinations without knowing whether fireweed uses memory,
    SQLite, Postgres, or an object log internally.
 
 ### Success Metrics
@@ -129,29 +129,29 @@ evidence record is not publishable.
 
 ### Non-Goals
 
-- pqueue v1 will not hardcode Seventh Sense job, action, connector, quota,
+- fireweed v1 will not hardcode Seventh Sense job, action, connector, quota,
   paused, suppressed, or campaign concepts into the core item model.
-- pqueue v1 will not be a full workflow engine like Temporal.
-- pqueue v1 will not require strict global priority ordering for every queue.
-- pqueue v1 will not implement AMQP, Kafka, or SQS compatibility as the core
+- fireweed v1 will not be a full workflow engine like Temporal.
+- fireweed v1 will not require strict global priority ordering for every queue.
+- fireweed v1 will not implement AMQP, Kafka, or SQS compatibility as the core
   data model. A Kafka producer wire adapter (ApiVersions/Metadata/Produce only,
-  mapped to pqueue enqueue semantics) is in scope as P2 (ADR-005); consumer-side
+  mapped to fireweed enqueue semantics) is in scope as P2 (ADR-005); consumer-side
   Kafka APIs are permanently out of scope.
-- pqueue v1 will not prescribe a storage engine or shard implementation in the
+- fireweed v1 will not prescribe a storage engine or shard implementation in the
   PRD.
-- pqueue v1 does not enforce downstream API rate limits or quotas. Pacing work
+- fireweed v1 does not enforce downstream API rate limits or quotas. Pacing work
   to a downstream system's accepted rate (for example a per-account,
   per-connector, or per-day send ceiling) is the responsibility of the calling
-  worker. pqueue exposes claim-pacing controls (claim batch size, claim cadence,
+  worker. fireweed exposes claim-pacing controls (claim batch size, claim cadence,
   per-item `not_before`, and group selection) that a caller uses to pace itself;
-  pqueue itself performs no rate admission and applies no downstream-rate token
+  fireweed itself performs no rate admission and applies no downstream-rate token
   bucket.
 
 ## Users and Scope
 
 ### Primary Persona: Queue Platform Engineer
 
-**Role**: Engineer operating pqueue for one or more applications
+**Role**: Engineer operating fireweed for one or more applications
 
 **Goals**: Define queues, scale throughput, preserve durability, observe
 backlogs, and keep noisy workloads isolated.
@@ -249,9 +249,9 @@ priority, retry, claim, and state logic with different table shapes.
 
 1. SQS-shaped API adapter for familiar send, receive, delete, visibility, delay,
    and batch semantics. The adapter cannot represent mutable priority or
-   schedule updates and must remain secondary to the native pqueue API.
-2. pqueue deployment-level rate limits, quotas, and tenant capacity controls
-   (protecting the pqueue deployment from noisy tenants - not enforcing callers'
+   schedule updates and must remain secondary to the native fireweed API.
+2. fireweed deployment-level rate limits, quotas, and tenant capacity controls
+   (protecting the fireweed deployment from noisy tenants - not enforcing callers'
    downstream API limits, which are a permanent non-goal).
 3. Dead-letter, redrive, and retention policies configurable per queue.
 4. Operational repair actions for pause, unpause, reschedule, retry, fail,
@@ -264,7 +264,7 @@ priority, retry, claim, and state logic with different table shapes.
 2. A hosted dashboard for queue inspection, repair, and trend analysis.
 3. Optional bounded-relaxed ordering-quality metrics such as rank error.
 4. Kafka producer wire adapter: ApiVersions/Metadata/Produce over heimq-wire,
-   mapping Produce records to pqueue enqueue semantics. Consumer-side Kafka APIs
+   mapping Produce records to fireweed enqueue semantics. Consumer-side Kafka APIs
    are permanently out of scope (ADR-005).
 
 ## Functional Requirements
@@ -277,7 +277,7 @@ priority, retry, claim, and state logic with different table shapes.
   value type, ordering direction, and deterministic tie-breaker.
 - **FR-3** - Timestamp ascending is a first-class priority model.
 - **FR-4** - At least one non-timestamp priority model is supported to validate
-  that pqueue is not timestamp-only.
+  that fireweed is not timestamp-only.
 - **FR-5** - A queue declares its ordering mode at creation: strict or
   bounded-relaxed.
 - **FR-6** - Queue priority model and ordering mode are immutable after creation
@@ -406,7 +406,7 @@ priority, retry, claim, and state logic with different table shapes.
   reset the per-cycle transient-retry counter; only transient `retry` finalizes
   within a cycle are bounded by `max_attempts`.
 - **FR-51** - A recurring item is a single logical item per logical key
-  (singleton), reusing idempotent push convergence; pqueue does not create one
+  (singleton), reusing idempotent push convergence; fireweed does not create one
   item per cycle.
 - **FR-52** - A recurring item terminates only via explicit terminal finalize,
   `recurrence.until` followed by terminal finalize/purge, or out-of-band
@@ -433,7 +433,7 @@ priority, retry, claim, and state logic with different table shapes.
 - **FR-43** - Queue isolation includes noisy-neighbor protection: one queue's
   load or backlog cannot prevent another queue from making progress within its
   configured limits.
-- **FR-48** - In native service mode, pqueue exposes a tenant-scoped discovery
+- **FR-48** - In native service mode, fireweed exposes a tenant-scoped discovery
   read that enumerates the queues, and group keys within a queue, that currently
   have eligible work for the principal, ranked by oldest-eligible age. With no
   `queue_id` it ranks authorized queues (tenant-scoped top-N across queues); with
@@ -450,7 +450,7 @@ priority, retry, claim, and state logic with different table shapes.
 
 ### Subsystem: Seventh Sense Validation
 
-- **FR-44** - pqueue can represent Seventh Sense scheduled delivery/action work
+- **FR-44** - fireweed can represent Seventh Sense scheduled delivery/action work
   using timestamp-ascending priority without embedding Seventh Sense-specific
   states in the core lifecycle.
 - **FR-45** - Seventh Sense-specific pause, suppression, account, connector, job,
@@ -461,14 +461,14 @@ priority, retry, claim, and state logic with different table shapes.
   dynamic gate keys via `SetGates`. Downstream delivery-pacing and quota
   constraints are **not** core queue features and are **not** eligibility
   conditions: callers pace claims using claim batch size, claim cadence,
-  `not_before`, and group selection (see Non-Goals). pqueue does not model a
+  `not_before`, and group selection (see Non-Goals). fireweed does not model a
   downstream rate or quota as a lifecycle state or claim-time admission control.
-- **FR-46** - pqueue can support the existing Seventh Sense need to ingest work
+- **FR-46** - fireweed can support the existing Seventh Sense need to ingest work
   quickly and update scheduled time later.
-- **FR-47** - pqueue can claim batches compatible with downstream Seventh Sense
+- **FR-47** - fireweed can claim batches compatible with downstream Seventh Sense
   API constraints such as account, connector, job, campaign, or external batch
   key.
-- **FR-47a** - pqueue can represent Seventh Sense work by mapping its nesting
+- **FR-47a** - fireweed can represent Seventh Sense work by mapping its nesting
   onto the four client-visible axes (ADR-004): `tenant_id` for the
   account/isolation boundary, `queue_id` per logical stream, `group_key` for the
   per-queue ordering/atomicity key (`job_id` for non-cohort scheduled-action
@@ -477,15 +477,15 @@ priority, retry, claim, and state logic with different table shapes.
   `account`, `connector`, `campaign` as `metadata`. The scheduled timestamp maps
   to timestamp-ascending `priority`. Progress is enforced queue-globally; per-job
   or per-callback fairness is a worker-routing concern via active-scope discovery.
-- **FR-47b** - pqueue can claim batches bounded by a downstream per-call entity
+- **FR-47b** - fireweed can claim batches bounded by a downstream per-call entity
   limit, such as the Marketo lead-enrichment constraint of up to 300 distinct
   leads per API call, returning all currently-eligible tasks for the selected
   leads as whole groups in one atomic claim.
-- **FR-47c** - pqueue can represent the Seventh Sense `actions_scheduled`
+- **FR-47c** - fireweed can represent the Seventh Sense `actions_scheduled`
   `batch_checksum` / `callback_id` "execute the complete batch together"
   requirement as an opt-in cohort claim, without embedding `callback_id`
   semantics in the core lifecycle.
-- **FR-55** - pqueue can represent Seventh Sense `jobs_queue` and
+- **FR-55** - fireweed can represent Seventh Sense `jobs_queue` and
   `connectors_queue` singleton recurring rows (one per job/connector key,
   re-armed via next-processing time, never terminal until the underlying entity
   is removed via `PurgeItems`) using recurring-queue primitives, without
@@ -519,7 +519,7 @@ priority, retry, claim, and state logic with different table shapes.
 | FR-48 | Eligibility parity under rearm | Recurring item is idle (disarmed) | Discovery omits it; after rearm it appears |
 | FR-48, FR-47 | Discover-then-claim fairness | Worker discovers oldest active group, then `BatchClaim` that `group_key` | Claim returns items from the reported group; a group drained after discovery returns empty without error |
 | FR-31a, FR-47b | Group-cardinality claim | Eligible items across 1,000 co-resident groups; claim with `group_batching.max_groups=300` | Claim returns all eligible items for the 300 highest-claim-order wholly-available groups, total <= max_items, no group partially returned |
-| FR-45, Non-Goals | No downstream rate enforcement | Queue with many eligible items for one `group_key`; worker claims with `max_items=25` then pauses between calls | pqueue applies no rate-based throttling: each `BatchClaim` returns up to 25 items subject only to normal eligibility and `max_items` (a short or empty batch is still valid per API-001), never withholding work for a downstream-rate reason; pacing is determined entirely by the worker's `max_items` and call cadence |
+| FR-45, Non-Goals | No downstream rate enforcement | Queue with many eligible items for one `group_key`; worker claims with `max_items=25` then pauses between calls | fireweed applies no rate-based throttling: each `BatchClaim` returns up to 25 items subject only to normal eligibility and `max_items` (a short or empty batch is still valid per API-001), never withholding work for a downstream-rate reason; pacing is determined entirely by the worker's `max_items` and call cadence |
 | FR-49, FR-50 | Perpetual re-arm | Recurring item claimed and `rearm`-finalized far more than `max_attempts` times | Never terminal; stays in pending/leased cycle |
 | FR-50 | Per-cycle retry budget | Within one cycle, `retry` up to `max_attempts` then once more | Item terminal `failed` for that cycle; a prior `rearm` had reset the counter |
 | FR-51, FR-55 | Singleton recurring | Same `client_item_key` pushed/claimed/re-armed across many cycles | Exactly one logical item; `item_version` increments per `rearm` |
@@ -563,9 +563,9 @@ Reference systems and interfaces to study:
 
 - **Business**: The first validation workload is Seventh Sense scheduled
   delivery/action execution.
-- **Technical**: pqueue must support durable claims and batch operations without
+- **Technical**: fireweed must support durable claims and batch operations without
   requiring exact global ordering for every queue.
-- **Technical**: Downstream API rate/quota enforcement is out of the pqueue
+- **Technical**: Downstream API rate/quota enforcement is out of the fireweed
   engine. The claim path MUST NOT contain a downstream-rate admission stage;
   callers pace via claim batch size, claim cadence, `not_before`, and group
   selection.
@@ -589,7 +589,7 @@ Reference systems and interfaces to study:
 - The committed v1 technical designs for storage backends (including the second,
   higher-scale backend) and queue ownership/assignment/fencing/rebalance across
   nodes. These substantiate the horizontal envelope in Success Metrics.
-- API-001 for native pqueue operations. SQS-shaped compatibility remains a
+- API-001 for native fireweed operations. SQS-shaped compatibility remains a
   later adapter, not the native contract.
 - A later operator/retention contract for P1 redrive, purge, archive, and
   administrative repair APIs.
@@ -621,7 +621,7 @@ Reference systems and interfaces to study:
   leases one complete cohort under a shared cohort lease, all-or-nothing. These
   are the explicit all-or-nothing claim modes v1 supports for group-aware claims;
   no other v1 all-or-nothing batch mode is required.
-- The first client surface is the native pqueue API defined in API-001. An
+- The first client surface is the native fireweed API defined in API-001. An
   SQS-shaped adapter is P1 compatibility work and cannot represent mutable
   priority or schedule updates.
 - v1 scale is committed in two envelopes - single-deployment and horizontal
@@ -630,11 +630,11 @@ Reference systems and interfaces to study:
   evidence artifact (see "Scale
   Substantiation"). The PRD states product envelopes only; storage backend and
   placement mechanism live in the governing design/test artifacts.
-- Downstream API rate/quota enforcement is a non-goal of the pqueue engine, not a
+- Downstream API rate/quota enforcement is a non-goal of the fireweed engine, not a
   deferred feature. Callers pace claim output using `max_items`, claim cadence,
   `not_before`, and group selection (`compatibility.group_key` / `same_group_key`
   / `metadata_equals` / `group_batching.max_groups`). The `rate_limited` item
-  status and the rate-limit error row are reserved exclusively for pqueue's own
+  status and the rate-limit error row are reserved exclusively for fireweed's own
   deployment/tenant capacity controls (P1), not downstream-system pacing.
 - Recurring (never-terminal) items are a first-class queue mode. A `recurring`
   queue accepts a `rearm` finalize outcome that returns the item to pending with
@@ -663,15 +663,15 @@ Reference systems and interfaces to study:
   ADR-004, a single `group_key` is the ordering/atomicity key; a queue needing
   both keys must be split (one keyed by `job_id`, one by `callback_id`) because
   metadata cannot carry a placement/atomicity key. This confirmation gates the
-  migration topology but does NOT block generic pqueue implementation, since
+  migration topology but does NOT block generic fireweed implementation, since
   `group_key` topology and `progress_bound_ms` are per-queue configuration.
 
 ## Success Criteria
 
-pqueue is successful when a general-purpose queue can be created with a
+fireweed is successful when a general-purpose queue can be created with a
 configured priority model, accepts and updates work idempotently at production
 scale, claims eligible work in strict or bounded-relaxed order without
 starvation, survives worker failure through leases, and supports group-aware
 batch execution. For Seventh Sense, success means scheduled delivery/action work
-can move to pqueue without losing timestamp scheduling correctness, operational
+can move to fireweed without losing timestamp scheduling correctness, operational
 visibility, or throughput.

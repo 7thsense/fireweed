@@ -23,7 +23,7 @@ placement is an internal storage concern (ADR-008: the queue is the unit of
 sharding; any item-table partition is client-invisible). The first validation
 workload (Seventh Sense) nests account, job, connector, and campaign concepts,
 claims work in scheduled-timestamp order, and physically hash-partitions on a
-job-like key. The native model never mapped that nesting onto pqueue's axes, never
+job-like key. The native model never mapped that nesting onto fireweed's axes, never
 stated at what domain claim result order is guaranteed, never stated the placement
 precondition under which per-group order is achievable, and never stated whether
 physical placement is client-visible. Several downstream gap designs (group-cardinality claim,
@@ -128,7 +128,7 @@ recurring" topology. CreateQueue MUST reject a queue that sets both
 
 ### Per-group summary projection (single canonical projection)
 
-There is exactly ONE per-group summary projection, **`pqueue_group_summary`**,
+There is exactly ONE per-group summary projection, **`fireweed_group_summary`**,
 keyed by **`(tenant_id, queue_id, group_key)`** (owner-local; one row per group —
 ADR-008). It is the single
 source of truth for (a) g1 `group_batching` oldest-group selection, (b) g4
@@ -145,7 +145,7 @@ gate-flip consistency model below and TD-002); only the counts may lag. The DDL
 and full consistency model are owned by TD-002. Tenant-wide queue-granularity
 discovery is a rollup over this same projection (queue-level
 `min(oldest_eligible_at)`), not a second table. There is no
-`pqueue_active_scope_summary` table.
+`fireweed_active_scope_summary` table.
 
 ### Gate-flip / per-group exact-on-read model (consistency)
 
@@ -168,7 +168,7 @@ in the group).
 
 ### Granularity mapping (normative reference table)
 
-| Domain concept | pqueue axis | Rationale |
+| Domain concept | fireweed axis | Rationale |
 |----------------|-------------|-----------|
 | Tenant / account class / deployment boundary | `tenant_id` | Auth + storage isolation (ADR-002). |
 | Logical work stream with its own ordering policy & progress bound | `queue_id` | Config + ordering + metrics boundary (FR-1). |

@@ -624,7 +624,7 @@ async fn resp_xclaim_drain_split_renews_inflight_and_refuses_reassign() {
         .await;
     let err = result.unwrap_err().to_string();
     assert!(
-        err.contains("pqueue unavailable"),
+        err.contains("fireweed unavailable"),
         "drain reassign half should be refused, got {err}"
     );
 
@@ -1972,8 +1972,8 @@ fn resolve_node_id_uses_small_ints_verbatim_and_hashes_the_rest() {
     assert_eq!(resolve_node_id("  3 "), 3, "trimmed");
     // Out of u8 range / non-numeric -> hashed into range (stable, and distinct here).
     let a = resolve_node_id("256");
-    let b = resolve_node_id("pqueue-statefulset-0");
-    let c = resolve_node_id("pqueue-statefulset-1");
+    let b = resolve_node_id("fireweed-statefulset-0");
+    let c = resolve_node_id("fireweed-statefulset-1");
     assert_ne!(b, c, "distinct pod identities map to distinct node ids");
     let _ = a; // just must not panic / must be in range (u8 by construction)
 }

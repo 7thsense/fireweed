@@ -88,7 +88,7 @@ harness exercises identical 256-record input through both encoders and reports e
 ordinary CI:
 
 ```text
-cargo test -p pqueue-objectlog segment_v2_v3_integrity_overhead_manual_benchmark -- --ignored --nocapture
+cargo test -p fireweed-objectlog segment_v2_v3_integrity_overhead_manual_benchmark -- --ignored --nocapture
 ```
 
 Release N keeps v2 as the default. An interleaved same-run v2/v3 encode/decode/replay comparison under

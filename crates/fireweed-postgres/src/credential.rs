@@ -99,7 +99,7 @@ impl DatabricksCredentialConfig {
         let get = |key: &str| env.get(key).filter(|s| !s.is_empty()).cloned();
         let workspace_host =
             get("DATABRICKS_HOST").ok_or(EngineError::Invalid("DATABRICKS_HOST is required"))?;
-        let instance_name = get("PQUEUE_DATABRICKS_DATABASE_INSTANCE_NAME")
+        let instance_name = get("FIREWEED_DATABRICKS_DATABASE_INSTANCE_NAME")
             .or_else(|| get("DATABRICKS_DATABASE_INSTANCE_NAME"))
             .ok_or(EngineError::Invalid(
                 "DATABRICKS_DATABASE_INSTANCE_NAME is required",
@@ -121,10 +121,10 @@ impl DatabricksCredentialConfig {
                             "DATABRICKS_CLIENT_ID+DATABRICKS_CLIENT_SECRET or DATABRICKS_TOKEN is required",
                         ),
                     )?;
-                let postgres_user = get("PQUEUE_DATABRICKS_POSTGRES_USER")
+                let postgres_user = get("FIREWEED_DATABRICKS_POSTGRES_USER")
                     .or_else(|| get("DATABRICKS_POSTGRES_USER"))
                     .ok_or(EngineError::Invalid(
-                        "PQUEUE_DATABRICKS_POSTGRES_USER is required with DATABRICKS_TOKEN",
+                        "FIREWEED_DATABRICKS_POSTGRES_USER is required with DATABRICKS_TOKEN",
                     ))?;
                 (DatabricksAuth::Pat { token }, postgres_user)
             }
@@ -250,7 +250,7 @@ fn next_request_id() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("pqueue-{pid}-{now}-{n}", pid = std::process::id())
+    format!("fireweed-{pid}-{now}-{n}", pid = std::process::id())
 }
 
 pub fn parse_databricks_credential_response(raw: &str) -> EngineResult<Credential> {
@@ -473,11 +473,11 @@ mod tests {
             ("DATABRICKS_HOST", "https://example.cloud.databricks.com"),
             ("DATABRICKS_DATABASE_INSTANCE_NAME", "ignored"),
             (
-                "PQUEUE_DATABRICKS_DATABASE_INSTANCE_NAME",
+                "FIREWEED_DATABRICKS_DATABASE_INSTANCE_NAME",
                 "lakebase-override",
             ),
             ("DATABRICKS_TOKEN", "pat"),
-            ("PQUEUE_DATABRICKS_POSTGRES_USER", "user@example.com"),
+            ("FIREWEED_DATABRICKS_POSTGRES_USER", "user@example.com"),
             ("DATABRICKS_CLI", "/opt/bin/databricks"),
         ])
         .unwrap();
@@ -506,7 +506,10 @@ mod tests {
         ])
         .unwrap_err();
 
-        assert!(err.to_string().contains("PQUEUE_DATABRICKS_POSTGRES_USER"));
+        assert!(
+            err.to_string()
+                .contains("FIREWEED_DATABRICKS_POSTGRES_USER")
+        );
     }
 
     #[test]
@@ -515,7 +518,7 @@ mod tests {
             ("DATABRICKS_HOST", "https://example.cloud.databricks.com"),
             ("DATABRICKS_DATABASE_INSTANCE_NAME", "lakebase-prod"),
             ("DATABRICKS_TOKEN", "pat"),
-            ("PQUEUE_DATABRICKS_POSTGRES_USER", "user@example.com"),
+            ("FIREWEED_DATABRICKS_POSTGRES_USER", "user@example.com"),
         ])
         .unwrap();
         let fetcher = databricks_fetcher_with_runner(config, |cmd| {

@@ -30,7 +30,7 @@ network body limits, and generic memory accounting.
   seam. This preserves the existing single-serialization invariant and makes a conservative resident-peak
   charge available. Co-batched requests each reserve their own 25-byte fixed frame overhead, so aggregate
   accounting intentionally overcharges relative to the one merged frame rather than undercounting a peak.
-- Put the runtime-neutral budget/waiter/permit types in `pqueue-engine` and inject them per ADR-017; object-log
+- Put the runtime-neutral budget/waiter/permit types in `fireweed-engine` and inject them per ADR-017; object-log
   adapters own wiring and byte classification without creating an engine-to-objectlog dependency.
 - For an already-formed raw commit, `AsyncComposedBackend` requires `PreparedAsyncCommitStrategy`, acquires
   bytes before the queue gate and dispatch, and dispatches only the prepared owned request. The direct
@@ -57,7 +57,7 @@ network body limits, and generic memory accounting.
 | 0 | Commit, push, and verify the async/cohort/purge baseline | clean worktree; focused and workspace gates green |
 | 1 | Amend TD-004/ADR-017 and TP-002/TP-003 with accounting, errors, metrics, and defaults | HELIX validation; config examples |
 | 2 | Hoist serialization and thread pre-serialized commands through coordinator/group-commit seams without behavior change | byte-identical segments; no double serialization |
-| 3 | Add runtime-neutral `BufferedByteBudget`, fair waiter, owned permit, tenant classifier, and invariant tests in `pqueue-engine` | proptest/model tests for conservation and cancellation |
+| 3 | Add runtime-neutral `BufferedByteBudget`, fair waiter, owned permit, tenant classifier, and invariant tests in `fireweed-engine` | proptest/model tests for conservation and cancellation |
 | 4 | Integrate permits into explicit prepared admission, finite ordinary trait admission, queue gating, coordinator, and segment buffer | no double charge; exact release on every exit |
 | 5 | Add cross-queue/tenant stress, close/drain, oversize, and stalled-store tests | bounded resident bytes; unrelated tenant progress |
 | 6 | Benchmark request-count-only baseline against byte budget at small/target/oversize payloads, including serialization paid before rejection | throughput and p99 bars from roadmap |

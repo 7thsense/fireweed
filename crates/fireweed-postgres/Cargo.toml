@@ -42,7 +42,7 @@ tls = ["dep:native-tls", "dep:postgres-native-tls"]
 # The library facade, driven as a COORDINATED owner over the postgres backend + control plane for the B5
 # durable multi-instance competition test. `default-features = false` so we don't pull the other adapters.
 fireweed = { path = "../fireweed", default-features = false, features = ["postgres"] }
-# Runs the shared backend-conformance suite against the postgres backend (env-gated on PQUEUE_PG_TEST_URL).
+# Runs the shared backend-conformance suite against the postgres backend (env-gated on FIREWEED_PG_TEST_URL).
 fireweed-conformance = { path = "../fireweed-conformance" }
 [[test]]
 name = "conformance"
@@ -52,18 +52,18 @@ path = "tests/conformance.rs"
 name = "durability"
 path = "tests/durability.rs"
 
-# BQ-12: the postgres RELATIONAL backend's core + relational-reconnect class (env-gated on PQUEUE_PG_TEST_URL).
+# BQ-12: the postgres RELATIONAL backend's core + relational-reconnect class (env-gated on FIREWEED_PG_TEST_URL).
 [[test]]
 name = "relational_conformance"
 path = "tests/relational_conformance.rs"
 
-# ADR-012 P1b-ii: the UNIFIED postgres-relational COMPOSITION's core class (env-gated on PQUEUE_PG_TEST_URL).
+# ADR-012 P1b-ii: the UNIFIED postgres-relational COMPOSITION's core class (env-gated on FIREWEED_PG_TEST_URL).
 [[test]]
 name = "composed_relational_conformance"
 path = "tests/composed_relational_conformance.rs"
 
 # Live TLS round-trip proof (Lakebase / cloud-postgres transport): only compiled with `--features tls`,
-# and env-gated on PQUEUE_PG_TLS_TEST_URL (a sslmode=require DSN to a TLS-enabled postgres). LOUD-skips otherwise.
+# and env-gated on FIREWEED_PG_TLS_TEST_URL (a sslmode=require DSN to a TLS-enabled postgres). LOUD-skips otherwise.
 [[test]]
 name = "tls_connection"
 path = "tests/tls_connection.rs"

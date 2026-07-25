@@ -18,7 +18,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
-            "pqueue-e3-contract-{}-{}",
+            "fireweed-e3-contract-{}-{}",
             std::process::id(),
             NEXT_DIR.fetch_add(1, Ordering::Relaxed)
         ));

@@ -22,7 +22,7 @@ STRUCTURED engine errors; commit-invariant (pre-validate so apply is infallible)
 > (so a mid-plan stop leaves an accurate report) and `git commit`s when green.
 
 ### Chunk 1 — B: attempt-count = delivery count (TD-006:129 reconciliation)
-**Problem (verified):** `apply_command` bumps `attempt_count` in BOTH the `Claim` arm (`pqueue-projection`
+**Problem (verified):** `apply_command` bumps `attempt_count` in BOTH the `Claim` arm (`fireweed-projection`
 ~316) AND the `LeaseExpired` arm (~368), so a reclaim+redeliver charges 2; TD-006 says one.
 **INVARIANT (the explicit semantic):** `attempt_count` = the number of times the item was **handed to a
 worker** — i.e. it increments **only** in the `Claim` apply arm. A reclaim (`LeaseExpired`) returns the item
@@ -70,29 +70,29 @@ to both suites covering the happy path + a fenced/superseded reject.
 backend.
 
 ### Chunk 4 — A: postgres adapter (DEFERRED → DONE) — RISKIEST; resolve I1/I2 as preconditions
-**Provision:** start a local PostgreSQL (docker preferred: `docker run -d --name pq-pg -p 5433:5432 -e
-POSTGRES_PASSWORD=pq postgres:16`; fall back to `pg_ctl`/`initdb`). Export
-`PQUEUE_PG_TEST_URL=postgres://postgres:pq@127.0.0.1:5433/postgres`.
-**Build:** re-create `pqueue-postgres` to the engine ports via the durable-adapter template (durable LOG in
+**Provision:** start a local PostgreSQL (docker preferred: `docker run -d --name fireweed-pg -p 5433:5432 -e
+POSTGRES_PASSWORD=fireweed postgres:16`; fall back to `pg_ctl`/`initdb`). Export
+`FIREWEED_PG_TEST_URL=postgres://postgres:fireweed@127.0.0.1:5433/postgres`.
+**Build:** re-create `fireweed-postgres` to the engine ports via the durable-adapter template (durable LOG in
 postgres + projection rebuilt-from-log; atomic class), SYNC `postgres` crate. Implement EVERY port incl.
 PushPort + UpsertPort(new) + RenewLeasePort. Schema mirrors sqlite (BIGINT, `$N` params, `ON CONFLICT … DO
-UPDATE`, `COALESCE(MAX(seq),-1)+1`). Errors → `Storage`. **M1:** `pqueue-postgres` is ALREADY in the
+UPDATE`, `COALESCE(MAX(seq),-1)+1`). Errors → `Storage`. **M1:** `fireweed-postgres` is ALREADY in the
 dep-direction `ADAPTERS` list — the only action is re-adding it to workspace `members`.
 **I1 — blocking-in-async DECISION (record it):** the port bodies do blocking postgres calls inside
 `std::future::ready` (mirroring sqlite). For CONFORMANCE this is safe — each scenario is a separate
 `#[tokio::test]` with its own runtime + its own connection, and calls are sequential within a scenario, so
-no single runtime is starved. For a PRODUCTION `pqueue-server` serving many connections over ONE postgres,
+no single runtime is starved. For a PRODUCTION `fireweed-server` serving many connections over ONE postgres,
 synchronous network calls on Tokio worker threads WOULD starve the runtime → **documented caveat**: the
 postgres backend requires a blocking-friendly executor; the production refinement (wrap in
 `spawn_blocking` + a connection pool, or the relational-projection `FOR UPDATE SKIP LOCKED` multi-node mode)
 is a recorded POST-LAUNCH optimization. Launch postgres = single-node durable-log + in-mem projection,
 identical guarantees to sqlite. This is NOT a silent sqlite-mirror — the caveat is written in the crate
 docs + the reconciliation report.
-**Conformance + I2 (no silent never-run):** `tests/conformance.rs` env-gated on `PQUEUE_PG_TEST_URL`. **M2:**
+**Conformance + I2 (no silent never-run):** `tests/conformance.rs` env-gated on `FIREWEED_PG_TEST_URL`. **M2:**
 each scenario gets its OWN connection + a UNIQUE schema (`connect_fresh` opens a fresh connection, `CREATE
-SCHEMA pq_test_<pid>_<atomic>; SET search_path` — NOT a shared connection mutating search_path, which would
+SCHEMA fireweed_test_<pid>_<atomic>; SET search_path` — NOT a shared connection mutating search_path, which would
 race under cargo's concurrent tests). If the env var is ABSENT the test prints a LOUD
-`eprintln!("POSTGRES CONFORMANCE SKIPPED — set PQUEUE_PG_TEST_URL")` and returns (so a green run is visibly
+`eprintln!("POSTGRES CONFORMANCE SKIPPED — set FIREWEED_PG_TEST_URL")` and returns (so a green run is visibly
 partial, not a hidden pass). **DoD addition:** "postgres conformance runs in CI" — add a documented
 `make test-postgres` / CI service-container note; do NOT mark the PHASE-7 "conformance on …+postgres" gate
 PASS on the in-session run alone — mark it "PASS (live), CI-job owed".
@@ -142,7 +142,7 @@ item) + upsert↔claim race (best-effort).
   n-a in TD-006 with NO unmarked library-only cell; fix gaps.
 - **F.2c** doc hygiene: scrub remaining HTTP-era phrasing from API-001/TP-001; ensure docs self-consistent.
 - **F.2d** re-scope/close beads tied to the deleted crates (claimed-item-shape → transport-neutral; Lakebase →
-  `pqueue-server` image + health probe).
+  `fireweed-server` image + health probe).
 **Accept:** reconciliation owed-item F → resolved; update `PHASE-7-reconciliation.md` to mark all six owed
 items RESOLVED.
 

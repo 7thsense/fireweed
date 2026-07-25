@@ -1904,7 +1904,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     }
 
     /// Override the recovery-window budget (max durable-log tail commands a reopen replays before a
-    /// recovery-window warning is logged) — the composition-root form of `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS`.
+    /// recovery-window warning is logged) — the composition-root form of `FIREWEED_RECOVERY_MAX_TAIL_COMMANDS`.
     pub fn with_recovery_max_tail(mut self, max_tail: u64) -> Self {
         self.recovery_max_tail = max_tail;
         self
@@ -3403,7 +3403,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     /// The NON-item claim path (whole-group / same-group-key / whole-cohort, BQ-14b/c). The projection axis
     /// selects the candidates (and, for whole-cohort, the cohort id) under the composition's unit-of-work
     /// lock; the composition then commits the lease as a plain `Claim` (group / same-group) or a
-    /// `CohortClaim` (whole-cohort — its apply arm also flips `pqueue_cohorts` to leased) through the atomic
+    /// `CohortClaim` (whole-cohort — its apply arm also flips `fireweed_cohorts` to leased) through the atomic
     /// write seam, and renders the reply. A projection without a group/cohort read model refuses the
     /// selection with `Unavailable`, so the log-replay family rejects non-item units unchanged.
     fn claim_rich(&self, req: &ClaimRequest, unit: ClaimUnit) -> EngineResult<Claimed> {

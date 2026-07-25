@@ -83,7 +83,7 @@ fn query_context(now: i64) -> ClaimByQueryContext {
 #[test]
 fn claim_by_query_eligibility_cas() {
     let path = std::env::temp_dir().join(format!(
-        "pqueue-claim-by-query-cas-{}.db",
+        "fireweed-claim-by-query-cas-{}.db",
         std::process::id()
     ));
     let _ = std::fs::remove_file(&path);
@@ -217,10 +217,10 @@ fn claim_by_query_eligibility_cas() {
     connection
         .execute_batch(&format!(
             "CREATE TRIGGER claim_by_query_stale_version
-             BEFORE UPDATE OF lifecycle_state ON pqueue_items
+             BEFORE UPDATE OF lifecycle_state ON fireweed_items
              WHEN OLD.item_id = '{}' AND NEW.lifecycle_state = 'Leased'
              BEGIN
-               UPDATE pqueue_items SET item_version = item_version + 1
+               UPDATE fireweed_items SET item_version = item_version + 1
                WHERE tenant_id = 't1' AND queue_id = 'q1' AND item_id = '{}';
                SELECT RAISE(IGNORE);
              END;",
@@ -274,7 +274,7 @@ fn claim_by_query_eligibility_cas() {
     let stale_id_string = stale_id.to_string();
     let (state, version): (String, i64) = connection
         .query_row(
-            "SELECT lifecycle_state, item_version FROM pqueue_items WHERE item_id = ?1",
+            "SELECT lifecycle_state, item_version FROM fireweed_items WHERE item_id = ?1",
             [stale_id_string],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )

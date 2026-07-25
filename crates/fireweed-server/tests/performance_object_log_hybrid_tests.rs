@@ -3,7 +3,7 @@
 //! Default lane:
 //!
 //! ```text
-//! PQUEUE_LEDGER_DIR=docs/perf/evidence \
+//! FIREWEED_LEDGER_DIR=docs/perf/evidence \
 //!   cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests \
 //!   performance_object_log_hybrid_smoke -- --nocapture
 //! ```
@@ -11,7 +11,7 @@
 //! Release lane (ignored because it is a 10M-resident run):
 //!
 //! ```text
-//! PQUEUE_LEDGER_DIR=docs/perf/evidence PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=10000000 \
+//! FIREWEED_LEDGER_DIR=docs/perf/evidence FIREWEED_PERF_ENV=1 FIREWEED_HYBRID_RESIDENT=10000000 \
 //!   cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests \
 //!   performance_object_log_hybrid_release_10m -- --ignored --nocapture
 //! ```
@@ -456,7 +456,7 @@ fn apply_object_store_counters(
 
 fn scratch(label: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
-        "pqueue-hybrid-perf-{label}-{}-{}",
+        "fireweed-hybrid-perf-{label}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -470,7 +470,7 @@ fn spawn_composed_flusher(backend: Arc<HybridBackend>) -> tokio::task::JoinHandl
         let mut tick = tokio::time::interval(Duration::from_millis(
             backend.group_commit_flush_interval_ms(),
         ));
-        let deferred_interval_ms = env_u64("PQUEUE_HYBRID_DEFERRED_FLUSH_INTERVAL_MS", 3_600_000);
+        let deferred_interval_ms = env_u64("FIREWEED_HYBRID_DEFERRED_FLUSH_INTERVAL_MS", 3_600_000);
         let mut deferred_tick = tokio::time::interval(Duration::from_millis(deferred_interval_ms));
         loop {
             tokio::select! {
@@ -608,7 +608,7 @@ where
 
     let mut claim_finalize_latencies = Vec::new();
     let mut claimed_total = 0u64;
-    let rmw_window = env_u64("PQUEUE_HYBRID_RMW_WINDOW", 64).max(1) as usize;
+    let rmw_window = env_u64("FIREWEED_HYBRID_RMW_WINDOW", 64).max(1) as usize;
     let claim_finalize_io_start = ProcIoSnapshot::read();
     let claim_finalize_start = Instant::now();
     let emit_claim_finalize_windows = backend_profile.contains("sqlite") && resident >= 1_000_000;
@@ -1850,7 +1850,7 @@ fn emit_ledger(
             "local filesystem segmented object log; resident={resident}; compared objectlog/hybrid, objectlog/inmemory, objectlog/sqlite under one segment config"
         ),
         exit_status: 0,
-        ac_ids: vec!["pqueue-1363098f-AC1".into(), "pqueue-1363098f-AC3".into()],
+        ac_ids: vec!["fireweed-1363098f-AC1".into(), "fireweed-1363098f-AC3".into()],
         inv_ids: vec![],
         pass_bar: "objectlog/hybrid hot path <=20% over same-host objectlog/inmemory; normal restart replays a bounded structural tail; disk-loss replay reconstructs exact pending count".into(),
         evidence_tier: if release { "release".into() } else { "smoke".into() },
@@ -1897,19 +1897,19 @@ async fn run_suite(release: bool) -> HybridGates {
     let (suite, command) = if release {
         (
             "performance_object_log_hybrid_release_10m",
-            "PQUEUE_LEDGER_DIR=docs/perf/evidence PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RESIDENT=10000000 cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_release_10m -- --ignored --nocapture",
+            "FIREWEED_LEDGER_DIR=docs/perf/evidence FIREWEED_PERF_ENV=1 FIREWEED_HYBRID_RESIDENT=10000000 cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_release_10m -- --ignored --nocapture",
         )
     } else {
         (
             "performance_object_log_hybrid_smoke",
-            "PQUEUE_LEDGER_DIR=docs/perf/evidence cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_smoke -- --nocapture",
+            "FIREWEED_LEDGER_DIR=docs/perf/evidence cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_smoke -- --nocapture",
         )
     };
     run_suite_named(suite, command, release).await
 }
 
 /// The default push/claim batch size `run_suite_named` drives at a given resident count (before any
-/// `PQUEUE_HYBRID_LOAD_BATCH` / `PQUEUE_HYBRID_CLAIM_BATCH` override). Factored out so the deferred-flush-
+/// `FIREWEED_HYBRID_LOAD_BATCH` / `FIREWEED_HYBRID_CLAIM_BATCH` override). Factored out so the deferred-flush-
 /// chunking backlog-size assertion (`performance_object_log_hybrid_deferred_flush_chunking`) derives from
 /// the same source of truth as the release suite instead of a hand-duplicated constant.
 fn release_default_batch(release: bool, resident: u64) -> u64 {
@@ -1928,20 +1928,20 @@ fn release_default_batch(release: bool, resident: u64) -> u64 {
 /// gates. The gate tests call this with their own suite name so they never clobber the default smoke ledger.
 async fn run_suite_named(suite: &str, command: &str, release: bool) -> HybridGates {
     let resident = env_u64(
-        "PQUEUE_HYBRID_RESIDENT",
+        "FIREWEED_HYBRID_RESIDENT",
         if release { RELEASE_RESIDENT } else { 1_000 },
     );
     let default_batch = release_default_batch(release, resident);
-    let load_batch = env_u64("PQUEUE_HYBRID_LOAD_BATCH", default_batch).max(1);
-    let claim_batch = env_u64("PQUEUE_HYBRID_CLAIM_BATCH", default_batch).max(1) as usize;
-    let target_bytes = env_u64("PQUEUE_HYBRID_SEGMENT_TARGET_BYTES", 262_144) as usize;
+    let load_batch = env_u64("FIREWEED_HYBRID_LOAD_BATCH", default_batch).max(1);
+    let claim_batch = env_u64("FIREWEED_HYBRID_CLAIM_BATCH", default_batch).max(1) as usize;
+    let target_bytes = env_u64("FIREWEED_HYBRID_SEGMENT_TARGET_BYTES", 262_144) as usize;
     // 500ms (not 5ms) so smoke-tier sealing is SIZE-driven, not timing-driven: on slow shared CI
     // runners a 5ms latency bound fires between pushes and seals one-command segments, failing the
     // density gate nondeterministically (v0.9.0 release runs 28802824669/28804163186) while the same
     // workload packs by target_bytes on any faster machine. Density must measure the workload shape,
-    // not runner speed. Release-tier evidence overrides via PQUEUE_HYBRID_SEGMENT_MAX_LATENCY_MS to
+    // not runner speed. Release-tier evidence overrides via FIREWEED_HYBRID_SEGMENT_MAX_LATENCY_MS to
     // sweep the real commit-latency dial (TP-002 E3).
-    let max_latency_ms = env_u64("PQUEUE_HYBRID_SEGMENT_MAX_LATENCY_MS", 500);
+    let max_latency_ms = env_u64("FIREWEED_HYBRID_SEGMENT_MAX_LATENCY_MS", 500);
     let cfg = SegmentConfig::new(target_bytes, max_latency_ms).expect("valid segment config");
 
     let inmemory = run_inmemory(resident, load_batch, claim_batch, cfg).await;
@@ -2463,7 +2463,7 @@ fn emit_matrix_cell(
             "local filesystem segmented object log; seeded workload (seed=0, non-uniform payload); cache={cache}; concurrency={concurrency}; load_batch={load_batch}; claim_batch={claim_batch}"
         ),
         exit_status: 0,
-        ac_ids: vec!["pqueue-3d5bb3df-AC2".into()],
+        ac_ids: vec!["fireweed-3d5bb3df-AC2".into()],
         inv_ids: vec![],
         pass_bar: "one ledger cell emitted per (cache, concurrency, batch); queue drains fully under concurrent producers/consumers".into(),
         evidence_tier: "smoke".into(),
@@ -2546,13 +2546,13 @@ fn detected_mem_available_bytes() -> Option<u64> {
     None
 }
 
-/// RSS capacity budget for the scale guard. `PQUEUE_HYBRID_RSS_BUDGET_BYTES`
+/// RSS capacity budget for the scale guard. `FIREWEED_HYBRID_RSS_BUDGET_BYTES`
 /// overrides everything. In the release lane the budget is 3/4 of detected
 /// available memory (a provisioned box runs the big scales); otherwise a
 /// conservative fixed budget keeps the default (non-provisioned) lane fast by
 /// admitting only the 10k scale.
 fn rss_budget_bytes(release: bool) -> u64 {
-    if let Ok(v) = std::env::var("PQUEUE_HYBRID_RSS_BUDGET_BYTES")
+    if let Ok(v) = std::env::var("FIREWEED_HYBRID_RSS_BUDGET_BYTES")
         && let Ok(n) = v.parse::<u64>()
     {
         return n;
@@ -2670,7 +2670,7 @@ fn emit_scale_cell(
             "local filesystem segmented object log; seeded workload (seed=0); resident={resident}; {reps} reps; median+CoV under trimmed-extremes outlier policy"
         ),
         exit_status: 0,
-        ac_ids: vec!["pqueue-3d5bb3df-AC3".into()],
+        ac_ids: vec!["fireweed-3d5bb3df-AC3".into()],
         inv_ids: vec![],
         pass_bar: ">=5 reps per release cell; median + coefficient-of-variation recorded under the documented outlier-trim policy".into(),
         evidence_tier: if release { "release".into() } else { "smoke".into() },
@@ -3195,7 +3195,7 @@ async fn performance_object_log_hybrid_distribution_pins() {
 async fn performance_object_log_hybrid_cache_matrix_smoke() {
     let suite = "performance_object_log_hybrid_cache_matrix_smoke";
     let command = "cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_cache_matrix_smoke -- --nocapture";
-    let resident = env_u64("PQUEUE_HYBRID_RESIDENT", 1_000).min(1_000);
+    let resident = env_u64("FIREWEED_HYBRID_RESIDENT", 1_000).min(1_000);
     let spec = WorkloadSpec::pinned();
     let cfg = SegmentConfig::new(262_144, 5).expect("valid segment config");
 
@@ -3258,10 +3258,10 @@ async fn performance_object_log_hybrid_cache_matrix_smoke() {
 async fn performance_object_log_hybrid_scale_matrix() {
     let suite = "performance_object_log_hybrid_scale_matrix";
     let command = "cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests performance_object_log_hybrid_scale_matrix -- --nocapture";
-    let release = std::env::var("PQUEUE_PERF_ENV").is_ok();
-    let reps = env_u64("PQUEUE_HYBRID_SCALE_REPS", 5).max(5) as usize;
-    let load_batch = env_u64("PQUEUE_HYBRID_LOAD_BATCH", 1_000).max(1);
-    let claim_batch = env_u64("PQUEUE_HYBRID_CLAIM_BATCH", 1_000).max(1) as usize;
+    let release = std::env::var("FIREWEED_PERF_ENV").is_ok();
+    let reps = env_u64("FIREWEED_HYBRID_SCALE_REPS", 5).max(5) as usize;
+    let load_batch = env_u64("FIREWEED_HYBRID_LOAD_BATCH", 1_000).max(1);
+    let claim_batch = env_u64("FIREWEED_HYBRID_CLAIM_BATCH", 1_000).max(1) as usize;
     let spec = WorkloadSpec::pinned();
     let cfg = SegmentConfig::new(262_144, 5).expect("valid segment config");
     let budget = rss_budget_bytes(release);
@@ -3275,7 +3275,7 @@ async fn performance_object_log_hybrid_scale_matrix() {
         if !scale_fits_budget(resident, budget) {
             skipped += 1;
             println!(
-                "SKIP scale resident={resident}: estimated {} bytes exceeds capacity budget {} bytes (set PQUEUE_HYBRID_RSS_BUDGET_BYTES to raise)",
+                "SKIP scale resident={resident}: estimated {} bytes exceeds capacity budget {} bytes (set FIREWEED_HYBRID_RSS_BUDGET_BYTES to raise)",
                 resident.saturating_mul(EST_BYTES_PER_ITEM),
                 budget,
             );
@@ -3703,8 +3703,8 @@ async fn performance_object_log_hybrid_tail_replay_after_partial_sqlite_high_wat
 #[ignore = "10M resident release-tier evidence; run explicitly in a provisioned perf lane"]
 async fn performance_object_log_hybrid_release_10m() {
     assert!(
-        std::env::var("PQUEUE_PERF_ENV").is_ok(),
-        "release-tier run requires PQUEUE_PERF_ENV=1"
+        std::env::var("FIREWEED_PERF_ENV").is_ok(),
+        "release-tier run requires FIREWEED_PERF_ENV=1"
     );
     run_suite(true).await;
 }

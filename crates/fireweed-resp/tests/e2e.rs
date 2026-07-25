@@ -1,4 +1,4 @@
-//! End-to-end: an OFF-THE-SHELF Redis client (`redis` crate) drives the pqueue RESP front over real
+//! End-to-end: an OFF-THE-SHELF Redis client (`redis` crate) drives the fireweed RESP front over real
 //! TCP: produce via XADD, drain via XREADGROUP `>`, ack via XACK, and reconcile that every
 //! produced item is delivered exactly once, in priority order, with ties broken by insertion order
 //! (plan section 3 drain-and-reconcile, validating Invariant 1 through the stock command surface).
@@ -965,10 +965,10 @@ fn assert_claimed_entry_parity(entry: &redis::streams::StreamId, claimed: &Claim
 }
 
 // TD-006: "consumer group" on this surface is stock Redis Streams wire vocabulary only.
-// pqueue accepts XGROUP/XREADGROUP group names for stock-client compatibility but never persists
+// fireweed accepts XGROUP/XREADGROUP group names for stock-client compatibility but never persists
 // them — delivery is priority-ordered per-item tracking under one implicit group. This has nothing
 // to do with Kafka consumer groups, which are entirely fjord's concern on the change-log surface
-// (ADR-014): pqueue produces to fjord; fjord does Kafka things.
+// (ADR-014): fireweed produces to fjord; fjord does Kafka things.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resp_named_consumer_groups_are_wire_fiction_not_persisted() {
     let (mut con, _backend) = setup().await;
@@ -1023,7 +1023,7 @@ async fn resp_named_consumer_groups_are_wire_fiction_not_persisted() {
     let Value::Array(groups) = groups else {
         panic!("XINFO GROUPS must be an array, got {groups:?}");
     };
-    assert_eq!(groups.len(), 1, "pqueue keeps only its implicit group");
+    assert_eq!(groups.len(), 1, "fireweed keeps only its implicit group");
     let Value::Array(group) = &groups[0] else {
         panic!("group entry must be an array");
     };
@@ -1034,7 +1034,7 @@ async fn resp_named_consumer_groups_are_wire_fiction_not_persisted() {
     assert_eq!(
         group_fields.get("name").map(bulk_string_text),
         Some("default".to_string()),
-        "named consumer groups are not stored in pqueue"
+        "named consumer groups are not stored in fireweed"
     );
     assert_eq!(
         group_fields.get("pending").and_then(|v| match v {
@@ -1057,12 +1057,12 @@ async fn resp_named_consumer_groups_are_wire_fiction_not_persisted() {
             .map(bulk_string_text)
             .as_deref(),
         Some("0-0"),
-        "pqueue does not persist committed-stream offsets"
+        "fireweed does not persist committed-stream offsets"
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pq_live_hash_reads_return_structured_fields_until_ack() {
+async fn fireweed_live_hash_reads_return_structured_fields_until_ack() {
     let (mut con, _backend) = setup().await;
     let id: String = redis::cmd("XADD")
         .arg("t1:q1")
@@ -1082,7 +1082,7 @@ async fn pq_live_hash_reads_return_structured_fields_until_ack() {
         .unwrap();
 
     let hgetall = value_array(
-        redis::cmd("PQ.HGETALL")
+        redis::cmd("FW.HGETALL")
             .arg("t1:q1")
             .arg("work-1")
             .query_async::<Value>(&mut con)
@@ -1103,7 +1103,7 @@ async fn pq_live_hash_reads_return_structured_fields_until_ack() {
     );
 
     let hmget = value_array(
-        redis::cmd("PQ.HMGET")
+        redis::cmd("FW.HMGET")
             .arg("t1:q1")
             .arg("work-1")
             .arg("recipient_ref")
@@ -1118,7 +1118,7 @@ async fn pq_live_hash_reads_return_structured_fields_until_ack() {
     assert!(matches!(hmget[2], Value::Nil));
 
     let mget = value_array(
-        redis::cmd("PQ.MGET")
+        redis::cmd("FW.MGET")
             .arg("t1:q1")
             .arg("missing")
             .arg("work-1")
@@ -1163,7 +1163,7 @@ async fn pq_live_hash_reads_return_structured_fields_until_ack() {
         .await
         .unwrap();
     let after_ack = value_array(
-        redis::cmd("PQ.HMGET")
+        redis::cmd("FW.HMGET")
             .arg("t1:q1")
             .arg("work-1")
             .arg("recipient_ref")
@@ -1355,7 +1355,7 @@ async fn xautoclaim_redelivers_expired_leases() {
     // At exactly expiry (t == 1060): half-open lease still held → nothing reclaimed, and XPENDING still
     // shows the item leased with attempt_count == 1 (the boundary is load-bearing at the RESP layer).
     clock.set(1_060);
-    // A large min-idle-time (1h) is deliberately ignored: pqueue reclaims by lease expiry, not idle.
+    // A large min-idle-time (1h) is deliberately ignored: fireweed reclaims by lease expiry, not idle.
     let (_c, entries, _d): AutoClaim = redis::cmd("XAUTOCLAIM")
         .arg("t1:q1")
         .arg("g")
@@ -1777,7 +1777,7 @@ async fn xclaim_self_renews_no_charge_cross_consumer_reclaims_with_attempt_bump(
 
 /// XLEN / XDEL / XINFO over the stock client (owed-item E.2 / Chunk 6b). XLEN counts LIVE entries
 /// (pending + in-flight), terminal/acked entries drop out; XDEL hard-removes and returns the count;
-/// XINFO STREAM/GROUPS summarize. These are pqueue-flavored reads — divergences documented in TD-006 §3.
+/// XINFO STREAM/GROUPS summarize. These are fireweed-flavored reads — divergences documented in TD-006 §3.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn xlen_xdel_xinfo_over_offtheshelf_client() {
     let (mut con, _backend) = setup().await;
@@ -2259,7 +2259,7 @@ async fn cluster_bootstrap_over_the_wire() {
     assert_eq!(String::from_utf8_lossy(id_bytes), myid);
 }
 
-/// BQ-30 — a REAL stock redis CLUSTER client bootstraps against the single pqueue node: `ClusterClient`
+/// BQ-30 — a REAL stock redis CLUSTER client bootstraps against the single fireweed node: `ClusterClient`
 /// reads `CLUSTER SLOTS`, builds its routing table, and routes a command by computed slot to this node.
 /// This is the definitive "a stock redis-cluster client bootstraps" evidence (the plain-client test above
 /// proves the reply shapes + slot constants).

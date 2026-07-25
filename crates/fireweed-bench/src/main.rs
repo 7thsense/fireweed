@@ -1,4 +1,4 @@
-//! pqueue performance / e2e harness (TP-002 + data-shape baseline).
+//! fireweed performance / e2e harness (TP-002 + data-shape baseline).
 //!
 //! Drives SIX backends across BOTH projection families through ingest / claim+ack / lifecycle / recovery /
 //! density workloads over a representative SET of data SHAPES, and reports diagnostic throughput/capacity
@@ -16,7 +16,7 @@
 //!       [--workloads ingest,claim,lifecycle,recovery,density] [--shapes minimal,hot_record,...]
 //!       [--queues Q] [--pg-url URL]
 //!   # postgres / postgres_relational need a live DB (else they loud-skip):
-//!   PQUEUE_PG_TEST_URL=postgres://postgres:pq@HOST:5432/postgres cargo run --release -p fireweed-bench
+//!   FIREWEED_PG_TEST_URL=postgres://postgres:fireweed@HOST:5432/postgres cargo run --release -p fireweed-bench
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -71,9 +71,7 @@ impl Config {
         ];
         let mut shape_names: Option<Vec<String>> = None;
         let mut queues = 1000usize;
-        let mut pg_url = std::env::var("FIREWEED_PG_TEST_URL")
-            .or_else(|_| std::env::var("PQUEUE_PG_TEST_URL"))
-            .ok();
+        let mut pg_url = std::env::var("FIREWEED_PG_TEST_URL").ok();
 
         let args: Vec<String> = std::env::args().skip(1).collect();
         let mut i = 0;
@@ -118,7 +116,7 @@ impl Config {
     }
 
     fn print_header(&self) {
-        println!("pqueue performance / e2e harness — TP-002 + data-shape baseline");
+        println!("fireweed performance / e2e harness — TP-002 + data-shape baseline");
         println!(
             "  items/queue = {}   batch = {}   queues(density) = {}",
             fmt_count(self.items),
@@ -208,30 +206,30 @@ where
     for shape in &cfg.shapes {
         // ingest / claim share one prepared queue per shape (claim drains what ingest pushed).
         if cfg.has("ingest") || cfg.has("claim") {
-            let pq = make();
+            let fireweed = make();
             let qn = format!("{name}-{}-tput", shape.name);
             let q = qkey(&qn);
-            pq.create_queue(bench_qdef("bench", &qn, shape))
+            fireweed.create_queue(bench_qdef("bench", &qn, shape))
                 .await
                 .expect("create queue");
-            let mut s = ingest(&pq, &q, shape, cfg.items, cfg.batch).await;
+            let mut s = ingest(&fireweed, &q, shape, cfg.items, cfg.batch).await;
             if cfg.has("ingest") {
                 print_row(name, family, shape.name, &mut s);
             }
             if cfg.has("claim") {
-                let (mut c, mut a) = claim_ack(&pq, &q, cfg.items, cfg.batch).await;
+                let (mut c, mut a) = claim_ack(&fireweed, &q, cfg.items, cfg.batch).await;
                 print_row(name, family, shape.name, &mut c);
                 print_row(name, family, shape.name, &mut a);
             }
         }
         if cfg.has("lifecycle") {
-            let pq = make();
+            let fireweed = make();
             let qn = format!("{name}-{}-life", shape.name);
             let q = qkey(&qn);
-            pq.create_queue(bench_qdef("bench", &qn, shape))
+            fireweed.create_queue(bench_qdef("bench", &qn, shape))
                 .await
                 .expect("create queue");
-            match lifecycle(&pq, &q, shape, cfg.items, cfg.batch, supports_update).await {
+            match lifecycle(&fireweed, &q, shape, cfg.items, cfg.batch, supports_update).await {
                 Ok(mut ls) => {
                     print_row(name, family, shape.name, &mut ls.push);
                     print_row(name, family, shape.name, &mut ls.claim);
@@ -312,16 +310,16 @@ async fn run_objectlog(cfg: &Config) {
         let _ = std::fs::remove_dir_all(&dir);
         let shape = &cfg.shapes[0];
         {
-            let pq = open_objectlog(&dir, Arc::new(SystemClock)).expect("open objectlog");
+            let fireweed = open_objectlog(&dir, Arc::new(SystemClock)).expect("open objectlog");
             let q = qkey("recov");
-            pq.create_queue(bench_qdef("bench", "recov", shape))
+            fireweed.create_queue(bench_qdef("bench", "recov", shape))
                 .await
                 .unwrap();
-            ingest(&pq, &q, shape, cfg.items, cfg.batch).await;
+            ingest(&fireweed, &q, shape, cfg.items, cfg.batch).await;
         }
         let t = Instant::now();
-        let pq = open_objectlog(&dir, Arc::new(SystemClock)).expect("reopen objectlog");
-        report_recovery("objectlog", LOG_FAMILY, t.elapsed(), &pq, cfg).await;
+        let fireweed = open_objectlog(&dir, Arc::new(SystemClock)).expect("reopen objectlog");
+        report_recovery("objectlog", LOG_FAMILY, t.elapsed(), &fireweed, cfg).await;
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -329,7 +327,7 @@ async fn run_objectlog(cfg: &Config) {
 async fn run_postgres(cfg: &Config) {
     let Some(url) = cfg.pg_url.clone() else {
         println!(
-            "{:<20} (SKIPPED — set --pg-url or FIREWEED_PG_TEST_URL to a live DB; PQUEUE_PG_TEST_URL is a compatibility alias)",
+            "{:<20} (SKIPPED — set --pg-url or FIREWEED_PG_TEST_URL to a live DB)",
             "postgres"
         );
         return;
@@ -337,7 +335,7 @@ async fn run_postgres(cfg: &Config) {
     let mut counter = 0usize;
     run_shapes(cfg, "postgres", LOG_FAMILY, true, || {
         counter += 1;
-        let schema = format!("pq_bench_log_{}_{}", std::process::id(), counter);
+        let schema = format!("fireweed_bench_log_{}_{}", std::process::id(), counter);
         open_postgres_runtime(
             PostgresRuntimeConfig {
                 url: ConfigSecret::new(url.clone()),
@@ -352,10 +350,10 @@ async fn run_postgres(cfg: &Config) {
     })
     .await;
     if cfg.has("recovery") {
-        let schema = format!("pq_bench_log_recov_{}", std::process::id());
+        let schema = format!("fireweed_bench_log_recov_{}", std::process::id());
         let shape = &cfg.shapes[0];
         {
-            let pq = open_postgres_runtime(
+            let fireweed = open_postgres_runtime(
                 PostgresRuntimeConfig {
                     url: ConfigSecret::new(url.clone()),
                     schema: Some(schema.clone()),
@@ -367,13 +365,13 @@ async fn run_postgres(cfg: &Config) {
             )
             .expect("connect postgres");
             let q = qkey("recov");
-            pq.create_queue(bench_qdef("bench", "recov", shape))
+            fireweed.create_queue(bench_qdef("bench", "recov", shape))
                 .await
                 .unwrap();
-            ingest(&pq, &q, shape, cfg.items, cfg.batch).await;
+            ingest(&fireweed, &q, shape, cfg.items, cfg.batch).await;
         }
         let t = Instant::now();
-        let pq = open_postgres_runtime(
+        let fireweed = open_postgres_runtime(
             PostgresRuntimeConfig {
                 url: ConfigSecret::new(url.clone()),
                 schema: Some(schema),
@@ -384,14 +382,14 @@ async fn run_postgres(cfg: &Config) {
             Arc::new(SystemClock),
         )
         .expect("reconnect postgres");
-        report_recovery("postgres", LOG_FAMILY, t.elapsed(), &pq, cfg).await;
+        report_recovery("postgres", LOG_FAMILY, t.elapsed(), &fireweed, cfg).await;
     }
 }
 
 async fn run_postgres_relational(cfg: &Config) {
     let Some(url) = cfg.pg_url.clone() else {
         println!(
-            "{:<20} (SKIPPED — set --pg-url or FIREWEED_PG_TEST_URL to a live DB; PQUEUE_PG_TEST_URL is a compatibility alias)",
+            "{:<20} (SKIPPED — set --pg-url or FIREWEED_PG_TEST_URL to a live DB)",
             "postgres_relational"
         );
         return;
@@ -399,7 +397,7 @@ async fn run_postgres_relational(cfg: &Config) {
     let mut counter = 0usize;
     run_shapes(cfg, "postgres_relational", REL_FAMILY, true, || {
         counter += 1;
-        let schema = format!("pq_bench_rel_{}_{}", std::process::id(), counter);
+        let schema = format!("fireweed_bench_rel_{}_{}", std::process::id(), counter);
         open_postgres_runtime(
             PostgresRuntimeConfig {
                 url: ConfigSecret::new(url.clone()),
@@ -430,21 +428,21 @@ where
     let _ = std::fs::remove_file(&path);
     let shape = &cfg.shapes[0];
     {
-        let pq = reopen(&path);
+        let fireweed = reopen(&path);
         let q = qkey("recov");
-        pq.create_queue(bench_qdef("bench", "recov", shape))
+        fireweed.create_queue(bench_qdef("bench", "recov", shape))
             .await
             .unwrap();
-        ingest(&pq, &q, shape, cfg.items, cfg.batch).await;
+        ingest(&fireweed, &q, shape, cfg.items, cfg.batch).await;
     }
     let t = Instant::now();
-    let pq = reopen(&path);
-    report_recovery(name, family, t.elapsed(), &pq, cfg).await;
+    let fireweed = reopen(&path);
+    report_recovery(name, family, t.elapsed(), &fireweed, cfg).await;
     let _ = std::fs::remove_file(&path);
 }
 
-async fn report_recovery(name: &str, family: &str, elapsed: Duration, pq: &Fireweed, cfg: &Config) {
-    let resident = pq
+async fn report_recovery(name: &str, family: &str, elapsed: Duration, fireweed: &Fireweed, cfg: &Config) {
+    let resident = fireweed
         .metrics(&qkey("recov"))
         .await
         .map(|m| m.pending + m.leased)
@@ -470,15 +468,15 @@ async fn report_recovery(name: &str, family: &str, elapsed: Duration, pq: &Firew
 async fn density(cfg: &Config) {
     println!("\nqueue density (single node, memory backend, minimal shape):");
     let shape = all_shapes()[0]; // minimal
-    let pq = open_memory(Arc::new(SystemClock));
+    let fireweed = open_memory(Arc::new(SystemClock));
     let cold_each = 100u64;
     let create_start = Instant::now();
     for i in 0..cfg.queues {
         let name = format!("q{i}");
-        pq.create_queue(bench_qdef("bench", &name, &shape))
+        fireweed.create_queue(bench_qdef("bench", &name, &shape))
             .await
             .unwrap();
-        ingest(&pq, &qkey(&name), &shape, cold_each, cfg.batch).await;
+        ingest(&fireweed, &qkey(&name), &shape, cold_each, cfg.batch).await;
     }
     let setup = create_start.elapsed();
     let resident = (cfg.queues as u64) * cold_each;
@@ -490,14 +488,14 @@ async fn density(cfg: &Config) {
     );
 
     let hot = format!("q{}", cfg.queues);
-    pq.create_queue(bench_qdef("bench", &hot, &shape))
+    fireweed.create_queue(bench_qdef("bench", &hot, &shape))
         .await
         .unwrap();
     let hk = qkey(&hot);
-    let mut ing = ingest(&pq, &hk, &shape, cfg.items, cfg.batch).await;
+    let mut ing = ingest(&fireweed, &hk, &shape, cfg.items, cfg.batch).await;
     ing.op = "hot-ingest";
     print_row("density", LOG_FAMILY, "minimal", &mut ing);
-    let (mut c, _a) = claim_ack(&pq, &hk, cfg.items, cfg.batch).await;
+    let (mut c, _a) = claim_ack(&fireweed, &hk, cfg.items, cfg.batch).await;
     c.op = "hot-claim";
     print_row("density", LOG_FAMILY, "minimal", &mut c);
     println!(

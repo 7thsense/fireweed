@@ -1,6 +1,6 @@
 //! Release-evidence verification ledger (TP-001/TP-002/TP-003).
 //!
-//! A *verification ledger* is an append-only JSONL file under `target/pqueue-ledger/`. Each line is one
+//! A *verification ledger* is an append-only JSONL file under `target/fireweed-ledger/`. Each line is one
 //! [`LedgerRow`] recording a measured release-evidence run: which suite/command produced it, the
 //! backend profile + scale + seed + environment it ran under, the acceptance/invariant ids and TP-002
 //! evidence ids it substantiates, the pass bar, the exit status, and the measured values. Evidence suites
@@ -321,7 +321,7 @@ pub mod single_deployment {
                 .and_then(|values| values.last())
                 .is_none_or(|last| *last != (0, 0, 10_000_000, 0, 10_000_000, last.5))
         {
-            errors.push("real Pqueue lifecycle telemetry snapshots must be parseable, counted, and end at the exact 10M checkpoint".into());
+            errors.push("real Fireweed lifecycle telemetry snapshots must be parseable, counted, and end at the exact 10M checkpoint".into());
         }
         if !true_value(row, "topology_declared") {
             errors.push(
@@ -683,8 +683,8 @@ impl LedgerRow {
 }
 
 /// The ledger file an evidence suite writes its row to: `<dir>/<suite>.jsonl`, where `<dir>` is
-/// `$FIREWEED_LEDGER_DIR` if set (or its v0.20.0 `$PQUEUE_LEDGER_DIR` compatibility alias), else
-/// `<repo>/target/pqueue-ledger` derived from the caller's `manifest_dir` (pass `env!("CARGO_MANIFEST_DIR")`
+/// `$FIREWEED_LEDGER_DIR` if set, else
+/// `<repo>/target/fireweed-ledger` derived from the caller's `manifest_dir` (pass `env!("CARGO_MANIFEST_DIR")`
 /// so this resolves to the repo-root `target/` regardless of which workspace the suite runs in).
 ///
 /// NOTE: this ledger-directory read is the ONE intentional library `std::env` access in the workspace. It
@@ -692,9 +692,7 @@ impl LedgerRow {
 /// configuration — so it is exempt from the "no env reads in library runtime code" rule. The runtime
 /// `Config` populator (`fireweed_server::Config::from_env`) is the only env→config path for the server itself.
 pub fn ledger_path(manifest_dir: &str, suite: &str) -> std::path::PathBuf {
-    let dir = match std::env::var("FIREWEED_LEDGER_DIR")
-        .or_else(|_| std::env::var("PQUEUE_LEDGER_DIR"))
-    {
+    let dir = match std::env::var("FIREWEED_LEDGER_DIR") {
         Ok(d) if !d.trim().is_empty() => {
             let path = std::path::PathBuf::from(d);
             if path.is_absolute() {
@@ -704,7 +702,7 @@ pub fn ledger_path(manifest_dir: &str, suite: &str) -> std::path::PathBuf {
             }
         }
         // `..` resolves at IO time; crates/<x>/../../target == repo-root target.
-        _ => Path::new(manifest_dir).join("../../target/pqueue-ledger"),
+        _ => Path::new(manifest_dir).join("../../target/fireweed-ledger"),
     };
     dir.join(format!("{suite}.jsonl"))
 }
@@ -1699,7 +1697,7 @@ pub mod e2 {
                  {cores} cores; node image {node_image}; owner counts 2/4/8; each owner an independent \
                  fireweed-service Deployment(replicas=1)+Service on object_log_sqlite_projection in SEGMENTED \
                  group-commit mode (TD-004) with its own object-log root + sqlite projection on an emptyDir \
-                 medium=Memory tmpfs, distinct PQUEUE_NODE_ID, disjoint PQUEUE_BOOTSTRAP_QUEUES, CPU \
+                 medium=Memory tmpfs, distinct FIREWEED_NODE_ID, disjoint FIREWEED_BOOTSTRAP_QUEUES, CPU \
                  request={req}/limit={lim}, {worker} worker threads; load driven by a LEAN, SEPARATED \
                  in-cluster Job (CPU limit {load}) speaking raw RESP pod->pod over Service ClusterIP to each \
                  owner; each queue driven by {conns} concurrent connections",
@@ -4992,7 +4990,7 @@ mod tests {
     #[test]
     fn smoke_tier_evidence_does_not_count_toward_the_headline() {
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("pq-tier-{}.jsonl", std::process::id()));
+        let path = dir.join(format!("fireweed-tier-{}.jsonl", std::process::id()));
         let _ = fs::remove_file(&path);
         // A release E2 row and a SMOKE E3 row.
         append_row(&path, &row("release_e2", 0, &["E2"])).unwrap();
@@ -5051,27 +5049,20 @@ mod tests {
     #[test]
     fn ledger_path_honors_env_override_and_default() {
         // SAFETY: single-threaded test; we set then clear the override around the assertions.
-        unsafe { std::env::set_var("PQUEUE_LEDGER_DIR", "/tmp/pq-ledger") };
+        unsafe { std::env::set_var("FIREWEED_LEDGER_DIR", "/tmp/fireweed-ledger") };
         assert_eq!(
             ledger_path("/repo/crates/x", "suite_a"),
-            std::path::PathBuf::from("/tmp/pq-ledger/suite_a.jsonl")
+            std::path::PathBuf::from("/tmp/fireweed-ledger/suite_a.jsonl")
         );
-        unsafe { std::env::set_var("PQUEUE_LEDGER_DIR", "docs/perf/evidence") };
+        unsafe { std::env::set_var("FIREWEED_LEDGER_DIR", "docs/perf/evidence") };
         assert_eq!(
             ledger_path("/repo/crates/x", "suite_a"),
             std::path::PathBuf::from("/repo/crates/x/../../docs/perf/evidence/suite_a.jsonl")
         );
-        unsafe { std::env::set_var("FIREWEED_LEDGER_DIR", "/tmp/fireweed-ledger") };
-        assert_eq!(
-            ledger_path("/repo/crates/x", "suite_a"),
-            std::path::PathBuf::from("/tmp/fireweed-ledger/suite_a.jsonl"),
-            "the authoritative Fireweed name must win over its compatibility alias"
-        );
         unsafe { std::env::remove_var("FIREWEED_LEDGER_DIR") };
-        unsafe { std::env::remove_var("PQUEUE_LEDGER_DIR") };
         assert_eq!(
             ledger_path("/repo/crates/x", "suite_a"),
-            std::path::PathBuf::from("/repo/crates/x/../../target/pqueue-ledger/suite_a.jsonl")
+            std::path::PathBuf::from("/repo/crates/x/../../target/fireweed-ledger/suite_a.jsonl")
         );
     }
 

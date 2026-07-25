@@ -16,7 +16,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_i
 use super::*;
 
 // ---------------------------------------------------------------------------
-// read queries (SQL over pqueue_items)
+// read queries (SQL over fireweed_items)
 // ---------------------------------------------------------------------------
 
 pub(crate) fn batch_update_snapshot_sql(
@@ -50,7 +50,7 @@ pub(crate) fn batch_update_snapshot_sql(
         serde_json::to_string(&keys).map_err(|error| EngineError::Storage(error.to_string()))?;
     let mut stmt = st(conn.prepare(
         "SELECT item_id,client_item_key,lifecycle_state,item_version,fenced,superseded \
-         FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND (\
+         FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND (\
          item_id IN (SELECT value FROM json_each(?3)) OR \
          client_item_key IN (SELECT value FROM json_each(?4)))",
     ))?;
@@ -101,7 +101,7 @@ pub(crate) fn has_blocked_gates(conn: &Connection, shard: &QueueKey) -> EngineRe
     let (t, q) = parts(shard);
     let found: Option<i64> = st(conn
         .query_row(
-            "SELECT 1 FROM pqueue_gate_state WHERE tenant_id=?1 AND queue_id=?2 LIMIT 1",
+            "SELECT 1 FROM fireweed_gate_state WHERE tenant_id=?1 AND queue_id=?2 LIMIT 1",
             params![t, q],
             |row| row.get(0),
         )
@@ -153,16 +153,16 @@ pub(crate) fn filter_item_claim_candidates(
         compatibility.metadata_equals.clone(),
     ))?;
     let mut statement = st(conn.prepare(
-        "SELECT item_id FROM pqueue_items \
+        "SELECT item_id FROM fireweed_items \
              WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
              AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
-             AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
-             JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
-             AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=pqueue_items.tenant_id \
-             AND ig.queue_id=pqueue_items.queue_id AND ig.item_id=pqueue_items.item_id) \
+             AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
+             JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+             AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=fireweed_items.tenant_id \
+             AND ig.queue_id=fireweed_items.queue_id AND ig.item_id=fireweed_items.item_id) \
              AND (?5 IS NULL OR group_key=?5) \
              AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted \
-               WHERE NOT EXISTS (SELECT 1 FROM json_each(pqueue_items.metadata) actual \
+               WHERE NOT EXISTS (SELECT 1 FROM json_each(fireweed_items.metadata) actual \
                  WHERE actual.key=wanted.key AND actual.value=wanted.value \
                    AND actual.type=wanted.type)) \
              ORDER BY priority_sort,created_seq LIMIT ?4",
@@ -200,7 +200,7 @@ pub(crate) fn select_eligible_sql_after(
     if !has_blocked_gates(conn, shard)? {
         let (sql, floor) = if rowid_floor.is_some() {
             (
-                "SELECT item_id FROM pqueue_items NOT INDEXED WHERE tenant_id=?1 AND queue_id=?2 \
+                "SELECT item_id FROM fireweed_items NOT INDEXED WHERE tenant_id=?1 AND queue_id=?2 \
                  AND lifecycle_state='Pending' AND superseded=0 AND cohort_size IS NULL \
                  AND (not_before IS NULL OR not_before<=?3) \
                  AND eligible_since IS NOT NULL AND rowid>=?5 \
@@ -209,7 +209,7 @@ pub(crate) fn select_eligible_sql_after(
             )
         } else {
             (
-                "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+                "SELECT item_id FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
                  AND lifecycle_state='Pending' AND superseded=0 AND cohort_size IS NULL \
                  AND (not_before IS NULL OR not_before<=?3) \
                  AND eligible_since IS NOT NULL \
@@ -246,14 +246,14 @@ pub(crate) fn select_eligible_sql_after(
     // reference (`eligible_candidates` has no at-risk promotion). `created_seq` is the stable analogue of
     // the CTE's `created_at, item_id` FIFO tiebreak.
     let mut stmt = st(conn.prepare(
-        "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+        "SELECT item_id FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
          AND lifecycle_state='Pending' AND superseded=0 AND cohort_size IS NULL \
          AND (not_before IS NULL OR not_before<=?3) \
          AND eligible_since IS NOT NULL \
-         AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+         AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
              ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
-             WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
-             AND ig.item_id=pqueue_items.item_id) \
+             WHERE ig.tenant_id=fireweed_items.tenant_id AND ig.queue_id=fireweed_items.queue_id \
+             AND ig.item_id=fireweed_items.item_id) \
          ORDER BY priority_sort, created_seq LIMIT ?4",
     ))?;
     let mapped = st(
@@ -270,7 +270,7 @@ pub(crate) fn select_eligible_sql_after(
 
 // ---------------------------------------------------------------------------
 // BQ-14b: group-aware claim selection (group_batching / same_group_key), owner-local, consuming
-// `pqueue_group_summary`. The queue has one owner, so every group is owner-local (ADR-008); the sqlite
+// `fireweed_group_summary`. The queue has one owner, so every group is owner-local (ADR-008); the sqlite
 // relational backend serializes the whole claim under `Mutex<Inner>`, so two claims cannot split a group
 // (the postgres backend takes a real `FOR UPDATE SKIP LOCKED` group-summary lock for the same guarantee).
 // ---------------------------------------------------------------------------
@@ -292,13 +292,13 @@ pub(crate) fn refresh_due_group_summaries(
     let now_n = ts_nanos(now);
     let mut stmt = st(tx.prepare(
         "SELECT DISTINCT i.group_key \
-         FROM pqueue_items i \
-         LEFT JOIN pqueue_group_summary gs \
+         FROM fireweed_items i \
+         LEFT JOIN fireweed_group_summary gs \
            ON gs.tenant_id=i.tenant_id AND gs.queue_id=i.queue_id AND gs.group_key=i.group_key \
          WHERE i.tenant_id=?1 AND i.queue_id=?2 \
            AND i.lifecycle_state='Pending' AND i.superseded=0 AND i.group_key IS NOT NULL \
            AND i.eligible_since IS NOT NULL AND (i.not_before IS NULL OR i.not_before<=?3) \
-           AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gstate \
+           AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gstate \
              ON gstate.tenant_id=ig.tenant_id AND gstate.queue_id=ig.queue_id AND gstate.gate_key=ig.gate_key \
              WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id) \
            AND (gs.group_key IS NULL OR gs.oldest_eligible_at IS NULL OR gs.rep_item_id IS NULL) \
@@ -349,28 +349,28 @@ pub(crate) fn select_group_batching(
         "WITH candidate_raw AS MATERIALIZED (SELECT s.group_key,e.priority_sort rep_priority_sort,\
            e.created_at rep_created_at,e.item_id rep_item_id,e.created_seq,ROW_NUMBER() OVER \
            (PARTITION BY s.group_key ORDER BY e.priority_sort,e.created_seq,e.item_id) rn \
-           FROM pqueue_group_summary s JOIN pqueue_items e ON e.tenant_id=?1 AND e.queue_id=?2 \
+           FROM fireweed_group_summary s JOIN fireweed_items e ON e.tenant_id=?1 AND e.queue_id=?2 \
              AND e.group_key=s.group_key WHERE s.tenant_id=?1 AND s.queue_id=?2 \
            AND s.oldest_eligible_at IS NOT NULL AND e.lifecycle_state='Pending' AND e.superseded=0 \
            AND e.cohort_size IS NULL AND (e.not_before IS NULL OR e.not_before<=?3) \
-           AND e.eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
-             JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+           AND e.eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
+             JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
              AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=e.tenant_id \
              AND ig.queue_id=e.queue_id AND ig.item_id=e.item_id) \
            AND NOT EXISTS (SELECT 1 FROM json_each(?5) wanted WHERE NOT EXISTS \
              (SELECT 1 FROM json_each(e.metadata) actual WHERE actual.key=wanted.key \
               AND actual.value=wanted.value AND actual.type=wanted.type)) \
-           AND NOT EXISTS (SELECT 1 FROM pqueue_items leased WHERE leased.tenant_id=?1 \
+           AND NOT EXISTS (SELECT 1 FROM fireweed_items leased WHERE leased.tenant_id=?1 \
              AND leased.queue_id=?2 AND leased.group_key=s.group_key AND leased.superseded=0 \
              AND leased.cohort_size IS NULL AND leased.lifecycle_state='Leased')), \
          candidate AS MATERIALIZED (SELECT group_key,rep_priority_sort,rep_created_at,rep_item_id \
            FROM candidate_raw WHERE rn=1 ORDER BY rep_priority_sort,created_seq,rep_item_id,group_key LIMIT ?4), \
          eligible AS MATERIALIZED (SELECT c.group_key,c.rep_priority_sort,c.rep_created_at,\
            c.rep_item_id,i.item_id,i.priority_sort,i.created_seq FROM candidate c \
-           JOIN pqueue_items i ON i.tenant_id=?1 AND i.queue_id=?2 AND i.group_key=c.group_key \
+           JOIN fireweed_items i ON i.tenant_id=?1 AND i.queue_id=?2 AND i.group_key=c.group_key \
            WHERE i.lifecycle_state='Pending' AND i.superseded=0 AND i.cohort_size IS NULL \
              AND (i.not_before IS NULL OR i.not_before<=?3) AND i.eligible_since IS NOT NULL \
-             AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+             AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
                ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
                WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id) \
              AND NOT EXISTS (SELECT 1 FROM json_each(?5) wanted WHERE NOT EXISTS \
@@ -438,23 +438,23 @@ pub(crate) fn select_same_group(
         compatibility.metadata_equals.clone(),
     ))?;
     let mut statement = st(conn.prepare(
-        "WITH candidate AS (SELECT s.group_key FROM pqueue_group_summary s WHERE s.tenant_id=?1 \
+        "WITH candidate AS (SELECT s.group_key FROM fireweed_group_summary s WHERE s.tenant_id=?1 \
          AND s.queue_id=?2 AND s.oldest_eligible_at IS NOT NULL AND (?5 IS NULL OR s.group_key=?5) \
-         AND EXISTS (SELECT 1 FROM pqueue_items e WHERE e.tenant_id=?1 AND e.queue_id=?2 \
+         AND EXISTS (SELECT 1 FROM fireweed_items e WHERE e.tenant_id=?1 AND e.queue_id=?2 \
            AND e.group_key=s.group_key AND e.lifecycle_state='Pending' AND e.superseded=0 \
            AND e.cohort_size IS NULL AND (e.not_before IS NULL OR e.not_before<=?3) \
-           AND e.eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
-             JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+           AND e.eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
+             JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
              AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=e.tenant_id AND ig.queue_id=e.queue_id \
              AND ig.item_id=e.item_id) AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted \
              WHERE NOT EXISTS (SELECT 1 FROM json_each(e.metadata) actual \
                WHERE actual.key=wanted.key AND actual.value=wanted.value AND actual.type=wanted.type))) \
          ORDER BY s.rep_priority_sort,s.rep_created_at,s.rep_item_id,s.group_key LIMIT 1) \
-         SELECT i.item_id FROM candidate c JOIN pqueue_items i ON i.tenant_id=?1 AND i.queue_id=?2 \
+         SELECT i.item_id FROM candidate c JOIN fireweed_items i ON i.tenant_id=?1 AND i.queue_id=?2 \
          AND i.group_key=c.group_key WHERE i.lifecycle_state='Pending' AND i.superseded=0 \
          AND i.cohort_size IS NULL AND (i.not_before IS NULL OR i.not_before<=?3) \
-         AND i.eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
-           JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+         AND i.eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
+           JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
            AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id \
            AND ig.item_id=i.item_id) AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted \
            WHERE NOT EXISTS (SELECT 1 FROM json_each(i.metadata) actual WHERE actual.key=wanted.key \
@@ -506,16 +506,16 @@ pub(crate) fn select_whole_cohort(
         compatibility.metadata_equals.clone(),
     ))?;
     let candidate: Option<(String, String, i64)> = st(conn.query_row(
-        "SELECT c.group_key,c.cohort_id,c.cohort_size FROM pqueue_cohorts c \
+        "SELECT c.group_key,c.cohort_id,c.cohort_size FROM fireweed_cohorts c \
          WHERE c.tenant_id=?1 AND c.queue_id=?2 AND c.state='complete' \
-         AND (SELECT COUNT(*) FROM pqueue_items a WHERE a.tenant_id=?1 AND a.queue_id=?2 \
+         AND (SELECT COUNT(*) FROM fireweed_items a WHERE a.tenant_id=?1 AND a.queue_id=?2 \
            AND a.group_key=c.group_key AND a.superseded=0 AND a.cohort_size IS NOT NULL \
            AND a.lifecycle_state NOT IN ('Complete','Failed'))=c.cohort_size \
-         AND NOT EXISTS (SELECT 1 FROM pqueue_items i WHERE i.tenant_id=?1 AND i.queue_id=?2 \
+         AND NOT EXISTS (SELECT 1 FROM fireweed_items i WHERE i.tenant_id=?1 AND i.queue_id=?2 \
            AND i.group_key=c.group_key AND i.superseded=0 AND i.cohort_size IS NOT NULL \
            AND i.lifecycle_state NOT IN ('Complete','Failed') AND NOT (i.lifecycle_state='Pending' \
              AND (i.not_before IS NULL OR i.not_before<=?3) AND i.eligible_since IS NOT NULL \
-             AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+             AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
                ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
                WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id) \
              AND NOT EXISTS (SELECT 1 FROM json_each(?4) wanted WHERE NOT EXISTS \
@@ -556,14 +556,14 @@ pub(crate) fn cohort_eligible_items(
         compatibility.metadata_equals.clone(),
     ))?;
     let mut stmt = st(conn.prepare(
-            "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
+            "SELECT item_id FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
          AND lifecycle_state='Pending' AND superseded=0 AND cohort_size IS NOT NULL \
          AND (not_before IS NULL OR not_before<=?4) AND eligible_since IS NOT NULL \
-         AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+         AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
              ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
-             WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
-             AND ig.item_id=pqueue_items.item_id) AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted \
-             WHERE NOT EXISTS (SELECT 1 FROM json_each(pqueue_items.metadata) actual \
+             WHERE ig.tenant_id=fireweed_items.tenant_id AND ig.queue_id=fireweed_items.queue_id \
+             AND ig.item_id=fireweed_items.item_id) AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted \
+             WHERE NOT EXISTS (SELECT 1 FROM json_each(fireweed_items.metadata) actual \
                WHERE actual.key=wanted.key AND actual.value=wanted.value AND actual.type=wanted.type)) \
          ORDER BY priority_sort, created_seq LIMIT ?5",
         ))?;
@@ -594,12 +594,12 @@ pub(crate) fn peek_sql(
 ) -> EngineResult<Vec<ItemView>> {
     let (t, q) = parts(shard);
     let mut stmt = st(conn.prepare(
-        "SELECT item_id, client_item_key, priority, item_version FROM pqueue_items \
+        "SELECT item_id, client_item_key, priority, item_version FROM fireweed_items \
          WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
-         AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+         AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
            ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
-           WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
-           AND ig.item_id=pqueue_items.item_id) \
+           WHERE ig.tenant_id=fireweed_items.tenant_id AND ig.queue_id=fireweed_items.queue_id \
+           AND ig.item_id=fireweed_items.item_id) \
          ORDER BY priority_sort, created_seq LIMIT ?3",
     ))?;
     let rows = st(stmt.query_map(params![t, q, limit as i64], |row| {
@@ -632,22 +632,22 @@ pub(crate) fn peek_page_sql(
 ) -> EngineResult<Vec<ItemView>> {
     let (tenant, queue) = parts(shard);
     let sql = if after.is_some() {
-        "SELECT item_id, client_item_key, priority, item_version FROM pqueue_items \
+        "SELECT item_id, client_item_key, priority, item_version FROM fireweed_items \
          WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
            AND (priority_sort, created_seq, item_id) > (SELECT priority_sort, created_seq, item_id \
-             FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3) \
-           AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+             FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3) \
+           AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
              ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
-             WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
-             AND ig.item_id=pqueue_items.item_id) \
+             WHERE ig.tenant_id=fireweed_items.tenant_id AND ig.queue_id=fireweed_items.queue_id \
+             AND ig.item_id=fireweed_items.item_id) \
          ORDER BY priority_sort, created_seq, item_id LIMIT ?4"
     } else {
-        "SELECT item_id, client_item_key, priority, item_version FROM pqueue_items \
+        "SELECT item_id, client_item_key, priority, item_version FROM fireweed_items \
          WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
-         AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+         AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
            ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
-           WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
-           AND ig.item_id=pqueue_items.item_id) \
+           WHERE ig.tenant_id=fireweed_items.tenant_id AND ig.queue_id=fireweed_items.queue_id \
+           AND ig.item_id=fireweed_items.item_id) \
          ORDER BY priority_sort, created_seq, item_id LIMIT ?4"
     };
     let mut stmt = st(conn.prepare(sql))?;
@@ -677,10 +677,10 @@ pub(crate) fn peek_page_sql(
 }
 
 /// B-011 exact active-scope discovery. Keyed and ungrouped scopes are aggregated from the same live
-/// `pqueue_items` source with the claim eligibility predicate (pending, not superseded, due at `now`, and
+/// `fireweed_items` source with the claim eligibility predicate (pending, not superseded, due at `now`, and
 /// not blocked by a current gate). This makes a time-only `not_before` crossing visible without a write and
 /// represents all ungrouped items as one `group_key=None` scope. The partial
-/// `pqueue_items_active_scope_idx` bounds the source scan to one queue's pending, non-superseded rows;
+/// `fireweed_items_active_scope_idx` bounds the source scan to one queue's pending, non-superseded rows;
 /// gate anti-joins use the membership/state primary keys. The cost is O(live pending rows in the addressed
 /// queue), rather than the old O(stored keyed summaries), in exchange for exact read-time eligibility.
 ///
@@ -705,11 +705,11 @@ pub(crate) fn discover_active_scopes_sql(
     let now_n = ts_nanos(now);
     let mut stmt = st(conn.prepare(
         "SELECT i.group_key, MIN(i.eligible_since) AS oldest_eligible_at, COUNT(*) \
-         FROM pqueue_items i \
+         FROM fireweed_items i \
          WHERE i.tenant_id=?1 AND i.queue_id=?2 AND i.lifecycle_state='Pending' \
          AND i.superseded=0 AND i.eligible_since IS NOT NULL \
          AND (i.not_before IS NULL OR i.not_before<=?3) \
-         AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+         AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
            ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
            WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id) \
          GROUP BY i.group_key \
@@ -748,7 +748,7 @@ pub(crate) fn pending_sql(
 ) -> EngineResult<Vec<LeaseView>> {
     let (t, q) = parts(shard);
     let mut stmt = st(conn.prepare(
-        "SELECT item_id, lease_expires_at, retry_count FROM pqueue_items \
+        "SELECT item_id, lease_expires_at, retry_count FROM fireweed_items \
          WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased'",
     ))?;
     let rows = st(stmt.query_map(params![t, q], |row| {
@@ -819,7 +819,7 @@ pub(crate) fn pending_by_ids_sql(
     for chunk in id_strings.chunks(SQLITE_BATCH) {
         let placeholders = vec!["?"; chunk.len()].join(",");
         let sql = format!(
-            "SELECT item_id,lease_expires_at,retry_count FROM pqueue_items \
+            "SELECT item_id,lease_expires_at,retry_count FROM fireweed_items \
              WHERE tenant_id=? AND queue_id=? AND lifecycle_state='Leased' \
              AND lease_expires_at IS NOT NULL AND item_id IN ({placeholders})"
         );
@@ -956,7 +956,7 @@ pub(crate) fn render_claimed(
         let ph = vec!["?"; chunk.len()].join(",");
         let sql = format!(
             "SELECT item_id, client_item_key, item_version, priority, group_key, not_before, \
-             lease_expires_at, retry_count, payload, fields, metadata FROM pqueue_items \
+             lease_expires_at, retry_count, payload, fields, metadata FROM fireweed_items \
              WHERE tenant_id=? AND queue_id=? AND lifecycle_state='Leased' AND item_id IN ({ph})"
         );
         let mut p: Vec<Value> = vec![Value::Text(t.clone()), Value::Text(q.clone())];
@@ -1040,7 +1040,7 @@ pub(crate) fn item_gate_keys_for_ids(
     for chunk in id_strs.chunks(SQLITE_BATCH) {
         let ph = vec!["?"; chunk.len()].join(",");
         let sql = format!(
-            "SELECT item_id, gate_key FROM pqueue_item_gates \
+            "SELECT item_id, gate_key FROM fireweed_item_gates \
              WHERE tenant_id=? AND queue_id=? AND item_id IN ({ph}) \
              ORDER BY item_id, gate_key"
         );
@@ -1066,7 +1066,7 @@ pub(crate) fn item_gate_key_map(
 ) -> EngineResult<HashMap<ItemId, Vec<String>>> {
     let (t, q) = parts(shard);
     let mut stmt = st(conn.prepare(
-        "SELECT item_id,gate_key FROM pqueue_item_gates \
+        "SELECT item_id,gate_key FROM fireweed_item_gates \
          WHERE tenant_id=?1 AND queue_id=?2 \
          ORDER BY item_id,gate_key",
     ))?;
@@ -1101,7 +1101,7 @@ pub(crate) fn live_items_sql(
         let placeholders = vec!["?"; chunk.len()].join(",");
         let sql = format!(
             "SELECT client_item_key, item_id, item_version, lifecycle_state, priority, group_key, \
-             not_before, retry_count, payload, fields FROM pqueue_items \
+             not_before, retry_count, payload, fields FROM fireweed_items \
              WHERE tenant_id=? AND queue_id=? AND client_item_key IN ({placeholders}) \
                AND superseded=0 AND lifecycle_state IN ('Pending','Leased')"
         );
@@ -1163,7 +1163,7 @@ pub(crate) fn live_items_sql(
 pub(crate) fn metrics_sql(conn: &Connection, shard: &QueueKey) -> EngineResult<QueueMetrics> {
     let (t, q) = parts(shard);
     let mut stmt = st(conn.prepare(
-        "SELECT lifecycle_state, COUNT(*) FROM pqueue_items \
+        "SELECT lifecycle_state, COUNT(*) FROM fireweed_items \
          WHERE tenant_id=?1 AND queue_id=?2 AND superseded=0 GROUP BY lifecycle_state",
     ))?;
     let rows = st(stmt.query_map(params![t, q], |row| {
@@ -1198,7 +1198,7 @@ pub(crate) fn item_flags_map(
     for chunk in id_strs.chunks(SQLITE_BATCH) {
         let ph = vec!["?"; chunk.len()].join(",");
         let sql = format!(
-            "SELECT item_id, lifecycle_state, fenced, superseded, cohort_size IS NOT NULL FROM pqueue_items \
+            "SELECT item_id, lifecycle_state, fenced, superseded, cohort_size IS NOT NULL FROM fireweed_items \
              WHERE tenant_id=? AND queue_id=? AND item_id IN ({ph})"
         );
         let mut p: Vec<Value> = vec![Value::Text(t.clone()), Value::Text(q.clone())];
@@ -1267,7 +1267,7 @@ pub(crate) fn validate_cohort_lease(
     let (t, q) = parts(shard);
     let row: Option<(String, Option<Vec<u8>>)> = st(conn
         .query_row(
-            "SELECT state, cohort_lease_token_hash FROM pqueue_cohorts \
+            "SELECT state, cohort_lease_token_hash FROM fireweed_cohorts \
              WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3",
             params![t, q, target.cohort_id.as_str()],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -1298,7 +1298,7 @@ pub(crate) fn lookup_active_by_key(
     let (t, q) = parts(shard);
     let id: Option<String> = st(conn
         .query_row(
-            "SELECT item_id FROM pqueue_items \
+            "SELECT item_id FROM fireweed_items \
              WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3 AND superseded=0",
             params![t, q, client_item_key.as_str()],
             |row| row.get(0),
@@ -1330,7 +1330,7 @@ pub(crate) fn leased_id_count_sql(
     for chunk in id_strs.chunks(SQLITE_BATCH) {
         let ph = vec!["?"; chunk.len()].join(",");
         let sql = format!(
-            "SELECT COUNT(*) FROM pqueue_items \
+            "SELECT COUNT(*) FROM fireweed_items \
              WHERE tenant_id=? AND queue_id=? AND lifecycle_state='Leased' AND item_id IN ({ph})"
         );
         let mut p: Vec<Value> = vec![Value::Text(t.clone()), Value::Text(q.clone())];
@@ -1352,7 +1352,7 @@ pub(crate) fn item_version_sql(
     let (t, q) = parts(shard);
     let v: Option<i64> = st(conn
         .query_row(
-            "SELECT item_version FROM pqueue_items \
+            "SELECT item_version FROM fireweed_items \
              WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
             params![t, q, id.to_string()],
             |row| row.get(0),
@@ -1371,7 +1371,7 @@ pub(crate) fn expired_leases_sql(
     let (t, q) = parts(shard);
     let now_n = ts_nanos(now);
     let mut stmt = st(conn.prepare(
-        "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+        "SELECT item_id FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
          AND lifecycle_state='Leased' AND lease_expires_at IS NOT NULL \
          AND lease_expires_at<?3 ORDER BY item_id",
     ))?;
@@ -1391,7 +1391,7 @@ pub(crate) fn all_expired_leases_sql(
 ) -> EngineResult<Vec<(QueueKey, Vec<ItemId>)>> {
     let now_n = ts_nanos(now);
     let mut stmt = st(conn.prepare(
-        "SELECT tenant_id, queue_id, item_id FROM pqueue_items \
+        "SELECT tenant_id, queue_id, item_id FROM fireweed_items \
          WHERE lifecycle_state='Leased' AND lease_expires_at IS NOT NULL \
          AND lease_expires_at<?1 ORDER BY tenant_id, queue_id",
     ))?;
@@ -1441,7 +1441,7 @@ pub(crate) fn expired_leases_page_sql(
         None => (0_i64, 0_i64, String::new(), String::new(), String::new()),
     };
     let mut statement = st(conn.prepare(
-        "SELECT lease_expires_at,tenant_id,queue_id,item_id FROM pqueue_items \
+        "SELECT lease_expires_at,tenant_id,queue_id,item_id FROM fireweed_items \
          WHERE lifecycle_state='Leased' AND lease_expires_at IS NOT NULL \
          AND lease_expires_at<?1 AND (?2=0 OR \
            lease_expires_at>?3 OR \
@@ -1524,7 +1524,7 @@ pub(crate) fn update_fields_validate_sql(
     let (t, q) = parts(shard);
     let row: Option<(String, i64, i64, i64)> = st(conn
         .query_row(
-            "SELECT lifecycle_state, superseded, fenced, item_version FROM pqueue_items \
+            "SELECT lifecycle_state, superseded, fenced, item_version FROM fireweed_items \
              WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
             params![t, q, id.to_string()],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -1555,7 +1555,7 @@ pub(crate) fn instance_fence_sql(
     let (t, q) = parts(shard);
     let v: Option<i64> = st(conn
         .query_row(
-            "SELECT fence FROM pqueue_instance_fences \
+            "SELECT fence FROM fireweed_instance_fences \
              WHERE tenant_id=?1 AND queue_id=?2 AND instance_key=?3",
             params![t, q, key],
             |row| row.get(0),
@@ -1573,7 +1573,7 @@ pub(crate) fn side_record_sql(
     let (t, q) = parts(shard);
     let payload: Option<Vec<u8>> = st(conn
         .query_row(
-            "SELECT payload FROM pqueue_side_records \
+            "SELECT payload FROM fireweed_side_records \
              WHERE tenant_id=?1 AND queue_id=?2 AND key=?3",
             params![t, q, key],
             |row| row.get(0),
@@ -1593,7 +1593,7 @@ mod reclaim_page_tests {
     fn batch_update_snapshot_resolves_ids_and_keys_in_one_query() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE pqueue_items (
+            "CREATE TABLE fireweed_items (
                 tenant_id TEXT NOT NULL,
                 queue_id TEXT NOT NULL,
                 item_id TEXT NOT NULL,
@@ -1612,7 +1612,7 @@ mod reclaim_page_tests {
         let first = ItemId::from_u64(1);
         let second = ItemId::from_u64(2);
         conn.execute(
-            "INSERT INTO pqueue_items VALUES (?1,?2,?3,'key-1','Pending',4,0,0)",
+            "INSERT INTO fireweed_items VALUES (?1,?2,?3,'key-1','Pending',4,0,0)",
             params![
                 shard.tenant_id.as_str(),
                 shard.queue_id.as_str(),
@@ -1621,7 +1621,7 @@ mod reclaim_page_tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO pqueue_items VALUES (?1,?2,?3,'key-2','Leased',7,1,0)",
+            "INSERT INTO fireweed_items VALUES (?1,?2,?3,'key-2','Leased',7,1,0)",
             params![
                 shard.tenant_id.as_str(),
                 shard.queue_id.as_str(),
@@ -1650,7 +1650,7 @@ mod reclaim_page_tests {
 
     fn count_reclaim_select(statement: &str) {
         if statement
-            .starts_with("SELECT lease_expires_at,tenant_id,queue_id,item_id FROM pqueue_items")
+            .starts_with("SELECT lease_expires_at,tenant_id,queue_id,item_id FROM fireweed_items")
         {
             RECLAIM_SELECTS.fetch_add(1, Ordering::Relaxed);
         }
@@ -1660,7 +1660,7 @@ mod reclaim_page_tests {
     fn expired_lease_pages_are_bounded_and_progress_past_foreign_first_pages() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE pqueue_items (
+            "CREATE TABLE fireweed_items (
                 lease_expires_at INTEGER,
                 tenant_id TEXT NOT NULL,
                 queue_id TEXT NOT NULL,
@@ -1691,7 +1691,7 @@ mod reclaim_page_tests {
                 (1_i64, ItemId::from_u64(foreign as u64))
             };
             conn.execute(
-                "INSERT INTO pqueue_items VALUES (?1,?2,?3,?4,'Leased')",
+                "INSERT INTO fireweed_items VALUES (?1,?2,?3,?4,'Leased')",
                 params![expiry, tenant.as_str(), queue_id.as_str(), item.to_string()],
             )
             .unwrap();
@@ -1733,7 +1733,7 @@ mod reclaim_page_tests {
         );
         assert!(
             fireweed_relational::RELATIONAL_SCHEMA
-                .contains("pqueue_items_global_expired_lease_idx")
+                .contains("fireweed_items_global_expired_lease_idx")
         );
     }
 }

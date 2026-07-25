@@ -30,7 +30,10 @@ fn ts(s: i64) -> UtcTimestamp {
 
 fn unique_path(tag: &str) -> String {
     std::env::temp_dir()
-        .join(format!("pqueue-rel-commit-{tag}-{}.db", std::process::id()))
+        .join(format!(
+            "fireweed-rel-commit-{tag}-{}.db",
+            std::process::id()
+        ))
         .to_str()
         .unwrap()
         .to_string()
@@ -114,7 +117,7 @@ async fn push_and_claim(b: &SqliteRelationalBackend, now: i64) -> ClaimRef {
 fn read_side_record(path: &str, q: &QueueKey, key: &str) -> Option<Vec<u8>> {
     let conn = Connection::open(path).unwrap();
     conn.query_row(
-        "SELECT payload FROM pqueue_side_records WHERE tenant_id=?1 AND queue_id=?2 AND key=?3",
+        "SELECT payload FROM fireweed_side_records WHERE tenant_id=?1 AND queue_id=?2 AND key=?3",
         rusqlite::params![q.tenant_id.as_str(), q.queue_id.as_str(), key.as_bytes()],
         |row| row.get::<_, Vec<u8>>(0),
     )
@@ -123,7 +126,7 @@ fn read_side_record(path: &str, q: &QueueKey, key: &str) -> Option<Vec<u8>> {
 
 fn count_side_records(path: &str) -> i64 {
     let conn = Connection::open(path).unwrap();
-    conn.query_row("SELECT COUNT(*) FROM pqueue_side_records", [], |row| {
+    conn.query_row("SELECT COUNT(*) FROM fireweed_side_records", [], |row| {
         row.get(0)
     })
     .unwrap()
@@ -318,7 +321,7 @@ async fn relational_commit_request_id_replays_without_double_write() {
 fn read_instance_fence(path: &str, q: &QueueKey, key: &[u8]) -> Option<i64> {
     let conn = Connection::open(path).unwrap();
     conn.query_row(
-        "SELECT fence FROM pqueue_instance_fences WHERE tenant_id=?1 AND queue_id=?2 AND instance_key=?3",
+        "SELECT fence FROM fireweed_instance_fences WHERE tenant_id=?1 AND queue_id=?2 AND instance_key=?3",
         rusqlite::params![q.tenant_id.as_str(), q.queue_id.as_str(), key],
         |row| row.get::<_, i64>(0),
     )

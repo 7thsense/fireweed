@@ -2,7 +2,7 @@
 //!
 //! `open_postgres_coordinated` builds the postgres backend AND the binding control plane internally and
 //! returns a coordinated `Fireweed` — the client names neither a backend nor a control plane. Env-gated on
-//! `PQUEUE_PG_TEST_URL`; driven by a non-tokio executor (the sync postgres client).
+//! `FIREWEED_PG_TEST_URL`; driven by a non-tokio executor (the sync postgres client).
 #![cfg(feature = "postgres")]
 
 use std::future::Future;
@@ -75,8 +75,8 @@ fn schema_url(url: &str, schema: &str) -> String {
 /// working multi-instance owner (acquires + fences) without the client naming either.
 #[test]
 fn open_postgres_coordinated_builds_a_working_owner() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
-        eprintln!("OWED-6 SKIPPED — set PQUEUE_PG_TEST_URL to a live DB");
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
+        eprintln!("OWED-6 SKIPPED — set FIREWEED_PG_TEST_URL to a live DB");
         return;
     };
     let unique = std::time::SystemTime::now()
@@ -92,7 +92,7 @@ fn open_postgres_coordinated_builds_a_working_owner() {
     let isolated_url = schema_url(&url, &schema);
     let queue = qkey(&queue_id);
     let clock = Arc::new(ManualClock(AtomicI64::new(0)));
-    let pq = fireweed::open_postgres_coordinated(
+    let fireweed = fireweed::open_postgres_coordinated(
         &isolated_url,
         clock,
         OwnerId::new("inst-1").unwrap(),
@@ -100,15 +100,15 @@ fn open_postgres_coordinated_builds_a_working_owner() {
     )
     .expect("postgres binds the storage epoch, so the coordinated constructor succeeds");
 
-    bo(pq.create_queue(qdef(&queue_id))).unwrap();
-    bo(pq.push(&queue, NewItem::default())).unwrap();
-    assert_eq!(bo(pq.metrics(&queue)).unwrap().pending, 1);
+    bo(fireweed.create_queue(qdef(&queue_id))).unwrap();
+    bo(fireweed.push(&queue, NewItem::default())).unwrap();
+    assert_eq!(bo(fireweed.metrics(&queue)).unwrap().pending, 1);
     // It is a real coordinated owner: ownership resolves to Mine at a granted epoch.
     assert!(matches!(
-        bo(pq.ownership(&queue)).unwrap(),
+        bo(fireweed.ownership(&queue)).unwrap(),
         fireweed::Ownership::Mine { epoch: Some(e) } if e >= 1
     ));
-    drop(pq);
+    drop(fireweed);
     admin
         .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
         .unwrap();
@@ -116,8 +116,8 @@ fn open_postgres_coordinated_builds_a_working_owner() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn open_postgres_runtime_async_is_safe_inside_tokio() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
-        eprintln!("SKIPPED — set PQUEUE_PG_TEST_URL to a live DB");
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
+        eprintln!("SKIPPED — set FIREWEED_PG_TEST_URL to a live DB");
         return;
     };
     let unique = std::time::SystemTime::now()

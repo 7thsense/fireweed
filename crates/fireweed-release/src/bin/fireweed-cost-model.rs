@@ -439,8 +439,8 @@ fn render_granularity_section(s: &mut String, p: &PriceInputs) {
          ceil(commands arriving inside latency bound / batch))`. This admits target overshoot by a whole \
          downstream batch and assumes a due flush wins ties at the exact deadline. Real arrival and batch \
          distributions must come from E3 counters. The production \
-         defaults are `PQUEUE_SEGMENT_TARGET_BYTES=262144` and \
-         `PQUEUE_SEGMENT_MAX_LATENCY_MS=20`. Steady successful non-genesis PUT amplification is derived from \
+         defaults are `FIREWEED_SEGMENT_TARGET_BYTES=262144` and \
+         `FIREWEED_SEGMENT_MAX_LATENCY_MS=20`. Steady successful non-genesis PUT amplification is derived from \
          the current authority-head algorithm: segment + manifest candidate + versioned head + one \
          copy-on-write node per recovery-index level + one retirement marker, or `5 + resulting index \
          height` on an ordinary post-genesis append. A root-height transition reuses the old root and omits \
@@ -895,8 +895,8 @@ mod tests {
     #[test]
     fn granularity_report_exposes_defaults_and_write_amplification_assumptions() {
         let report = render_granularity_artifact(&PriceInputs::adr_001_us_east_1());
-        assert!(report.contains("PQUEUE_SEGMENT_TARGET_BYTES=262144"));
-        assert!(report.contains("PQUEUE_SEGMENT_MAX_LATENCY_MS=20"));
+        assert!(report.contains("FIREWEED_SEGMENT_TARGET_BYTES=262144"));
+        assert!(report.contains("FIREWEED_SEGMENT_MAX_LATENCY_MS=20"));
         assert!(report.contains("fixed-batch, regular-arrival sensitivity"));
         assert!(report.contains("5 + resulting index"));
         assert!(report.contains("does not hold height constant"));

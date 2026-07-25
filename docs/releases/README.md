@@ -1,6 +1,6 @@
 # Release tag evidence gate
 
-Every pqueue tag must pass two distinct evidence lanes before artifacts are
+Every Fireweed tag must pass two distinct evidence lanes before artifacts are
 published.
 
 `scripts/ci/release-gate.sh` first creates a clean ledger and runs the current
@@ -27,7 +27,7 @@ under load, not a host-performance bar, and remains release-significant.
 
 Versioned files in this directory describe already-cut releases. Fireweed Queue
 v0.20.0 is the first renamed public preview release; v0.19.6 and earlier retain
-the pqueue identity as immutable release and audit history under ADR-020. This
+the retired identity as immutable release and audit history under ADR-023. This
 file defines the gate applied to future tags.
 
 ## Public version sources
@@ -41,7 +41,7 @@ bash scripts/release/list-public-version-sources.sh
 
 The command reports the Cargo workspace version, README artifact coordinates,
 Helm chart `version` and `appVersion`, Helm packaging inputs and evidence names,
-and existing files under `docs/releases`. ADR-020 sets `v0.20.0` as the first
+and existing files under `docs/releases`. ADR-023 sets `v0.20.0` as the first
 Fireweed-branded release. Cargo and published artifact coordinates are
 release-synchronized to that target. The chart file's development defaults are
 independently versioned, while `package-helm-chart.sh` overrides both chart
@@ -64,10 +64,10 @@ The E3 handoff is deliberately a directory hook (`--e3-source-dir`). The
 strengthened E3 producer owns the measured ledger, TP-003 rows, and fencing
 evidence in that directory. The stager copies only those three named inputs;
 unlisted files beside them cannot enter the governed bundle. It invokes
-`pqueue-build-e3-contract` to recompute cost rows and build the exact-revision
+`fireweed-build-e3-contract` to recompute cost rows and build the exact-revision
 contract without weakening it.
 When tag and review timestamps are supplied, the stager adds and verifies
-`attestation.json`, using `pqueue_release::attestation::digest_path`, then
+`attestation.json`, using `fireweed_release::attestation::digest_path`, then
 archives the fixed `tp002-release/` root as `<exact-head>.tar.gz` plus
 `<exact-head>.tar.gz.sha256` beside it. Sorted paths and normalized tar/gzip
 metadata make identical inputs byte-identical. Existing output, archive, or

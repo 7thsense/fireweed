@@ -24,7 +24,7 @@ mod objectlog_inmemory {
 
     fn root_path() -> PathBuf {
         std::env::temp_dir().join(format!(
-            "pqueue-composed-objectlog-reconnect-{:?}",
+            "fireweed-composed-objectlog-reconnect-{:?}",
             std::thread::current().id()
         ))
     }
@@ -55,9 +55,9 @@ mod objectlog_sqlite_projection {
 
     fn paths() -> (std::path::PathBuf, String) {
         let tid = format!("{:?}", std::thread::current().id());
-        let root = std::env::temp_dir().join(format!("pqueue-composed-ol-sqliteproj-{tid}"));
+        let root = std::env::temp_dir().join(format!("fireweed-composed-ol-sqliteproj-{tid}"));
         let proj = std::env::temp_dir()
-            .join(format!("pqueue-composed-ol-sqliteproj-{tid}.proj.db"))
+            .join(format!("fireweed-composed-ol-sqliteproj-{tid}.proj.db"))
             .to_str()
             .unwrap()
             .to_string();

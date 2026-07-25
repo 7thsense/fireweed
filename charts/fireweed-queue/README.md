@@ -5,17 +5,15 @@ separate log and projection axes.
 
 ## Fireweed Queue preview version policy
 
-`fireweed-queue` is the authoritative chart coordinate under ADR-020. This
+`fireweed-queue` is the authoritative chart coordinate under ADR-023. This
 source chart keeps an independent version
 and `appVersion` for development packages. For the Fireweed Queue v0.20.0
 public preview, `scripts/release/package-helm-chart.sh --version 0.20.0`
 overrides both values and produces `fireweed-queue-0.20.0.tgz` plus
 `fireweed-queue-helm-chart.txt` release evidence.
 
-The legacy chart path, chart name, rendered Kubernetes names, and package or
-evidence names are not published as aliases. The
-operator guide documents the resource-recreation boundary. Runtime environment
-aliases and persisted identifiers remain governed separately.
+The chart path, chart name, rendered Kubernetes names, package names, runtime
+environment, and persisted identifiers all use the Fireweed namespace.
 
 ## Storage Axes
 
@@ -34,7 +32,7 @@ Projection backend:
 - `postgres`
 
 `hybrid-strict` is intentionally not a chart value. The server retains an
-experimental `PQUEUE_PROJECTION_BACKEND=hybrid-strict` env/direct-config path,
+experimental `FIREWEED_PROJECTION_BACKEND=hybrid-strict` env/direct-config path,
 but it is not chart-selectable or production-supported. Helm schema validation
 must reject attempts to set `storage.projection.backend=hybrid-strict`.
 
@@ -50,21 +48,21 @@ startup with a message naming the required feature build. Other unsupported
 combinations also fail loudly at startup instead of being hidden behind a synthetic
 combined backend name.
 
-`PQUEUE_PROJECTION_BACKEND=hybrid` selects the normative `objectlog/hybrid`
-profile. It uses the same `PQUEUE_SQLITE_PROJECTION_PATH` as
+`FIREWEED_PROJECTION_BACKEND=hybrid` selects the normative `objectlog/hybrid`
+profile. It uses the same `FIREWEED_SQLITE_PROJECTION_PATH` as
 `sqlite`, applies committed object-log batches to SQLite first, hydrates the hot
 in-memory projection from a SQLite `ProjectionImage` before returning SQLite
 high-water on recovery, and fails closed if memory apply fails after a SQLite
 commit. Until other pairings are explicitly implemented and tested,
 `memory/hybrid`, `sqlite/hybrid`, and `postgres/hybrid` must fail at startup.
 
-`PQUEUE_PROJECTION_BACKEND=hybrid-async` selects the `objectlog/hybrid-async`
+`FIREWEED_PROJECTION_BACKEND=hybrid-async` selects the `objectlog/hybrid-async`
 profile (TD-004): the same hot-in-memory serving over a durable SQLite checkpoint
-image as `hybrid` and the same `PQUEUE_SQLITE_PROJECTION_PATH`, but manifest commit
+image as `hybrid` and the same `FIREWEED_SQLITE_PROJECTION_PATH`, but manifest commit
 plus synchronous in-memory apply/render is the success barrier and the durable
 SQLite image is an asynchronous checkpoint that MAY lag (caught up by object-log
 tail replay on recovery). The deployment carries the async-apply
-debt/backpressure/poison thresholds, rendered as `PQUEUE_HYBRID_ASYNC_*` from
+debt/backpressure/poison thresholds, rendered as `FIREWEED_HYBRID_ASYNC_*` from
 `storage.projection.hybridAsync`; each bound MUST be `> 0` (a zero bound is
 instantly backpressured) and the server fails closed at startup otherwise. Only
 the object-log log axis pairs with `hybrid-async`; `memory/hybrid-async`,
@@ -73,7 +71,7 @@ the object-log log axis pairs with `hybrid-async`; `memory/hybrid-async`,
 ### Databricks Lakebase (postgres over TLS)
 
 When `storage.log.backend=postgres`, the chart renders the log DSN Secret ref into
-`PQUEUE_POSTGRES_LOG_DATABASE_URL`. With a `tls`-built image this is a **real runtime
+`FIREWEED_POSTGRES_LOG_DATABASE_URL`. With a `tls`-built image this is a **real runtime
 path** (no longer render-only): a DSN with `sslmode=require` connects to Lakebase /
 cloud postgres over native-tls, and a service-principal/PAT credential provider
 injects the postgres user/password when the `DATABRICKS_*` envs are supplied. Build the
@@ -93,16 +91,16 @@ storage:
 
 The chart renders:
 
-- `PQUEUE_LOG_BACKEND`
-- `PQUEUE_PROJECTION_BACKEND`
-- `PQUEUE_OBJECT_LOG_ROOT` when `storage.log.backend=objectlog`
-- `PQUEUE_SQLITE_PROJECTION_PATH` when `storage.projection.backend=sqlite`,
+- `FIREWEED_LOG_BACKEND`
+- `FIREWEED_PROJECTION_BACKEND`
+- `FIREWEED_OBJECT_LOG_ROOT` when `storage.log.backend=objectlog`
+- `FIREWEED_SQLITE_PROJECTION_PATH` when `storage.projection.backend=sqlite`,
   `hybrid`, or `hybrid-async`
-- `PQUEUE_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS`,
-  `PQUEUE_HYBRID_ASYNC_APPLY_DEBT_MAX_BYTES`,
-  `PQUEUE_HYBRID_ASYNC_APPLY_QUEUE_DEPTH_MAX`,
-  `PQUEUE_HYBRID_ASYNC_OLDEST_UNAPPLIED_MAX_MS`, and
-  `PQUEUE_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD` (from
+- `FIREWEED_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS`,
+  `FIREWEED_HYBRID_ASYNC_APPLY_DEBT_MAX_BYTES`,
+  `FIREWEED_HYBRID_ASYNC_APPLY_QUEUE_DEPTH_MAX`,
+  `FIREWEED_HYBRID_ASYNC_OLDEST_UNAPPLIED_MAX_MS`, and
+  `FIREWEED_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD` (from
   `storage.projection.hybridAsync`) when `storage.projection.backend=hybrid-async`
 - Postgres log/projection database URL Secret refs when the corresponding axis
   uses `postgres`
@@ -113,8 +111,8 @@ The service exposes the RESP port and uses TCP liveness/readiness probes.
 
 `values-shared-s3.yaml` selects the replica-safe shared S3 object log, Postgres
 ownership control plane, and pod-local rebuildable SQLite projection. Each pod
-publishes its Kubernetes `metadata.uid` as the full-width `PQUEUE_OWNER_ID` and
-its pod IP as `PQUEUE_ADVERTISE_ADDR`; `PQUEUE_NODE_ID` remains the independent
+publishes its Kubernetes `metadata.uid` as the full-width `FIREWEED_OWNER_ID` and
+its pod IP as `FIREWEED_ADVERTISE_ADDR`; `FIREWEED_NODE_ID` remains the independent
 compact item-ID field. Create the referenced S3 and Postgres Secrets before
 installing this profile.
 
@@ -134,21 +132,21 @@ referenced by `storage.log.postgres.databaseUrlKey` must contain a
 host=<pooler-or-direct-host> port=5432 user=<postgres-user> password=<secret> dbname=databricks_postgres sslmode=require
 ```
 
-This DSN is rendered to the container as `PQUEUE_POSTGRES_LOG_DATABASE_URL`.
+This DSN is rendered to the container as `FIREWEED_POSTGRES_LOG_DATABASE_URL`.
 Select the Lakebase pooler or direct endpoint by placing that endpoint host in
 the DSN Secret. The `storage.lakebase.endpointMode`, `databaseName`, `port`, and
 `sslMode` values are operator documentation for constructing that DSN; the binary
-does not read `PQUEUE_LAKEBASE_*` metadata, so the chart does not render it.
+does not read `FIREWEED_LAKEBASE_*` metadata, so the chart does not render it.
 
 For native password auth, set `storage.lakebase.auth.mode=native-password` and
 store the password inside the DSN Secret. For service-principal OAuth, set
 `storage.lakebase.auth.mode=service-principal-oauth` and provide
 `storage.lakebase.auth.existingSecret`; the chart renders Secret refs for
-`DATABRICKS_HOST`, `PQUEUE_DATABRICKS_DATABASE_INSTANCE_NAME`,
+`DATABRICKS_HOST`, `FIREWEED_DATABRICKS_DATABASE_INSTANCE_NAME`,
 `DATABRICKS_CLIENT_ID`, and `DATABRICKS_CLIENT_SECRET`. For PAT-backed OAuth set
 `pat-oauth`; the chart renders `DATABRICKS_HOST`,
-`PQUEUE_DATABRICKS_DATABASE_INSTANCE_NAME`, `DATABRICKS_TOKEN`, and
-`PQUEUE_DATABRICKS_POSTGRES_USER`. These names match the binary's
+`FIREWEED_DATABRICKS_DATABASE_INSTANCE_NAME`, `DATABRICKS_TOKEN`, and
+`FIREWEED_DATABRICKS_POSTGRES_USER`. These names match the binary's
 `DatabricksCredentialConfig` contract; when `DATABRICKS_HOST` is present a
 service-principal/PAT credential provider supplies the postgres user/password at
 connect in place of the DSN password.

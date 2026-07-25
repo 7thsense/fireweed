@@ -1,4 +1,4 @@
-# pqueue Re-Architecture — Comprehensive Implementation Plan (v4, master)
+# fireweed Re-Architecture — Comprehensive Implementation Plan (v4, master)
 
 Status: DRAFT, post-review-round-2. **Pre-launch clean cutover.** Single authoritative plan;
 consolidates ADR-007 (architecture), TD-006 (RESP surface — refolded), TD-007 (durability +
@@ -7,12 +7,12 @@ reclaim + upsert — to author in Phase 0).
 ## 0. Goal & non-negotiables
 
 - **One engine.** CQRS: priority-ordered projection (speed) over a log store (cost durability).
-- **Two interfaces, asymmetric by design.** RESP (pqueue-flavored Redis; limited but contract-faithful)
+- **Two interfaces, asymmetric by design.** RESP (fireweed-flavored Redis; limited but contract-faithful)
   + Rust library (full power). The library is strictly more capable; recorded, not accidental (§3).
 - **Hexagonal, modular encapsulation.** Domain defines ports; adapters depend inward; enforced by a
   dependency-direction test.
 - **Clean cutover at ALL touchpoints.** No stubs, no legacy fallbacks, no compatibility shims. Done =
-  `pqueue-service`/`-client`/`-kafka` deleted, docs superseded, beads re-scoped.
+  `fireweed-service`/`-client`/`-kafka` deleted, docs superseded, beads re-scoped.
 - **Launch scope = single-shard.** Multi-shard *coordination* (owner assignment + loop + cross-shard
   guards) is **post-launch**, recorded as an intentional subset (§2.5). The ports admit it (shard_id
   in keys, `ControlPlaneStore` for assignments); the launch build implements one shard completely —
@@ -24,15 +24,15 @@ reclaim + upsert — to author in Phase 0).
 
 | Crate | Role | Outward deps | I/O |
 |---|---|---|---|
-| `pqueue-core` | Domain — types & rules | — | none |
-| `pqueue-engine` | Domain — execution, ports, migrated service logic, **ReclaimDriver** (§2.4) | core | none |
-| `pqueue-memory` | Driven adapter — InMemory log+projection (reference) | engine, core | none |
-| `pqueue-sqlite` | Driven adapter — sqlite log+projection+control-plane | engine, core | rusqlite |
-| `pqueue-postgres` | Driven adapter — postgres, atomic claim via `ClaimPort` | engine, core | tokio-postgres |
-| `pqueue-objectlog` | Driven adapter — object-log (eventual-apply class) | engine, core | S3 |
-| `pqueue-resp` | Driving adapter — RESP server (§3) | engine | tokio net |
-| `pqueue` | Driving adapter — Rust library facade | engine + adapters | none |
-| `pqueue-server` | Composition root — bin; DI; runs the ReclaimDriver task; ops probe (§ M2) | all | net |
+| `fireweed-core` | Domain — types & rules | — | none |
+| `fireweed-engine` | Domain — execution, ports, migrated service logic, **ReclaimDriver** (§2.4) | core | none |
+| `fireweed-memory` | Driven adapter — InMemory log+projection (reference) | engine, core | none |
+| `fireweed-sqlite` | Driven adapter — sqlite log+projection+control-plane | engine, core | rusqlite |
+| `fireweed-postgres` | Driven adapter — postgres, atomic claim via `ClaimPort` | engine, core | tokio-postgres |
+| `fireweed-objectlog` | Driven adapter — object-log (eventual-apply class) | engine, core | S3 |
+| `fireweed-resp` | Driving adapter — RESP server (§3) | engine | tokio net |
+| `fireweed` | Driving adapter — Rust library facade | engine + adapters | none |
+| `fireweed-server` | Composition root — bin; DI; runs the ReclaimDriver task; ops probe (§ M2) | all | net |
 | ~~service / client / kafka~~ | **DELETE** | — | — |
 
 Dependency-direction test asserts no engine/core → adapter edge. The CLI is a **library consumer**,
@@ -40,7 +40,7 @@ not a third interface.
 
 ## 2. Engine model
 
-**2.1 Ports (`pqueue-engine`):** `LogWriter`/`LogRead`, `ProjectionWriter`/`ProjectionRead`
+**2.1 Ports (`fireweed-engine`):** `LogWriter`/`LogRead`, `ProjectionWriter`/`ProjectionRead`
 (`select_eligible` priority order, `peek`, `pending`, `metrics`), `Backend` (atomic `write(|log,proj|)`
 UoW), **`ClaimPort`** (backend may claim atomically), **`UpsertPort`** (`replace_if_pending`, §3 Inv 2 —
 runs in the *same unit of work / item lock* as claim), `ControlPlaneStore` (queue defs + epoch source),
@@ -64,11 +64,11 @@ implement claim atomically behind `ClaimPort` (postgres keeps `FOR UPDATE SKIP L
 claim **mutually exclude** on the same item (same lock / row) on the atomic class.
 
 **2.4 ReclaimDriver (new component — closes the orphaning gap).** Redis evaluates lease idle-time
-lazily inside `XCLAIM`/`XAUTOCLAIM`, so a quiet stream needs no timer. pqueue models reclaim,
+lazily inside `XCLAIM`/`XAUTOCLAIM`, so a quiet stream needs no timer. fireweed models reclaim,
 cohort-`completion_bound_ms`, `not_before`/recurrence promotion, and `progress_bound_ms` enforcement
 as **state transitions that something must fire** — otherwise an item on a queue with no claim traffic
 orphans forever. The `ReclaimDriver` is engine-owned policy driven by the composition root:
-`pqueue-server` (and an async library embedding) spawns a periodic task; a **synchronous** library
+`fireweed-server` (and an async library embedding) spawns a periodic task; a **synchronous** library
 embedding with no async runtime drives it deterministically via an explicit `engine.tick(now)` entry
 point. The reclaim *logic* is domain; the *clock* is the composition root's. DoD: an item is
 reclaimed/expired with **zero** intervening client commands on its queue (§6).
@@ -77,10 +77,10 @@ reclaimed/expired with **zero** intervening client commands on its queue (§6).
 uniqueness are naturally shard-local. Multi-shard owner-assignment + coordination loop + cross-shard
 guards are **post-launch** (recorded subset; ports already carry `shard_id`).
 
-## 3. RESP surface — "pqueue-flavored Redis" (semantic-contract fidelity)
+## 3. RESP surface — "fireweed-flavored Redis" (semantic-contract fidelity)
 
 **Bar:** a stock Redis client gets correct, non-surprising results — the *semantic contract* of each
-command holds even where pqueue's flavor differs. Two implementation invariants:
+command holds even where fireweed's flavor differs. Two implementation invariants:
 
 - **Invariant 1 — per-item delivery tracking, no single `last-delivered-id` cursor.** `XREADGROUP >`
   returns highest-priority *undelivered* items, tracked per item; never orphans a low-priority small-id
@@ -102,7 +102,7 @@ command holds even where pqueue's flavor differs. Two implementation invariants:
   as success and defeat the fence).
 - `XCLAIM`/`XAUTOCLAIM` — **reclaim is entry-id-ordered (cursor-faithful)**; priority governs delivery,
   not reclaim. **Same-consumer `XCLAIM`/`XCLAIM JUSTID` = renew and charges no attempt; cross-consumer
-  = reclaim and charges one** (lets a stock worker renew safely with no `PQ*` command). The
+  = reclaim and charges one** (lets a stock worker renew safely without a Fireweed-specific command). The
   `ReclaimDriver` (§2.4) handles timed reclaim independently, so quiet queues don't depend on a client
   running `XAUTOCLAIM`.
 - `XPENDING`/`XLEN`/`XINFO`/`XDEL` — faithful.
@@ -116,7 +116,7 @@ command holds even where pqueue's flavor differs. Two implementation invariants:
 4. At-least-once delivery (crash → reclaim); consumer-side idempotency is the app's job, as on Redis.
 5. On **eventual-apply** backends, priority order and no-double-claim are "over applied state, eventual,"
    and upsert is unavailable (§2.2).
-6. `XREADGROUP` replies carry pqueue reserved fields (`item_version`, `lease_expires_at`, …) as extra
+6. `XREADGROUP` replies carry fireweed reserved fields (`item_version`, `lease_expires_at`, …) as extra
    entry fields — benign; stock clients ignore unknown fields.
 7. Same-consumer `XCLAIM` is a no-charge **renew** (Redis would bump the delivery count); strictly more
    forgiving — a client relying on self-`XCLAIM` to advance retry count for poison detection sees it
@@ -125,10 +125,10 @@ command holds even where pqueue's flavor differs. Two implementation invariants:
 Canonical error replies (asserted verbatim by e2e/conformance): `-ERR fireweed stale_lease`,
 `-ERR fireweed superseded`, `-ERR fireweed unavailable`, `-ERR fireweed terminal`, `-ERR fireweed invalid`.
 
-**RESP capability = {RESP-stock, library}.** Zero required `PQ*`. Filtered claims, gates, cohorts,
+**RESP capability = {RESP-stock, library}.** No required Fireweed-specific commands. Filtered claims, gates, cohorts,
 rich finalize dispositions, mutable-priority, create/config, scopes, operator/inspect are
 **library-only — explicitly marked** in the capability matrix (§6). "No *silent* library-only cells";
-marked ones are intentional. Optional single `PQFIN` for atomic rich finalize is a post-launch decision.
+marked ones are intentional. An optional custom command for atomic rich finalize is a post-launch decision.
 
 **e2e (off-the-shelf Redis client — pinned `redis-py` + one of `go-redis`/`redis-rs`):**
 - **Inv 1 — drain-and-reconcile:** produce N mixed-priority, drain via `XREADGROUP >` to empty,
@@ -143,9 +143,9 @@ marked ones are intentional. Optional single `PQFIN` for atomic rich finalize is
 - **Fence:** operator stale → staled worker's `XACK` returns `-ERR fireweed stale_lease`.
 - **Intra-group exclusion:** two consumers, concurrent `XREADGROUP >`, never the same item.
 
-## 4. Legacy teardown — ALL touchpoints (no stubs/fallbacks)
+## 4. Retired-surface teardown — ALL touchpoints (no stubs/fallbacks)
 
-**4a. Domain logic → `pqueue-engine`, durable (closed inventory):** AuthContext + authorize_*;
+**4a. Domain logic → `fireweed-engine`, durable (closed inventory):** AuthContext + authorize_*;
 request-id idempotency + operator replay→409; **operator-operation store + get/cancel/list**; lease
 fencing (+un-fence+compaction); pause/resume (+un-pause); **`command_position`**; **QueueCatalog**
 (capabilities, metrics, active-scopes+roll-up); claim/finalize/rearm/purge validation; lease-token
@@ -156,7 +156,7 @@ objectlog; delete service/client/kafka.
 
 **4c. Docs:** SUPERSEDE ADR-005. REWRITE API-001 (neutral + RESP binding), TP-001. ADD ADR-007;
 KEEP TD-006 aligned with §3 — it records the launch `{RESP-stock, library}` matrix, excludes required
-`PQ*` commands, specifies `-ERR fireweed stale_lease`, and documents the `XAUTOCLAIM` cursor caveat.
+Fireweed-specific commands, specifies `-ERR fireweed stale_lease`, and documents the `XAUTOCLAIM` cursor caveat.
 AUTHOR **TD-007** (two-class durability, ReclaimDriver, UpsertPort,
 durable-state schema/retention/compaction/replay). KEEP+update ADR-001/2/3/4/6, TD-001/2/3/4/5,
 TP-002/3.
@@ -164,7 +164,7 @@ TP-002/3.
 **4d. Tests:** delete ~3 kafka + ~20 HTTP-route; **re-home** service invariant tests to the engine;
 migrate ~56 to conformance. (Test churn is ~20k LOC — see § scope.)
 
-**4e. Beads:** re-scope (claimed-item shape → transport-neutral; Lakebase deploy → `pqueue-server`
+**4e. Beads:** re-scope (claimed-item shape → transport-neutral; Lakebase deploy → `fireweed-server`
 image + health probe); none halted.
 
 ## 5. Implementation phases (each: implement → review → test; nothing stubbed)
@@ -172,21 +172,21 @@ image + health probe); none halted.
 - **Phase 0 — gating docs (own review gate).** ADR-007; validate TD-006 against the launch
   `{RESP-stock, library}` matrix; author TD-007 (durability classes, **ReclaimDriver**,
   **UpsertPort**, eventual-apply upsert ban, superseded reply, cross-shard deferred). Converge all
-  three before any code. Resolve `PQFIN`-optional.
-- **Phase 1 — ports + reference engine + early RESP smoke.** Define ports; extract `pqueue-memory`;
+  three before any code. Resolve whether an optional custom finalize command is needed.
+- **Phase 1 — ports + reference engine + early RESP smoke.** Define ports; extract `fireweed-memory`;
   implement priority claim/lease/ack + Invariants 1 & 2 + ReclaimDriver over memory; conformance green.
   Stand up a throwaway in-memory RESP front and run the §3 **drain-and-reconcile** stock-client e2e
   against memory — validates the semantic model *before* backend work.
-- **Phase 2 — migrate domain logic (move-and-delete, test-first).** Drop `pqueue-service` from
+- **Phase 2 — migrate domain logic (move-and-delete, test-first).** Drop `fireweed-service` from
   `default-members`. For each 4a unit: write the engine test, move the logic durable, **delete the
   service code path in the same step** (the service crate shrinks to nothing by phase end — no
   delegation, no shim).
 - **Phase 3 — driven adapters.** sqlite, postgres (`ClaimPort`), objectlog (eventual-apply, upsert
   banned). Conformance green on each — incl. concurrent-claim races, intra-group exclusion, and each
   durability class's *declared* guarantee (strong on atomic; weaker on eventual-apply).
-- **Phase 4 — full RESP adapter + e2e.** `pqueue-resp`; the complete §3 e2e suite (all backends,
+- **Phase 4 — full RESP adapter + e2e.** `fireweed-resp`; the complete §3 e2e suite (all backends,
   cursor loop, crash recovery, fence, race) is the headline acceptance gate.
-- **Phase 5 — library + composition root.** `pqueue` facade + `pqueue-server` (DI, ReclaimDriver task,
+- **Phase 5 — library + composition root.** `fireweed` facade + `fireweed-server` (DI, ReclaimDriver task,
   ops probe).
 - **Phase 6 — delete legacy.** Remove service/client/kafka + tests; dissolve storage; supersede/rewrite
   docs; re-scope beads.
@@ -219,8 +219,8 @@ image + health probe); none halted.
 - **Phase 7 reconciliation report** shows no dropped item.
 
 ## Scope (honest)
-Source ≈17.3k LOC + tests ≈19.7k LOC ≈ **37k LOC touched**. Net-new: `pqueue-resp` protocol server,
+Source ≈17.3k LOC + tests ≈19.7k LOC ≈ **37k LOC touched**. Net-new: `fireweed-resp` protocol server,
 `ReclaimDriver`, `UpsertPort`, durable-state re-architecture. The likely stall points are the
 durable-state design (Phase 0/TD-007) and re-homing the seventh-sense/invariant-stress test suites
-onto the engine API (non-mechanical). Health/readiness probe transport on `pqueue-server` is a small
+onto the engine API (non-mechanical). Health/readiness probe transport on `fireweed-server` is a small
 non-`axum` endpoint (decide in Phase 5), distinct from the two client interfaces.

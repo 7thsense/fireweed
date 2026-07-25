@@ -8,11 +8,11 @@
 //! TOPOLOGY (a real ADR-008 multi-node cluster of independent owners, as DOCKER CONTAINERS on the bridge).
 //! Each owner node is an independent `fireweed-service` process running in its own `ubuntu:25.04` container on
 //! the docker bridge network, on the FAST `object_log_sqlite_projection` backend in **segmented group-commit
-//! mode** (`PQUEUE_LOG_BACKEND=objectlog` + `PQUEUE_PROJECTION_BACKEND=sqlite` +
-//! `PQUEUE_OBJECT_LOG_MODE=segmented` → the local-object-log authority with a group-committing segmented
-//! substrate plus a SQLite materialized projection, TD-004). Shared-nothing: a distinct `PQUEUE_NODE_ID`, its
+//! mode** (`FIREWEED_LOG_BACKEND=objectlog` + `FIREWEED_PROJECTION_BACKEND=sqlite` +
+//! `FIREWEED_OBJECT_LOG_MODE=segmented` → the local-object-log authority with a group-committing segmented
+//! substrate plus a SQLite materialized projection, TD-004). Shared-nothing: a distinct `FIREWEED_NODE_ID`, its
 //! OWN object-log root + sqlite projection on a per-container `tmpfs /data`, its own `0.0.0.0:8080` listener,
-//! and a DISJOINT `PQUEUE_BOOTSTRAP_QUEUES` set (each node owns its own M queues; no queue lives on two
+//! and a DISJOINT `FIREWEED_BOOTSTRAP_QUEUES` set (each node owns its own M queues; no queue lives on two
 //! nodes). The driver (this cargo-test host process) reaches each node directly at its **container IP:8080**
 //! over real bridge TCP — host-process → container, the ADR-008 ownership model with no shared store, no
 //! shared lock, no shared projection.
@@ -46,16 +46,16 @@
 //! the bars are NOT met on this box (a core / I-O ceiling), the row is emitted SMOKE-tier (honest, never a
 //! faked release row) AND the test still hard-fails so the bead stays open with the measured ceiling visible.
 //!
-//! ENV-GATED. Self-skips (LOUD) without `PQUEUE_E2_MULTINODE=1`, so a routine `cargo test` is short and never
+//! ENV-GATED. Self-skips (LOUD) without `FIREWEED_E2_MULTINODE=1`, so a routine `cargo test` is short and never
 //! spins up an 8-node container cluster. To run the headline:
 //!   cargo build -p fireweed-server --release --bin fireweed-service
-//!   PQUEUE_E2_MULTINODE=1 cargo test --manifest-path crates/fireweed-bench/Cargo.toml \
+//!   FIREWEED_E2_MULTINODE=1 cargo test --manifest-path crates/fireweed-bench/Cargo.toml \
 //!     --test performance_multi_node_object_log_e2_tests -- --nocapture
-//! Tunables (env, all optional): PQUEUE_E2_QUEUES_PER_OWNER (default 1), PQUEUE_E2_ITEMS_PER_QUEUE
-//! (default 12000), PQUEUE_E2_CONNS_PER_QUEUE (default 8), PQUEUE_E2_PIPE (default 1000),
-//! PQUEUE_E2_BATCH (default 1000), PQUEUE_E2_SEGMENT_MAX_LATENCY_MS (default 1),
-//! PQUEUE_E2_SEGMENT_TARGET_BYTES (default 262144), PQUEUE_E2_WORKER_THREADS (default 4 per container),
-//! PQUEUE_E2_IMAGE (default ubuntu:25.04), PQUEUE_SERVICE_BIN (default <repo>/target/release/fireweed-service).
+//! Tunables (env, all optional): FIREWEED_E2_QUEUES_PER_OWNER (default 1), FIREWEED_E2_ITEMS_PER_QUEUE
+//! (default 12000), FIREWEED_E2_CONNS_PER_QUEUE (default 8), FIREWEED_E2_PIPE (default 1000),
+//! FIREWEED_E2_BATCH (default 1000), FIREWEED_E2_SEGMENT_MAX_LATENCY_MS (default 1),
+//! FIREWEED_E2_SEGMENT_TARGET_BYTES (default 262144), FIREWEED_E2_WORKER_THREADS (default 4 per container),
+//! FIREWEED_E2_IMAGE (default ubuntu:25.04), FIREWEED_SERVICE_BIN (default <repo>/target/release/fireweed-service).
 
 use std::collections::BTreeMap;
 use std::env;
@@ -353,7 +353,7 @@ fn spawn_cluster(
     let mount = format!("{svc}:/svc:ro");
     let mut nodes = Vec::with_capacity(owner_count);
     for idx in 0..owner_count {
-        let name = format!("pqe2-{tag}-o{owner_count}-n{idx}");
+        let name = format!("fireweed-e2-{tag}-o{owner_count}-n{idx}");
         // Best-effort remove a leftover with the same name from an aborted prior run.
         let _ = Command::new("docker").args(["rm", "-f", &name]).output();
         let owned: Vec<String> = (0..queues_per_owner)
@@ -364,33 +364,33 @@ fn spawn_cluster(
             .args([
                 "run", "-d", "--name", &name, "--tmpfs", "/data", "-v", &mount,
             ])
-            .args(["-e", "PQUEUE_LOG_BACKEND=objectlog"])
-            .args(["-e", "PQUEUE_PROJECTION_BACKEND=sqlite"])
-            .args(["-e", "PQUEUE_OBJECT_LOG_MODE=segmented"])
+            .args(["-e", "FIREWEED_LOG_BACKEND=objectlog"])
+            .args(["-e", "FIREWEED_PROJECTION_BACKEND=sqlite"])
+            .args(["-e", "FIREWEED_OBJECT_LOG_MODE=segmented"])
             .args([
                 "-e",
                 &format!(
-                    "PQUEUE_SEGMENT_TARGET_BYTES={}",
+                    "FIREWEED_SEGMENT_TARGET_BYTES={}",
                     tuning.segment_target_bytes
                 ),
             ])
             .args([
                 "-e",
                 &format!(
-                    "PQUEUE_SEGMENT_MAX_LATENCY_MS={}",
+                    "FIREWEED_SEGMENT_MAX_LATENCY_MS={}",
                     tuning.segment_max_latency_ms
                 ),
             ])
             .args([
                 "-e",
-                &format!("PQUEUE_WORKER_THREADS={}", tuning.worker_threads),
+                &format!("FIREWEED_WORKER_THREADS={}", tuning.worker_threads),
             ])
-            .args(["-e", &format!("PQUEUE_NODE_ID={}", idx + 1)])
-            .args(["-e", "PQUEUE_OBJECT_LOG_ROOT=/data/olog"])
-            .args(["-e", "PQUEUE_SQLITE_PROJECTION_PATH=/data/proj.db"])
-            .args(["-e", &format!("PQUEUE_LISTEN_ADDR=0.0.0.0:{NODE_PORT}")])
-            .args(["-e", &format!("PQUEUE_BOOTSTRAP_QUEUES={bootstrap}")])
-            .args(["-e", "PQUEUE_RECLAIM_INTERVAL_MS=60000"])
+            .args(["-e", &format!("FIREWEED_NODE_ID={}", idx + 1)])
+            .args(["-e", "FIREWEED_OBJECT_LOG_ROOT=/data/olog"])
+            .args(["-e", "FIREWEED_SQLITE_PROJECTION_PATH=/data/proj.db"])
+            .args(["-e", &format!("FIREWEED_LISTEN_ADDR=0.0.0.0:{NODE_PORT}")])
+            .args(["-e", &format!("FIREWEED_BOOTSTRAP_QUEUES={bootstrap}")])
+            .args(["-e", "FIREWEED_RECLAIM_INTERVAL_MS=60000"])
             .args([&tuning.image, "/svc"])
             .output()
             .expect("docker run");
@@ -602,7 +602,7 @@ fn measure(
 }
 
 fn locate_binary() -> PathBuf {
-    if let Ok(p) = env::var("PQUEUE_SERVICE_BIN") {
+    if let Ok(p) = env::var("FIREWEED_SERVICE_BIN") {
         return PathBuf::from(p);
     }
     // crates/fireweed-bench/../../target/release/fireweed-service == repo-root target.
@@ -625,9 +625,9 @@ fn env_u64(key: &str, default: u64) -> u64 {
 
 #[test]
 fn performance_multi_node_object_log_e2_tests() {
-    if env::var("PQUEUE_E2_MULTINODE").is_err() {
+    if env::var("FIREWEED_E2_MULTINODE").is_err() {
         eprintln!(
-            "TP-002 E2 LIVE MULTI-NODE object_log_sqlite_projection SKIPPED — set PQUEUE_E2_MULTINODE=1 (and \
+            "TP-002 E2 LIVE MULTI-NODE object_log_sqlite_projection SKIPPED — set FIREWEED_E2_MULTINODE=1 (and \
              build the service: `cargo build -p fireweed-server --release --bin fireweed-service`) to run the \
              headline cross-queue scale-out at owner counts 2/4/8 as bridge containers. The >=3.5x-at-8 \
              multiple + worst-per-queue floor evidence is DEFERRED (not measured), never a hidden pass."
@@ -639,7 +639,7 @@ fn performance_multi_node_object_log_e2_tests() {
     assert!(
         bin.exists(),
         "fireweed-service binary not found at {} — build it first: \
-         `cargo build -p fireweed-server --release --bin fireweed-service` (or set PQUEUE_SERVICE_BIN)",
+         `cargo build -p fireweed-server --release --bin fireweed-service` (or set FIREWEED_SERVICE_BIN)",
         bin.display()
     );
     // The driver shells out to docker; fail loudly (not as a benchmark miss) if it is unavailable.
@@ -658,16 +658,16 @@ fn performance_multi_node_object_log_e2_tests() {
     // 8 co-located node containers are not starved); 4 worker threads per node (enough that the force-sealed
     // claim+finalize path keeps its per-queue floor at 8 owners, few enough that the box scales near-linearly
     // 2->8). Override any via env to re-tune on different hardware.
-    let queues_per_owner = env_usize("PQUEUE_E2_QUEUES_PER_OWNER", 1);
-    let items_per_queue = env_u64("PQUEUE_E2_ITEMS_PER_QUEUE", 12_000);
-    let conns_per_queue = env_usize("PQUEUE_E2_CONNS_PER_QUEUE", 8);
-    let pipe = env_usize("PQUEUE_E2_PIPE", 1_000);
-    let batch = env_usize("PQUEUE_E2_BATCH", 1_000);
+    let queues_per_owner = env_usize("FIREWEED_E2_QUEUES_PER_OWNER", 1);
+    let items_per_queue = env_u64("FIREWEED_E2_ITEMS_PER_QUEUE", 12_000);
+    let conns_per_queue = env_usize("FIREWEED_E2_CONNS_PER_QUEUE", 8);
+    let pipe = env_usize("FIREWEED_E2_PIPE", 1_000);
+    let batch = env_usize("FIREWEED_E2_BATCH", 1_000);
     let tuning = NodeTuning {
-        segment_target_bytes: env_usize("PQUEUE_E2_SEGMENT_TARGET_BYTES", 262_144),
-        segment_max_latency_ms: env_u64("PQUEUE_E2_SEGMENT_MAX_LATENCY_MS", 1),
-        worker_threads: env_usize("PQUEUE_E2_WORKER_THREADS", 4),
-        image: env::var("PQUEUE_E2_IMAGE").unwrap_or_else(|_| "ubuntu:25.04".to_string()),
+        segment_target_bytes: env_usize("FIREWEED_E2_SEGMENT_TARGET_BYTES", 262_144),
+        segment_max_latency_ms: env_u64("FIREWEED_E2_SEGMENT_MAX_LATENCY_MS", 1),
+        worker_threads: env_usize("FIREWEED_E2_WORKER_THREADS", 4),
+        image: env::var("FIREWEED_E2_IMAGE").unwrap_or_else(|_| "ubuntu:25.04".to_string()),
         bin: bin.clone(),
     };
     let cores = thread::available_parallelism()
@@ -862,7 +862,7 @@ fn performance_multi_node_object_log_e2_tests() {
     ]);
     let row = fireweed_release::LedgerRow {
         suite: "performance_multi_node_object_log_e2_tests".into(),
-        command: "PQUEUE_E2_MULTINODE=1 cargo test --manifest-path crates/fireweed-bench/Cargo.toml --test performance_multi_node_object_log_e2_tests".into(),
+        command: "FIREWEED_E2_MULTINODE=1 cargo test --manifest-path crates/fireweed-bench/Cargo.toml --test performance_multi_node_object_log_e2_tests".into(),
         backend_profile: "object_log_sqlite_projection".into(),
         scale: scale.into(),
         seed: 0,

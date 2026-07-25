@@ -1,6 +1,6 @@
 //! Live TLS-connection proof for the postgres adapter (the Lakebase / cloud-postgres transport).
 //!
-//! Behind the `tls` cargo feature AND env-gated on `PQUEUE_PG_TLS_TEST_URL` (a DSN with `sslmode=require`
+//! Behind the `tls` cargo feature AND env-gated on `FIREWEED_PG_TLS_TEST_URL` (a DSN with `sslmode=require`
 //! pointing at a TLS-enabled postgres). LOUD-skips otherwise so a CI/dev machine without a TLS database
 //! never reports a false pass. The companion harness `scripts/dev/pg-tls-smoke.sh` starts a self-signed
 //! `postgres:16 -c ssl=on` in docker and runs exactly this test end-to-end.
@@ -13,9 +13,9 @@ use fireweed_postgres::{PostgresConnectConfig, PostgresSslMode, connect};
 /// `connect()` path (native-tls connector selection + handshake), not a bespoke connector.
 #[test]
 fn postgres_tls_connection_succeeds() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TLS_TEST_URL") else {
+    let Ok(url) = std::env::var("FIREWEED_PG_TLS_TEST_URL") else {
         eprintln!(
-            "POSTGRES TLS ROUND-TRIP SKIPPED — set PQUEUE_PG_TLS_TEST_URL to a TLS-enabled postgres DSN \
+            "POSTGRES TLS ROUND-TRIP SKIPPED — set FIREWEED_PG_TLS_TEST_URL to a TLS-enabled postgres DSN \
              (sslmode=require) to run this proof"
         );
         return;
@@ -24,10 +24,10 @@ fn postgres_tls_connection_succeeds() {
     // The DSN must actually demand TLS; a misconfigured `disable` URL here would silently prove nothing.
     let ssl_mode = PostgresConnectConfig::new(&url)
         .parsed_ssl_mode()
-        .expect("PQUEUE_PG_TLS_TEST_URL parses");
+        .expect("FIREWEED_PG_TLS_TEST_URL parses");
     assert!(
         matches!(ssl_mode, PostgresSslMode::Require | PostgresSslMode::Prefer),
-        "PQUEUE_PG_TLS_TEST_URL must request TLS (sslmode=require|prefer), got {ssl_mode:?}"
+        "FIREWEED_PG_TLS_TEST_URL must request TLS (sslmode=require|prefer), got {ssl_mode:?}"
     );
 
     let mut client = connect(PostgresConnectConfig::new(&url))
@@ -57,11 +57,11 @@ fn postgres_tls_connection_succeeds() {
     // Round-trip 3: an actual write/read through a temp table, so the proof is not read-only.
     client
         .batch_execute(
-            "CREATE TEMP TABLE pqueue_tls_probe (v int); INSERT INTO pqueue_tls_probe VALUES (7);",
+            "CREATE TEMP TABLE fireweed_tls_probe (v int); INSERT INTO fireweed_tls_probe VALUES (7);",
         )
         .expect("temp-table write over TLS");
     let stored: i32 = client
-        .query_one("SELECT v FROM pqueue_tls_probe", &[])
+        .query_one("SELECT v FROM fireweed_tls_probe", &[])
         .expect("temp-table read over TLS")
         .get(0);
     assert_eq!(stored, 7, "value written over TLS reads back");

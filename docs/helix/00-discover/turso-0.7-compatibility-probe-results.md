@@ -41,7 +41,7 @@ rustup run 1.92.0 cargo run \
 
 The tool is a nested Cargo workspace with its own lockfile. It is not a member of the root workspace and no
 default GitHub Actions workflow invokes it. Its `include_str!` reads
-`crates/pqueue-sqlite/src/relational/helpers.rs` and extracts the `RELATIONAL_SCHEMA` raw string at compile
+`crates/fireweed-sqlite/src/relational/helpers.rs` and extracts the `RELATIONAL_SCHEMA` raw string at compile
 time, so the schema check cannot silently substitute a reduced copy.
 
 ## Observed Results
@@ -111,9 +111,9 @@ They reinforce keeping the probe opt-in and outside the default root workspace a
 ## Decision
 
 The SQL result is promising but the governing probe stop rule makes the adapter decision **no-go under the
-current pqueue ports**. This is not a claim that a Turso adapter is intrinsically impossible. Turso's Rust
+current fireweed ports**. This is not a claim that a Turso adapter is intrinsically impossible. Turso's Rust
 API builds the database asynchronously and makes SQL preparation, queries, transactions, commits, and
-rollbacks async. pqueue's `LogStore` and `ProjectionStore` operations and the closure passed to
+rollbacks async. fireweed's `LogStore` and `ProjectionStore` operations and the closure passed to
 `Backend::write` are synchronous inside the atomic unit-of-work lock. Under that current boundary, an
 adapter would require either:
 
@@ -124,7 +124,7 @@ The first exceeds this probe and ADR-006's stop rule. The second discards the na
 reason for selecting Turso and adds another scheduling and failure boundary. Neither is authorized here.
 Bundled SQLite through rusqlite remains the production baseline and adapter selection is unchanged.
 
-A future decision may reopen the candidate only if pqueue independently adopts async storage ports or Turso
+A future decision may reopen the candidate only if fireweed independently adopts async storage ports or Turso
 ships a supported synchronous Rust API. Any Turso version change must rerun this exact compatibility probe.
 
 ADR-015 subsequently selected full-async storage boundaries and ADR-016 selected Turso as the first

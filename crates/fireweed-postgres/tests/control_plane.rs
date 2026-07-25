@@ -1,5 +1,5 @@
 //! BQ-22 — the postgres [`PostgresControlPlane`] lease lifecycle + C4b seam invariants run against a LIVE
-//! database, **env-gated** on `PQUEUE_PG_TEST_URL`. Without it every scenario prints a LOUD skip — a green
+//! database, **env-gated** on `FIREWEED_PG_TEST_URL`. Without it every scenario prints a LOUD skip — a green
 //! run is then VISIBLY partial (the durable control plane unverified against a real DB), never a hidden
 //! pass. Compiling this file already proves `PostgresControlPlane` implements `QueueControlPlane` and shares
 //! the engine's pure lease decisions. The single-connection scenarios mirror the in-memory reference's
@@ -9,8 +9,8 @@
 //! the B1 genesis-row fix and would FAIL without it). Live-DB execution is deferred where no DB is present.
 //!
 //! To run live:
-//!   docker run -d --name pq-pg -p 5433:5432 -e POSTGRES_PASSWORD=pq postgres:16
-//!   PQUEUE_PG_TEST_URL=postgres://postgres:pq@127.0.0.1:5433/postgres cargo test -p fireweed-postgres
+//!   docker run -d --name fireweed-pg -p 5433:5432 -e POSTGRES_PASSWORD=fireweed postgres:16
+//!   FIREWEED_PG_TEST_URL=postgres://postgres:fireweed@127.0.0.1:5433/postgres cargo test -p fireweed-postgres
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -25,7 +25,7 @@ use postgres::{Client, NoTls};
 fn fresh_schema() -> String {
     static N: AtomicU64 = AtomicU64::new(0);
     format!(
-        "pq_cp_{}_{}",
+        "fireweed_cp_{}_{}",
         std::process::id(),
         N.fetch_add(1, Ordering::SeqCst)
     )
@@ -180,9 +180,9 @@ fn batch_resolution_is_one_statement_and_orders_present_and_missing_rows() {
 
 #[test]
 fn concurrent_reverse_order_batches_do_not_deadlock_or_shorten_leases() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
         eprintln!(
-            "POSTGRES CONTROL-PLANE SKIPPED (concurrent_reverse_order_batches) — set PQUEUE_PG_TEST_URL"
+            "POSTGRES CONTROL-PLANE SKIPPED (concurrent_reverse_order_batches) — set FIREWEED_PG_TEST_URL"
         );
         return;
     };
@@ -236,9 +236,9 @@ fn concurrent_reverse_order_batches_do_not_deadlock_or_shorten_leases() {
 
 #[test]
 fn expired_batch_renewal_racing_takeover_is_fenced_at_epoch_two() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
         eprintln!(
-            "POSTGRES CONTROL-PLANE SKIPPED (expired_batch_renewal_racing_takeover) — set PQUEUE_PG_TEST_URL"
+            "POSTGRES CONTROL-PLANE SKIPPED (expired_batch_renewal_racing_takeover) — set FIREWEED_PG_TEST_URL"
         );
         return;
     };
@@ -303,8 +303,10 @@ fn qk(q: &str) -> QueueKey {
 
 /// Run `body` against a fresh schema, or LOUD-skip when no live DB is configured.
 fn with_cp(name: &str, body: impl FnOnce(PostgresControlPlane)) {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
-        eprintln!("POSTGRES CONTROL-PLANE SKIPPED ({name}) — set PQUEUE_PG_TEST_URL to a live DB");
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
+        eprintln!(
+            "POSTGRES CONTROL-PLANE SKIPPED ({name}) — set FIREWEED_PG_TEST_URL to a live DB"
+        );
         return;
     };
     let schema = fresh_schema();
@@ -479,9 +481,9 @@ fn resolve_reports_deterministic_target_and_durable_epoch() {
 /// (two live writers at one epoch). Env-gated; LOUD-skips without a DB.
 #[test]
 fn genesis_concurrent_acquire_has_a_single_winner() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
         eprintln!(
-            "POSTGRES CONTROL-PLANE SKIPPED (genesis_concurrent_acquire_has_a_single_winner) — set PQUEUE_PG_TEST_URL"
+            "POSTGRES CONTROL-PLANE SKIPPED (genesis_concurrent_acquire_has_a_single_winner) — set FIREWEED_PG_TEST_URL"
         );
         return;
     };

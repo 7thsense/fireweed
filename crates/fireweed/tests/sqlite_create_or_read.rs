@@ -177,13 +177,12 @@ async fn open_sqlite_atomic_create_rich_reopen_and_capability() {
         )
         .await
         .unwrap();
+    let scopes = loser
+        .discover_active_scopes(&queue_key(), DiscoveryGranularity::Queue)
+        .await
+        .unwrap();
+    assert_eq!(scopes.len(), 1);
     assert_eq!(loser.claim(&queue_key(), 1, 1_000).await.unwrap().len(), 1);
-    assert!(matches!(
-        loser
-            .discover_active_scopes(&queue_key(), DiscoveryGranularity::Queue,)
-            .await,
-        Err(EngineError::Unavailable)
-    ));
     drop(handles);
 
     let reopened = fireweed::open_sqlite(&path, Arc::new(ManualClock::at(20))).unwrap();

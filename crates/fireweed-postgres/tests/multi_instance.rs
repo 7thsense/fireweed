@@ -8,7 +8,7 @@
 //! needs the DB-authoritative relational backend; the log-replay `PostgresBackend` rebuilds its in-memory
 //! projection per connection, so item counts are asserted only against the writer's own view here.)
 //!
-//! Env-gated on `PQUEUE_PG_TEST_URL` (LOUD skip without a DB). A shared in-test `ManualClock` drives lease
+//! Env-gated on `FIREWEED_PG_TEST_URL` (LOUD skip without a DB). A shared in-test `ManualClock` drives lease
 //! expiry deterministically. A NON-tokio executor drives the sync pg client.
 
 use std::future::Future;
@@ -58,8 +58,8 @@ fn fresh_schema() -> String {
 
 #[test]
 fn two_instances_compete_over_shared_postgres() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
-        eprintln!("B5 multi-instance SKIPPED — set PQUEUE_PG_TEST_URL to a live DB");
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
+        eprintln!("B5 multi-instance SKIPPED — set FIREWEED_PG_TEST_URL to a live DB");
         return;
     };
     let schema = fresh_schema();
@@ -142,12 +142,12 @@ fn two_instances_compete_over_shared_postgres() {
 }
 
 /// OWED-4: over the DB-authoritative RELATIONAL backend (`postgres_native`), multi-instance competition has
-/// **full cross-instance item visibility** (both instances read `pqueue_items` from the shared DB) AND the
+/// **full cross-instance item visibility** (both instances read `fireweed_items` from the shared DB) AND the
 /// durable epoch fence — the complete production multi-instance guarantee.
 #[test]
 fn relational_multi_instance_has_item_visibility_and_fence() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
-        eprintln!("B5 relational multi-instance SKIPPED — set PQUEUE_PG_TEST_URL to a live DB");
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
+        eprintln!("B5 relational multi-instance SKIPPED — set FIREWEED_PG_TEST_URL to a live DB");
         return;
     };
     let schema = fresh_schema();
@@ -216,6 +216,6 @@ fn relational_multi_instance_has_item_visibility_and_fence() {
 
 // NOTE (relational concurrent-push id limitation, separate from the fence): the relational backend mints
 // item ids from a per-connection sequence prefix, so two SEPARATE connections each pushing a fresh item can
-// collide on `pqueue_items_pkey` (both start at 0). Full concurrent multi-writer push needs a DB-sequence-
+// collide on `fireweed_items_pkey` (both start at 0). Full concurrent multi-writer push needs a DB-sequence-
 // based (globally unique) item id — a tracked follow-up. The fence, cross-instance visibility, and
 // cross-instance claim handoff (the safety + work-handoff guarantees) are unaffected and proven above.

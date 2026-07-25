@@ -24,7 +24,7 @@ fn dep_lines(manifest: &str) -> String {
 
 /// True if `manifest` declares a dependency on a crate named exactly `crate_name` (matches the
 /// `crate_name = ...` or `crate_name.workspace` dependency-line forms, not a substring like
-/// `fireweed-core` matching `pqueue`).
+/// `fireweed-core` matching `fireweed`).
 fn depends_on(manifest: &str, crate_name: &str) -> bool {
     dep_lines(manifest).lines().any(|line| {
         let l = line.trim_start();
@@ -40,7 +40,7 @@ const ADAPTERS: &[&str] = &[
     "fireweed-objectlog",
     "fireweed-resp",
     "fireweed-server",
-    "pqueue", // the library facade (a driving adapter)
+    "fireweed", // the library facade (a driving adapter)
 ];
 
 #[test]
@@ -62,6 +62,6 @@ fn domain_crates_do_not_depend_on_adapters() {
     // The innermost crate (core) must not depend even on the engine.
     assert!(
         !depends_on(core, "fireweed-engine"),
-        "fireweed-core is the innermost domain crate and must depend on nothing pqueue-*"
+        "fireweed-core is the innermost domain crate and must depend on nothing fireweed-*"
     );
 }

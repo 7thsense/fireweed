@@ -4,20 +4,20 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CHART="${ROOT}/charts/fireweed-queue"
-CLUSTER="${PQUEUE_E2_CLUSTER:-pqueue-e2-failover-$$}"
-NS="pqueue-e2"
-IMAGE="${PQUEUE_E2_IMAGE:-fireweed-service:e2-failover}"
-TIMEOUT="${PQUEUE_E2_TIMEOUT:-240s}"
-PORT="${PQUEUE_E2_PORT:-18180}"
-PG_PORT="${PQUEUE_E2_PG_PORT:-15433}"
-S3_PORT="${PQUEUE_E2_S3_PORT:-19001}"
-SEED="${PQUEUE_E2_SEED:-2002}"
-OUT="${PQUEUE_E2_EVIDENCE:-${ROOT}/target/tp002-e2-failover/evidence.json}"
-KEEP="${PQUEUE_E2_KEEP_CLUSTER:-0}"
-PG_IMAGE="${PQUEUE_E2_POSTGRES_IMAGE:-postgres:16}"
-MINIO_IMAGE="${PQUEUE_E2_MINIO_IMAGE:-minio/minio:latest}"
-MC_IMAGE="${PQUEUE_E2_MC_IMAGE:-minio/mc:latest}"
-COORDINATION_TIMEOUT_SECS="${PQUEUE_TEST_COORDINATION_TIMEOUT_SECS-}"
+CLUSTER="${FIREWEED_E2_CLUSTER:-fireweed-e2-failover-$$}"
+NS="fireweed-e2"
+IMAGE="${FIREWEED_E2_IMAGE:-fireweed-service:e2-failover}"
+TIMEOUT="${FIREWEED_E2_TIMEOUT:-240s}"
+PORT="${FIREWEED_E2_PORT:-18180}"
+PG_PORT="${FIREWEED_E2_PG_PORT:-15433}"
+S3_PORT="${FIREWEED_E2_S3_PORT:-19001}"
+SEED="${FIREWEED_E2_SEED:-2002}"
+OUT="${FIREWEED_E2_EVIDENCE:-${ROOT}/target/tp002-e2-failover/evidence.json}"
+KEEP="${FIREWEED_E2_KEEP_CLUSTER:-0}"
+PG_IMAGE="${FIREWEED_E2_POSTGRES_IMAGE:-postgres:16}"
+MINIO_IMAGE="${FIREWEED_E2_MINIO_IMAGE:-minio/minio:latest}"
+MC_IMAGE="${FIREWEED_E2_MC_IMAGE:-minio/mc:latest}"
+COORDINATION_TIMEOUT_SECS="${FIREWEED_TEST_COORDINATION_TIMEOUT_SECS-}"
 PF_PID=""
 CLUSTER_CREATED=0
 START_MS="$(date +%s%3N)"
@@ -37,11 +37,11 @@ trap cleanup EXIT
 # shellcheck source=scripts/perf/resp_readiness.sh
 source "${ROOT}/scripts/perf/resp_readiness.sh"
 
-if [[ -v PQUEUE_TEST_COORDINATION_TIMEOUT_SECS ]]; then
+if [[ -v FIREWEED_TEST_COORDINATION_TIMEOUT_SECS ]]; then
   [[ "${COORDINATION_TIMEOUT_SECS}" =~ ^[1-9][0-9]{0,4}$ ]] || \
-    die "PQUEUE_TEST_COORDINATION_TIMEOUT_SECS must match [1-9][0-9]* and be <= 86400"
+    die "FIREWEED_TEST_COORDINATION_TIMEOUT_SECS must match [1-9][0-9]* and be <= 86400"
   ((10#${COORDINATION_TIMEOUT_SECS} <= 86400)) || \
-    die "PQUEUE_TEST_COORDINATION_TIMEOUT_SECS must be <= 86400"
+    die "FIREWEED_TEST_COORDINATION_TIMEOUT_SECS must be <= 86400"
 fi
 
 start_pf() {
@@ -116,11 +116,11 @@ PY
 
 pg_scalar() {
   local sql="$1"
-  k -n "${NS}" exec deploy/pqueue-e2-postgres -- psql -U pqueue -d pqueue -Atqc "${sql}"
+  k -n "${NS}" exec deploy/fireweed-e2-postgres -- psql -U fireweed -d fireweed -Atqc "${sql}"
 }
 
 owner_row() {
-  pg_scalar "SELECT active_owner_id || '|' || assignment_epoch FROM pqueue_queue_owner WHERE tenant='t1' AND queue='q1' AND state='assigned';" | tail -1
+  pg_scalar "SELECT active_owner_id || '|' || assignment_epoch FROM fireweed_queue_owner WHERE tenant='t1' AND queue='q1' AND state='assigned';" | tail -1
 }
 
 wait_stable_owner() {
@@ -139,7 +139,7 @@ wait_stable_owner() {
 }
 
 pod_for_uid() {
-  k -n "${NS}" get pods -l app.kubernetes.io/instance=pqueue -o jsonpath="{range .items[?(@.metadata.uid=='$1')]}{.metadata.name}{end}"
+  k -n "${NS}" get pods -l app.kubernetes.io/instance=fireweed -o jsonpath="{range .items[?(@.metadata.uid=='$1')]}{.metadata.name}{end}"
 }
 
 pod_ip() { k -n "${NS}" get pod "$1" -o jsonpath='{.status.podIP}'; }
@@ -175,36 +175,36 @@ k create namespace "${NS}"
 k -n "${NS}" apply -f - <<EOF
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: pqueue-e2-postgres}
+metadata: {name: fireweed-e2-postgres}
 spec:
   replicas: 1
-  selector: {matchLabels: {app: pqueue-e2-postgres}}
+  selector: {matchLabels: {app: fireweed-e2-postgres}}
   template:
-    metadata: {labels: {app: pqueue-e2-postgres}}
+    metadata: {labels: {app: fireweed-e2-postgres}}
     spec:
       containers:
       - name: postgres
         image: ${PG_IMAGE}
         imagePullPolicy: IfNotPresent
         env:
-        - {name: POSTGRES_USER, value: pqueue}
-        - {name: POSTGRES_PASSWORD, value: pqueue}
-        - {name: POSTGRES_DB, value: pqueue}
-        readinessProbe: {exec: {command: [pg_isready, -U, pqueue]}, periodSeconds: 2}
+        - {name: POSTGRES_USER, value: fireweed}
+        - {name: POSTGRES_PASSWORD, value: fireweed}
+        - {name: POSTGRES_DB, value: fireweed}
+        readinessProbe: {exec: {command: [pg_isready, -U, fireweed]}, periodSeconds: 2}
 ---
 apiVersion: v1
 kind: Service
-metadata: {name: pqueue-e2-postgres}
-spec: {selector: {app: pqueue-e2-postgres}, ports: [{port: 5432}]}
+metadata: {name: fireweed-e2-postgres}
+spec: {selector: {app: fireweed-e2-postgres}, ports: [{port: 5432}]}
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: pqueue-e2-minio}
+metadata: {name: fireweed-e2-minio}
 spec:
   replicas: 1
-  selector: {matchLabels: {app: pqueue-e2-minio}}
+  selector: {matchLabels: {app: fireweed-e2-minio}}
   template:
-    metadata: {labels: {app: pqueue-e2-minio}}
+    metadata: {labels: {app: fireweed-e2-minio}}
     spec:
       containers:
       - name: minio
@@ -218,42 +218,42 @@ spec:
 ---
 apiVersion: v1
 kind: Service
-metadata: {name: pqueue-e2-minio}
-spec: {selector: {app: pqueue-e2-minio}, ports: [{port: 9000}]}
+metadata: {name: fireweed-e2-minio}
+spec: {selector: {app: fireweed-e2-minio}, ports: [{port: 9000}]}
 EOF
-k -n "${NS}" rollout status deploy/pqueue-e2-postgres --timeout "${TIMEOUT}"
-k -n "${NS}" rollout status deploy/pqueue-e2-minio --timeout "${TIMEOUT}"
-k -n "${NS}" run pqueue-e2-mc --restart=Never --image="${MC_IMAGE}" --image-pull-policy=IfNotPresent --command -- \
-  sh -c 'mc alias set e2 http://pqueue-e2-minio:9000 minioadmin minioadmin && mc mb --ignore-existing e2/pqueue-e2'
-k -n "${NS}" wait --for=jsonpath='{.status.phase}'=Succeeded pod/pqueue-e2-mc --timeout "${TIMEOUT}"
-k -n "${NS}" logs pqueue-e2-mc
+k -n "${NS}" rollout status deploy/fireweed-e2-postgres --timeout "${TIMEOUT}"
+k -n "${NS}" rollout status deploy/fireweed-e2-minio --timeout "${TIMEOUT}"
+k -n "${NS}" run fireweed-e2-mc --restart=Never --image="${MC_IMAGE}" --image-pull-policy=IfNotPresent --command -- \
+  sh -c 'mc alias set e2 http://fireweed-e2-minio:9000 minioadmin minioadmin && mc mb --ignore-existing e2/fireweed-e2'
+k -n "${NS}" wait --for=jsonpath='{.status.phase}'=Succeeded pod/fireweed-e2-mc --timeout "${TIMEOUT}"
+k -n "${NS}" logs fireweed-e2-mc
 
 k -n "${NS}" create secret generic fireweed-objectlog-s3 --from-literal=access-key-id=minioadmin --from-literal=secret-access-key=minioadmin
 k -n "${NS}" create secret generic fireweed-control-plane \
-  --from-literal=database-url='postgres://pqueue:pqueue@pqueue-e2-postgres:5432/pqueue?sslmode=disable'
+  --from-literal=database-url='postgres://fireweed:fireweed@fireweed-e2-postgres:5432/fireweed?sslmode=disable'
 
 REPO="${IMAGE%:*}"; TAG="${IMAGE##*:}"
-helm upgrade --install pqueue "${CHART}" --kube-context "kind-${CLUSTER}" -n "${NS}" \
+helm upgrade --install fireweed "${CHART}" --kube-context "kind-${CLUSTER}" -n "${NS}" \
   -f "${CHART}/values-shared-s3.yaml" \
-  --set fullnameOverride=pqueue --set image.repository="${REPO}" --set image.tag="${TAG}" \
+  --set fullnameOverride=fireweed --set image.repository="${REPO}" --set image.tag="${TAG}" \
   --set image.pullPolicy=IfNotPresent --set bootstrap.queues[0]=t1:q1 \
-  --set storage.log.objectLog.s3.endpoint=http://pqueue-e2-minio:9000 \
-  --set storage.log.objectLog.s3.bucket=pqueue-e2 \
+  --set storage.log.objectLog.s3.endpoint=http://fireweed-e2-minio:9000 \
+  --set storage.log.objectLog.s3.bucket=fireweed-e2 \
   --set storage.log.objectLog.s3.allowInsecureHttp=true --wait --timeout "${TIMEOUT}"
-k -n "${NS}" rollout status deploy/pqueue --timeout "${TIMEOUT}"
-[[ "$(k -n "${NS}" get deploy pqueue -o jsonpath='{.status.readyReplicas}')" == 3 ]] || die "three replicas are not ready"
+k -n "${NS}" rollout status deploy/fireweed --timeout "${TIMEOUT}"
+[[ "$(k -n "${NS}" get deploy fireweed -o jsonpath='{.status.readyReplicas}')" == 3 ]] || die "three replicas are not ready"
 
 OLD="$(wait_stable_owner)"; OLD_OWNER="${OLD%%|*}"; OLD_EPOCH="${OLD##*|}"
 OWNER_POD="$(pod_for_uid "${OLD_OWNER}")"; [[ -n "${OWNER_POD}" ]] || die "owner UID does not map to a pod"
 OWNER_IP="$(pod_ip "${OWNER_POD}")"
-NONOWNER_POD="$(k -n "${NS}" get pods -l app.kubernetes.io/instance=pqueue -o name | sed 's#pod/##' | grep -v -Fx "${OWNER_POD}" | head -1)"
+NONOWNER_POD="$(k -n "${NS}" get pods -l app.kubernetes.io/instance=fireweed -o name | sed 's#pod/##' | grep -v -Fx "${OWNER_POD}" | head -1)"
 [[ -n "${NONOWNER_POD}" ]] || die "no non-owner pod"
 
 {
   echo "selected_owner_row=${OLD}"
   echo "selected_owner_pod=${OWNER_POD} uid=$(k -n "${NS}" get pod "${OWNER_POD}" -o jsonpath='{.metadata.uid}') ip=${OWNER_IP}"
   echo "selected_nonowner_pod=${NONOWNER_POD} uid=$(k -n "${NS}" get pod "${NONOWNER_POD}" -o jsonpath='{.metadata.uid}') ip=$(pod_ip "${NONOWNER_POD}")"
-  echo "workers=$(pg_scalar "SELECT owner_id || '@' || endpoint FROM pqueue_workers ORDER BY owner_id;")"
+  echo "workers=$(pg_scalar "SELECT owner_id || '@' || endpoint FROM fireweed_workers ORDER BY owner_id;")"
 } | tee "${RUN_DIR}/routing-selection.log"
 
 # One request to a non-owner must redirect to the pod-reachable active endpoint; retry exactly once.
@@ -294,15 +294,15 @@ grep -Eq '^\*0|^\*-1|^\$-1' "${RUN_DIR}/claim-two.resp" || { cat "${RUN_DIR}/cla
 stop_pf
 
 # Use the same live dependencies to prove the epoch-stale append cut and true snapshot+tail reopen seam.
-start_pf svc/pqueue-e2-postgres "${PG_PORT}" 5432
+start_pf svc/fireweed-e2-postgres "${PG_PORT}" 5432
 PG_PF="${PF_PID}"; PF_PID=""
 kubectl --context "kind-${CLUSTER}" -n "${NS}" port-forward \
-  svc/pqueue-e2-minio "${S3_PORT}:9000" >"${RUN_DIR}/s3-port-forward.log" 2>&1 & S3_PF=$!
+  svc/fireweed-e2-minio "${S3_PORT}:9000" >"${RUN_DIR}/s3-port-forward.log" 2>&1 & S3_PF=$!
 trap 'kill "${PG_PF:-}" "${S3_PF:-}" 2>/dev/null || true; cleanup' EXIT
 sleep 2
-PQUEUE_PG_TEST_URL="postgres://pqueue:pqueue@127.0.0.1:${PG_PORT}/pqueue?sslmode=disable" \
-PQUEUE_S3_TEST_ENDPOINT="http://127.0.0.1:${S3_PORT}" \
-PQUEUE_S3_TEST_BUCKET="pqueue-e2" \
+FIREWEED_PG_TEST_URL="postgres://fireweed:fireweed@127.0.0.1:${PG_PORT}/fireweed?sslmode=disable" \
+FIREWEED_S3_TEST_ENDPOINT="http://127.0.0.1:${S3_PORT}" \
+FIREWEED_S3_TEST_BUCKET="fireweed-e2" \
   cargo test -p fireweed-server --test objectlog_shared_ownership \
   stale_append_paused_before_authority_cannot_survive_handoff -- --nocapture \
   2>&1 | tee "${RUN_DIR}/stale-handoff.log" || {
@@ -313,8 +313,8 @@ PQUEUE_S3_TEST_BUCKET="pqueue-e2" \
     fi
     die "stale handoff semantic seam failed"
   }
-PQUEUE_PG_TEST_URL="postgres://pqueue:pqueue@127.0.0.1:${PG_PORT}/pqueue?sslmode=disable" \
-PQUEUE_S3_TEST_ENDPOINT="http://127.0.0.1:${S3_PORT}" PQUEUE_S3_TEST_BUCKET="pqueue-e2" \
+FIREWEED_PG_TEST_URL="postgres://fireweed:fireweed@127.0.0.1:${PG_PORT}/fireweed?sslmode=disable" \
+FIREWEED_S3_TEST_ENDPOINT="http://127.0.0.1:${S3_PORT}" FIREWEED_S3_TEST_BUCKET="fireweed-e2" \
   cargo test -p fireweed-server --test objectlog_shared_ownership \
   greater_epoch_owner_hydrates_snapshot_tail_before_serving -- --nocapture 2>&1 | tee "${RUN_DIR}/snapshot-tail.log"
 grep -Fq 'greater_epoch_owner_hydrates_snapshot_tail_before_serving ... ok' "${RUN_DIR}/snapshot-tail.log" || \
@@ -322,7 +322,7 @@ grep -Fq 'greater_epoch_owner_hydrates_snapshot_tail_before_serving ... ok' "${R
 kill "${PG_PF}" "${S3_PF}" 2>/dev/null || true; wait "${PG_PF}" "${S3_PF}" 2>/dev/null || true
 
 DURATION_MS="$(( $(date +%s%3N) - START_MS ))"
-E2_COMMAND="PQUEUE_E2_SEED=${SEED} bash scripts/perf/tp002-e2-failover-kind.sh"
+E2_COMMAND="FIREWEED_E2_SEED=${SEED} bash scripts/perf/tp002-e2-failover-kind.sh"
 python3 - "${OUT}" <<PY
 import json, sys
 row = {
@@ -336,7 +336,7 @@ row = {
  "visible_items_before":int(${BEFORE@Q}),"visible_items_after":int(${AFTER@Q}),
  "lost_work":0,"double_leases":0,"corrupt_writes":0,"moved_count":1,"retry_count":1,"retry_succeeded":True,
  "moved_endpoint":${OWNER_IP@Q}+":8080",
- "topology":"kind: 3 pqueue pods; shared MinIO S3 object log; Postgres ownership; per-pod SQLite projection",
+ "topology":"kind: 3 fireweed pods; shared MinIO S3 object log; Postgres ownership; per-pod SQLite projection",
  "hardware":${HARDWARE@Q},"seed":int(${SEED@Q}),"duration_ms":int(${DURATION_MS@Q}),
  "fault_schedule":"after one redirected/retried push plus three owner pushes, delete active owner pod; await distinct owner and larger epoch",
  "exclusions":"density throughput managed-cloud S3/Postgres and the SP-06 modeled handoff profile; performance is covered by the separate E3 lane",

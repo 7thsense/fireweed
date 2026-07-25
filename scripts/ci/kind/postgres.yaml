@@ -23,11 +23,11 @@ spec:
           imagePullPolicy: IfNotPresent
           env:
             - name: POSTGRES_USER
-              value: pqueue
+              value: fireweed
             - name: POSTGRES_PASSWORD
-              value: pqueue
+              value: fireweed
             - name: POSTGRES_DB
-              value: pqueue
+              value: fireweed
           ports:
             - name: postgres
               containerPort: 5432
@@ -36,9 +36,9 @@ spec:
               command:
                 - pg_isready
                 - -U
-                - pqueue
+                - fireweed
                 - -d
-                - pqueue
+                - fireweed
             initialDelaySeconds: 3
             periodSeconds: 3
             timeoutSeconds: 2

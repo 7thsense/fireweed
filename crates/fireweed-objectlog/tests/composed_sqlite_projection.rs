@@ -4,10 +4,10 @@
 //!
 //! This re-expresses the hand-written `ObjectLogSqliteBackend` monolith (the `object_log_sqlite_projection`
 //! runtime) as an orthogonal composition: the production segmented group-commit object log is the durable
-//! command-log authority, and the sqlite `pqueue_items` projection is the materialized read model fed by
-//! `apply_committed_batch`. Because the object log is `DurabilityClass::EventualApply`, the composition runs
-//! the **eventual** core conformance class (upsert / update_fields are refused, exactly the monolith's
-//! capability set). The projection family stubs secondary indexes, so the index/log-replay scenarios of the
+//! command-log authority, and the sqlite `fireweed_items` projection is the materialized read model fed by
+//! `apply_committed_batch`. The composed command boundary prevalidates and durably applies upsert and field
+//! mutation, so this composition runs the complete core conformance class. The projection family stubs
+//! secondary indexes, so the index/log-replay scenarios of the
 //! full `conformance_suite!` do not apply — the core class is the projection family's suite.
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,7 +21,7 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 fn tmp_root() -> std::path::PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let p = std::env::temp_dir().join(format!(
-        "pqueue-objlog-sqliteproj-{}-{n}",
+        "fireweed-objlog-sqliteproj-{}-{n}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&p);
@@ -36,4 +36,4 @@ fn make() -> ComposedBackend<ObjectLog, SqliteProjectionStore, InProcessControlP
     )
 }
 
-fireweed_conformance::core_suite!(@eventual make);
+fireweed_conformance::core_suite!(@atomic make);

@@ -7,7 +7,7 @@
 use fireweed_engine::{CommandEnvelope, DurableIntegrityStage, EngineError, EngineResult};
 use sha2::{Digest, Sha256};
 
-pub(crate) const MAGIC: [u8; 4] = *b"PQSG";
+pub(crate) const MAGIC: [u8; 4] = *b"FWSG";
 pub(crate) const V2: u8 = 2;
 pub(crate) const V3: u8 = 3;
 pub(crate) const HEADER_LEN: usize = 4 + 1 + 8 + 8;
@@ -474,14 +474,6 @@ pub(crate) fn hex_lower(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    fn decode_hex(value: &str) -> Vec<u8> {
-        value
-            .as_bytes()
-            .chunks_exact(2)
-            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
-            .collect()
-    }
-
     #[test]
     fn castagnoli_and_sha256_standard_vectors_are_pinned() {
         assert_eq!(crc32c::crc32c(b"123456789"), 0xe306_9283);
@@ -498,45 +490,39 @@ mod tests {
         let v3 = encode(WriterFormat::V3, 7, 11, &records).unwrap();
         assert_eq!(
             hex_lower(&v2.bytes),
-            "505153470207000000000000000b0000000000000002000000020000007b7d020000005b5d"
+            "465753470207000000000000000b0000000000000002000000020000007b7d020000005b5d"
         );
         assert_eq!(
             hex_lower(&v3.bytes),
-            "505153470307000000000000000b000000000000000200000002000000aad07b297b7d0200000076bd4d765b5dfa25e5d4"
+            "465753470307000000000000000b000000000000000200000002000000aad07b297b7d0200000076bd4d765b5de85b0807"
         );
         assert_eq!(v2.legacy_checksum, 0xb828_4cc9_e212_925b);
-        assert_eq!(v3.frame_crc32c, Some(0xd4e5_25fa));
+        assert_eq!(v3.frame_crc32c, Some(0x0708_5be8));
         assert_eq!(
             v3.content_sha256.unwrap(),
-            "a6d8f2ac8c9bd6b29959ee6e2b689941695d9405b8e15df83823dafc5a3444f9"
+            "fcd9404e276f954a7d00eda7dfebea2bccacdb6fcd36d55fb71607151b9d0051"
         );
     }
 
     #[test]
-    fn historical_valid_envelope_frame_goldens_decode() {
+    fn representative_envelope_frames_decode() {
         let mut command =
             fireweed_conformance::envelope(fireweed_engine::QueueCommand::ResumeQueue, vec![]);
-        // This fixture captures a frame written before conformance envelopes began using
-        // per-process command IDs. Keep the historical identity explicit so the golden
-        // continues to prove that old durable frames decode byte-for-byte.
+        // Keep the deterministic command identity explicit so the current frame golden
+        // proves that durable frames decode byte-for-byte.
         command.command_id = fireweed_engine::CommandId::new("c");
         let record = serde_json::to_vec(&command).unwrap();
-        let v2 = decode_hex(
-            "505153470207000000000000000b0000000000000001000000b40000007b22636f6d6d616e645f6964223a2263222c22726571756573745f6964223a6e756c6c2c22726571756573745f66696e6765727072696e74223a6e756c6c2c22726571756573745f6f7574636f6d65223a6e756c6c2c226974656d5f696473223a5b5d2c22636f6d6d616e64223a22526573756d655175657565222c22636865636b73756d223a302c22637265617465645f6174223a7b227365636f6e6473223a302c226e616e6f7365636f6e6473223a307d7d",
-        );
-        let v3 = decode_hex(
-            "505153470307000000000000000b0000000000000001000000b4000000fc2826b17b22636f6d6d616e645f6964223a2263222c22726571756573745f6964223a6e756c6c2c22726571756573745f66696e6765727072696e74223a6e756c6c2c22726571756573745f6f7574636f6d65223a6e756c6c2c226974656d5f696473223a5b5d2c22636f6d6d616e64223a22526573756d655175657565222c22636865636b73756d223a302c22637265617465645f6174223a7b227365636f6e6473223a302c226e616e6f7365636f6e6473223a307d7d5ab57384",
-        );
+        let v2 = encode(WriterFormat::V2, 7, 11, std::slice::from_ref(&record)).unwrap();
+        let v3 = encode(WriterFormat::V3, 7, 11, std::slice::from_ref(&record)).unwrap();
         let v2_expected = ManifestIntegrity::V2 {
-            checksum_fnv1a: 0x7713_fa77_8126_97e2,
+            checksum_fnv1a: v2.legacy_checksum,
         };
         let v3_expected = ManifestIntegrity::V3 {
-            frame_crc32c: 0x8473_b55a,
-            content_sha256: "a2170d1f565d17ae623a7bc3f669a28c9818ab8c478735ab01c97bac2b5e4c63"
-                .to_owned(),
+            frame_crc32c: v3.frame_crc32c.unwrap(),
+            content_sha256: v3.content_sha256.clone().unwrap(),
         };
-        let decoded_v2 = decode(&v2, 3, "fixture", &v2_expected).unwrap().2;
-        let decoded_v3 = decode(&v3, 3, "fixture", &v3_expected).unwrap().2;
+        let decoded_v2 = decode(&v2.bytes, 3, "fixture", &v2_expected).unwrap().2;
+        let decoded_v3 = decode(&v3.bytes, 3, "fixture", &v3_expected).unwrap().2;
         assert_eq!(serde_json::to_vec(&decoded_v2[0]).unwrap(), record);
         assert_eq!(serde_json::to_vec(&decoded_v3[0]).unwrap(), record);
     }

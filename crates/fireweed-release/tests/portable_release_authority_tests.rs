@@ -20,11 +20,11 @@ fn portable(id: &str) -> LedgerRow {
         ("bounded_resources".into(), serde_json::json!(true)),
         ("source_revision".into(), serde_json::json!(REV)),
         ("checkout_revision".into(), serde_json::json!(REV)),
-        ("checkout_root".into(), serde_json::json!("/src/pqueue")),
+        ("checkout_root".into(), serde_json::json!("/src/fireweed")),
         ("checkout_clean".into(), serde_json::json!(true)),
         (
             "compile_source_root".into(),
-            serde_json::json!("/src/pqueue"),
+            serde_json::json!("/src/fireweed"),
         ),
         ("compile_source_root_bound".into(), serde_json::json!(true)),
         ("source_root_explicit".into(), serde_json::json!(true)),

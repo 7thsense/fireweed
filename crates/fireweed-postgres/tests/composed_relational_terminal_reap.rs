@@ -34,7 +34,7 @@ fn claim_req() -> ClaimRequest {
 }
 
 fn fresh_schema(tag: &str) -> String {
-    format!("pq_rel_term_{}_{}", std::process::id(), tag)
+    format!("fireweed_rel_term_{}_{}", std::process::id(), tag)
 }
 
 fn open(url: &str, schema: &str) -> PostgresRelationalBackend {
@@ -44,9 +44,9 @@ fn open(url: &str, schema: &str) -> PostgresRelationalBackend {
 
 #[test]
 fn reap_waits_for_emission_cursor_on_opted_in_queue() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
         eprintln!(
-            "POSTGRES UNIFIED COMPOSITION SKIPPED (reap_waits_for_emission_cursor_on_opted_in_queue) — set PQUEUE_PG_TEST_URL to a live DB"
+            "POSTGRES UNIFIED COMPOSITION SKIPPED (reap_waits_for_emission_cursor_on_opted_in_queue) — set FIREWEED_PG_TEST_URL to a live DB"
         );
         return;
     };
@@ -76,7 +76,7 @@ fn reap_waits_for_emission_cursor_on_opted_in_queue() {
         .expect("set schema");
     let terminal_sequence: i64 = c
         .query_one(
-            "SELECT last_command_sequence FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
+            "SELECT last_command_sequence FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
             &[&"t1", &"q1", &item_id.to_string()],
         )
         .unwrap()
@@ -102,9 +102,9 @@ fn reap_waits_for_emission_cursor_on_opted_in_queue() {
 
 #[test]
 fn reap_ignores_emission_cursor_for_opted_out_queue() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
         eprintln!(
-            "POSTGRES UNIFIED COMPOSITION SKIPPED (reap_ignores_emission_cursor_for_opted_out_queue) — set PQUEUE_PG_TEST_URL to a live DB"
+            "POSTGRES UNIFIED COMPOSITION SKIPPED (reap_ignores_emission_cursor_for_opted_out_queue) — set FIREWEED_PG_TEST_URL to a live DB"
         );
         return;
     };

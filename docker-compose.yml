@@ -2,13 +2,13 @@ services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_DB: pqueue
-      POSTGRES_USER: pqueue
-      POSTGRES_PASSWORD: pqueue
+      POSTGRES_DB: fireweed
+      POSTGRES_USER: fireweed
+      POSTGRES_PASSWORD: fireweed
     ports:
       - "55432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U pqueue -d pqueue"]
+      test: ["CMD-SHELL", "pg_isready -U fireweed -d fireweed"]
       interval: 1s
       timeout: 5s
       retries: 30

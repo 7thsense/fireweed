@@ -35,7 +35,7 @@ use fireweed_core::{
 };
 use fireweed_engine::QueueKey;
 use fireweed_memory::{ComposedMemoryBackend, ManualClock, composed_memory_backend};
-use fireweed_objectlog::ObjectLogBackend;
+use fireweed_objectlog::composed_objectlog_backend;
 use fireweed_sqlite::{
     SqliteRelationalBackend, composed_sqlite_backend, composed_sqlite_relational_in_memory,
 };
@@ -48,8 +48,8 @@ use fireweed_sqlite::{
 /// deterministically). Returns the handle and the clock.
 fn deployment() -> (RuntimeCore<ComposedMemoryBackend>, Arc<ManualClock>) {
     let clock = Arc::new(ManualClock::at(0));
-    let pq = RuntimeCore::new(Arc::new(composed_memory_backend()), clock.clone());
-    (pq, clock)
+    let fireweed = RuntimeCore::new(Arc::new(composed_memory_backend()), clock.clone());
+    (fireweed, clock)
 }
 
 /// A large-capacity queue definition (so a workflow can push/claim realistic batch sizes).
@@ -119,7 +119,7 @@ fn qk(tenant: &str, queue: &str) -> QueueKey {
 fn unique_temp_path(tag: &str) -> std::path::PathBuf {
     static N: AtomicU64 = AtomicU64::new(0);
     std::env::temp_dir().join(format!(
-        "pqueue-product-{tag}-{}-{}",
+        "fireweed-product-{tag}-{}-{}",
         std::process::id(),
         N.fetch_add(1, Ordering::SeqCst)
     ))
@@ -157,7 +157,7 @@ fn emit_ac_with_context(
     );
     let row = fireweed_release::LedgerRow {
         suite: "product_validation_tests".into(),
-        command: "cargo test -p pqueue --test product_validation_tests".into(),
+        command: "cargo test -p fireweed --test product_validation_tests".into(),
         backend_profile: backend_profile.into(),
         scale: "smoke".into(),
         seed: 0,
@@ -185,23 +185,24 @@ fn emit_ac_with_context(
 // AC-E2E-9 — downstream pacing is a NON-GOAL
 // ---------------------------------------------------------------------------
 
-/// AC-E2E-9 (TP-003): prove pqueue does NOT enforce downstream API rate/quota admission. Load many eligible
+/// AC-E2E-9 (TP-003): prove fireweed does NOT enforce downstream API rate/quota admission. Load many eligible
 /// items for one compatibility group, claim with caller-selected `max_items` and deliberate pauses, and
-/// compare results to eligibility/`max_items` ONLY — pqueue returns up to `max_items` subject only to normal
+/// compare results to eligibility/`max_items` ONLY — fireweed returns up to `max_items` subject only to normal
 /// eligibility/active-leases/batch-limits, a short/empty batch is valid, and it never withholds otherwise-
 /// eligible work for a downstream-rate reason. (FR-45, Non-Goals.)
 #[tokio::test]
 async fn downstream_pacing_non_goal_e2e() {
-    let (pq, clock) = deployment();
+    let (fireweed, clock) = deployment();
     let q = qk("paced", "calls");
-    pq.create_queue(qdef(
-        "paced",
-        "calls",
-        PriorityDirection::Ascending,
-        OrderingMode::Strict,
-    ))
-    .await
-    .unwrap();
+    fireweed
+        .create_queue(qdef(
+            "paced",
+            "calls",
+            PriorityDirection::Ascending,
+            OrderingMode::Strict,
+        ))
+        .await
+        .unwrap();
 
     // Load many eligible items. They all carry the same `group_key` (modeling one downstream API target),
     // though item-level claim pools by eligibility, not by group — the grouping is incidental to AC-E2E-9.
@@ -215,11 +216,11 @@ async fn downstream_pacing_non_goal_e2e() {
             ..Default::default()
         })
         .collect();
-    pq.push_batch(&q, items).await.unwrap();
+    fireweed.push_batch(&q, items).await.unwrap();
     // NON-GOAL proof part 1 — there is no "rate-deferred"/"admission" parking state: every accepted item is
     // immediately eligible (pending). The metrics surface is purely lifecycle {pending,leased,complete,failed}
     // — it exposes NO downstream-rate/admission state for an item to hide in.
-    let m0 = pq.metrics(&q).await.unwrap();
+    let m0 = fireweed.metrics(&q).await.unwrap();
     assert_eq!(
         (m0.pending, m0.leased, m0.complete, m0.failed),
         (total, 0, 0, 0),
@@ -240,7 +241,7 @@ async fn downstream_pacing_non_goal_e2e() {
     for &max in &[1usize, 25, 100, 100, 100, 100, 100, 100] {
         clock.set(pause_s); // wall-clock advances between calls; no rate path consults it
         pause_s += 5;
-        let got = pq.claim(&q, max, 3_600_000).await.unwrap();
+        let got = fireweed.claim(&q, max, 3_600_000).await.unwrap();
         let expected = (max as i64).min(remaining).max(0) as usize;
         assert_eq!(
             got.len(),
@@ -262,21 +263,27 @@ async fn downstream_pacing_non_goal_e2e() {
             next_priority += 1;
         }
         max_batch_seen = max_batch_seen.max(got.len());
-        pq.ack(&q, got.iter().map(|c| c.item_id)).await.unwrap();
+        fireweed
+            .ack(&q, got.iter().map(|c| c.item_id))
+            .await
+            .unwrap();
         claimed_total += got.len() as u64;
         remaining -= got.len() as i64;
         batches += 1;
     }
     // Drain whatever remains so we can prove the totals.
-    while pq.metrics(&q).await.unwrap().pending > 0 {
-        let got = pq.claim(&q, 100, 3_600_000).await.unwrap();
-        pq.ack(&q, got.iter().map(|c| c.item_id)).await.unwrap();
+    while fireweed.metrics(&q).await.unwrap().pending > 0 {
+        let got = fireweed.claim(&q, 100, 3_600_000).await.unwrap();
+        fireweed
+            .ack(&q, got.iter().map(|c| c.item_id))
+            .await
+            .unwrap();
         claimed_total += got.len() as u64;
         batches += 1;
     }
 
     // A claim on a now-empty queue is a VALID empty batch (no error, no downstream-rate "throttled" state).
-    let empty = pq.claim(&q, 100, 3_600_000).await.unwrap();
+    let empty = fireweed.claim(&q, 100, 3_600_000).await.unwrap();
     assert!(
         empty.is_empty(),
         "claim on a drained queue is a valid empty batch"
@@ -288,7 +295,7 @@ async fn downstream_pacing_non_goal_e2e() {
         claimed_total, total,
         "all eligible work was claimable; none withheld for a downstream-rate reason"
     );
-    let m = pq.metrics(&q).await.unwrap();
+    let m = fireweed.metrics(&q).await.unwrap();
     assert_eq!(
         (m.complete, m.pending, m.leased, m.failed),
         (total, 0, 0, 0),
@@ -317,18 +324,18 @@ async fn downstream_pacing_non_goal_e2e() {
 }
 
 // ---------------------------------------------------------------------------
-// AC-E2E-8 — generic priority + bounded-relaxed (pqueue is not timestamp-/Seventh-Sense-only)
+// AC-E2E-8 — generic priority + bounded-relaxed (fireweed is not timestamp-/Seventh-Sense-only)
 // ---------------------------------------------------------------------------
 
 /// Drain `q` fully in `batch`-sized claims (ack each), returning the claimed priorities in delivery order.
 async fn drain_priorities(
-    pq: &RuntimeCore<ComposedMemoryBackend>,
+    fireweed: &RuntimeCore<ComposedMemoryBackend>,
     q: &QueueKey,
     batch: usize,
 ) -> Vec<i64> {
     let mut order = Vec::new();
     loop {
-        let got = pq.claim(q, batch, 3_600_000).await.unwrap();
+        let got = fireweed.claim(q, batch, 3_600_000).await.unwrap();
         if got.is_empty() {
             break;
         }
@@ -350,7 +357,10 @@ async fn drain_priorities(
             );
             order.push(pri);
         }
-        pq.ack(q, got.iter().map(|c| c.item_id)).await.unwrap();
+        fireweed
+            .ack(q, got.iter().map(|c| c.item_id))
+            .await
+            .unwrap();
     }
     order
 }
@@ -399,27 +409,28 @@ fn distinct_grouped_items(n: u64) -> Vec<NewItem> {
         .collect()
 }
 
-/// AC-E2E-8 (TP-003): prove pqueue is NOT timestamp-only or Seventh-Sense-only. (a) A strict `int64`
+/// AC-E2E-8 (TP-003): prove fireweed is NOT timestamp-only or Seventh-Sense-only. (a) A strict `int64`
 /// DESCENDING queue delivers in strict priority order with 0 inversions; (b) a bounded-relaxed queue is
 /// accepted and makes progress (INV-4) with opaque payload/metadata round-tripping — using only generic
 /// int64 priorities + opaque bytes, no Seventh Sense metadata shape. (FR-1,2,4,5-9,12-16,18-21, Non-Goals.)
 #[tokio::test]
 async fn generic_priority_bounded_relaxed_e2e() {
-    let (pq, _clock) = deployment();
+    let (fireweed, _clock) = deployment();
     let n = 300u64;
 
     // ----- (a) STRICT int64 DESCENDING: 0 inversions vs the spec ordering tuple -----
     let strict = qk("generic", "strict-desc");
-    pq.create_queue(qdef(
-        "generic",
-        "strict-desc",
-        PriorityDirection::Descending,
-        OrderingMode::Strict,
-    ))
-    .await
-    .unwrap();
-    pq.push_batch(&strict, skewed_items(n)).await.unwrap();
-    let strict_order = drain_priorities(&pq, &strict, 32).await;
+    fireweed
+        .create_queue(qdef(
+            "generic",
+            "strict-desc",
+            PriorityDirection::Descending,
+            OrderingMode::Strict,
+        ))
+        .await
+        .unwrap();
+    fireweed.push_batch(&strict, skewed_items(n)).await.unwrap();
+    let strict_order = drain_priorities(&fireweed, &strict, 32).await;
     assert_eq!(strict_order.len() as u64, n, "all strict items delivered");
     // 0 inversions: descending strict ⇒ priorities are NON-INCREASING across the whole delivery order.
     let strict_inversions = strict_order.windows(2).filter(|w| w[0] < w[1]).count();
@@ -446,18 +457,20 @@ async fn generic_priority_bounded_relaxed_e2e() {
     // sequence whose rank error is NON-ZERO yet stays <= the declared bound (pqueue-b725d3ee).
     let bound: u32 = 8;
     let relaxed = qk("generic", "bounded-relaxed");
-    pq.create_queue(qdef_relaxed(
-        "generic",
-        "bounded-relaxed",
-        PriorityDirection::Ascending,
-        bound,
-    ))
-    .await
-    .expect("a bounded-relaxed queue is accepted");
-    pq.push_batch(&relaxed, distinct_grouped_items(n))
+    fireweed
+        .create_queue(qdef_relaxed(
+            "generic",
+            "bounded-relaxed",
+            PriorityDirection::Ascending,
+            bound,
+        ))
+        .await
+        .expect("a bounded-relaxed queue is accepted");
+    fireweed
+        .push_batch(&relaxed, distinct_grouped_items(n))
         .await
         .unwrap();
-    let relaxed_order = drain_priorities(&pq, &relaxed, 32).await;
+    let relaxed_order = drain_priorities(&fireweed, &relaxed, 32).await;
     // INV-4 progress: every eligible item was eventually claimed (the queue fully drained), and each
     // distinct priority appears exactly once (the oldest/highest-priority item is never starved).
     assert_eq!(
@@ -540,16 +553,16 @@ fn ts(seconds: i64) -> UtcTimestamp {
 /// max_items/cadence pacing; complete/fail/retry/release/rearm finalize mappings; progress to terminal
 /// (INV-4); tenant NAMESPACING (same queue_id under two tenants are independent queues with no cross-tenant
 /// leakage); metrics match the terminal state.
-/// ASSERTED (BQ pqueue-7a96f929): BatchUpdate reschedule via `pq.update` — re-pricing re-keys the
+/// ASSERTED (BQ pqueue-7a96f929): BatchUpdate reschedule via `fireweed.update` — re-pricing re-keys the
 /// eligibility order and rescheduling `not_before` re-gates eligibility; and SetGates close+reopen via
-/// `pq.set_gates` on the gate-capable relational backend — no gated item is claimed while its gate is
+/// `fireweed.set_gates` on the gate-capable relational backend — no gated item is claimed while its gate is
 /// blocked, eligibility restored on reopen.
 /// DEFERRED: cross-tenant AUTHZ denial lives in the auth layer (ADR-002), not this trusted library facade.
 #[tokio::test]
 async fn scheduled_action_delivery_e2e() {
-    let (pq, clock) = deployment();
-    let memory = scheduled_batch_delivery_profile(&pq, clock.clone(), "sched-mem").await;
-    let memory_idempotent = assert_keyed_upsert_converges(&pq, "sched-mem-idempotent").await;
+    let (fireweed, clock) = deployment();
+    let memory = scheduled_batch_delivery_profile(&fireweed, clock.clone(), "sched-mem").await;
+    let memory_idempotent = assert_keyed_upsert_converges(&fireweed, "sched-mem-idempotent").await;
 
     let sqlite_path = unique_temp_path("scheduled-sqlite");
     let _ = std::fs::remove_file(&sqlite_path);
@@ -567,28 +580,29 @@ async fn scheduled_action_delivery_e2e() {
     let _ = std::fs::remove_dir_all(&dir);
     let object_clock = Arc::new(ManualClock::at(0));
     let objectlog = RuntimeCore::new(
-        Arc::new(ObjectLogBackend::open(&dir).expect("open object log")),
+        Arc::new(composed_objectlog_backend(&dir).expect("open object log")),
         object_clock.clone(),
     );
     let object = scheduled_batch_delivery_profile(&objectlog, object_clock, "sched-obj").await;
-    let objectlog_upsert_unavailable =
-        assert_upsert_unavailable(&objectlog, "sched-obj-idempotent").await;
+    let objectlog_idempotent =
+        assert_keyed_upsert_converges(&objectlog, "sched-obj-idempotent").await;
     let _ = std::fs::remove_dir_all(&dir);
 
     // Worker-obligation proof: mutate structured fields before claim, then consume only the claimed item
     // shape when executing the API-003 transition. No secondary queue-data lookup is needed here: the
     // worker step uses the returned `ClaimedItem.fields` map directly.
     let worker_q = qk("sched", "worker-fields");
-    pq.create_queue(qdef(
-        "sched",
-        "worker-fields",
-        PriorityDirection::Ascending,
-        OrderingMode::Strict,
-    ))
-    .await
-    .unwrap();
+    fireweed
+        .create_queue(qdef(
+            "sched",
+            "worker-fields",
+            PriorityDirection::Ascending,
+            OrderingMode::Strict,
+        ))
+        .await
+        .unwrap();
     clock.set(200);
-    let worker_item = pq
+    let worker_item = fireweed
         .push(
             &worker_q,
             NewItem {
@@ -607,28 +621,29 @@ async fn scheduled_action_delivery_e2e() {
         )
         .await
         .unwrap();
-    pq.update_fields(
-        &worker_q,
-        worker_item,
-        BTreeMap::from([
-            (
-                "worker_payload".to_string(),
-                Some(Bytes::from_static(b"dispatch-from-updated-fields")),
-            ),
-            ("stale_marker".to_string(), None),
-            (
-                "worker_stage".to_string(),
-                Some(Bytes::from_static(b"ready")),
-            ),
-        ]),
-        PayloadUpdate::Keep,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    fireweed
+        .update_fields(
+            &worker_q,
+            worker_item,
+            BTreeMap::from([
+                (
+                    "worker_payload".to_string(),
+                    Some(Bytes::from_static(b"dispatch-from-updated-fields")),
+                ),
+                ("stale_marker".to_string(), None),
+                (
+                    "worker_stage".to_string(),
+                    Some(Bytes::from_static(b"ready")),
+                ),
+            ]),
+            PayloadUpdate::Keep,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
     clock.set(250);
-    let claimed = pq.claim(&worker_q, 1, 60_000).await.unwrap();
+    let claimed = fireweed.claim(&worker_q, 1, 60_000).await.unwrap();
     assert_eq!(
         claimed.len(),
         1,
@@ -661,7 +676,7 @@ async fn scheduled_action_delivery_e2e() {
         lease_expires_at: claimed.lease_expires_at,
         item_version: claimed.item_version,
     };
-    let outcomes = pq
+    let outcomes = fireweed
         .commit(
             &worker_q,
             CommitRequest {
@@ -689,7 +704,7 @@ async fn scheduled_action_delivery_e2e() {
         }
         other => panic!("expected committed worker transition, got {other:?}"),
     };
-    let lifecycle = pq.claim(&worker_q, 1, 60_000).await.unwrap();
+    let lifecycle = fireweed.claim(&worker_q, 1, 60_000).await.unwrap();
     assert_eq!(
         lifecycle.len(),
         1,
@@ -701,8 +716,8 @@ async fn scheduled_action_delivery_e2e() {
         Some(worker_payload.as_ref()),
         "follow-up work is built from the claimed item's current field map"
     );
-    pq.ack(&worker_q, [lifecycle_item_id]).await.unwrap();
-    let worker_metrics = pq.metrics(&worker_q).await.unwrap();
+    fireweed.ack(&worker_q, [lifecycle_item_id]).await.unwrap();
+    let worker_metrics = fireweed.metrics(&worker_q).await.unwrap();
     assert_eq!(
         (
             worker_metrics.complete,
@@ -720,43 +735,47 @@ async fn scheduled_action_delivery_e2e() {
     // trusted library facade; it is not exercised here.)
     let qa = qk("iso-a", "shared");
     let qb = qk("iso-b", "shared");
-    pq.create_queue(qdef(
-        "iso-a",
-        "shared",
-        PriorityDirection::Ascending,
-        OrderingMode::Strict,
-    ))
-    .await
-    .unwrap();
-    pq.create_queue(qdef(
-        "iso-b",
-        "shared",
-        PriorityDirection::Ascending,
-        OrderingMode::Strict,
-    ))
-    .await
-    .unwrap();
+    fireweed
+        .create_queue(qdef(
+            "iso-a",
+            "shared",
+            PriorityDirection::Ascending,
+            OrderingMode::Strict,
+        ))
+        .await
+        .unwrap();
+    fireweed
+        .create_queue(qdef(
+            "iso-b",
+            "shared",
+            PriorityDirection::Ascending,
+            OrderingMode::Strict,
+        ))
+        .await
+        .unwrap();
     clock.set(0);
-    pq.push(
-        &qa,
-        NewItem {
-            payload: Some(Bytes::from_static(b"tenant-a")),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-    pq.push(
-        &qb,
-        NewItem {
-            payload: Some(Bytes::from_static(b"tenant-b")),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-    let from_a = pq.claim(&qa, 10, 60_000).await.unwrap();
-    let from_b = pq.claim(&qb, 10, 60_000).await.unwrap();
+    fireweed
+        .push(
+            &qa,
+            NewItem {
+                payload: Some(Bytes::from_static(b"tenant-a")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    fireweed
+        .push(
+            &qb,
+            NewItem {
+                payload: Some(Bytes::from_static(b"tenant-b")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let from_a = fireweed.claim(&qa, 10, 60_000).await.unwrap();
+    let from_b = fireweed.claim(&qb, 10, 60_000).await.unwrap();
     assert_eq!(
         from_a.len(),
         1,
@@ -782,16 +801,17 @@ async fn scheduled_action_delivery_e2e() {
     // (1) reschedule not_before: a deferred item is ineligible until its time; pulling its not_before to
     // now makes it claimable. (2) reschedule priority: re-pricing re-keys the eligibility order.
     let resched_q = qk("sched", "reschedule");
-    pq.create_queue(qdef(
-        "sched",
-        "reschedule",
-        PriorityDirection::Ascending,
-        OrderingMode::Strict,
-    ))
-    .await
-    .unwrap();
+    fireweed
+        .create_queue(qdef(
+            "sched",
+            "reschedule",
+            PriorityDirection::Ascending,
+            OrderingMode::Strict,
+        ))
+        .await
+        .unwrap();
     clock.set(0);
-    let deferred = pq
+    let deferred = fireweed
         .push(
             &resched_q,
             NewItem {
@@ -804,20 +824,25 @@ async fn scheduled_action_delivery_e2e() {
         .await
         .unwrap();
     assert!(
-        pq.claim(&resched_q, 10, 60_000).await.unwrap().is_empty(),
+        fireweed
+            .claim(&resched_q, 10, 60_000)
+            .await
+            .unwrap()
+            .is_empty(),
         "a deferred item is ineligible before its not_before"
     );
     // reschedule its not_before to now (Keep priority) → immediately eligible.
-    pq.update(
-        &resched_q,
-        deferred,
-        ScheduleUpdate::Keep,
-        ScheduleUpdate::Set(Some(ts(0))),
-        None,
-    )
-    .await
-    .unwrap();
-    let pulled = pq.claim(&resched_q, 10, 60_000).await.unwrap();
+    fireweed
+        .update(
+            &resched_q,
+            deferred,
+            ScheduleUpdate::Keep,
+            ScheduleUpdate::Set(Some(ts(0))),
+            None,
+        )
+        .await
+        .unwrap();
+    let pulled = fireweed.claim(&resched_q, 10, 60_000).await.unwrap();
     assert_eq!(
         pulled.len(),
         1,
@@ -825,19 +850,20 @@ async fn scheduled_action_delivery_e2e() {
     );
     assert_eq!(pulled[0].item_id, deferred);
     let reschedule_not_before = pulled.len() == 1 && pulled[0].item_id == deferred;
-    pq.ack(&resched_q, [deferred]).await.unwrap();
+    fireweed.ack(&resched_q, [deferred]).await.unwrap();
 
     // priority reschedule re-keys claim order: A(10) leads B(20) ascending; re-price A above B and B leads.
     let reprice_q = qk("sched", "reprice");
-    pq.create_queue(qdef(
-        "sched",
-        "reprice",
-        PriorityDirection::Ascending,
-        OrderingMode::Strict,
-    ))
-    .await
-    .unwrap();
-    let a = pq
+    fireweed
+        .create_queue(qdef(
+            "sched",
+            "reprice",
+            PriorityDirection::Ascending,
+            OrderingMode::Strict,
+        ))
+        .await
+        .unwrap();
+    let a = fireweed
         .push(
             &reprice_q,
             NewItem {
@@ -848,7 +874,7 @@ async fn scheduled_action_delivery_e2e() {
         )
         .await
         .unwrap();
-    let b = pq
+    let b = fireweed
         .push(
             &reprice_q,
             NewItem {
@@ -859,16 +885,17 @@ async fn scheduled_action_delivery_e2e() {
         )
         .await
         .unwrap();
-    pq.update(
-        &reprice_q,
-        a,
-        ScheduleUpdate::Set(Some(PriorityValue::Int64(30))),
-        ScheduleUpdate::Keep,
-        None,
-    )
-    .await
-    .unwrap();
-    let order = pq.claim(&reprice_q, 2, 60_000).await.unwrap();
+    fireweed
+        .update(
+            &reprice_q,
+            a,
+            ScheduleUpdate::Set(Some(PriorityValue::Int64(30))),
+            ScheduleUpdate::Keep,
+            None,
+        )
+        .await
+        .unwrap();
+    let order = fireweed.claim(&reprice_q, 2, 60_000).await.unwrap();
     assert_eq!(
         (order[0].item_id, order[1].item_id),
         (b, a),
@@ -884,9 +911,9 @@ async fn scheduled_action_delivery_e2e() {
     emit_ac_with_context(
         "AC-E2E-1",
         &["INV-4"],
-        "scheduled actions use stable client_item_key, become eligible at not_before, obey caller max_items/cadence pacing, map application results onto complete/fail/retry/release/rearm, preserve the no-rate-admission boundary, remain tenant-namespaced, and reach terminal metrics on memory/sqlite/object-log smoke profiles; BatchUpdate reschedule (pq.update) re-keys priority order and re-gates not_before eligibility; SetGates close+reopen (pq.set_gates) keeps a gated item unclaimable while blocked then restores it on the gate-capable relational backend [cross-tenant AUTHZ denial is the auth layer]",
+        "scheduled actions use stable client_item_key, become eligible at not_before, obey caller max_items/cadence pacing, map application results onto complete/fail/retry/release/rearm, preserve the no-rate-admission boundary, remain tenant-namespaced, and reach terminal metrics on memory/sqlite/object-log smoke profiles; BatchUpdate reschedule (fireweed.update) re-keys priority order and re-gates not_before eligibility; SetGates close+reopen (fireweed.set_gates) keeps a gated item unclaimable while blocked then restores it on the gate-capable relational backend [cross-tenant AUTHZ denial is the auth layer]",
         "memory+sqlite+object_log_sqlite_projection+relational_gates",
-        "in-process lib facade over MemoryBackend, SqliteBackend, ObjectLogBackend, and SqliteRelationalBackend (gates); release shape is the provisioned run",
+        "in-process lib facade over memory, SQLite, composed object-log, and SQLite relational storage (gates); release shape is the provisioned run",
         BTreeMap::from([
             (
                 "scheduled_actions".into(),
@@ -929,7 +956,7 @@ async fn scheduled_action_delivery_e2e() {
                 serde_json::json!({
                     "memory": memory_idempotent,
                     "sqlite": sqlite_idempotent,
-                    "object_log_upsert_unavailable": objectlog_upsert_unavailable
+                    "object_log": objectlog_idempotent
                 }),
             ),
             (
@@ -966,19 +993,20 @@ struct ScheduledProfileEvidence {
 }
 
 async fn scheduled_batch_delivery_profile<B: LibBackend>(
-    pq: &RuntimeCore<B>,
+    fireweed: &RuntimeCore<B>,
     clock: Arc<ManualClock>,
     tenant: &str,
 ) -> ScheduledProfileEvidence {
     let q = qk(tenant, "campaign");
-    pq.create_queue(qdef(
-        tenant,
-        "campaign",
-        PriorityDirection::Ascending,
-        OrderingMode::Strict,
-    ))
-    .await
-    .unwrap();
+    fireweed
+        .create_queue(qdef(
+            tenant,
+            "campaign",
+            PriorityDirection::Ascending,
+            OrderingMode::Strict,
+        ))
+        .await
+        .unwrap();
 
     let actions = [
         ("complete", 10i64),
@@ -996,10 +1024,10 @@ async fn scheduled_batch_delivery_profile<B: LibBackend>(
             payload: Some(Bytes::from(outcome.as_bytes().to_vec())),
             ..Default::default()
         };
-        pq.push(&q, item).await.unwrap();
+        fireweed.push(&q, item).await.unwrap();
     }
     assert!(
-        pq.claim(&q, 10, 60_000).await.unwrap().is_empty(),
+        fireweed.claim(&q, 10, 60_000).await.unwrap().is_empty(),
         "not_before prevents early delivery"
     );
 
@@ -1009,62 +1037,66 @@ async fn scheduled_batch_delivery_profile<B: LibBackend>(
     let mut max_items_pacing_observed = true;
     let mut stable_client_keys_observed = true;
 
-    let complete = claim_one(pq, &q, &mut delivered_order, &mut delivered_ids).await;
+    let complete = claim_one(fireweed, &q, &mut delivered_order, &mut delivered_ids).await;
     assert_eq!(payload_label(&complete), "complete");
     assert_eq!(
         complete.client_item_key.as_str(),
         format!("{tenant}-complete")
     );
-    pq.ack(&q, [complete.item_id]).await.unwrap();
+    fireweed.ack(&q, [complete.item_id]).await.unwrap();
 
-    let failed = claim_one(pq, &q, &mut delivered_order, &mut delivered_ids).await;
+    let failed = claim_one(fireweed, &q, &mut delivered_order, &mut delivered_ids).await;
     assert_eq!(payload_label(&failed), "fail");
     stable_client_keys_observed &= failed.client_item_key.as_str() == format!("{tenant}-fail");
-    pq.fail(&q, [failed.item_id]).await.unwrap();
+    fireweed.fail(&q, [failed.item_id]).await.unwrap();
 
-    let retry = claim_one(pq, &q, &mut delivered_order, &mut delivered_ids).await;
+    let retry = claim_one(fireweed, &q, &mut delivered_order, &mut delivered_ids).await;
     assert_eq!(payload_label(&retry), "retry");
     stable_client_keys_observed &= retry.client_item_key.as_str() == format!("{tenant}-retry");
-    pq.nack(
-        &q,
-        [retry.item_id],
-        Nack::Retry {
-            not_before: Some(ts(130)),
-        },
-    )
-    .await
-    .unwrap();
+    fireweed
+        .nack(
+            &q,
+            [retry.item_id],
+            Nack::Retry {
+                not_before: Some(ts(130)),
+            },
+        )
+        .await
+        .unwrap();
 
-    let release = claim_one(pq, &q, &mut delivered_order, &mut delivered_ids).await;
+    let release = claim_one(fireweed, &q, &mut delivered_order, &mut delivered_ids).await;
     assert_eq!(payload_label(&release), "release");
     stable_client_keys_observed &= release.client_item_key.as_str() == format!("{tenant}-release");
-    pq.nack(&q, [release.item_id], Nack::Release).await.unwrap();
-    let release_again = pq.claim(&q, 1, 60_000).await.unwrap();
+    fireweed
+        .nack(&q, [release.item_id], Nack::Release)
+        .await
+        .unwrap();
+    let release_again = fireweed.claim(&q, 1, 60_000).await.unwrap();
     max_items_pacing_observed &= release_again.len() == 1;
     assert_eq!(release_again[0].item_id, release.item_id);
-    pq.ack(&q, [release_again[0].item_id]).await.unwrap();
+    fireweed.ack(&q, [release_again[0].item_id]).await.unwrap();
 
-    let rearm = claim_one(pq, &q, &mut delivered_order, &mut delivered_ids).await;
+    let rearm = claim_one(fireweed, &q, &mut delivered_order, &mut delivered_ids).await;
     assert_eq!(payload_label(&rearm), "rearm");
     stable_client_keys_observed &= rearm.client_item_key.as_str() == format!("{tenant}-rearm");
-    pq.rearm(&q, [rearm.item_id]).await.unwrap();
-    let rearm_again = pq.claim(&q, 1, 60_000).await.unwrap();
+    fireweed.rearm(&q, [rearm.item_id]).await.unwrap();
+    let rearm_again = fireweed.claim(&q, 1, 60_000).await.unwrap();
     max_items_pacing_observed &= rearm_again.len() == 1;
     assert_eq!(rearm_again[0].item_id, rearm.item_id);
-    pq.ack(&q, [rearm_again[0].item_id]).await.unwrap();
+    fireweed.ack(&q, [rearm_again[0].item_id]).await.unwrap();
 
     clock.set(120);
     assert!(
-        pq.claim(&q, 1, 60_000).await.unwrap().is_empty(),
-        "retry backoff is caller-chosen not_before, not pqueue rate admission"
+        fireweed.claim(&q, 1, 60_000).await.unwrap().is_empty(),
+        "retry backoff is caller-chosen not_before, not fireweed rate admission"
     );
     clock.set(130);
-    let retry_again = pq.claim(&q, 1, 60_000).await.unwrap();
+    let retry_again = fireweed.claim(&q, 1, 60_000).await.unwrap();
     max_items_pacing_observed &= retry_again.len() == 1;
     assert_eq!(retry_again[0].item_id, retry.item_id);
-    pq.ack(&q, [retry_again[0].item_id]).await.unwrap();
+    fireweed.ack(&q, [retry_again[0].item_id]).await.unwrap();
 
-    let m = pq.metrics(&q).await.unwrap();
+    let m = fireweed.metrics(&q).await.unwrap();
     assert_eq!(
         (m.complete, m.failed, m.pending, m.leased),
         (4, 1, 0, 0),
@@ -1083,16 +1115,16 @@ async fn scheduled_batch_delivery_profile<B: LibBackend>(
 }
 
 async fn claim_one<B: LibBackend>(
-    pq: &RuntimeCore<B>,
+    fireweed: &RuntimeCore<B>,
     q: &QueueKey,
     order: &mut Vec<i64>,
     ids: &mut Vec<ItemId>,
 ) -> fireweed::ClaimedItem {
-    let got = pq.claim(q, 1, 60_000).await.unwrap();
+    let got = fireweed.claim(q, 1, 60_000).await.unwrap();
     assert_eq!(
         got.len(),
         1,
-        "caller-selected max_items=1 paces delivery; pqueue returns the one eligible item instead of applying downstream admission"
+        "caller-selected max_items=1 paces delivery; fireweed returns the one eligible item instead of applying downstream admission"
     );
     let item = got.into_iter().next().unwrap();
     if let Some(PriorityValue::Int64(n)) = item.priority {
@@ -1106,19 +1138,23 @@ fn payload_label(item: &fireweed::ClaimedItem) -> String {
     String::from_utf8(item.payload.clone().expect("payload").to_vec()).expect("utf8 payload")
 }
 
-async fn assert_keyed_upsert_converges<B: LibBackend>(pq: &RuntimeCore<B>, tenant: &str) -> bool {
+async fn assert_keyed_upsert_converges<B: LibBackend>(
+    fireweed: &RuntimeCore<B>,
+    tenant: &str,
+) -> bool {
     let q = qk(tenant, "campaign");
-    pq.create_queue(qdef(
-        tenant,
-        "campaign",
-        PriorityDirection::Ascending,
-        OrderingMode::Strict,
-    ))
-    .await
-    .unwrap();
+    fireweed
+        .create_queue(qdef(
+            tenant,
+            "campaign",
+            PriorityDirection::Ascending,
+            OrderingMode::Strict,
+        ))
+        .await
+        .unwrap();
 
     let key = ClientItemKey::new(format!("{tenant}-stable")).unwrap();
-    let first = pq
+    let first = fireweed
         .upsert(
             &q,
             key.clone(),
@@ -1134,7 +1170,7 @@ async fn assert_keyed_upsert_converges<B: LibBackend>(pq: &RuntimeCore<B>, tenan
         UpsertOutcome::Inserted { item_id } => item_id,
         UpsertOutcome::Replaced { .. } => panic!("first upsert inserts"),
     };
-    let second = pq
+    let second = fireweed
         .upsert(
             &q,
             key.clone(),
@@ -1157,7 +1193,7 @@ async fn assert_keyed_upsert_converges<B: LibBackend>(pq: &RuntimeCore<B>, tenan
         UpsertOutcome::Inserted { .. } => panic!("second upsert replaces the pending item"),
     };
 
-    let got = pq.claim(&q, 10, 60_000).await.unwrap();
+    let got = fireweed.claim(&q, 10, 60_000).await.unwrap();
     assert_eq!(
         got.len(),
         1,
@@ -1166,33 +1202,6 @@ async fn assert_keyed_upsert_converges<B: LibBackend>(pq: &RuntimeCore<B>, tenan
     assert_eq!(got[0].item_id, second_id);
     assert_eq!(got[0].client_item_key, key);
     assert_eq!(got[0].payload.as_deref(), Some(b"second".as_ref()));
-    true
-}
-
-async fn assert_upsert_unavailable<B: LibBackend>(pq: &RuntimeCore<B>, tenant: &str) -> bool {
-    let q = qk(tenant, "campaign");
-    pq.create_queue(qdef(
-        tenant,
-        "campaign",
-        PriorityDirection::Ascending,
-        OrderingMode::Strict,
-    ))
-    .await
-    .unwrap();
-
-    let err = pq
-        .upsert(
-            &q,
-            ClientItemKey::new(format!("{tenant}-stable")).unwrap(),
-            NewItem {
-                priority: Some(PriorityValue::Int64(10)),
-                payload: Some(Bytes::from_static(b"object-log-upsert")),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect_err("object-log profile keeps replace-if-pending unavailable");
-    assert_eq!(err, EngineError::Unavailable);
     true
 }
 
@@ -1216,22 +1225,23 @@ async fn assert_upsert_unavailable<B: LibBackend>(pq: &RuntimeCore<B>, tenant: &
 /// drives the item terminal (Complete) instead of re-arming.
 #[tokio::test]
 async fn jobs_connectors_recurring_e2e() {
-    let (pq, clock) = deployment();
+    let (fireweed, clock) = deployment();
 
     // max_attempts = 2 so the retry-exhaustion counterfactual bites in two cycles.
     let rec_q = qk("jobs", "connectors");
-    pq.create_queue(qdef_attempts(
-        "jobs",
-        "connectors",
-        PriorityDirection::Ascending,
-        OrderingMode::Strict,
-        2,
-    ))
-    .await
-    .unwrap();
+    fireweed
+        .create_queue(qdef_attempts(
+            "jobs",
+            "connectors",
+            PriorityDirection::Ascending,
+            OrderingMode::Strict,
+            2,
+        ))
+        .await
+        .unwrap();
 
     // --- recurring singleton: one logical poll-cursor item, repeated claim→rearm cycles ---
-    let job = pq
+    let job = fireweed
         .push(
             &rec_q,
             NewItem {
@@ -1245,7 +1255,7 @@ async fn jobs_connectors_recurring_e2e() {
     let mut attempts_per_cycle = Vec::new();
     let cycles = 5;
     for _ in 0..cycles {
-        let got = pq.claim(&rec_q, 10, 60_000).await.unwrap();
+        let got = fireweed.claim(&rec_q, 10, 60_000).await.unwrap();
         assert_eq!(
             got.len(),
             1,
@@ -1261,14 +1271,14 @@ async fn jobs_connectors_recurring_e2e() {
         );
         attempts_per_cycle.push(got[0].attempt_count);
         versions.push(got[0].item_version);
-        pq.rearm(&rec_q, [got[0].item_id]).await.unwrap();
+        fireweed.rearm(&rec_q, [got[0].item_id]).await.unwrap();
     }
     assert!(
         versions.windows(2).all(|w| w[1] > w[0]),
         "item_version increases monotonically across re-arms: {versions:?}"
     );
     // Survived 5 cycles (> max_attempts=2): rearm never exhausted the budget; still exactly one item, pending.
-    let m = pq.metrics(&rec_q).await.unwrap();
+    let m = fireweed.metrics(&rec_q).await.unwrap();
     assert_eq!(
         (m.pending, m.failed),
         (1, 0),
@@ -1291,9 +1301,9 @@ async fn jobs_connectors_recurring_e2e() {
         mode: RecurrenceMode::Recurring,
         until: Some(ts(10_000)),
     };
-    pq.create_queue(idle_def).await.unwrap();
+    fireweed.create_queue(idle_def).await.unwrap();
     clock.set(0);
-    let idle = pq
+    let idle = fireweed
         .push(
             &idle_q,
             NewItem {
@@ -1304,19 +1314,19 @@ async fn jobs_connectors_recurring_e2e() {
         .await
         .unwrap();
     // occurrence 1 at t=0
-    let occ1 = pq.claim(&idle_q, 10, 60_000).await.unwrap();
+    let occ1 = fireweed.claim(&idle_q, 10, 60_000).await.unwrap();
     assert_eq!(occ1.len(), 1);
     assert_eq!(occ1[0].item_id, idle);
     // rearm for the NEXT occurrence at t=100 (the idle recurrence interval)
-    pq.rearm_at(&idle_q, [idle], ts(100)).await.unwrap();
+    fireweed.rearm_at(&idle_q, [idle], ts(100)).await.unwrap();
     // IDLE: still at t=0, the item is ineligible — excluded from the eligible/oldest-eligible selection.
-    let idle_now = pq.claim(&idle_q, 10, 60_000).await.unwrap();
+    let idle_now = fireweed.claim(&idle_q, 10, 60_000).await.unwrap();
     assert!(
         idle_now.is_empty(),
         "an idle recurring item is ineligible until its next occurrence (rearm set a future not_before, and not_before-gated items are excluded from eligible selection)"
     );
     // It is parked on not_before (alive/pending), NOT terminal — the rearm did not fail or drop it.
-    let im = pq.metrics(&idle_q).await.unwrap();
+    let im = fireweed.metrics(&idle_q).await.unwrap();
     assert_eq!(
         (im.pending, im.leased, im.failed, im.complete),
         (1, 0, 0, 0),
@@ -1324,7 +1334,7 @@ async fn jobs_connectors_recurring_e2e() {
     );
     // advance to the next occurrence: the SAME id becomes eligible again.
     clock.set(100);
-    let occ2 = pq.claim(&idle_q, 10, 60_000).await.unwrap();
+    let occ2 = fireweed.claim(&idle_q, 10, 60_000).await.unwrap();
     assert_eq!(
         occ2.len(),
         1,
@@ -1348,15 +1358,18 @@ async fn jobs_connectors_recurring_e2e() {
         mode: RecurrenceMode::Recurring,
         until: Some(ts(100)),
     };
-    pq.create_queue(until_def).await.unwrap();
+    fireweed.create_queue(until_def).await.unwrap();
     clock.set(0);
-    let bounded = pq.push(&until_q, NewItem::default()).await.unwrap();
-    let bg = pq.claim(&until_q, 1, 60_000).await.unwrap();
+    let bounded = fireweed.push(&until_q, NewItem::default()).await.unwrap();
+    let bg = fireweed.claim(&until_q, 1, 60_000).await.unwrap();
     assert_eq!(bg.len(), 1);
     // A rearm for an occurrence AT `until` (t=100, not strictly past) keeps the series alive.
-    pq.rearm_at(&until_q, [bounded], ts(100)).await.unwrap();
+    fireweed
+        .rearm_at(&until_q, [bounded], ts(100))
+        .await
+        .unwrap();
     clock.set(100);
-    let still = pq.claim(&until_q, 1, 60_000).await.unwrap();
+    let still = fireweed.claim(&until_q, 1, 60_000).await.unwrap();
     assert_eq!(
         still.len(),
         1,
@@ -1364,8 +1377,11 @@ async fn jobs_connectors_recurring_e2e() {
     );
     assert_eq!(still[0].item_id, bounded);
     // A rearm for an occurrence PAST `until` (t=101) drives the item terminal — the series has ended.
-    pq.rearm_at(&until_q, [bounded], ts(101)).await.unwrap();
-    let um = pq.metrics(&until_q).await.unwrap();
+    fireweed
+        .rearm_at(&until_q, [bounded], ts(101))
+        .await
+        .unwrap();
+    let um = fireweed.metrics(&until_q).await.unwrap();
     assert_eq!(
         (um.pending, um.leased, um.complete),
         (0, 0, 1),
@@ -1375,34 +1391,40 @@ async fn jobs_connectors_recurring_e2e() {
     // and it never recurs again, no matter how far the clock advances.
     clock.set(1_000_000);
     assert!(
-        pq.claim(&until_q, 10, 60_000).await.unwrap().is_empty(),
+        fireweed
+            .claim(&until_q, 10, 60_000)
+            .await
+            .unwrap()
+            .is_empty(),
         "a past-until recurring item does not recur"
     );
 
     // --- retry COUNTERFACTUAL (same max_attempts=2): nack(Retry) DOES consume the budget → terminal ---
     let retry_q = qk("jobs", "retrying");
-    pq.create_queue(qdef_attempts(
-        "jobs",
-        "retrying",
-        PriorityDirection::Ascending,
-        OrderingMode::Strict,
-        2,
-    ))
-    .await
-    .unwrap();
-    let _ = pq.push(&retry_q, NewItem::default()).await.unwrap();
-    for _ in 0..2 {
-        let got = pq.claim(&retry_q, 1, 60_000).await.unwrap();
-        assert_eq!(got.len(), 1);
-        pq.nack(
-            &retry_q,
-            got.iter().map(|c| c.item_id),
-            Nack::Retry { not_before: None },
-        )
+    fireweed
+        .create_queue(qdef_attempts(
+            "jobs",
+            "retrying",
+            PriorityDirection::Ascending,
+            OrderingMode::Strict,
+            2,
+        ))
         .await
         .unwrap();
+    let _ = fireweed.push(&retry_q, NewItem::default()).await.unwrap();
+    for _ in 0..2 {
+        let got = fireweed.claim(&retry_q, 1, 60_000).await.unwrap();
+        assert_eq!(got.len(), 1);
+        fireweed
+            .nack(
+                &retry_q,
+                got.iter().map(|c| c.item_id),
+                Nack::Retry { not_before: None },
+            )
+            .await
+            .unwrap();
     }
-    let retry_terminal = pq.metrics(&retry_q).await.unwrap();
+    let retry_terminal = fireweed.metrics(&retry_q).await.unwrap();
     assert_eq!(
         (retry_terminal.failed, retry_terminal.pending),
         (1, 0),
@@ -1411,25 +1433,26 @@ async fn jobs_connectors_recurring_e2e() {
 
     // --- PurgeItems teardown: idempotent + late finalize → not_found ---
     let purge_q = qk("jobs", "teardown");
-    pq.create_queue(qdef(
-        "jobs",
-        "teardown",
-        PriorityDirection::Ascending,
-        OrderingMode::Strict,
-    ))
-    .await
-    .unwrap();
-    let pid = pq.push(&purge_q, NewItem::default()).await.unwrap();
-    let claimed = pq.claim(&purge_q, 1, 60_000).await.unwrap();
+    fireweed
+        .create_queue(qdef(
+            "jobs",
+            "teardown",
+            PriorityDirection::Ascending,
+            OrderingMode::Strict,
+        ))
+        .await
+        .unwrap();
+    let pid = fireweed.push(&purge_q, NewItem::default()).await.unwrap();
+    let claimed = fireweed.claim(&purge_q, 1, 60_000).await.unwrap();
     assert_eq!(claimed.len(), 1, "item leased before operator teardown");
-    let n1 = pq.purge(&purge_q, [pid], true).await.unwrap(); // force: the item is leased
+    let n1 = fireweed.purge(&purge_q, [pid], true).await.unwrap(); // force: the item is leased
     assert_eq!(n1, 1, "purge removes the leased item (force)");
-    let n2 = pq.purge(&purge_q, [pid], true).await.unwrap();
+    let n2 = fireweed.purge(&purge_q, [pid], true).await.unwrap();
     assert_eq!(
         n2, 0,
         "purge is IDEMPOTENT: a second purge of the same id is a no-op (0 removed)"
     );
-    let late = pq.ack(&purge_q, [pid]).await;
+    let late = fireweed.ack(&purge_q, [pid]).await;
     let late_not_found = matches!(late, Err(EngineError::NotFound));
     assert!(
         late_not_found,
@@ -1491,10 +1514,7 @@ fn group_qdef(tenant: &str, queue: &str, max_eligible_group_size: u64) -> QueueD
 }
 
 /// AC-E2E-2 (TP-003): model a downstream API that accepts up to N distinct lead groups — a group-batching
-/// queue. The whole-group SELECTION (claim/finalize whole eligible groups, under contention) is NOT yet
-/// implemented; this validates the group-batching claim-compatibility CONTRACT + item-level parity, and
-/// defers the selection. The cited FRs (FR-29..32, FR-35, FR-47, FR-48) are the full AC-E2E-2 scope — only
-/// the validation-contract subset is exercised here (the row's `inv_ids` is empty; nothing is overclaimed).
+/// queue. Both log-replay and relational compositions must select complete groups.
 ///
 /// COVERED via the lib facade (each assertion bites):
 ///   - the queue is loaded with >=1000 groups x multiple tasks, and item-level claim still works on it
@@ -1503,8 +1523,7 @@ fn group_qdef(tenant: &str, queue: &str, max_eligible_group_size: u64) -> QueueD
 ///       * `group_batching` on a queue WITHOUT max_eligible_group_size -> Invalid;
 ///       * `group_batching.max_groups == 0` -> Invalid;
 ///       * `max_eligible_group_size > max_items` -> BatchTooLarge (the "next whole group cannot fit" guard);
-///       * a well-formed WHOLE-GROUP claim unit on the LOG-REPLAY family is refused with `Unavailable`
-///         (that family has no group selection — NOT silently item-claimed or mis-rejected).
+///       * a well-formed WHOLE-GROUP claim unit on the LOG-REPLAY family returns only complete groups.
 /// ASSERTED (BQ-14b): atomic whole-group SELECTION on the gate/group-capable relational backend, via the
 /// same lib facade — a whole-group claim leases exactly one COMPLETE group (no partial group, INV-7),
 /// bounded by max_groups, and successive claims drain distinct groups with zero duplicates.
@@ -1512,10 +1531,11 @@ fn group_qdef(tenant: &str, queue: &str, max_eligible_group_size: u64) -> QueueD
 /// multi-claimer no-duplicate-group, and active-group discovery.
 #[tokio::test]
 async fn marketo_group_batching_e2e() {
-    let (pq, _clock) = deployment();
+    let (fireweed, _clock) = deployment();
     let max_group_size = 5u64;
     let q = qk("marketo", "leads");
-    pq.create_queue(group_qdef("marketo", "leads", max_group_size))
+    fireweed
+        .create_queue(group_qdef("marketo", "leads", max_group_size))
         .await
         .unwrap();
 
@@ -1533,22 +1553,23 @@ async fn marketo_group_batching_e2e() {
         }
     }
     let loaded = items.len() as u64;
-    pq.push_batch(&q, items).await.unwrap();
+    fireweed.push_batch(&q, items).await.unwrap();
     assert_eq!(
-        pq.metrics(&q).await.unwrap().pending,
+        fireweed.metrics(&q).await.unwrap().pending,
         loaded,
         "all group tasks resident"
     );
 
     // Parity: ITEM-level claim (the default unit) still works on a group-batching queue — the group config
     // does not disable ordinary delivery. (Counterfactual that the queue itself is healthy.)
-    let item_claim = pq.claim(&q, 10, 60_000).await.unwrap();
+    let item_claim = fireweed.claim(&q, 10, 60_000).await.unwrap();
     assert_eq!(
         item_claim.len(),
         10,
         "item-level claim works on a group-batching queue"
     );
-    pq.nack(&q, item_claim.iter().map(|c| c.item_id), Nack::Release)
+    fireweed
+        .nack(&q, item_claim.iter().map(|c| c.item_id), Nack::Release)
         .await
         .unwrap();
 
@@ -1559,14 +1580,14 @@ async fn marketo_group_batching_e2e() {
     };
 
     // (a) max_groups == 0 -> Invalid (pin the message so this is distinct from the missing-config Invalid (c)).
-    let zero = pq.claim_with(&q, 100, 60_000, whole_group(0)).await;
+    let zero = fireweed.claim_with(&q, 100, 60_000, whole_group(0)).await;
     assert!(
         matches!(&zero, Err(EngineError::Invalid(m)) if m.contains("max_groups")),
         "max_groups=0 is Invalid(max_groups...): {zero:?}"
     );
 
     // (b) max_eligible_group_size (5) > max_items (3) -> BatchTooLarge (the whole group can't fit the batch).
-    let too_large = pq.claim_with(&q, 3, 60_000, whole_group(300)).await;
+    let too_large = fireweed.claim_with(&q, 3, 60_000, whole_group(300)).await;
     assert!(
         matches!(too_large, Err(EngineError::BatchTooLarge)),
         "a max_items below the group size fires BatchTooLarge (next whole group cannot fit): {too_large:?}"
@@ -1574,30 +1595,52 @@ async fn marketo_group_batching_e2e() {
 
     // (c) group_batching on a queue WITHOUT max_eligible_group_size -> Invalid.
     let plain_q = qk("marketo", "plain");
-    pq.create_queue(qdef(
-        "marketo",
-        "plain",
-        PriorityDirection::Ascending,
-        OrderingMode::Strict,
-    ))
-    .await
-    .unwrap();
-    let _ = pq.push(&plain_q, NewItem::default()).await.unwrap();
-    let unconfigured = pq.claim_with(&plain_q, 100, 60_000, whole_group(300)).await;
+    fireweed
+        .create_queue(qdef(
+            "marketo",
+            "plain",
+            PriorityDirection::Ascending,
+            OrderingMode::Strict,
+        ))
+        .await
+        .unwrap();
+    let _ = fireweed.push(&plain_q, NewItem::default()).await.unwrap();
+    let unconfigured = fireweed
+        .claim_with(&plain_q, 100, 60_000, whole_group(300))
+        .await;
     assert!(
         matches!(&unconfigured, Err(EngineError::Invalid(m)) if m.contains("max_eligible_group_size")),
         "group_batching requires max_eligible_group_size (distinct from the max_groups Invalid): {unconfigured:?}"
     );
 
-    // (d) a WELL-FORMED whole-group claim (max_items >= group size) is RECOGNIZED and refused as Unavailable —
-    // the WholeGroup selection is not yet implemented (BQ-14b), NOT silently item-claimed. This is the biting
-    // contract: the unit is validated to WholeGroup, then the unimplemented selection returns the structured
-    // Unavailable (not Invalid, not a partial/item claim).
-    let well_formed = pq.claim_with(&q, 100, 60_000, whole_group(300)).await;
+    // (d) a well-formed whole-group claim returns complete groups on the log-replay family too.
+    let well_formed = fireweed
+        .claim_with(&q, 100, 60_000, whole_group(300))
+        .await
+        .unwrap();
+    let mut claimed_per_group = BTreeMap::new();
+    for item in &well_formed {
+        *claimed_per_group
+            .entry(item.group_key.clone().expect("grouped item"))
+            .or_insert(0usize) += 1;
+    }
     assert!(
-        matches!(well_formed, Err(EngineError::Unavailable)),
-        "a well-formed whole-group claim is refused with Unavailable on the log-replay family (no group selection there): {well_formed:?}"
+        !well_formed.is_empty()
+            && well_formed.len() <= 100
+            && claimed_per_group.len() <= 300
+            && claimed_per_group
+                .values()
+                .all(|count| *count == tasks_per_group as usize),
+        "log replay must return only complete groups: {claimed_per_group:?}"
     );
+    fireweed
+        .nack(
+            &q,
+            well_formed.iter().map(|item| item.item_id),
+            Nack::Release,
+        )
+        .await
+        .unwrap();
 
     // --- ASSERTED whole-group SELECTION on the gate/group-capable relational backend (BQ-14b) ---
     // The relational family implements atomic whole-group claim. Same lib facade (RuntimeCore), relational backend.
@@ -1768,29 +1811,31 @@ fn cohort_qdef(
 /// DEFERRED (relational suites): incomplete-cohort expiry -> terminal failed with reason.
 #[tokio::test]
 async fn callback_cohort_e2e() {
-    let (pq, _clock) = deployment();
+    let (fireweed, _clock) = deployment();
 
     // A VALID cohort queue: enabled + completion_bound_ms (30s) <= progress_bound_ms (60s).
     let cohort_q = qk("cohort", "callbacks");
-    pq.create_queue(cohort_qdef("cohort", "callbacks", true, Some(30_000)))
+    fireweed
+        .create_queue(cohort_qdef("cohort", "callbacks", true, Some(30_000)))
         .await
         .unwrap();
 
     // Item-level parity: ordinary delivery still works on a cohort-enabled queue.
-    let _ = pq.push(&cohort_q, NewItem::default()).await.unwrap();
-    let item_claim = pq.claim(&cohort_q, 10, 60_000).await.unwrap();
+    let _ = fireweed.push(&cohort_q, NewItem::default()).await.unwrap();
+    let item_claim = fireweed.claim(&cohort_q, 10, 60_000).await.unwrap();
     assert_eq!(
         item_claim.len(),
         1,
         "item-level claim works on a cohort-enabled queue"
     );
-    pq.nack(
-        &cohort_q,
-        item_claim.iter().map(|c| c.item_id),
-        Nack::Release,
-    )
-    .await
-    .unwrap();
+    fireweed
+        .nack(
+            &cohort_q,
+            item_claim.iter().map(|c| c.item_id),
+            Nack::Release,
+        )
+        .await
+        .unwrap();
 
     let whole_cohort = || ClaimCompatibility {
         whole_cohort: true,
@@ -1799,16 +1844,19 @@ async fn callback_cohort_e2e() {
 
     // (a) whole_cohort on a NON-cohort queue -> Invalid(enabled).
     let plain_q = qk("cohort", "plain");
-    pq.create_queue(qdef(
-        "cohort",
-        "plain",
-        PriorityDirection::Ascending,
-        OrderingMode::Strict,
-    ))
-    .await
-    .unwrap();
-    let _ = pq.push(&plain_q, NewItem::default()).await.unwrap();
-    let not_cohort = pq.claim_with(&plain_q, 10, 60_000, whole_cohort()).await;
+    fireweed
+        .create_queue(qdef(
+            "cohort",
+            "plain",
+            PriorityDirection::Ascending,
+            OrderingMode::Strict,
+        ))
+        .await
+        .unwrap();
+    let _ = fireweed.push(&plain_q, NewItem::default()).await.unwrap();
+    let not_cohort = fireweed
+        .claim_with(&plain_q, 10, 60_000, whole_cohort())
+        .await;
     assert!(
         matches!(&not_cohort, Err(EngineError::Invalid(m)) if m.contains("enabled=true")),
         "whole_cohort on a non-cohort queue is Invalid(enabled=true): {not_cohort:?}"
@@ -1816,11 +1864,17 @@ async fn callback_cohort_e2e() {
 
     // (b) whole_cohort on a cohort queue with completion_bound_ms = None -> Invalid(requires completion).
     let no_bound_q = qk("cohort", "nobound");
-    pq.create_queue(cohort_qdef("cohort", "nobound", true, None))
+    fireweed
+        .create_queue(cohort_qdef("cohort", "nobound", true, None))
         .await
         .unwrap();
-    let _ = pq.push(&no_bound_q, NewItem::default()).await.unwrap();
-    let no_bound = pq.claim_with(&no_bound_q, 10, 60_000, whole_cohort()).await;
+    let _ = fireweed
+        .push(&no_bound_q, NewItem::default())
+        .await
+        .unwrap();
+    let no_bound = fireweed
+        .claim_with(&no_bound_q, 10, 60_000, whole_cohort())
+        .await;
     assert!(
         matches!(&no_bound, Err(EngineError::Invalid(m)) if m.contains("requires cohort completion")),
         "whole_cohort requires completion_bound_ms: {no_bound:?}"
@@ -1828,11 +1882,15 @@ async fn callback_cohort_e2e() {
 
     // (c) completion_bound_ms (90s) > progress_bound_ms (60s) -> Invalid(<= progress_bound_ms).
     let bad_bound_q = qk("cohort", "badbound");
-    pq.create_queue(cohort_qdef("cohort", "badbound", true, Some(90_000)))
+    fireweed
+        .create_queue(cohort_qdef("cohort", "badbound", true, Some(90_000)))
         .await
         .unwrap();
-    let _ = pq.push(&bad_bound_q, NewItem::default()).await.unwrap();
-    let bad_bound = pq
+    let _ = fireweed
+        .push(&bad_bound_q, NewItem::default())
+        .await
+        .unwrap();
+    let bad_bound = fireweed
         .claim_with(&bad_bound_q, 10, 60_000, whole_cohort())
         .await;
     assert!(
@@ -1841,7 +1899,7 @@ async fn callback_cohort_e2e() {
     );
 
     // (d) whole_cohort COMBINED with group_key -> Invalid(cannot be combined).
-    let combined = pq
+    let combined = fireweed
         .claim_with(
             &cohort_q,
             10,
@@ -1860,7 +1918,9 @@ async fn callback_cohort_e2e() {
 
     // (e) A well-formed whole-cohort claim is accepted by the shared projection. The queue currently has
     // only an ordinary item, so the rich claim returns empty instead of silently item-claiming it.
-    let well_formed = pq.claim_with(&cohort_q, 10, 60_000, whole_cohort()).await;
+    let well_formed = fireweed
+        .claim_with(&cohort_q, 10, 60_000, whole_cohort())
+        .await;
     assert!(
         matches!(&well_formed, Ok(items) if items.is_empty()),
         "a well-formed whole_cohort claim succeeds without leasing ordinary items: {well_formed:?}"
@@ -1999,18 +2059,19 @@ async fn callback_cohort_e2e() {
 /// bounded-per-node worker pools (pqueue-c33c367e).
 #[tokio::test]
 async fn noisy_neighbor_scale_e2e() {
-    let (pq, _clock) = deployment();
+    let (fireweed, _clock) = deployment();
 
     // Hot queue: a large resident backlog.
     let hot = qk("nn", "hot");
-    pq.create_queue(qdef(
-        "nn",
-        "hot",
-        PriorityDirection::Ascending,
-        OrderingMode::Strict,
-    ))
-    .await
-    .unwrap();
+    fireweed
+        .create_queue(qdef(
+            "nn",
+            "hot",
+            PriorityDirection::Ascending,
+            OrderingMode::Strict,
+        ))
+        .await
+        .unwrap();
     let hot_backlog = 50_000u64;
     let hot_items: Vec<NewItem> = (0..hot_backlog)
         .map(|_| NewItem {
@@ -2018,20 +2079,21 @@ async fn noisy_neighbor_scale_e2e() {
             ..Default::default()
         })
         .collect();
-    pq.push_batch(&hot, hot_items).await.unwrap();
+    fireweed.push_batch(&hot, hot_items).await.unwrap();
 
     // K active queues, each with a small resident set.
     let k = 50u64;
     for i in 0..k {
         let q = qk("nn", &format!("active{i}"));
-        pq.create_queue(qdef(
-            "nn",
-            &format!("active{i}"),
-            PriorityDirection::Ascending,
-            OrderingMode::Strict,
-        ))
-        .await
-        .unwrap();
+        fireweed
+            .create_queue(qdef(
+                "nn",
+                &format!("active{i}"),
+                PriorityDirection::Ascending,
+                OrderingMode::Strict,
+            ))
+            .await
+            .unwrap();
         let marker = format!("active{i}");
         let items: Vec<NewItem> = (0..10)
             .map(|_| NewItem {
@@ -2039,19 +2101,20 @@ async fn noisy_neighbor_scale_e2e() {
                 ..Default::default()
             })
             .collect();
-        pq.push_batch(&q, items).await.unwrap();
+        fireweed.push_batch(&q, items).await.unwrap();
     }
 
     // Small eligible queue.
     let small = qk("nn", "small");
-    pq.create_queue(qdef(
-        "nn",
-        "small",
-        PriorityDirection::Ascending,
-        OrderingMode::Strict,
-    ))
-    .await
-    .unwrap();
+    fireweed
+        .create_queue(qdef(
+            "nn",
+            "small",
+            PriorityDirection::Ascending,
+            OrderingMode::Strict,
+        ))
+        .await
+        .unwrap();
     let small_n = 200u64;
     let small_items: Vec<NewItem> = (0..small_n)
         .map(|_| NewItem {
@@ -2059,12 +2122,12 @@ async fn noisy_neighbor_scale_e2e() {
             ..Default::default()
         })
         .collect();
-    pq.push_batch(&small, small_items).await.unwrap();
+    fireweed.push_batch(&small, small_items).await.unwrap();
 
     // CORRECTNESS isolation: with the hot backlog + K queues all resident, a claim from the small queue
     // returns ONLY the small queue's items (no hot/active leakage), and a claim from the hot queue returns
     // only hot items. Per-queue keying ⇒ zero cross-queue leakage.
-    let from_small = pq.claim(&small, 10, 60_000).await.unwrap();
+    let from_small = fireweed.claim(&small, 10, 60_000).await.unwrap();
     assert_eq!(
         from_small.len(),
         10,
@@ -2076,10 +2139,11 @@ async fn noisy_neighbor_scale_e2e() {
             .all(|c| c.payload.as_deref() == Some(b"small".as_ref())),
         "the small queue delivers only its own items (no hot/active leakage)"
     );
-    pq.nack(&small, from_small.iter().map(|c| c.item_id), Nack::Release)
+    fireweed
+        .nack(&small, from_small.iter().map(|c| c.item_id), Nack::Release)
         .await
         .unwrap();
-    let from_hot = pq.claim(&hot, 10, 60_000).await.unwrap();
+    let from_hot = fireweed.claim(&hot, 10, 60_000).await.unwrap();
     assert_eq!(
         from_hot.len(),
         10,
@@ -2091,14 +2155,15 @@ async fn noisy_neighbor_scale_e2e() {
             .all(|c| c.payload.as_deref() == Some(b"hot".as_ref())),
         "the hot queue delivers only its own items"
     );
-    pq.nack(&hot, from_hot.iter().map(|c| c.item_id), Nack::Release)
+    fireweed
+        .nack(&hot, from_hot.iter().map(|c| c.item_id), Nack::Release)
         .await
         .unwrap();
 
     // K queues independently claimable: each returns only its own marker.
     for i in 0..k {
         let q = qk("nn", &format!("active{i}"));
-        let got = pq.claim(&q, 100, 60_000).await.unwrap();
+        let got = fireweed.claim(&q, 100, 60_000).await.unwrap();
         let marker = format!("active{i}");
         assert_eq!(
             got.len(),
@@ -2110,7 +2175,8 @@ async fn noisy_neighbor_scale_e2e() {
                 .all(|c| c.payload.as_deref() == Some(marker.as_bytes())),
             "active queue {i} delivers only its own items"
         );
-        pq.nack(&q, got.iter().map(|c| c.item_id), Nack::Release)
+        fireweed
+            .nack(&q, got.iter().map(|c| c.item_id), Nack::Release)
             .await
             .unwrap();
     }
@@ -2120,12 +2186,15 @@ async fn noisy_neighbor_scale_e2e() {
     let t = Instant::now();
     let mut drained = 0u64;
     loop {
-        let got = pq.claim(&small, 100, 60_000).await.unwrap();
+        let got = fireweed.claim(&small, 100, 60_000).await.unwrap();
         if got.is_empty() {
             break;
         }
         drained += got.len() as u64;
-        pq.ack(&small, got.iter().map(|c| c.item_id)).await.unwrap();
+        fireweed
+            .ack(&small, got.iter().map(|c| c.item_id))
+            .await
+            .unwrap();
     }
     let small_rate = drained as f64 / t.elapsed().as_secs_f64();
     assert_eq!(
@@ -2137,7 +2206,7 @@ async fn noisy_neighbor_scale_e2e() {
         "the small queue must make measurable progress with a {hot_backlog}-item hot backlog + {k} queues resident: {small_rate:.0}/s"
     );
     // The hot backlog is untouched by the small queue's drain (isolation): still fully resident.
-    let hot_pending_after = pq.metrics(&hot).await.unwrap().pending;
+    let hot_pending_after = fireweed.metrics(&hot).await.unwrap().pending;
     assert_eq!(
         hot_pending_after, hot_backlog,
         "hot backlog undisturbed by the small queue"
@@ -2260,7 +2329,7 @@ async fn noisy_neighbor_scale_e2e() {
 // ---------------------------------------------------------------------------
 
 /// AC-E2E-5 (TP-003): durable recovery — acknowledged commands survive a restart and no accepted item is
-/// lost. Driven via the lib facade over a FILE-BACKED durable backend (ObjectLogBackend): build durable
+/// lost. Driven via the lib facade over a file-backed composed object-log backend: build durable
 /// state, DROP the handle (the process "crashes"), reopen a fresh handle on the same on-disk log, and verify
 /// the state was rebuilt from disk. (FR-23..28, FR-33..39; durability/recovery.)
 ///
@@ -2280,7 +2349,7 @@ async fn noisy_neighbor_scale_e2e() {
 ///     plane) (-> pqueue-c33c367e server runtime). NOT asserted, NOT claimed in the row.
 #[tokio::test]
 async fn worker_crash_recovery_e2e() {
-    let dir = std::env::temp_dir().join(format!("pqueue-pv-e2e5-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("fireweed-pv-e2e5-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let q = qk("recovery", "jobs");
     let n = 100u64;
@@ -2289,38 +2358,45 @@ async fn worker_crash_recovery_e2e() {
 
     // ----- build durable state, then "crash" (drop the handle) -----
     let (complete_before, accounted_before) = {
-        let pq = RuntimeCore::new(
-            Arc::new(ObjectLogBackend::open(&dir).expect("open object log")),
+        let fireweed = RuntimeCore::new(
+            Arc::new(composed_objectlog_backend(&dir).expect("open object log")),
             Arc::new(ManualClock::at(0)),
         );
-        pq.create_queue(qdef(
-            "recovery",
-            "jobs",
-            PriorityDirection::Ascending,
-            OrderingMode::Strict,
-        ))
-        .await
-        .unwrap();
+        fireweed
+            .create_queue(qdef(
+                "recovery",
+                "jobs",
+                PriorityDirection::Ascending,
+                OrderingMode::Strict,
+            ))
+            .await
+            .unwrap();
         let items: Vec<NewItem> = (0..n).map(|_| NewItem::default()).collect();
-        pq.push_batch(&q, items).await.unwrap();
+        fireweed.push_batch(&q, items).await.unwrap();
         // Ack `acked` (acknowledged commands), leave `leased` leased, the rest pending.
-        let to_ack = pq.claim(&q, acked as usize, 3_600_000).await.unwrap();
-        pq.ack(&q, to_ack.iter().map(|c| c.item_id)).await.unwrap();
-        let _still_leased = pq.claim(&q, leased as usize, 3_600_000).await.unwrap(); // left leased
-        let m = pq.metrics(&q).await.unwrap();
+        let to_ack = fireweed.claim(&q, acked as usize, 3_600_000).await.unwrap();
+        fireweed
+            .ack(&q, to_ack.iter().map(|c| c.item_id))
+            .await
+            .unwrap();
+        let _still_leased = fireweed
+            .claim(&q, leased as usize, 3_600_000)
+            .await
+            .unwrap(); // left leased
+        let m = fireweed.metrics(&q).await.unwrap();
         assert_eq!(m.complete, acked, "acked items complete before crash");
         let accounted = m.pending + m.leased + m.complete + m.failed;
         assert_eq!(accounted, n, "every accepted item accounted before crash");
         (m.complete, accounted)
-    }; // <- the RuntimeCore + ObjectLogBackend drop here; only the on-disk object log survives.
+    }; // <- the runtime and composed backend drop here; only the on-disk object log survives.
 
     // ----- COUNTERFACTUAL: a FRESH dir recovers nothing (recovery is from disk, not a surviving projection) -----
     let fresh_dir =
-        std::env::temp_dir().join(format!("pqueue-pv-e2e5-fresh-{}", std::process::id()));
+        std::env::temp_dir().join(format!("fireweed-pv-e2e5-fresh-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&fresh_dir);
     {
         let fresh = RuntimeCore::new(
-            Arc::new(ObjectLogBackend::open(&fresh_dir).expect("open fresh")),
+            Arc::new(composed_objectlog_backend(&fresh_dir).expect("open fresh")),
             Arc::new(ManualClock::at(0)),
         );
         // The queue itself isn't known to a fresh backend (no create_queue command in its empty log).
@@ -2332,11 +2408,11 @@ async fn worker_crash_recovery_e2e() {
     }
 
     // ----- RECOVERY: reopen the SAME on-disk log; the projection is rebuilt from disk -----
-    let pq = RuntimeCore::new(
-        Arc::new(ObjectLogBackend::open(&dir).expect("reopen object log")),
+    let fireweed = RuntimeCore::new(
+        Arc::new(composed_objectlog_backend(&dir).expect("reopen object log")),
         Arc::new(ManualClock::at(0)),
     );
-    let m = pq
+    let m = fireweed
         .metrics(&q)
         .await
         .expect("the crashed node's durable state is recovered");
@@ -2357,19 +2433,20 @@ async fn worker_crash_recovery_e2e() {
     // ----- lease REASSIGN (item-level, ReassignLeasePort): reassign a leased item's lease; it stays leased,
     // not lost to pending/complete. (Only the leased COUNT is observed via metrics — the facade does not
     // surface the post-reassign token, so token transfer itself is not asserted here.)
-    let leased_before = pq.metrics(&q).await.unwrap().leased;
+    let leased_before = fireweed.metrics(&q).await.unwrap().leased;
     // Claim a fresh pending item to reassign (it is now leased). Non-conditional so the proof can't be skipped.
-    let claimed = pq.claim(&q, 1, 3_600_000).await.unwrap();
+    let claimed = fireweed.claim(&q, 1, 3_600_000).await.unwrap();
     assert_eq!(
         claimed.len(),
         1,
         "a pending item is claimable on the recovered queue"
     );
-    pq.reassign(&q, [claimed[0].item_id], 3_600_000)
+    fireweed
+        .reassign(&q, [claimed[0].item_id], 3_600_000)
         .await
         .unwrap();
     assert_eq!(
-        pq.metrics(&q).await.unwrap().leased,
+        fireweed.metrics(&q).await.unwrap().leased,
         leased_before + 1,
         "the reassigned item remains leased (not lost to pending/complete)"
     );

@@ -34,7 +34,7 @@ fn claim_req() -> ClaimRequest {
 }
 
 fn fresh_schema(tag: &str) -> String {
-    format!("pq_rel_term_{}_{}", std::process::id(), tag)
+    format!("fireweed_rel_term_{}_{}", std::process::id(), tag)
 }
 
 fn open(url: &str, schema: &str) -> PostgresRelationalBackend {
@@ -75,8 +75,8 @@ fn terminal_position(url: &str, schema: &str, item_id: &str) -> CommandPosition 
         .expect("set schema");
     let row = client
         .query_one(
-            "SELECT c.assignment_epoch, c.seq FROM pqueue_items i \
-             JOIN pqueue_commands c ON c.tenant=i.tenant_id AND c.queue=i.queue_id \
+            "SELECT c.assignment_epoch, c.seq FROM fireweed_items i \
+             JOIN fireweed_commands c ON c.tenant=i.tenant_id AND c.queue=i.queue_id \
                  AND c.seq=i.last_command_sequence \
              WHERE i.tenant_id=$1 AND i.queue_id=$2 AND i.item_id=$3",
             &[&"t1", &"q1", &item_id],
@@ -89,9 +89,9 @@ fn terminal_position(url: &str, schema: &str, item_id: &str) -> CommandPosition 
 
 #[test]
 fn postgres_terminal_reap_sweeps_with_cursor_conjunction() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
         eprintln!(
-            "POSTGRES RELATIONAL SKIPPED (TestPostgresTerminalReapSweepsWithCursorConjunction) — set PQUEUE_PG_TEST_URL to a live DB"
+            "POSTGRES RELATIONAL SKIPPED (TestPostgresTerminalReapSweepsWithCursorConjunction) — set FIREWEED_PG_TEST_URL to a live DB"
         );
         return;
     };
@@ -145,9 +145,9 @@ fn postgres_terminal_reap_sweeps_with_cursor_conjunction() {
 
 #[test]
 fn terminal_reap_opt_out_ignores_cursor() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
         eprintln!(
-            "POSTGRES RELATIONAL SKIPPED (TestTerminalReapOptOutIgnoresCursor) — set PQUEUE_PG_TEST_URL to a live DB"
+            "POSTGRES RELATIONAL SKIPPED (TestTerminalReapOptOutIgnoresCursor) — set FIREWEED_PG_TEST_URL to a live DB"
         );
         return;
     };

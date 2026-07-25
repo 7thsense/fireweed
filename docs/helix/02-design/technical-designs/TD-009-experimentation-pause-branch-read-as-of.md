@@ -28,8 +28,8 @@ at a position, run the variant against the branch, compare, discard.
 ## 1. Pause (harden the existing verb)
 
 Pause already exists as a durable log command: `QueueCommand::PauseQueue`/`ResumeQueue`
-(`crates/pqueue-engine/src/command.rs:59-60,584-585`); the projection carries `paused: bool`
-(`crates/pqueue-projection/src/lib.rs:165`), `select_eligible` returns empty while paused (`:1887`),
+(`crates/fireweed-engine/src/command.rs:59-60,584-585`); the projection carries `paused: bool`
+(`crates/fireweed-projection/src/lib.rs:165`), `select_eligible` returns empty while paused (`:1887`),
 and the flag round-trips through `ProjectionImage` (`:1266,1286`). This TD pins the semantics that are
 currently unspecified:
 
@@ -39,12 +39,12 @@ currently unspecified:
   pause is the recommended mode for the branch workflow.
 - **Leases**: in-flight leases continue on their normal clock — pause neither extends nor cancels
   them. Discovery keeps reporting intrinsic eligibility buildup, pause-agnostic
-  (`crates/pqueue-engine/src/port.rs:818-819`). Documented so paused-queue metrics are not misread.
+  (`crates/fireweed-engine/src/port.rs:818-819`). Documented so paused-queue metrics are not misread.
 - Pause/resume are log commands, so they emit change records (TD-008) and survive failover.
 
 ## 2. Read-as-of-position
 
-Primitives exist: `LogStore::high_water` (`crates/pqueue-engine/src/compose.rs:113`) and
+Primitives exist: `LogStore::high_water` (`crates/fireweed-engine/src/compose.rs:113`) and
 snapshot-at-position storage (`compose.rs:116-123`). (`shard` below is a `QueueKey` — the whole queue,
 per ADR-008; the name survives from the engine's internal vocabulary.) New read path:
 
@@ -58,13 +58,13 @@ per ADR-008; the name survives from the engine's internal vocabulary.) New read 
   implement `recovery_high_water`, and replay the tail on recovery), but as-of reads additionally
   require reconstructing an ephemeral historical projection from snapshot + replay, which the
   relational projection stores decline (`supports_as_of() = false`,
-  `crates/pqueue-engine/src/port.rs:1220-1231`) — so the relational family still serves only "now"
+  `crates/fireweed-engine/src/port.rs:1220-1231`) — so the relational family still serves only "now"
   until that reconstruct path is built.
 
 ## 3. Branch-at-position
 
 **Object-log family (natural copy-on-write).** `ManifestEntry` objects and segment objects are
-immutable (`crates/pqueue-objectlog/src/segmented.rs:539-549`), namespaced per `(tenant, queue)`
+immutable (`crates/fireweed-objectlog/src/segmented.rs:539-549`), namespaced per `(tenant, queue)`
 (`shard_prefix`, `:582`). Branching queue Q at position P:
 
 1. Allocate a new queue identity Q′ (new `(tenant, queue_id)`) — a new object prefix and manifest
@@ -72,7 +72,7 @@ immutable (`crates/pqueue-objectlog/src/segmented.rs:539-549`), namespaced per `
 2. Write Q′'s manifest referencing **the same immutable segment objects** as Q for all sequences ≤ P
    (copy-on-write share, no data copy); Q′ diverges by appending its own segments.
 3. Q′ acquires its **own control-plane lease and epoch**
-   (`crates/pqueue-engine/src/control_plane.rs:59-89`). The single-active-lease invariant
+   (`crates/fireweed-engine/src/control_plane.rs:59-89`). The single-active-lease invariant
    (`control_plane.rs:14`) is preserved because the branch is a distinct queue, never a second owner
    of Q. Q keeps running, or stays paused for a clean comparison baseline.
 

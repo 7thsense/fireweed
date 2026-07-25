@@ -20,7 +20,7 @@ ddx:
 
 ## Scope
 
-Implement six improvements derived from the FOQS discovery review while preserving pqueue's existing
+Implement six improvements derived from the FOQS discovery review while preserving fireweed's existing
 queue-local transaction, ordering, progress, and backend contracts.
 
 **Governing artifacts**:
@@ -59,25 +59,25 @@ queue-local transaction, ordering, progress, and backend contracts.
 - B-004 inherits each composition's ownership scope: B-010 establishes same-process atomicity for
   in-process control planes and cross-process atomicity only for backends that support multi-process use.
 - Downstream/callee rate limits and quotas, worker-runtime capacity, compute admission, and load balancing
-  stay outside the pqueue engine. Pqueue deployment/tenant capacity controls remain a P1 pqueue concern.
+  stay outside the fireweed engine. Fireweed deployment/tenant capacity controls remain a P1 fireweed concern.
   No downstream scheduler/router trait, token bucket, or lifecycle state is added to core.
-- Public names remain `pqueue` until the separate identity migration epic lands.
+- Public names remain `fireweed` until the separate identity migration epic lands.
 
 ## Implementation Slices
 
 | Slice | Outcome | In-Scope Files | Depends On | Validation Gate |
 |---|---|---|---|---|
 | B-001 | Specify queue-template and ensure semantics | ADR-018 linked to API-001 | None | `ddx doc validate`; `ddx doc audit` |
-| B-002 | Publish queue-versus-stream selection guide | `docs/helix/01-frame/guides/choosing-pqueue.md`, `README.md` | None | HELIX graph validation; guide decision cases reviewed |
-| B-003 | Publish scheduler/router integration boundary | `docs/helix/01-frame/guides/scheduler-router-boundary.md`, `crates/pqueue/examples/`, `README.md` | None | Example compiles; existing downstream-pacing validation passes |
-| B-004 | Add caller-owned queue templates and exact ensure | `pqueue` façade/tests | B-001, B-010, B-013–B-016 | Façade template tests; Clippy/fmt |
-| B-005 | Complete ergonomic lifecycle vocabulary | `crates/pqueue/src/lib.rs`, façade tests and rustdoc | B-009 | Alias lifecycle/error parity tests; rustdoc |
-| B-006 | Add non-atomic multi-queue claim orchestration | `crates/pqueue/src/lib.rs`, dedicated integration test | B-009 | Preflight/no-effect, partial-result, ordering, and backend tests |
-| B-007 | Add progress-aware active-scope dispersion selector | `crates/pqueue/src/lib.rs`, dedicated routing test | B-009, B-011 | Stability, dispersion-window, framing, and urgency tests |
+| B-002 | Publish queue-versus-stream selection guide | `docs/helix/01-frame/guides/choosing-fireweed.md`, `README.md` | None | HELIX graph validation; guide decision cases reviewed |
+| B-003 | Publish scheduler/router integration boundary | `docs/helix/01-frame/guides/scheduler-router-boundary.md`, `crates/fireweed/examples/`, `README.md` | None | Example compiles; existing downstream-pacing validation passes |
+| B-004 | Add caller-owned queue templates and exact ensure | `fireweed` façade/tests | B-001, B-010, B-013–B-016 | Façade template tests; Clippy/fmt |
+| B-005 | Complete ergonomic lifecycle vocabulary | `crates/fireweed/src/lib.rs`, façade tests and rustdoc | B-009 | Alias lifecycle/error parity tests; rustdoc |
+| B-006 | Add non-atomic multi-queue claim orchestration | `crates/fireweed/src/lib.rs`, dedicated integration test | B-009 | Preflight/no-effect, partial-result, ordering, and backend tests |
+| B-007 | Add progress-aware active-scope dispersion selector | `crates/fireweed/src/lib.rs`, dedicated routing test | B-009, B-011 | Stability, dispersion-window, framing, and urgency tests |
 | B-008 | Run final workspace and documentation gates | Workspace and DDx graph | B-001–B-007, B-009–B-016 | Workspace fmt, Clippy, tests; documentation graph validation |
 | B-009 | Specify optional façade and routing orchestration | ADR-019 linked to API-001, ADR-004, and ADR-008 | B-001 | `ddx doc validate`; `ddx doc audit` |
 | B-010 | Make in-process queue creation atomic under races | In-process planes, wrappers, and conformance tests | B-001 | Cross-handle race tests; engine/façade gates |
-| B-011 | Repair relational active-scope omission | Relational group-summary refresh/query, `crates/pqueue/src/lib.rs`, and conformance tests | B-009, B-016 | Ungrouped/time-only discovery and stamp-fidelity tests |
+| B-011 | Repair relational active-scope omission | Relational group-summary refresh/query, `crates/fireweed/src/lib.rs`, and conformance tests | B-009, B-016 | Ungrouped/time-only discovery and stamp-fidelity tests |
 | B-012 | Integrate the public workflow example | Example and README pointer | B-002–B-007, B-009–B-011 | Example compile/run tests |
 | B-013 | Make object-log queue creation atomic | Object-log planes and tests | B-001 | Sole-owner/cross-handle race and reopen tests |
 | B-014 | Make PostgreSQL queue creation atomic | PostgreSQL native/relational planes and live tests | B-001 | Mandatory cross-process race plus losing-handle use |
@@ -133,14 +133,14 @@ the transport contract's existing dependents.
 
 **Acceptance**:
 
-1. `docs/helix/01-frame/guides/choosing-pqueue.md` has DDx id `guide-choosing-pqueue`, an `informed_by`
+1. `docs/helix/01-frame/guides/choosing-fireweed.md` has DDx id `guide-choosing-fireweed`, an `informed_by`
    link to `prd`, an `informed_by` link to `discover-meta-asynchronous-computing-learnings`, and a decision
    table covering mutable/arbitrary priority,
    `not_before`, leases, item-level delayed retry, groups/cohorts, immutable sequential batches, offsets,
    replay, and broadcast consumption.
-2. The guide contains concrete use and do-not-use examples and distinguishes pqueue's change log from a
+2. The guide contains concrete use and do-not-use examples and distinguishes fireweed's change log from a
    stream consumption model.
-3. The guide cites the local Meta Async discovery asset without claiming FOQS compatibility or a pqueue
+3. The guide cites the local Meta Async discovery asset without claiming FOQS compatibility or a fireweed
    performance advantage.
 4. `README.md` links the guide; `ddx doc validate`, `ddx doc audit`, and an explicit local-target link check
    for every new README/guide link pass.
@@ -154,18 +154,18 @@ the transport contract's existing dependents.
 1. `docs/helix/01-frame/guides/scheduler-router-boundary.md` has DDx id
    `guide-scheduler-router-boundary`, `informed_by` links to `prd` and `api-native-client-interface`, and
    assigns queue definition, eligibility, priority/progress,
-   leases, lifecycle, retry, and durable/idempotent mutations to pqueue; advisory selection/fan-in to a
+   leases, lifecycle, retry, and durable/idempotent mutations to fireweed; advisory selection/fan-in to a
    router; and downstream/callee rate/quota/concurrency/protection/compute admission to a scheduler or
-   worker. A separate row keeps pqueue deployment-level rate limits, noisy-tenant quotas, and tenant
-   capacity controls (PRD P1, API-001 `rate_limited`) in pqueue and marks them currently unbuilt.
+   worker. A separate row keeps fireweed deployment-level rate limits, noisy-tenant quotas, and tenant
+   capacity controls (PRD P1, API-001 `rate_limited`) in fireweed and marks them currently unbuilt.
 2. The reference loop obtains downstream capacity before claiming, bounds `max_items` by granted capacity,
    treats discovery as stale, and finalizes every lease.
 3. The guide distinguishes `not_before`, gates, group filters, and finalize retry from downstream rate
    tokens; it forbids raw backend access, implicit queue creation, and cross-queue atomicity assumptions.
 4. A checked-in, deliberately non-discovery scheduler-boundary example obtains capacity before claim,
-   bounds `max_items`, and finalizes every returned lease; `cargo check -p pqueue --example
+   bounds `max_items`, and finalizes every returned lease; `cargo check -p fireweed --example
    scheduler_boundary` and
-   `cargo test -p pqueue --test product_validation_tests downstream_pacing_non_goal_e2e -- --nocapture`
+   `cargo test -p fireweed --test product_validation_tests downstream_pacing_non_goal_e2e -- --nocapture`
    pass, and `README.md` links the guide.
 5. The example uses inline fake capacity acquisition and ordinary façade operations only; it exports no
    scheduler/router trait and introduces no token bucket, registry, or persisted routing state.
@@ -183,7 +183,7 @@ the transport contract's existing dependents.
    Prototype queue keys are discarded and cannot affect template identity or diagnostics; new create fields
    fail compilation until mapped. Resolution injects a `QueueKey` and runs `CreateQueue::validate` with the
    pinned policy. The template does not become persisted domain state.
-2. `Pqueue::ensure_queue(&QueueKey, &QueueTemplate) -> Result<EnsureQueueOutcome, EnsureQueueError>`
+2. `Fireweed::ensure_queue(&QueueKey, &QueueTemplate) -> Result<EnsureQueueOutcome, EnsureQueueError>`
    atomically calls create, then accepts only structural equality between the full
    returned stored effective `QueueDefinition` and the full resolved desired definition. Any drift returns
    `QueueDefinitionConflict`, including rank-error, retention, index, schema, change-record, or other fields
@@ -204,7 +204,7 @@ the transport contract's existing dependents.
    unchanged.
 5. Focused façade template tests and reopen-then-ensure tests pass for every supported durable public
    constructor, including `open_sqlite`, `open_sqlite_relational`, `open_objectlog`, PostgreSQL sole-owner/
-   coordinated constructors, and embedded durable variants. Pqueue Clippy and workspace fmt pass. The
+   coordinated constructors, and embedded durable variants. Fireweed Clippy and workspace fmt pass. The
    ensure path does not claim to repair direct `create_queue`/RESP compatibility.
 6. A pre-template or older-build definition that differs after default rehydration returns the documented
    exact conflict. The available remedies are to adopt a new `queue_id` or align the template to the stored
@@ -257,7 +257,7 @@ the transport contract's existing dependents.
 
 ### B-016 — Make embedded SQLite catalog creation atomic
 
-1. Add public `open_sqlite_relational` over `pqueue_sqlite::composed_sqlite_relational`, wrapped in
+1. Add public `open_sqlite_relational` over `fireweed_sqlite::composed_sqlite_relational`, wrapped in
    `BlockingLibBackend`, and document its discovery capability delta from `open_sqlite`. Both constructors
    derive create authority from their durable `queue_defs`/`queues` catalogs rather than per-handle
    `InProcessControlPlane` state.
@@ -267,7 +267,7 @@ the transport contract's existing dependents.
    losers can immediately use the queue, and incompatible definitions never overwrite the winner.
 4. Both catalogs return definitions decoded from durable JSON. Every-non-default-field encode/decode and
    reopen-then-ensure tests cover `open_sqlite` and `open_sqlite_relational` explicitly.
-5. SQLite composition/recovery tests, pqueue façade tests, Clippy, and fmt pass.
+5. SQLite composition/recovery tests, fireweed façade tests, Clippy, and fmt pass.
 
 ### B-011 — Repair relational active-scope omission
 
@@ -277,7 +277,7 @@ the transport contract's existing dependents.
 
 1. Relational group discovery emits API-001's `group_key=null` descriptor for eligible ungrouped work.
 2. A group whose `not_before` crosses due with no subsequent mutation appears in read-only discovery with a
-   correct observed age. Discovery computes both keyed and ungrouped scope ages live from `pqueue_items`
+   correct observed age. Discovery computes both keyed and ungrouped scope ages live from `fireweed_items`
    with the same eligibility predicate, performs no writes, and uses a documented supporting index. The ADR
    records the query/cost delta from summary-only lookup.
 3. ADR-019 governs the ungrouped descriptor as a derived scope without requiring a nullable stored summary
@@ -304,7 +304,7 @@ the transport contract's existing dependents.
    the finalize paths; only `discover` asserts ordered-result parity.
 3. Crate rustdoc documents the conceptual worker loop, states that the aliases remain batch-shaped, and
    makes their all-or-nothing batch failure mode explicit.
-4. `cargo test -p pqueue --test facade`, `cargo test -p pqueue --doc`, Clippy, and fmt pass.
+4. `cargo test -p fireweed --test facade`, `cargo test -p fireweed --doc`, Clippy, and fmt pass.
 
 ### B-006 — Add non-atomic multi-queue claim orchestration
 
@@ -375,7 +375,7 @@ the transport contract's existing dependents.
    progress bounds.
 4. Documentation calls the result advisory and makes no fairness/progress promise when callers stop polling.
    A time-only-crossed group repaired by B-011 triggers the urgency guard in a focused test.
-5. Add a public read-only `Pqueue::queue_definition` accessor so callers can obtain the configured progress
+5. Add a public read-only `Fireweed::queue_definition` accessor so callers can obtain the configured progress
    bound without retaining a create response.
 6. Focused routing tests, Clippy, and fmt pass; backend discovery ordering remains unchanged.
 
@@ -391,7 +391,7 @@ the transport contract's existing dependents.
    discovery `Unavailable` unconditionally and exercises both grouped and ungrouped descriptors.
 2. B-002 and B-003 own their README guide links; B-012 adds only the example pointer.
 3. The scheduler guide's matrix explicitly identifies B-006/B-007 as optional stateless caller helpers in
-   the pqueue library, not scheduler state, traits, or persistence.
+   the fireweed library, not scheduler state, traits, or persistence.
 
 ### B-008 — Run final workspace and documentation gates
 

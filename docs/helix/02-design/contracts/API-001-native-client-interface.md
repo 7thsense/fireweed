@@ -25,17 +25,17 @@ ddx:
 **Related**: PRD, ADR-001, ADR-007 (hexagonal architecture & the two realized interfaces)
 
 > **Realized surfaces (ADR-007).** The hexagonal build realizes this transport-neutral contract through
-> **two** first-class faces: the **Rust library** (`pqueue` crate — full surface) and the **RESP/Redis-
-> Streams wire front** (`pqueue-resp` — the stock worker hot path, with the richer operations marked
+> **two** first-class faces: the **Rust library** (`fireweed` crate — full surface) and the **RESP/Redis-
+> Streams wire front** (`fireweed-resp` — the stock worker hot path, with the richer operations marked
 > `library-only` in TD-006 §3). The **HTTP/JSON service** surface described below is retained as a valid
 > transport-neutral binding of the same command model, but was **not** built in this architecture (the
-> legacy HTTP `pqueue-service` crate was deleted); the `/v1` route table is therefore an illustrative
+> legacy HTTP `fireweed-service` crate was deleted); the `/v1` route table is therefore an illustrative
 > mapping, not a current implementation surface. Capability classification per face lives in the TD-006 §3
 > matrix.
 
 ## Purpose
 
-This contract defines the native pqueue client interface for queue definition,
+This contract defines the native fireweed client interface for queue definition,
 idempotent batch writes, structured hot item storage, mutable priority updates,
 live item reads by caller key, batch claims, lease renewal, and batch
 finalization.
@@ -47,9 +47,9 @@ operations, fields, lifecycle semantics, per-item outcomes, and error rules.
 The same native command model is exposed through exactly **two committed
 first-class surfaces** (ADR-007; see the "Realized surfaces" note above):
 
-- The **Rust library** (`pqueue` crate) for embedded or same-process use — the
+- The **Rust library** (`fireweed` crate) for embedded or same-process use — the
   full surface.
-- The **RESP wire front** (`pqueue-resp`, TD-006) — the stock-worker hot path.
+- The **RESP wire front** (`fireweed-resp`, TD-006) — the stock-worker hot path.
 
 Other transports (a stateless HTTP/JSON service, SDKs wrapping it) are
 **possible bindings** of this transport-neutral contract, not committed
@@ -59,7 +59,7 @@ planned.
 
 Compatibility adapters, such as an SQS-shaped API, are separate secondary
 surfaces. They MUST NOT replace the native API because they cannot represent
-mutable priority, mutable schedule, or pqueue's full batch/update semantics.
+mutable priority, mutable schedule, or fireweed's full batch/update semantics.
 
 ## External Transaction Contract
 
@@ -97,7 +97,7 @@ following externally visible guarantees:
 - In scope: first-class exposure surfaces and HTTP route shape.
 - Out of scope: storage adapter traits, SQS-compatible adapter details, operator
   UI, authentication provider details, and exact generated SDK packaging.
-- Owning system or team: pqueue core.
+- Owning system or team: fireweed core.
 
 ## Normative Surface
 
@@ -117,15 +117,15 @@ message, endpoint, or payload element named here is part of the contract.
 | `lease_token` | string | claim / renew / finalize | MUST be unguessable; MUST authorize lease renewal and finalization for one active lease. | Stale tokens fail per item. |
 | `priority` | tagged scalar | yes when item should be orderable | MUST match the queue's declared priority model. | Timestamp queues use RFC 3339 UTC timestamps. |
 | `not_before` | timestamp | no | If present, item MUST NOT be claimable before this timestamp. | Distinct from priority. |
-| `payload` | opaque bytes or JSON value | no | MUST be stored and returned to claimers without pqueue interpreting application meaning. | Transport adapters define encoding. |
-| `fields` | map string -> opaque bytes | no | MUST be stored as caller-defined structured item fields and returned to claimers and live-item reads without pqueue interpreting application meaning. Field names MUST be UTF-8 strings. Transport adapters MAY reserve field names for pqueue system fields; reserved names MUST be documented by the adapter. | This is the hot-storage field model for compound work records. It is distinct from `metadata`, which is for predicates/observability. |
+| `payload` | opaque bytes or JSON value | no | MUST be stored and returned to claimers without fireweed interpreting application meaning. | Transport adapters define encoding. |
+| `fields` | map string -> opaque bytes | no | MUST be stored as caller-defined structured item fields and returned to claimers and live-item reads without fireweed interpreting application meaning. Field names MUST be UTF-8 strings. Transport adapters MAY reserve field names for fireweed system fields; reserved names MUST be documented by the adapter. | This is the hot-storage field model for compound work records. It is distinct from `metadata`, which is for predicates/observability. |
 | `metadata` | JSON object / map | no | MUST be caller-defined and queryable only through supported predicates. | Used for gates, group keys, and observability dimensions. |
 | `group_key` | string | no (yes on cohort / group-batching queues) | MAY identify a claim compatibility / ordering partition within a queue. When a claim's effective domain is a single `group_key`, claim result order is the exact per-group priority order (ADR-004): because the queue is the unit of sharding (ADR-008), every item of a `group_key` is co-resident on the queue's single owner **by construction**, so per-group order always holds. On a queue with `cohort_policy.enabled` or group batching enabled, every item MUST carry `group_key`. `group_key` carries no progress-bound meaning; progress is queue-global. | Examples: job, callback/cohort, account, connector, campaign. |
-| `gate_keys` | array of strings | no | MAY declare zero or more opaque gate keys for the item. An item MUST be ineligible for claim while any of its gate keys is `blocked` in the queue's gate state (see Eligibility Precedence). pqueue MUST NOT interpret gate-key meaning. An item with no gate keys is never gate-blocked. Each key MUST match `^[A-Za-z0-9._:-]{1,256}$`; duplicates within one item MUST be collapsed to a set; the set size MUST NOT exceed the queue's `eligibility_policy.max_gate_keys_per_item`. Valid only when the queue's `eligibility_policy.gate_keys = dynamic`; otherwise the item fails per-item `invalid`. | Distinct from `group_key` (claim compatibility/ordering, not eligibility) and from downstream rate pacing (not modeled by pqueue). Gate keys are opaque and independent of whichever `group_key` topology a queue uses (ADR-004). |
+| `gate_keys` | array of strings | no | MAY declare zero or more opaque gate keys for the item. An item MUST be ineligible for claim while any of its gate keys is `blocked` in the queue's gate state (see Eligibility Precedence). fireweed MUST NOT interpret gate-key meaning. An item with no gate keys is never gate-blocked. Each key MUST match `^[A-Za-z0-9._:-]{1,256}$`; duplicates within one item MUST be collapsed to a set; the set size MUST NOT exceed the queue's `eligibility_policy.max_gate_keys_per_item`. Valid only when the queue's `eligibility_policy.gate_keys = dynamic`; otherwise the item fails per-item `invalid`. | Distinct from `group_key` (claim compatibility/ordering, not eligibility) and from downstream rate pacing (not modeled by fireweed). Gate keys are opaque and independent of whichever `group_key` topology a queue uses (ADR-004). |
 | `cohort_size` | integer | conditional | Required on every item of a queue with `cohort_policy.enabled=true`; MUST NOT be present otherwise (else per-item `invalid`). MUST be greater than 0. MUST be identical for every item sharing one `group_key`; a conflicting value on a later member MUST be rejected per item with `conflict`. Fixed at the first accepted member of the `group_key` and immutable thereafter. | Expected complete-cohort member count (analogue of `batch_checksum`). The cohort key is `group_key`; cohort identity = all items sharing a `group_key` on a cohort-enabled queue. |
 | `lifecycle_state` | enum | response | MUST be one of `pending`, `leased`, `complete`, `failed`. Retry is represented as pending with retry metadata and `not_before`. A **recurring** item (see Queue Definition `recurrence`) cycles between `pending` and `leased` indefinitely and reaches `complete`/`failed` only on an explicit terminal finalize. After `recurrence.until` the item stops being re-armed but does **not** change lifecycle state until a terminal finalize occurs or the item is removed by `PurgeItems`. | Recurring items never auto-terminate. |
-| `attempt_count` | integer | response | MUST count the deliveries charged to the item in its current cycle. Charging rules: a successful claim charges exactly one delivery; a timed reclaim (an expired lease returned to pending) charges nothing — the subsequent re-delivery charges the one attempt, so a reclaim-plus-redeliver cycle charges exactly one; a lease renewal by the same consumer never charges; a reclaim by a different consumer charges one (the re-lease is the delivery). This is the queue's per-cycle transient-retry counter — the same counter `retry_policy.max_attempts` bounds (a `retry` finalize once `attempt_count` has reached `max_attempts` MUST make the item terminal `failed`, see Queue Definition) and that a successful `rearm` MUST reset to 0 (see Batch Finalize). pqueue defines exactly one attempt counter; there is no separate `retry_count`. | RESP wire mapping (reserved reply field; `XCLAIM`/`XAUTOCLAIM` charging) is pinned in TD-006 §2–§3. |
-| `item_result.status` | enum | response | MUST be one of `accepted`, `updated`, `duplicate`, `claimed`, `renewed`, `completed`, `failed`, `retried`, `released`, `rearmed`, `purged`, `not_found`, `invalid`, `conflict`, `stale_lease`, `terminal`, `rate_limited`, `unavailable`. | Per-item outcome. `rearmed` is the per-item success status of a `rearm` finalize; `purged` is the per-item success status of a `PurgeItems` removal. `rate_limited` denotes a pqueue deployment/tenant capacity limit only (P1) — specifically the partial-batch case where pqueue accepts some items and declines others of one request under a capacity control; whole-request capacity rejection uses the envelope rate-limit error instead. `rate_limited` is never a downstream-API rate signal. |
+| `attempt_count` | integer | response | MUST count the deliveries charged to the item in its current cycle. Charging rules: a successful claim charges exactly one delivery; a timed reclaim (an expired lease returned to pending) charges nothing — the subsequent re-delivery charges the one attempt, so a reclaim-plus-redeliver cycle charges exactly one; a lease renewal by the same consumer never charges; a reclaim by a different consumer charges one (the re-lease is the delivery). This is the queue's per-cycle transient-retry counter — the same counter `retry_policy.max_attempts` bounds (a `retry` finalize once `attempt_count` has reached `max_attempts` MUST make the item terminal `failed`, see Queue Definition) and that a successful `rearm` MUST reset to 0 (see Batch Finalize). fireweed defines exactly one attempt counter; there is no separate `retry_count`. | RESP wire mapping (reserved reply field; `XCLAIM`/`XAUTOCLAIM` charging) is pinned in TD-006 §2–§3. |
+| `item_result.status` | enum | response | MUST be one of `accepted`, `updated`, `duplicate`, `claimed`, `renewed`, `completed`, `failed`, `retried`, `released`, `rearmed`, `purged`, `not_found`, `invalid`, `conflict`, `stale_lease`, `terminal`, `rate_limited`, `unavailable`. | Per-item outcome. `rearmed` is the per-item success status of a `rearm` finalize; `purged` is the per-item success status of a `PurgeItems` removal. `rate_limited` denotes a fireweed deployment/tenant capacity limit only (P1) — specifically the partial-batch case where fireweed accepts some items and declines others of one request under a capacity control; whole-request capacity rejection uses the envelope rate-limit error instead. `rate_limited` is never a downstream-API rate signal. |
 
 ### Batch-Centric Operation Shape
 
@@ -151,16 +151,16 @@ per-item result semantics as a one-item batch.
 
 | Element | Type / Shape | Required | Rules | Notes |
 |---------|--------------|----------|-------|-------|
-| Rust library surface | crate API (`pqueue`) | yes | MUST expose the native operations as typed async Rust functions or traits. MUST NOT require any wire service for same-process deployments. | Committed full-power surface (ADR-007/ADR-009). |
-| RESP wire surface | RESP protocol (`pqueue-resp`) | yes | MUST expose the stock-worker subset per TD-006 with the richer operations marked library-only in the TD-006 §3 capability matrix. | Committed remote surface (ADR-007). |
-| HTTP service surface | HTTP/JSON API | no (possible binding, not built) | IF ever built, MUST expose the native operations over versioned `/v1` routes and support stateless service containers behind a load balancer. | Not committed; the legacy `pqueue-service` crate was deleted (ADR-007). The route shape below is illustrative. |
+| Rust library surface | crate API (`fireweed`) | yes | MUST expose the native operations as typed async Rust functions or traits. MUST NOT require any wire service for same-process deployments. | Committed full-power surface (ADR-007/ADR-009). |
+| RESP wire surface | RESP protocol (`fireweed-resp`) | yes | MUST expose the stock-worker subset per TD-006 with the richer operations marked library-only in the TD-006 §3 capability matrix. | Committed remote surface (ADR-007). |
+| HTTP service surface | HTTP/JSON API | no (possible binding, not built) | IF ever built, MUST expose the native operations over versioned `/v1` routes and support stateless service containers behind a load balancer. | Not committed; the legacy `fireweed-service` crate was deleted (ADR-007). The route shape below is illustrative. |
 | SDK surface | client library | no (possible binding, not built) | IF ever built, SHOULD wrap a wire surface without changing operation semantics, result ordering, or error codes. | Not committed. |
 | Compatibility adapter surface | adapter API | may | MAY expose SQS-shaped or other compatibility APIs. MUST document unsupported native semantics. | P1, not the native contract. |
 
 ### HTTP Route Shape
 
 **This entire section is conditional and illustrative** (see Exposure Surfaces
-above): no HTTP binding is built or committed — the legacy `pqueue-service`
+above): no HTTP binding is built or committed — the legacy `fireweed-service`
 crate was deleted (ADR-007). Every requirement below applies **only IF** an
 HTTP binding is ever built; it then defines that binding's shape so the
 transport-neutral contract is preserved.
@@ -394,7 +394,7 @@ selects among groups. Compatibility predicates are conjunctive: `group_key`,
 `metadata_equals`, and `same_group_key` all apply when provided. Combining
 `same_group_key=true` with an explicit `group_key` is valid and means all
 returned items MUST match the explicit group. Explicit caller filters restrict
-the claim domain for that request; pqueue can preserve progress within requested
+the claim domain for that request; fireweed can preserve progress within requested
 domains, but operators remain responsible for running workers that cover all
 required domains.
 
@@ -427,7 +427,7 @@ returns.
 | `metadata` | conditional | Present when the item carries caller metadata; returned verbatim. |
 | `gate_keys` | conditional | Present **only** on queues created with `eligibility_policy.gate_keys = dynamic` and only when the item declared one or more gate keys; **absent** on `gate_keys = none` queues. |
 
-pqueue MUST NOT add, drop, or reinterpret any field of a claimed item; the shape
+fireweed MUST NOT add, drop, or reinterpret any field of a claimed item; the shape
 above is the complete claimed-item contract. The JSON example below shows an
 item-level result whose source item carries no `not_before` and no `gate_keys`,
 so those conditional fields are correctly omitted.
@@ -496,7 +496,7 @@ silently skip the cohort). `whole_cohort` selection is owner-local because the
 queue is the unit of sharding, so every `group_key`'s members are co-resident on
 the queue's single owner by construction (ADR-008).
 
-**Caller-driven downstream pacing.** pqueue does not enforce downstream API rate
+**Caller-driven downstream pacing.** fireweed does not enforce downstream API rate
 limits or quotas; the claim path applies **no downstream-rate admission or
 throttling**. A `BatchClaim` MAY still return fewer than `max_items` items, or an
 empty batch, for ordinary reasons — eligibility, compatibility filters, active
@@ -512,7 +512,7 @@ rejection), group selection (`compatibility.group_key`,
 downstream target independently, the per-claim group-batching bound
 (`compatibility.group_batching.max_groups`, g1), and active-scope routing
 (`DiscoverActiveScopes`, g4, which MAY be omitted in embedded single-queue
-deployments). pqueue adds no `rate_policy`, token bucket, or per-claim rate gate.
+deployments). fireweed adds no `rate_policy`, token bucket, or per-claim rate gate.
 
 ### Eligibility Precedence
 
@@ -545,7 +545,7 @@ conjunction; later conditions MUST NOT override earlier exclusions):
    gate state.
 
 An item that fails any of 0–5 is **ineligible** and MUST NOT be reported toward
-the progress bound while it remains so (FR-10). pqueue defines **no rate, quota,
+the progress bound while it remains so (FR-10). fireweed defines **no rate, quota,
 or downstream-pacing eligibility condition**; downstream pacing is the caller's
 responsibility and, if a caller chooses to pause a scope for pacing, it does so
 by `blocked`ing a gate key it owns (condition 5) — ordinary ineligibility, not a
@@ -594,7 +594,7 @@ spent blocked.
 item to `pending` with a caller-supplied `not_before`, resets the per-cycle
 transient-retry counter to 0, and materializes the effective eligible instant at
 finalize commit as `max(commit_time, rearm.not_before)`, recorded as
-`eligible_since`; pqueue does NOT fire a command at wall-clock passage of
+`eligible_since`; fireweed does NOT fire a command at wall-clock passage of
 `not_before`. The re-armed item re-enters the precedence at **stage 3 (Timing)**:
 it is ineligible until wall-clock reaches `not_before` (idle), then becomes a
 candidate that MUST still satisfy stages 1–2 (lifecycle, lease) and stages 4–5
@@ -684,7 +684,7 @@ its initial value). The item row is deleted (never a live row again under the sa
 | `metrics.recurring_leased` | integer | conditional | On a `recurring` queue MUST count recurring items currently `leased` (actively ticking). MAY be approximate if documented. | Active recurring work. |
 
 The recurring counters are served from the `metrics` envelope (the
-`lifecycle_counts`-family observability fields), NOT from `pqueue_group_summary`,
+`lifecycle_counts`-family observability fields), NOT from `fireweed_group_summary`,
 which holds only `oldest_eligible_at` and eligible/at-risk counts and is the
 selection/discovery source. `metrics.oldest_eligible_age_ms` is unchanged for
 recurring items: an idle (future `not_before`) recurring item is ineligible and
@@ -916,7 +916,7 @@ HTTP. Library bindings SHOULD map the same `code` values to typed errors.
 | `SetGates` not durably applied on the queue's owner before `commit-timeout` | Envelope `commit-timeout` | yes by same `request_id` | Retry by `request_id`; application is idempotent per `gate_epoch`. |
 | Discovery `granularity=group` with no resolvable queue | Envelope error `invalid-request` | yes after fix | Provide a `queue_id` for group-granularity discovery. |
 | Discovery names a queue the principal cannot read | Envelope error `queue-forbidden` or `queue-not-found` | no | Use a queue visible to the caller. |
-| pqueue deployment or tenant capacity limit exceeded | Envelope error (rate-limit / capacity error) | yes | Back off per retry guidance. This applies ONLY to pqueue's own deployment/tenant capacity controls (P1) and is an envelope-level admission outcome — pqueue rejects or defers the whole request before per-item processing. pqueue does not rate-limit on behalf of a caller's downstream API. |
+| fireweed deployment or tenant capacity limit exceeded | Envelope error (rate-limit / capacity error) | yes | Back off per retry guidance. This applies ONLY to fireweed's own deployment/tenant capacity controls (P1) and is an envelope-level admission outcome — fireweed rejects or defers the whole request before per-item processing. fireweed does not rate-limit on behalf of a caller's downstream API. |
 
 ## Examples
 
@@ -1173,7 +1173,7 @@ is the ungrouped-items scope, NOT a queue rollup; there is no `claim_scope` fiel
 
 The native contract intentionally exposes batch operations first. Transport
 adapters may offer convenience single-item methods, but those should be client
-wrappers over batch operations because pqueue's cost, durability, and throughput
+wrappers over batch operations because fireweed's cost, durability, and throughput
 model depends on batching.
 
 `CreateQueue` is included in the native API because queue definition controls

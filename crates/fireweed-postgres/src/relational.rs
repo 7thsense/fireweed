@@ -1,8 +1,8 @@
 //! # Relational projection family (postgres) — BQ-12
 //!
 //! The postgres sibling of [`fireweed_sqlite::SqliteRelationalBackend`]: a rebuildable relational
-//! projection family (ADR-008 / TD-001 relational class) where the `pqueue_items` SQL table holds the
-//! durable projection cache. Every lifecycle command is applied as SQL against `pqueue_items`; reads are
+//! projection family (ADR-008 / TD-001 relational class) where the `fireweed_items` SQL table holds the
+//! durable projection cache. Every lifecycle command is applied as SQL against `fireweed_items`; reads are
 //! SQL; a reconnect recovers committed state from the table itself (no command log to replay). The
 //! schema + the 14-arm apply mirror the sqlite relational reference arm-for-arm, so the two relational
 //! backends - and the in-memory reference - stay behaviorally identical on the conformance CORE class.
@@ -39,7 +39,7 @@
 //! claim ordering); TD-002's production schema uses `timestamptz` — a column-type choice that does not
 //! change behavior and is deferred to the live-DB hardening.
 //!
-//! LIVE-DB EVIDENCE IS GATED: this environment has no `PQUEUE_PG_TEST_URL`, so the core +
+//! LIVE-DB EVIDENCE IS GATED: this environment has no `FIREWEED_PG_TEST_URL`, so the core +
 //! relational-reconnect + contended-writer suites against a live postgres are DEFERRED (they run, with a
 //! LOUD skip, when the env var points at a database). The non-gated evidence is: this compiles, the SQL
 //! shapes are unit-asserted (`sql_shape_tests`), and the sqlite-relational parity reference is unchanged.
@@ -160,11 +160,11 @@ fn push_sql_probe(shard: &QueueKey) -> PushSqlProbe {
     PUSH_SQL_PROBES.with(|probes| probes.borrow().get(shard).copied().unwrap_or_default())
 }
 
-/// The relational schema (postgres). Mirrors the sqlite reference column-for-column: `pqueue_items` is
+/// The relational schema (postgres). Mirrors the sqlite reference column-for-column: `fireweed_items` is
 /// TD-002's item projection plus the reference operational columns (`fenced`/`superseded`/`max_attempts`/
 /// `created_seq`); a partial unique index keeps one ACTIVE item per `client_item_key`; `relational_cursor`
-/// holds the per-queue command + item sequence counters (allocated atomically). `pqueue_group_summary` and
-/// `pqueue_item_key_retention` are the relational-only group/idempotency projections (BQ-11c parity).
+/// holds the per-queue command + item sequence counters (allocated atomically). `fireweed_group_summary` and
+/// `fireweed_item_key_retention` are the relational-only group/idempotency projections (BQ-11c parity).
 pub(crate) const RELATIONAL_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS queues (
     tenant TEXT NOT NULL, queue TEXT NOT NULL, definition TEXT NOT NULL,
@@ -172,7 +172,7 @@ CREATE TABLE IF NOT EXISTS queues (
     pause_drain_intake BOOLEAN NOT NULL DEFAULT false,
     PRIMARY KEY (tenant, queue)
 );
-CREATE TABLE IF NOT EXISTS pqueue_items (
+CREATE TABLE IF NOT EXISTS fireweed_items (
     tenant_id TEXT NOT NULL,
     queue_id TEXT NOT NULL,
     item_id TEXT NOT NULL,
@@ -204,15 +204,15 @@ CREATE TABLE IF NOT EXISTS pqueue_items (
     created_seq BIGINT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, item_id)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS pqueue_items_active_key
-    ON pqueue_items (tenant_id, queue_id, client_item_key) WHERE superseded = false;
-CREATE INDEX IF NOT EXISTS pqueue_items_claim_idx
-    ON pqueue_items (tenant_id, queue_id, priority_sort, created_seq) WHERE lifecycle_state = 'Pending';
-CREATE INDEX IF NOT EXISTS pqueue_items_expired_lease_idx
-    ON pqueue_items (tenant_id, queue_id, lease_expires_at, item_id)
+CREATE UNIQUE INDEX IF NOT EXISTS fireweed_items_active_key
+    ON fireweed_items (tenant_id, queue_id, client_item_key) WHERE superseded = false;
+CREATE INDEX IF NOT EXISTS fireweed_items_claim_idx
+    ON fireweed_items (tenant_id, queue_id, priority_sort, created_seq) WHERE lifecycle_state = 'Pending';
+CREATE INDEX IF NOT EXISTS fireweed_items_expired_lease_idx
+    ON fireweed_items (tenant_id, queue_id, lease_expires_at, item_id)
     WHERE lifecycle_state = 'Leased' AND cohort_size IS NULL AND fenced = false AND superseded = false;
-CREATE INDEX IF NOT EXISTS pqueue_items_pending_entry_idx
-    ON pqueue_items (tenant_id, queue_id, (item_id::numeric))
+CREATE INDEX IF NOT EXISTS fireweed_items_pending_entry_idx
+    ON fireweed_items (tenant_id, queue_id, (item_id::numeric))
     INCLUDE (lease_token_hash, lease_expires_at, retry_count)
     WHERE lifecycle_state = 'Leased';
 CREATE TABLE IF NOT EXISTS relational_cursor (
@@ -222,12 +222,12 @@ CREATE TABLE IF NOT EXISTS relational_cursor (
     assignment_epoch BIGINT NOT NULL DEFAULT 0,   -- TD-003 durable ownership epoch (the fence authority)
     PRIMARY KEY (tenant, queue)
 );
-CREATE TABLE IF NOT EXISTS pqueue_id_high_water (
+CREATE TABLE IF NOT EXISTS fireweed_id_high_water (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL,
     item_id TEXT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id)
 );
-CREATE TABLE IF NOT EXISTS pqueue_schema_migrations (
+CREATE TABLE IF NOT EXISTS fireweed_schema_migrations (
     migration_name TEXT NOT NULL PRIMARY KEY
 );
 CREATE TABLE IF NOT EXISTS relational_emission_cursor (
@@ -236,7 +236,7 @@ CREATE TABLE IF NOT EXISTS relational_emission_cursor (
     seq BIGINT NOT NULL,
     PRIMARY KEY (tenant, queue)
 );
-CREATE TABLE IF NOT EXISTS pqueue_group_summary (
+CREATE TABLE IF NOT EXISTS fireweed_group_summary (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, group_key TEXT NOT NULL,
     oldest_eligible_at BIGINT,
     rep_progress_guard_sort BYTEA,
@@ -248,18 +248,18 @@ CREATE TABLE IF NOT EXISTS pqueue_group_summary (
     updated_at BIGINT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, group_key)
 );
-CREATE TABLE IF NOT EXISTS pqueue_group_due_pending (
+CREATE TABLE IF NOT EXISTS fireweed_group_due_pending (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, item_id TEXT NOT NULL,
     group_key TEXT NOT NULL, due_at BIGINT NOT NULL, created_seq BIGINT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, item_id)
 );
-CREATE TABLE IF NOT EXISTS pqueue_item_key_retention (
+CREATE TABLE IF NOT EXISTS fireweed_item_key_retention (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, client_item_key TEXT NOT NULL,
     item_id TEXT NOT NULL, expires_at BIGINT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, client_item_key)
 );
 -- TD-002 §cohort lifecycle projection.
-CREATE TABLE IF NOT EXISTS pqueue_cohorts (
+CREATE TABLE IF NOT EXISTS fireweed_cohorts (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, group_key TEXT NOT NULL,
     cohort_id TEXT NOT NULL,
     cohort_size BIGINT NOT NULL,
@@ -273,25 +273,25 @@ CREATE TABLE IF NOT EXISTS pqueue_cohorts (
     created_at BIGINT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, group_key)
 );
-CREATE INDEX IF NOT EXISTS pqueue_cohorts_claim_idx
-    ON pqueue_cohorts (tenant_id, queue_id, state)
+CREATE INDEX IF NOT EXISTS fireweed_cohorts_claim_idx
+    ON fireweed_cohorts (tenant_id, queue_id, state)
     WHERE state='complete';
-CREATE INDEX IF NOT EXISTS pqueue_cohorts_expiry_idx
-    ON pqueue_cohorts (tenant_id, queue_id, cohort_created_at)
+CREATE INDEX IF NOT EXISTS fireweed_cohorts_expiry_idx
+    ON fireweed_cohorts (tenant_id, queue_id, cohort_created_at)
     WHERE state IN ('forming','complete');
--- BQ-14d: gates (TD-002 §gate / API-001 g2). `pqueue_item_gates` is the item↔gate-key membership
--- (inserted on Push); `pqueue_gate_state` is the queue's BLOCKED gate keys (one row per blocked key,
+-- BQ-14d: gates (TD-002 §gate / API-001 g2). `fireweed_item_gates` is the item↔gate-key membership
+-- (inserted on Push); `fireweed_gate_state` is the queue's BLOCKED gate keys (one row per blocked key,
 -- maintained by SetGates). An item is gate-blocked (ineligible) iff any of its gate keys is in
--- pqueue_gate_state — the eligibility predicate anti-joins these (exact-on-read, O(blocked keys)).
-CREATE TABLE IF NOT EXISTS pqueue_item_gates (
+-- fireweed_gate_state — the eligibility predicate anti-joins these (exact-on-read, O(blocked keys)).
+CREATE TABLE IF NOT EXISTS fireweed_item_gates (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, item_id TEXT NOT NULL, gate_key TEXT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, item_id, gate_key)
 );
-CREATE TABLE IF NOT EXISTS pqueue_gate_state (
+CREATE TABLE IF NOT EXISTS fireweed_gate_state (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, gate_key TEXT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, gate_key)
 );
-CREATE TABLE IF NOT EXISTS pqueue_request_idempotency (
+CREATE TABLE IF NOT EXISTS fireweed_request_idempotency (
     tenant_id TEXT NOT NULL,
     queue_id TEXT NOT NULL,
     operation TEXT NOT NULL,
@@ -302,15 +302,15 @@ CREATE TABLE IF NOT EXISTS pqueue_request_idempotency (
     created_at BIGINT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, operation, request_id)
 );
-CREATE INDEX IF NOT EXISTS pqueue_request_idempotency_expiry_idx
-    ON pqueue_request_idempotency (expires_at);
+CREATE INDEX IF NOT EXISTS fireweed_request_idempotency_expiry_idx
+    ON fireweed_request_idempotency (expires_at);
 -- ADR-011 (pqueue-f4ffd679): typed secondary index rows. PK is (tenant, queue, index_name, item_id)
 -- because each item has at most one canonical key per named index. Unique typed indexes are also protected
 -- by a partial unique index over `(tenant, queue, index_name, index_key) WHERE is_unique`, so cross-instance
 -- writers cannot race past the application-level pre-check. Rows are inserted on Push/ReplacePending/
 -- UpdateFields and deleted only on PurgeItems — terminal items keep their index rows so they are still
 -- findable (parity with in-memory projection).
-CREATE TABLE IF NOT EXISTS pqueue_item_index (
+CREATE TABLE IF NOT EXISTS fireweed_item_index (
     tenant_id TEXT NOT NULL,
     queue_id TEXT NOT NULL,
     index_name TEXT NOT NULL,
@@ -319,43 +319,43 @@ CREATE TABLE IF NOT EXISTS pqueue_item_index (
     is_unique BOOLEAN NOT NULL DEFAULT false,
     PRIMARY KEY (tenant_id, queue_id, index_name, item_id)
 );
-CREATE INDEX IF NOT EXISTS pqueue_item_index_key_idx
-    ON pqueue_item_index (tenant_id, queue_id, index_name, index_key);
-CREATE UNIQUE INDEX IF NOT EXISTS pqueue_item_index_unique_key_idx
-    ON pqueue_item_index (tenant_id, queue_id, index_name, index_key)
+CREATE INDEX IF NOT EXISTS fireweed_item_index_key_idx
+    ON fireweed_item_index (tenant_id, queue_id, index_name, index_key);
+CREATE UNIQUE INDEX IF NOT EXISTS fireweed_item_index_unique_key_idx
+    ON fireweed_item_index (tenant_id, queue_id, index_name, index_key)
     WHERE is_unique = true;
-CREATE TABLE IF NOT EXISTS pqueue_item_index_component (
+CREATE TABLE IF NOT EXISTS fireweed_item_index_component (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, index_name TEXT NOT NULL,
     item_id TEXT NOT NULL, component_position INTEGER NOT NULL, component_value BYTEA NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, index_name, item_id, component_position)
 );
-CREATE TABLE IF NOT EXISTS pqueue_metrics_counted_item (
+CREATE TABLE IF NOT EXISTS fireweed_metrics_counted_item (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, item_id TEXT NOT NULL,
     lifecycle_state TEXT NOT NULL, superseded BOOLEAN NOT NULL, item_version BIGINT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, item_id)
 );
 -- C9 (epic pqueue-2201fd37): opaque NON-WORK side records written by the authoritative vectorized
--- claimed-work commit (Snorri StateStore boundary). Deliberately SEPARATE from `pqueue_items`: a side
+-- claimed-work commit (Snorri StateStore boundary). Deliberately SEPARATE from `fireweed_items`: a side
 -- record carries no lifecycle/lease/priority/eligibility, so it is never claimable, eligible, peekable, or
--- counted as work. `key`/`payload` are opaque bytes pqueue stores verbatim; the apply arm upserts by key.
--- Mirrors `fireweed-sqlite`'s `pqueue_side_records` (`crates/fireweed-sqlite/src/relational.rs:234-237`).
-CREATE TABLE IF NOT EXISTS pqueue_side_records (
+-- counted as work. `key`/`payload` are opaque bytes fireweed stores verbatim; the apply arm upserts by key.
+-- Mirrors `fireweed-sqlite`'s `fireweed_side_records` (`crates/fireweed-sqlite/src/relational.rs:234-237`).
+CREATE TABLE IF NOT EXISTS fireweed_side_records (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, key BYTEA NOT NULL, payload BYTEA NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, key)
 );
 -- C6 (epic pqueue-2201fd37): caller-supplied opaque instance/state fences advanced by the authoritative
--- vectorized claimed-work commit (Snorri StateStore boundary). SEPARATE from `pqueue_items`: a fence carries
+-- vectorized claimed-work commit (Snorri StateStore boundary). SEPARATE from `fireweed_items`: a fence carries
 -- no lifecycle/lease and is never claimable/eligible/peekable. `instance_key` is opaque bytes; an absent key
 -- reads as fence 0 (the unset convention). The commit upserts the row to `next` only after validation.
--- Mirrors `fireweed-sqlite`'s `pqueue_instance_fences` (`crates/fireweed-sqlite/src/relational.rs:242-245`).
-CREATE TABLE IF NOT EXISTS pqueue_instance_fences (
+-- Mirrors `fireweed-sqlite`'s `fireweed_instance_fences` (`crates/fireweed-sqlite/src/relational.rs:242-245`).
+CREATE TABLE IF NOT EXISTS fireweed_instance_fences (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, instance_key BYTEA NOT NULL, fence BIGINT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, instance_key)
 );
 "#;
 
 const COMMAND_LOG_MIGRATION: &str = r#"
-CREATE TABLE IF NOT EXISTS pqueue_commands (
+CREATE TABLE IF NOT EXISTS fireweed_commands (
     tenant TEXT NOT NULL,
     queue TEXT NOT NULL,
     assignment_epoch BIGINT NOT NULL,
@@ -366,11 +366,11 @@ CREATE TABLE IF NOT EXISTS pqueue_commands (
     created_at BIGINT NOT NULL,
     PRIMARY KEY (tenant, queue, seq)
 );
-CREATE INDEX IF NOT EXISTS pqueue_commands_read_idx
-    ON pqueue_commands (tenant, queue, seq);
-CREATE UNIQUE INDEX IF NOT EXISTS pqueue_commands_command_id_idx
-    ON pqueue_commands (tenant, queue, command_id);
-CREATE TABLE IF NOT EXISTS pqueue_command_baselines (
+CREATE INDEX IF NOT EXISTS fireweed_commands_read_idx
+    ON fireweed_commands (tenant, queue, seq);
+CREATE UNIQUE INDEX IF NOT EXISTS fireweed_commands_command_id_idx
+    ON fireweed_commands (tenant, queue, command_id);
+CREATE TABLE IF NOT EXISTS fireweed_command_baselines (
     tenant TEXT NOT NULL,
     queue TEXT NOT NULL,
     generation TEXT NOT NULL,
@@ -382,7 +382,7 @@ CREATE TABLE IF NOT EXISTS pqueue_command_baselines (
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (tenant, queue)
 );
-CREATE TABLE IF NOT EXISTS pqueue_command_baseline_rows (
+CREATE TABLE IF NOT EXISTS fireweed_command_baseline_rows (
     tenant TEXT NOT NULL,
     queue TEXT NOT NULL,
     generation TEXT NOT NULL,
@@ -391,7 +391,7 @@ CREATE TABLE IF NOT EXISTS pqueue_command_baseline_rows (
     payload JSONB NOT NULL,
     PRIMARY KEY (tenant, queue, generation, relation_name, row_ordinal)
 );
-CREATE TABLE IF NOT EXISTS pqueue_command_baseline_migrations (
+CREATE TABLE IF NOT EXISTS fireweed_command_baseline_migrations (
     tenant TEXT NOT NULL,
     queue TEXT NOT NULL,
     generation TEXT NOT NULL,
@@ -410,43 +410,43 @@ CREATE TABLE IF NOT EXISTS pqueue_command_baseline_migrations (
 const BASELINE_RELATIONS: &[(&str, &str, &str)] = &[
     ("queues", "tenant", "queue"),
     ("relational_emission_cursor", "tenant", "queue"),
-    ("pqueue_id_high_water", "tenant_id", "queue_id"),
-    ("pqueue_items", "tenant_id", "queue_id"),
-    ("pqueue_group_summary", "tenant_id", "queue_id"),
-    ("pqueue_group_due_pending", "tenant_id", "queue_id"),
-    ("pqueue_item_key_retention", "tenant_id", "queue_id"),
-    ("pqueue_cohorts", "tenant_id", "queue_id"),
-    ("pqueue_item_gates", "tenant_id", "queue_id"),
-    ("pqueue_gate_state", "tenant_id", "queue_id"),
-    ("pqueue_request_idempotency", "tenant_id", "queue_id"),
-    ("pqueue_item_index", "tenant_id", "queue_id"),
-    ("pqueue_item_index_component", "tenant_id", "queue_id"),
-    ("pqueue_metrics_counted_item", "tenant_id", "queue_id"),
-    ("pqueue_queue_metrics_v2", "tenant_id", "queue_id"),
-    ("pqueue_side_records", "tenant_id", "queue_id"),
-    ("pqueue_instance_fences", "tenant_id", "queue_id"),
+    ("fireweed_id_high_water", "tenant_id", "queue_id"),
+    ("fireweed_items", "tenant_id", "queue_id"),
+    ("fireweed_group_summary", "tenant_id", "queue_id"),
+    ("fireweed_group_due_pending", "tenant_id", "queue_id"),
+    ("fireweed_item_key_retention", "tenant_id", "queue_id"),
+    ("fireweed_cohorts", "tenant_id", "queue_id"),
+    ("fireweed_item_gates", "tenant_id", "queue_id"),
+    ("fireweed_gate_state", "tenant_id", "queue_id"),
+    ("fireweed_request_idempotency", "tenant_id", "queue_id"),
+    ("fireweed_item_index", "tenant_id", "queue_id"),
+    ("fireweed_item_index_component", "tenant_id", "queue_id"),
+    ("fireweed_metrics_counted_item", "tenant_id", "queue_id"),
+    ("fireweed_queue_metrics_v2", "tenant_id", "queue_id"),
+    ("fireweed_side_records", "tenant_id", "queue_id"),
+    ("fireweed_instance_fences", "tenant_id", "queue_id"),
 ];
 
 const QUEUE_METRICS_MIGRATION: &str = r#"
 -- The operator migration is standalone: it must create every relation used by
 -- its concurrent indexes before an upgraded backend has run constructor DDL.
-CREATE TABLE IF NOT EXISTS pqueue_group_due_pending (
+CREATE TABLE IF NOT EXISTS fireweed_group_due_pending (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, item_id TEXT NOT NULL,
     group_key TEXT NOT NULL, due_at BIGINT NOT NULL, created_seq BIGINT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, item_id)
 );
-CREATE TABLE IF NOT EXISTS pqueue_item_index_component (
+CREATE TABLE IF NOT EXISTS fireweed_item_index_component (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, index_name TEXT NOT NULL,
     item_id TEXT NOT NULL, component_position INTEGER NOT NULL, component_value BYTEA NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, index_name, item_id, component_position)
 );
-CREATE TABLE IF NOT EXISTS pqueue_queue_metrics_v2 (
+CREATE TABLE IF NOT EXISTS fireweed_queue_metrics_v2 (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL,
     pending BIGINT NOT NULL DEFAULT 0, leased BIGINT NOT NULL DEFAULT 0,
     complete BIGINT NOT NULL DEFAULT 0, failed BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (tenant_id, queue_id)
 );
-CREATE TABLE IF NOT EXISTS pqueue_metrics_migration_state (
+CREATE TABLE IF NOT EXISTS fireweed_metrics_migration_state (
     migration_name TEXT PRIMARY KEY,
     status TEXT NOT NULL,
     high_tenant TEXT, high_queue TEXT, high_item_id TEXT,
@@ -456,14 +456,14 @@ CREATE TABLE IF NOT EXISTS pqueue_metrics_migration_state (
     batches_completed BIGINT NOT NULL DEFAULT 0,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
-CREATE TABLE IF NOT EXISTS pqueue_metrics_counted_item (
+CREATE TABLE IF NOT EXISTS fireweed_metrics_counted_item (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, item_id TEXT NOT NULL,
     lifecycle_state TEXT NOT NULL, superseded BOOLEAN NOT NULL, item_version BIGINT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, item_id)
 );
-ALTER TABLE pqueue_metrics_migration_state
+ALTER TABLE fireweed_metrics_migration_state
     ADD COLUMN IF NOT EXISTS due_rows_backfilled BIGINT NOT NULL DEFAULT 0;
-CREATE OR REPLACE FUNCTION pqueue_index_component(key BYTEA, component_offset INTEGER)
+CREATE OR REPLACE FUNCTION fireweed_index_component(key BYTEA, component_offset INTEGER)
 RETURNS BYTEA AS $$
 DECLARE component_length INTEGER;
 BEGIN
@@ -475,7 +475,7 @@ BEGIN
   IF octet_length(key) < component_offset + 4 + component_length THEN RETURN NULL; END IF;
   RETURN substring(key FROM component_offset + 5 FOR component_length);
 END $$ LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE;
-CREATE OR REPLACE FUNCTION pqueue_index_components(key BYTEA)
+CREATE OR REPLACE FUNCTION fireweed_index_components(key BYTEA)
 RETURNS TABLE(component_position INTEGER, component_value BYTEA) AS $$
 DECLARE component_offset INTEGER := 0;
 DECLARE component_length INTEGER;
@@ -493,38 +493,38 @@ BEGIN
     component_position := component_position + 1;
   END LOOP;
 END $$ LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE;
-CREATE OR REPLACE FUNCTION pqueue_sync_index_components() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION fireweed_sync_index_components() RETURNS trigger AS $$
 BEGIN
   IF TG_OP <> 'INSERT' THEN
-    DELETE FROM pqueue_item_index_component
+    DELETE FROM fireweed_item_index_component
      WHERE tenant_id=OLD.tenant_id AND queue_id=OLD.queue_id
        AND index_name=OLD.index_name AND item_id=OLD.item_id;
   END IF;
   IF TG_OP <> 'DELETE' THEN
-    INSERT INTO pqueue_item_index_component(
+    INSERT INTO fireweed_item_index_component(
       tenant_id,queue_id,index_name,item_id,component_position,component_value)
     SELECT NEW.tenant_id,NEW.queue_id,NEW.index_name,NEW.item_id,
            component_position,component_value
-      FROM pqueue_index_components(NEW.index_key);
+      FROM fireweed_index_components(NEW.index_key);
   END IF;
   RETURN CASE WHEN TG_OP='DELETE' THEN OLD ELSE NEW END;
 END $$ LANGUAGE plpgsql;
 DO $$ BEGIN
-  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='pqueue_item_index_components_sync'
-             AND tgrelid='pqueue_item_index'::regclass
-             AND (tgfoid<>to_regprocedure('pqueue_sync_index_components()')
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='fireweed_item_index_components_sync'
+             AND tgrelid='fireweed_item_index'::regclass
+             AND (tgfoid<>to_regprocedure('fireweed_sync_index_components()')
                   OR tgenabled NOT IN ('O','A')
                   OR pg_get_triggerdef(oid) NOT LIKE '%AFTER INSERT OR DELETE OR UPDATE OF index_key%')) THEN
-    DROP TRIGGER pqueue_item_index_components_sync ON pqueue_item_index;
+    DROP TRIGGER fireweed_item_index_components_sync ON fireweed_item_index;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='pqueue_item_index_components_sync'
-                 AND tgrelid='pqueue_item_index'::regclass) THEN
-    CREATE TRIGGER pqueue_item_index_components_sync
-      AFTER INSERT OR DELETE OR UPDATE OF index_key ON pqueue_item_index
-      FOR EACH ROW EXECUTE FUNCTION pqueue_sync_index_components();
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='fireweed_item_index_components_sync'
+                 AND tgrelid='fireweed_item_index'::regclass) THEN
+    CREATE TRIGGER fireweed_item_index_components_sync
+      AFTER INSERT OR DELETE OR UPDATE OF index_key ON fireweed_item_index
+      FOR EACH ROW EXECUTE FUNCTION fireweed_sync_index_components();
   END IF;
 END $$;
-CREATE OR REPLACE FUNCTION pqueue_apply_metrics_delta() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION fireweed_apply_metrics_delta() RETURNS trigger AS $$
 DECLARE p BIGINT := 0; l BIGINT := 0; c BIGINT := 0; f BIGINT := 0;
 DECLARE metric_tenant TEXT; metric_queue TEXT;
 DECLARE old_counted BOOLEAN := false; new_counted BOOLEAN := false;
@@ -535,7 +535,7 @@ BEGIN
   IF TG_OP <> 'INSERT' THEN
     SELECT lifecycle_state,superseded,item_version
       INTO counted_state,counted_superseded,counted_version
-      FROM pqueue_metrics_counted_item
+      FROM fireweed_metrics_counted_item
      WHERE tenant_id=OLD.tenant_id AND queue_id=OLD.queue_id AND item_id=OLD.item_id
      FOR UPDATE;
     marker_found := FOUND;
@@ -544,13 +544,13 @@ BEGIN
   IF TG_OP <> 'DELETE' THEN
     LOOP
       IF marker_found THEN
-        UPDATE pqueue_metrics_counted_item SET lifecycle_state=NEW.lifecycle_state,
+        UPDATE fireweed_metrics_counted_item SET lifecycle_state=NEW.lifecycle_state,
           superseded=NEW.superseded,item_version=NEW.item_version
          WHERE tenant_id=NEW.tenant_id AND queue_id=NEW.queue_id AND item_id=NEW.item_id;
         new_counted := true;
         EXIT;
       END IF;
-      INSERT INTO pqueue_metrics_counted_item(
+      INSERT INTO fireweed_metrics_counted_item(
         tenant_id,queue_id,item_id,lifecycle_state,superseded,item_version)
       VALUES(NEW.tenant_id,NEW.queue_id,NEW.item_id,NEW.lifecycle_state,NEW.superseded,NEW.item_version)
       ON CONFLICT DO NOTHING;
@@ -558,7 +558,7 @@ BEGIN
       IF acquired=1 THEN new_counted := true; EXIT; END IF;
       SELECT lifecycle_state,superseded,item_version
         INTO counted_state,counted_superseded,counted_version
-        FROM pqueue_metrics_counted_item
+        FROM fireweed_metrics_counted_item
        WHERE tenant_id=NEW.tenant_id AND queue_id=NEW.queue_id AND item_id=NEW.item_id
        FOR UPDATE;
       marker_found := FOUND;
@@ -580,25 +580,25 @@ BEGIN
     metric_tenant := NEW.tenant_id; metric_queue := NEW.queue_id;
   END IF;
   IF p<>0 OR l<>0 OR c<>0 OR f<>0 THEN
-    INSERT INTO pqueue_queue_metrics_v2(tenant_id,queue_id,pending,leased,complete,failed)
+    INSERT INTO fireweed_queue_metrics_v2(tenant_id,queue_id,pending,leased,complete,failed)
       VALUES(metric_tenant,metric_queue,p,l,c,f)
     ON CONFLICT(tenant_id,queue_id) DO UPDATE SET
-      pending=pqueue_queue_metrics_v2.pending+EXCLUDED.pending,
-      leased=pqueue_queue_metrics_v2.leased+EXCLUDED.leased,
-      complete=pqueue_queue_metrics_v2.complete+EXCLUDED.complete,
-      failed=pqueue_queue_metrics_v2.failed+EXCLUDED.failed;
+      pending=fireweed_queue_metrics_v2.pending+EXCLUDED.pending,
+      leased=fireweed_queue_metrics_v2.leased+EXCLUDED.leased,
+      complete=fireweed_queue_metrics_v2.complete+EXCLUDED.complete,
+      failed=fireweed_queue_metrics_v2.failed+EXCLUDED.failed;
   END IF;
   IF TG_OP='DELETE' THEN
-    DELETE FROM pqueue_metrics_counted_item
+    DELETE FROM fireweed_metrics_counted_item
       WHERE tenant_id=OLD.tenant_id AND queue_id=OLD.queue_id AND item_id=OLD.item_id;
   END IF;
   IF TG_OP <> 'INSERT' THEN
-    DELETE FROM pqueue_group_due_pending
+    DELETE FROM fireweed_group_due_pending
       WHERE tenant_id=OLD.tenant_id AND queue_id=OLD.queue_id AND item_id=OLD.item_id;
   END IF;
   IF TG_OP <> 'DELETE' AND NEW.group_key IS NOT NULL AND NEW.lifecycle_state='Pending'
      AND NOT NEW.superseded AND NEW.not_before IS NOT NULL THEN
-    INSERT INTO pqueue_group_due_pending(
+    INSERT INTO fireweed_group_due_pending(
       tenant_id,queue_id,item_id,group_key,due_at,created_seq)
     VALUES(NEW.tenant_id,NEW.queue_id,NEW.item_id,NEW.group_key,NEW.not_before,NEW.created_seq)
     ON CONFLICT(tenant_id,queue_id,item_id) DO UPDATE SET
@@ -607,99 +607,99 @@ BEGIN
   RETURN CASE WHEN TG_OP='DELETE' THEN OLD ELSE NEW END;
 END $$ LANGUAGE plpgsql;
 DO $$ BEGIN
-  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='pqueue_items_metrics_delta'
-             AND tgrelid='pqueue_items'::regclass
-             AND (tgfoid<>to_regprocedure('pqueue_apply_metrics_delta()')
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='fireweed_items_metrics_delta'
+             AND tgrelid='fireweed_items'::regclass
+             AND (tgfoid<>to_regprocedure('fireweed_apply_metrics_delta()')
                   OR tgenabled NOT IN ('O','A')
                   OR pg_get_triggerdef(oid) NOT LIKE
                     '%AFTER INSERT OR DELETE OR UPDATE OF lifecycle_state, superseded, not_before, group_key%')) THEN
-    DROP TRIGGER pqueue_items_metrics_delta ON pqueue_items;
+    DROP TRIGGER fireweed_items_metrics_delta ON fireweed_items;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='pqueue_items_metrics_delta'
-                 AND tgrelid='pqueue_items'::regclass) THEN
-    CREATE TRIGGER pqueue_items_metrics_delta
-      AFTER INSERT OR DELETE OR UPDATE OF lifecycle_state,superseded,not_before,group_key ON pqueue_items
-      FOR EACH ROW EXECUTE FUNCTION pqueue_apply_metrics_delta();
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='fireweed_items_metrics_delta'
+                 AND tgrelid='fireweed_items'::regclass) THEN
+    CREATE TRIGGER fireweed_items_metrics_delta
+      AFTER INSERT OR DELETE OR UPDATE OF lifecycle_state,superseded,not_before,group_key ON fireweed_items
+      FOR EACH ROW EXECUTE FUNCTION fireweed_apply_metrics_delta();
   END IF;
 END $$;
 "#;
 
 const GROUP_SUMMARY_INDEX_MIGRATIONS: &[(&str, &str)] = &[
     (
-        "pqueue_item_index_component_lookup_idx",
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_item_index_component_lookup_idx \
-         ON pqueue_item_index_component \
+        "fireweed_item_index_component_lookup_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS fireweed_item_index_component_lookup_idx \
+         ON fireweed_item_index_component \
            (tenant_id,queue_id,index_name,component_position,component_value,item_id)",
     ),
     (
-        "pqueue_items_group_summary_idx",
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_items_group_summary_idx \
-         ON pqueue_items (tenant_id,queue_id,group_key,priority_sort,created_seq) \
+        "fireweed_items_group_summary_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS fireweed_items_group_summary_idx \
+         ON fireweed_items (tenant_id,queue_id,group_key,priority_sort,created_seq) \
          INCLUDE (eligible_since,created_at,item_id,not_before) \
          WHERE lifecycle_state='Pending' AND superseded=false AND group_key IS NOT NULL",
     ),
     (
-        "pqueue_items_group_oldest_idx",
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_items_group_oldest_idx \
-         ON pqueue_items (tenant_id,queue_id,group_key,eligible_since,created_seq) INCLUDE (not_before) \
+        "fireweed_items_group_oldest_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS fireweed_items_group_oldest_idx \
+         ON fireweed_items (tenant_id,queue_id,group_key,eligible_since,created_seq) INCLUDE (not_before) \
          WHERE lifecycle_state='Pending' AND superseded=false AND group_key IS NOT NULL",
     ),
     (
-        "pqueue_items_group_active_idx",
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_items_group_active_idx \
-         ON pqueue_items (tenant_id,queue_id,group_key,item_id) \
+        "fireweed_items_group_active_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS fireweed_items_group_active_idx \
+         ON fireweed_items (tenant_id,queue_id,group_key,item_id) \
          WHERE lifecycle_state = ANY (ARRAY['Pending'::text,'Leased'::text]) \
            AND superseded=false AND group_key IS NOT NULL",
     ),
     (
-        "pqueue_items_group_due_idx",
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_items_group_due_idx \
-         ON pqueue_items (tenant_id,queue_id,group_key,not_before,created_seq) INCLUDE (item_id) \
+        "fireweed_items_group_due_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS fireweed_items_group_due_idx \
+         ON fireweed_items (tenant_id,queue_id,group_key,not_before,created_seq) INCLUDE (item_id) \
          WHERE lifecycle_state='Pending' AND superseded=false AND group_key IS NOT NULL \
            AND not_before IS NOT NULL",
     ),
     (
-        "pqueue_items_active_scope_idx",
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_items_active_scope_idx \
-         ON pqueue_items (tenant_id,queue_id,group_key,eligible_since,not_before,item_id) \
+        "fireweed_items_active_scope_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS fireweed_items_active_scope_idx \
+         ON fireweed_items (tenant_id,queue_id,group_key,eligible_since,not_before,item_id) \
          WHERE lifecycle_state='Pending' AND superseded=false",
     ),
     (
-        "pqueue_group_summary_claim_rank_idx",
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_group_summary_claim_rank_idx \
-         ON pqueue_group_summary \
+        "fireweed_group_summary_claim_rank_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS fireweed_group_summary_claim_rank_idx \
+         ON fireweed_group_summary \
             (tenant_id,queue_id,rep_priority_sort,rep_item_id,group_key) \
          WHERE oldest_eligible_at IS NOT NULL",
     ),
     (
-        "pqueue_group_summary_oldest_rank_idx",
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_group_summary_oldest_rank_idx \
-         ON pqueue_group_summary (tenant_id,queue_id,oldest_eligible_at,group_key) \
+        "fireweed_group_summary_oldest_rank_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS fireweed_group_summary_oldest_rank_idx \
+         ON fireweed_group_summary (tenant_id,queue_id,oldest_eligible_at,group_key) \
          WHERE oldest_eligible_at IS NOT NULL",
     ),
     (
-        "pqueue_group_summary_refresh_frontier_idx",
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_group_summary_refresh_frontier_idx \
-         ON pqueue_group_summary (tenant_id,queue_id,updated_at,group_key)",
+        "fireweed_group_summary_refresh_frontier_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS fireweed_group_summary_refresh_frontier_idx \
+         ON fireweed_group_summary (tenant_id,queue_id,updated_at,group_key)",
     ),
     (
-        "pqueue_items_global_expired_lease_idx",
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_items_global_expired_lease_idx \
-         ON pqueue_items (lease_expires_at,tenant_id,queue_id,item_id) \
+        "fireweed_items_global_expired_lease_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS fireweed_items_global_expired_lease_idx \
+         ON fireweed_items (lease_expires_at,tenant_id,queue_id,item_id) \
          WHERE lifecycle_state='Leased' AND cohort_size IS NULL \
            AND fenced=false AND superseded=false",
     ),
     (
-        "pqueue_items_pending_entry_idx",
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_items_pending_entry_idx \
-         ON pqueue_items (tenant_id,queue_id,(item_id::numeric)) \
+        "fireweed_items_pending_entry_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS fireweed_items_pending_entry_idx \
+         ON fireweed_items (tenant_id,queue_id,(item_id::numeric)) \
          INCLUDE (lease_token_hash,lease_expires_at,retry_count) \
          WHERE lifecycle_state='Leased'",
     ),
     (
-        "pqueue_group_due_pending_frontier_idx",
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_group_due_pending_frontier_idx \
-         ON pqueue_group_due_pending (tenant_id,queue_id,due_at,created_seq,item_id)",
+        "fireweed_group_due_pending_frontier_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS fireweed_group_due_pending_frontier_idx \
+         ON fireweed_group_due_pending (tenant_id,queue_id,due_at,created_seq,item_id)",
     ),
 ];
 
@@ -731,16 +731,16 @@ fn verify_group_summary_indexes(client: &mut Client, fresh: bool) -> EngineResul
             st(client.batch_execute(&create))?;
             continue;
         }
-        let table = if ddl.contains(" ON pqueue_items ") {
-            "pqueue_items"
-        } else if ddl.contains("pqueue_item_index_component") {
-            "pqueue_item_index_component"
-        } else if ddl.contains(" ON pqueue_item_index ") {
-            "pqueue_item_index"
-        } else if ddl.contains(" ON pqueue_group_due_pending ") {
-            "pqueue_group_due_pending"
+        let table = if ddl.contains(" ON fireweed_items ") {
+            "fireweed_items"
+        } else if ddl.contains("fireweed_item_index_component") {
+            "fireweed_item_index_component"
+        } else if ddl.contains(" ON fireweed_item_index ") {
+            "fireweed_item_index"
+        } else if ddl.contains(" ON fireweed_group_due_pending ") {
+            "fireweed_group_due_pending"
         } else {
-            "pqueue_group_summary"
+            "fireweed_group_summary"
         };
         let Some(row) = st(client.query_opt(
             "SELECT i.indisvalid,pg_get_indexdef(i.indexrelid) FROM pg_index i \
@@ -772,18 +772,18 @@ const IDEMPOTENCY_OPERATION_CLAIM_BY_QUERY: &str = "claim_by_query";
 /// Authored as a constant so its shape is unit-asserted without a live DB (`sql_shape_tests`).
 pub(crate) const CLAIM_CTE: &str = "\
 WITH candidates AS MATERIALIZED ( \
-    SELECT item_id FROM pqueue_items \
+    SELECT item_id FROM fireweed_items \
     WHERE tenant_id=$1 AND queue_id=$2 AND lifecycle_state='Pending' AND superseded=false AND cohort_size IS NULL \
       AND (not_before IS NULL OR not_before<=$3) AND eligible_since IS NOT NULL \
-      AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+      AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
           ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
-          WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
-          AND ig.item_id=pqueue_items.item_id) \
+          WHERE ig.tenant_id=fireweed_items.tenant_id AND ig.queue_id=fireweed_items.queue_id \
+          AND ig.item_id=fireweed_items.item_id) \
     ORDER BY priority_sort, created_seq \
     LIMIT $4 \
     FOR UPDATE SKIP LOCKED \
 ), updated AS ( \
-UPDATE pqueue_items i \
+UPDATE fireweed_items i \
 SET lifecycle_state='Leased', lease_token_hash=$5, lease_expires_at=$6, \
     retry_count=retry_count+1, item_version=item_version+1, updated_at=$7, last_command_sequence=$8 \
 FROM candidates c \
@@ -797,11 +797,11 @@ SELECT item_id, client_item_key, item_version, priority, group_key, not_before, 
 ORDER BY claim_priority_sort, claim_created_seq";
 
 pub(crate) const ITEM_GATE_KEYS_BATCH_SQL: &str = "\
-SELECT item_id, gate_key FROM pqueue_item_gates \
+SELECT item_id, gate_key FROM fireweed_item_gates \
 WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3) \
 ORDER BY item_id, gate_key";
 
-const ASYNC_EXPIRED_LEASES_BOUNDED_SQL: &str = "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
+const ASYNC_EXPIRED_LEASES_BOUNDED_SQL: &str = "SELECT item_id FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 \
      AND lifecycle_state='Leased' AND cohort_size IS NULL AND fenced=false AND superseded=false \
      AND lease_expires_at IS NOT NULL AND lease_expires_at<$3 ORDER BY item_id LIMIT $4";
 
@@ -872,7 +872,7 @@ fn check_request_idempotency(
     let (t, q) = parts(shard);
     let prior = st(tx.query_opt(
         "SELECT request_fingerprint, response_payload, expires_at \
-         FROM pqueue_request_idempotency \
+         FROM fireweed_request_idempotency \
          WHERE tenant_id=$1 AND queue_id=$2 AND operation=$3 AND request_id=$4",
         &[&t, &q, &operation, &request_id.as_str()],
     ))?;
@@ -884,7 +884,7 @@ fn check_request_idempotency(
     let expires_at: i64 = row.get(2);
     if expires_at <= now_n {
         st(tx.execute(
-            "DELETE FROM pqueue_request_idempotency \
+            "DELETE FROM fireweed_request_idempotency \
              WHERE tenant_id=$1 AND queue_id=$2 AND operation=$3 AND request_id=$4",
             &[&t, &q, &operation, &request_id.as_str()],
         ))?;
@@ -910,16 +910,16 @@ fn record_request_idempotency(
     let (t, q) = parts(shard);
     let response_payload = item_ids_to_json(response_ids)?;
     let affected = st(tx.execute(
-        "INSERT INTO pqueue_request_idempotency \
+        "INSERT INTO fireweed_request_idempotency \
          (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,expires_at,created_at) \
          VALUES($1,$2,$3,$4,$5,$6,$7,$8) \
          ON CONFLICT(tenant_id,queue_id,operation,request_id) DO UPDATE SET \
           request_fingerprint=EXCLUDED.request_fingerprint, \
           response_payload=EXCLUDED.response_payload, \
           expires_at=EXCLUDED.expires_at, created_at=EXCLUDED.created_at \
-         WHERE pqueue_request_idempotency.expires_at<=EXCLUDED.created_at OR \
-           (pqueue_request_idempotency.request_fingerprint=EXCLUDED.request_fingerprint \
-           AND pqueue_request_idempotency.response_payload=EXCLUDED.response_payload)",
+         WHERE fireweed_request_idempotency.expires_at<=EXCLUDED.created_at OR \
+           (fireweed_request_idempotency.request_fingerprint=EXCLUDED.request_fingerprint \
+           AND fireweed_request_idempotency.response_payload=EXCLUDED.response_payload)",
         &[
             &t,
             &q,
@@ -954,7 +954,7 @@ fn check_batch_update_idempotency(
     let (t, q) = parts(shard);
     let prior = st(tx.query_opt(
         "SELECT request_fingerprint,response_payload,expires_at \
-         FROM pqueue_request_idempotency \
+         FROM fireweed_request_idempotency \
          WHERE tenant_id=$1 AND queue_id=$2 AND operation=$3 AND request_id=$4",
         &[
             &t,
@@ -969,7 +969,7 @@ fn check_batch_update_idempotency(
     let expires_at: i64 = row.get(2);
     if expires_at <= now_n {
         st(tx.execute(
-            "DELETE FROM pqueue_request_idempotency \
+            "DELETE FROM fireweed_request_idempotency \
              WHERE tenant_id=$1 AND queue_id=$2 AND operation=$3 AND request_id=$4",
             &[
                 &t,
@@ -998,15 +998,15 @@ fn record_batch_update_idempotency(
 ) -> EngineResult<()> {
     let (t, q) = parts(shard);
     let affected = st(tx.execute(
-        "INSERT INTO pqueue_request_idempotency \
+        "INSERT INTO fireweed_request_idempotency \
          (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,expires_at,created_at) \
          VALUES($1,$2,$3,$4,$5,$6,$7,$8) \
          ON CONFLICT(tenant_id,queue_id,operation,request_id) DO UPDATE SET \
            request_fingerprint=EXCLUDED.request_fingerprint,response_payload=EXCLUDED.response_payload, \
            expires_at=EXCLUDED.expires_at,created_at=EXCLUDED.created_at \
-         WHERE pqueue_request_idempotency.expires_at<=EXCLUDED.created_at OR \
-           (pqueue_request_idempotency.request_fingerprint=EXCLUDED.request_fingerprint AND \
-            pqueue_request_idempotency.response_payload=EXCLUDED.response_payload)",
+         WHERE fireweed_request_idempotency.expires_at<=EXCLUDED.created_at OR \
+           (fireweed_request_idempotency.request_fingerprint=EXCLUDED.request_fingerprint AND \
+            fireweed_request_idempotency.response_payload=EXCLUDED.response_payload)",
         &[
             &t,
             &q,
@@ -1240,7 +1240,7 @@ fn check_commit_idempotency(
     let (t, q) = parts(shard);
     let prior = st(tx.query_opt(
         "SELECT request_fingerprint, response_payload, expires_at \
-         FROM pqueue_request_idempotency \
+         FROM fireweed_request_idempotency \
          WHERE tenant_id=$1 AND queue_id=$2 AND operation=$3 AND request_id=$4",
         &[&t, &q, &IDEMPOTENCY_OPERATION_COMMIT, &request_id.as_str()],
     ))?;
@@ -1252,7 +1252,7 @@ fn check_commit_idempotency(
     let expires_at: i64 = row.get(2);
     if expires_at <= now_n {
         st(tx.execute(
-            "DELETE FROM pqueue_request_idempotency \
+            "DELETE FROM fireweed_request_idempotency \
              WHERE tenant_id=$1 AND queue_id=$2 AND operation=$3 AND request_id=$4",
             &[&t, &q, &IDEMPOTENCY_OPERATION_COMMIT, &request_id.as_str()],
         ))?;
@@ -1271,7 +1271,7 @@ fn read_commit_recovery(
 ) -> EngineResult<Option<Vec<EntryRecovery>>> {
     let (t, q) = parts(shard);
     let payload: Option<String> = st(client.query_opt(
-        "SELECT response_payload FROM pqueue_request_idempotency \
+        "SELECT response_payload FROM fireweed_request_idempotency \
          WHERE tenant_id=$1 AND queue_id=$2 AND operation=$3 AND request_id=$4",
         &[&t, &q, &IDEMPOTENCY_OPERATION_COMMIT, &request_id.as_str()],
     ))?
@@ -1293,7 +1293,7 @@ fn record_commit_idempotency(
 ) -> EngineResult<()> {
     let (t, q) = parts(shard);
     st(tx.execute(
-        "INSERT INTO pqueue_request_idempotency \
+        "INSERT INTO fireweed_request_idempotency \
          (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,expires_at,created_at) \
          VALUES($1,$2,$3,$4,$5,$6,$7,$8) \
          ON CONFLICT(tenant_id,queue_id,operation,request_id) DO UPDATE SET \
@@ -1323,7 +1323,7 @@ fn commit_validate_sql(
     let (t, q) = parts(shard);
     let row = st(tx.query_opt(
         "SELECT lifecycle_state, fenced, superseded, lease_token_hash, lease_expires_at, item_version \
-         FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
+         FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
         &[&t, &q, &claim_ref.item_id.to_string()],
     ))?;
     let Some(row) = row else {
@@ -1567,14 +1567,14 @@ fn check_typed_unique_conflicts(
         }
         let holder: Option<String> = match exclude_item_id {
             Some(excl) => st(tx.query_opt(
-                "SELECT item_id FROM pqueue_item_index \
+                "SELECT item_id FROM fireweed_item_index \
                  WHERE tenant_id=$1 AND queue_id=$2 AND index_name=$3 AND index_key=$4 \
                  AND item_id<>$5 LIMIT 1",
                 &[&t, &q, name, &key.as_slice(), &excl],
             ))?
             .map(|row| row.get(0)),
             None => st(tx.query_opt(
-                "SELECT item_id FROM pqueue_item_index \
+                "SELECT item_id FROM fireweed_item_index \
                  WHERE tenant_id=$1 AND queue_id=$2 AND index_name=$3 AND index_key=$4 LIMIT 1",
                 &[&t, &q, name, &key.as_slice()],
             ))?
@@ -1587,7 +1587,7 @@ fn check_typed_unique_conflicts(
     Ok(())
 }
 
-/// Insert `pqueue_item_index` rows for one item's `(name, key)` pairs (upsert so a retry is safe).
+/// Insert `fireweed_item_index` rows for one item's `(name, key)` pairs (upsert so a retry is safe).
 fn insert_typed_index_rows(
     tx: &mut postgres::Transaction<'_>,
     t: &str,
@@ -1603,7 +1603,7 @@ fn insert_typed_index_rows(
             .map(index_is_unique)
             .unwrap_or(false);
         tx.execute(
-            "INSERT INTO pqueue_item_index \
+            "INSERT INTO fireweed_item_index \
              (tenant_id, queue_id, index_name, index_key, item_id, is_unique) VALUES ($1,$2,$3,$4,$5,$6) \
              ON CONFLICT(tenant_id,queue_id,index_name,item_id) DO UPDATE SET \
              index_key=EXCLUDED.index_key, is_unique=EXCLUDED.is_unique",
@@ -1620,7 +1620,7 @@ fn insert_typed_index_rows(
     Ok(())
 }
 
-/// Delete all `pqueue_item_index` rows for the given item IDs.
+/// Delete all `fireweed_item_index` rows for the given item IDs.
 fn delete_typed_index_rows(
     tx: &mut impl GenericClient,
     t: &str,
@@ -1631,7 +1631,7 @@ fn delete_typed_index_rows(
         return Ok(());
     }
     st(tx.execute(
-        "DELETE FROM pqueue_item_index \
+        "DELETE FROM fireweed_item_index \
          WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
         &[&t, &q, &item_ids],
     ))?;
@@ -1723,7 +1723,7 @@ fn persist_command_envelopes(
             created_at.push(ts_nanos(envelope.created_at));
         }
         st(tx.execute(
-            "INSERT INTO pqueue_commands \
+            "INSERT INTO fireweed_commands \
              (tenant,queue,assignment_epoch,seq,command_id,envelope,envelope_sha256,created_at) \
              SELECT * FROM UNNEST($1::text[],$2::text[],$3::bigint[],$4::bigint[],\
                                   $5::text[],$6::bytea[],$7::bytea[],$8::bigint[])",
@@ -2026,7 +2026,7 @@ fn groups_of(
     let id_strs: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
     // One set-based round-trip (was one SELECT per item): the distinct non-null group keys of these ids.
     let rows = st(tx.query(
-        "SELECT DISTINCT group_key FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
+        "SELECT DISTINCT group_key FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 \
          AND item_id = ANY($3) AND group_key IS NOT NULL",
         &[&t, &q, &id_strs],
     ))?;
@@ -2048,7 +2048,7 @@ fn cohort_group_for_id(
 ) -> EngineResult<GroupKey> {
     let (t, q) = parts(shard);
     let row = st(tx.query_one(
-        "SELECT group_key FROM pqueue_cohorts WHERE tenant_id=$1 AND queue_id=$2 AND cohort_id=$3",
+        "SELECT group_key FROM fireweed_cohorts WHERE tenant_id=$1 AND queue_id=$2 AND cohort_id=$3",
         &[&t, &q, &cohort_id.as_str()],
     ))?;
     let group: String = row.get(0);
@@ -2063,7 +2063,7 @@ fn cohort_item_ids(
     let (t, q) = parts(shard);
     let group = cohort_group_for_id(tx, shard, cohort_id)?;
     let rows = st(tx.query(
-        "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND group_key=$3 \
+        "SELECT item_id FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 AND group_key=$3 \
          AND superseded=false AND cohort_size IS NOT NULL AND lifecycle_state NOT IN ('Complete','Failed') \
          ORDER BY priority_sort, created_seq",
         &[&t, &q, &group.as_str()],
@@ -2076,7 +2076,7 @@ fn cohort_item_ids(
         .collect()
 }
 
-/// Recompute `pqueue_group_summary` for one group from `pqueue_items` (exact at mutation time; lagged
+/// Recompute `fireweed_group_summary` for one group from `fireweed_items` (exact at mutation time; lagged
 /// across a time-only `not_before` crossing — same contract as the sqlite reference; BQ-14 consumers
 /// re-apply the gate on read).
 fn refresh_group_summary(
@@ -2088,7 +2088,7 @@ fn refresh_group_summary(
     let (t, q) = parts(shard);
     let now_n = ts_nanos(now);
     let agg = st(tx.query_one(
-        "SELECT COUNT(*)::bigint, MIN(eligible_since) FROM pqueue_items \
+        "SELECT COUNT(*)::bigint, MIN(eligible_since) FROM fireweed_items \
          WHERE tenant_id=$1 AND queue_id=$2 AND group_key=$3 \
          AND lifecycle_state='Pending' AND superseded=false AND (not_before IS NULL OR not_before<=$4)",
         &[&t, &q, &group_key.as_str(), &now_n],
@@ -2096,7 +2096,7 @@ fn refresh_group_summary(
     let count: i64 = agg.get(0);
     let oldest: Option<i64> = agg.get(1);
     let rep = st(tx.query_opt(
-        "SELECT priority_sort, created_at, created_seq, item_id FROM pqueue_items \
+        "SELECT priority_sort, created_at, created_seq, item_id FROM fireweed_items \
          WHERE tenant_id=$1 AND queue_id=$2 AND group_key=$3 \
          AND lifecycle_state='Pending' AND superseded=false AND (not_before IS NULL OR not_before<=$4) \
          ORDER BY priority_sort, created_seq LIMIT 1",
@@ -2108,7 +2108,7 @@ fn refresh_group_summary(
             None => (None, None, None),
         };
     st(tx.execute(
-        "INSERT INTO pqueue_group_summary \
+        "INSERT INTO fireweed_group_summary \
          (tenant_id,queue_id,group_key,oldest_eligible_at,rep_progress_guard_sort,rep_priority_sort,\
           rep_created_at,rep_item_id,eligible_item_count,at_risk_count,updated_at) \
          VALUES ($1,$2,$3,$4,NULL,$5,$6,$7,$8,0,$9) \
@@ -2158,7 +2158,7 @@ fn refresh_group_summaries(
         "WITH requested(group_key) AS (SELECT DISTINCT unnest($3::text[])), \
          eligible AS ( \
            SELECT group_key, eligible_since, priority_sort, created_at, item_id, created_seq \
-           FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND group_key=ANY($3) \
+           FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 AND group_key=ANY($3) \
              AND lifecycle_state='Pending' AND superseded=false \
              AND (not_before IS NULL OR not_before<=$4) \
          ), aggregated AS ( \
@@ -2168,7 +2168,7 @@ fn refresh_group_summaries(
            SELECT DISTINCT ON (group_key) group_key, priority_sort, created_at, created_seq, item_id \
            FROM eligible ORDER BY group_key, priority_sort, created_seq \
          ) \
-         INSERT INTO pqueue_group_summary \
+         INSERT INTO fireweed_group_summary \
            (tenant_id,queue_id,group_key,oldest_eligible_at,rep_progress_guard_sort,rep_priority_sort, \
             rep_created_at,rep_item_id,eligible_item_count,at_risk_count,updated_at) \
          SELECT $1,$2,r.group_key,a.oldest,NULL,p.priority_sort,p.created_at,p.item_id, \
@@ -2203,11 +2203,11 @@ fn increment_group_summaries_for_items(
     update_push_sql_probe(shard, |probe| probe.group_summary_statements += 5);
     st(tx.execute(
         "WITH wanted AS ( \
-           SELECT DISTINCT group_key FROM pqueue_items \
+           SELECT DISTINCT group_key FROM fireweed_items \
            WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3) AND group_key IS NOT NULL \
          ), incoming_new AS ( \
            SELECT group_key,eligible_since,priority_sort,created_at,item_id,created_seq \
-           FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3) \
+           FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3) \
              AND group_key IS NOT NULL AND lifecycle_state='Pending' AND superseded=false \
              AND (not_before IS NULL OR not_before<=$4) \
          ), incoming AS (SELECT * FROM incoming_new), aggregated AS ( \
@@ -2217,7 +2217,7 @@ fn increment_group_summaries_for_items(
            SELECT DISTINCT ON (group_key) group_key,priority_sort,created_at,created_seq,item_id \
            FROM incoming ORDER BY group_key,priority_sort,created_seq \
          ) \
-         INSERT INTO pqueue_group_summary \
+         INSERT INTO fireweed_group_summary \
            (tenant_id,queue_id,group_key,oldest_eligible_at,rep_progress_guard_sort,rep_priority_sort, \
             rep_created_at,rep_item_id,eligible_item_count,at_risk_count,updated_at) \
          SELECT $1,$2,w.group_key,a.oldest,NULL,r.priority_sort,r.created_at,r.item_id, \
@@ -2225,10 +2225,10 @@ fn increment_group_summaries_for_items(
                 LEFT JOIN aggregated a USING (group_key) LEFT JOIN representative r USING (group_key) \
          ON CONFLICT(tenant_id,queue_id,group_key) DO UPDATE SET \
            oldest_eligible_at=CASE \
-             WHEN pqueue_group_summary.oldest_eligible_at IS NULL THEN EXCLUDED.oldest_eligible_at \
-             ELSE LEAST(pqueue_group_summary.oldest_eligible_at,EXCLUDED.oldest_eligible_at) END, \
-           eligible_item_count=pqueue_group_summary.eligible_item_count+EXCLUDED.eligible_item_count, \
-           at_risk_count=0,updated_at=pqueue_group_summary.updated_at",
+             WHEN fireweed_group_summary.oldest_eligible_at IS NULL THEN EXCLUDED.oldest_eligible_at \
+             ELSE LEAST(fireweed_group_summary.oldest_eligible_at,EXCLUDED.oldest_eligible_at) END, \
+           eligible_item_count=fireweed_group_summary.eligible_item_count+EXCLUDED.eligible_item_count, \
+           at_risk_count=0,updated_at=fireweed_group_summary.updated_at",
         &[&t, &q, &item_ids, &now_n],
     ))?;
     // The existing representative's authoritative FIFO tiebreak lives on its item row. Keeping it out of
@@ -2236,10 +2236,10 @@ fn increment_group_summaries_for_items(
     // authority, and a nullable duplicated created-sequence column cannot corrupt mixed-version ordering.
     st(tx.execute(
         "WITH wanted AS ( \
-           SELECT DISTINCT group_key FROM pqueue_items \
+           SELECT DISTINCT group_key FROM fireweed_items \
            WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3) AND group_key IS NOT NULL \
          ), incoming AS ( \
-           SELECT group_key,priority_sort,created_at,created_seq,item_id FROM pqueue_items \
+           SELECT group_key,priority_sort,created_at,created_seq,item_id FROM fireweed_items \
            WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3) AND group_key IS NOT NULL \
              AND lifecycle_state='Pending' AND superseded=false \
              AND (not_before IS NULL OR not_before<=$4) \
@@ -2247,21 +2247,21 @@ fn increment_group_summaries_for_items(
            SELECT DISTINCT ON (group_key) group_key,priority_sort,created_at,created_seq,item_id \
            FROM incoming ORDER BY group_key,priority_sort,created_seq \
          ), winning AS ( \
-           SELECT r.* FROM representative r JOIN pqueue_group_summary s \
+           SELECT r.* FROM representative r JOIN fireweed_group_summary s \
              ON s.tenant_id=$1 AND s.queue_id=$2 AND s.group_key=r.group_key \
-           LEFT JOIN pqueue_items old ON old.tenant_id=s.tenant_id AND old.queue_id=s.queue_id \
+           LEFT JOIN fireweed_items old ON old.tenant_id=s.tenant_id AND old.queue_id=s.queue_id \
              AND old.item_id=s.rep_item_id \
            WHERE s.rep_item_id IS NULL OR old.item_id IS NULL OR \
              (r.priority_sort,r.created_seq,r.item_id) < \
              (s.rep_priority_sort,old.created_seq,s.rep_item_id) \
-         ) UPDATE pqueue_group_summary s SET rep_priority_sort=w.priority_sort, \
+         ) UPDATE fireweed_group_summary s SET rep_priority_sort=w.priority_sort, \
              rep_created_at=w.created_at,rep_item_id=w.item_id \
            FROM winning w WHERE s.tenant_id=$1 AND s.queue_id=$2 AND s.group_key=w.group_key",
         &[&t, &q, &item_ids, &now_n],
     ))?;
     st(tx.execute(
-        "UPDATE pqueue_group_summary s SET updated_at=GREATEST(s.updated_at,$4) \
-         FROM (SELECT DISTINCT group_key FROM pqueue_items \
+        "UPDATE fireweed_group_summary s SET updated_at=GREATEST(s.updated_at,$4) \
+         FROM (SELECT DISTINCT group_key FROM fireweed_items \
                WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3) AND group_key IS NOT NULL) w \
          WHERE s.tenant_id=$1 AND s.queue_id=$2 AND s.group_key=w.group_key",
         &[&t, &q, &item_ids, &now_n],
@@ -2269,12 +2269,12 @@ fn increment_group_summaries_for_items(
     // Future grouped items enter a durable due frontier. Rewriting an item first removes any obsolete
     // schedule; the replacement row is inserted only while it is still pending and strictly future-due.
     st(tx.execute(
-        "DELETE FROM pqueue_group_due_pending WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3)",
+        "DELETE FROM fireweed_group_due_pending WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3)",
         &[&t, &q, &item_ids],
     ))?;
     st(tx.execute(
-        "INSERT INTO pqueue_group_due_pending(tenant_id,queue_id,item_id,group_key,due_at,created_seq) \
-         SELECT tenant_id,queue_id,item_id,group_key,not_before,created_seq FROM pqueue_items \
+        "INSERT INTO fireweed_group_due_pending(tenant_id,queue_id,item_id,group_key,due_at,created_seq) \
+         SELECT tenant_id,queue_id,item_id,group_key,not_before,created_seq FROM fireweed_items \
          WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3) AND group_key IS NOT NULL \
            AND lifecycle_state='Pending' AND superseded=false AND not_before>$4 \
          ON CONFLICT(tenant_id,queue_id,item_id) DO UPDATE SET group_key=EXCLUDED.group_key, \
@@ -2303,7 +2303,7 @@ fn decrement_group_summaries_for_items(
            SELECT i.group_key,COUNT(*)::bigint AS removed_count, \
                   BOOL_OR(i.item_id=s.rep_item_id) AS rep_removed, \
                   BOOL_OR(i.eligible_since=s.oldest_eligible_at) AS oldest_removed \
-           FROM pqueue_items i JOIN pqueue_group_summary s \
+           FROM fireweed_items i JOIN fireweed_group_summary s \
              ON s.tenant_id=i.tenant_id AND s.queue_id=i.queue_id AND s.group_key=i.group_key \
            WHERE i.tenant_id=$1 AND i.queue_id=$2 AND i.item_id=ANY($3) \
              AND i.group_key IS NOT NULL AND (i.not_before IS NULL OR i.not_before<=$4) \
@@ -2312,7 +2312,7 @@ fn decrement_group_summaries_for_items(
            SELECT a.*,nr.priority_sort,nr.created_at,nr.created_seq,nr.item_id,ne.eligible_since \
            FROM affected a \
            LEFT JOIN LATERAL ( \
-             SELECT priority_sort,created_at,created_seq,item_id FROM pqueue_items \
+             SELECT priority_sort,created_at,created_seq,item_id FROM fireweed_items \
              WHERE tenant_id=$1 AND queue_id=$2 AND group_key=a.group_key \
                AND lifecycle_state='Pending' AND superseded=false \
                AND item_id<>ALL($3) \
@@ -2320,7 +2320,7 @@ fn decrement_group_summaries_for_items(
              ORDER BY priority_sort,created_seq LIMIT 1 \
            ) nr ON a.rep_removed \
            LEFT JOIN LATERAL ( \
-             SELECT eligible_since FROM pqueue_items \
+             SELECT eligible_since FROM fireweed_items \
              WHERE tenant_id=$1 AND queue_id=$2 AND group_key=a.group_key \
                AND lifecycle_state='Pending' AND superseded=false \
                AND item_id<>ALL($3) \
@@ -2328,7 +2328,7 @@ fn decrement_group_summaries_for_items(
              ORDER BY eligible_since,created_seq LIMIT 1 \
            ) ne ON a.oldest_removed \
          ) \
-         UPDATE pqueue_group_summary s SET \
+         UPDATE fireweed_group_summary s SET \
            eligible_item_count=GREATEST(s.eligible_item_count-r.removed_count,0), \
            oldest_eligible_at=CASE WHEN r.oldest_removed THEN r.eligible_since \
                                    ELSE s.oldest_eligible_at END, \
@@ -2365,7 +2365,7 @@ fn promote_due_group_summary_chunk_in_tx(
         &[&tenant, &queue],
     ))?;
     let rows = st(tx.query(
-        "SELECT item_id FROM pqueue_group_due_pending \
+        "SELECT item_id FROM fireweed_group_due_pending \
          WHERE tenant_id=$1 AND queue_id=$2 AND due_at<=$3 \
          ORDER BY due_at,created_seq,item_id LIMIT $4 FOR UPDATE",
         &[&tenant, &queue, &at, &fetch_limit],
@@ -2399,7 +2399,7 @@ fn promote_due_group_summary_chunk(
 // apply: the 14-arm command -> SQL projection write
 // ---------------------------------------------------------------------------
 
-/// One materialized row for the batched `pqueue_items` insert. Owns its values so the param slice can
+/// One materialized row for the batched `fireweed_items` insert. Owns its values so the param slice can
 /// borrow them across the multi-row statement build.
 struct ItemRow {
     item_id: String,
@@ -2418,13 +2418,13 @@ struct ItemRow {
     created_seq: i64,
 }
 
-/// Max `pqueue_items` rows per INSERT statement: 14 bound params/row + 4 shared; 1000 rows ≈ 14k params,
+/// Max `fireweed_items` rows per INSERT statement: 14 bound params/row + 4 shared; 1000 rows ≈ 14k params,
 /// well under postgres' 65535 bound-parameter ceiling.
 const PG_INSERT_CHUNK: usize = 1000;
 
 /// Batch-insert all `items` of a Push (or the single ReplacePending replacement) as set-based statements:
-/// one (chunked) multi-row INSERT into `pqueue_items`, one multi-row INSERT into `pqueue_item_gates`, and
-/// one multi-row upsert into `pqueue_cohorts` — replacing the former per-item `insert_item` (N+ round-trips
+/// one (chunked) multi-row INSERT into `fireweed_items`, one multi-row INSERT into `fireweed_item_gates`, and
+/// one multi-row upsert into `fireweed_cohorts` — replacing the former per-item `insert_item` (N+ round-trips
 /// → a handful). Column values, the `fields` TEXT-JSON encoding, and the `eligible_since`/`not_before`
 /// pairing are identical to the per-item path; `created_seq` is bulk-allocated (`base + i`) so FIFO order is
 /// preserved.
@@ -2466,7 +2466,7 @@ fn insert_items(
     }
     for chunk in rows.chunks(PG_INSERT_CHUNK) {
         let mut sql = String::from(
-            "INSERT INTO pqueue_items \
+            "INSERT INTO fireweed_items \
              (tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
               not_before,eligible_since,group_key,cohort_size,payload,fields,metadata,entity_document,retry_count,\
               item_version,lease_token_hash,lease_expires_at,worker_id,last_command_sequence,created_at,\
@@ -2548,7 +2548,7 @@ fn insert_gates(
     }
     for chunk in pairs.chunks(5000) {
         let mut sql = String::from(
-            "INSERT INTO pqueue_item_gates (tenant_id,queue_id,item_id,gate_key) VALUES ",
+            "INSERT INTO fireweed_item_gates (tenant_id,queue_id,item_id,gate_key) VALUES ",
         );
         let mut params: Vec<&(dyn ToSql + Sync)> = vec![&t, &q];
         for (r, (id, g)) in chunk.iter().enumerate() {
@@ -2626,7 +2626,7 @@ fn upsert_cohorts(
     let _ = cohort_retention_until(queues, shard, now_n)?;
     for (gk, (size, added)) in cohorts {
         let existing = st(tx.query_opt(
-            "SELECT cohort_size, member_count, state, retention_until FROM pqueue_cohorts \
+            "SELECT cohort_size, member_count, state, retention_until FROM fireweed_cohorts \
              WHERE tenant_id=$1 AND queue_id=$2 AND group_key=$3 FOR UPDATE",
             &[&t, &q, &gk],
         ))?;
@@ -2642,7 +2642,7 @@ fn upsert_cohorts(
                     None
                 };
                 st(tx.execute(
-                    "INSERT INTO pqueue_cohorts \
+                    "INSERT INTO fireweed_cohorts \
                      (tenant_id,queue_id,group_key,cohort_id,cohort_size,member_count,state,\
                       cohort_created_at,first_eligible_at,created_at) \
                      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$8)",
@@ -2678,7 +2678,7 @@ fn upsert_cohorts(
                         None
                     };
                     st(tx.execute(
-                        "UPDATE pqueue_cohorts SET cohort_id=$4, cohort_size=$5, member_count=$6, \
+                        "UPDATE fireweed_cohorts SET cohort_id=$4, cohort_size=$5, member_count=$6, \
                          state=$7, cohort_created_at=$8, first_eligible_at=$9, expire_command_pos=NULL, \
                          cohort_lease_token_hash=NULL, retention_until=NULL, created_at=$8 \
                          WHERE tenant_id=$1 AND queue_id=$2 AND group_key=$3",
@@ -2710,7 +2710,7 @@ fn upsert_cohorts(
                 };
                 let set_first = next_state == "complete";
                 st(tx.execute(
-                    "UPDATE pqueue_cohorts SET member_count=$4, state=$5, \
+                    "UPDATE fireweed_cohorts SET member_count=$4, state=$5, \
                      first_eligible_at=CASE WHEN $6 AND first_eligible_at IS NULL THEN $7 ELSE first_eligible_at END \
                      WHERE tenant_id=$1 AND queue_id=$2 AND group_key=$3",
                     &[&t, &q, &gk, &next_count, &next_state, &set_first, &now_n],
@@ -2739,7 +2739,7 @@ fn finalize_update(
         return Ok(());
     }
     st(tx.execute(
-        "UPDATE pqueue_items SET lifecycle_state=$4, lease_token_hash=NULL, lease_expires_at=NULL, \
+        "UPDATE fireweed_items SET lifecycle_state=$4, lease_token_hash=NULL, lease_expires_at=NULL, \
          fenced=false, item_version=item_version+1, \
          retry_count=CASE WHEN $5 THEN 0 ELSE retry_count END, \
          terminal_at=$6, updated_at=$7, last_command_sequence=$8 \
@@ -2749,7 +2749,7 @@ fn finalize_update(
     Ok(())
 }
 
-/// Apply one command to `pqueue_items` as SQL. Mirrors `ProjectionData::apply_command` (and the sqlite
+/// Apply one command to `fireweed_items` as SQL. Mirrors `ProjectionData::apply_command` (and the sqlite
 /// reference) arm-for-arm. Token-map mutations accumulate in `token_ops` (applied post-commit).
 fn advance_id_high_water(
     tx: &mut postgres::Transaction<'_>,
@@ -2765,9 +2765,9 @@ fn advance_id_high_water(
     };
     let (tenant, queue) = parts(shard);
     st(tx.execute(
-        "INSERT INTO pqueue_id_high_water(tenant_id,queue_id,item_id) VALUES($1,$2,$3) \
+        "INSERT INTO fireweed_id_high_water(tenant_id,queue_id,item_id) VALUES($1,$2,$3) \
          ON CONFLICT(tenant_id,queue_id) DO UPDATE SET item_id=EXCLUDED.item_id \
-         WHERE pqueue_id_high_water.item_id::numeric < EXCLUDED.item_id::numeric",
+         WHERE fireweed_id_high_water.item_id::numeric < EXCLUDED.item_id::numeric",
         &[&tenant, &queue, &max_new.to_string()],
     ))?;
     Ok(())
@@ -2812,7 +2812,7 @@ fn apply_command_sql(
                 .map(|item| item.client_item_key.as_str())
                 .collect();
             st(tx.execute(
-                "DELETE FROM pqueue_item_key_retention \
+                "DELETE FROM fireweed_item_key_retention \
                  WHERE tenant_id=$1 AND queue_id=$2 AND client_item_key=ANY($3) AND expires_at<=$4",
                 &[&t, &q, &client_keys, &now_n],
             ))?;
@@ -2834,7 +2834,7 @@ fn apply_command_sql(
             let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
             let worker_id = c.worker_id.as_ref().map(|worker| worker.as_str());
             st(tx.execute(
-                "UPDATE pqueue_items SET lifecycle_state='Leased', lease_token_hash=$4, \
+                "UPDATE fireweed_items SET lifecycle_state='Leased', lease_token_hash=$4, \
                  lease_expires_at=$5, worker_id=$6, retry_count=retry_count+1, \
                  item_version=item_version+1, updated_at=$7, last_command_sequence=$8 \
                  WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
@@ -2851,14 +2851,14 @@ fn apply_command_sql(
             let exp = ts_nanos(c.lease_expires_at);
             let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
             st(tx.execute(
-                "UPDATE pqueue_items SET lifecycle_state='Leased', lease_token_hash=$4, \
+                "UPDATE fireweed_items SET lifecycle_state='Leased', lease_token_hash=$4, \
                  lease_expires_at=$5, retry_count=retry_count+1, item_version=item_version+1, \
                  updated_at=$6, last_command_sequence=$7 \
                  WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
                 &[&t, &q, &ids, &hash, &exp, &now_n, &seqi],
             ))?;
             st(tx.execute(
-                "UPDATE pqueue_cohorts SET state='leased', cohort_lease_token_hash=$4 \
+                "UPDATE fireweed_cohorts SET state='leased', cohort_lease_token_hash=$4 \
                  WHERE tenant_id=$1 AND queue_id=$2 AND cohort_id=$3",
                 &[&t, &q, &c.cohort_id.as_str(), &hash],
             ))?;
@@ -2872,7 +2872,7 @@ fn apply_command_sql(
             let exp = ts_nanos(c.lease_expires_at);
             let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
             st(tx.execute(
-                "UPDATE pqueue_items SET lease_expires_at=$4, item_version=item_version+1, \
+                "UPDATE fireweed_items SET lease_expires_at=$4, item_version=item_version+1, \
                  updated_at=$5, last_command_sequence=$6 \
                  WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
                 &[&t, &q, &ids, &exp, &now_n, &seqi],
@@ -2884,7 +2884,7 @@ fn apply_command_sql(
             let id_strs: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
             let exp = ts_nanos(c.lease_expires_at);
             st(tx.execute(
-                "UPDATE pqueue_items SET lease_expires_at=$4, item_version=item_version+1, \
+                "UPDATE fireweed_items SET lease_expires_at=$4, item_version=item_version+1, \
                  updated_at=$5, last_command_sequence=$6 \
                  WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
                 &[&t, &q, &id_strs, &exp, &now_n, &seqi],
@@ -2899,7 +2899,7 @@ fn apply_command_sql(
             let item_id = c.item_id.to_string();
             let row = st(tx.query_opt(
                 "SELECT fields,lifecycle_state,priority,priority_sort,not_before,eligible_since,payload,metadata \
-                 FROM pqueue_items \
+                 FROM fireweed_items \
                  WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 \
                  AND lifecycle_state IN ('Pending','Leased') AND superseded=false AND fenced=false",
                 &[&t, &q, &item_id],
@@ -2955,7 +2955,7 @@ fn apply_command_sql(
                 }
             }
             st(tx.execute(
-                "UPDATE pqueue_items SET fields=$4,payload=$5,metadata=$6,priority=$7, \
+                "UPDATE fireweed_items SET fields=$4,payload=$5,metadata=$6,priority=$7, \
                  priority_sort=$8,not_before=$9,eligible_since=$10,item_version=item_version+1, \
                  updated_at=$11,last_command_sequence=$12 WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 \
                  AND lifecycle_state IN ('Pending','Leased') AND superseded=false AND fenced=false",
@@ -2964,13 +2964,13 @@ fn apply_command_sql(
             ))?;
             if let Some(gate_keys) = &c.set_gate_keys {
                 st(tx.execute(
-                    "DELETE FROM pqueue_item_gates WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
+                    "DELETE FROM fireweed_item_gates WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
                     &[&t, &q, &item_id],
                 ))?;
                 if !gate_keys.is_empty() {
                     let item_ids = vec![item_id.clone(); gate_keys.len()];
                     st(tx.execute(
-                        "INSERT INTO pqueue_item_gates(tenant_id,queue_id,item_id,gate_key) \
+                        "INSERT INTO fireweed_item_gates(tenant_id,queue_id,item_id,gate_key) \
                          SELECT $1,$2,* FROM UNNEST($3::text[],$4::text[]) \
                          ON CONFLICT(tenant_id,queue_id,item_id,gate_key) DO NOTHING",
                         &[&t, &q, &item_ids, gate_keys],
@@ -2982,7 +2982,7 @@ fn apply_command_sql(
             if let Some(ref doc) = c.set_entity_document {
                 let entity_document = to_json(doc)?;
                 st(tx.execute(
-                    "UPDATE pqueue_items SET entity_document=$4 \
+                    "UPDATE fireweed_items SET entity_document=$4 \
                      WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
                     &[&t, &q, &item_id, &entity_document],
                 ))?;
@@ -3007,7 +3007,7 @@ fn apply_command_sql(
             let exp = ts_nanos(c.lease_expires_at);
             let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
             st(tx.execute(
-                "UPDATE pqueue_items SET lease_token_hash=$4, lease_expires_at=$5, \
+                "UPDATE fireweed_items SET lease_token_hash=$4, lease_expires_at=$5, \
                  retry_count=retry_count+1, item_version=item_version+1, updated_at=$6, \
                  last_command_sequence=$7 WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
                 &[&t, &q, &ids, &hash, &exp, &now_n, &seqi],
@@ -3028,7 +3028,7 @@ fn apply_command_sql(
             let mut retry_info: HashMap<String, (i64, i64)> = HashMap::new();
             if !retry_ids.is_empty() {
                 let rows = st(tx.query(
-                    "SELECT item_id, retry_count, max_attempts FROM pqueue_items \
+                    "SELECT item_id, retry_count, max_attempts FROM fireweed_items \
                      WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
                     &[&t, &q, &retry_ids],
                 ))?;
@@ -3135,7 +3135,7 @@ fn apply_command_sql(
                 st(tx.execute(
                     "WITH schedule(item_id,not_before,eligible_since) AS ( \
                        SELECT * FROM unnest($3::text[],$4::bigint[],$5::bigint[]) \
-                     ) UPDATE pqueue_items i SET not_before=s.not_before,eligible_since=s.eligible_since \
+                     ) UPDATE fireweed_items i SET not_before=s.not_before,eligible_since=s.eligible_since \
                        FROM schedule s WHERE i.tenant_id=$1 AND i.queue_id=$2 AND i.item_id=s.item_id",
                     &[&t,&q,&scheduled_ids,&scheduled_not_before,&scheduled_eligible_since],
                 ))?;
@@ -3153,7 +3153,7 @@ fn apply_command_sql(
             let effective_kind = if matches!(c.kind, FinalizeKind::Retry) {
                 let id_strings = ids.iter().map(ToString::to_string).collect::<Vec<_>>();
                 let rows = st(tx.query(
-                    "SELECT retry_count,max_attempts FROM pqueue_items \
+                    "SELECT retry_count,max_attempts FROM fireweed_items \
                      WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
                     &[&t, &q, &id_strings],
                 ))?;
@@ -3199,7 +3199,7 @@ fn apply_command_sql(
                 None
             };
             st(tx.execute(
-                "UPDATE pqueue_cohorts SET state=$4, cohort_lease_token_hash=NULL, retention_until=$5 \
+                "UPDATE fireweed_cohorts SET state=$4, cohort_lease_token_hash=NULL, retention_until=$5 \
                  WHERE tenant_id=$1 AND queue_id=$2 AND cohort_id=$3",
                 &[&t, &q, &c.cohort_id.as_str(), &next_state, &retention_until],
             ))?;
@@ -3211,12 +3211,12 @@ fn apply_command_sql(
             let superseded_str = c.superseded_item_id.to_string();
             delete_typed_index_rows(tx, &t, &q, std::slice::from_ref(&superseded_str))?;
             st(tx.execute(
-                "DELETE FROM pqueue_group_due_pending \
+                "DELETE FROM fireweed_group_due_pending \
                  WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
                 &[&t, &q, &superseded_str],
             ))?;
             st(tx.execute(
-                "UPDATE pqueue_items SET superseded=true, updated_at=$4, last_command_sequence=$5 \
+                "UPDATE fireweed_items SET superseded=true, updated_at=$4, last_command_sequence=$5 \
                  WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
                 &[&t, &q, &c.superseded_item_id.to_string(), &now_n, &seqi],
             ))?;
@@ -3242,10 +3242,10 @@ fn apply_command_sql(
             refresh_group_summaries(tx, shard, &groups, now)?;
             let replacement_id = c.replacement.item_id.to_string();
             st(tx.execute(
-                "INSERT INTO pqueue_group_due_pending( \
+                "INSERT INTO fireweed_group_due_pending( \
                    tenant_id,queue_id,item_id,group_key,due_at,created_seq) \
                  SELECT tenant_id,queue_id,item_id,group_key,not_before,created_seq \
-                 FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 \
+                 FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 \
                    AND lifecycle_state='Pending' AND superseded=false AND group_key IS NOT NULL \
                    AND not_before>$4 \
                  ON CONFLICT(tenant_id,queue_id,item_id) DO UPDATE SET \
@@ -3257,7 +3257,7 @@ fn apply_command_sql(
         QueueCommand::LeaseExpired(c) => {
             let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
             st(tx.execute(
-                "UPDATE pqueue_items SET lifecycle_state='Pending', lease_token_hash=NULL, \
+                "UPDATE fireweed_items SET lifecycle_state='Pending', lease_token_hash=NULL, \
                  lease_expires_at=NULL, item_version=item_version+1, updated_at=$4, \
                  last_command_sequence=$5 WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
                 &[&t, &q, &ids, &now_n, &seqi],
@@ -3270,7 +3270,7 @@ fn apply_command_sql(
         }
         QueueCommand::CohortExpired(c) => {
             let rows = st(tx.query(
-                "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
+                "SELECT item_id FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 \
                  AND group_key=$3 AND lifecycle_state NOT IN ('Complete','Failed')",
                 &[&t, &q, &c.group_key.as_str()],
             ))?;
@@ -3282,7 +3282,7 @@ fn apply_command_sql(
                 ids.push(ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?);
             }
             st(tx.execute(
-                "UPDATE pqueue_items SET lifecycle_state='Failed', item_version=item_version+1, \
+                "UPDATE fireweed_items SET lifecycle_state='Failed', item_version=item_version+1, \
                  terminal_at=$4, updated_at=$4, last_command_sequence=$5 \
                  WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
                 &[&t, &q, &id_strs, &now_n, &seqi],
@@ -3291,7 +3291,7 @@ fn apply_command_sql(
                 token_ops.push(TokenOp::Clear(*id));
             }
             st(tx.execute(
-                "UPDATE pqueue_cohorts SET state='terminal', expire_command_pos=$4, \
+                "UPDATE fireweed_cohorts SET state='terminal', expire_command_pos=$4, \
                  cohort_lease_token_hash=NULL, retention_until=$5 \
                  WHERE tenant_id=$1 AND queue_id=$2 AND group_key=$3",
                 &[
@@ -3308,7 +3308,7 @@ fn apply_command_sql(
         QueueCommand::FenceLease(c) => {
             let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
             st(tx.execute(
-                "UPDATE pqueue_items SET fenced=true WHERE tenant_id=$1 AND queue_id=$2 \
+                "UPDATE fireweed_items SET fenced=true WHERE tenant_id=$1 AND queue_id=$2 \
                  AND item_id = ANY($3)",
                 &[&t, &q, &ids],
             ))?;
@@ -3317,7 +3317,7 @@ fn apply_command_sql(
         QueueCommand::UnfenceLease(c) => {
             let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
             st(tx.execute(
-                "UPDATE pqueue_items SET fenced=false WHERE tenant_id=$1 AND queue_id=$2 \
+                "UPDATE fireweed_items SET fenced=false WHERE tenant_id=$1 AND queue_id=$2 \
                  AND item_id = ANY($3)",
                 &[&t, &q, &ids],
             ))?;
@@ -3345,7 +3345,7 @@ fn apply_command_sql(
             let id_strs: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
             // One set-based read of every purged item (was one SELECT per item).
             let rows = st(tx.query(
-                "SELECT item_id, group_key, client_item_key, lifecycle_state FROM pqueue_items \
+                "SELECT item_id, group_key, client_item_key, lifecycle_state FROM fireweed_items \
                  WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
                 &[&t, &q, &id_strs],
             ))?;
@@ -3375,7 +3375,7 @@ fn apply_command_sql(
             if !retention.is_empty() {
                 let expires = now_n.saturating_add((retention_ms as i64).saturating_mul(1_000_000));
                 let mut sql = String::from(
-                    "INSERT INTO pqueue_item_key_retention \
+                    "INSERT INTO fireweed_item_key_retention \
                      (tenant_id,queue_id,client_item_key,item_id,expires_at) VALUES ",
                 );
                 let mut params: Vec<&(dyn ToSql + Sync)> = vec![&t, &q, &expires];
@@ -3396,11 +3396,11 @@ fn apply_command_sql(
             }
             // Set-based deletes (item rows + their gate membership) — one round-trip each.
             st(tx.execute(
-                "DELETE FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
+                "DELETE FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
                 &[&t, &q, &id_strs],
             ))?;
             st(tx.execute(
-                "DELETE FROM pqueue_item_gates WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
+                "DELETE FROM fireweed_item_gates WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
                 &[&t, &q, &id_strs],
             ))?;
             // ADR-011: drop the purged items' typed secondary index rows.
@@ -3423,14 +3423,14 @@ fn apply_command_sql(
             if !gate_keys.is_empty() {
                 if c.blocked {
                     st(tx.execute(
-                        "INSERT INTO pqueue_gate_state (tenant_id,queue_id,gate_key) \
+                        "INSERT INTO fireweed_gate_state (tenant_id,queue_id,gate_key) \
                          SELECT $1,$2,gate_key FROM UNNEST($3::text[]) AS incoming(gate_key) \
                          ON CONFLICT (tenant_id,queue_id,gate_key) DO NOTHING",
                         &[&t, &q, &gate_keys],
                     ))?;
                 } else {
                     st(tx.execute(
-                        "DELETE FROM pqueue_gate_state \
+                        "DELETE FROM fireweed_gate_state \
                          WHERE tenant_id=$1 AND queue_id=$2 AND gate_key = ANY($3)",
                         &[&t, &q, &gate_keys],
                     ))?;
@@ -3439,7 +3439,7 @@ fn apply_command_sql(
             Ok(())
         }
         // C9 (epic pqueue-2201fd37): opaque NON-WORK side records (Snorri authoritative-commit boundary).
-        // Upsert each (key,payload) into `pqueue_side_records` — a table disjoint from `pqueue_items`, so a
+        // Upsert each (key,payload) into `fireweed_side_records` — a table disjoint from `fireweed_items`, so a
         // side record is never claimable/eligible/peekable nor counted as work. Apply is infallible
         // (insert-or-overwrite by key), mirroring `fireweed-sqlite`'s arm. `CommitTransitionPort` itself is not
         // yet wired on this backend (a separate bead) — this arm only makes the storage ready for it.
@@ -3456,7 +3456,7 @@ fn apply_command_sql(
                     .map(|record| record.payload.to_vec())
                     .collect::<Vec<_>>();
                 st(tx.execute(
-                    "INSERT INTO pqueue_side_records (tenant_id,queue_id,key,payload) \
+                    "INSERT INTO fireweed_side_records (tenant_id,queue_id,key,payload) \
                      SELECT $1,$2,batch.key,batch.payload \
                      FROM ( \
                        SELECT DISTINCT ON (key) key,payload \
@@ -3472,11 +3472,11 @@ fn apply_command_sql(
         }
         // C6 (epic pqueue-2201fd37): advance a caller-supplied opaque instance/state fence. Validated
         // pre-commit (stored==expected, next>expected), so the upsert is infallible. Disjoint from
-        // `pqueue_items` — a fence is never claimable/peekable work. `CommitTransitionPort` itself is not
+        // `fireweed_items` — a fence is never claimable/peekable work. `CommitTransitionPort` itself is not
         // yet wired on this backend (a separate bead) — this arm only makes the storage ready for it.
         QueueCommand::AdvanceInstanceFence(c) => {
             st(tx.execute(
-                "INSERT INTO pqueue_instance_fences (tenant_id,queue_id,instance_key,fence) \
+                "INSERT INTO fireweed_instance_fences (tenant_id,queue_id,instance_key,fence) \
                  VALUES ($1,$2,$3,$4) \
                  ON CONFLICT(tenant_id,queue_id,instance_key) DO UPDATE SET fence=EXCLUDED.fence",
                 &[&t, &q, &c.instance_key, &(c.next as i64)],
@@ -3517,13 +3517,13 @@ fn select_eligible_sql(
     let now_n = ts_nanos(now);
     let lim = sql_limit(limit);
     let rows = st(client.query(
-        "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
+        "SELECT item_id FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 \
          AND lifecycle_state='Pending' AND superseded=false AND cohort_size IS NULL \
          AND (not_before IS NULL OR not_before<=$3) AND eligible_since IS NOT NULL \
-         AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+         AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
              ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
-             WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
-             AND ig.item_id=pqueue_items.item_id) \
+             WHERE ig.tenant_id=fireweed_items.tenant_id AND ig.queue_id=fireweed_items.queue_id \
+             AND ig.item_id=fireweed_items.item_id) \
          ORDER BY priority_sort, created_seq LIMIT $4",
         &[&t, &q, &now_n, &lim],
     ))?;
@@ -3559,13 +3559,13 @@ fn select_item_claim_sql(
         compatibility.metadata_equals.clone(),
     ))?;
     let rows = st(client.query(
-        "SELECT item_id FROM pqueue_items \
+        "SELECT item_id FROM fireweed_items \
              WHERE tenant_id=$1 AND queue_id=$2 AND lifecycle_state='Pending' AND superseded=false \
              AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=$3) \
-             AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
-             JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
-             AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=pqueue_items.tenant_id \
-             AND ig.queue_id=pqueue_items.queue_id AND ig.item_id=pqueue_items.item_id) \
+             AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
+             JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+             AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=fireweed_items.tenant_id \
+             AND ig.queue_id=fireweed_items.queue_id AND ig.item_id=fireweed_items.item_id) \
              AND ($5::text IS NULL OR group_key=$5) \
              AND NOT EXISTS (SELECT 1 FROM jsonb_each($6::text::jsonb) wanted(key,value) \
                WHERE metadata::jsonb -> wanted.key IS DISTINCT FROM wanted.value) \
@@ -3589,7 +3589,7 @@ fn select_item_claim_sql(
 
 // ---------------------------------------------------------------------------
 // BQ-14b: group-aware claim selection (group_batching / same_group_key), owner-local, consuming
-// `pqueue_group_summary`. The candidate groups are locked with `FOR UPDATE SKIP LOCKED` on their summary
+// `fireweed_group_summary`. The candidate groups are locked with `FOR UPDATE SKIP LOCKED` on their summary
 // rows — TD-002's per-group lock that guarantees two concurrent claims never split a group (the real
 // row-lock the sqlite backend approximates with its process Mutex). Runs inside the claim transaction.
 // ---------------------------------------------------------------------------
@@ -3626,12 +3626,12 @@ fn select_group_batching(
     let rows = st(tx.query(
         "WITH candidate AS MATERIALIZED ( \
            SELECT s.group_key,r.priority_sort AS rep_priority_sort,r.created_seq,r.item_id AS rep_item_id \
-           FROM pqueue_group_summary s JOIN LATERAL ( \
-             SELECT e.priority_sort,e.created_seq,e.item_id FROM pqueue_items e \
+           FROM fireweed_group_summary s JOIN LATERAL ( \
+             SELECT e.priority_sort,e.created_seq,e.item_id FROM fireweed_items e \
              WHERE e.tenant_id=$1 AND e.queue_id=$2 AND e.group_key=s.group_key \
                AND e.lifecycle_state='Pending' AND e.superseded=false AND e.cohort_size IS NULL \
                AND (e.not_before IS NULL OR e.not_before<=$3) AND e.eligible_since IS NOT NULL \
-               AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+               AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
                  ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
                  WHERE ig.tenant_id=e.tenant_id AND ig.queue_id=e.queue_id AND ig.item_id=e.item_id) \
                AND NOT EXISTS (SELECT 1 FROM jsonb_each($5::text::jsonb) wanted(key,value) \
@@ -3644,12 +3644,12 @@ fn select_group_batching(
            LIMIT $4 FOR UPDATE OF s SKIP LOCKED \
          ), locked AS MATERIALIZED ( \
            SELECT c.group_key,member.item_id,member.priority_sort,member.created_seq \
-           FROM candidate c JOIN pqueue_items member ON member.tenant_id=$1 AND member.queue_id=$2 \
+           FROM candidate c JOIN fireweed_items member ON member.tenant_id=$1 AND member.queue_id=$2 \
                AND member.group_key=c.group_key AND member.lifecycle_state='Pending' \
                AND member.superseded=false AND member.cohort_size IS NULL \
                AND (member.not_before IS NULL OR member.not_before<=$3) \
                AND member.eligible_since IS NOT NULL \
-               AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+               AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
                  ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
                  WHERE ig.tenant_id=member.tenant_id AND ig.queue_id=member.queue_id \
                    AND ig.item_id=member.item_id) \
@@ -3707,12 +3707,12 @@ fn select_same_group(
     ))?;
     let rows = st(tx.query(
         "WITH candidate AS MATERIALIZED ( \
-           SELECT s.group_key FROM pqueue_group_summary s JOIN LATERAL ( \
-             SELECT e.priority_sort,e.created_seq,e.item_id FROM pqueue_items e \
+           SELECT s.group_key FROM fireweed_group_summary s JOIN LATERAL ( \
+             SELECT e.priority_sort,e.created_seq,e.item_id FROM fireweed_items e \
              WHERE e.tenant_id=$1 AND e.queue_id=$2 AND e.group_key=s.group_key \
                AND e.lifecycle_state='Pending' AND e.superseded=false AND e.cohort_size IS NULL \
                AND (e.not_before IS NULL OR e.not_before<=$3) AND e.eligible_since IS NOT NULL \
-               AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+               AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
                  ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
                  WHERE ig.tenant_id=e.tenant_id AND ig.queue_id=e.queue_id AND ig.item_id=e.item_id) \
                AND NOT EXISTS (SELECT 1 FROM jsonb_each($5::text::jsonb) wanted(key,value) \
@@ -3721,16 +3721,16 @@ fn select_same_group(
            ) r ON true WHERE s.tenant_id=$1 AND s.queue_id=$2 \
              AND (s.oldest_eligible_at IS NOT NULL OR $7) \
              AND ($6::text IS NULL OR s.group_key=$6) \
-             AND NOT EXISTS (SELECT 1 FROM pqueue_items leased WHERE leased.tenant_id=$1 \
+             AND NOT EXISTS (SELECT 1 FROM fireweed_items leased WHERE leased.tenant_id=$1 \
                AND leased.queue_id=$2 AND leased.group_key=s.group_key AND leased.superseded=false \
                AND leased.cohort_size IS NULL AND leased.lifecycle_state='Leased') \
            ORDER BY r.priority_sort,r.created_seq,r.item_id,s.group_key \
            LIMIT 1 FOR UPDATE OF s SKIP LOCKED \
-         ) SELECT i.item_id FROM candidate c JOIN pqueue_items i ON i.tenant_id=$1 \
+         ) SELECT i.item_id FROM candidate c JOIN fireweed_items i ON i.tenant_id=$1 \
            AND i.queue_id=$2 AND i.group_key=c.group_key WHERE i.lifecycle_state='Pending' \
            AND i.superseded=false AND i.cohort_size IS NULL \
            AND (i.not_before IS NULL OR i.not_before<=$3) AND i.eligible_since IS NOT NULL \
-           AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+           AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
              ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
              WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id) \
            AND NOT EXISTS (SELECT 1 FROM jsonb_each($5::text::jsonb) wanted(key,value) \
@@ -3768,16 +3768,16 @@ fn select_whole_cohort(
         compatibility.metadata_equals.clone(),
     ))?;
     let candidate = st(tx.query_opt(
-        "SELECT c.group_key,c.cohort_id,c.cohort_size FROM pqueue_cohorts c \
+        "SELECT c.group_key,c.cohort_id,c.cohort_size FROM fireweed_cohorts c \
          WHERE c.tenant_id=$1 AND c.queue_id=$2 AND c.state='complete' \
-         AND (SELECT COUNT(*)::bigint FROM pqueue_items a WHERE a.tenant_id=$1 AND a.queue_id=$2 \
+         AND (SELECT COUNT(*)::bigint FROM fireweed_items a WHERE a.tenant_id=$1 AND a.queue_id=$2 \
            AND a.group_key=c.group_key AND a.superseded=false AND a.cohort_size IS NOT NULL \
            AND a.lifecycle_state NOT IN ('Complete','Failed'))=c.cohort_size \
-         AND NOT EXISTS (SELECT 1 FROM pqueue_items i WHERE i.tenant_id=$1 AND i.queue_id=$2 \
+         AND NOT EXISTS (SELECT 1 FROM fireweed_items i WHERE i.tenant_id=$1 AND i.queue_id=$2 \
            AND i.group_key=c.group_key AND i.superseded=false AND i.cohort_size IS NOT NULL \
            AND i.lifecycle_state NOT IN ('Complete','Failed') AND NOT (i.lifecycle_state='Pending' \
              AND (i.not_before IS NULL OR i.not_before<=$3) AND i.eligible_since IS NOT NULL \
-             AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+             AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
                ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
                WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id) \
              AND NOT EXISTS (SELECT 1 FROM jsonb_each($4::text::jsonb) wanted(key,value) \
@@ -3821,13 +3821,13 @@ fn cohort_eligible_items(
         compatibility.metadata_equals.clone(),
     ))?;
     let rows = st(tx.query(
-        "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND group_key=$3 \
+        "SELECT item_id FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 AND group_key=$3 \
          AND lifecycle_state='Pending' AND superseded=false AND cohort_size IS NOT NULL \
          AND (not_before IS NULL OR not_before<=$4) AND eligible_since IS NOT NULL \
-         AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+         AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
              ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
-             WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
-             AND ig.item_id=pqueue_items.item_id) \
+             WHERE ig.tenant_id=fireweed_items.tenant_id AND ig.queue_id=fireweed_items.queue_id \
+             AND ig.item_id=fireweed_items.item_id) \
          AND NOT EXISTS (SELECT 1 FROM jsonb_each($6::text::jsonb) AS wanted(key,value) \
              WHERE metadata::jsonb -> wanted.key IS DISTINCT FROM wanted.value) \
          ORDER BY priority_sort, created_seq LIMIT $5 FOR UPDATE",
@@ -3845,12 +3845,12 @@ fn peek_sql(client: &mut Client, shard: &QueueKey, limit: usize) -> EngineResult
     let (t, q) = parts(shard);
     let lim = limit as i64;
     let rows = st(client.query(
-        "SELECT item_id, client_item_key, priority, item_version FROM pqueue_items \
+        "SELECT item_id, client_item_key, priority, item_version FROM fireweed_items \
          WHERE tenant_id=$1 AND queue_id=$2 AND lifecycle_state='Pending' AND superseded=false \
-         AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+         AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
            ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
-           WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
-           AND ig.item_id=pqueue_items.item_id) \
+           WHERE ig.tenant_id=fireweed_items.tenant_id AND ig.queue_id=fireweed_items.queue_id \
+           AND ig.item_id=fireweed_items.item_id) \
          ORDER BY priority_sort, created_seq LIMIT $3",
         &[&t, &q, &lim],
     ))?;
@@ -3873,7 +3873,7 @@ fn peek_sql(client: &mut Client, shard: &QueueKey, limit: usize) -> EngineResult
 
 /// B-011 exact active-scope discovery, mirrored by SQLite. Keyed and ungrouped scopes come from one
 /// read-only aggregate over live pending items, including time-only due crossings and current gate state.
-/// `pqueue_items_active_scope_idx` bounds the scan to the addressed queue's pending, non-superseded rows;
+/// `fireweed_items_active_scope_idx` bounds the scan to the addressed queue's pending, non-superseded rows;
 /// the cost is O(live pending rows in that queue), replacing the summary-only O(keyed groups) lookup.
 ///
 /// `progress_bound_risk_count` is `None` ("no signal"), not `Some(0)`: the summary's `at_risk_count` is a
@@ -3881,11 +3881,11 @@ fn peek_sql(client: &mut Client, shard: &QueueKey, limit: usize) -> EngineResult
 /// for an uncomputed signal. Discovery does NOT short-circuit on `queue_paused` (reports intrinsic
 /// eligibility — an operator wants to see pause-induced buildup; a read of an unknown queue → empty list).
 const ACTIVE_SCOPE_DISCOVERY_SQL: &str = "SELECT i.group_key, MIN(i.eligible_since) AS oldest_eligible_at, COUNT(*)::bigint \
-     FROM pqueue_items i \
+     FROM fireweed_items i \
      WHERE i.tenant_id=$1 AND i.queue_id=$2 AND i.lifecycle_state='Pending' \
      AND i.superseded=false AND i.eligible_since IS NOT NULL \
      AND (i.not_before IS NULL OR i.not_before<=$3) \
-     AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+     AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
        ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
        WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id) \
      GROUP BY i.group_key \
@@ -3926,7 +3926,7 @@ fn pending_sql(
 ) -> EngineResult<Vec<LeaseView>> {
     let (t, q) = parts(shard);
     let rows = st(client.query(
-        "SELECT item_id, lease_expires_at, retry_count FROM pqueue_items \
+        "SELECT item_id, lease_expires_at, retry_count FROM fireweed_items \
          WHERE tenant_id=$1 AND queue_id=$2 AND lifecycle_state='Leased'",
         &[&t, &q],
     ))?;
@@ -3960,7 +3960,7 @@ fn pending_summary_sql(
     let (t, q) = parts(shard);
     let rows = st(client.query(
         "SELECT lease_token_hash,COUNT(*),MIN(item_id::numeric)::text,MAX(item_id::numeric)::text \
-         FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND lifecycle_state='Leased' \
+         FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 AND lifecycle_state='Leased' \
          AND lease_token_hash IS NOT NULL GROUP BY lease_token_hash",
         &[&t, &q],
     ))?;
@@ -4026,7 +4026,7 @@ fn pending_page_sql(
         .unwrap_or_else(|| "0".into());
     let row_limit = limit.saturating_add(1).min(i64::MAX as usize) as i64;
     let mut rows = st(client.query(
-        "SELECT item_id,lease_expires_at,retry_count FROM pqueue_items \
+        "SELECT item_id,lease_expires_at,retry_count FROM fireweed_items \
          WHERE tenant_id=$1 AND queue_id=$2 AND lifecycle_state='Leased' \
          AND item_id::numeric >= $3::text::numeric ORDER BY item_id::numeric LIMIT $4",
         &[&t, &q, &start, &row_limit],
@@ -4069,7 +4069,7 @@ fn pending_range_sql(
     let rows = if let Some(consumer) = consumer {
         let hash = lease_hash(consumer);
         st(client.query(
-            "SELECT item_id,lease_expires_at,retry_count FROM pqueue_items \
+            "SELECT item_id,lease_expires_at,retry_count FROM fireweed_items \
              WHERE tenant_id=$1 AND queue_id=$2 AND lifecycle_state='Leased' \
              AND item_id::numeric BETWEEN $3::text::numeric AND $4::text::numeric \
              AND lease_token_hash=$5 ORDER BY item_id::numeric LIMIT $6",
@@ -4077,7 +4077,7 @@ fn pending_range_sql(
         ))?
     } else {
         st(client.query(
-            "SELECT item_id,lease_expires_at,retry_count FROM pqueue_items \
+            "SELECT item_id,lease_expires_at,retry_count FROM fireweed_items \
              WHERE tenant_id=$1 AND queue_id=$2 AND lifecycle_state='Leased' \
              AND item_id::numeric BETWEEN $3::text::numeric AND $4::text::numeric \
              ORDER BY item_id::numeric LIMIT $5",
@@ -4099,7 +4099,7 @@ fn pending_by_ids_sql(
     let (t, q) = parts(shard);
     let id_strings: Vec<String> = ids.iter().map(ToString::to_string).collect();
     let rows = st(client.query(
-        "SELECT item_id,lease_expires_at,retry_count FROM pqueue_items \
+        "SELECT item_id,lease_expires_at,retry_count FROM fireweed_items \
          WHERE tenant_id=$1 AND queue_id=$2 AND lifecycle_state='Leased' \
          AND item_id = ANY($3::text[])",
         &[&t, &q, &id_strings],
@@ -4196,7 +4196,7 @@ fn render_claimed(
     let id_strings: Vec<String> = ids.iter().map(ToString::to_string).collect();
     let rows = st(client.query(
         "SELECT item_id,client_item_key,item_version,priority,group_key,not_before, \
-         lease_expires_at,retry_count,payload,fields,metadata FROM pqueue_items \
+         lease_expires_at,retry_count,payload,fields,metadata FROM fireweed_items \
          WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3::text[]) \
          AND lifecycle_state='Leased'",
         &[&t, &q, &id_strings],
@@ -4253,7 +4253,7 @@ fn live_items_sql(
         .collect::<Vec<_>>();
     let rows = st(client.query(
         "SELECT client_item_key, item_id, item_version, lifecycle_state, priority, group_key, not_before, \
-             retry_count, payload, fields FROM pqueue_items \
+             retry_count, payload, fields FROM fireweed_items \
              WHERE tenant_id=$1 AND queue_id=$2 AND client_item_key = ANY($3) \
                AND superseded=false AND lifecycle_state IN ('Pending','Leased')",
         &[&t, &q, &key_strings],
@@ -4295,7 +4295,7 @@ fn live_items_sql(
 
 fn metrics_sql(client: &mut Client, shard: &QueueKey) -> EngineResult<QueueMetrics> {
     let ready: bool = st(client.query_one(
-        "SELECT EXISTS(SELECT 1 FROM pqueue_metrics_migration_state \
+        "SELECT EXISTS(SELECT 1 FROM fireweed_metrics_migration_state \
          WHERE migration_name='queue_metrics_v2_counted' AND status='complete')",
         &[],
     ))?
@@ -4305,7 +4305,7 @@ fn metrics_sql(client: &mut Client, shard: &QueueKey) -> EngineResult<QueueMetri
     }
     let (t, q) = parts(shard);
     let row = st(client.query_opt(
-        "SELECT pending,leased,complete,failed FROM pqueue_queue_metrics_v2 \
+        "SELECT pending,leased,complete,failed FROM fireweed_queue_metrics_v2 \
          WHERE tenant_id=$1 AND queue_id=$2",
         &[&t, &q],
     ))?;
@@ -4411,8 +4411,8 @@ fn metrics_by_query_sql(
            COUNT(*) FILTER (WHERE i.lifecycle_state='Leased')::bigint, \
            COUNT(*) FILTER (WHERE i.lifecycle_state='Complete')::bigint, \
            COUNT(*) FILTER (WHERE i.lifecycle_state='Failed')::bigint \
-         FROM pqueue_item_index idx \
-         JOIN pqueue_items i \
+         FROM fireweed_item_index idx \
+         JOIN fireweed_items i \
            ON i.tenant_id=idx.tenant_id AND i.queue_id=idx.queue_id AND i.item_id=idx.item_id \
          WHERE idx.tenant_id=$1 AND idx.queue_id=$2 AND idx.index_name=$3 \
            AND i.superseded=false",
@@ -4473,7 +4473,7 @@ fn metrics_by_query_sql(
         // Each component predicate is a lookup/range over the normalized component index. This keeps
         // later-field ranges indexable regardless of variable-length equality-prefix values.
         sql.push_str(&format!(
-            " AND EXISTS (SELECT 1 FROM pqueue_item_index_component component_{filter_number} \
+            " AND EXISTS (SELECT 1 FROM fireweed_item_index_component component_{filter_number} \
              WHERE component_{filter_number}.tenant_id=idx.tenant_id \
                AND component_{filter_number}.queue_id=idx.queue_id \
                AND component_{filter_number}.index_name=idx.index_name \
@@ -4528,8 +4528,8 @@ fn hot_query_projection_sql(
     };
     let (tenant, queue) = parts(shard);
     let rows = st(client.query(
-        "SELECT i.item_id,idx.index_key FROM pqueue_items i \
-         LEFT JOIN pqueue_item_index idx \
+        "SELECT i.item_id,idx.index_key FROM fireweed_items i \
+         LEFT JOIN fireweed_item_index idx \
            ON idx.tenant_id=i.tenant_id AND idx.queue_id=i.queue_id AND idx.item_id=i.item_id \
           AND idx.index_name=$3 \
          WHERE i.tenant_id=$1 AND i.queue_id=$2 AND i.superseded=false \
@@ -4589,7 +4589,7 @@ fn bounded_mutation_plan_sql(
     for candidate in matches.results {
         let row = st(inner.client.query_opt(
             "SELECT lifecycle_state,fenced,superseded,entity_document,fields,item_version \
-             FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
+             FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
             &[&tenant, &queue, &candidate.item_id.to_string()],
         ))?;
         let Some(row) = row else {
@@ -4785,10 +4785,10 @@ fn claim_by_query_sql(
         }
         let id = row.item_id.to_string();
         if st(tx.query_opt(
-            "SELECT item_id FROM pqueue_items i WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 \
+            "SELECT item_id FROM fireweed_items i WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 \
              AND lifecycle_state='Pending' AND fenced=false AND superseded=false \
              AND (not_before IS NULL OR not_before<=$4) \
-             AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+             AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
                ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
                WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id) \
              FOR UPDATE SKIP LOCKED",
@@ -4860,7 +4860,7 @@ fn item_flags_map(
     let (t, q) = parts(shard);
     let id_strs: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
     let rows = st(client.query(
-        "SELECT item_id, lifecycle_state, fenced, superseded, cohort_size IS NOT NULL FROM pqueue_items \
+        "SELECT item_id, lifecycle_state, fenced, superseded, cohort_size IS NOT NULL FROM fireweed_items \
          WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
         &[&t, &q, &id_strs],
     ))?;
@@ -4906,7 +4906,7 @@ fn validate_cohort_lease(
 ) -> EngineResult<()> {
     let (t, q) = parts(shard);
     let row = st(client.query_opt(
-        "SELECT state, cohort_lease_token_hash FROM pqueue_cohorts \
+        "SELECT state, cohort_lease_token_hash FROM fireweed_cohorts \
          WHERE tenant_id=$1 AND queue_id=$2 AND cohort_id=$3",
         &[&t, &q, &target.cohort_id.as_str()],
     ))?;
@@ -4931,7 +4931,7 @@ fn validate_cohort_lease(
 // PostgresRelationalBackend
 // ---------------------------------------------------------------------------
 
-/// Postgres-backed **relational** projection family (`pqueue_items` is a rebuildable projection cache).
+/// Postgres-backed **relational** projection family (`fireweed_items` is a rebuildable projection cache).
 /// Atomic class.
 pub struct PostgresRelationalBackend {
     inner: Mutex<Inner>,
@@ -5054,10 +5054,10 @@ impl PostgresRelationalBackend {
 
     fn from_client(mut client: Client) -> EngineResult<Self> {
         let fresh: bool =
-            st(client.query_one("SELECT to_regclass('pqueue_items') IS NULL", &[]))?.get(0);
+            st(client.query_one("SELECT to_regclass('fireweed_items') IS NULL", &[]))?.get(0);
         if !fresh {
             let state_table_exists: bool = st(client.query_one(
-                "SELECT to_regclass('pqueue_metrics_migration_state') IS NOT NULL",
+                "SELECT to_regclass('fireweed_metrics_migration_state') IS NOT NULL",
                 &[],
             ))?
             .get(0);
@@ -5065,7 +5065,7 @@ impl PostgresRelationalBackend {
                 return Err(EngineError::Unavailable);
             }
             let ready: bool = st(client.query_one(
-                "SELECT EXISTS(SELECT 1 FROM pqueue_metrics_migration_state \
+                "SELECT EXISTS(SELECT 1 FROM fireweed_metrics_migration_state \
                  WHERE migration_name='queue_metrics_v2_counted' AND status='complete')",
                 &[],
             ))?
@@ -5075,27 +5075,27 @@ impl PostgresRelationalBackend {
             }
             let maintenance_ready: bool = st(client.query_one(
                 "SELECT \
-                   to_regclass('pqueue_queue_metrics_v2') IS NOT NULL \
-                   AND to_regclass('pqueue_metrics_counted_item') IS NOT NULL \
-                   AND to_regclass('pqueue_group_due_pending') IS NOT NULL \
-                   AND to_regclass('pqueue_item_index_component') IS NOT NULL \
-                   AND to_regclass('pqueue_commands') IS NOT NULL \
-                   AND to_regclass('pqueue_command_baselines') IS NOT NULL \
-                   AND to_regclass('pqueue_commands_read_idx') IS NOT NULL \
-                   AND to_regclass('pqueue_commands_command_id_idx') IS NOT NULL \
-                   AND to_regprocedure('pqueue_apply_metrics_delta()') IS NOT NULL \
-                   AND to_regprocedure('pqueue_index_components(bytea)') IS NOT NULL \
-                   AND to_regprocedure('pqueue_sync_index_components()') IS NOT NULL \
+                   to_regclass('fireweed_queue_metrics_v2') IS NOT NULL \
+                   AND to_regclass('fireweed_metrics_counted_item') IS NOT NULL \
+                   AND to_regclass('fireweed_group_due_pending') IS NOT NULL \
+                   AND to_regclass('fireweed_item_index_component') IS NOT NULL \
+                   AND to_regclass('fireweed_commands') IS NOT NULL \
+                   AND to_regclass('fireweed_command_baselines') IS NOT NULL \
+                   AND to_regclass('fireweed_commands_read_idx') IS NOT NULL \
+                   AND to_regclass('fireweed_commands_command_id_idx') IS NOT NULL \
+                   AND to_regprocedure('fireweed_apply_metrics_delta()') IS NOT NULL \
+                   AND to_regprocedure('fireweed_index_components(bytea)') IS NOT NULL \
+                   AND to_regprocedure('fireweed_sync_index_components()') IS NOT NULL \
                    AND EXISTS(SELECT 1 FROM pg_trigger \
-                     WHERE tgname='pqueue_items_metrics_delta' \
-                       AND tgrelid='pqueue_items'::regclass AND tgenabled IN ('O','A') \
-                       AND tgfoid=to_regprocedure('pqueue_apply_metrics_delta()') \
+                     WHERE tgname='fireweed_items_metrics_delta' \
+                       AND tgrelid='fireweed_items'::regclass AND tgenabled IN ('O','A') \
+                       AND tgfoid=to_regprocedure('fireweed_apply_metrics_delta()') \
                        AND pg_get_triggerdef(oid) LIKE \
                          '%AFTER INSERT OR DELETE OR UPDATE OF lifecycle_state, superseded, not_before, group_key%') \
                    AND EXISTS(SELECT 1 FROM pg_trigger \
-                     WHERE tgname='pqueue_item_index_components_sync' \
-                       AND tgrelid='pqueue_item_index'::regclass AND tgenabled IN ('O','A') \
-                       AND tgfoid=to_regprocedure('pqueue_sync_index_components()') \
+                     WHERE tgname='fireweed_item_index_components_sync' \
+                       AND tgrelid='fireweed_item_index'::regclass AND tgenabled IN ('O','A') \
+                       AND tgfoid=to_regprocedure('fireweed_sync_index_components()') \
                        AND pg_get_triggerdef(oid) LIKE \
                          '%AFTER INSERT OR DELETE OR UPDATE OF index_key%')",
                 &[],
@@ -5107,14 +5107,14 @@ impl PostgresRelationalBackend {
             let command_log_ready: bool = st(client.query_one(
                 "SELECT NOT EXISTS ( \
                    SELECT 1 FROM relational_cursor c \
-                   LEFT JOIN pqueue_command_baselines b \
+                   LEFT JOIN fireweed_command_baselines b \
                      ON b.tenant=c.tenant AND b.queue=c.queue \
                    LEFT JOIN LATERAL ( \
-                     SELECT seq FROM pqueue_commands p \
+                     SELECT seq FROM fireweed_commands p \
                      WHERE p.tenant=c.tenant AND p.queue=c.queue ORDER BY seq ASC LIMIT 1 \
                    ) first_command ON true \
                    LEFT JOIN LATERAL ( \
-                     SELECT seq FROM pqueue_commands p \
+                     SELECT seq FROM fireweed_commands p \
                      WHERE p.tenant=c.tenant AND p.queue=c.queue ORDER BY seq DESC LIMIT 1 \
                    ) last_command ON true \
                    WHERE b.tenant IS NULL OR octet_length(b.snapshot_digest)<>32 \
@@ -5137,35 +5137,35 @@ impl PostgresRelationalBackend {
             st(client.batch_execute(COMMAND_LOG_MIGRATION))?;
             st(client.batch_execute(QUEUE_METRICS_MIGRATION))?;
             st(client.execute(
-                "INSERT INTO pqueue_metrics_migration_state(migration_name,status) \
+                "INSERT INTO fireweed_metrics_migration_state(migration_name,status) \
                  VALUES('queue_metrics_v2_counted','complete') ON CONFLICT(migration_name) DO NOTHING",
                 &[],
             ))?;
             st(client.batch_execute(
-                "ALTER TABLE pqueue_items ADD COLUMN IF NOT EXISTS fields TEXT NOT NULL DEFAULT '{}';\
+                "ALTER TABLE fireweed_items ADD COLUMN IF NOT EXISTS fields TEXT NOT NULL DEFAULT '{}';\
                  ALTER TABLE queues ADD COLUMN IF NOT EXISTS pause_drain_intake BOOLEAN NOT NULL DEFAULT false;\
-                 ALTER TABLE pqueue_items ADD COLUMN IF NOT EXISTS metadata TEXT NOT NULL DEFAULT '{}';\
-                 ALTER TABLE pqueue_items ADD COLUMN IF NOT EXISTS entity_document TEXT;\
-                 ALTER TABLE pqueue_cohorts ADD COLUMN IF NOT EXISTS cohort_id TEXT;\
-             ALTER TABLE pqueue_cohorts ADD COLUMN IF NOT EXISTS member_count BIGINT NOT NULL DEFAULT 0;\
-             ALTER TABLE pqueue_cohorts ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'forming';\
-             ALTER TABLE pqueue_cohorts ADD COLUMN IF NOT EXISTS cohort_created_at BIGINT;\
-             ALTER TABLE pqueue_cohorts ADD COLUMN IF NOT EXISTS first_eligible_at BIGINT;\
-             ALTER TABLE pqueue_cohorts ADD COLUMN IF NOT EXISTS expire_command_pos BIGINT;\
-             ALTER TABLE pqueue_cohorts ADD COLUMN IF NOT EXISTS cohort_lease_token_hash BYTEA;\
-             ALTER TABLE pqueue_cohorts ADD COLUMN IF NOT EXISTS retention_until BIGINT;\
-             UPDATE pqueue_cohorts SET cohort_id=group_key WHERE cohort_id IS NULL;\
-             UPDATE pqueue_cohorts SET cohort_created_at=created_at WHERE cohort_created_at IS NULL;\
-             UPDATE pqueue_cohorts c SET member_count=(SELECT COUNT(*) FROM pqueue_items i \
+                 ALTER TABLE fireweed_items ADD COLUMN IF NOT EXISTS metadata TEXT NOT NULL DEFAULT '{}';\
+                 ALTER TABLE fireweed_items ADD COLUMN IF NOT EXISTS entity_document TEXT;\
+                 ALTER TABLE fireweed_cohorts ADD COLUMN IF NOT EXISTS cohort_id TEXT;\
+             ALTER TABLE fireweed_cohorts ADD COLUMN IF NOT EXISTS member_count BIGINT NOT NULL DEFAULT 0;\
+             ALTER TABLE fireweed_cohorts ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'forming';\
+             ALTER TABLE fireweed_cohorts ADD COLUMN IF NOT EXISTS cohort_created_at BIGINT;\
+             ALTER TABLE fireweed_cohorts ADD COLUMN IF NOT EXISTS first_eligible_at BIGINT;\
+             ALTER TABLE fireweed_cohorts ADD COLUMN IF NOT EXISTS expire_command_pos BIGINT;\
+             ALTER TABLE fireweed_cohorts ADD COLUMN IF NOT EXISTS cohort_lease_token_hash BYTEA;\
+             ALTER TABLE fireweed_cohorts ADD COLUMN IF NOT EXISTS retention_until BIGINT;\
+             UPDATE fireweed_cohorts SET cohort_id=group_key WHERE cohort_id IS NULL;\
+             UPDATE fireweed_cohorts SET cohort_created_at=created_at WHERE cohort_created_at IS NULL;\
+             UPDATE fireweed_cohorts c SET member_count=(SELECT COUNT(*) FROM fireweed_items i \
                WHERE i.tenant_id=c.tenant_id AND i.queue_id=c.queue_id AND i.group_key=c.group_key \
                AND i.superseded=false AND i.cohort_size IS NOT NULL \
                AND i.lifecycle_state NOT IN ('Complete','Failed'));\
-             UPDATE pqueue_cohorts SET state=CASE WHEN member_count >= cohort_size THEN 'complete' ELSE 'forming' END \
+             UPDATE fireweed_cohorts SET state=CASE WHEN member_count >= cohort_size THEN 'complete' ELSE 'forming' END \
                WHERE state IS NULL OR state='forming' OR state='complete';\
-             CREATE INDEX IF NOT EXISTS pqueue_cohorts_claim_idx \
-               ON pqueue_cohorts (tenant_id, queue_id, state) WHERE state='complete';\
-             CREATE INDEX IF NOT EXISTS pqueue_cohorts_expiry_idx \
-               ON pqueue_cohorts (tenant_id, queue_id, cohort_created_at) \
+             CREATE INDEX IF NOT EXISTS fireweed_cohorts_claim_idx \
+               ON fireweed_cohorts (tenant_id, queue_id, state) WHERE state='complete';\
+             CREATE INDEX IF NOT EXISTS fireweed_cohorts_expiry_idx \
+               ON fireweed_cohorts (tenant_id, queue_id, cohort_created_at) \
                WHERE state IN ('forming','complete');",
             ))?;
         }
@@ -5192,7 +5192,7 @@ impl PostgresRelationalBackend {
     fn restore_counters(&self) -> EngineResult<()> {
         let mut g = self.inner.lock().expect("poisoned");
         let rows = st(g.client.query(
-            "SELECT tenant_id, queue_id, item_id FROM pqueue_id_high_water",
+            "SELECT tenant_id, queue_id, item_id FROM fireweed_id_high_water",
             &[],
         ))?;
         for row in rows {
@@ -5221,7 +5221,7 @@ impl PostgresRelationalBackend {
         let (tenant, queue) = parts(shard);
         let mut inner = self.inner.lock().expect("poisoned");
         let row = st(inner.client.query_opt(
-            "SELECT generation,assignment_epoch,next_seq FROM pqueue_command_baselines \
+            "SELECT generation,assignment_epoch,next_seq FROM fireweed_command_baselines \
              WHERE tenant=$1 AND queue=$2",
             &[&tenant, &queue],
         ))?
@@ -5263,7 +5263,7 @@ impl PostgresRelationalBackend {
         let durable_epoch: i64 = cursor.get(1);
         let baseline = st(tx.query_one(
             "SELECT generation,schema_version,assignment_epoch,next_seq,row_count,snapshot_digest \
-             FROM pqueue_command_baselines WHERE tenant=$1 AND queue=$2",
+             FROM fireweed_command_baselines WHERE tenant=$1 AND queue=$2",
             &[&tenant, &queue],
         ))?;
         let generation: String = baseline.get(0);
@@ -5288,7 +5288,7 @@ impl PostgresRelationalBackend {
             "SELECT COUNT(*)::text, \
                     COALESCE(SUM(hashtextextended(relation_name||':'||payload::text,0)::numeric),0)::text, \
                     COALESCE(SUM(hashtextextended(relation_name||':'||payload::text,2147483647)::numeric),0)::text \
-             FROM pqueue_command_baseline_rows \
+             FROM fireweed_command_baseline_rows \
              WHERE tenant=$1 AND queue=$2 AND generation=$3",
             &[&tenant, &queue, &generation],
         ))?;
@@ -5311,7 +5311,7 @@ impl PostgresRelationalBackend {
             });
         }
 
-        st(tx.batch_execute("ALTER TABLE pqueue_items DISABLE TRIGGER USER"))?;
+        st(tx.batch_execute("ALTER TABLE fireweed_items DISABLE TRIGGER USER"))?;
         for &(relation, tenant_column, queue_column) in BASELINE_RELATIONS.iter().rev() {
             st(tx.execute(
                 &format!("DELETE FROM {relation} WHERE {tenant_column}=$1 AND {queue_column}=$2"),
@@ -5322,14 +5322,14 @@ impl PostgresRelationalBackend {
             st(tx.execute(
                 &format!(
                     "INSERT INTO {relation} SELECT (jsonb_populate_record(NULL::{relation},payload)).* \
-                     FROM pqueue_command_baseline_rows \
+                     FROM fireweed_command_baseline_rows \
                      WHERE tenant=$1 AND queue=$2 AND generation=$3 AND relation_name=$4 \
                      ORDER BY row_ordinal"
                 ),
                 &[&tenant, &queue, &generation, &relation],
             ))?;
         }
-        st(tx.batch_execute("ALTER TABLE pqueue_items ENABLE TRIGGER USER"))?;
+        st(tx.batch_execute("ALTER TABLE fireweed_items ENABLE TRIGGER USER"))?;
         st(tx.execute(
             "UPDATE relational_cursor SET next_seq=$3,assignment_epoch=$4 \
              WHERE tenant=$1 AND queue=$2",
@@ -5340,7 +5340,7 @@ impl PostgresRelationalBackend {
         let mut token_ops = Vec::new();
         while next < durable_head {
             let rows = st(tx.query(
-                "SELECT assignment_epoch,seq,envelope,envelope_sha256 FROM pqueue_commands \
+                "SELECT assignment_epoch,seq,envelope,envelope_sha256 FROM fireweed_commands \
                  WHERE tenant=$1 AND queue=$2 AND seq>=$3 ORDER BY seq LIMIT 1024",
                 &[&tenant, &queue, &next],
             ))?;
@@ -5465,8 +5465,8 @@ fn apply_command_log_migration(client: &mut Client) -> EngineResult<()> {
     // generation. Ordinary startup never creates or blesses a baseline.
     st(client.batch_execute(COMMAND_LOG_MIGRATION))?;
     let has_orphan_history: bool = st(client.query_one(
-        "SELECT EXISTS(SELECT 1 FROM pqueue_commands p \
-         LEFT JOIN pqueue_command_baselines b USING(tenant,queue) WHERE b.tenant IS NULL)",
+        "SELECT EXISTS(SELECT 1 FROM fireweed_commands p \
+         LEFT JOIN fireweed_command_baselines b USING(tenant,queue) WHERE b.tenant IS NULL)",
         &[],
     ))?
     .get(0);
@@ -5476,11 +5476,11 @@ fn apply_command_log_migration(client: &mut Client) -> EngineResult<()> {
         ));
     }
     st(client.execute(
-        "INSERT INTO pqueue_command_baseline_migrations \
+        "INSERT INTO fireweed_command_baseline_migrations \
            (tenant,queue,generation,expected_epoch,expected_next_seq) \
          SELECT c.tenant,c.queue,'baseline-'||c.assignment_epoch||'-'||c.next_seq, \
                 c.assignment_epoch,c.next_seq FROM relational_cursor c \
-         LEFT JOIN pqueue_command_baselines b USING(tenant,queue) \
+         LEFT JOIN fireweed_command_baselines b USING(tenant,queue) \
          WHERE b.tenant IS NULL ON CONFLICT(tenant,queue) DO NOTHING",
         &[],
     ))?;
@@ -5489,7 +5489,7 @@ fn apply_command_log_migration(client: &mut Client) -> EngineResult<()> {
         let state = st(client.query_opt(
             "SELECT tenant,queue,generation,expected_epoch,expected_next_seq,relation_index, \
                     last_ctid,rows_copied,hash_a::text,hash_b::text \
-             FROM pqueue_command_baseline_migrations ORDER BY tenant,queue LIMIT 1",
+             FROM fireweed_command_baseline_migrations ORDER BY tenant,queue LIMIT 1",
             &[],
         ))?;
         let Some(state) = state else {
@@ -5516,7 +5516,7 @@ fn apply_command_log_migration(client: &mut Client) -> EngineResult<()> {
                    WHERE {tenant_column}=$1 AND {queue_column}=$2 AND ctid>$5::text::tid \
                    ORDER BY ctid LIMIT 1024 \
                  ), inserted AS ( \
-                   INSERT INTO pqueue_command_baseline_rows \
+                   INSERT INTO fireweed_command_baseline_rows \
                      (tenant,queue,generation,relation_name,row_ordinal,payload) \
                    SELECT $1,$2,$3,$4,$6+row_number() OVER (ORDER BY ctid),payload FROM batch \
                    RETURNING relation_name,payload \
@@ -5529,7 +5529,7 @@ fn apply_command_log_migration(client: &mut Client) -> EngineResult<()> {
                           (SELECT COALESCE(SUM(hashtextextended(relation_name||':'||payload::text,2147483647)::numeric),0) \
                              FROM inserted) AS hash_b FROM batch \
                  ) \
-                 UPDATE pqueue_command_baseline_migrations m SET \
+                 UPDATE fireweed_command_baseline_migrations m SET \
                    relation_index=CASE WHEN stats.copied=0 THEN m.relation_index+1 ELSE m.relation_index END, \
                    last_ctid=CASE WHEN stats.copied=0 THEN '(0,0)' ELSE stats.last_ctid END, \
                    rows_copied=m.rows_copied+stats.inserted_count, \
@@ -5567,7 +5567,7 @@ fn apply_command_log_migration(client: &mut Client) -> EngineResult<()> {
                SELECT 'relational_emission_cursor',to_jsonb(e) FROM relational_emission_cursor e \
                  WHERE tenant=$1 AND queue=$2 \
              ), snap AS ( \
-               SELECT relation_name,payload FROM pqueue_command_baseline_rows \
+               SELECT relation_name,payload FROM fireweed_command_baseline_rows \
                  WHERE tenant=$1 AND queue=$2 AND generation=$3 \
                    AND relation_name IN ('queues','relational_emission_cursor') \
              ) \
@@ -5581,12 +5581,12 @@ fn apply_command_log_migration(client: &mut Client) -> EngineResult<()> {
             || !metadata_stable
         {
             st(tx.execute(
-                "DELETE FROM pqueue_command_baseline_rows \
+                "DELETE FROM fireweed_command_baseline_rows \
                  WHERE tenant=$1 AND queue=$2 AND generation=$3",
                 &[&tenant, &queue, &generation],
             ))?;
             st(tx.execute(
-                "DELETE FROM pqueue_command_baseline_migrations WHERE tenant=$1 AND queue=$2",
+                "DELETE FROM fireweed_command_baseline_migrations WHERE tenant=$1 AND queue=$2",
                 &[&tenant, &queue],
             ))?;
             st(tx.commit())?;
@@ -5600,7 +5600,7 @@ fn apply_command_log_migration(client: &mut Client) -> EngineResult<()> {
         let row_count = rows_copied;
         let snapshot_digest = Sha256::digest(summary.as_bytes()).to_vec();
         st(tx.execute(
-            "INSERT INTO pqueue_command_baselines \
+            "INSERT INTO fireweed_command_baselines \
                (tenant,queue,generation,schema_version,assignment_epoch,next_seq,row_count,snapshot_digest) \
              VALUES($1,$2,$3,1,$4,$5,$6,$7)",
             &[
@@ -5614,7 +5614,7 @@ fn apply_command_log_migration(client: &mut Client) -> EngineResult<()> {
             ],
         ))?;
         st(tx.execute(
-            "DELETE FROM pqueue_command_baseline_migrations WHERE tenant=$1 AND queue=$2",
+            "DELETE FROM fireweed_command_baseline_migrations WHERE tenant=$1 AND queue=$2",
             &[&tenant, &queue],
         ))?;
         st(tx.commit())?;
@@ -5623,16 +5623,16 @@ fn apply_command_log_migration(client: &mut Client) -> EngineResult<()> {
 
 fn migrate_id_high_water(client: &mut Client) -> EngineResult<()> {
     st(client.batch_execute(
-        "CREATE TABLE IF NOT EXISTS pqueue_id_high_water ( \
+        "CREATE TABLE IF NOT EXISTS fireweed_id_high_water ( \
            tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, item_id TEXT NOT NULL, \
            PRIMARY KEY (tenant_id,queue_id)); \
-         CREATE TABLE IF NOT EXISTS pqueue_schema_migrations ( \
+         CREATE TABLE IF NOT EXISTS fireweed_schema_migrations ( \
            migration_name TEXT NOT NULL PRIMARY KEY);",
     ))?;
     let mut tx = st(client.transaction())?;
-    st(tx.batch_execute("LOCK TABLE pqueue_schema_migrations IN EXCLUSIVE MODE"))?;
+    st(tx.batch_execute("LOCK TABLE fireweed_schema_migrations IN EXCLUSIVE MODE"))?;
     let complete: bool = st(tx.query_one(
-        "SELECT EXISTS(SELECT 1 FROM pqueue_schema_migrations \
+        "SELECT EXISTS(SELECT 1 FROM fireweed_schema_migrations \
          WHERE migration_name='item_id_high_water_v2')",
         &[],
     ))?
@@ -5641,15 +5641,15 @@ fn migrate_id_high_water(client: &mut Client) -> EngineResult<()> {
         // One set-based upgrade pass for v0.19.3 databases. Every later pool member and restart sees the
         // marker and does O(1) work; no Rust-side materialized-row loop is introduced.
         st(tx.execute(
-            "INSERT INTO pqueue_id_high_water(tenant_id,queue_id,item_id) \
-             SELECT tenant_id,queue_id,MAX(item_id::numeric)::text FROM pqueue_items \
+            "INSERT INTO fireweed_id_high_water(tenant_id,queue_id,item_id) \
+             SELECT tenant_id,queue_id,MAX(item_id::numeric)::text FROM fireweed_items \
              GROUP BY tenant_id,queue_id \
              ON CONFLICT(tenant_id,queue_id) DO UPDATE SET item_id=EXCLUDED.item_id \
-             WHERE pqueue_id_high_water.item_id::numeric < EXCLUDED.item_id::numeric",
+             WHERE fireweed_id_high_water.item_id::numeric < EXCLUDED.item_id::numeric",
             &[],
         ))?;
         st(tx.execute(
-            "INSERT INTO pqueue_schema_migrations(migration_name) \
+            "INSERT INTO fireweed_schema_migrations(migration_name) \
              VALUES('item_id_high_water_v2')",
             &[],
         ))?;
@@ -5670,23 +5670,23 @@ fn migrate_metrics_batch(
 
     // Initialization takes only a metadata/high-water lock window; it never scans or aggregates the table.
     let exists: bool = st(client.query_one(
-        "SELECT EXISTS(SELECT 1 FROM pqueue_metrics_migration_state \
+        "SELECT EXISTS(SELECT 1 FROM fireweed_metrics_migration_state \
          WHERE migration_name='queue_metrics_v2_counted')",
         &[],
     ))?
     .get(0);
     if !exists {
         let mut tx = st(client.transaction())?;
-        st(tx.batch_execute("LOCK TABLE pqueue_items IN SHARE ROW EXCLUSIVE MODE"))?;
+        st(tx.batch_execute("LOCK TABLE fireweed_items IN SHARE ROW EXCLUSIVE MODE"))?;
         let initialized: bool = st(tx.query_one(
-            "SELECT EXISTS(SELECT 1 FROM pqueue_metrics_migration_state \
+            "SELECT EXISTS(SELECT 1 FROM fireweed_metrics_migration_state \
              WHERE migration_name='queue_metrics_v2_counted')",
             &[],
         ))?
         .get(0);
         if !initialized {
             let high = st(tx.query_opt(
-                "SELECT tenant_id,queue_id,item_id FROM pqueue_items \
+                "SELECT tenant_id,queue_id,item_id FROM fireweed_items \
                  ORDER BY tenant_id DESC,queue_id DESC,item_id DESC LIMIT 1",
                 &[],
             ))?;
@@ -5696,7 +5696,7 @@ fn migrate_metrics_batch(
                     let high_q: String = row.get(1);
                     let high_i: String = row.get(2);
                     st(tx.execute(
-                        "INSERT INTO pqueue_metrics_migration_state( \
+                        "INSERT INTO fireweed_metrics_migration_state( \
                            migration_name,status,high_tenant,high_queue,high_item_id) \
                          VALUES('queue_metrics_v2_counted','active',$1,$2,$3)",
                         &[&high_t, &high_q, &high_i],
@@ -5704,7 +5704,7 @@ fn migrate_metrics_batch(
                 }
                 None => {
                     st(tx.execute(
-                        "INSERT INTO pqueue_metrics_migration_state(migration_name,status) \
+                        "INSERT INTO fireweed_metrics_migration_state(migration_name,status) \
                          VALUES('queue_metrics_v2_counted','complete')",
                         &[],
                     ))?;
@@ -5718,7 +5718,7 @@ fn migrate_metrics_batch(
     let state = st(tx.query_one(
         "SELECT status,high_tenant,high_queue,high_item_id,last_tenant,last_queue,last_item_id, \
                 rows_backfilled,batches_completed,due_rows_backfilled \
-         FROM pqueue_metrics_migration_state WHERE migration_name='queue_metrics_v2_counted' FOR UPDATE",
+         FROM fireweed_metrics_migration_state WHERE migration_name='queue_metrics_v2_counted' FOR UPDATE",
         &[],
     ))?;
     let status: String = state.get(0);
@@ -5743,7 +5743,7 @@ fn migrate_metrics_batch(
     let last_i: Option<String> = state.get(6);
     let rows = st(tx.query(
         "SELECT tenant_id,queue_id,item_id,lifecycle_state,superseded,item_version \
-         FROM pqueue_items \
+         FROM fireweed_items \
          WHERE (tenant_id,queue_id,item_id) > ($1,$2,$3) \
            AND (tenant_id,queue_id,item_id) <= ($4,$5,$6) \
          ORDER BY tenant_id,queue_id,item_id LIMIT $7 FOR UPDATE",
@@ -5768,7 +5768,7 @@ fn migrate_metrics_batch(
         Vec::new()
     } else {
         st(tx.query(
-            "INSERT INTO pqueue_metrics_counted_item( \
+            "INSERT INTO fireweed_metrics_counted_item( \
                tenant_id,queue_id,item_id,lifecycle_state,superseded,item_version) \
              SELECT * FROM unnest($1::text[],$2::text[],$3::text[],$4::text[],$5::bool[],$6::bigint[]) \
              ON CONFLICT(tenant_id,queue_id,item_id) DO NOTHING \
@@ -5792,12 +5792,12 @@ fn migrate_metrics_batch(
     }
     for ((tenant, queue), counts) in per_queue {
         st(tx.execute(
-            "INSERT INTO pqueue_queue_metrics_v2(tenant_id,queue_id,pending,leased,complete,failed) \
+            "INSERT INTO fireweed_queue_metrics_v2(tenant_id,queue_id,pending,leased,complete,failed) \
              VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(tenant_id,queue_id) DO UPDATE SET \
-               pending=pqueue_queue_metrics_v2.pending+EXCLUDED.pending, \
-               leased=pqueue_queue_metrics_v2.leased+EXCLUDED.leased, \
-               complete=pqueue_queue_metrics_v2.complete+EXCLUDED.complete, \
-               failed=pqueue_queue_metrics_v2.failed+EXCLUDED.failed",
+               pending=fireweed_queue_metrics_v2.pending+EXCLUDED.pending, \
+               leased=fireweed_queue_metrics_v2.leased+EXCLUDED.leased, \
+               complete=fireweed_queue_metrics_v2.complete+EXCLUDED.complete, \
+               failed=fireweed_queue_metrics_v2.failed+EXCLUDED.failed",
             &[
                 &tenant, &queue, &counts[0], &counts[1], &counts[2], &counts[3],
             ],
@@ -5805,13 +5805,13 @@ fn migrate_metrics_batch(
     }
     if !item_ids.is_empty() {
         st(tx.execute(
-            "INSERT INTO pqueue_item_index_component( \
+            "INSERT INTO fireweed_item_index_component( \
                tenant_id,queue_id,index_name,item_id,component_position,component_value) \
              SELECT idx.tenant_id,idx.queue_id,idx.index_name,idx.item_id, \
                     component.component_position,component.component_value \
              FROM unnest($1::text[],$2::text[],$3::text[]) selected(tenant_id,queue_id,item_id) \
-             JOIN pqueue_item_index idx USING(tenant_id,queue_id,item_id) \
-             CROSS JOIN LATERAL pqueue_index_components(idx.index_key) component \
+             JOIN fireweed_item_index idx USING(tenant_id,queue_id,item_id) \
+             CROSS JOIN LATERAL fireweed_index_components(idx.index_key) component \
              ON CONFLICT(tenant_id,queue_id,index_name,item_id,component_position) \
              DO UPDATE SET component_value=EXCLUDED.component_value",
             &[&item_tenants, &item_queues, &item_ids],
@@ -5821,11 +5821,11 @@ fn migrate_metrics_batch(
         0
     } else {
         st(tx.execute(
-            "INSERT INTO pqueue_group_due_pending(tenant_id,queue_id,item_id,group_key,due_at,created_seq) \
+            "INSERT INTO fireweed_group_due_pending(tenant_id,queue_id,item_id,group_key,due_at,created_seq) \
              SELECT i.tenant_id,i.queue_id,i.item_id,i.group_key,i.not_before,i.created_seq \
              FROM unnest($1::text[],$2::text[],$3::text[]) selected(tenant_id,queue_id,item_id) \
-             JOIN pqueue_items i USING(tenant_id,queue_id,item_id) \
-             LEFT JOIN pqueue_group_summary s ON s.tenant_id=i.tenant_id AND s.queue_id=i.queue_id \
+             JOIN fireweed_items i USING(tenant_id,queue_id,item_id) \
+             LEFT JOIN fireweed_group_summary s ON s.tenant_id=i.tenant_id AND s.queue_id=i.queue_id \
                AND s.group_key=i.group_key \
              WHERE i.group_key IS NOT NULL AND i.lifecycle_state='Pending' \
                AND i.superseded=false AND i.not_before IS NOT NULL \
@@ -5849,7 +5849,7 @@ fn migrate_metrics_batch(
         })
         .unwrap_or((high_t, high_q, high_i));
     st(tx.execute(
-        "UPDATE pqueue_metrics_migration_state SET status=$1,last_tenant=$2,last_queue=$3,last_item_id=$4, \
+        "UPDATE fireweed_metrics_migration_state SET status=$1,last_tenant=$2,last_queue=$3,last_item_id=$4, \
            rows_backfilled=rows_backfilled+$5,due_rows_backfilled=due_rows_backfilled+$6, \
            batches_completed=batches_completed+1,updated_at=clock_timestamp() \
          WHERE migration_name='queue_metrics_v2_counted'",
@@ -6090,7 +6090,7 @@ impl ControlPlaneStore for PostgresRelationalBackend {
                     // empty genesis snapshot. An empty relation set therefore hashes "0:0:0", not zero bytes.
                     let empty_snapshot_digest = Sha256::digest(b"0:0:0").to_vec();
                     st(tx.execute(
-                        "INSERT INTO pqueue_command_baselines \
+                        "INSERT INTO fireweed_command_baselines \
                            (tenant,queue,generation,schema_version,assignment_epoch,next_seq,row_count,snapshot_digest) \
                          VALUES($1,$2,'genesis',1,0,0,0,$3)",
                         &[&t, &q, &empty_snapshot_digest],
@@ -6129,7 +6129,7 @@ impl ControlPlaneStore for PostgresRelationalBackend {
                 .map_err(|e| EngineError::Storage(e.to_string()))?;
             let counter_high_water = {
                 let row = st(g.client.query_opt(
-                    "SELECT item_id FROM pqueue_id_high_water WHERE tenant_id=$1 AND queue_id=$2",
+                    "SELECT item_id FROM fireweed_id_high_water WHERE tenant_id=$1 AND queue_id=$2",
                     &[&t, &q],
                 ))?;
                 row.map(|row| {
@@ -6398,7 +6398,7 @@ impl ProjectionRead for PostgresRelationalBackend {
     }
 }
 
-/// ADR-011 (pqueue-f4ffd679): typed secondary index queries backed by `pqueue_item_index`.
+/// ADR-011 (pqueue-f4ffd679): typed secondary index queries backed by `fireweed_item_index`.
 fn index_get_unique_sql(
     client: &mut Client,
     queues: &HashMap<QueueKey, QueueDefinition>,
@@ -6425,8 +6425,8 @@ fn index_get_unique_sql(
     let (tenant, queue) = parts(shard);
     let row = st(client.query_opt(
         "SELECT i.item_id, i.client_item_key, i.item_version \
-         FROM pqueue_item_index idx \
-         JOIN pqueue_items i \
+         FROM fireweed_item_index idx \
+         JOIN fireweed_items i \
            ON i.tenant_id=idx.tenant_id AND i.queue_id=idx.queue_id \
           AND i.item_id=idx.item_id \
          WHERE idx.tenant_id=$1 AND idx.queue_id=$2 \
@@ -6471,8 +6471,8 @@ fn index_lookup_sql(
     let (tenant, queue) = parts(shard);
     let rows = st(client.query(
         "SELECT i.item_id, i.client_item_key, i.item_version \
-         FROM pqueue_item_index idx \
-         JOIN pqueue_items i \
+         FROM fireweed_item_index idx \
+         JOIN fireweed_items i \
            ON i.tenant_id=idx.tenant_id AND i.queue_id=idx.queue_id \
           AND i.item_id=idx.item_id \
          WHERE idx.tenant_id=$1 AND idx.queue_id=$2 \
@@ -6557,7 +6557,7 @@ impl LogRead for PostgresRelationalBackend {
             let (tenant, queue) = parts(shard);
             let mut inner = self.inner.lock().expect("poisoned");
             let baseline_row = st(inner.client.query_opt(
-                "SELECT b.next_seq,c.next_seq FROM pqueue_command_baselines b \
+                "SELECT b.next_seq,c.next_seq FROM fireweed_command_baselines b \
                  JOIN relational_cursor c ON c.tenant=b.tenant AND c.queue=b.queue \
                  WHERE b.tenant=$1 AND b.queue=$2",
                 &[&tenant, &queue],
@@ -6592,7 +6592,7 @@ impl LogRead for PostgresRelationalBackend {
             let start = i64::try_from(start)
                 .map_err(|_| EngineError::Invalid("log cursor exceeds postgres sequence range"))?;
             let mut rows = st(inner.client.query(
-                "SELECT assignment_epoch,seq,envelope,envelope_sha256 FROM pqueue_commands \
+                "SELECT assignment_epoch,seq,envelope,envelope_sha256 FROM fireweed_commands \
                  WHERE tenant=$1 AND queue=$2 AND seq>=$3 ORDER BY seq LIMIT $4",
                 &[&tenant, &queue, &start, &fetch_limit],
             ))?;
@@ -6837,7 +6837,7 @@ impl ClaimPort for PostgresRelationalBackend {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
             // BQ-14a/b: resolve the claim unit. Item-level (default) keeps the CTE path; WholeGroup /
-            // SameGroupKey select group-aware from pqueue_group_summary; WholeCohort → Unavailable (BQ-14c).
+            // SameGroupKey select group-aware from fireweed_group_summary; WholeCohort → Unavailable (BQ-14c).
             let unit = if req.compatibility != ClaimCompatibility::default() {
                 let def = g.queues.get(&req.shard).ok_or(EngineError::NotFound)?;
                 validate_claim_compatibility(&req.compatibility, req.max_items as u64, def)?
@@ -7098,7 +7098,7 @@ impl UpsertPort for PostgresRelationalBackend {
                 .map(|d| d.retry_policy.max_attempts)
                 .ok_or(EngineError::NotFound)?;
             let existing = st(g.client.query_opt(
-                "SELECT item_id, lifecycle_state FROM pqueue_items \
+                "SELECT item_id, lifecycle_state FROM fireweed_items \
                  WHERE tenant_id=$1 AND queue_id=$2 AND client_item_key=$3 AND superseded=false",
                 &[&t, &q, &client_item_key.as_str()],
             ))?;
@@ -7123,7 +7123,7 @@ impl UpsertPort for PostgresRelationalBackend {
                 None => {
                     // A retention tombstone from any successfully purged item keeps the re-push a dup.
                     let retained = st(g.client.query_opt(
-                        "SELECT expires_at FROM pqueue_item_key_retention \
+                        "SELECT expires_at FROM fireweed_item_key_retention \
                          WHERE tenant_id=$1 AND queue_id=$2 AND client_item_key=$3",
                         &[&t, &q, &client_item_key.as_str()],
                     ))?;
@@ -7265,7 +7265,7 @@ impl CommitTransitionPort for PostgresRelationalBackend {
                 if let Some(fence) = &entry.instance_fence {
                     let (it, iq) = parts(shard);
                     let row = st(tx.query_opt(
-                        "SELECT fence FROM pqueue_instance_fences \
+                        "SELECT fence FROM fireweed_instance_fences \
                              WHERE tenant_id=$1 AND queue_id=$2 AND instance_key=$3",
                         &[&it, &iq, &fence.instance_key],
                     ))?;
@@ -7465,7 +7465,7 @@ impl RecoveryReadPort for PostgresRelationalBackend {
             let mut g = self.inner.lock().expect("poisoned");
             let (t, q) = parts(shard);
             let payload: Option<Vec<u8>> = st(g.client.query_opt(
-                "SELECT payload FROM pqueue_side_records \
+                "SELECT payload FROM fireweed_side_records \
                  WHERE tenant_id=$1 AND queue_id=$2 AND key=$3",
                 &[&t, &q, &key],
             ))?
@@ -7701,7 +7701,7 @@ impl ReschedulePort for PostgresRelationalBackend {
             let item_id_text = item_id.to_string();
             let mut inner = self.inner.lock().expect("poisoned");
             let row = st(inner.client.query_opt(
-                "SELECT lifecycle_state, superseded, fenced, item_version FROM pqueue_items \
+                "SELECT lifecycle_state, superseded, fenced, item_version FROM fireweed_items \
                  WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
                 &[&tenant, &queue, &item_id_text],
             ))?
@@ -7740,7 +7740,7 @@ impl ReschedulePort for PostgresRelationalBackend {
                 expected_epoch,
             )?;
             let new_version: i64 = st(inner.client.query_one(
-                "SELECT item_version FROM pqueue_items \
+                "SELECT item_version FROM fireweed_items \
                  WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
                 &[&tenant, &queue, &item_id_text],
             ))?
@@ -7775,7 +7775,7 @@ impl UpdateFieldsPort for PostgresRelationalBackend {
             // fenced=StaleLease, terminal=Terminal, superseded=Superseded, version-mismatch=Conflict.
             // Nothing is appended on rejection (commit has no rollback).
             let row = st(g.client.query_opt(
-                "SELECT lifecycle_state, superseded, fenced, item_version FROM pqueue_items \
+                "SELECT lifecycle_state, superseded, fenced, item_version FROM fireweed_items \
                  WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
                 &[&t, &q, &id_str],
             ))?
@@ -7817,7 +7817,7 @@ impl UpdateFieldsPort for PostgresRelationalBackend {
             )?;
             // Re-read the bumped version from the now-committed projection.
             let new_version: i64 = st(g.client.query_one(
-                "SELECT item_version FROM pqueue_items \
+                "SELECT item_version FROM fireweed_items \
                  WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
                 &[&t, &q, &id_str],
             ))?
@@ -7913,7 +7913,7 @@ impl BatchUpdatePort for PostgresRelationalBackend {
             let rows = st(tx.query(
                 "SELECT item_id,client_item_key,lifecycle_state,superseded,fenced,item_version, \
                         priority,priority_sort,not_before,payload,fields,metadata,group_key \
-                 FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
+                 FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 \
                    AND (item_id=ANY($3) OR client_item_key=ANY($4)) FOR UPDATE",
                 &[&t, &q, &requested_ids, &requested_keys],
             ))?;
@@ -8208,7 +8208,7 @@ impl BatchUpdatePort for PostgresRelationalBackend {
                 #[cfg(test)]
                 update_batch_update_sql_probe(shard, |probe| probe.projection_updates += 1);
                 let changed = st(tx.execute(
-                    "UPDATE pqueue_items AS item SET fields=batch.fields,payload=batch.payload, \
+                    "UPDATE fireweed_items AS item SET fields=batch.fields,payload=batch.payload, \
                        metadata=batch.metadata,priority=batch.priority,priority_sort=batch.priority_sort, \
                        not_before=batch.not_before,item_version=item.item_version+1,updated_at=$11, \
                        last_command_sequence=batch.sequence \
@@ -8245,7 +8245,7 @@ impl BatchUpdatePort for PostgresRelationalBackend {
                     .collect();
                 if !gate_item_ids.is_empty() {
                     st(tx.execute(
-                        "DELETE FROM pqueue_item_gates \
+                        "DELETE FROM fireweed_item_gates \
                          WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3)",
                         &[&t, &q, &gate_item_ids],
                     ))?;
@@ -8261,7 +8261,7 @@ impl BatchUpdatePort for PostgresRelationalBackend {
                     }
                     if !pair_items.is_empty() {
                         st(tx.execute(
-                            "INSERT INTO pqueue_item_gates(tenant_id,queue_id,item_id,gate_key) \
+                            "INSERT INTO fireweed_item_gates(tenant_id,queue_id,item_id,gate_key) \
                              SELECT $1,$2,* FROM UNNEST($3::text[],$4::text[]) \
                              ON CONFLICT(tenant_id,queue_id,item_id,gate_key) DO NOTHING",
                             &[&t, &q, &pair_items, &pair_keys],
@@ -8379,13 +8379,13 @@ impl ReclaimPort for PostgresRelationalBackend {
             // This queue's leases that expired strictly before `now` (FAC-2); LIMIT caps the batch.
             let rows = match limit {
                 Some(lim) => st(g.client.query(
-                    "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
+                    "SELECT item_id FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 \
                      AND lifecycle_state='Leased' AND lease_expires_at IS NOT NULL \
                      AND lease_expires_at<$3 ORDER BY item_id LIMIT $4",
                     &[&t, &q, &now_n, &(lim as i64)],
                 ))?,
                 None => st(g.client.query(
-                    "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
+                    "SELECT item_id FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 \
                      AND lifecycle_state='Leased' AND lease_expires_at IS NOT NULL \
                      AND lease_expires_at<$3 ORDER BY item_id",
                     &[&t, &q, &now_n],
@@ -8495,7 +8495,7 @@ impl ReclaimDriver for PostgresRelationalBackend {
             let mut g = self.inner.lock().expect("poisoned");
             let now_n = ts_nanos(now);
             let rows = st(g.client.query(
-                "SELECT tenant_id, queue_id, item_id FROM pqueue_items \
+                "SELECT tenant_id, queue_id, item_id FROM fireweed_items \
                  WHERE lifecycle_state='Leased' AND lease_expires_at IS NOT NULL \
                  AND cohort_size IS NULL AND fenced=false AND superseded=false \
                  AND lease_expires_at<$1 ORDER BY lease_expires_at,tenant_id,queue_id,item_id LIMIT $2",
@@ -8526,7 +8526,7 @@ impl ReclaimDriver for PostgresRelationalBackend {
             let rows = st(g.client.query(
                 "SELECT c.tenant_id, c.queue_id, c.group_key, c.cohort_created_at, \
                  c.first_eligible_at, r.assignment_epoch \
-                 FROM pqueue_cohorts c \
+                 FROM fireweed_cohorts c \
                  JOIN relational_cursor r ON r.tenant=c.tenant_id AND r.queue=c.queue_id \
                  WHERE c.state IN ('forming','complete') \
                  ORDER BY c.tenant_id, c.queue_id, c.group_key \
@@ -8645,7 +8645,7 @@ fn lookup_active_by_key(
 ) -> EngineResult<Option<ItemId>> {
     let (t, q) = parts(shard);
     let row = st(client.query_opt(
-        "SELECT item_id FROM pqueue_items \
+        "SELECT item_id FROM fireweed_items \
          WHERE tenant_id=$1 AND queue_id=$2 AND client_item_key=$3 AND superseded=false",
         &[&t, &q, &client_item_key.as_str()],
     ))?;
@@ -8656,7 +8656,7 @@ fn lookup_active_by_key(
 }
 
 const BATCH_UPDATE_SNAPSHOT_SQL: &str = "SELECT item_id,client_item_key,lifecycle_state,item_version,fenced,superseded \
-     FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
+     FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 \
      AND (item_id=ANY($3) OR client_item_key=ANY($4))";
 
 fn batch_update_snapshot_sql(
@@ -8723,7 +8723,7 @@ fn item_version_sql(
 ) -> EngineResult<Option<u64>> {
     let (t, q) = parts(shard);
     let row = st(client.query_opt(
-        "SELECT item_version FROM pqueue_items \
+        "SELECT item_version FROM fireweed_items \
          WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
         &[&t, &q, &id.to_string()],
     ))?;
@@ -8740,7 +8740,7 @@ fn expired_leases_sql(
     let (t, q) = parts(shard);
     let now_n = ts_nanos(now);
     let rows = st(client.query(
-        "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
+        "SELECT item_id FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 \
          AND lifecycle_state='Leased' AND lease_expires_at IS NOT NULL \
          AND lease_expires_at<$3 ORDER BY item_id",
         &[&t, &q, &now_n],
@@ -8762,7 +8762,7 @@ fn all_expired_leases_sql(
 ) -> EngineResult<Vec<(QueueKey, Vec<ItemId>)>> {
     let now_n = ts_nanos(now);
     let rows = st(client.query(
-        "SELECT tenant_id, queue_id, item_id FROM pqueue_items \
+        "SELECT tenant_id, queue_id, item_id FROM fireweed_items \
          WHERE lifecycle_state='Leased' AND lease_expires_at IS NOT NULL \
          AND cohort_size IS NULL AND fenced=false AND superseded=false \
          AND lease_expires_at<$1 ORDER BY lease_expires_at,tenant_id,queue_id,item_id LIMIT $2",
@@ -8805,7 +8805,7 @@ fn expired_leases_page_sql(
     let row_limit = i64::try_from(limit.saturating_add(1))
         .map_err(|error| EngineError::Storage(error.to_string()))?;
     let rows = st(client.query(
-        "SELECT lease_expires_at,tenant_id,queue_id,item_id FROM pqueue_items \
+        "SELECT lease_expires_at,tenant_id,queue_id,item_id FROM fireweed_items \
          WHERE lifecycle_state='Leased' AND lease_expires_at IS NOT NULL \
          AND cohort_size IS NULL AND fenced=false AND superseded=false \
          AND lease_expires_at<$1 AND ($2=false OR \
@@ -8881,7 +8881,7 @@ fn terminal_items_to_reap_sql(
         };
         let cursor_seq = cursor.sequence as i64;
         st(client.query(
-            "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
+            "SELECT item_id FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 \
              AND superseded=false AND lifecycle_state IN ('Complete','Failed') \
              AND terminal_at IS NOT NULL AND terminal_at<=$3 \
              AND last_command_sequence<=$4 ORDER BY item_id",
@@ -8889,7 +8889,7 @@ fn terminal_items_to_reap_sql(
         ))?
     } else {
         st(client.query(
-            "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
+            "SELECT item_id FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 \
              AND superseded=false AND lifecycle_state IN ('Complete','Failed') \
              AND terminal_at IS NOT NULL AND terminal_at<=$3 ORDER BY item_id",
             &[&t, &q, &cutoff],
@@ -8913,7 +8913,7 @@ fn update_fields_validate_sql(
 ) -> EngineResult<()> {
     let (t, q) = parts(shard);
     let row = st(client.query_opt(
-        "SELECT lifecycle_state, superseded, fenced, item_version FROM pqueue_items \
+        "SELECT lifecycle_state, superseded, fenced, item_version FROM fireweed_items \
          WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
         &[&t, &q, &id.to_string()],
     ))?
@@ -8970,11 +8970,11 @@ impl PostgresRelational {
 
     fn from_client(mut client: Client) -> EngineResult<Self> {
         let fresh: bool =
-            st(client.query_one("SELECT to_regclass('pqueue_items') IS NULL", &[]))?.get(0);
+            st(client.query_one("SELECT to_regclass('fireweed_items') IS NULL", &[]))?.get(0);
         st(client.batch_execute(RELATIONAL_SCHEMA))?;
         st(client.batch_execute(QUEUE_METRICS_MIGRATION))?;
         st(client.execute(
-            "INSERT INTO pqueue_metrics_migration_state(migration_name,status) \
+            "INSERT INTO fireweed_metrics_migration_state(migration_name,status) \
              VALUES('queue_metrics_v2_counted','complete') ON CONFLICT(migration_name) DO NOTHING",
             &[],
         ))?;
@@ -9004,12 +9004,12 @@ impl PostgresRelational {
         let mut g = self.lock();
         st(g.client.batch_execute(
             "TRUNCATE TABLE \
-             pqueue_instance_fences, pqueue_side_records, pqueue_item_index_component, \
-             pqueue_item_index, pqueue_metrics_counted_item, pqueue_queue_metrics_v2, \
-             pqueue_request_idempotency, pqueue_gate_state, pqueue_item_gates, pqueue_cohorts, \
-             pqueue_item_key_retention, pqueue_group_summary, pqueue_group_due_pending, \
-             pqueue_id_high_water, relational_emission_cursor, \
-             pqueue_items, relational_cursor, queues CASCADE",
+             fireweed_instance_fences, fireweed_side_records, fireweed_item_index_component, \
+             fireweed_item_index, fireweed_metrics_counted_item, fireweed_queue_metrics_v2, \
+             fireweed_request_idempotency, fireweed_gate_state, fireweed_item_gates, fireweed_cohorts, \
+             fireweed_item_key_retention, fireweed_group_summary, fireweed_group_due_pending, \
+             fireweed_id_high_water, relational_emission_cursor, \
+             fireweed_items, relational_cursor, queues CASCADE",
         ))?;
         g.queues.clear();
         g.schemas.clear();
@@ -9058,9 +9058,9 @@ impl PostgresRelational {
             #[cfg(test)]
             update_push_sql_probe(shard, |probe| probe.admission_conflict_queries += 1);
             if st(tx.query_opt(
-                "SELECT 1 FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
+                "SELECT 1 FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 \
                  AND (item_id=ANY($3) OR (client_item_key=ANY($4) AND superseded=false)) \
-                 UNION ALL SELECT 1 FROM pqueue_item_key_retention WHERE tenant_id=$1 AND queue_id=$2 \
+                 UNION ALL SELECT 1 FROM fireweed_item_key_retention WHERE tenant_id=$1 AND queue_id=$2 \
                  AND client_item_key=ANY($4) AND expires_at>$5 LIMIT 1",
                 &[&t, &q, &item_ids, &keys, &now_n],
             ))?.is_some() {
@@ -9088,7 +9088,7 @@ impl PostgresRelational {
                     "WITH wanted AS ( \
                        SELECT * FROM unnest($3::text[],$4::bigint[]) AS w(group_key,probe_limit) \
                      ) SELECT w.group_key FROM wanted w JOIN LATERAL ( \
-                       SELECT 1 FROM pqueue_items i WHERE i.tenant_id=$1 AND i.queue_id=$2 \
+                       SELECT 1 FROM fireweed_items i WHERE i.tenant_id=$1 AND i.queue_id=$2 \
                          AND i.group_key=w.group_key AND i.lifecycle_state IN ('Pending','Leased') \
                          AND i.superseded=false LIMIT w.probe_limit \
                      ) found ON true GROUP BY w.group_key,w.probe_limit \
@@ -9136,7 +9136,7 @@ impl PostgresRelational {
             .collect::<Vec<_>>();
         let rows = st(g.client.query(
             "SELECT item_id,lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash \
-             FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
+             FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
             &[&tenant, &queue, &ids],
         ))?;
         let rows = rows
@@ -9211,7 +9211,7 @@ impl PostgresRelational {
         st(tx.batch_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))?;
         let row = st(tx.query_opt(
             "SELECT group_key,state,cohort_size,member_count,cohort_lease_token_hash \
-             FROM pqueue_cohorts WHERE tenant_id=$1 AND queue_id=$2 AND cohort_id=$3",
+             FROM fireweed_cohorts WHERE tenant_id=$1 AND queue_id=$2 AND cohort_id=$3",
             &[&tenant, &queue, &target.cohort_id.as_str()],
         ))?
         .ok_or(EngineError::NotFound)?;
@@ -9234,7 +9234,7 @@ impl PostgresRelational {
         }
         let rows = st(tx.query(
             "SELECT item_id,lifecycle_state,fenced,superseded,lease_expires_at,retry_count,max_attempts \
-             FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND group_key=$3 \
+             FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 AND group_key=$3 \
              AND cohort_size IS NOT NULL AND superseded=false \
              AND lifecycle_state NOT IN ('Complete','Failed') ORDER BY priority_sort,created_seq",
             &[&tenant, &queue, &group],
@@ -9318,7 +9318,7 @@ impl PostgresRelational {
                 .collect::<Vec<_>>();
             let rows = st(tx.query(
                 "SELECT item_id,lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash,item_version,retry_count,max_attempts \
-                 FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3) FOR SHARE",
+                 FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3) FOR SHARE",
                 &[&tenant, &queue, &ids],
             ))?;
             let rows = rows
@@ -9756,7 +9756,7 @@ impl ProjectionStore for PostgresRelational {
     // -- recovery-on-open (ADR-012 P2): the DB-authoritative store persists the applied cursor in
     //    `relational_cursor`, so recovery can resume from that durable high-water and only replay the
     //    retained log tail. Recovery also repopulates the in-process control plane and re-seeds the
-    //    id-mint counters from `pqueue_items`.
+    //    id-mint counters from `fireweed_items`.
 
     fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
         Ok(self.lock().queues.values().cloned().collect())
@@ -9806,7 +9806,7 @@ impl ProjectionStore for PostgresRelational {
         let mut g = self.lock();
         let (t, q) = parts(shard);
         let row = st(g.client.query_opt(
-            "SELECT item_id FROM pqueue_id_high_water WHERE tenant_id=$1 AND queue_id=$2",
+            "SELECT item_id FROM fireweed_id_high_water WHERE tenant_id=$1 AND queue_id=$2",
             &[&t, &q],
         ))?;
         row.map(|row| {
@@ -9862,7 +9862,7 @@ impl ProjectionStore for PostgresRelational {
         let mut inner = self.lock();
         let (tenant, queue) = parts(shard);
         st(inner.client.query_opt(
-            "SELECT fence FROM pqueue_instance_fences \
+            "SELECT fence FROM fireweed_instance_fences \
              WHERE tenant_id=$1 AND queue_id=$2 AND instance_key=$3",
             &[&tenant, &queue, &key],
         ))?
@@ -9878,7 +9878,7 @@ impl ProjectionStore for PostgresRelational {
         let mut inner = self.lock();
         let (tenant, queue) = parts(shard);
         Ok(st(inner.client.query_opt(
-            "SELECT payload FROM pqueue_side_records \
+            "SELECT payload FROM fireweed_side_records \
              WHERE tenant_id=$1 AND queue_id=$2 AND key=$3",
             &[&tenant, &queue, &key],
         ))?
@@ -10276,11 +10276,11 @@ impl ProjectionStore for PostgresRelational {
             let (tenant, queue) = parts(shard);
             let id_strings = ids.iter().map(ToString::to_string).collect::<Vec<_>>();
             st(tx.execute(
-                "DELETE FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3)",
+                "DELETE FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3)",
                 &[&tenant, &queue, &id_strings],
             ))?;
             st(tx.execute(
-                "DELETE FROM pqueue_item_gates WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3)",
+                "DELETE FROM fireweed_item_gates WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3)",
                 &[&tenant, &queue, &id_strings],
             ))?;
             delete_typed_index_rows(&mut tx, &tenant, &queue, &id_strings)?;
@@ -10363,7 +10363,7 @@ pub fn composed_postgres_relational_in_schema(
 #[cfg(test)]
 mod sql_shape_tests {
     //! No-DB assertions on the assembled SQL shapes (the live-DB behavioral suites are env-gated on
-    //! `PQUEUE_PG_TEST_URL`). These pin the concurrency-critical pieces: the claim uses a real row lock and
+    //! `FIREWEED_PG_TEST_URL`). These pin the concurrency-critical pieces: the claim uses a real row lock and
     //! the sequence allocation is a single atomic increment-and-return (no read-then-write TOCTOU).
     use super::*;
 
@@ -10400,7 +10400,7 @@ mod sql_shape_tests {
             "claim leases + returns the rich rows in one statement"
         );
         assert!(
-            CLAIM_CTE.contains("pqueue_item_gates") && CLAIM_CTE.contains("pqueue_gate_state"),
+            CLAIM_CTE.contains("fireweed_item_gates") && CLAIM_CTE.contains("fireweed_gate_state"),
             "BQ-14d: item-level claim MUST anti-join blocked gates (a blocked gate hides its items)"
         );
     }
@@ -10415,20 +10415,20 @@ mod sql_shape_tests {
             .split("/// B-011")
             .next()
             .unwrap();
-        assert!(peek.contains("pqueue_item_gates"));
-        assert!(peek.contains("pqueue_gate_state"));
+        assert!(peek.contains("fireweed_item_gates"));
+        assert!(peek.contains("fireweed_gate_state"));
         assert!(peek.contains("NOT EXISTS"));
     }
 
     #[test]
     fn active_scope_discovery_is_live_read_only_and_null_stable() {
-        assert!(ACTIVE_SCOPE_DISCOVERY_SQL.contains("FROM pqueue_items i"));
+        assert!(ACTIVE_SCOPE_DISCOVERY_SQL.contains("FROM fireweed_items i"));
         assert!(ACTIVE_SCOPE_DISCOVERY_SQL.contains("i.not_before<=$3"));
-        assert!(ACTIVE_SCOPE_DISCOVERY_SQL.contains("pqueue_item_gates"));
-        assert!(ACTIVE_SCOPE_DISCOVERY_SQL.contains("pqueue_gate_state"));
+        assert!(ACTIVE_SCOPE_DISCOVERY_SQL.contains("fireweed_item_gates"));
+        assert!(ACTIVE_SCOPE_DISCOVERY_SQL.contains("fireweed_gate_state"));
         assert!(ACTIVE_SCOPE_DISCOVERY_SQL.contains("GROUP BY i.group_key"));
         assert!(ACTIVE_SCOPE_DISCOVERY_SQL.contains("(i.group_key IS NOT NULL) ASC"));
-        assert!(!ACTIVE_SCOPE_DISCOVERY_SQL.contains("pqueue_group_summary"));
+        assert!(!ACTIVE_SCOPE_DISCOVERY_SQL.contains("fireweed_group_summary"));
         assert!(!ACTIVE_SCOPE_DISCOVERY_SQL.contains("UPDATE"));
         assert!(!ACTIVE_SCOPE_DISCOVERY_SQL.contains("INSERT"));
     }
@@ -10481,7 +10481,7 @@ mod sql_shape_tests {
     fn scheduling_expiry_and_metrics_shapes_are_bounded() {
         let source = include_str!("relational.rs");
         assert!(source.contains("unnest($3::text[],$4::bigint[],$5::bigint[])"));
-        assert!(source.contains("pqueue_items_global_expired_lease_idx"));
+        assert!(source.contains("fireweed_items_global_expired_lease_idx"));
         assert!(source.contains("LIMIT $2\""));
         let reclaim_page = source
             .split("fn expired_leases_page_sql(")
@@ -10503,7 +10503,7 @@ mod sql_shape_tests {
             .split("fn metrics_by_query_sql")
             .next()
             .unwrap();
-        assert!(metrics_fn.contains("FROM pqueue_queue_metrics_v2"));
+        assert!(metrics_fn.contains("FROM fireweed_queue_metrics_v2"));
         assert!(!metrics_fn.contains("COUNT(*)"));
     }
 
@@ -10540,7 +10540,7 @@ mod sql_shape_tests {
         assert!(claimed.contains("item_id=ANY($3::text[])"));
         assert!(!claimed.contains("query_opt"));
         assert!(GROUP_SUMMARY_INDEX_MIGRATIONS.iter().any(|(name, ddl)| {
-            *name == "pqueue_items_pending_entry_idx"
+            *name == "fireweed_items_pending_entry_idx"
                 && ddl.contains("(item_id::numeric)")
                 && ddl.contains("WHERE lifecycle_state='Leased'")
         }));
@@ -10633,14 +10633,14 @@ mod sql_shape_tests {
             .unwrap();
         assert!(metrics_fn.contains("COUNT(*) FILTER"));
         assert!(metrics_fn.contains("idx.index_key >="));
-        assert!(metrics_fn.contains("FROM pqueue_item_index_component component_"));
+        assert!(metrics_fn.contains("FROM fireweed_item_index_component component_"));
         assert!(metrics_fn.contains("component_position=$"));
         assert!(metrics_fn.contains("component_value {operator} $"));
         assert!(!metrics_fn.contains("filtered_lifecycle_metrics_by_index_key"));
         assert!(!metrics_fn.contains("Vec::with_capacity(rows.len())"));
-        assert!(RELATIONAL_SCHEMA.contains("pqueue_item_index_key_idx"));
+        assert!(RELATIONAL_SCHEMA.contains("fireweed_item_index_key_idx"));
         assert!(GROUP_SUMMARY_INDEX_MIGRATIONS.iter().any(|(name, ddl)| {
-            *name == "pqueue_item_index_component_lookup_idx"
+            *name == "fireweed_item_index_component_lookup_idx"
                 && ddl.contains("component_position,component_value,item_id")
         }));
     }
@@ -10659,11 +10659,11 @@ mod sql_shape_tests {
         assert!(migration_fn.contains("batch_size == 0 || batch_size > 100_000"));
         assert!(migration_fn.contains("rows_backfilled=rows_backfilled+$5"));
         assert!(migration_fn.contains("due_rows_backfilled=due_rows_backfilled+$6"));
-        assert!(migration_fn.contains("pqueue_metrics_counted_item"));
+        assert!(migration_fn.contains("fireweed_metrics_counted_item"));
         assert!(QUEUE_METRICS_MIGRATION.contains("new_counted := true"));
         assert!(migration_fn.contains("FROM unnest($1::text[],$2::text[],$3::text[])"));
-        assert!(!migration_fn.contains("FROM pqueue_items WHERE superseded=false GROUP BY"));
-        assert!(!migration_fn.contains("DELETE FROM pqueue_queue_metrics_v2"));
+        assert!(!migration_fn.contains("FROM fireweed_items WHERE superseded=false GROUP BY"));
+        assert!(!migration_fn.contains("DELETE FROM fireweed_queue_metrics_v2"));
     }
 
     #[test]
@@ -10697,7 +10697,7 @@ mod sql_shape_tests {
             .split("fn promote_due_group_summary_chunk(")
             .next()
             .unwrap();
-        assert!(promotion.contains("FROM pqueue_group_due_pending"));
+        assert!(promotion.contains("FROM fireweed_group_due_pending"));
         assert!(promotion.contains("DUE_PROMOTION_ITEM_LIMIT + 1"));
         assert!(promotion.contains("take(DUE_PROMOTION_ITEM_LIMIT as usize)"));
         assert!(promotion.contains("FROM relational_cursor"));
@@ -10711,7 +10711,7 @@ mod sql_shape_tests {
             .next()
             .unwrap();
         assert!(!increment.contains("prior_due"));
-        assert!(increment.contains("INSERT INTO pqueue_group_due_pending"));
+        assert!(increment.contains("INSERT INTO fireweed_group_due_pending"));
     }
 
     #[test]
@@ -10738,10 +10738,10 @@ mod sql_shape_tests {
         ] {
             assert!(ASYNC_EXPIRED_LEASES_BOUNDED_SQL.contains(predicate));
         }
-        assert!(RELATIONAL_SCHEMA.contains("pqueue_items_expired_lease_idx"));
+        assert!(RELATIONAL_SCHEMA.contains("fireweed_items_expired_lease_idx"));
         assert!(
             RELATIONAL_SCHEMA
-                .contains("ON pqueue_items (tenant_id, queue_id, lease_expires_at, item_id)")
+                .contains("ON fireweed_items (tenant_id, queue_id, lease_expires_at, item_id)")
         );
     }
 
@@ -10759,14 +10759,14 @@ mod sql_shape_tests {
     #[test]
     fn schema_has_relational_projections() {
         for table in [
-            "pqueue_items",
-            "pqueue_group_summary",
-            "pqueue_item_key_retention",
-            "pqueue_cohorts",
+            "fireweed_items",
+            "fireweed_group_summary",
+            "fireweed_item_key_retention",
+            "fireweed_cohorts",
             "relational_emission_cursor",
-            "pqueue_item_gates",
-            "pqueue_gate_state",
-            "pqueue_item_index",
+            "fireweed_item_gates",
+            "fireweed_gate_state",
+            "fireweed_item_index",
         ] {
             assert!(RELATIONAL_SCHEMA.contains(table), "missing {table}");
         }
@@ -10780,7 +10780,7 @@ mod sql_shape_tests {
         );
         assert!(
             RELATIONAL_SCHEMA
-                .contains("CREATE UNIQUE INDEX IF NOT EXISTS pqueue_item_index_unique_key_idx")
+                .contains("CREATE UNIQUE INDEX IF NOT EXISTS fireweed_item_index_unique_key_idx")
                 && RELATIONAL_SCHEMA.contains("WHERE is_unique = true"),
             "unique typed indexes must be protected by a database-level partial unique index"
         );
@@ -10839,7 +10839,7 @@ mod sql_shape_tests {
             .next()
             .unwrap();
         assert!(insert.contains("rows.chunks(PG_INSERT_CHUNK)"));
-        assert!(insert.contains("INSERT INTO pqueue_items"));
+        assert!(insert.contains("INSERT INTO fireweed_items"));
 
         let claim = source
             .split("impl ClaimPort for PostgresRelationalBackend")
@@ -10867,8 +10867,8 @@ mod sql_shape_tests {
 
 #[cfg(test)]
 mod gated_group_summary_tests {
-    //! Env-gated (`PQUEUE_PG_TEST_URL`) white-box guard that the claim path refreshes
-    //! `pqueue_group_summary` (the BQ-12 fresh-eyes BLOCKING fix). LOUD-skips without a live DB. Reads the
+    //! Env-gated (`FIREWEED_PG_TEST_URL`) white-box guard that the claim path refreshes
+    //! `fireweed_group_summary` (the BQ-12 fresh-eyes BLOCKING fix). LOUD-skips without a live DB. Reads the
     //! summary table directly via the private client (there is no read port until BQ-14).
     use super::*;
     use fireweed_core::{
@@ -10938,7 +10938,7 @@ mod gated_group_summary_tests {
         let mut g = b.inner.lock().unwrap();
         g.client
             .query_one(
-                "SELECT eligible_item_count FROM pqueue_group_summary \
+                "SELECT eligible_item_count FROM fireweed_group_summary \
                  WHERE tenant_id='t1' AND queue_id='q1' AND group_key='g'",
                 &[],
             )
@@ -11043,13 +11043,13 @@ mod gated_group_summary_tests {
 
     #[test]
     fn pending_entry_ports_preserve_bounds_and_requested_order() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (pending_entry_ports_preserve_bounds_and_requested_order) — set PQUEUE_PG_TEST_URL"
+                "POSTGRES RELATIONAL SKIPPED (pending_entry_ports_preserve_bounds_and_requested_order) — set FIREWEED_PG_TEST_URL"
             );
             return;
         };
-        let schema = format!("pq_rel_pending_ports_{}", std::process::id());
+        let schema = format!("fireweed_rel_pending_ports_{}", std::process::id());
         let mut client = Client::connect(&url, NoTls).expect("connect");
         client
             .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -11122,13 +11122,13 @@ mod gated_group_summary_tests {
 
     #[test]
     fn eligible_candidates_accepts_unbounded_limit_sentinel() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (eligible_candidates_accepts_unbounded_limit_sentinel) — set PQUEUE_PG_TEST_URL"
+                "POSTGRES RELATIONAL SKIPPED (eligible_candidates_accepts_unbounded_limit_sentinel) — set FIREWEED_PG_TEST_URL"
             );
             return;
         };
-        let schema = format!("pq_rel_unbounded_limit_{}", std::process::id());
+        let schema = format!("fireweed_rel_unbounded_limit_{}", std::process::id());
         let mut client = Client::connect(&url, NoTls).expect("connect");
         client
             .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -11154,13 +11154,13 @@ mod gated_group_summary_tests {
 
     #[test]
     fn push_500_across_128_groups_has_constant_query_amplification() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (push_500_across_128_groups_has_constant_query_amplification) — set PQUEUE_PG_TEST_URL"
+                "POSTGRES RELATIONAL SKIPPED (push_500_across_128_groups_has_constant_query_amplification) — set FIREWEED_PG_TEST_URL"
             );
             return;
         };
-        let schema = format!("pq_rel_push_amp_{}", std::process::id());
+        let schema = format!("fireweed_rel_push_amp_{}", std::process::id());
         let mut c = Client::connect(&url, NoTls).expect("connect");
         c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
             .expect("drop schema");
@@ -11203,7 +11203,7 @@ mod gated_group_summary_tests {
             .query_one(
                 "SELECT COUNT(*)::bigint, SUM(eligible_item_count)::bigint, \
                  COUNT(*) FILTER (WHERE rep_item_id IS NOT NULL)::bigint \
-                 FROM pqueue_group_summary WHERE tenant_id=$1 AND queue_id=$2",
+                 FROM fireweed_group_summary WHERE tenant_id=$1 AND queue_id=$2",
                 &[&tenant, &queue],
             )
             .unwrap();
@@ -11214,13 +11214,13 @@ mod gated_group_summary_tests {
 
     #[test]
     fn async_validate_500_items_uses_one_conflict_and_one_group_query() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (async_validate_500_items_uses_one_conflict_and_one_group_query) — set PQUEUE_PG_TEST_URL"
+                "POSTGRES RELATIONAL SKIPPED (async_validate_500_items_uses_one_conflict_and_one_group_query) — set FIREWEED_PG_TEST_URL"
             );
             return;
         };
-        let schema = format!("pq_rel_validate_amp_{}", std::process::id());
+        let schema = format!("fireweed_rel_validate_amp_{}", std::process::id());
         let mut c = Client::connect(&url, NoTls).expect("connect");
         c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
             .expect("drop schema");
@@ -11262,13 +11262,13 @@ mod gated_group_summary_tests {
 
     #[test]
     fn existing_schema_requires_exact_predeployed_indexes() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
                 "POSTGRES RELATIONAL SKIPPED (existing_schema_requires_exact_predeployed_indexes)"
             );
             return;
         };
-        let schema = format!("pq_rel_index_predeploy_{}", std::process::id());
+        let schema = format!("fireweed_rel_index_predeploy_{}", std::process::id());
         let mut admin = Client::connect(&url, NoTls).unwrap();
         admin
             .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -11279,7 +11279,7 @@ mod gated_group_summary_tests {
 
         let (name, _) = GROUP_SUMMARY_INDEX_MIGRATIONS
             .iter()
-            .find(|(name, _)| *name == "pqueue_items_group_active_idx")
+            .find(|(name, _)| *name == "fireweed_items_group_active_idx")
             .unwrap();
         let mut admin = Client::connect(&url, NoTls).unwrap();
         admin
@@ -11298,7 +11298,7 @@ mod gated_group_summary_tests {
         admin
             .batch_execute(&format!(
                 "SET search_path TO {schema}; DROP INDEX {name}; \
-                 CREATE INDEX {name} ON pqueue_items (tenant_id,queue_id,group_key)"
+                 CREATE INDEX {name} ON fireweed_items (tenant_id,queue_id,group_key)"
             ))
             .unwrap();
         drop(admin);
@@ -11310,13 +11310,13 @@ mod gated_group_summary_tests {
 
     #[test]
     fn existing_schema_rejects_missing_maintenance_triggers() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
                 "POSTGRES RELATIONAL SKIPPED (existing_schema_rejects_missing_maintenance_triggers)"
             );
             return;
         };
-        let schema = format!("pq_rel_trigger_ready_{}", std::process::id());
+        let schema = format!("fireweed_rel_trigger_ready_{}", std::process::id());
         let mut admin = Client::connect(&url, NoTls).unwrap();
         admin
             .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -11327,7 +11327,7 @@ mod gated_group_summary_tests {
         admin
             .batch_execute(&format!(
                 "SET search_path TO {schema}; \
-                 DROP TRIGGER pqueue_items_metrics_delta ON pqueue_items"
+                 DROP TRIGGER fireweed_items_metrics_delta ON fireweed_items"
             ))
             .unwrap();
         drop(admin);
@@ -11342,10 +11342,10 @@ mod gated_group_summary_tests {
         admin
             .batch_execute(&format!(
                 "SET search_path TO {schema}; \
-                 DROP TRIGGER pqueue_items_metrics_delta ON pqueue_items; \
-                 CREATE TRIGGER pqueue_items_metrics_delta \
-                   AFTER INSERT OR DELETE OR UPDATE OF lifecycle_state,superseded ON pqueue_items \
-                   FOR EACH ROW EXECUTE FUNCTION pqueue_apply_metrics_delta()"
+                 DROP TRIGGER fireweed_items_metrics_delta ON fireweed_items; \
+                 CREATE TRIGGER fireweed_items_metrics_delta \
+                   AFTER INSERT OR DELETE OR UPDATE OF lifecycle_state,superseded ON fireweed_items \
+                   FOR EACH ROW EXECUTE FUNCTION fireweed_apply_metrics_delta()"
             ))
             .unwrap();
         drop(admin);
@@ -11360,7 +11360,7 @@ mod gated_group_summary_tests {
         admin
             .batch_execute(&format!(
                 "SET search_path TO {schema}; \
-                 DROP TRIGGER pqueue_item_index_components_sync ON pqueue_item_index"
+                 DROP TRIGGER fireweed_item_index_components_sync ON fireweed_item_index"
             ))
             .unwrap();
         drop(admin);
@@ -11373,7 +11373,7 @@ mod gated_group_summary_tests {
         admin
             .batch_execute(&format!(
                 "SET search_path TO {schema}; \
-                 ALTER TABLE pqueue_items DISABLE TRIGGER pqueue_items_metrics_delta"
+                 ALTER TABLE fireweed_items DISABLE TRIGGER fireweed_items_metrics_delta"
             ))
             .unwrap();
         drop(admin);
@@ -11390,8 +11390,8 @@ mod gated_group_summary_tests {
                 "SET search_path TO {schema}; \
                  CREATE OR REPLACE FUNCTION wrong_component_trigger() RETURNS trigger AS $$ \
                    BEGIN RETURN NEW; END $$ LANGUAGE plpgsql; \
-                 DROP TRIGGER pqueue_item_index_components_sync ON pqueue_item_index; \
-                 CREATE TRIGGER pqueue_item_index_components_sync AFTER INSERT ON pqueue_item_index \
+                 DROP TRIGGER fireweed_item_index_components_sync ON fireweed_item_index; \
+                 CREATE TRIGGER fireweed_item_index_components_sync AFTER INSERT ON fireweed_item_index \
                    FOR EACH ROW EXECUTE FUNCTION wrong_component_trigger()"
             ))
             .unwrap();
@@ -11406,7 +11406,7 @@ mod gated_group_summary_tests {
         let mut admin = Client::connect(&url, NoTls).unwrap();
         admin
             .batch_execute(&format!(
-                "SET search_path TO {schema}; DROP FUNCTION pqueue_index_components(bytea)"
+                "SET search_path TO {schema}; DROP FUNCTION fireweed_index_components(bytea)"
             ))
             .unwrap();
         drop(admin);
@@ -11420,13 +11420,13 @@ mod gated_group_summary_tests {
 
     #[test]
     fn claim_refreshes_group_summary() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (claim_refreshes_group_summary) — set PQUEUE_PG_TEST_URL"
+                "POSTGRES RELATIONAL SKIPPED (claim_refreshes_group_summary) — set FIREWEED_PG_TEST_URL"
             );
             return;
         };
-        let schema = format!("pq_rel_gs_{}", std::process::id());
+        let schema = format!("fireweed_rel_gs_{}", std::process::id());
         let mut c = Client::connect(&url, NoTls).expect("connect");
         c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
             .expect("drop schema");
@@ -11441,19 +11441,19 @@ mod gated_group_summary_tests {
         assert_eq!(
             group_count(&b),
             1,
-            "claim must refresh pqueue_group_summary (leased item leaves the eligible count)"
+            "claim must refresh fireweed_group_summary (leased item leaves the eligible count)"
         );
     }
 
     #[test]
     fn update_fields_reschedules_and_repairs_group_summary() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
                 "POSTGRES RELATIONAL SKIPPED (update_fields_reschedules_and_repairs_group_summary)"
             );
             return;
         };
-        let schema = format!("pq_vec_a8609c39_update_{}", std::process::id());
+        let schema = format!("fireweed_vec_a8609c39_update_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
             .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -11510,7 +11510,7 @@ mod gated_group_summary_tests {
             let row = inner
                 .client
                 .query_one(
-                    "SELECT eligible_item_count,rep_item_id,updated_at FROM pqueue_group_summary \
+                    "SELECT eligible_item_count,rep_item_id,updated_at FROM fireweed_group_summary \
                      WHERE tenant_id='t1' AND queue_id='q1' AND group_key='g'",
                     &[],
                 )
@@ -11540,7 +11540,7 @@ mod gated_group_summary_tests {
             let rescheduled = inner
                 .client
                 .query_one(
-                    "SELECT not_before,eligible_since FROM pqueue_items \
+                    "SELECT not_before,eligible_since FROM fireweed_items \
                      WHERE tenant_id='t1' AND queue_id='q1' AND item_id=$1",
                     &[&ids[1].to_string()],
                 )
@@ -11568,7 +11568,7 @@ mod gated_group_summary_tests {
             .unwrap()
             .client
             .query_one(
-                "SELECT updated_at FROM pqueue_group_summary WHERE tenant_id='t1' AND queue_id='q1' AND group_key='g'",
+                "SELECT updated_at FROM fireweed_group_summary WHERE tenant_id='t1' AND queue_id='q1' AND group_key='g'",
                 &[],
             )
             .unwrap()
@@ -11581,11 +11581,11 @@ mod gated_group_summary_tests {
 
     #[test]
     fn touched_group_push_absorbs_prior_due_rows() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!("POSTGRES RELATIONAL SKIPPED (touched_group_push_absorbs_prior_due_rows)");
             return;
         };
-        let schema = format!("pq_rel_due_push_{}", std::process::id());
+        let schema = format!("fireweed_rel_due_push_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
             .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -11610,8 +11610,8 @@ mod gated_group_summary_tests {
         let row = inner
             .client
             .query_one(
-                "SELECT eligible_item_count,p.priority FROM pqueue_group_summary s \
-                 JOIN pqueue_items p ON p.tenant_id=s.tenant_id AND p.queue_id=s.queue_id \
+                "SELECT eligible_item_count,p.priority FROM fireweed_group_summary s \
+                 JOIN fireweed_items p ON p.tenant_id=s.tenant_id AND p.queue_id=s.queue_id \
                    AND p.item_id=s.rep_item_id \
                  WHERE s.tenant_id='t1' AND s.queue_id='q1' AND s.group_key='due-group'",
                 &[],
@@ -11626,13 +11626,13 @@ mod gated_group_summary_tests {
 
     #[test]
     fn due_promotion_claims_new_leader_and_repairs_to_remaining_item() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
                 "POSTGRES RELATIONAL SKIPPED (due_promotion_claims_new_leader_and_repairs_to_remaining_item)"
             );
             return;
         };
-        let schema = format!("pq_rel_due_claim_{}", std::process::id());
+        let schema = format!("fireweed_rel_due_claim_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
             .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -11671,8 +11671,8 @@ mod gated_group_summary_tests {
         let row = inner
             .client
             .query_one(
-                "SELECT eligible_item_count,p.priority FROM pqueue_group_summary s \
-                 JOIN pqueue_items p ON p.tenant_id=s.tenant_id AND p.queue_id=s.queue_id \
+                "SELECT eligible_item_count,p.priority FROM fireweed_group_summary s \
+                 JOIN fireweed_items p ON p.tenant_id=s.tenant_id AND p.queue_id=s.queue_id \
                    AND p.item_id=s.rep_item_id \
                  WHERE s.tenant_id='t1' AND s.queue_id='q1' AND s.group_key='due-group'",
                 &[],
@@ -11687,13 +11687,13 @@ mod gated_group_summary_tests {
 
     #[test]
     fn incomplete_due_chunk_returns_unavailable_before_selecting() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
                 "POSTGRES RELATIONAL SKIPPED (incomplete_due_chunk_returns_unavailable_before_selecting)"
             );
             return;
         };
-        let schema = format!("pq_rel_due_chunk_{}", std::process::id());
+        let schema = format!("fireweed_rel_due_chunk_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
             .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -11740,13 +11740,13 @@ mod gated_group_summary_tests {
 
     #[test]
     fn online_metrics_migration_is_bounded_resumable_and_gates_startup() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
                 "POSTGRES RELATIONAL SKIPPED (online_metrics_migration_is_bounded_resumable_and_gates_startup)"
             );
             return;
         };
-        let schema = format!("pq_vec_metrics_migrate_{}", std::process::id());
+        let schema = format!("fireweed_vec_metrics_migrate_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
             .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -11769,9 +11769,9 @@ mod gated_group_summary_tests {
             inner
                 .client
                 .batch_execute(
-                    "DELETE FROM pqueue_metrics_migration_state WHERE migration_name='queue_metrics_v2_counted'; \
-                     DROP TABLE pqueue_queue_metrics_v2; DELETE FROM pqueue_group_due_pending; \
-                     DELETE FROM pqueue_item_index_component; DELETE FROM pqueue_metrics_counted_item",
+                    "DELETE FROM fireweed_metrics_migration_state WHERE migration_name='queue_metrics_v2_counted'; \
+                     DROP TABLE fireweed_queue_metrics_v2; DELETE FROM fireweed_group_due_pending; \
+                     DELETE FROM fireweed_item_index_component; DELETE FROM fireweed_metrics_counted_item",
                 )
                 .unwrap();
         }
@@ -11796,7 +11796,7 @@ mod gated_group_summary_tests {
         let mut holder = holder_client.transaction().unwrap();
         holder
             .query_one(
-                "SELECT item_id FROM pqueue_items WHERE tenant_id='t1' AND queue_id='q1' \
+                "SELECT item_id FROM fireweed_items WHERE tenant_id='t1' AND queue_id='q1' \
                  AND item_id=$1 FOR UPDATE",
                 &[&existing_ids[2].to_string()],
             )
@@ -11838,7 +11838,7 @@ mod gated_group_summary_tests {
         );
         inserter
             .execute(
-                "INSERT INTO pqueue_items(tenant_id,queue_id,item_id,client_item_key,lifecycle_state, \
+                "INSERT INTO fireweed_items(tenant_id,queue_id,item_id,client_item_key,lifecycle_state, \
                    priority_sort,not_before,eligible_since,group_key,fields,metadata,retry_count, \
                    item_version,last_command_sequence,created_at,updated_at,fenced,superseded,max_attempts,created_seq) \
                  VALUES('t1','q1','10','late-during-migration','Pending',decode('00','hex'), \
@@ -11857,7 +11857,7 @@ mod gated_group_summary_tests {
         let row = inner
             .client
             .query_one(
-                "SELECT pending,leased,complete,failed FROM pqueue_queue_metrics_v2 \
+                "SELECT pending,leased,complete,failed FROM fireweed_queue_metrics_v2 \
                  WHERE tenant_id='t1' AND queue_id='q1'",
                 &[],
             )
@@ -11869,7 +11869,7 @@ mod gated_group_summary_tests {
         assert_eq!(
             inner
                 .client
-                .query_one("SELECT COUNT(*) FROM pqueue_group_due_pending", &[])
+                .query_one("SELECT COUNT(*) FROM fireweed_group_due_pending", &[])
                 .unwrap()
                 .get::<_, i64>(0),
             2
@@ -11877,7 +11877,7 @@ mod gated_group_summary_tests {
         assert_eq!(
             inner
                 .client
-                .query_one("SELECT COUNT(*) FROM pqueue_metrics_counted_item", &[])
+                .query_one("SELECT COUNT(*) FROM fireweed_metrics_counted_item", &[])
                 .unwrap()
                 .get::<_, i64>(0),
             6
@@ -11890,13 +11890,13 @@ mod gated_group_summary_tests {
 
     #[test]
     fn migration_marker_serializes_waiting_update_and_delete() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
                 "POSTGRES RELATIONAL SKIPPED (migration_marker_serializes_waiting_update_and_delete)"
             );
             return;
         };
-        let schema = format!("pq_vec_metrics_mutation_race_{}", std::process::id());
+        let schema = format!("fireweed_vec_metrics_mutation_race_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
             .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -11916,8 +11916,8 @@ mod gated_group_summary_tests {
             inner
                 .client
                 .batch_execute(
-                    "DELETE FROM pqueue_metrics_migration_state; DROP TABLE pqueue_queue_metrics_v2; \
-                     DELETE FROM pqueue_metrics_counted_item",
+                    "DELETE FROM fireweed_metrics_migration_state; DROP TABLE fireweed_queue_metrics_v2; \
+                     DELETE FROM fireweed_metrics_counted_item",
                 )
                 .unwrap();
         }
@@ -11934,7 +11934,7 @@ mod gated_group_summary_tests {
         let mut holder = holder_client.transaction().unwrap();
         holder
             .query_one(
-                "SELECT item_id FROM pqueue_items WHERE tenant_id='t1' AND queue_id='q1' \
+                "SELECT item_id FROM fireweed_items WHERE tenant_id='t1' AND queue_id='q1' \
                  AND item_id=$1 FOR UPDATE",
                 &[&ids[4].to_string()],
             )
@@ -11974,7 +11974,7 @@ mod gated_group_summary_tests {
                 .unwrap();
             client
                 .execute(
-                    "UPDATE pqueue_items SET lifecycle_state='Complete',item_version=item_version+1 \
+                    "UPDATE fireweed_items SET lifecycle_state='Complete',item_version=item_version+1 \
                      WHERE tenant_id='t1' AND queue_id='q1' AND item_id=$1",
                     &[&update_id],
                 )
@@ -11990,7 +11990,7 @@ mod gated_group_summary_tests {
                 .unwrap();
             client
                 .execute(
-                    "DELETE FROM pqueue_items WHERE tenant_id='t1' AND queue_id='q1' AND item_id=$1",
+                    "DELETE FROM fireweed_items WHERE tenant_id='t1' AND queue_id='q1' AND item_id=$1",
                     &[&delete_id],
                 )
                 .unwrap();
@@ -11999,8 +11999,8 @@ mod gated_group_summary_tests {
             let waiting: i64 = observer
                 .query_one(
                     "SELECT COUNT(*) FROM pg_stat_activity WHERE wait_event_type='Lock' \
-                     AND (query LIKE 'UPDATE pqueue_items SET lifecycle_state=%' \
-                       OR query LIKE 'DELETE FROM pqueue_items WHERE tenant_id=%')",
+                     AND (query LIKE 'UPDATE fireweed_items SET lifecycle_state=%' \
+                       OR query LIKE 'DELETE FROM fireweed_items WHERE tenant_id=%')",
                     &[],
                 )
                 .unwrap()
@@ -12023,7 +12023,7 @@ mod gated_group_summary_tests {
                 .lock()
                 .unwrap()
                 .client
-                .query_one("SELECT COUNT(*) FROM pqueue_metrics_counted_item", &[])
+                .query_one("SELECT COUNT(*) FROM fireweed_metrics_counted_item", &[])
                 .unwrap()
                 .get::<_, i64>(0),
             4
@@ -12032,13 +12032,13 @@ mod gated_group_summary_tests {
 
     #[test]
     fn migration_seeds_authority_without_double_counting_preexisting_counters() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
                 "POSTGRES RELATIONAL SKIPPED (migration_seeds_authority_without_double_counting_preexisting_counters)"
             );
             return;
         };
-        let schema = format!("pq_vec_metrics_upgrade_{}", std::process::id());
+        let schema = format!("fireweed_vec_metrics_upgrade_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
             .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -12058,14 +12058,14 @@ mod gated_group_summary_tests {
             inner
                 .client
                 .batch_execute(
-                    "DELETE FROM pqueue_metrics_migration_state; \
-                     DELETE FROM pqueue_metrics_counted_item; \
-                     DROP TABLE pqueue_queue_metrics_v2; \
-                     CREATE TABLE pqueue_queue_metrics( \
+                    "DELETE FROM fireweed_metrics_migration_state; \
+                     DELETE FROM fireweed_metrics_counted_item; \
+                     DROP TABLE fireweed_queue_metrics_v2; \
+                     CREATE TABLE fireweed_queue_metrics( \
                        tenant_id TEXT NOT NULL,queue_id TEXT NOT NULL,pending BIGINT NOT NULL, \
                        leased BIGINT NOT NULL,complete BIGINT NOT NULL,failed BIGINT NOT NULL, \
                        PRIMARY KEY(tenant_id,queue_id)); \
-                     INSERT INTO pqueue_queue_metrics VALUES('t1','q1',5,0,0,0)",
+                     INSERT INTO fireweed_queue_metrics VALUES('t1','q1',5,0,0,0)",
                 )
                 .unwrap();
         }
@@ -12094,7 +12094,7 @@ mod gated_group_summary_tests {
         assert_eq!(
             inner
                 .client
-                .query_one("SELECT COUNT(*) FROM pqueue_metrics_counted_item", &[])
+                .query_one("SELECT COUNT(*) FROM fireweed_metrics_counted_item", &[])
                 .unwrap()
                 .get::<_, i64>(0),
             5
@@ -12102,7 +12102,7 @@ mod gated_group_summary_tests {
         assert_eq!(
             inner
                 .client
-                .query_one("SELECT pending FROM pqueue_queue_metrics", &[])
+                .query_one("SELECT pending FROM fireweed_queue_metrics", &[])
                 .unwrap()
                 .get::<_, i64>(0),
             5,
@@ -12112,13 +12112,13 @@ mod gated_group_summary_tests {
 
     #[test]
     fn compound_later_field_metrics_range_uses_normalized_components() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
                 "POSTGRES RELATIONAL SKIPPED (compound_later_field_metrics_range_uses_normalized_components)"
             );
             return;
         };
-        let schema = format!("pq_vec_metrics_component_{}", std::process::id());
+        let schema = format!("fireweed_vec_metrics_component_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
             .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -12213,7 +12213,7 @@ mod gated_group_summary_tests {
             .lock()
             .unwrap()
             .client
-            .query_one("SELECT COUNT(*) FROM pqueue_item_index_component", &[])
+            .query_one("SELECT COUNT(*) FROM fireweed_item_index_component", &[])
             .unwrap()
             .get(0);
         assert_eq!(component_count, 8);
@@ -12221,13 +12221,13 @@ mod gated_group_summary_tests {
 
     #[test]
     fn future_grouped_replacement_moves_the_due_frontier() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
                 "POSTGRES RELATIONAL SKIPPED (future_grouped_replacement_moves_the_due_frontier)"
             );
             return;
         };
-        let schema = format!("pq_vec_replace_due_{}", std::process::id());
+        let schema = format!("fireweed_vec_replace_due_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
             .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -12288,7 +12288,7 @@ mod gated_group_summary_tests {
             .unwrap()
             .client
             .query(
-                "SELECT item_id FROM pqueue_group_due_pending ORDER BY item_id",
+                "SELECT item_id FROM fireweed_group_due_pending ORDER BY item_id",
                 &[],
             )
             .unwrap()
@@ -12309,13 +12309,13 @@ mod gated_group_summary_tests {
 
     #[test]
     fn million_due_items_in_one_hot_group_advance_in_bounded_chunks() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
                 "POSTGRES RELATIONAL SKIPPED (million_due_items_in_one_hot_group_advance_in_bounded_chunks)"
             );
             return;
         };
-        let schema = format!("pq_vec_a8609c39_hot_{}", std::process::id());
+        let schema = format!("fireweed_vec_a8609c39_hot_{}", std::process::id());
         let mut client = Client::connect(&url, NoTls).unwrap();
         client
             .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -12331,18 +12331,18 @@ mod gated_group_summary_tests {
         loader
             .batch_execute(&format!(
                 "SET search_path TO {schema}; \
-                 ALTER TABLE pqueue_items DISABLE TRIGGER pqueue_items_metrics_delta; \
-                 INSERT INTO pqueue_items(tenant_id,queue_id,item_id,client_item_key,lifecycle_state, \
+                 ALTER TABLE fireweed_items DISABLE TRIGGER fireweed_items_metrics_delta; \
+                 INSERT INTO fireweed_items(tenant_id,queue_id,item_id,client_item_key,lifecycle_state, \
                    priority_sort,not_before,eligible_since,group_key,fields,metadata,retry_count, \
                    item_version,last_command_sequence,created_at,updated_at,fenced,superseded,max_attempts,created_seq) \
                  SELECT 't1','q1','hot-'||g,'key-'||g,'Pending',decode('00','hex'),10000000000, \
                    10000000000,'hot','{{}}','{{}}',0,1,0,0,0,false,false,3,g \
                  FROM generate_series(1,1000000) g; \
-                 ALTER TABLE pqueue_items ENABLE TRIGGER pqueue_items_metrics_delta; \
-                 INSERT INTO pqueue_group_summary(tenant_id,queue_id,group_key,eligible_item_count,at_risk_count,updated_at) \
+                 ALTER TABLE fireweed_items ENABLE TRIGGER fireweed_items_metrics_delta; \
+                 INSERT INTO fireweed_group_summary(tenant_id,queue_id,group_key,eligible_item_count,at_risk_count,updated_at) \
                    VALUES('t1','q1','hot',0,0,0); \
-                 INSERT INTO pqueue_group_due_pending(tenant_id,queue_id,item_id,group_key,due_at,created_seq) \
-                   SELECT tenant_id,queue_id,item_id,group_key,not_before,created_seq FROM pqueue_items"
+                 INSERT INTO fireweed_group_due_pending(tenant_id,queue_id,item_id,group_key,due_at,created_seq) \
+                   SELECT tenant_id,queue_id,item_id,group_key,not_before,created_seq FROM fireweed_items"
             ))
             .unwrap();
         {
@@ -12353,7 +12353,7 @@ mod gated_group_summary_tests {
         let row = loader
             .query_one(
                 "SELECT s.eligible_item_count,COUNT(p.item_id)::bigint \
-                 FROM pqueue_group_summary s CROSS JOIN pqueue_group_due_pending p \
+                 FROM fireweed_group_summary s CROSS JOIN fireweed_group_due_pending p \
                  WHERE s.tenant_id='t1' AND s.queue_id='q1' AND s.group_key='hot' \
                    AND p.tenant_id='t1' AND p.queue_id='q1' GROUP BY s.eligible_item_count",
                 &[],
@@ -12368,14 +12368,14 @@ mod gated_group_summary_tests {
 
     #[test]
     fn grouped_lifecycle_is_exact_at_1_100_and_1000_items() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
                 "POSTGRES RELATIONAL SKIPPED (grouped_lifecycle_is_exact_at_1_100_and_1000_items)"
             );
             return;
         };
         for size in [1usize, 100, 1_000] {
-            let schema = format!("pq_rel_lifecycle_{size}_{}", std::process::id());
+            let schema = format!("fireweed_rel_lifecycle_{size}_{}", std::process::id());
             let mut cleanup = Client::connect(&url, NoTls).unwrap();
             cleanup
                 .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -12430,11 +12430,11 @@ mod gated_group_summary_tests {
 
     #[test]
     fn ungrouped_push_has_zero_summary_work() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!("POSTGRES RELATIONAL SKIPPED (ungrouped_push_has_zero_summary_work)");
             return;
         };
-        let schema = format!("pq_rel_ungrouped_{}", std::process::id());
+        let schema = format!("fireweed_rel_ungrouped_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
             .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -12454,13 +12454,13 @@ mod gated_group_summary_tests {
 
     #[test]
     fn request_replay_and_failed_push_do_not_double_apply_summary_delta() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
                 "POSTGRES RELATIONAL SKIPPED (request_replay_and_failed_push_do_not_double_apply_summary_delta)"
             );
             return;
         };
-        let schema = format!("pq_rel_summary_replay_{}", std::process::id());
+        let schema = format!("fireweed_rel_summary_replay_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
             .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -12502,13 +12502,13 @@ mod gated_group_summary_tests {
 
     #[test]
     fn bounded_group_queries_use_required_partial_indexes() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
                 "POSTGRES RELATIONAL SKIPPED (bounded_group_queries_use_required_partial_indexes)"
             );
             return;
         };
-        let schema = format!("pq_rel_group_plan_{}", std::process::id());
+        let schema = format!("fireweed_rel_group_plan_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
             .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -12535,7 +12535,10 @@ mod gated_group_summary_tests {
         block_on(b.push(&shard(), batch("g", None), ts(0), None)).unwrap();
         block_on(b.push(&shard(), batch("future", Some(ts(10))), ts(0), None)).unwrap();
         let mut inner = b.inner.lock().unwrap();
-        inner.client.batch_execute("ANALYZE pqueue_items").unwrap();
+        inner
+            .client
+            .batch_execute("ANALYZE fireweed_items")
+            .unwrap();
         // This is an index-eligibility proof on a deliberately tiny fixture, not a planner-cost benchmark.
         // Disabling seqscan prevents the small table from hiding whether each exact production predicate
         // can use its required partial index; the separate capped query below proves the row-work bound.
@@ -12554,35 +12557,38 @@ mod gated_group_summary_tests {
         };
         let active = explain(
             &mut inner.client,
-            "SELECT 1 FROM pqueue_items WHERE tenant_id='t1' AND queue_id='q1' \
+            "SELECT 1 FROM fireweed_items WHERE tenant_id='t1' AND queue_id='q1' \
              AND group_key='g' AND lifecycle_state IN ('Pending','Leased') \
              AND superseded=false LIMIT 6",
         );
-        assert!(active.contains("pqueue_items_group_active_idx"), "{active}");
+        assert!(
+            active.contains("fireweed_items_group_active_idx"),
+            "{active}"
+        );
         let due = explain(
             &mut inner.client,
-            "SELECT i.item_id FROM pqueue_items i JOIN pqueue_group_summary s \
+            "SELECT i.item_id FROM fireweed_items i JOIN fireweed_group_summary s \
              ON s.tenant_id=i.tenant_id AND s.queue_id=i.queue_id AND s.group_key=i.group_key \
              WHERE i.tenant_id='t1' AND i.queue_id='q1' AND i.lifecycle_state='Pending' \
              AND i.superseded=false AND i.group_key IS NOT NULL AND i.not_before IS NOT NULL \
              AND i.not_before>s.updated_at AND i.not_before<=10000000000 \
              ORDER BY i.not_before,i.created_seq LIMIT 128",
         );
-        assert!(due.contains("pqueue_items_group_due_idx"), "{due}");
+        assert!(due.contains("fireweed_items_group_due_idx"), "{due}");
         let group_due = explain(
             &mut inner.client,
-            "SELECT item_id FROM pqueue_items WHERE tenant_id='t1' AND queue_id='q1' \
+            "SELECT item_id FROM fireweed_items WHERE tenant_id='t1' AND queue_id='q1' \
              AND group_key='future' AND lifecycle_state='Pending' AND superseded=false \
              AND not_before IS NOT NULL AND not_before>0 AND not_before<=10000000000",
         );
         assert!(
-            group_due.contains("pqueue_items_group_due_idx"),
+            group_due.contains("fireweed_items_group_due_idx"),
             "{group_due}"
         );
         let bounded: i64 = inner
             .client
             .query_one(
-                "SELECT COUNT(*)::bigint FROM (SELECT item_id FROM pqueue_items \
+                "SELECT COUNT(*)::bigint FROM (SELECT item_id FROM fireweed_items \
                  WHERE tenant_id='t1' AND queue_id='q1' AND group_key='g' \
                  AND lifecycle_state IN ('Pending','Leased') AND superseded=false LIMIT 6) capped",
                 &[],
@@ -12598,13 +12604,13 @@ mod gated_group_summary_tests {
     /// BQ-14b: group_batching leases whole groups oldest-first (env-gated; LOUD-skips without a DB).
     #[test]
     fn group_batching_leases_whole_groups() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (group_batching_leases_whole_groups) — set PQUEUE_PG_TEST_URL"
+                "POSTGRES RELATIONAL SKIPPED (group_batching_leases_whole_groups) — set FIREWEED_PG_TEST_URL"
             );
             return;
         };
-        let schema = format!("pq_rel_gb_{}", std::process::id());
+        let schema = format!("fireweed_rel_gb_{}", std::process::id());
         let mut c = Client::connect(&url, NoTls).expect("connect");
         c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
             .expect("drop schema");
@@ -12655,13 +12661,13 @@ mod gated_group_summary_tests {
 
     #[test]
     fn oversized_group_locks_only_max_items_plus_one() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
                 "POSTGRES RELATIONAL SKIPPED (oversized_group_locks_only_max_items_plus_one)"
             );
             return;
         };
-        let schema = format!("pq_vec_a8609c39_group_bound_{}", std::process::id());
+        let schema = format!("fireweed_vec_a8609c39_group_bound_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
             .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -12712,7 +12718,7 @@ mod gated_group_summary_tests {
         assert_eq!(
             probe
                 .execute(
-                    "UPDATE pqueue_items SET updated_at=updated_at+1 \
+                    "UPDATE fireweed_items SET updated_at=updated_at+1 \
                      WHERE tenant_id='t1' AND queue_id='q1' AND item_id=$1",
                     &[&ids[3].to_string()],
                 )
@@ -12725,13 +12731,13 @@ mod gated_group_summary_tests {
 
     #[test]
     fn group_member_lock_budget_is_global_across_candidates() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
                 "POSTGRES RELATIONAL SKIPPED (group_member_lock_budget_is_global_across_candidates)"
             );
             return;
         };
-        let schema = format!("pq_vec_group_global_bound_{}", std::process::id());
+        let schema = format!("fireweed_vec_group_global_bound_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
             .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -12788,7 +12794,7 @@ mod gated_group_summary_tests {
         assert_eq!(
             probe
                 .execute(
-                    "UPDATE pqueue_items SET updated_at=updated_at+1 \
+                    "UPDATE fireweed_items SET updated_at=updated_at+1 \
                      WHERE tenant_id='t1' AND queue_id='q1' AND item_id=$1",
                     &[&ids[3].to_string()],
                 )
@@ -12801,13 +12807,13 @@ mod gated_group_summary_tests {
 
     #[test]
     fn group_batching_refills_past_metadata_mismatch_before_limit() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
                 "POSTGRES RELATIONAL SKIPPED (group_batching_refills_past_metadata_mismatch_before_limit)"
             );
             return;
         };
-        let schema = format!("pq_vec_a8609c39_refill_{}", std::process::id());
+        let schema = format!("fireweed_vec_a8609c39_refill_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
             .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -12867,13 +12873,13 @@ mod gated_group_summary_tests {
 
     #[test]
     fn group_candidate_locks_are_scoped_and_scan_past_contention() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (group_candidate_locks_are_scoped_and_scan_past_contention) — set PQUEUE_PG_TEST_URL"
+                "POSTGRES RELATIONAL SKIPPED (group_candidate_locks_are_scoped_and_scan_past_contention) — set FIREWEED_PG_TEST_URL"
             );
             return;
         };
-        let schema = format!("pq_rel_group_locks_{}", std::process::id());
+        let schema = format!("fireweed_rel_group_locks_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).expect("connect");
         cleanup
             .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -12923,7 +12929,7 @@ mod gated_group_summary_tests {
         let mut probe = probe_client.transaction().unwrap();
         probe
             .query_one(
-                "SELECT group_key FROM pqueue_group_summary WHERE tenant_id='t1' AND queue_id='q1' \
+                "SELECT group_key FROM fireweed_group_summary WHERE tenant_id='t1' AND queue_id='q1' \
                  AND group_key='g2' FOR UPDATE NOWAIT",
                 &[],
             )
@@ -12936,7 +12942,7 @@ mod gated_group_summary_tests {
         assert!(
             locked_probe
                 .query_one(
-                    "SELECT group_key FROM pqueue_group_summary WHERE tenant_id='t1' AND queue_id='q1' \
+                    "SELECT group_key FROM fireweed_group_summary WHERE tenant_id='t1' AND queue_id='q1' \
                      AND group_key='g1' FOR UPDATE NOWAIT",
                     &[],
                 )
@@ -12952,7 +12958,7 @@ mod gated_group_summary_tests {
         let mut holder = holder_client.transaction().unwrap();
         holder
             .query_one(
-                "SELECT group_key FROM pqueue_group_summary WHERE tenant_id='t1' AND queue_id='q1' \
+                "SELECT group_key FROM fireweed_group_summary WHERE tenant_id='t1' AND queue_id='q1' \
                  AND group_key='g1' FOR UPDATE",
                 &[],
             )
@@ -12975,7 +12981,7 @@ mod gated_group_summary_tests {
         let scanned_id = scanned[0].to_string();
         let scanned_group: String = scanner
             .query_one(
-                "SELECT group_key FROM pqueue_items WHERE tenant_id='t1' AND queue_id='q1' AND item_id=$1",
+                "SELECT group_key FROM fireweed_items WHERE tenant_id='t1' AND queue_id='q1' AND item_id=$1",
                 &[&scanned_id],
             )
             .unwrap()
@@ -12988,13 +12994,13 @@ mod gated_group_summary_tests {
     /// BQ-14c: whole_cohort leases a complete, all-eligible cohort (env-gated; LOUD-skips without a DB).
     #[test]
     fn whole_cohort_leases_complete_cohort() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (whole_cohort_leases_complete_cohort) — set PQUEUE_PG_TEST_URL"
+                "POSTGRES RELATIONAL SKIPPED (whole_cohort_leases_complete_cohort) — set FIREWEED_PG_TEST_URL"
             );
             return;
         };
-        let schema = format!("pq_rel_wc_{}", std::process::id());
+        let schema = format!("fireweed_rel_wc_{}", std::process::id());
         let mut c = Client::connect(&url, NoTls).expect("connect");
         c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
             .expect("drop schema");
@@ -13053,13 +13059,13 @@ mod gated_group_summary_tests {
     /// crossings, reports deferred at-risk as None, and drops fully-leased scopes (env-gated; LOUD skip).
     #[test]
     fn discover_active_scopes_reads_live_items() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (discover_active_scopes_reads_live_items) — set PQUEUE_PG_TEST_URL"
+                "POSTGRES RELATIONAL SKIPPED (discover_active_scopes_reads_live_items) — set FIREWEED_PG_TEST_URL"
             );
             return;
         };
-        let schema = format!("pq_rel_ds_{}", std::process::id());
+        let schema = format!("fireweed_rel_ds_{}", std::process::id());
         let mut c = Client::connect(&url, NoTls).expect("connect");
         c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
             .expect("drop schema");
@@ -13172,7 +13178,7 @@ mod commit_transition_tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static N: AtomicU64 = AtomicU64::new(0);
         format!(
-            "pq_rel_commit_{}_{}_{}",
+            "fireweed_rel_commit_{}_{}_{}",
             tag,
             std::process::id(),
             N.fetch_add(1, Ordering::SeqCst)
@@ -13229,7 +13235,7 @@ mod commit_transition_tests {
     fn count_side_records(backend: &PostgresRelationalBackend) -> i64 {
         let mut g = backend.inner.lock().unwrap();
         g.client
-            .query_one("SELECT COUNT(*) FROM pqueue_side_records", &[])
+            .query_one("SELECT COUNT(*) FROM fireweed_side_records", &[])
             .unwrap()
             .get(0)
     }
@@ -13241,7 +13247,7 @@ mod commit_transition_tests {
         let queue = q.queue_id.as_str().to_string();
         g.client
             .query_opt(
-                "SELECT payload FROM pqueue_side_records WHERE tenant_id=$1 AND queue_id=$2 AND key=$3",
+                "SELECT payload FROM fireweed_side_records WHERE tenant_id=$1 AND queue_id=$2 AND key=$3",
                 &[&tenant, &queue, &key.as_bytes()],
             )
             .unwrap()
@@ -13256,9 +13262,9 @@ mod commit_transition_tests {
 
     #[test]
     fn commit_transition_rejects_bad_token_bad_version_and_writes_nothing() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (commit_transition_rejects_bad_token_bad_version_and_writes_nothing) — set PQUEUE_PG_TEST_URL"
+                "POSTGRES RELATIONAL SKIPPED (commit_transition_rejects_bad_token_bad_version_and_writes_nothing) — set FIREWEED_PG_TEST_URL"
             );
             return;
         };
@@ -13318,9 +13324,9 @@ mod commit_transition_tests {
 
     #[test]
     fn commit_transition_request_id_replays_without_double_write() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (commit_transition_request_id_replays_without_double_write) — set PQUEUE_PG_TEST_URL"
+                "POSTGRES RELATIONAL SKIPPED (commit_transition_request_id_replays_without_double_write) — set FIREWEED_PG_TEST_URL"
             );
             return;
         };
@@ -13369,9 +13375,9 @@ mod commit_transition_tests {
 
     #[test]
     fn commit_transition_without_expected_epoch_mints_lifecycle_ids_at_locked_cursor_epoch() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (commit_transition_without_expected_epoch_mints_lifecycle_ids_at_locked_cursor_epoch) — set PQUEUE_PG_TEST_URL"
+                "POSTGRES RELATIONAL SKIPPED (commit_transition_without_expected_epoch_mints_lifecycle_ids_at_locked_cursor_epoch) — set FIREWEED_PG_TEST_URL"
             );
             return;
         };
@@ -13411,9 +13417,9 @@ mod commit_transition_tests {
 
     #[test]
     fn commit_transition_atomically_finalizes_multiple_claims() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (commit_transition_atomically_finalizes_multiple_claims) — set PQUEUE_PG_TEST_URL"
+                "POSTGRES RELATIONAL SKIPPED (commit_transition_atomically_finalizes_multiple_claims) — set FIREWEED_PG_TEST_URL"
             );
             return;
         };
@@ -13482,9 +13488,9 @@ mod commit_transition_tests {
 
     #[test]
     fn commit_transition_conflict_is_per_entry_during_race() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (commit_transition_conflict_is_per_entry_during_race) — set PQUEUE_PG_TEST_URL"
+                "POSTGRES RELATIONAL SKIPPED (commit_transition_conflict_is_per_entry_during_race) — set FIREWEED_PG_TEST_URL"
             );
             return;
         };
@@ -13544,14 +13550,14 @@ mod command_log_recovery_tests {
     use futures::executor::block_on;
 
     fn live_url() -> Option<String> {
-        std::env::var("PQUEUE_PG_TEST_URL").ok()
+        std::env::var("FIREWEED_PG_TEST_URL").ok()
     }
 
     fn unique_schema(tag: &str) -> String {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
         format!(
-            "pq_rel_log_{}_{}_{}",
+            "fireweed_rel_log_{}_{}_{}",
             tag,
             std::process::id(),
             NEXT.fetch_add(1, Ordering::SeqCst)
@@ -13561,7 +13567,7 @@ mod command_log_recovery_tests {
     #[test]
     fn nonempty_prelog_upgrade_restores_snapshot_and_exposes_baseline_ref() {
         let Some(url) = live_url() else {
-            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set PQUEUE_PG_TEST_URL");
+            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
             return;
         };
         let schema = unique_schema("upgrade");
@@ -13585,8 +13591,8 @@ mod command_log_recovery_tests {
         {
             let mut inner = backend.inner.lock().unwrap();
             st(inner.client.batch_execute(
-                "DROP TABLE pqueue_command_baseline_rows; \
-                 DROP TABLE pqueue_command_baselines; DROP TABLE pqueue_commands",
+                "DROP TABLE fireweed_command_baseline_rows; \
+                 DROP TABLE fireweed_command_baselines; DROP TABLE fireweed_commands",
             ))
             .unwrap();
         }
@@ -13602,7 +13608,7 @@ mod command_log_recovery_tests {
         {
             let mut inner = reopened.inner.lock().unwrap();
             st(inner.client.execute(
-                "DELETE FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2",
+                "DELETE FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2",
                 &[&shard.tenant_id.as_str(), &shard.queue_id.as_str()],
             ))
             .unwrap();
@@ -13619,7 +13625,7 @@ mod command_log_recovery_tests {
     #[test]
     fn deleted_terminal_log_suffix_fails_closed() {
         let Some(url) = live_url() else {
-            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set PQUEUE_PG_TEST_URL");
+            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
             return;
         };
         let schema = unique_schema("suffix");
@@ -13643,7 +13649,7 @@ mod command_log_recovery_tests {
         {
             let mut inner = backend.inner.lock().unwrap();
             st(inner.client.execute(
-                "DELETE FROM pqueue_commands WHERE tenant=$1 AND queue=$2 AND seq=1",
+                "DELETE FROM fireweed_commands WHERE tenant=$1 AND queue=$2 AND seq=1",
                 &[&shard.tenant_id.as_str(), &shard.queue_id.as_str()],
             ))
             .unwrap();
@@ -13660,7 +13666,7 @@ mod command_log_recovery_tests {
     #[test]
     fn durable_position_tamper_breaks_command_checksum() {
         let Some(url) = live_url() else {
-            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set PQUEUE_PG_TEST_URL");
+            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
             return;
         };
         let schema = unique_schema("position_tamper");
@@ -13670,7 +13676,7 @@ mod command_log_recovery_tests {
         {
             let mut inner = backend.inner.lock().unwrap();
             st(inner.client.execute(
-                "UPDATE pqueue_commands SET assignment_epoch=assignment_epoch+1 \
+                "UPDATE fireweed_commands SET assignment_epoch=assignment_epoch+1 \
                  WHERE tenant=$1 AND queue=$2 AND seq=0",
                 &[&shard.tenant_id.as_str(), &shard.queue_id.as_str()],
             ))
@@ -13685,7 +13691,7 @@ mod command_log_recovery_tests {
     #[test]
     fn projection_failure_rolls_back_command_append() {
         let Some(url) = live_url() else {
-            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set PQUEUE_PG_TEST_URL");
+            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
             return;
         };
         let schema = unique_schema("rollback");
@@ -13697,7 +13703,7 @@ mod command_log_recovery_tests {
             st(inner.client.batch_execute(
                 "CREATE FUNCTION reject_item_insert() RETURNS trigger LANGUAGE plpgsql AS $$ \
                    BEGIN RAISE EXCEPTION 'injected projection failure'; END $$; \
-                 CREATE TRIGGER reject_item_insert BEFORE INSERT ON pqueue_items \
+                 CREATE TRIGGER reject_item_insert BEFORE INSERT ON fireweed_items \
                    FOR EACH ROW EXECUTE FUNCTION reject_item_insert()",
             ))
             .unwrap();
@@ -13713,7 +13719,7 @@ mod command_log_recovery_tests {
         );
         let mut inner = backend.inner.lock().unwrap();
         let count: i64 = st(inner.client.query_one(
-            "SELECT COUNT(*) FROM pqueue_commands WHERE tenant=$1 AND queue=$2",
+            "SELECT COUNT(*) FROM fireweed_commands WHERE tenant=$1 AND queue=$2",
             &[&shard.tenant_id.as_str(), &shard.queue_id.as_str()],
         ))
         .unwrap()
@@ -13724,7 +13730,7 @@ mod command_log_recovery_tests {
     #[test]
     fn atomic_fault_cut_never_reports_or_leaves_append_only_state() {
         let Some(url) = live_url() else {
-            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set PQUEUE_PG_TEST_URL");
+            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
             return;
         };
         let schema = unique_schema("fault_cut");
@@ -13749,7 +13755,7 @@ mod command_log_recovery_tests {
         assert_eq!(result, Err(EngineError::Unavailable));
         let mut inner = backend.inner.lock().unwrap();
         let count: i64 = st(inner.client.query_one(
-            "SELECT COUNT(*) FROM pqueue_commands WHERE tenant=$1 AND queue=$2",
+            "SELECT COUNT(*) FROM fireweed_commands WHERE tenant=$1 AND queue=$2",
             &[&shard.tenant_id.as_str(), &shard.queue_id.as_str()],
         ))
         .unwrap()
@@ -13760,7 +13766,7 @@ mod command_log_recovery_tests {
     #[test]
     fn command_reads_hard_bound_each_page() {
         let Some(url) = live_url() else {
-            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set PQUEUE_PG_TEST_URL");
+            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
             return;
         };
         let schema = unique_schema("page");
@@ -13802,7 +13808,7 @@ mod command_log_recovery_tests {
     #[test]
     fn projection_only_store_has_no_internal_command_log() {
         let Some(url) = live_url() else {
-            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set PQUEUE_PG_TEST_URL");
+            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
             return;
         };
         let schema = unique_schema("reap_guard");
@@ -13823,7 +13829,7 @@ mod command_log_recovery_tests {
         let mut inner = store.lock();
         let exists: bool = st(inner
             .client
-            .query_one("SELECT to_regclass('pqueue_commands') IS NOT NULL", &[]))
+            .query_one("SELECT to_regclass('fireweed_commands') IS NOT NULL", &[]))
         .unwrap()
         .get(0);
         assert!(!exists);
@@ -13854,7 +13860,7 @@ mod command_log_recovery_tests {
     #[test]
     fn batch_update_1000_uses_one_target_select_command_insert_and_projection_update() {
         let Some(url) = live_url() else {
-            eprintln!("POSTGRES BATCH UPDATE TEST SKIPPED — set PQUEUE_PG_TEST_URL");
+            eprintln!("POSTGRES BATCH UPDATE TEST SKIPPED — set FIREWEED_PG_TEST_URL");
             return;
         };
         let schema = unique_schema("batch_update_1000");
@@ -13901,7 +13907,7 @@ mod command_log_recovery_tests {
     #[test]
     fn all_rejected_batch_update_marker_rebuilds_idempotent_response() {
         let Some(url) = live_url() else {
-            eprintln!("POSTGRES BATCH UPDATE TEST SKIPPED — set PQUEUE_PG_TEST_URL");
+            eprintln!("POSTGRES BATCH UPDATE TEST SKIPPED — set FIREWEED_PG_TEST_URL");
             return;
         };
         let schema = unique_schema("batch_update_marker");
@@ -13922,7 +13928,7 @@ mod command_log_recovery_tests {
             let envelope: Vec<u8> = inner
                 .client
                 .query_one(
-                    "SELECT envelope FROM pqueue_commands WHERE tenant=$1 AND queue=$2 ORDER BY seq DESC LIMIT 1",
+                    "SELECT envelope FROM fireweed_commands WHERE tenant=$1 AND queue=$2 ORDER BY seq DESC LIMIT 1",
                     &[&shard.tenant_id.as_str(), &shard.queue_id.as_str()],
                 )
                 .unwrap()
@@ -13939,7 +13945,7 @@ mod command_log_recovery_tests {
             inner
                 .client
                 .execute(
-                    "DELETE FROM pqueue_request_idempotency WHERE tenant_id=$1 AND queue_id=$2",
+                    "DELETE FROM fireweed_request_idempotency WHERE tenant_id=$1 AND queue_id=$2",
                     &[&shard.tenant_id.as_str(), &shard.queue_id.as_str()],
                 )
                 .unwrap();
@@ -13964,7 +13970,7 @@ mod command_log_recovery_tests {
     #[test]
     fn empty_genesis_baseline_rebuilds_before_any_data_command() {
         let Some(url) = live_url() else {
-            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set PQUEUE_PG_TEST_URL");
+            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
             return;
         };
         let schema = unique_schema("empty_genesis_rebuild");

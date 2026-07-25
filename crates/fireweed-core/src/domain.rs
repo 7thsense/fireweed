@@ -552,7 +552,7 @@ pub struct ItemResult {
 /// Declaration of one per-queue secondary index over configured item fields (ADR-010).
 ///
 /// An index belongs to one queue (no cross-queue lookup) and is generic over field *names* and opaque
-/// *bytes* values (pqueue stays domain-agnostic). The composite key is built from `fields` in order; a
+/// *bytes* values (fireweed stays domain-agnostic). The composite key is built from `fields` in order; a
 /// `unique` index rejects a push/upsert/update that would create a duplicate key with
 /// [`ApiErrorCode::Conflict`] semantics, atomically committing nothing.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -565,9 +565,9 @@ pub struct IndexSpec {
     pub unique: bool,
 }
 
-/// A named typed secondary index for pqueue query ergonomics (ADR-011).
+/// A named typed secondary index for fireweed query ergonomics (ADR-011).
 ///
-/// Wraps an `axon_esf::IndexDeclaration` (single-field or compound) with a pqueue-specific `name`
+/// Wraps an `axon_esf::IndexDeclaration` (single-field or compound) with a fireweed-specific `name`
 /// so that callers can address indexes by name rather than by field path. The declaration drives
 /// typed key encoding via `axon_esf::encode_index_value` / `encode_compound_index_key` — keys are
 /// byte-identical to those produced by axon and sort correctly for all ESF `IndexType` variants.
@@ -606,7 +606,7 @@ pub struct CreateQueue {
     pub secondary_indexes: Vec<IndexSpec>,
     /// Optional ESF entity schema document (ADR-011). Absent = no payload validation.
     pub entity_schema: Option<EntitySchemaDocument>,
-    /// Typed secondary indexes (ADR-011), each wrapping an ESF declaration with a pqueue name.
+    /// Typed secondary indexes (ADR-011), each wrapping an ESF declaration with a fireweed name.
     /// Empty = no typed indexes. Must not overlap `secondary_indexes` by name.
     pub typed_indexes: Vec<QueueIndex>,
     // Whether this queue emits change records to the history sink. Default-on so operators get
@@ -646,7 +646,7 @@ pub struct QueueDefinition {
     /// `#[serde(default)]` keeps existing persisted definitions and the wire compatible.
     #[serde(default)]
     pub entity_schema: Option<EntitySchemaDocument>,
-    /// Typed secondary indexes (ADR-011), each wrapping an ESF declaration with a pqueue name.
+    /// Typed secondary indexes (ADR-011), each wrapping an ESF declaration with a fireweed name.
     /// `#[serde(default)]` keeps existing persisted definitions and the wire compatible.
     #[serde(default)]
     pub typed_indexes: Vec<QueueIndex>,
@@ -1122,7 +1122,7 @@ fn encode_decimal_ascending(mantissa: i128, scale: u32) -> Vec<u8> {
 // B-012: item lifecycle state machine
 // ---------------------------------------------------------------------------
 
-/// Lifecycle state of a pqueue item.
+/// Lifecycle state of a fireweed item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ItemState {
     Pending,

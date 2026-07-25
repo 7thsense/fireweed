@@ -2,7 +2,7 @@
 //! InProcessControlPlane>`, ADR-012 P2). Proves the generic `ComposedBackend::recover` rebuilds the
 //! in-memory projection by replaying the durable postgres log on reconnect — the same property the
 //! monolithic `PostgresBackend` durability suite proves, now for the composed path. Env-gated on
-//! `PQUEUE_PG_TEST_URL`; LOUD-skips if absent.
+//! `FIREWEED_PG_TEST_URL`; LOUD-skips if absent.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -13,13 +13,13 @@ use fireweed_engine::{
 use fireweed_postgres::{PostgresLog, composed_postgres_backend_in_schema};
 
 fn pg_url() -> Option<String> {
-    std::env::var("PQUEUE_PG_TEST_URL").ok()
+    std::env::var("FIREWEED_PG_TEST_URL").ok()
 }
 
 fn fresh_schema(tag: &str) -> String {
     static N: AtomicU64 = AtomicU64::new(0);
     format!(
-        "pq_cmp_{}_{}_{}",
+        "fireweed_cmp_{}_{}_{}",
         tag,
         std::process::id(),
         N.fetch_add(1, Ordering::SeqCst)
@@ -30,7 +30,7 @@ fn fresh_schema(tag: &str) -> String {
 fn composed_postgres_projection_rebuilds_from_durable_log_on_reconnect() {
     let Some(url) = pg_url() else {
         eprintln!(
-            "COMPOSED POSTGRES RECOVERY SKIPPED (reopen) — set PQUEUE_PG_TEST_URL to a live DB"
+            "COMPOSED POSTGRES RECOVERY SKIPPED (reopen) — set FIREWEED_PG_TEST_URL to a live DB"
         );
         return;
     };
@@ -41,7 +41,7 @@ fn composed_postgres_projection_rebuilds_from_durable_log_on_reconnect() {
 fn postgres_log_pagination_resumes_after_last_returned_position() {
     let Some(url) = pg_url() else {
         eprintln!(
-            "COMPOSED POSTGRES RECOVERY SKIPPED (pagination) — set PQUEUE_PG_TEST_URL to a live DB"
+            "COMPOSED POSTGRES RECOVERY SKIPPED (pagination) — set FIREWEED_PG_TEST_URL to a live DB"
         );
         return;
     };
@@ -88,7 +88,7 @@ fn postgres_log_pagination_resumes_after_last_returned_position() {
 fn postgres_log_batches_sequence_allocation_and_pages_across_insert_chunks() {
     let Some(url) = pg_url() else {
         eprintln!(
-            "COMPOSED POSTGRES RECOVERY SKIPPED (batched append) — set PQUEUE_PG_TEST_URL to a live DB"
+            "COMPOSED POSTGRES RECOVERY SKIPPED (batched append) — set FIREWEED_PG_TEST_URL to a live DB"
         );
         return;
     };
@@ -146,7 +146,7 @@ fn postgres_log_batches_sequence_allocation_and_pages_across_insert_chunks() {
 fn composed_postgres_log_preserves_request_id_idempotency() {
     let Some(url) = pg_url() else {
         eprintln!(
-            "COMPOSED POSTGRES RECOVERY SKIPPED (request id) — set PQUEUE_PG_TEST_URL to a live DB"
+            "COMPOSED POSTGRES RECOVERY SKIPPED (request id) — set FIREWEED_PG_TEST_URL to a live DB"
         );
         return;
     };
@@ -164,7 +164,7 @@ fn composed_postgres_log_preserves_request_id_idempotency() {
 fn postgres_log_cross_chunk_append_is_one_atomic_transaction() {
     let Some(url) = pg_url() else {
         eprintln!(
-            "COMPOSED POSTGRES RECOVERY SKIPPED (batched atomicity) — set PQUEUE_PG_TEST_URL to a live DB"
+            "COMPOSED POSTGRES RECOVERY SKIPPED (batched atomicity) — set FIREWEED_PG_TEST_URL to a live DB"
         );
         return;
     };

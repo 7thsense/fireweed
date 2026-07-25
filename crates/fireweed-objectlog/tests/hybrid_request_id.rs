@@ -22,7 +22,7 @@ type HybridBackend = ComposedBackend<ObjectLog, HybridProjectionStore, InProcess
 fn tmp_root(tag: &str) -> std::path::PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let p = std::env::temp_dir().join(format!(
-        "pqueue-objlog-hybrid-request-id-{tag}-{}-{n}",
+        "fireweed-objlog-hybrid-request-id-{tag}-{}-{n}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&p);

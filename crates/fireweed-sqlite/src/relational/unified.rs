@@ -312,7 +312,7 @@ impl ProjectionStore for SqliteRelational {
         let prior: Option<(Vec<u8>, String, i64)> = st(tx
             .query_row(
                 "SELECT request_fingerprint,response_payload,expires_at \
-                 FROM pqueue_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+                 FROM fireweed_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
                  AND operation=?3 AND request_id=?4",
                 params![
                     tenant,
@@ -329,7 +329,7 @@ impl ProjectionStore for SqliteRelational {
         };
         if expires_at <= ts_nanos(now) {
             st(tx.execute(
-                "DELETE FROM pqueue_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+                "DELETE FROM fireweed_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
                  AND operation=?3 AND request_id=?4",
                 params![
                     tenant,
@@ -363,7 +363,7 @@ impl ProjectionStore for SqliteRelational {
         let prior: Option<(Vec<u8>, String, i64)> = st(tx
             .query_row(
                 "SELECT request_fingerprint,response_payload,expires_at \
-                 FROM pqueue_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+                 FROM fireweed_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
                  AND operation=?3 AND request_id=?4",
                 params![
                     tenant,
@@ -380,7 +380,7 @@ impl ProjectionStore for SqliteRelational {
         };
         if expires_at <= ts_nanos(now) {
             st(tx.execute(
-                "DELETE FROM pqueue_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+                "DELETE FROM fireweed_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
                  AND operation=?3 AND request_id=?4",
                 params![
                     tenant,
@@ -411,7 +411,7 @@ impl ProjectionStore for SqliteRelational {
         let response_payload: Option<String> = st(g
             .conn
             .query_row(
-                "SELECT response_payload FROM pqueue_request_idempotency \
+                "SELECT response_payload FROM fireweed_request_idempotency \
                  WHERE tenant_id=?1 AND queue_id=?2 AND operation=?3 AND request_id=?4",
                 params![
                     tenant,
@@ -532,7 +532,7 @@ impl ProjectionStore for SqliteRelational {
         // the `refresh_due_group_summaries` write above is a transient selection aid, NOT a durable mutation.
         // The composition's `commit_locked` runs the epoch fence + append AFTER this returns; if the claim is
         // fenced (stale epoch) or selects nothing (empty / paused), NOTHING is appended and there must be no
-        // durable side effect. Persisting the refresh here would durably mutate `pqueue_group_summary` for a
+        // durable side effect. Persisting the refresh here would durably mutate `fireweed_group_summary` for a
         // no-op/fenced claim — violating that invariant. The durable summary update for the groups actually
         // leased instead rides the `Claim` / `CohortClaim` apply arm (which re-refreshes their summaries),
         // so a successful claim still leaves the summary current — faithful to the monolith, which commits

@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
-: "${PQUEUE_E3_DRIFT_SENTINEL:?test must provide drift sentinel}"
-touch "$PQUEUE_E3_DRIFT_SENTINEL"
+: "${FIREWEED_E3_DRIFT_SENTINEL:?test must provide drift sentinel}"
+touch "$FIREWEED_E3_DRIFT_SENTINEL"

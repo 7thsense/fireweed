@@ -1,4 +1,4 @@
-//! Conformance for the sqlite **relational** projection family (`pqueue_items` as a rebuildable cache).
+//! Conformance for the sqlite **relational** projection family (`fireweed_items` as a rebuildable cache).
 //!
 //! Three layers of evidence:
 //!
@@ -7,7 +7,7 @@
 //!    serialized claim CTE is in place. (group/cohort/gate selection is BQ-14; dup-push idempotency +
 //!    tombstone is BQ-11c; the relational-reconnect class is BQ-11d.)
 //! 2. **Lifecycle round-trip** (BQ-11a) — each apply arm applied as SQL and observed back through the read
-//!    ports, proving the apply-UoW round-trips item state through `pqueue_items` (incl. CohortExpired,
+//!    ports, proving the apply-UoW round-trips item state through `fireweed_items` (incl. CohortExpired,
 //!    which is not in the core class).
 //! 3. **Regression guards** — id-counter restore on reopen + stable-FIFO from the BQ-11a fresh-eyes review.
 //!
@@ -706,7 +706,7 @@ async fn upsert_inserts_then_replaces_then_rejects() {
     );
 }
 
-/// BQ-11c: duplicate-push convergence across a purge (TD-002 `pqueue_item_key_retention`). After a
+/// BQ-11c: duplicate-push convergence across a purge (TD-002 `fireweed_item_key_retention`). After a
 /// TERMINAL item under a key is purged, a re-push of the same key is still rejected as a duplicate
 /// (`Terminal`) until `client_item_key_retention_ms` elapses — it cannot resurrect the completed work.
 #[tokio::test]
@@ -804,7 +804,7 @@ async fn purged_terminal_key_is_retained_against_repush() {
 #[tokio::test]
 async fn reopen_restores_id_counter_and_state() {
     let path = std::env::temp_dir()
-        .join(format!("pqueue-rel-reopen-{}.db", std::process::id()))
+        .join(format!("fireweed-rel-reopen-{}.db", std::process::id()))
         .to_str()
         .unwrap()
         .to_string();
@@ -1510,7 +1510,7 @@ async fn whole_cohort_ignores_non_cohort_group_members() {
 // 6. GATES (BQ-14d) — a blocked gate key makes every item carrying it INELIGIBLE via the eligibility
 //    anti-join; clearing the gate restores eligibility with no per-item rewrite (exact-on-read). Gates are
 //    a RELATIONAL-class feature (kept out of the shared core suite); item-level claim is unchanged when no
-//    gate is set (parity preserved by the anti-join being a no-op against an empty pqueue_gate_state).
+//    gate is set (parity preserved by the anti-join being a no-op against an empty fireweed_gate_state).
 // ---------------------------------------------------------------------------
 
 /// A push spec carrying gate-key membership (priority + gate_keys).
@@ -1712,7 +1712,7 @@ async fn reclaim_tick_expires_incomplete_cohort() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. ACTIVE-SCOPE DISCOVERY (BQ-14e) — DiscoveryPort rolls up pqueue_group_summary into ranked
+// 7. ACTIVE-SCOPE DISCOVERY (BQ-14e) — DiscoveryPort rolls up fireweed_group_summary into ranked
 //    ActiveScopes (owner-local oldest-first; Queue granularity collapses to one queue rollup). A
 //    relational-class read (the in-memory family has no group summary), so it lives in this suite.
 // ---------------------------------------------------------------------------
@@ -1946,7 +1946,7 @@ async fn discover_empty_queue_is_empty() {
 }
 
 // ---------------------------------------------------------------------------
-// 9. ADR-011 typed secondary index conformance (pqueue_item_index, pqueue-f4ffd679)
+// 9. ADR-011 typed secondary index conformance (fireweed_item_index, pqueue-f4ffd679)
 // ---------------------------------------------------------------------------
 
 use fireweed_core::{IndexDeclaration, IndexType, QueueIndex};
@@ -2340,7 +2340,7 @@ async fn typed_index_update_fields_unique_conflict_is_atomic() {
 #[tokio::test]
 async fn typed_index_reopen_preserves_rows() {
     let path = std::env::temp_dir()
-        .join(format!("pqueue-idx-reopen-{}.db", std::process::id()))
+        .join(format!("fireweed-idx-reopen-{}.db", std::process::id()))
         .to_string_lossy()
         .to_string();
     let _ = std::fs::remove_file(&path);

@@ -742,7 +742,7 @@ impl<B: LibBackend + 'static> FireweedDataPlane for RuntimeCore<B> {
 pub struct Fireweed {
     inner: Arc<dyn FireweedDataPlane>,
     batch: Arc<dyn FireweedBatchPlane>,
-    projection: Option<EmbeddedHandle>,
+    projection: Option<ProjectionLifecycleHandle>,
 }
 
 impl fmt::Debug for Fireweed {
@@ -765,7 +765,7 @@ impl Fireweed {
 
     pub(crate) fn from_runtime_with_projection<B: LibBackend + BatchUpdatePort + 'static>(
         queue: RuntimeCore<B>,
-        projection: EmbeddedHandle,
+        projection: ProjectionLifecycleHandle,
     ) -> Self {
         let queue = Arc::new(queue);
         Self {
@@ -780,53 +780,16 @@ impl Fireweed {
             let capabilities = inner.lifecycle_capabilities();
             (capabilities.verify_projection
                 || capabilities.delete_projection
-                || capabilities.rehydrate_projection)
+                || capabilities.rebuild_projection)
                 .then_some(ProjectionControl { inner })
         })
     }
 
-    #[doc(hidden)]
-    #[allow(dead_code)] // Private compatibility helper retained for migrated internal lifecycle tests.
-    pub(crate) fn lifecycle_capabilities(&self) -> EmbeddedLifecycleCapabilities {
+    #[cfg(test)]
+    pub(crate) fn test_buffered_group_commit_commands(&self) -> Option<usize> {
         self.projection
             .as_ref()
-            .map(EmbeddedHandle::lifecycle_capabilities)
-            .unwrap_or_default()
-    }
-
-    #[doc(hidden)]
-    #[allow(dead_code)] // Private compatibility helper retained for migrated internal lifecycle tests.
-    pub(crate) fn buffered_group_commit_commands(&self) -> Option<usize> {
-        self.projection
-            .as_ref()
-            .and_then(EmbeddedHandle::buffered_group_commit_commands)
-    }
-
-    #[doc(hidden)]
-    #[allow(dead_code)] // Private compatibility helper retained for migrated internal lifecycle tests.
-    pub(crate) async fn verify_projection(&self) -> EngineResult<EmbeddedProjectionVerification> {
-        match self.projection.as_ref() {
-            Some(control) => control.verify_projection().await,
-            None => Err(EngineError::Unavailable),
-        }
-    }
-
-    #[doc(hidden)]
-    #[allow(dead_code)] // Private compatibility helper retained for migrated internal lifecycle tests.
-    pub(crate) async fn delete_projection(&self) -> EngineResult<()> {
-        match self.projection.as_ref() {
-            Some(control) => control.delete_projection().await,
-            None => Err(EngineError::Unavailable),
-        }
-    }
-
-    #[doc(hidden)]
-    #[allow(dead_code)] // Private compatibility helper retained for migrated internal lifecycle tests.
-    pub(crate) async fn rehydrate_projection(&self) -> EngineResult<EmbeddedRehydration> {
-        match self.projection.as_ref() {
-            Some(control) => control.rehydrate_projection().await,
-            None => Err(EngineError::Unavailable),
-        }
+            .and_then(ProjectionLifecycleHandle::buffered_group_commit_commands)
     }
 
     pub async fn ownership(&self, queue: &QueueKey) -> EngineResult<Ownership> {
@@ -1300,7 +1263,7 @@ impl Fireweed {
 
 /// Borrowed maintenance interface for a configured disposable projection.
 pub struct ProjectionControl<'a> {
-    inner: &'a EmbeddedHandle,
+    inner: &'a ProjectionLifecycleHandle,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1330,7 +1293,7 @@ impl ProjectionControl<'_> {
         ProjectionControlCapabilities {
             verify: capabilities.verify_projection,
             delete: capabilities.delete_projection,
-            rebuild: capabilities.rehydrate_projection,
+            rebuild: capabilities.rebuild_projection,
         }
     }
     pub async fn verify(&self) -> EngineResult<ProjectionVerification> {
@@ -1348,7 +1311,7 @@ impl ProjectionControl<'_> {
     }
     pub async fn rebuild(&self) -> EngineResult<ProjectionRebuild> {
         self.inner
-            .rehydrate_projection()
+            .rebuild_projection()
             .await
             .map(|result| ProjectionRebuild {
                 snapshot_used: result.snapshot_used,

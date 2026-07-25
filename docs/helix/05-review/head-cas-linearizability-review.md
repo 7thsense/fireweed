@@ -27,19 +27,19 @@ and non-CAS durability paths (segment object writes, snapshot writes).
 
 ## Evidence Reviewed
 
-- `crates/pqueue-objectlog/src/segmented.rs` — `BlobStore` trait, `seal()`,
+- `crates/fireweed-objectlog/src/segmented.rs` — `BlobStore` trait, `seal()`,
   `acquire_epoch()`, `commit_manifest_entry()`, `recover_manifest()`,
   `advance_retention_floor()`, `ManifestEntry`, `ManifestHeadBlob`,
   `VersionedHead`, `update_manifest_head_if_version()`.
-- `crates/pqueue-objectlog/src/lib.rs` — local-filesystem epoch CAS
+- `crates/fireweed-objectlog/src/lib.rs` — local-filesystem epoch CAS
   (`with_epoch_lock`, `write_epoch_object`).
-- `crates/pqueue-objectlog/src/compose_log.rs` — `append`, `acquire_epoch`,
+- `crates/fireweed-objectlog/src/compose_log.rs` — `append`, `acquire_epoch`,
   `advance_retention_floor` passthroughs.
-- `crates/pqueue-objectlog/tests/object_log_segment_commit_tests.rs` — CAS/fencing
+- `crates/fireweed-objectlog/tests/object_log_segment_commit_tests.rs` — CAS/fencing
   concurrency tests.
-- `crates/pqueue-objectlog/tests/segmented_s3_substrate_tests.rs` — stale-epoch
+- `crates/fireweed-objectlog/tests/segmented_s3_substrate_tests.rs` — stale-epoch
   CAS tests, `assert_manifest_head_cas_contract`.
-- `crates/pqueue-objectlog/tests/composed_group_commit.rs` — hybrid force-seal
+- `crates/fireweed-objectlog/tests/composed_group_commit.rs` — hybrid force-seal
   and stale-epoch fencing.
 - `docs/helix/02-design/technical-designs/TD-004-s3-object-log-sqlite-projection-mode.md`
   — lines 188, 218, 730, §§"Manifest Commit and Epoch Fencing" and

@@ -366,7 +366,7 @@ PostgreSQL configuration is accepted only when
 the database name begins `fireweed`, and it is not `postgres`, `template0`, or
 `template1`. Plain PostgreSQL cells use enumerated
 `fireweed_perf_<run-id>_*` schemas. Object-log/PostgreSQL cells use the facade's
-exact derived schema: `pq_` plus the first 60 lowercase hex characters of
+exact derived schema: `fireweed_` plus the first 54 lowercase hex characters of
 SHA-256 over the logical object-log namespace. Before construction the runner
 places both kinds in an immutable cleanup allowlist; cleanup accepts exact
 allowlist membership only, never a wildcard or caller-supplied physical schema.

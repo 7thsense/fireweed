@@ -36,7 +36,7 @@ ddx:
 
 ## Purpose
 
-This contract defines the **operator repair surface** for pqueue: queue
+This contract defines the **operator repair surface** for fireweed: queue
 pause/resume, item repair (reschedule, force retry/fail/complete/release, clear
 lease), dead-letter redrive, bulk operator purge, archive, retention runs, and
 operator inspection. It is the "P1 operator/retention contract for redrive,
@@ -68,7 +68,7 @@ outcomes, the async operation model, and the error rules.
   operation, which is **P0 and defined in API-001/TD-001** (`item:update` scope).
   API-002 `PurgeQueueItems` is the **bulk, selector-scoped** operator purge and
   MUST NOT be conflated with it.
-- Owning system or team: pqueue operator/control surface.
+- Owning system or team: fireweed operator/control surface.
 
 ## Relationship to API-001 and the engine invariants
 

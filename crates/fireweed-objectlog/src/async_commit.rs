@@ -1399,7 +1399,7 @@ mod tests {
 
     fn root() -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
-            "pqueue-async-replay-{}-{}",
+            "fireweed-async-replay-{}-{}",
             std::process::id(),
             NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
         ))

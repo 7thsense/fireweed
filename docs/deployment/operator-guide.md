@@ -131,7 +131,7 @@ and fencing/lease settings until every replica runs the new image.
 
 `fireweed-queue` changes the chart name, helper namespace, default workload
 names, selector labels, service account, ConfigMap, Service, and PVC names. Helm
-does not adopt resources from an existing `pqueue` release automatically. A
+does not adopt resources from an existing `fireweed` release automatically. A
 Fireweed install therefore creates a new resource set; it is not an in-place
 rename of the old release.
 
@@ -141,7 +141,7 @@ deliberately migrated claim before directing traffic to the new Service. Shared
 S3/Postgres deployments may point at the same durable authorities only after
 verifying compatible schemas, fencing settings, and Secrets. Keep the old
 release available for rollback until Fireweed recovery and readback checks pass,
-then remove it explicitly. The chart publishes no `pqueue` release or resource
+then remove it explicitly. The chart publishes no `fireweed` release or resource
 alias.
 
 ## Bootstrap Queue Inventories

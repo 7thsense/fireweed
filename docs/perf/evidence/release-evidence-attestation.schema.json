@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://pqueue.dev/schemas/release-evidence-attestation-v1.json",
-  "title": "pqueue TP-002 release-evidence attestation",
+  "$id": "https://fireweed.dev/schemas/release-evidence-attestation-v1.json",
+  "title": "fireweed TP-002 release-evidence attestation",
   "type": "object",
   "additionalProperties": false,
   "required": [

@@ -67,12 +67,12 @@ Resolving a template for a `QueueKey` produces a concrete desired `QueueDefiniti
 4. returning the resulting effective `QueueDefinition`.
 
 Validation failures are caller-visible `EnsureQueueError` values; they are not backend calls. Any schema or
-index type needed to build a template through the public facade must either be re-exported by `pqueue` or
+index type needed to build a template through the public facade must either be re-exported by `fireweed` or
 documented as a required direct dependency.
 
 Because `QueueDefinition` includes decimal priority/index-related values that implement `PartialEq` but not
 `Eq`, exact ensure is defined in terms of `PartialEq` structural equality. Tests must assert the ordinary
-reflexive case used by pqueue definitions, including `resolved == resolved.clone()`, and must avoid values
+reflexive case used by fireweed definitions, including `resolved == resolved.clone()`, and must avoid values
 whose comparison would make that assertion false.
 
 ### 3. EnsureQueue is an explicit Rust-library operation
@@ -80,7 +80,7 @@ whose comparison would make that assertion false.
 The Rust library exposes:
 
 ```rust
-Pqueue::ensure_queue(&QueueKey, &QueueTemplate) -> Result<EnsureQueueOutcome, EnsureQueueError>
+Fireweed::ensure_queue(&QueueKey, &QueueTemplate) -> Result<EnsureQueueOutcome, EnsureQueueError>
 ```
 
 `ensure_queue` is explicit. No `push`, `claim`, `ack`, `nack`, `renew`, `discover`, metrics, query, or other
@@ -101,7 +101,7 @@ backend family named below.
 
 ### 4. EnsureQueueOutcome is facade-local
 
-`EnsureQueueOutcome` is a `pqueue` facade-local result type, distinct from engine and wire response types.
+`EnsureQueueOutcome` is a `fireweed` facade-local result type, distinct from engine and wire response types.
 It carries:
 
 | Field | Meaning |
@@ -111,7 +111,7 @@ It carries:
 | `template_name: Option<String>` | Non-durable diagnostic copied from the template. |
 | `template_revision: Option<String>` | Non-durable diagnostic copied from the template. |
 
-The `created` flag is required because pqueue has no rollback/delete primitive. A conflict after a
+The `created` flag is required because fireweed has no rollback/delete primitive. A conflict after a
 successful create still means the queue may now exist and callers need to know whether this operation
 created it.
 

@@ -1,7 +1,7 @@
 # TP-002 hybrid-async perf gates + attribution
 
 **Bead:** `pqueue-21d63f09`. **Suite:**
-`crates/pqueue-server/tests/performance_object_log_hybrid_tests.rs`.
+`crates/fireweed-server/tests/performance_object_log_hybrid_tests.rs`.
 
 The hybrid-async perf suite previously gated only the ack/claim ratio, normal
 restart recovery, and disk-loss reconstruction. A passing row could not prove the
@@ -122,11 +122,11 @@ utilization.
 ## Running the gates
 
 ```text
-cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests \
+cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests \
   performance_object_log_hybrid_attribution -- --nocapture
-cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests \
+cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests \
   performance_object_log_hybrid_bounded_debt_gate -- --nocapture
-cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests \
+cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests \
   performance_object_log_hybrid_segment_density_gate -- --nocapture
 ```
 

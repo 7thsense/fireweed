@@ -11,23 +11,23 @@ use std::path::PathBuf;
 
 use fireweed_server::{Config, start};
 
-const HELP: &str = "fireweed-service\n\nEnvironment:\n  PQUEUE_LISTEN_ADDR=0.0.0.0:8080\n  PQUEUE_ADVERTISE_ADDR=10.0.0.12:8080      (required for replicas>1; pod-reachable IP:port)\n  PQUEUE_LOG_BACKEND=objectlog|postgres|sqlite|memory\n  PQUEUE_PROJECTION_BACKEND=inmemory|sqlite|hybrid|hybrid-async|postgres\n  PQUEUE_CONTROL_PLANE=inprocess|postgres   (inprocess is development-only and requires one replica)\n  PQUEUE_REPLICA_COUNT=1                    (>1 requires the postgres control plane)\n  PQUEUE_POSTGRES_CONTROL_PLANE_DATABASE_URL=postgres://user:pass@host:5432/db\n  PQUEUE_CONTROL_PLANE_HEARTBEAT_TTL_MS=5000\n  PQUEUE_CONTROL_PLANE_LEASE_TTL_MS=15000\n  PQUEUE_NODE_ID=0           (per-replica id; distinct integer per instance, else hashed to a byte)\n  PQUEUE_SQLITE_LOG_PATH=/var/lib/pqueue/pqueue-log.db\n  PQUEUE_OBJECT_LOG_ROOT=/var/lib/pqueue/object-log\n  PQUEUE_PG_URL=postgres://user:pass@host:5432/db   (postgres backend; build --features postgres[,tls])\n  PQUEUE_POSTGRES_LOG_DATABASE_URL=...   (Helm/Lakebase DSN secret; preferred over PQUEUE_PG_URL; sslmode=require needs --features tls)\n  DATABRICKS_HOST/...=...   (optional Databricks service-principal|PAT credential injection for the postgres backend)\n  PQUEUE_SQLITE_PROJECTION_PATH=/var/lib/pqueue/pqueue-projection.db   (objectlog log + sqlite, hybrid, or hybrid-async projection)\n  PQUEUE_FJORD_STATE_ROOT=/var/lib/pqueue/fjord   (embedded fjord storage namespace root, separate from queue storage)\n  PQUEUE_FJORD_CLUSTER_ID=pqueue-fjord            (embedded fjord cluster id)\n  PQUEUE_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS=100000   (objectlog/hybrid-async async-apply thresholds; each bound must be >0)\n  PQUEUE_HYBRID_ASYNC_APPLY_DEBT_MAX_BYTES=536870912\n  PQUEUE_HYBRID_ASYNC_APPLY_QUEUE_DEPTH_MAX=1024\n  PQUEUE_HYBRID_ASYNC_OLDEST_UNAPPLIED_MAX_MS=60000\n  PQUEUE_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD=3\n  PQUEUE_WORKER_THREADS=N                  (cap the tokio worker-thread pool; default one per core)\n  PQUEUE_BOOTSTRAP_QUEUES=t1:q1[,tenant:queue]\n  PQUEUE_CHANGE_RECORD_SINK_ENABLED=1
-  PQUEUE_CHANGE_RECORD_SINK_ENDPOINT=http://127.0.0.1:8081/ingest
-  PQUEUE_CHANGE_RECORD_SINK_TICK_INTERVAL_MS=250
-  PQUEUE_CHANGE_RECORD_SINK_BATCH_SIZE=256
-  PQUEUE_CHANGE_RECORD_SINK_AUTHORIZATION=Bearer token
-  PQUEUE_CHANGE_RECORD_SINK_HEADER_X_API_KEY=...
-  PQUEUE_RECLAIM_INTERVAL_MS=1000";
+const HELP: &str = "fireweed-service\n\nEnvironment:\n  FIREWEED_LISTEN_ADDR=0.0.0.0:8080\n  FIREWEED_ADVERTISE_ADDR=10.0.0.12:8080      (required for replicas>1; pod-reachable IP:port)\n  FIREWEED_LOG_BACKEND=objectlog|postgres|sqlite|memory\n  FIREWEED_PROJECTION_BACKEND=inmemory|sqlite|hybrid|hybrid-async|postgres\n  FIREWEED_CONTROL_PLANE=inprocess|postgres   (inprocess is development-only and requires one replica)\n  FIREWEED_REPLICA_COUNT=1                    (>1 requires the postgres control plane)\n  FIREWEED_POSTGRES_CONTROL_PLANE_DATABASE_URL=postgres://user:pass@host:5432/db\n  FIREWEED_CONTROL_PLANE_HEARTBEAT_TTL_MS=5000\n  FIREWEED_CONTROL_PLANE_LEASE_TTL_MS=15000\n  FIREWEED_NODE_ID=0           (per-replica id; distinct integer per instance, else hashed to a byte)\n  FIREWEED_SQLITE_LOG_PATH=/var/lib/fireweed/fireweed-log.db\n  FIREWEED_OBJECT_LOG_ROOT=/var/lib/fireweed/object-log\n  FIREWEED_PG_URL=postgres://user:pass@host:5432/db   (postgres backend; build --features postgres[,tls])\n  FIREWEED_POSTGRES_LOG_DATABASE_URL=...   (Helm/Lakebase DSN secret; preferred over FIREWEED_PG_URL; sslmode=require needs --features tls)\n  DATABRICKS_HOST/...=...   (optional Databricks service-principal|PAT credential injection for the postgres backend)\n  FIREWEED_SQLITE_PROJECTION_PATH=/var/lib/fireweed/fireweed-projection.db   (objectlog log + sqlite, hybrid, or hybrid-async projection)\n  FIREWEED_FJORD_STATE_ROOT=/var/lib/fireweed/fjord   (embedded fjord storage namespace root, separate from queue storage)\n  FIREWEED_FJORD_CLUSTER_ID=fireweed-fjord            (embedded fjord cluster id)\n  FIREWEED_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS=100000   (objectlog/hybrid-async async-apply thresholds; each bound must be >0)\n  FIREWEED_HYBRID_ASYNC_APPLY_DEBT_MAX_BYTES=536870912\n  FIREWEED_HYBRID_ASYNC_APPLY_QUEUE_DEPTH_MAX=1024\n  FIREWEED_HYBRID_ASYNC_OLDEST_UNAPPLIED_MAX_MS=60000\n  FIREWEED_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD=3\n  FIREWEED_WORKER_THREADS=N                  (cap the tokio worker-thread pool; default one per core)\n  FIREWEED_BOOTSTRAP_QUEUES=t1:q1[,tenant:queue]\n  FIREWEED_CHANGE_RECORD_SINK_ENABLED=1
+  FIREWEED_CHANGE_RECORD_SINK_ENDPOINT=http://127.0.0.1:8081/ingest
+  FIREWEED_CHANGE_RECORD_SINK_TICK_INTERVAL_MS=250
+  FIREWEED_CHANGE_RECORD_SINK_BATCH_SIZE=256
+  FIREWEED_CHANGE_RECORD_SINK_AUTHORIZATION=Bearer token
+  FIREWEED_CHANGE_RECORD_SINK_HEADER_X_API_KEY=...
+  FIREWEED_RECLAIM_INTERVAL_MS=1000";
 
-const OBJECT_LOG_HELP: &str = "Object-log storage profiles:\n  PQUEUE_OBJECT_LOG_STORE=local|s3   (local is single-replica only; s3 is shared)\n  PQUEUE_OBJECT_LOG_ROOT=/var/lib/pqueue/object-log   (local only)\n  PQUEUE_OBJECTLOG_BUFFERED_BYTES_GLOBAL=67108864\n  PQUEUE_OBJECTLOG_BUFFERED_BYTES_TENANT=33554432   (optional uniform tenant cap)\n  PQUEUE_OBJECTLOG_QUEUE_WAITING_BYTES=16777216\n  PQUEUE_OBJECT_LOG_S3_ENDPOINT=https://s3.example.com\n  PQUEUE_OBJECT_LOG_S3_BUCKET=pqueue\n  PQUEUE_OBJECT_LOG_S3_REGION=us-east-1\n  PQUEUE_OBJECT_LOG_S3_CREDENTIAL_SOURCE=static\n  PQUEUE_OBJECT_LOG_S3_ACCESS_KEY_ID=...\n  PQUEUE_OBJECT_LOG_S3_SECRET_ACCESS_KEY=...\n  PQUEUE_OBJECT_LOG_S3_ALLOW_INSECURE_HTTP=false   (local MinIO only)";
+const OBJECT_LOG_HELP: &str = "Object-log storage profiles:\n  FIREWEED_OBJECT_LOG_STORE=local|s3   (local is single-replica only; s3 is shared)\n  FIREWEED_OBJECT_LOG_ROOT=/var/lib/fireweed/object-log   (local only)\n  FIREWEED_OBJECTLOG_BUFFERED_BYTES_GLOBAL=67108864\n  FIREWEED_OBJECTLOG_BUFFERED_BYTES_TENANT=33554432   (optional uniform tenant cap)\n  FIREWEED_OBJECTLOG_QUEUE_WAITING_BYTES=16777216\n  FIREWEED_OBJECT_LOG_S3_ENDPOINT=https://s3.example.com\n  FIREWEED_OBJECT_LOG_S3_BUCKET=fireweed\n  FIREWEED_OBJECT_LOG_S3_REGION=us-east-1\n  FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE=static\n  FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID=...\n  FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY=...\n  FIREWEED_OBJECT_LOG_S3_ALLOW_INSECURE_HTTP=false   (local MinIO only)";
 
-const RUNTIME_RESOURCE_HELP: &str = "Optional density evidence instrumentation:\n  PQUEUE_RUNTIME_RESOURCE_METRICS_PATH=/tmp/pqueue-runtime-resources.json\n      absolute path for an atomic Tokio worker/live-task gauge snapshot; absent disables the reporter";
+const RUNTIME_RESOURCE_HELP: &str = "Optional density evidence instrumentation:\n  FIREWEED_RUNTIME_RESOURCE_METRICS_PATH=/tmp/fireweed-runtime-resources.json\n      absolute path for an atomic Tokio worker/live-task gauge snapshot; absent disables the reporter";
 
 // Multi-threaded runtime: blocking durable work (segment seal I/O + the batched SQLite apply) runs on a
 // worker thread without stalling the network accept/read path on the others, so concurrent pushes from many
 // RESP connections keep co-buffering into the next segment while one is sealing (the group-commit win).
 //
-// `PQUEUE_WORKER_THREADS` caps the tokio worker-thread pool (default: one per available core). A node owns
+// `FIREWEED_WORKER_THREADS` caps the tokio worker-thread pool (default: one per available core). A node owns
 // only its own queues and is single-writer per queue, so a small pool suffices; capping it is important when
 // many nodes are CO-LOCATED on one host (e.g. a dense multi-owner box), where the default per-process
 // `num_cpus` pool would oversubscribe the shared cores and degrade every node's throughput.
@@ -38,9 +38,9 @@ fn main() {
     }
     if std::env::args().any(|arg| arg == "--help" || arg == "-h") {
         let help = format!("{HELP}\n\n{OBJECT_LOG_HELP}\n\n{RUNTIME_RESOURCE_HELP}")
-            .replace("PQUEUE_", "FIREWEED_");
+            .replace("FIREWEED_", "FIREWEED_");
         println!(
-            "{help}\n\nCompatibility: matching PQUEUE_* environment variables remain accepted as v0.20.0 aliases; FIREWEED_* wins when both are set. Persisted /var/lib/pqueue paths remain unchanged."
+            "{help}\n\nCompatibility: matching FIREWEED_* environment variables remain accepted as v0.20.0 aliases; FIREWEED_* wins when both are set. Persisted /var/lib/fireweed paths remain unchanged."
         );
         return;
     }

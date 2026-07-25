@@ -97,17 +97,17 @@ impl fireweed::Clock for GuardedClock {
 async fn push_claim_ack_nack_lifecycle_over_memory() {
     let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
-    let pq = RuntimeCore::new(backend, clock);
+    let fireweed = RuntimeCore::new(backend, clock);
     let q = qkey();
-    pq.create_queue(qdef()).await.unwrap();
+    fireweed.create_queue(qdef()).await.unwrap();
 
     // push out of priority order.
     for p in [30, 10, 20] {
-        pq.push(&q, at(p)).await.unwrap();
+        fireweed.push(&q, at(p)).await.unwrap();
     }
 
     // peek is priority-ordered (ascending Int64): 10, 20, 30.
-    let peeked: Vec<i64> = pq
+    let peeked: Vec<i64> = fireweed
         .peek(&q, 10)
         .await
         .unwrap()
@@ -120,7 +120,7 @@ async fn push_claim_ack_nack_lifecycle_over_memory() {
     assert_eq!(peeked, vec![10, 20, 30]);
 
     // claim 2 highest-priority → 10, 20; both leased.
-    let claimed = pq.claim(&q, 2, 30_000).await.unwrap();
+    let claimed = fireweed.claim(&q, 2, 30_000).await.unwrap();
     let claimed_pri: Vec<i64> = claimed
         .iter()
         .map(|c| match c.priority {
@@ -129,55 +129,65 @@ async fn push_claim_ack_nack_lifecycle_over_memory() {
         })
         .collect();
     assert_eq!(claimed_pri, vec![10, 20]);
-    let m = pq.metrics(&q).await.unwrap();
+    let m = fireweed.metrics(&q).await.unwrap();
     assert_eq!((m.pending, m.leased), (1, 2));
 
     // ack them → complete.
-    pq.ack(&q, claimed.iter().map(|c| c.item_id)).await.unwrap();
-    let m = pq.metrics(&q).await.unwrap();
+    fireweed
+        .ack(&q, claimed.iter().map(|c| c.item_id))
+        .await
+        .unwrap();
+    let m = fireweed.metrics(&q).await.unwrap();
     assert_eq!((m.complete, m.leased), (2, 0));
 
     // claim the last (30), nack Retry → back to pending, claimable again with a bumped attempt.
-    let last = pq.claim(&q, 1, 30_000).await.unwrap();
+    let last = fireweed.claim(&q, 1, 30_000).await.unwrap();
     assert_eq!(last.len(), 1);
     assert_eq!(last[0].attempt_count, 1);
-    pq.nack(
-        &q,
-        last.iter().map(|c| c.item_id),
-        Nack::Retry { not_before: None },
-    )
-    .await
-    .unwrap();
-    let again = pq.claim(&q, 1, 30_000).await.unwrap();
+    fireweed
+        .nack(
+            &q,
+            last.iter().map(|c| c.item_id),
+            Nack::Retry { not_before: None },
+        )
+        .await
+        .unwrap();
+    let again = fireweed.claim(&q, 1, 30_000).await.unwrap();
     assert_eq!(again.len(), 1, "retried item is claimable again");
     assert!(again[0].attempt_count > 1, "redelivery bumps attempt_count");
 }
 
 #[tokio::test]
-async fn lifecycle_aliases_preserve_batch_state_and_structured_errors() {
+async fn lifecycle_convenience_verbs_preserve_batch_state_and_structured_errors() {
     let clock = Arc::new(ManualClock::at(0));
-    let pq = RuntimeCore::new(Arc::new(composed_memory_backend()), clock);
+    let fireweed = RuntimeCore::new(Arc::new(composed_memory_backend()), clock);
     let q = qkey();
-    pq.create_queue(qdef()).await.unwrap();
+    fireweed.create_queue(qdef()).await.unwrap();
 
-    let leased_id = pq.push(&q, at(10)).await.unwrap();
-    let pending_id = pq.push(&q, at(20)).await.unwrap();
-    assert_eq!(pq.claim(&q, 1, 30_000).await.unwrap()[0].item_id, leased_id);
+    let leased_id = fireweed.push(&q, at(10)).await.unwrap();
+    let pending_id = fireweed.push(&q, at(20)).await.unwrap();
+    assert_eq!(
+        fireweed.claim(&q, 1, 30_000).await.unwrap()[0].item_id,
+        leased_id
+    );
 
-    let alias_error = pq.complete(&q, [leased_id, pending_id]).await.unwrap_err();
-    let existing_error = pq.ack(&q, [leased_id, pending_id]).await.unwrap_err();
-    assert_eq!(alias_error, existing_error);
-    let unchanged = pq.metrics(&q).await.unwrap();
+    let complete_error = fireweed
+        .complete(&q, [leased_id, pending_id])
+        .await
+        .unwrap_err();
+    let existing_error = fireweed.ack(&q, [leased_id, pending_id]).await.unwrap_err();
+    assert_eq!(complete_error, existing_error);
+    let unchanged = fireweed.metrics(&q).await.unwrap();
     assert_eq!(
         (unchanged.pending, unchanged.leased, unchanged.complete),
         (1, 1, 0)
     );
 
-    pq.complete(&q, [leased_id]).await.unwrap();
-    let released = pq.claim(&q, 1, 30_000).await.unwrap();
+    fireweed.complete(&q, [leased_id]).await.unwrap();
+    let released = fireweed.claim(&q, 1, 30_000).await.unwrap();
     assert_eq!(released[0].item_id, pending_id);
-    pq.release(&q, [pending_id]).await.unwrap();
-    let after_release = pq.metrics(&q).await.unwrap();
+    fireweed.release(&q, [pending_id]).await.unwrap();
+    let after_release = fireweed.metrics(&q).await.unwrap();
     assert_eq!(
         (
             after_release.pending,
@@ -191,57 +201,62 @@ async fn lifecycle_aliases_preserve_batch_state_and_structured_errors() {
 #[tokio::test]
 async fn retry_aliases_match_absolute_relative_and_exhaustion_behavior() {
     let clock = Arc::new(ManualClock::at(100));
-    let pq = RuntimeCore::new(Arc::new(composed_memory_backend()), clock.clone());
+    let fireweed = RuntimeCore::new(Arc::new(composed_memory_backend()), clock.clone());
     let q = qkey();
     let mut definition = qdef();
     definition.retry_policy.max_attempts = 2;
-    pq.create_queue(definition).await.unwrap();
+    fireweed.create_queue(definition).await.unwrap();
 
     for priority in [10, 20, 30, 40] {
-        pq.push(&q, at(priority)).await.unwrap();
+        fireweed.push(&q, at(priority)).await.unwrap();
     }
-    let claimed = pq.claim(&q, 4, 30_000).await.unwrap();
-    pq.retry(&q, [claimed[0].item_id], Some(ts(110)))
+    let claimed = fireweed.claim(&q, 4, 30_000).await.unwrap();
+    fireweed
+        .retry(&q, [claimed[0].item_id], Some(ts(110)))
         .await
         .unwrap();
-    pq.nack(
-        &q,
-        [claimed[1].item_id],
-        Nack::Retry {
-            not_before: Some(ts(110)),
-        },
-    )
-    .await
-    .unwrap();
-    pq.retry_after(&q, [claimed[2].item_id], 20_000)
+    fireweed
+        .nack(
+            &q,
+            [claimed[1].item_id],
+            Nack::Retry {
+                not_before: Some(ts(110)),
+            },
+        )
         .await
         .unwrap();
-    pq.nack_retry_after(&q, [claimed[3].item_id], 20_000)
+    fireweed
+        .retry_after(&q, [claimed[2].item_id], 20_000)
+        .await
+        .unwrap();
+    fireweed
+        .nack_retry_after(&q, [claimed[3].item_id], 20_000)
         .await
         .unwrap();
 
     clock.set(109);
-    assert!(pq.claim(&q, 4, 30_000).await.unwrap().is_empty());
+    assert!(fireweed.claim(&q, 4, 30_000).await.unwrap().is_empty());
     clock.set(110);
-    let absolute = pq.claim(&q, 4, 30_000).await.unwrap();
+    let absolute = fireweed.claim(&q, 4, 30_000).await.unwrap();
     assert_eq!(absolute.len(), 2);
     assert_eq!(
         absolute.iter().map(|item| item.item_id).collect::<Vec<_>>(),
         vec![claimed[0].item_id, claimed[1].item_id,]
     );
-    pq.retry(&q, absolute.iter().map(|item| item.item_id), None)
+    fireweed
+        .retry(&q, absolute.iter().map(|item| item.item_id), None)
         .await
         .unwrap();
-    let exhausted = pq.metrics(&q).await.unwrap();
+    let exhausted = fireweed.metrics(&q).await.unwrap();
     assert_eq!(
         exhausted.failed, 2,
         "retry exhaustion matches nack retry semantics"
     );
 
     clock.set(119);
-    assert!(pq.claim(&q, 4, 30_000).await.unwrap().is_empty());
+    assert!(fireweed.claim(&q, 4, 30_000).await.unwrap().is_empty());
     clock.set(120);
-    let relative = pq.claim(&q, 4, 30_000).await.unwrap();
+    let relative = fireweed.claim(&q, 4, 30_000).await.unwrap();
     assert_eq!(relative.len(), 2);
     assert_eq!(
         relative.iter().map(|item| item.item_id).collect::<Vec<_>>(),
@@ -261,24 +276,27 @@ async fn discover_alias_preserves_exact_scope_order() {
         std::process::id()
     ));
     let backend = Arc::new(SqliteRelationalBackend::open(path.to_str().unwrap()).unwrap());
-    let pq = RuntimeCore::new(backend, clock.clone());
+    let fireweed = RuntimeCore::new(backend, clock.clone());
     let q = qkey();
-    pq.create_queue(qdef()).await.unwrap();
+    fireweed.create_queue(qdef()).await.unwrap();
 
     let mut old = at(10);
     old.group_key = Some(GroupKey::new("old").unwrap());
-    pq.push(&q, old).await.unwrap();
+    fireweed.push(&q, old).await.unwrap();
     clock.set(10);
     let mut new = at(20);
     new.group_key = Some(GroupKey::new("new").unwrap());
-    pq.push(&q, new).await.unwrap();
+    fireweed.push(&q, new).await.unwrap();
     clock.set(20);
 
-    let existing = pq
+    let existing = fireweed
         .discover_active_scopes(&q, DiscoveryGranularity::Group)
         .await
         .unwrap();
-    let alias = pq.discover(&q, DiscoveryGranularity::Group).await.unwrap();
+    let alias = fireweed
+        .discover(&q, DiscoveryGranularity::Group)
+        .await
+        .unwrap();
     assert_eq!(alias, existing);
     assert_eq!(
         alias
@@ -288,7 +306,7 @@ async fn discover_alias_preserves_exact_scope_order() {
         vec![Some("old".to_string()), Some("new".to_string())]
     );
 
-    drop(pq);
+    drop(fireweed);
     std::fs::remove_file(path).unwrap();
 }
 
@@ -303,19 +321,22 @@ async fn stamped_discovery_preserves_ungrouped_order_through_relational_construc
         "fireweed-facade-stamped-discovery-{}-{nonce}.db",
         std::process::id()
     ));
-    let pq = fireweed::open_sqlite_relational(path.to_str().unwrap(), clock).unwrap();
+    let fireweed = fireweed::open_sqlite_relational(path.to_str().unwrap(), clock).unwrap();
     let q = qkey();
-    pq.create_queue(qdef()).await.unwrap();
+    fireweed.create_queue(qdef()).await.unwrap();
     let ungrouped = at(10);
     let mut keyed = at(20);
     keyed.group_key = Some(GroupKey::new("keyed").unwrap());
-    pq.push_batch(&q, vec![ungrouped, keyed]).await.unwrap();
+    fireweed
+        .push_batch(&q, vec![ungrouped, keyed])
+        .await
+        .unwrap();
 
-    let existing = pq
+    let existing = fireweed
         .discover_active_scopes(&q, DiscoveryGranularity::Group)
         .await
         .unwrap();
-    let stamped = pq
+    let stamped = fireweed
         .discover_active_scopes_stamped(&q, DiscoveryGranularity::Group)
         .await
         .unwrap();
@@ -331,7 +352,7 @@ async fn stamped_discovery_preserves_ungrouped_order_through_relational_construc
         vec![None, Some("keyed")]
     );
 
-    drop(pq);
+    drop(fireweed);
     std::fs::remove_file(path).unwrap();
 }
 
@@ -340,7 +361,7 @@ async fn request_id_push_replays_over_sqlite_relational_facade() {
     let clock = Arc::new(ManualClock::at(0));
     let path = std::env::temp_dir()
         .join(format!(
-            "pqueue-facade-request-id-{}.db",
+            "fireweed-facade-request-id-{}.db",
             std::process::id()
         ))
         .to_str()
@@ -348,23 +369,23 @@ async fn request_id_push_replays_over_sqlite_relational_facade() {
         .to_string();
     let _ = std::fs::remove_file(&path);
     let backend = Arc::new(SqliteRelationalBackend::open(&path).unwrap());
-    let pq = RuntimeCore::new(backend, clock);
+    let fireweed = RuntimeCore::new(backend, clock);
     let q = qkey();
-    pq.create_queue(qdef()).await.unwrap();
+    fireweed.create_queue(qdef()).await.unwrap();
     let request_id = RequestId::new("push-req-1").unwrap();
 
-    let first = pq
+    let first = fireweed
         .push_batch_with_request_id(&q, request_id.clone(), vec![at(10), at(20)])
         .await
         .unwrap();
-    let replay = pq
+    let replay = fireweed
         .push_batch_with_request_id(&q, request_id, vec![at(10), at(20)])
         .await
         .unwrap();
 
     assert_eq!(replay, first);
-    assert_eq!(pq.metrics(&q).await.unwrap().pending, 2);
-    drop(pq);
+    assert_eq!(fireweed.metrics(&q).await.unwrap().pending, 2);
+    drop(fireweed);
     let _ = std::fs::remove_file(&path);
 }
 
@@ -376,20 +397,23 @@ async fn request_id_push_is_idempotent_on_memory_backend() {
     // `tests/request_id_idempotency.rs`.
     let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
-    let pq = RuntimeCore::new(backend, clock);
+    let fireweed = RuntimeCore::new(backend, clock);
     let q = qkey();
-    pq.create_queue(qdef()).await.unwrap();
+    fireweed.create_queue(qdef()).await.unwrap();
 
     let rid = RequestId::new("push-req-1").unwrap();
-    let first = pq
+    let first = fireweed
         .push_with_request_id(&q, rid.clone(), at(10))
         .await
         .unwrap();
-    let replay = pq.push_with_request_id(&q, rid, at(10)).await.unwrap();
+    let replay = fireweed
+        .push_with_request_id(&q, rid, at(10))
+        .await
+        .unwrap();
 
     assert_eq!(first, replay, "same request id + same body replays the id");
     assert_eq!(
-        pq.metrics(&q).await.unwrap().pending,
+        fireweed.metrics(&q).await.unwrap().pending,
         1,
         "replay must not enqueue a duplicate"
     );
@@ -399,12 +423,12 @@ async fn request_id_push_is_idempotent_on_memory_backend() {
 async fn claimed_item_exposes_api001_shape_over_facade() {
     let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(100));
-    let pq = RuntimeCore::new(backend, clock);
+    let fireweed = RuntimeCore::new(backend, clock);
     let q = qkey();
     let mut def = qdef();
     def.eligibility_policy.gate_keys = GateKeyPolicy::Dynamic;
     def.eligibility_policy.max_gate_keys_per_item = Some(8);
-    pq.create_queue(def).await.unwrap();
+    fireweed.create_queue(def).await.unwrap();
 
     // NB: no `gate_keys` here — the memory reference backend is not gate-capable (`supports_gates()` is
     // false), so the in-tree gate-validation guard rejects a gate-bearing push on it. Gate round-trip in
@@ -420,8 +444,8 @@ async fn claimed_item_exposes_api001_shape_over_facade() {
     item.metadata
         .insert("tenant_segment", MetadataValue::String("vip".to_string()));
 
-    let id = pq.push(&q, item).await.unwrap();
-    let claimed = pq.claim(&q, 1, 30_000).await.unwrap();
+    let id = fireweed.push(&q, item).await.unwrap();
+    let claimed = fireweed.claim(&q, 1, 30_000).await.unwrap();
     assert_eq!(claimed.len(), 1);
     let got = &claimed[0];
     assert_eq!(got.item_id, id);
@@ -451,17 +475,17 @@ async fn claimed_item_exposes_api001_shape_over_facade() {
 async fn upsert_dedups_on_client_item_key_over_memory() {
     let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
-    let pq = RuntimeCore::new(backend, clock);
+    let fireweed = RuntimeCore::new(backend, clock);
     let q = qkey();
-    pq.create_queue(qdef()).await.unwrap();
+    fireweed.create_queue(qdef()).await.unwrap();
 
     let key = ClientItemKey::new("dup").unwrap();
-    pq.upsert(&q, key.clone(), at(50)).await.unwrap();
-    pq.upsert(&q, key, at(20)).await.unwrap(); // replaces the pending item
+    fireweed.upsert(&q, key.clone(), at(50)).await.unwrap();
+    fireweed.upsert(&q, key, at(20)).await.unwrap(); // replaces the pending item
 
-    let m = pq.metrics(&q).await.unwrap();
+    let m = fireweed.metrics(&q).await.unwrap();
     assert_eq!(m.pending, 1, "same key upserts to a single pending item");
-    let peeked: Vec<i64> = pq
+    let peeked: Vec<i64> = fireweed
         .peek(&q, 10)
         .await
         .unwrap()
@@ -475,26 +499,31 @@ async fn upsert_dedups_on_client_item_key_over_memory() {
 }
 
 #[tokio::test]
-async fn objectlog_push_works_but_upsert_is_unavailable() {
-    use fireweed_objectlog::ObjectLogBackend;
-    let root = std::env::temp_dir().join(format!("pqueue-facade-objlog-{}", std::process::id()));
+async fn composed_objectlog_supports_atomic_upsert() {
+    use fireweed_objectlog::composed_objectlog_backend;
+    let root = std::env::temp_dir().join(format!("fireweed-facade-objlog-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    let backend = Arc::new(ObjectLogBackend::open(&root).unwrap());
+    let backend = Arc::new(composed_objectlog_backend(&root).unwrap());
     let clock = Arc::new(ManualClock::at(0));
-    let pq = RuntimeCore::new(backend, clock);
+    let fireweed = RuntimeCore::new(backend, clock);
     let q = qkey();
-    pq.create_queue(qdef()).await.unwrap();
+    fireweed.create_queue(qdef()).await.unwrap();
 
-    // push (append) works on the eventual-apply class...
-    pq.push(&q, at(5)).await.unwrap();
-    assert_eq!(pq.metrics(&q).await.unwrap().pending, 1);
-
-    // ...but upsert (atomic XDEL+XADD) is refused with the structured `Unavailable`.
-    let err = pq
-        .upsert(&q, ClientItemKey::new("k").unwrap(), at(5))
-        .await
-        .unwrap_err();
-    assert_eq!(err, EngineError::Unavailable);
+    let key = ClientItemKey::new("k").unwrap();
+    let first = fireweed.upsert(&q, key.clone(), at(5)).await.unwrap();
+    let first_id = match first {
+        fireweed_engine::UpsertOutcome::Inserted { item_id } => item_id,
+        other => panic!("first upsert must insert, got {other:?}"),
+    };
+    let second = fireweed.upsert(&q, key, at(3)).await.unwrap();
+    match second {
+        fireweed_engine::UpsertOutcome::Replaced {
+            superseded_item_id,
+            ..
+        } => assert_eq!(superseded_item_id, first_id),
+        other => panic!("second upsert must replace, got {other:?}"),
+    }
+    assert_eq!(fireweed.metrics(&q).await.unwrap().pending, 1);
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -523,11 +552,11 @@ async fn two_handles_on_one_backend_do_not_collide_ids() {
 #[tokio::test]
 async fn ack_of_non_leased_id_is_a_structured_error() {
     let backend = Arc::new(composed_memory_backend());
-    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
+    let fireweed = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
-    pq.create_queue(qdef()).await.unwrap();
-    let id = pq.push(&q, at(5)).await.unwrap(); // pending, never claimed
-    let err = pq.ack(&q, [id]).await.unwrap_err();
+    fireweed.create_queue(qdef()).await.unwrap();
+    let id = fireweed.push(&q, at(5)).await.unwrap(); // pending, never claimed
+    let err = fireweed.ack(&q, [id]).await.unwrap_err();
     assert_eq!(
         err,
         EngineError::Invalid("item is not leased"),
@@ -538,15 +567,16 @@ async fn ack_of_non_leased_id_is_a_structured_error() {
 #[tokio::test]
 async fn fail_dead_letters_a_claimed_item() {
     let backend = Arc::new(composed_memory_backend());
-    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
+    let fireweed = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
-    pq.create_queue(qdef()).await.unwrap();
-    pq.push(&q, at(5)).await.unwrap();
-    let claimed = pq.claim(&q, 1, 30_000).await.unwrap();
-    pq.fail(&q, claimed.iter().map(|c| c.item_id))
+    fireweed.create_queue(qdef()).await.unwrap();
+    fireweed.push(&q, at(5)).await.unwrap();
+    let claimed = fireweed.claim(&q, 1, 30_000).await.unwrap();
+    fireweed
+        .fail(&q, claimed.iter().map(|c| c.item_id))
         .await
         .unwrap();
-    let m = pq.metrics(&q).await.unwrap();
+    let m = fireweed.metrics(&q).await.unwrap();
     assert_eq!(
         (m.failed, m.leased),
         (1, 0),
@@ -558,17 +588,20 @@ async fn fail_dead_letters_a_claimed_item() {
 async fn renew_extends_lease_without_charging_a_delivery() {
     let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
-    let pq = RuntimeCore::new(backend, clock);
+    let fireweed = RuntimeCore::new(backend, clock);
     let q = qkey();
-    pq.create_queue(qdef()).await.unwrap();
-    pq.push(&q, at(5)).await.unwrap();
-    let claimed = pq.claim(&q, 1, 30_000).await.unwrap(); // lease_expires_at = 30s, attempt 1
+    fireweed.create_queue(qdef()).await.unwrap();
+    fireweed.push(&q, at(5)).await.unwrap();
+    let claimed = fireweed.claim(&q, 1, 30_000).await.unwrap(); // lease_expires_at = 30s, attempt 1
     let id = claimed[0].item_id;
     assert_eq!(claimed[0].attempt_count, 1);
 
     // Renew to 60s from now: the lease deadline extends, the delivery count does NOT change.
-    pq.renew(&q, [id], 60_000).await.unwrap();
-    let view = pq.claimed(&q, std::slice::from_ref(&id)).await.unwrap();
+    fireweed.renew(&q, [id], 60_000).await.unwrap();
+    let view = fireweed
+        .claimed(&q, std::slice::from_ref(&id))
+        .await
+        .unwrap();
     assert_eq!(view.len(), 1);
     assert_eq!(view[0].attempt_count, 1, "renew does not charge a delivery");
     assert_eq!(
@@ -581,21 +614,24 @@ async fn renew_extends_lease_without_charging_a_delivery() {
 #[tokio::test]
 async fn reassign_transfers_and_charges_one_delivery() {
     let backend = Arc::new(composed_memory_backend());
-    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
+    let fireweed = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
-    pq.create_queue(qdef()).await.unwrap();
-    pq.push(&q, at(5)).await.unwrap();
-    let claimed = pq.claim(&q, 1, 30_000).await.unwrap(); // attempt 1
+    fireweed.create_queue(qdef()).await.unwrap();
+    fireweed.push(&q, at(5)).await.unwrap();
+    let claimed = fireweed.claim(&q, 1, 30_000).await.unwrap(); // attempt 1
     let id = claimed[0].item_id;
 
-    pq.reassign(&q, [id], 30_000).await.unwrap();
-    let view = pq.claimed(&q, std::slice::from_ref(&id)).await.unwrap();
+    fireweed.reassign(&q, [id], 30_000).await.unwrap();
+    let view = fireweed
+        .claimed(&q, std::slice::from_ref(&id))
+        .await
+        .unwrap();
     assert_eq!(
         view[0].attempt_count, 2,
         "reassign is a re-delivery (claim 1 + reassign 1)"
     );
     assert_eq!(
-        pq.metrics(&q).await.unwrap().leased,
+        fireweed.metrics(&q).await.unwrap().leased,
         1,
         "still leased under the new owner"
     );
@@ -604,20 +640,21 @@ async fn reassign_transfers_and_charges_one_delivery() {
 #[tokio::test]
 async fn rearm_resets_attempt_and_requeues_the_item() {
     let backend = Arc::new(composed_memory_backend());
-    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
+    let fireweed = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
-    pq.create_queue(qdef()).await.unwrap();
-    pq.push(&q, at(5)).await.unwrap();
-    let claimed = pq.claim(&q, 1, 30_000).await.unwrap();
+    fireweed.create_queue(qdef()).await.unwrap();
+    fireweed.push(&q, at(5)).await.unwrap();
+    let claimed = fireweed.claim(&q, 1, 30_000).await.unwrap();
     assert_eq!(claimed[0].attempt_count, 1);
 
     // Re-arm: the item returns to pending with attempt_count reset to 0.
-    pq.rearm(&q, claimed.iter().map(|c| c.item_id))
+    fireweed
+        .rearm(&q, claimed.iter().map(|c| c.item_id))
         .await
         .unwrap();
-    let m = pq.metrics(&q).await.unwrap();
+    let m = fireweed.metrics(&q).await.unwrap();
     assert_eq!((m.pending, m.leased), (1, 0), "rearm re-queues the item");
-    let again = pq.claim(&q, 1, 30_000).await.unwrap();
+    let again = fireweed.claim(&q, 1, 30_000).await.unwrap();
     assert_eq!(
         again[0].attempt_count, 1,
         "the fresh delivery starts at 1 (attempt was reset)"
@@ -627,36 +664,40 @@ async fn rearm_resets_attempt_and_requeues_the_item() {
 #[tokio::test]
 async fn purge_force_removes_a_leased_item_and_gates_without_force() {
     let backend = Arc::new(composed_memory_backend());
-    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
+    let fireweed = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
-    pq.create_queue(qdef()).await.unwrap();
-    pq.push(&q, at(5)).await.unwrap();
-    let claimed = pq.claim(&q, 1, 30_000).await.unwrap();
+    fireweed.create_queue(qdef()).await.unwrap();
+    fireweed.push(&q, at(5)).await.unwrap();
+    let claimed = fireweed.claim(&q, 1, 30_000).await.unwrap();
     let id = claimed[0].item_id;
 
     // Without force, purging a leased item is a structured Conflict (nothing removed).
     assert_eq!(
-        pq.purge(&q, [id], false).await.unwrap_err(),
+        fireweed.purge(&q, [id], false).await.unwrap_err(),
         EngineError::Conflict
     );
-    assert_eq!(pq.metrics(&q).await.unwrap().leased, 1);
+    assert_eq!(fireweed.metrics(&q).await.unwrap().leased, 1);
     // With force, it is removed; the count reflects one removal.
-    assert_eq!(pq.purge(&q, [id], true).await.unwrap(), 1);
-    assert_eq!(pq.metrics(&q).await.unwrap().leased, 0, "force-purged");
+    assert_eq!(fireweed.purge(&q, [id], true).await.unwrap(), 1);
+    assert_eq!(
+        fireweed.metrics(&q).await.unwrap().leased,
+        0,
+        "force-purged"
+    );
 }
 
 #[tokio::test]
 async fn claimed_renders_only_leased_items() {
     let backend = Arc::new(composed_memory_backend());
-    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
+    let fireweed = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
-    pq.create_queue(qdef()).await.unwrap();
-    let lo = pq.push(&q, at(5)).await.unwrap(); // top priority
-    let hi = pq.push(&q, at(9)).await.unwrap(); // stays pending
-    let claimed = pq.claim(&q, 1, 30_000).await.unwrap();
+    fireweed.create_queue(qdef()).await.unwrap();
+    let lo = fireweed.push(&q, at(5)).await.unwrap(); // top priority
+    let hi = fireweed.push(&q, at(9)).await.unwrap(); // stays pending
+    let claimed = fireweed.claim(&q, 1, 30_000).await.unwrap();
     assert_eq!(claimed[0].item_id, lo);
 
-    let view = pq.claimed(&q, &[lo, hi]).await.unwrap();
+    let view = fireweed.claimed(&q, &[lo, hi]).await.unwrap();
     assert_eq!(
         view.len(),
         1,
@@ -681,18 +722,18 @@ fn with_fields(priority: i64, fields: &[(&str, &[u8])], payload: &[u8]) -> NewIt
 /// bumps `item_version`, and honors the optimistic `expected_item_version` CAS.
 #[tokio::test]
 async fn update_fields_merges_versions_and_cas_over_memory() {
-    let pq = RuntimeCore::new(
+    let fireweed = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     let q = qkey();
-    pq.create_queue(qdef()).await.unwrap();
-    let id = pq
+    fireweed.create_queue(qdef()).await.unwrap();
+    let id = fireweed
         .push(&q, with_fields(5, &[("a", b"1"), ("b", b"2")], b"p0"))
         .await
         .unwrap();
     // Lease it, then mutate the leased item in place — the path that upsert/replace-if-pending refuses.
-    let claimed = pq.claim(&q, 1, 30_000).await.unwrap();
+    let claimed = fireweed.claim(&q, 1, 30_000).await.unwrap();
     assert_eq!(claimed[0].item_id, id);
 
     let ops = BTreeMap::from([
@@ -700,7 +741,7 @@ async fn update_fields_merges_versions_and_cas_over_memory() {
         ("b".to_string(), None),                           // remove
         ("c".to_string(), Some(Bytes::from_static(b"3"))), // add
     ]);
-    let v = pq
+    let v = fireweed
         .update_fields(
             &q,
             id,
@@ -714,7 +755,11 @@ async fn update_fields_merges_versions_and_cas_over_memory() {
     assert!(v >= 2, "item_version bumped past the genesis 1");
 
     let key = ClientItemKey::new(id.to_string()).unwrap();
-    let live = pq.live_item(&q, key.clone()).await.unwrap().expect("live");
+    let live = fireweed
+        .live_item(&q, key.clone())
+        .await
+        .unwrap()
+        .expect("live");
     assert_eq!(live.fields.get("a").map(|b| b.as_ref()), Some(&b"9"[..]));
     assert_eq!(live.fields.get("c").map(|b| b.as_ref()), Some(&b"3"[..]));
     assert!(!live.fields.contains_key("b"), "removed key is gone");
@@ -722,7 +767,7 @@ async fn update_fields_merges_versions_and_cas_over_memory() {
     assert_eq!(live.item_version, v);
 
     // A stale CAS rejects with Conflict and commits nothing.
-    let stale = pq
+    let stale = fireweed
         .update_fields(
             &q,
             id,
@@ -733,7 +778,7 @@ async fn update_fields_merges_versions_and_cas_over_memory() {
         )
         .await;
     assert!(matches!(stale, Err(EngineError::Conflict)));
-    let live2 = pq.live_item(&q, key).await.unwrap().expect("live");
+    let live2 = fireweed.live_item(&q, key).await.unwrap().expect("live");
     assert_eq!(
         live2.item_version, v,
         "rejected CAS left the item unchanged"
@@ -744,16 +789,19 @@ async fn update_fields_merges_versions_and_cas_over_memory() {
 /// FAC-1: a terminal item rejects `update_fields` with the structured `Terminal` (parity with finalize).
 #[tokio::test]
 async fn update_fields_rejects_terminal_over_memory() {
-    let pq = RuntimeCore::new(
+    let fireweed = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     let q = qkey();
-    pq.create_queue(qdef()).await.unwrap();
-    let id = pq.push(&q, at(5)).await.unwrap();
-    let claimed = pq.claim(&q, 1, 30_000).await.unwrap();
-    pq.ack(&q, claimed.iter().map(|c| c.item_id)).await.unwrap();
-    let r = pq
+    fireweed.create_queue(qdef()).await.unwrap();
+    let id = fireweed.push(&q, at(5)).await.unwrap();
+    let claimed = fireweed.claim(&q, 1, 30_000).await.unwrap();
+    fireweed
+        .ack(&q, claimed.iter().map(|c| c.item_id))
+        .await
+        .unwrap();
+    let r = fireweed
         .update_fields(&q, id, BTreeMap::new(), PayloadUpdate::Keep, None, None)
         .await;
     assert!(matches!(r, Err(EngineError::Terminal)));
@@ -762,16 +810,16 @@ async fn update_fields_rejects_terminal_over_memory() {
 /// API-001: reserved write-field names are blocked before the library facade dispatches to the backend.
 #[tokio::test]
 async fn api001_reservation_policy_is_recorded_or_enforced() {
-    let pq = RuntimeCore::new(
+    let fireweed = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     let q = qkey();
-    pq.create_queue(qdef()).await.unwrap();
-    let id = pq.push(&q, at(5)).await.unwrap();
-    pq.claim(&q, 1, 30_000).await.unwrap();
+    fireweed.create_queue(qdef()).await.unwrap();
+    let id = fireweed.push(&q, at(5)).await.unwrap();
+    fireweed.claim(&q, 1, 30_000).await.unwrap();
 
-    let payload_ok = pq
+    let payload_ok = fireweed
         .update_fields(
             &q,
             id,
@@ -784,7 +832,7 @@ async fn api001_reservation_policy_is_recorded_or_enforced() {
         .unwrap();
     assert!(payload_ok >= 2);
 
-    let err = pq
+    let err = fireweed
         .update_fields(
             &q,
             id,
@@ -805,7 +853,7 @@ async fn api001_reservation_policy_is_recorded_or_enforced() {
         .await
         .expect_err("reserved names must be rejected");
     assert!(matches!(err, EngineError::Invalid(_)));
-    let live = pq
+    let live = fireweed
         .live_item(&q, ClientItemKey::new(id.to_string()).unwrap())
         .await
         .unwrap()
@@ -813,23 +861,38 @@ async fn api001_reservation_policy_is_recorded_or_enforced() {
     assert_eq!(live.payload.as_deref(), Some(&b"payload-1"[..]));
 }
 
-/// FAC-1: the eventual-apply class cannot serve a read-your-write field mutation — `Unavailable`.
 #[tokio::test]
-async fn update_fields_unavailable_over_objectlog() {
-    use fireweed_objectlog::ObjectLogBackend;
-    let root = std::env::temp_dir().join(format!("pqueue-facade-uf-objlog-{}", std::process::id()));
+async fn composed_objectlog_supports_read_your_write_field_mutation() {
+    use fireweed_objectlog::composed_objectlog_backend;
+    let root =
+        std::env::temp_dir().join(format!("fireweed-facade-uf-objlog-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    let pq = RuntimeCore::new(
-        Arc::new(ObjectLogBackend::open(&root).unwrap()),
+    let fireweed = RuntimeCore::new(
+        Arc::new(composed_objectlog_backend(&root).unwrap()),
         Arc::new(ManualClock::at(0)),
     );
     let q = qkey();
-    pq.create_queue(qdef()).await.unwrap();
-    let id = pq.push(&q, at(5)).await.unwrap();
-    let r = pq
-        .update_fields(&q, id, BTreeMap::new(), PayloadUpdate::Keep, None, None)
-        .await;
-    assert_eq!(r.unwrap_err(), EngineError::Unavailable);
+    fireweed.create_queue(qdef()).await.unwrap();
+    let id = fireweed.push(&q, at(5)).await.unwrap();
+    let version = fireweed
+        .update_fields(
+            &q,
+            id,
+            BTreeMap::from([("state".to_owned(), Some(Bytes::from_static(b"ready")))]),
+            PayloadUpdate::Set(Some(Bytes::from_static(b"updated"))),
+            None,
+            Some(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(version, 2);
+    let live = fireweed
+        .live_item(&q, ClientItemKey::new(id.to_string()).unwrap())
+        .await
+        .unwrap()
+        .expect("updated item remains live");
+    assert_eq!(live.fields.get("state").map(Bytes::as_ref), Some(&b"ready"[..]));
+    assert_eq!(live.payload.as_deref(), Some(&b"updated"[..]));
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -838,27 +901,27 @@ async fn update_fields_unavailable_over_objectlog() {
 #[tokio::test]
 async fn reclaim_expired_convenience_uses_handle_clock() {
     let clock = Arc::new(ManualClock::at(0));
-    let pq = RuntimeCore::new(Arc::new(composed_memory_backend()), clock.clone());
+    let fireweed = RuntimeCore::new(Arc::new(composed_memory_backend()), clock.clone());
     let q = qkey();
-    pq.create_queue(qdef()).await.unwrap();
-    let id = pq.push(&q, at(5)).await.unwrap();
-    pq.claim(&q, 1, 30_000).await.unwrap(); // lease for 30s
-    assert_eq!(pq.metrics(&q).await.unwrap().leased, 1);
+    fireweed.create_queue(qdef()).await.unwrap();
+    let id = fireweed.push(&q, at(5)).await.unwrap();
+    fireweed.claim(&q, 1, 30_000).await.unwrap(); // lease for 30s
+    assert_eq!(fireweed.metrics(&q).await.unwrap().leased, 1);
 
     // Before the lease expires: nothing to reclaim (half-open — still valid at the boundary).
     clock.set(10);
-    assert!(pq.reclaim_expired(&q, None).await.unwrap().is_empty());
+    assert!(fireweed.reclaim_expired(&q, None).await.unwrap().is_empty());
 
     // Past the 30s lease: the sweep returns the id and the item is Pending again.
     clock.set(40);
-    let reclaimed = pq.reclaim_expired(&q, None).await.unwrap();
+    let reclaimed = fireweed.reclaim_expired(&q, None).await.unwrap();
     assert_eq!(reclaimed, vec![id]);
-    let m = pq.metrics(&q).await.unwrap();
+    let m = fireweed.metrics(&q).await.unwrap();
     assert_eq!((m.pending, m.leased), (1, 0));
     // Idempotent: a second sweep finds nothing.
-    assert!(pq.reclaim_expired(&q, None).await.unwrap().is_empty());
+    assert!(fireweed.reclaim_expired(&q, None).await.unwrap().is_empty());
     // And the item is claimable again.
-    assert_eq!(pq.claim(&q, 1, 30_000).await.unwrap().len(), 1);
+    assert_eq!(fireweed.claim(&q, 1, 30_000).await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -883,7 +946,7 @@ async fn reclaim_expired_at_honors_caller_time_without_reading_handle_clock() {
     let control_plane: Arc<dyn fireweed_engine::QueueControlPlane> = Arc::new(
         fireweed_engine::InMemoryControlPlane::new(ControlPlaneConfig::default()),
     );
-    let pq = RuntimeCore::with_control_plane_in_process(
+    let fireweed = RuntimeCore::with_control_plane_in_process(
         backend,
         clock.clone(),
         OwnerId::new("reclaim-owner").unwrap(),
@@ -891,14 +954,15 @@ async fn reclaim_expired_at_honors_caller_time_without_reading_handle_clock() {
     );
     clock.reject_reads();
     assert!(
-        pq.reclaim_expired_at(&q, None, ts(19))
+        fireweed
+            .reclaim_expired_at(&q, None, ts(19))
             .await
             .unwrap()
             .is_empty(),
         "a caller time before lease expiry must not reclaim"
     );
     assert_eq!(
-        pq.reclaim_expired_at(&q, None, ts(21)).await.unwrap(),
+        fireweed.reclaim_expired_at(&q, None, ts(21)).await.unwrap(),
         vec![id],
         "a caller time after lease expiry must reclaim"
     );
@@ -912,17 +976,18 @@ async fn reclaim_expired_at_is_deterministic_under_divergent_frozen_clocks() {
     let right = RuntimeCore::new(Arc::new(composed_memory_backend()), right_clock.clone());
     let q = qkey();
 
-    for pq in [&left, &right] {
-        pq.create_queue(qdef()).await.unwrap();
-        pq.push(&q, at(5)).await.unwrap();
-        pq.claim_at(
-            &q,
-            ClaimAt::new(1, 10_000)
-                .eligibility_time(ts(10))
-                .lease_time(ts(10)),
-        )
-        .await
-        .unwrap();
+    for fireweed in [&left, &right] {
+        fireweed.create_queue(qdef()).await.unwrap();
+        fireweed.push(&q, at(5)).await.unwrap();
+        fireweed
+            .claim_at(
+                &q,
+                ClaimAt::new(1, 10_000)
+                    .eligibility_time(ts(10))
+                    .lease_time(ts(10)),
+            )
+            .await
+            .unwrap();
     }
 
     left_clock.set(-1_000);
@@ -938,23 +1003,23 @@ async fn reclaim_expired_at_is_deterministic_under_divergent_frozen_clocks() {
 }
 
 // ---------------------------------------------------------------------------
-// ADR-011 JSON entity document compatibility (pqueue-1b13d001)
+// ADR-011 JSON entity document support (pqueue-1b13d001)
 // ---------------------------------------------------------------------------
 
-/// Legacy (bytes-only) items — opaque bytes payload + BTreeMap<String, Bytes> fields — push and claim with
-/// full fidelity through the current NewItem shape. The existing bytes workflows are UNCHANGED by ADR-011;
-/// this test pins that contract so a future typed-payload refactor cannot silently break them.
+/// Opaque-byte items — bytes payload + BTreeMap<String, Bytes> fields — push and claim with
+/// full fidelity through the current NewItem shape. This test pins the supported binary representation so a
+/// future typed-payload refactor cannot silently break it.
 #[tokio::test]
-async fn legacy_bytes_items_push_claim_roundtrip() {
-    let pq = RuntimeCore::new(
+async fn opaque_bytes_items_push_claim_roundtrip() {
+    let fireweed = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     let q = qkey();
-    pq.create_queue(qdef()).await.unwrap();
+    fireweed.create_queue(qdef()).await.unwrap();
 
     let opaque_payload = Bytes::from_static(b"\x00\x01\x02\x03opaque-non-utf8");
-    let id = pq
+    let id = fireweed
         .push(
             &q,
             NewItem {
@@ -970,7 +1035,7 @@ async fn legacy_bytes_items_push_claim_roundtrip() {
         .await
         .unwrap();
 
-    let claimed = pq.claim(&q, 1, 30_000).await.unwrap();
+    let claimed = fireweed.claim(&q, 1, 30_000).await.unwrap();
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].item_id, id);
     assert_eq!(claimed[0].payload.as_deref(), Some(opaque_payload.as_ref()));
@@ -989,17 +1054,17 @@ async fn legacy_bytes_items_push_claim_roundtrip() {
 /// representation survives both paths identically: the bytes carrier is agnostic to payload content.
 #[tokio::test]
 async fn typed_json_payload_round_trips_push_claim_and_commit_lifecycle() {
-    let pq = RuntimeCore::new(
+    let fireweed = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     let q = qkey();
-    pq.create_queue(qdef()).await.unwrap();
+    fireweed.create_queue(qdef()).await.unwrap();
 
     let json_doc = Bytes::from_static(br#"{"status":"pending","count":42,"tags":["a","b"]}"#);
 
     // --- push/claim path ---
-    let id = pq
+    let id = fireweed
         .push(
             &q,
             NewItem {
@@ -1015,7 +1080,7 @@ async fn typed_json_payload_round_trips_push_claim_and_commit_lifecycle() {
         .await
         .unwrap();
 
-    let claimed = pq.claim(&q, 1, 30_000).await.unwrap();
+    let claimed = fireweed.claim(&q, 1, 30_000).await.unwrap();
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].item_id, id);
     // JSON payload survives the push/claim round-trip verbatim.
@@ -1035,7 +1100,7 @@ async fn typed_json_payload_round_trips_push_claim_and_commit_lifecycle() {
 
     // --- vectorized commit lifecycle path ---
     let lifecycle_json = Bytes::from_static(br#"{"status":"dispatched","parent":"root"}"#);
-    let outcomes = pq
+    let outcomes = fireweed
         .commit(
             &q,
             CommitRequest {
@@ -1064,7 +1129,7 @@ async fn typed_json_payload_round_trips_push_claim_and_commit_lifecycle() {
     assert_eq!(lifecycle_ids.len(), 1, "one lifecycle item enqueued");
 
     // Claim the lifecycle item and verify the JSON payload survived the commit path.
-    let follow_up = pq.claim(&q, 1, 30_000).await.unwrap();
+    let follow_up = fireweed.claim(&q, 1, 30_000).await.unwrap();
     assert_eq!(follow_up.len(), 1);
     assert_eq!(follow_up[0].item_id, lifecycle_ids[0]);
     assert_eq!(
@@ -1083,32 +1148,33 @@ async fn typed_json_payload_round_trips_push_claim_and_commit_lifecycle() {
 async fn claim_at_resolves_eligibility_at_an_explicit_epoch_over_memory() {
     let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(0)); // operational time: ts(0), and it stays there
-    let pq = RuntimeCore::new(backend, clock);
+    let fireweed = RuntimeCore::new(backend, clock);
     let q = qkey();
-    pq.create_queue(qdef()).await.unwrap();
+    fireweed.create_queue(qdef()).await.unwrap();
 
     // Three items scheduled ahead of the operational clock (ascending priority = the claim order).
     for (priority, not_before) in [(10, 100), (20, 200), (30, 300)] {
-        pq.push(
-            &q,
-            NewItem {
-                not_before: Some(UtcTimestamp::new(not_before, 0).unwrap()),
-                ..at(priority)
-            },
-        )
-        .await
-        .unwrap();
+        fireweed
+            .push(
+                &q,
+                NewItem {
+                    not_before: Some(UtcTimestamp::new(not_before, 0).unwrap()),
+                    ..at(priority)
+                },
+            )
+            .await
+            .unwrap();
     }
 
     // Nothing is due at the operational clock, so the ordinary claim is empty...
     assert!(
-        pq.claim(&q, 10, 60_000).await.unwrap().is_empty(),
+        fireweed.claim(&q, 10, 60_000).await.unwrap().is_empty(),
         "no item is due at the operational clock"
     );
 
     // ...but a claim resolved AT the ts(200) execution epoch takes the work scheduled by then. The
     // boundary is inclusive, so the item scheduled exactly at 200 is due; the one at 300 is not.
-    let due = pq
+    let due = fireweed
         .claim_at(
             &q,
             ClaimAt::new(10, 60_000).eligibility_time(UtcTimestamp::new(200, 0).unwrap()),
@@ -1134,13 +1200,13 @@ async fn claim_at_resolves_eligibility_at_an_explicit_epoch_over_memory() {
     // The eligibility epoch selected work without disturbing the clock: the remaining item is still not
     // due at operational time, and a plain claim still sees an empty queue.
     assert!(
-        pq.claim(&q, 10, 60_000).await.unwrap().is_empty(),
+        fireweed.claim(&q, 10, 60_000).await.unwrap().is_empty(),
         "claim_at left the handle's clock untouched"
     );
 
     // lease_time is independently steerable: select the last item at its epoch, but anchor its lease to a
     // caller-supplied operational instant.
-    let late = pq
+    let late = fireweed
         .claim_at(
             &q,
             ClaimAt::new(10, 60_000)

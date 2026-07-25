@@ -23,14 +23,14 @@ ddx:
 > written. What shipped since:
 >
 > - `objectlog/hybrid` landed and was released in **v0.6.0** (docs/releases/v0.6.0.md), wired through
->   `PQUEUE_PROJECTION_BACKEND=hybrid` (`crates/pqueue-server/src/env_config.rs`) with the
+>   `FIREWEED_PROJECTION_BACKEND=hybrid` (`crates/fireweed-server/src/env_config.rs`) with the
 >   SQLite-first apply, projection-image hydration recovery, fail-closed poisoning, and durable
 >   request-id replay this plan specifies.
 > - Two sibling profiles followed under TD-004: `objectlog/hybrid-strict` (SQLite durable **before**
 >   memory apply on the group-commit path) and `objectlog/hybrid-async` (deferred async SQLite
 >   checkpoint with debt/backpressure admission gating, high-water withholding, and debt-gated
 >   terminal-item retention advancement), both wired in `env_config.rs`/`lib.rs` and implemented in
->   `crates/pqueue-sqlite/src/relational.rs`, current through **v0.11.0**.
+>   `crates/fireweed-sqlite/src/relational.rs`, current through **v0.11.0**.
 > - Known open residual (unchanged from this plan's snapshot-authority stance): object-log
 >   **segment-object reclamation remains deferred** pending a bounded-recovery retention floor
 >   (bead `pqueue-b5cc2bc7`); segment expiry stays disabled, exactly as required below.
@@ -41,7 +41,7 @@ Implement the missing `Hybrid` projection axis described by ADR-012: a single
 `ProjectionStore` that serves hot reads and pre-commit validation from the
 in-process `ProjectionData` model while durably applying every committed batch to
 `SqliteProjectionStore`. The first wired runtime target is
-`PQUEUE_LOG_BACKEND=objectlog` with `PQUEUE_PROJECTION_BACKEND=hybrid`.
+`FIREWEED_LOG_BACKEND=objectlog` with `FIREWEED_PROJECTION_BACKEND=hybrid`.
 
 This is not already complete. The current repository has `objectlog/inmemory`
 and `objectlog/sqlite` as separate runtime profiles. It does not have one
@@ -50,16 +50,16 @@ SQLite snapshot/high-water recovery.
 
 ## Current State
 
-- `pqueue-projection::InMemoryProjection` is the fastest read model and already
+- `fireweed-projection::InMemoryProjection` is the fastest read model and already
   implements the full `ProjectionStore` surface over per-queue `ProjectionData`.
-- `pqueue-sqlite::SqliteProjectionStore` persists queue definitions, item state,
+- `fireweed-sqlite::SqliteProjectionStore` persists queue definitions, item state,
   metrics, commit-class state, and per-queue recovery high-water. Its
   `apply_committed_batch` applies a sealed segment in one SQLite transaction and
   idempotently skips already-applied prefixes.
-- `pqueue-engine::ComposedBackend` already has a group-commit path that buffers
+- `fireweed-engine::ComposedBackend` already has a group-commit path that buffers
   pushes, force-seals before read-modify-write operations, applies each sealed
   batch through `ProjectionStore::apply`, and acknowledges only after apply.
-- `pqueue-server` currently parses projection values `inmemory` and `sqlite`.
+- `fireweed-server` currently parses projection values `inmemory` and `sqlite`.
   It wires `objectlog/inmemory` and `objectlog/sqlite`, but not `hybrid`.
 - Existing tests cover SQLite batch atomicity, segmented object-log CAS and
   group commit, conformance suites, and release-tier object-log performance
@@ -70,7 +70,7 @@ SQLite snapshot/high-water recovery.
 
 In scope:
 
-- Add a `HybridProjectionStore` implementation, preferably in `pqueue-sqlite`,
+- Add a `HybridProjectionStore` implementation, preferably in `fireweed-sqlite`,
   that wraps `InMemoryProjection` plus `SqliteProjectionStore`.
 - Add recovery helpers needed to rebuild the hot in-memory projection from the
   durable SQLite projection high-water and the object-log tail.
@@ -85,7 +85,7 @@ In scope:
 
 Out of scope:
 
-- Changing pqueue's queue-as-shard ownership model.
+- Changing fireweed's queue-as-shard ownership model.
 - Using the object-storage segmented log as a tiny per-operation commit log.
   Normal data-plane traffic must wait for packed object-log group commit before
   durable acknowledgement. Rare explicit sync/control flushes are permitted, but
@@ -132,7 +132,7 @@ therefore needs a recovery path that:
 The concrete mechanism is a new projection-image seam, not an implementation
 choice left to a worker:
 
-- add a typed `ProjectionImage` import/export API in `pqueue-projection`;
+- add a typed `ProjectionImage` import/export API in `fireweed-projection`;
 - add `ProjectionData::from_image(definition, image)` and
   `ProjectionData::to_image()` tests that round-trip item lifecycle, lease
   state, indexes, side records, instance fences, queue paused state, and metrics;
@@ -228,8 +228,8 @@ for the hybrid profile, which is not acceptable for release.
 
 ### Runtime Wiring
 
-`PQUEUE_PROJECTION_BACKEND=hybrid` uses the same
-`PQUEUE_SQLITE_PROJECTION_PATH` as `sqlite`. The server should reject unsupported
+`FIREWEED_PROJECTION_BACKEND=hybrid` uses the same
+`FIREWEED_SQLITE_PROJECTION_PATH` as `sqlite`. The server should reject unsupported
 log pairings initially unless they are intentionally implemented and tested.
 The release target is:
 
@@ -239,9 +239,9 @@ The release target is:
 
 Runtime wiring will use the generic group-commit composition:
 
-`ComposedBackend<pqueue_objectlog::ObjectLog, HybridProjectionStore, InProcessControlPlane>`
+`ComposedBackend<fireweed_objectlog::ObjectLog, HybridProjectionStore, InProcessControlPlane>`
 
-The existing `pqueue-objectlog::ObjectLog::open_group_commit` log axis exposes
+The existing `fireweed-objectlog::ObjectLog::open_group_commit` log axis exposes
 the segmented production substrate, segment configuration, counters, durable
 queue definitions, and `LogStore` group-commit hooks. The server bead must add a
 generic flusher task that calls `flush_tick` at
@@ -291,7 +291,7 @@ quiet-host or fixed-speed support gate.
    docs with the hybrid contract, failure model, env surface, snapshot authority,
    durable request-id replay, and release gates.
 2. Projection image seam: add `ProjectionImage` export/import APIs and tests in
-   `pqueue-projection` and `pqueue-sqlite`.
+   `fireweed-projection` and `fireweed-sqlite`.
 3. Hybrid projection core: implement `HybridProjectionStore`, SQLite-first
    apply, poison-on-memory-failure, hot-read delegation, recovery high-water,
    and focused divergence tests.
@@ -322,15 +322,15 @@ must include at least:
 - `cargo fmt --check`
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - `cargo test --workspace --all-features`
-- `cargo test -p pqueue-sqlite --test sqlite_projection_tests -- --nocapture`
-- `cargo test -p pqueue-server --test server -- --nocapture`
-- `cargo test -p pqueue-objectlog --test composed_group_commit -- --nocapture`
-- `cargo test -p pqueue-conformance`
+- `cargo test -p fireweed-sqlite --test sqlite_projection_tests -- --nocapture`
+- `cargo test -p fireweed-server --test server -- --nocapture`
+- `cargo test -p fireweed-objectlog --test composed_group_commit -- --nocapture`
+- `cargo test -p fireweed-conformance`
 - hybrid-specific chaos tests with injected apply/recovery failures, including
   fail-closed poisoning after SQLite success and memory failure
 - hybrid-specific request-id replay tests for committed-but-unreturned pushes
 - hybrid-specific server/runtime tests for
-  `PQUEUE_LOG_BACKEND=objectlog PQUEUE_PROJECTION_BACKEND=hybrid`
+  `FIREWEED_LOG_BACKEND=objectlog FIREWEED_PROJECTION_BACKEND=hybrid`
 - release-tier ignored performance runs that write evidence to `docs/perf/`
 
 The release is not complete until the docs state the exact version, the hybrid
@@ -359,8 +359,8 @@ profile is wired in the runtime contract, the release artifact is published, and
 
 ## Open Questions
 
-- Whether `HybridProjectionStore` should live entirely in `pqueue-sqlite` or in a
-  small new composition crate. Default: `pqueue-sqlite`, because it owns
-  `SqliteProjectionStore` and already depends on `pqueue-projection`.
+- Whether `HybridProjectionStore` should live entirely in `fireweed-sqlite` or in a
+  small new composition crate. Default: `fireweed-sqlite`, because it owns
+  `SqliteProjectionStore` and already depends on `fireweed-projection`.
 - The exact release version. Default: the next minor after `v0.5.0`, because this
   adds a new supported storage profile. (Resolved: shipped as `v0.6.0`.)

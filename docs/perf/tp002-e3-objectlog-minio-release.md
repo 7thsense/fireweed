@@ -13,13 +13,13 @@ evidence. This preparation change deliberately does not fabricate replacement me
 Start a fresh MinIO instance with a tmpfs data volume:
 
 ```bash
-docker run -d --name pqe3-minio \
+docker run -d --name fireweed-e3-minio \
   --tmpfs /data:rw,size=8g \
   -e MINIO_ROOT_USER=minioadmin \
   -e MINIO_ROOT_PASSWORD=minioadmin \
   minio/minio server /data
-IP=$(docker inspect pqe3-minio --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
-PQUEUE_S3_TEST_ENDPOINT="http://$IP:9000" scripts/perf/tp002-e3-minio.sh
+IP=$(docker inspect fireweed-e3-minio --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+FIREWEED_S3_TEST_ENDPOINT="http://$IP:9000" scripts/perf/tp002-e3-minio.sh
 ```
 
 The wrapper fixes the release workload at 10,000,000 resident items, 100,000 single-item acknowledgement

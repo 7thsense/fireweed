@@ -60,51 +60,52 @@ fn item(priority: i64) -> NewItem {
 
 #[tokio::test]
 async fn same_request_id_same_body_replays_without_a_second_append() {
-    let pq = RuntimeCore::new(
+    let fireweed = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     let q = qkey();
-    pq.create_queue(qdef(60_000)).await.unwrap();
+    fireweed.create_queue(qdef(60_000)).await.unwrap();
     let rid = RequestId::new("snorri-txn-1").unwrap();
 
-    let first = pq
+    let first = fireweed
         .push_with_request_id(&q, rid.clone(), item(10))
         .await
         .unwrap();
     // Replay: identical body under the same request id returns the SAME id and appends nothing.
-    let replay = pq
+    let replay = fireweed
         .push_with_request_id(&q, rid.clone(), item(10))
         .await
         .unwrap();
     assert_eq!(first, replay, "replay must return the original id");
 
     // Exactly one item exists (the replay did not enqueue a second one).
-    let m = pq.metrics(&q).await.unwrap();
+    let m = fireweed.metrics(&q).await.unwrap();
     assert_eq!(m.pending, 1, "replay must not enqueue a duplicate");
 }
 
 #[tokio::test]
 async fn same_request_id_different_body_conflicts() {
-    let pq = RuntimeCore::new(
+    let fireweed = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     let q = qkey();
-    pq.create_queue(qdef(60_000)).await.unwrap();
+    fireweed.create_queue(qdef(60_000)).await.unwrap();
     let rid = RequestId::new("snorri-txn-2").unwrap();
 
-    pq.push_with_request_id(&q, rid.clone(), item(10))
+    fireweed
+        .push_with_request_id(&q, rid.clone(), item(10))
         .await
         .unwrap();
     // A different body under the same request id is a structural conflict — nothing appended.
-    let err = pq
+    let err = fireweed
         .push_with_request_id(&q, rid.clone(), item(99))
         .await
         .unwrap_err();
     assert_eq!(err, EngineError::RequestIdConflict);
 
-    let m = pq.metrics(&q).await.unwrap();
+    let m = fireweed.metrics(&q).await.unwrap();
     assert_eq!(
         m.pending, 1,
         "the conflicting body must not enqueue anything"
@@ -114,20 +115,20 @@ async fn same_request_id_different_body_conflicts() {
 #[tokio::test]
 async fn retry_after_retention_window_is_a_fresh_push() {
     let clock = Arc::new(ManualClock::at(0));
-    let pq = RuntimeCore::new(Arc::new(composed_memory_backend()), clock.clone());
+    let fireweed = RuntimeCore::new(Arc::new(composed_memory_backend()), clock.clone());
     let q = qkey();
     // Short retention so a clock advance crosses the expiry boundary.
-    pq.create_queue(qdef(1_000)).await.unwrap();
+    fireweed.create_queue(qdef(1_000)).await.unwrap();
     let rid = RequestId::new("snorri-txn-3").unwrap();
 
-    let first = pq
+    let first = fireweed
         .push_with_request_id(&q, rid.clone(), item(10))
         .await
         .unwrap();
 
     // Advance past the retention window (1_000ms): the retained entry is now expired.
     clock.set(5);
-    let after_expiry = pq
+    let after_expiry = fireweed
         .push_with_request_id(&q, rid.clone(), item(10))
         .await
         .unwrap();
@@ -138,27 +139,27 @@ async fn retry_after_retention_window_is_a_fresh_push() {
         first, after_expiry,
         "an expired request id must execute fresh, not replay"
     );
-    let m = pq.metrics(&q).await.unwrap();
+    let m = fireweed.metrics(&q).await.unwrap();
     assert_eq!(m.pending, 2, "expired retry must enqueue a second item");
 }
 
 #[tokio::test]
 async fn distinct_request_ids_each_append() {
-    let pq = RuntimeCore::new(
+    let fireweed = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
     let q = qkey();
-    pq.create_queue(qdef(60_000)).await.unwrap();
+    fireweed.create_queue(qdef(60_000)).await.unwrap();
 
-    let a = pq
+    let a = fireweed
         .push_with_request_id(&q, RequestId::new("a").unwrap(), item(10))
         .await
         .unwrap();
-    let b = pq
+    let b = fireweed
         .push_with_request_id(&q, RequestId::new("b").unwrap(), item(10))
         .await
         .unwrap();
     assert_ne!(a, b, "distinct request ids are distinct logical requests");
-    assert_eq!(pq.metrics(&q).await.unwrap().pending, 2);
+    assert_eq!(fireweed.metrics(&q).await.unwrap().pending, 2);
 }

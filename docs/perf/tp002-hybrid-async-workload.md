@@ -1,7 +1,7 @@
 # TP-002 hybrid-async workload harness
 
 **Bead:** `pqueue-3d5bb3df`. **Suite:**
-`crates/pqueue-server/tests/performance_object_log_hybrid_tests.rs`.
+`crates/fireweed-server/tests/performance_object_log_hybrid_tests.rs`.
 
 This document pins the seeded workload generator, cache/concurrency/batch sweep,
 and resident scale matrix that let the hybrid-async perf suite emit release-grade
@@ -45,7 +45,7 @@ the cross product of:
   (projection pre-touched by fully loading+draining a warmup queue first);
 - **concurrency** — `N` tokio producer tasks over disjoint workload slices, then
   `N` consumer tasks claiming+finalizing until every resident is terminal
-  (swept over `{1, 4}`, `PQUEUE_HYBRID_CONCURRENCY`-shaped);
+  (swept over `{1, 4}`, `FIREWEED_HYBRID_CONCURRENCY`-shaped);
 - **batch** — `(load_batch, claim_batch)` swept over `{(50,50), (200,200)}`.
 
 It emits **one ledger cell per `(cache, concurrency, batch)`** — 8 cells — each
@@ -56,14 +56,14 @@ injected retry/error counts + distinct payload sizes for the seeded workload.
 
 `performance_object_log_hybrid_scale_matrix` parametrizes resident over
 **{10k, 100k, 1M, 10M}** and runs **>= 5 repetitions per release cell**
-(`PQUEUE_HYBRID_SCALE_REPS`, min 5).
+(`FIREWEED_HYBRID_SCALE_REPS`, min 5).
 
 ### Capacity guard
 
 Each scale is gated by an RSS capacity guard: estimated resident RSS
 (`EST_BYTES_PER_ITEM = 4096` × resident) must fit the budget, else the scale is
-**skipped-with-log**. The budget is `PQUEUE_HYBRID_RSS_BUDGET_BYTES` if set; in the
-release lane (`PQUEUE_PERF_ENV=1`) it defaults to 3/4 of `/proc/meminfo`
+**skipped-with-log**. The budget is `FIREWEED_HYBRID_RSS_BUDGET_BYTES` if set; in the
+release lane (`FIREWEED_PERF_ENV=1`) it defaults to 3/4 of `/proc/meminfo`
 `MemAvailable`; otherwise a conservative fixed 128 MiB, which admits the 10k scale
 and skips 100k/1M/10M so the default lane stays fast. A provisioned perf box runs
 the larger scales by raising the budget (or via detected memory in the release
@@ -87,23 +87,23 @@ Each cell records `reps`, `trimmed_reps`, `outlier_trim_policy`,
 
 ```text
 # AC1 — distribution pins
-cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests \
+cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests \
   performance_object_log_hybrid_distribution_pins -- --nocapture
 
 # AC2 — warm/cold × concurrency × batch cells
-cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests \
+cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests \
   performance_object_log_hybrid_cache_matrix_smoke -- --nocapture
 
 # AC3 — resident scale matrix, >=5 reps, capacity guard
-cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests \
+cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests \
   performance_object_log_hybrid_scale_matrix -- --nocapture
 
 # Release lane (provisioned box): raise the budget / reps as needed
-PQUEUE_PERF_ENV=1 PQUEUE_HYBRID_RSS_BUDGET_BYTES=68719476736 \
-  cargo test -p pqueue-server --release --test performance_object_log_hybrid_tests \
+FIREWEED_PERF_ENV=1 FIREWEED_HYBRID_RSS_BUDGET_BYTES=68719476736 \
+  cargo test -p fireweed-server --release --test performance_object_log_hybrid_tests \
   performance_object_log_hybrid_scale_matrix -- --nocapture
 ```
 
-Ledger rows land under `$PQUEUE_LEDGER_DIR/<suite>.jsonl` (or
-`target/pqueue-ledger/<suite>.jsonl`) and are strict-validated by
-`pqueue_release::verify_ledger`.
+Ledger rows land under `$FIREWEED_LEDGER_DIR/<suite>.jsonl` (or
+`target/fireweed-ledger/<suite>.jsonl`) and are strict-validated by
+`fireweed_release::verify_ledger`.

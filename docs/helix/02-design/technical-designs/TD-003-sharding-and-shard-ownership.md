@@ -24,7 +24,7 @@ ddx:
 
 ## Scope
 
-This technical design defines how a horizontally scaled pqueue deployment
+This technical design defines how a horizontally scaled fireweed deployment
 assigns ownership of whole queues to single-writer owners without an external
 coordinator, and how a queue's local progress bound is preserved on its one
 owner. Per ADR-008, **the queue is the unit of sharding**: a whole queue is
@@ -79,7 +79,7 @@ Out of scope:
 
 ## Technical Approach
 
-**Strategy**: pqueue achieves horizontal scale by distributing whole queues
+**Strategy**: fireweed achieves horizontal scale by distributing whole queues
 across owner nodes and giving exactly one worker authority over each queue at a
 time (ADR-008). Authority is not negotiated between nodes; it is *read* from the
 control plane and *enforced* at the durable log via a monotonic epoch fence.
@@ -118,7 +118,7 @@ partitions it across multiple queues at the application layer (ADR-008).
   honoring the bound for the queue's items (TD-001) and (ii) the queue having a
   live owner (the owner-liveness guard below).
 - **No external coordinator.** Assignment, leases, and epochs live in the
-  control plane. pqueue runs no membership, election, or consensus protocol.
+  control plane. fireweed runs no membership, election, or consensus protocol.
 
 **Trade-offs**:
 
@@ -159,7 +159,7 @@ without any co-residency flag.
 
 | Rule | Normative text |
 |------|----------------|
-| Owner set source | The set of candidate owner workers is registered in the `ControlPlaneStore` (`pqueue_workers` or equivalent, see Data Model) with a heartbeat. pqueue MUST NOT discover workers peer-to-peer. The **live owner set** is the set of registered owners whose `heartbeat_at + heartbeat_ttl_ms > now()`. |
+| Owner set source | The set of candidate owner workers is registered in the `ControlPlaneStore` (`fireweed_workers` or equivalent, see Data Model) with a heartbeat. fireweed MUST NOT discover workers peer-to-peer. The **live owner set** is the set of registered owners whose `heartbeat_at + heartbeat_ttl_ms > now()`. |
 | Assignment function | The control plane MUST compute a deterministic **target owner** for each queue from `((tenant_id, queue_id), live_owner_set)` (e.g. rendezvous / highest-random-weight hashing) so that adding or removing one owner moves only an `O(queues / owners)` fraction of queues. The function MUST be a pure function of `((tenant_id, queue_id), live_owner_set)`. |
 | Target vs active owner | The function's output is the **target owner**. The **active owner** is whoever currently holds the non-expired lease in the authority record. These MAY differ transiently (a new target is selected but the previous owner's lease has not yet expired or drained). Safety never depends on them agreeing; see Queue Lease Lifecycle and the "Single Authoritative Fencing Rule". |
 | Authority record | For each queue the control plane MUST record at most one active owner lease: `(active_owner_id, assignment_epoch, lease_expires_at, state, target_owner_id)`. |
@@ -268,8 +268,8 @@ requirement.
 
 This design is written in terms of an abstract "owner worker." Per ADR-007 there
 are **two** driving adapters that realize an owner-runtime over the *same* engine
-coordination: the RESP server (`pqueue-resp`) and the **in-process Rust library**
-(`pqueue`, `Pqueue`). ADR-009 makes both first-class owners — **neither is exempt
+coordination: the RESP server (`fireweed-resp`) and the **in-process Rust library**
+(`fireweed`, `Fireweed`). ADR-009 makes both first-class owners — **neither is exempt
 from resolve + fence**, and coordination is enforced in the engine *below the
 ports*, not in either adapter. The rules below constrain the library realization
 specifically (closing the gap where the library delegated straight to the
@@ -278,14 +278,14 @@ unchanged from the rest of this design.
 
 | Rule | Normative text |
 |------|----------------|
-| Library is an owner | A `Pqueue` handle MUST carry an `OwnerId` and a `ControlPlaneStore`, resolve ownership, and operate under an acquired, fenced lease for every queue-addressed op — identically to the RESP server. It MUST NOT append to a queue it has not acquired-and-fenced. A single embedded sole-owner deployment is the degenerate case: constant ownership and a constant (always-current) epoch, so single-instance behavior is unchanged. |
+| Library is an owner | A `Fireweed` handle MUST carry an `OwnerId` and a `ControlPlaneStore`, resolve ownership, and operate under an acquired, fenced lease for every queue-addressed op — identically to the RESP server. It MUST NOT append to a queue it has not acquired-and-fenced. A single embedded sole-owner deployment is the degenerate case: constant ownership and a constant (always-current) epoch, so single-instance behavior is unchanged. |
 | Cached acquire-time epoch (MUST) | The `expected_epoch` carried on every data-plane append (`PushPort`/`ClaimPort`/`FinalizePort` -> `append_batch`) MUST be the epoch the owner **cached at `acquire_queue_lease`** (`OwnedSession.fence_epoch`), NOT a value re-read from the control plane / current log epoch at append time. Re-reading the current epoch defeats the fence (a superseded owner would read the new epoch and pass) and is therefore forbidden. The fence MUST be evaluated **at commit time inside the append's atomic unit of work**, so an owner superseded after it resolved but before it commits is rejected `queue-epoch-stale` mid-operation (no resolve->commit TOCTOU). |
 | Single durable epoch (MUST) | For the cached-epoch fence to bind, the control-plane `assignment_epoch` and the storage append-fence epoch MUST be **one durable value advanced atomically at acquire** — already specified as the same token (Data Model) and bound in the `postgres_native` acquire transaction (Backend Profile Bindings). An implementation that keeps two separately-advanced counters does NOT satisfy this rule. |
 | Data-path fail-closed (MUST) | Lease liveness MUST fail closed on the **data path**, not only the control path. If a library owner stalls (host GC pause) past `lease_expires_at` and a peer reclaims the queue at a greater epoch, the stalled owner's next append MUST be rejected by the cached-epoch fence regardless of whether its renew loop has run. The cached session is advisory for liveness; the append fence is the safety authority. |
 | Target-affinity (MUST) | The library policy layer MUST restrict `acquire_queue_lease` to the queue's deterministic `target_owner` (Queue-to-owner) and MUST NOT acquire a queue a live peer is the target for. A queue held by a different live owner yields an owned-elsewhere resolution (rendered `-MOVED` by RESP, an `OwnedElsewhere` value by the library); the library MUST NOT contend by acquiring a *live* lease (online handoff is `begin_drain`). The reference in-memory control plane's *cooperative* acquire (admits any live owner) is a reference-impl simplification; target-affinity is the normative requirement **both** adapters MUST apply so they cannot thrash a queue against each other. After a renew/acquire timeout the owner MUST **re-resolve**, never blindly retry the non-idempotent acquire. |
 | Bounded per-node coordination (MUST) | A library process owning many queues MUST keep renew/heartbeat and ownership state bounded per node — a single bounded renew/heartbeat driver, never one task/connection per queue (Queue density). |
 
-**Multi-instance shared-store competition (library).** Multiple `Pqueue` instances
+**Multi-instance shared-store competition (library).** Multiple `Fireweed` instances
 sharing one durable backend, competing for per-queue leases, is the library
 realization of this design. It is correct **only** on a backend that presents the
 single atomic acquire->fence epoch above — `postgres_native` once that binding
@@ -294,7 +294,7 @@ backend with no shared durable control plane (sqlite-local) are **single-process
 only**. `object_log_sqlite_projection` is **single-owner only** until the
 manifest-CAS acquire→fence (Control-Plane Pluggability) lands and per-entry epochs
 are recorded — committed build direction per ADR-008 §4: the object log is the
-intended per-queue multi-node fencing/coordination substrate. A `Pqueue` constructed for multi-owner operation MUST runtime-refuse
+intended per-queue multi-node fencing/coordination substrate. A `Fireweed` constructed for multi-owner operation MUST runtime-refuse
 a backend that does not present the atomic acquire->fence capability.
 
 ## Graceful Drain
@@ -385,10 +385,10 @@ invariant in the engine, and per-group fairness is a routing concern served by
 
 | Rule | Normative text |
 |------|----------------|
-| Source | The owner maintains oldest-eligible age in the per-group summary projection (`pqueue_group_summary`, keyed `(tenant_id, queue_id, group_key)`, maintained transactionally with item mutations). `oldest_eligible_at` per row is authoritative and exact; eligible *counts* MAY be lagged/approximate (per the projection consistency model). |
+| Source | The owner maintains oldest-eligible age in the per-group summary projection (`fireweed_group_summary`, keyed `(tenant_id, queue_id, group_key)`, maintained transactionally with item mutations). `oldest_eligible_at` per row is authoritative and exact; eligible *counts* MAY be lagged/approximate (per the projection consistency model). |
 | Queue oldest-eligible | `metrics.oldest_eligible_age_ms` (API-001) MUST equal `now() - min(oldest_eligible_at)` over the queue's own summary rows on its owner — a single local read. The per-group rows store one queue's state; this min imposes no per-group invariant. |
 | Queue risk count | `metrics.progress_bound_risk_count` MUST be the count of eligible items whose eligible age is near `progress_bound_ms`. This MAY be approximate when documented (API-001 already allows approximate counts); the oldest-eligible age MUST be authoritative. |
-| Read cost | The value MUST be served from the maintained summary projection: a bounded rank-index read on the owner, never a full-table scan of `pqueue_items`. |
+| Read cost | The value MUST be served from the maintained summary projection: a bounded rank-index read on the owner, never a full-table scan of `fireweed_items`. |
 | Read semantics | The read carries the summary `as_of` watermark so callers can reason about staleness; the `oldest_eligible_age_ms` is "exact as of `as_of`". |
 | Progress enforcement (state vs owner) | TD-003 supplies the per-queue oldest-eligible state and the owner-liveness guard. The decision of how the owner orders claim capacity to keep the bound is the TD-001 claim planner's responsibility: the planner MUST honor the queue-global `progress_bound_ms` (claim a near-violation item before the bound via the queue's progress-protection window — TD-002 claim shape). |
 | Owner-liveness guard (MUST) | The control plane MUST treat "a queue with eligible work has no live owner for longer than its oldest-eligible item's remaining budget against `progress_bound_ms`" as a progress-bound risk. The reassignment path (target-owner recompute + acquire) is the mechanism that restores a live owner; TD-003 requires this guard to exist and to be observable (FR-41). |
@@ -548,7 +548,7 @@ OwnerRegistration {
 ```
 
 The `assignment_epoch` here is the SAME token already threaded through
-`CommandPosition.backend_epoch` and `pqueue_commands.assignment_epoch`
+`CommandPosition.backend_epoch` and `fireweed_commands.assignment_epoch`
 (TD-001/TD-002). TD-003 only specifies *how it advances* (ownership change),
 *who allocates it* (the control plane on `acquire_queue_lease`), and *when it
 becomes binding on the log* (durably fenced before the new lease is usable, see
@@ -648,9 +648,9 @@ TD-003 is not satisfied until these scenarios pass for every backend profile.
 | Group co-residency by construction | All items of one `group_key` are owned by the queue's single owner; `whole_group`/`whole_cohort` claims (G1/G6) are owner-local and atomic with no co-residency flag. |
 | Stalled-queue visibility | A queue left unowned past `progress_bound_ms` is surfaced as a progress-bound violation in metrics and `DiscoverActiveScopes`. |
 | Queue density (>=1000 active queues/node) | A single node owns the leases for >=1000 concurrently active queues; lease renewal stays O(owned queues / interval) via batched per-node writes (not per-queue tasks/connections), background sweeps/aggregation run as bounded shared per-node jobs, every active queue meets its progress bound, any one queue can reach the per-queue floor, and there is no cross-queue degradation as the active-queue count grows to 1000 (`queue_density_single_node_tests`, TP-002 E2). |
-| In-process library owner fenced at commit (ADR-009) | A `Pqueue` owner holding cached epoch E continues to append (push/claim/finalize) after a peer acquired E+1; the append MUST fail `queue-epoch-stale` **at commit**, MUST NOT mutate state, and MUST use the cached epoch (NOT a re-read of current). A sole-owner `Pqueue` is never spuriously fenced. |
-| Library data-path fail-closed on stall (ADR-009) | A `Pqueue` owner whose lease expired during a simulated stall, after a peer reclaimed the queue, has its next append fenced **regardless** of whether its renew loop has run (the cached-epoch fence, not the renew loop, is the authority). |
-| Multi-instance target-affinity, no thrash (ADR-009) | Two `Pqueue` instances over a shared `postgres_native` store: only the deterministic `target_owner` acquires; requests at a non-target return `OwnedElsewhere` (no contended acquire of a live lease); the `assignment_epoch` does not ping-pong; a superseded instance is fenced; ownership migrates to a new target only on expiry/drain. A multi-owner `Pqueue` on a non-atomic-acquire backend is runtime-refused. |
+| In-process library owner fenced at commit (ADR-009) | A `Fireweed` owner holding cached epoch E continues to append (push/claim/finalize) after a peer acquired E+1; the append MUST fail `queue-epoch-stale` **at commit**, MUST NOT mutate state, and MUST use the cached epoch (NOT a re-read of current). A sole-owner `Fireweed` is never spuriously fenced. |
+| Library data-path fail-closed on stall (ADR-009) | A `Fireweed` owner whose lease expired during a simulated stall, after a peer reclaimed the queue, has its next append fenced **regardless** of whether its renew loop has run (the cached-epoch fence, not the renew loop, is the authority). |
+| Multi-instance target-affinity, no thrash (ADR-009) | Two `Fireweed` instances over a shared `postgres_native` store: only the deterministic `target_owner` acquires; requests at a non-target return `OwnedElsewhere` (no contended acquire of a live lease); the `assignment_epoch` does not ping-pong; a superseded instance is fenced; ownership migrates to a new target only on expiry/drain. A multi-owner `Fireweed` on a non-atomic-acquire backend is runtime-refused. |
 
 ## Risks
 

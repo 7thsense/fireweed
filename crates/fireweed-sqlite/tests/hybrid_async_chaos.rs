@@ -160,7 +160,7 @@ fn lag(commands: u64) -> HybridAsyncDebt {
 
 fn temp_path(tag: &str) -> std::path::PathBuf {
     let p = std::env::temp_dir().join(format!(
-        "pqueue-hybrid-async-chaos-{tag}-{}.db",
+        "fireweed-hybrid-async-chaos-{tag}-{}.db",
         std::process::id()
     ));
     for suffix in ["", "-wal", "-shm"] {

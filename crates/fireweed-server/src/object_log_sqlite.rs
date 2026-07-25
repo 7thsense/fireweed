@@ -94,7 +94,7 @@ fn record_replay_progress(samples: &mut Vec<u64>, sequence: u64) {
 /// recovery-window warning so an operator can investigate a projection that has fallen far behind the log.
 ///
 /// This is the in-code default; the composition root may override it from typed [`Config`](crate::Config)
-/// (populated by the bin from `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS`) via [`Self::with_recovery_max_tail`]. The
+/// (populated by the bin from `FIREWEED_RECOVERY_MAX_TAIL_COMMANDS`) via [`Self::with_recovery_max_tail`]. The
 /// backend itself never reads the process environment.
 pub const DEFAULT_RECOVERY_MAX_TAIL: u64 = 1_000_000;
 
@@ -515,7 +515,7 @@ impl ObjectLogSqliteBackend {
     }
 
     /// Override the recovery-window budget (max tail commands) — the explicit form of the
-    /// `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS` env knob, used by tests and embedders.
+    /// `FIREWEED_RECOVERY_MAX_TAIL_COMMANDS` env knob, used by tests and embedders.
     pub fn with_recovery_max_tail(mut self, max_tail: u64) -> Self {
         self.recovery_max_tail = max_tail;
         self
@@ -1204,7 +1204,7 @@ pub struct SegmentedObjectLogSqliteBackend {
     /// Recovery-window budget (max tail commands) before a reopen logs a recovery-window warning.
     recovery_max_tail: u64,
     /// Opt-in group-commit telemetry: when set, the flusher logs the segment counters ~1x/s. Set by the
-    /// composition root from typed `Config` (populated by the bin from `PQUEUE_DEBUG_SEGMENTS`); the backend
+    /// composition root from typed `Config` (populated by the bin from `FIREWEED_DEBUG_SEGMENTS`); the backend
     /// never reads the process environment.
     debug_segments: bool,
     /// Last per-queue snapshot-tail recovery telemetry (proof the reopen avoided a full-genesis replay).
@@ -1353,13 +1353,13 @@ impl SegmentedObjectLogSqliteBackend {
     }
 
     /// Override the recovery-window budget (max tail commands) — the explicit form of the
-    /// `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS` env knob, used by tests and embedders.
+    /// `FIREWEED_RECOVERY_MAX_TAIL_COMMANDS` env knob, used by tests and embedders.
     pub fn with_recovery_max_tail(mut self, max_tail: u64) -> Self {
         self.recovery_max_tail = max_tail;
         self
     }
 
-    /// Enable opt-in group-commit telemetry (the explicit form of the `PQUEUE_DEBUG_SEGMENTS` env knob):
+    /// Enable opt-in group-commit telemetry (the explicit form of the `FIREWEED_DEBUG_SEGMENTS` env knob):
     /// when `true`, the flusher logs segment counters ~1x/s. Set by the composition root from typed `Config`.
     pub fn with_debug_segments(mut self, debug_segments: bool) -> Self {
         self.debug_segments = debug_segments;
@@ -2477,7 +2477,7 @@ impl ProjectionRead for SegmentedObjectLogSqliteBackend {
 // sealed segment + manifest entry is still the durable boundary (eventual-apply class preserved; recovery
 // replays `read_all` into `ProjectionData` on `create_queue`); the per-segment projection write is now a
 // cheap in-memory `apply_command` per command rather than a batched SQLite transaction. This is the fast
-// path selected by `PQUEUE_OBJECT_LOG_MODE=segmented` + `PQUEUE_PROJECTION_BACKEND=inmemory`.
+// path selected by `FIREWEED_OBJECT_LOG_MODE=segmented` + `FIREWEED_PROJECTION_BACKEND=inmemory`.
 
 /// Group-committing object-log authority (`SegmentedObjectLog<LocalFsBlobStore>`) + in-memory
 /// `ProjectionData`. Eventual-apply durability class.
@@ -3930,7 +3930,7 @@ mod recovery_tests {
                 .map(|d| d.as_nanos())
                 .unwrap_or(0);
             let path = std::env::temp_dir().join(format!(
-                "pqueue-recovery-{label}-{}-{n}-{nanos}",
+                "fireweed-recovery-{label}-{}-{n}-{nanos}",
                 std::process::id()
             ));
             std::fs::create_dir_all(&path).unwrap();

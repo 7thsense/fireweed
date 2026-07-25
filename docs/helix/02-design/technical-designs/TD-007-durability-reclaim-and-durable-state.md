@@ -101,7 +101,7 @@ unit of work** as candidate selection — no item is selected-but-not-leased.
 ## 3. ReclaimDriver
 
 Redis evaluates lease idle-time lazily inside `XCLAIM`/`XAUTOCLAIM`, so a quiet stream needs no timer.
-pqueue models several lifecycle transitions as commands that **something must fire**; without a driver,
+fireweed models several lifecycle transitions as commands that **something must fire**; without a driver,
 an item on a queue with no client traffic never transitions and orphans. The `ReclaimDriver` fires:
 
 | Transition | Trigger | Command |
@@ -111,8 +111,8 @@ an item on a queue with no client traffic never transitions and orphans. The `Re
 | Delay / recurrence promotion | `now > not_before` (incl. re-armed recurring items) | promote to eligible |
 | Progress-bound metering | eligible age > `progress_bound_ms` | **launch = meter-only:** emit a `progress_bound_breach` metric/event; **no lifecycle transition** (D2 resolved — escalation/auto-action is post-launch) |
 
-**Placement (hexagonal).** The transition *logic* is domain (`pqueue-engine`); the *clock/driving* is
-the composition root's: `pqueue-server` (and an async library embedding) spawns a periodic task; a
+**Placement (hexagonal).** The transition *logic* is domain (`fireweed-engine`); the *clock/driving* is
+the composition root's: `fireweed-server` (and an async library embedding) spawns a periodic task; a
 **synchronous** library embedding drives it via an explicit `engine.tick(now) -> TickReport` entry
 point. `tick(now)` is **idempotent** (re-running with the same/earlier `now` makes no further
 transitions) and **serializes against claim** (a reclaim and a concurrent claim of the same item

@@ -35,18 +35,18 @@ plane), TD-003 (sharding & ownership), TD-006 (RESP `route`), TD-007 (durability
 
 ## Context
 
-ADR-007 ships two driving interfaces over one engine — the in-process Rust library (`pqueue` crate,
-`Pqueue<B>`) and the RESP wire front (`pqueue-resp`) — as **co-equal driving adapters over the engine
+ADR-007 ships two driving interfaces over one engine — the in-process Rust library (`fireweed` crate,
+`Fireweed<B>`) and the RESP wire front (`fireweed-resp`) — as **co-equal driving adapters over the engine
 ports**. ADR-008 makes the **queue** the unit of single-writer ownership with a control-plane lease and
 an epoch fence (the Single Authoritative Fencing Rule). Reviewing the realized code against those
 decisions surfaced three gaps that are individually small and collectively let an embedder silently
 violate the ownership model:
 
-1. **The library does not coordinate.** `Pqueue<B>` (`crates/pqueue/src/lib.rs`) holds
+1. **The library does not coordinate.** `Fireweed<B>` (`crates/fireweed/src/lib.rs`) holds
    `{ backend, clock, ids }`, has **no owner identity**, and **never** calls `resolve_queue_owner` /
    `acquire_and_fence`. Every method delegates straight to `backend.push/claim/finalize`. Its bound
    (`LibBackend`) already *requires* `ControlPlaneStore` — the capability is present and unused. Only the
-   RESP `route` decision (`pqueue-resp/src/routing.rs`) assembles `authorize → resolve → serve/redirect`.
+   RESP `route` decision (`fireweed-resp/src/routing.rs`) assembles `authorize → resolve → serve/redirect`.
 
 2. **The data plane never self-fences.** The real `PushPort`/`ClaimPort`/`FinalizePort` write paths
    **self-stamp the queue's current epoch** as `expected_epoch` (`ownership.rs:14-21`, `port.rs:33-34`,
@@ -56,9 +56,9 @@ violate the ownership model:
    counters even on Postgres** (`postgres/src/control_plane.rs:16-19`, `port.rs:480-484`) — there is no
    atomic acquire→fence on any backend today.
 
-3. **The ports are an open external surface.** `pub fn Pqueue::new(Arc<B>, clock)` hands `B` *in*, leaving
+3. **The ports are an open external surface.** `pub fn Fireweed::new(Arc<B>, clock)` hands `B` *in*, leaving
    a client holding an `Arc<B>: ClaimPort` it can call directly; no workspace crate sets `publish`, so a
-   client can `cargo add pqueue-engine` and use `ClaimPort` with no friction. "Use the library" is a
+   client can `cargo add fireweed-engine` and use `ClaimPort` with no friction. "Use the library" is a
    convention, not a constraint — the same reach-around hazard ADR-007 sought to remove, reintroduced at
    the client boundary.
 
@@ -70,19 +70,19 @@ it locates its enforcement and seals the surface.
 
 1. **Coordination is an engine responsibility, enforced below the ports.** Ownership resolution and epoch
    fencing are *coordination* (a property of >1 instance sharing a queue), not *security*, and are
-   independent of transport. They live in `pqueue-engine` (consistent with ADR-007: "the engine owns …
+   independent of transport. They live in `fireweed-engine` (consistent with ADR-007: "the engine owns …
    fencing … validation") and are **invoked identically by every driving adapter**. Because the fence is
    enforced *below* the ports, neither adapter can skip it. This **refines ADR-007** (it names the engine,
-   not either adapter, as the coordination locus) and does **not** make `pqueue-resp` depend on the
-   `pqueue` crate; both adapters consume the same engine session.
+   not either adapter, as the coordination locus) and does **not** make `fireweed-resp` depend on the
+   `fireweed` crate; both adapters consume the same engine session.
 
 2. **The published library is the only external surface to the engine.** A downstream crate reaches the
-   engine **only** through `Pqueue`. The raw ports and concrete backends are not a usable external
+   engine **only** through `Fireweed`. The raw ports and concrete backends are not a usable external
    construction-or-call surface. Mechanisms (all required): (a) backend construction is via static,
-   feature-gated, per-backend constructors — `Pqueue::open_postgres(cfg) -> Pqueue<impl LibBackend>` —
-   that build the backend internally and return an **opaque** handle; (b) `Pqueue::new(Arc<B>, …)` becomes
-   crate-private; (c) `pqueue` is the **only** `publish = true` crate — `pqueue-engine`, `pqueue-projection`,
-   `pqueue-conformance`, and the adapter crates are `publish = false`; (d) port traits are `#[doc(hidden)]`
+   feature-gated, per-backend constructors — `Fireweed::open_postgres(cfg) -> Fireweed<impl LibBackend>` —
+   that build the backend internally and return an **opaque** handle; (b) `Fireweed::new(Arc<B>, …)` becomes
+   crate-private; (c) `fireweed` is the **only** `publish = true` crate — `fireweed-engine`, `fireweed-projection`,
+   `fireweed-conformance`, and the adapter crates are `publish = false`; (d) port traits are `#[doc(hidden)]`
    with a doc-hidden marker supertrait (hygiene — true sealing is barred by the dependency-direction guard,
    and the load-bearing wall is (c)); (e) split guard tests assert the publish topology (manifest scan) and
    the absence of any public path to a port-bearing handle (`cargo-public-api`/`trybuild`). A single,
@@ -90,7 +90,7 @@ it locates its enforcement and seals the surface.
    strong-by-default, not absolute, never `unsafe`. No `dyn`-erased backend (the ports are not object-safe);
    a single runtime `open(cfg)` switch is therefore out of scope.
 
-3. **The library coordinates per op, with target-affinity.** `Pqueue` holds an `OwnerId` and a
+3. **The library coordinates per op, with target-affinity.** `Fireweed` holds an `OwnerId` and a
    control-plane handle; per queue-addressed op it resolves ownership and operates under a cached
    `OwnedSession{lease_epoch, fence_epoch}`. Acquisition is restricted to the rendezvous `target_owner`
    (the engine's `acquire` stays cooperative; the **library policy layer** imposes target-affinity to
@@ -136,7 +136,7 @@ it locates its enforcement and seals the surface.
    decision previously lived only in the library-canonical-coordination design and the code). An
    `ItemId` packs `[epoch:24][node:8][counter:32]`: the owner-tenure epoch, a **configured** `node_id`
    (sourced by the deployment, e.g. Helm), and a per-tenure monotonic counter
-   (`crates/pqueue-core/src/domain.rs` ItemId packing; counters in `QueueCounters`). Ids are minted
+   (`crates/fireweed-core/src/domain.rs` ItemId packing; counters in `QueueCounters`). Ids are minted
    locally by the queue's single owner with no coordination on the mint path — uniqueness follows from
    per-queue single-writer ownership (ADR-008) plus the epoch component across tenures. Ids are stable,
    orderable within a tenure, and never reused across epochs.
@@ -146,12 +146,12 @@ it locates its enforcement and seals the surface.
 - **New work this licenses (sequenced):** (i) collapse the control-plane lease epoch and the storage
   append-fence epoch into one durable atomically-advanced value on Postgres (the Decision-4 prerequisite,
   bead BQ-23 scope); (ii) thread the cached `fence_epoch` through `PushPort`/`ClaimPort`/`FinalizePort`,
-  checked at commit (Decision 4); (iii) give `Pqueue` an owner identity, session, resolve ladder, drain
+  checked at commit (Decision 4); (iii) give `Fireweed` an owner identity, session, resolve ladder, drain
   split, and bounded renew driver (Decision 3); (iv) encapsulate the published surface (Decision 2).
   (i)+(ii) also unblock the deferred RESP server acquire-runtime (`pqueue-c33c367e`), which MUST apply the
   same target-affinity (Decision 3) so the two adapters cannot thrash a queue.
 - **Contract text to rewrite:** `port.rs:33-34` and the `append_durable` BQ-20 notes (they prescribe the
-  always-current self-stamp that Decision 4 reverses). Existing single-owner `Pqueue` constructions and
+  always-current self-stamp that Decision 4 reverses). Existing single-owner `Fireweed` constructions and
   tests are preserved via a degenerate sole-owner session (constant ownership, constant always-current
   epoch) so the change is behavior-preserving for the single-instance case.
 - **Refines ADR-007** (engine, not "the library," is the coordination locus; "the library is the contract"
@@ -163,14 +163,14 @@ it locates its enforcement and seals the surface.
   Postgres is gated on the single-durable-epoch + fence-threading work, and object-log multi-owner is out
   until the manifest-CAS acquire→fence lands — but the latter is committed direction (the object log is
   the intended per-queue multi-node fencing/coordination substrate), not a deferred maybe.
-- **Trade-offs accepted:** `pqueue` becomes a thin composition root that fans into feature-gated adapter
+- **Trade-offs accepted:** `fireweed` becomes a thin composition root that fans into feature-gated adapter
   crates (an explicit dependency inversion, kept minimal by `optional` deps); the encapsulation wall is
   strong-by-default but a determined embedder can still path-depend on an internal crate (acceptable — the
   goal is preventing *accidental* reach-around, with a deliberate escape hatch for advanced use).
 
 ## Alternatives considered
 
-- **RESP consumes the `pqueue` library crate (the literal "network consumes the Rust interface").**
+- **RESP consumes the `fireweed` library crate (the literal "network consumes the Rust interface").**
   Rejected: it would couple the wire protocol to the library's ergonomic API and make one driving adapter
   depend on another, contradicting ADR-007's co-equal-adapter structure (which would itself need
   superseding). Putting coordination in the engine below the ports achieves the same anti-reach-around goal
@@ -178,7 +178,7 @@ it locates its enforcement and seals the surface.
 - **Leave coordination per-adapter (status quo: RESP coordinates, library doesn't).** Rejected: it is
   exactly the gap this ADR closes — an embedder gets an unfenced, non-resolving god-mode API while the
   network front is fenced, with nothing forcing the two to reconcile.
-- **Enforce encapsulation by `dyn`-erased backend behind one `Pqueue::open(cfg)`.** Rejected as infeasible:
+- **Enforce encapsulation by `dyn`-erased backend behind one `Fireweed::open(cfg)`.** Rejected as infeasible:
   `Backend::write<R,F>` is a generic method and the async ports return RPITIT, so the ports are not
   object-safe; runtime backend selection would require an erased-shim port redesign, deferred.
 - **Document the library-vs-ports boundary as convention only.** Rejected: convention is what failed (the

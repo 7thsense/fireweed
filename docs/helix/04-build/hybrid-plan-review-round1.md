@@ -7,12 +7,12 @@ Review `docs/helix/04-build/hybrid-sqlite-inmemory-projection-plan.md`.
 - `docs/helix/02-design/adr/ADR-012-orthogonal-log-projection-composition.md`
 - `docs/helix/02-design/technical-designs/TD-001-storage-architecture-backend-contracts.md`
 - `docs/helix/02-design/technical-designs/TD-004-s3-object-log-sqlite-projection-mode.md`
-- `crates/pqueue-engine/src/compose.rs`
-- `crates/pqueue-projection/src/compose_impls.rs`
-- `crates/pqueue-sqlite/src/relational.rs`
-- `crates/pqueue-objectlog/src/compose_log.rs`
-- `crates/pqueue-server/src/lib.rs`
-- `crates/pqueue-server/src/env_config.rs`
+- `crates/fireweed-engine/src/compose.rs`
+- `crates/fireweed-projection/src/compose_impls.rs`
+- `crates/fireweed-sqlite/src/relational.rs`
+- `crates/fireweed-objectlog/src/compose_log.rs`
+- `crates/fireweed-server/src/lib.rs`
+- `crates/fireweed-server/src/env_config.rs`
 
 ## Review Question
 

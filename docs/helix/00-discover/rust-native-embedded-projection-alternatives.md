@@ -13,7 +13,7 @@ ddx:
 # Rust-Native Embedded Projection Alternatives
 
 - **Decision date**: 2026-07-17
-- **Decision owner**: pqueue storage
+- **Decision owner**: fireweed storage
 - **Governing decision**: ADR-006
 
 ## Scope
@@ -30,7 +30,7 @@ fails, test **redb 4.1.x** as the engine-shaped fallback. A redb port would repl
 rather than substitute a driver.
 
 This ordering is based on cost of information, not the raw weighted score. redb scores higher as a storage
-engine, but the Turso probe can quickly determine whether pqueue can remove SQLite's C implementation
+engine, but the Turso probe can quickly determine whether fireweed can remove SQLite's C implementation
 without rewriting the projection. No production dependency or backend switch is authorized by this
 report.
 
@@ -52,15 +52,15 @@ The current port is not a generic SQL abstraction:
 
 - `SqliteProjectionStore` holds one `Mutex<Connection>`, applies a sealed command batch in one transaction,
   and advances `relational_cursor` in that transaction. The current contract is documented in
-  `crates/pqueue-sqlite/src/relational/projection.rs`.
+  `crates/fireweed-sqlite/src/relational/projection.rs`.
 - `ProjectionStore::apply` is synchronous and the composition serializes
   `select -> append -> apply -> render` under its unit-of-work lock. Native async I/O is therefore not an
   automatic benefit; it needs an explicit boundary design. See
-  `crates/pqueue-engine/src/compose.rs`.
+  `crates/fireweed-engine/src/compose.rs`.
 - The relational projection contains 15 application tables, partial and composite indexes, typed secondary
   indexes, and state-dependent queries. The five central SQL implementation files contain approximately
   5,945 lines and 163 SQL statement sites. See
-  `crates/pqueue-sqlite/src/relational/{projection,apply,query,recovery,helpers}.rs`.
+  `crates/fireweed-sqlite/src/relational/{projection,apply,query,recovery,helpers}.rs`.
 - Required behavior includes atomic batch apply and cursor advancement, replayed-prefix skipping, sequence
   gap rejection, deterministic priority/FIFO selection, client-key uniqueness, lease-expiry scans,
   secondary indexes, reopen, reset, and authoritative rebuild.
@@ -106,7 +106,7 @@ the same architecture: `rusqlite` is a Rust wrapper, `libsqlite3-sys` supplies d
 API, and `bundled` compiles and links vendored SQLite. `rusqlite` is MIT; bundled SQLite is public domain
 ([official repository](https://github.com/rusqlite/rusqlite)).
 
-It is the only candidate already proven by pqueue's relational, reconnect, durability, fault-injection, and
+It is the only candidate already proven by fireweed's relational, reconnect, durability, fault-injection, and
 hybrid recovery tests. Its synchronous connection and explicit transaction APIs match the current port.
 The drawback is implementation provenance and build surface, not a demonstrated correctness gap.
 
@@ -120,7 +120,7 @@ C engine ([repository](https://github.com/tursodatabase/libsql),
 [Rust API 0.9.30](https://docs.rs/libsql/latest/libsql/)).
 
 Its async API is a worse direct fit than `rusqlite` for the synchronous projection port. Embedded replicas,
-remote access, and replication add capabilities that duplicate rather than simplify pqueue's object-log
+remote access, and replication add capabilities that duplicate rather than simplify fireweed's object-log
 authority. libSQL is MIT, but it does not meet the Rust-native objective and offers no compensating local
 projection advantage.
 
@@ -156,7 +156,7 @@ unclean-open recovery may walk the full database; quick repair trades slower com
 recovery ([write transaction API](https://docs.rs/redb/latest/redb/struct.WriteTransaction.html)). For a
 rebuildable projection, default repair may be acceptable only if measured against the pod restart budget.
 
-Port cost is high. pqueue would need versioned composite key encodings and explicit tables for items,
+Port cost is high. fireweed would need versioned composite key encodings and explicit tables for items,
 client keys, eligibility order, lease expiry, gates, cohorts, typed indexes, summaries, and cursors. Every
 command arm must remove stale index keys and insert new ones in the same transaction before advancing the
 cursor. The 4.1 changelog also follows recent data-loss and corruption-class fixes, so a prototype must pin
@@ -167,7 +167,7 @@ cursor. The 4.1 changelog also follows recent data-loss and corruption-class fix
 
 Fjall is a safe-Rust LSM engine with lexicographically ordered range and prefix iteration, multiple
 keyspaces, cross-keyspace atomicity, optional serializable transactions, automatic compaction, a stable
-disk-format policy, and MIT-or-Apache-2.0 licensing. Its single-writer transactional mode fits pqueue's
+disk-format policy, and MIT-or-Apache-2.0 licensing. Its single-writer transactional mode fits fireweed's
 serialized writer; its LSM layout may favor sustained batch updates
 ([repository](https://github.com/fjall-rs/fjall),
 [transaction API](https://docs.rs/fjall/latest/fjall/struct.SingleWriterWriteTx.html)).

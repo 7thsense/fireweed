@@ -128,7 +128,7 @@ pub struct ItemView {
 ///
 /// "Live" means still owned by the queue as active work: pending or leased, not terminal and not
 /// superseded. The view intentionally includes the existing opaque payload plus the structured field map
-/// so pqueue can serve as hot storage for compound work records without forcing callers to maintain a
+/// so fireweed can serve as hot storage for compound work records without forcing callers to maintain a
 /// second snapshot store.
 #[derive(Debug, Clone)]
 pub struct LiveItemView {
@@ -534,7 +534,7 @@ pub struct PushSpec {
     /// replacement/upsert, and exposed through Redis-hash-shaped live read commands.
     pub fields: BTreeMap<String, Bytes>,
     /// Caller-owned item metadata used by API-001 compatibility predicates and returned verbatim in the
-    /// claimed-item shape. pqueue stores and filters it without interpreting application meaning.
+    /// claimed-item shape. fireweed stores and filters it without interpreting application meaning.
     pub metadata: Metadata,
     /// Declared cohort size (BQ-14c) — see [`crate::PushItem::cohort_size`]. `None` for non-cohort items.
     pub cohort_size: Option<u64>,
@@ -607,7 +607,7 @@ pub trait PushPort: Send + Sync {
     }
 
     /// Same append operation, but carrying API-001's envelope-level `request_id`. This is part of the
-    /// external pqueue contract, so every `PushPort` implementation must provide retained replay/conflict
+    /// external fireweed contract, so every `PushPort` implementation must provide retained replay/conflict
     /// semantics rather than silently degrading to a request-id-less push.
     fn push_with_request_id(
         &self,
@@ -831,7 +831,7 @@ pub struct ClaimRef {
 }
 
 /// A caller-supplied OPAQUE instance/state fence advanced or validated INSIDE the commit boundary (Snorri
-/// authoritative-commit boundary, ADR-009 / epic pqueue-2201fd37). `instance_key` is opaque bytes pqueue
+/// authoritative-commit boundary, ADR-009 / epic pqueue-2201fd37). `instance_key` is opaque bytes fireweed
 /// never interprets (e.g. a workflow instance key). The commit accepts the entry only if the queue's stored
 /// fence for `instance_key` equals `expected` (an `instance_key` never advanced reads as `0` — the unset
 /// convention), and `next > expected` (strictly monotonic). On accept the stored fence advances to `next`
@@ -1220,7 +1220,7 @@ pub trait ReclaimPort: Send + Sync {
 
 /// Operator discovery of a queue's **active scopes** — the groups that currently hold eligible work,
 /// summarized for ranking (`DiscoverActiveScopes`, API-001 / TD-002 §Discovery). A read-only rollup over
-/// the per-group summary projection (`pqueue_group_summary`): each group with `oldest_eligible_at` set
+/// the per-group summary projection (`fireweed_group_summary`): each group with `oldest_eligible_at` set
 /// becomes one source [`ActiveScope`] (age from `now`, eligible count; at-risk is `None` while its
 /// derivation is deferred), then [`project_scopes`](crate::project_scopes) collapses to the requested
 /// granularity (per-group detail, or a single queue rollup). The returned list is ranked **owner-local,

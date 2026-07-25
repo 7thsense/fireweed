@@ -27,29 +27,29 @@ Governing: **ADR-009** (engine-enforced coordination + encapsulated library surf
 > **v2 changelog:** B1 retargeted to the real write seam (`commit_locked`/`append_durable`/projection
 > `commit`, not `Backend::write`/`LogWriter::append`); B1 scope widened to **all** log-appending ports and
 > its gate to the full compile blast radius; B3 adds `open_memory`/`open_objectlog` + a doc-hidden test
-> injection constructor + the `Pqueue<MemoryBackend>` annotation migration and the dev-dep→optional-dep
+> injection constructor + the `Fireweed<MemoryBackend>` annotation migration and the dev-dep→optional-dep
 > reversal; B5 pins the runtime-refuse predicate to a **capability** (atomic acquire→fence), not a backend
 > name, and names the refuse-test backend; added N6 (library adds no authn/authz) and error-name mapping.
 
 ## 0. Goal & non-negotiables
 
-Make the in-process Rust library (`Pqueue`) a **first-class owner-runtime** that resolves ownership and
+Make the in-process Rust library (`Fireweed`) a **first-class owner-runtime** that resolves ownership and
 operates under an engine-enforced epoch fence on every queue-addressed op, and make the **published
-`pqueue` crate the only external surface** to the engine. Non-negotiables (from ADR-009 / TD-003):
+`fireweed` crate the only external surface** to the engine. Non-negotiables (from ADR-009 / TD-003):
 
 - **N1 — Engine-enforced fence, below the ports, on every log-appending op.** Every queue-addressed write
   port (Push, Claim, Finalize, Upsert, Renew, Reassign, Purge, and the ReclaimDriver) checks the owner's
   **cached acquire-time** `fence_epoch` (never a re-read of current), **at commit time inside the atomic
   UoW**.
-- **N2 — Behavior-preserving for single-owner.** A sole-owner `Pqueue` keeps today's semantics via a
+- **N2 — Behavior-preserving for single-owner.** A sole-owner `Fireweed` keeps today's semantics via a
   degenerate constant-ownership / always-current session (`expected_epoch = None` ⇒ stamp current, no
   fence) — existing tests stay green behaviorally.
-- **N3 — No accidental reach-around.** No safe path from published `pqueue` to a raw `PushPort`/`ClaimPort`/
+- **N3 — No accidental reach-around.** No safe path from published `fireweed` to a raw `PushPort`/`ClaimPort`/
   `FinalizePort` call. Enforced structurally (publish topology + private constructor + guard tests).
 - **N4 — Honest backend scope.** Multi-instance shared-store competition is **postgres-only**, gated on a
   single durable epoch; object-log is single-owner; memory/sqlite are single-process. Runtime-refuse keys
   on a **capability** (see N4a), not a backend name.
-- **N4a — Refuse predicate is capability-based.** A `Pqueue` constructed for **multi-owner** operation
+- **N4a — Refuse predicate is capability-based.** A `Fireweed` constructed for **multi-owner** operation
   MUST runtime-refuse a backend/control-plane pair that does not present the **atomic acquire→fence**
   capability (one durable epoch advanced atomically at acquire). The in-process `InMemoryControlPlane` +
   `MemoryBackend` pair *presents* the capability **non-durably** (single in-process epoch, no cross-process
@@ -72,13 +72,13 @@ exposes (engine/library: `EpochFenced`; RESP/conformance: `queue-epoch-stale`).
 | Capability | How tested | Available here |
 |---|---|---|
 | Engine/library/memory/sqlite semantics | in-process unit + conformance | yes (cargo) |
-| Library multi-instance **logic** (target-affinity, fence-at-commit, OwnedElsewhere, drain) | two `Pqueue` handles over one shared in-process `MemoryBackend` + `InMemoryControlPlane` (asserts against `fence_epoch`, the storage epoch — never `lease_epoch`, which holds a different integer) | yes (cargo) |
-| Postgres single-durable-epoch (BQ-23) + **durable** multi-instance | `PQUEUE_PG_TEST_URL` against a live DB | yes via `docker run postgres` + set env (LOUD-skips otherwise) |
+| Library multi-instance **logic** (target-affinity, fence-at-commit, OwnedElsewhere, drain) | two `Fireweed` handles over one shared in-process `MemoryBackend` + `InMemoryControlPlane` (asserts against `fence_epoch`, the storage epoch — never `lease_epoch`, which holds a different integer) | yes (cargo) |
+| Postgres single-durable-epoch (BQ-23) + **durable** multi-instance | `FIREWEED_PG_TEST_URL` against a live DB | yes via `docker run postgres` + set env (LOUD-skips otherwise) |
 | Encapsulation guard | manifest scan + `trybuild` compile-fail (and/or `cargo-public-api`) | yes (cargo) |
 
 Postgres steps spin up a throwaway container, e.g.
-`docker run -d --rm -p 5433:5432 -e POSTGRES_PASSWORD=pq postgres:18` then
-`PQUEUE_PG_TEST_URL=postgres://postgres:pq@127.0.0.1:5433/postgres`.
+`docker run -d --rm -p 5433:5432 -e POSTGRES_PASSWORD=fireweed postgres:18` then
+`FIREWEED_PG_TEST_URL=postgres://postgres:fireweed@127.0.0.1:5433/postgres`.
 
 ## 2. Build sequence (DAG)
 
@@ -88,7 +88,7 @@ Dependencies: B2→B1; B3→B2; B4 independent of B1-B3 (postgres durability) bu
 ### B1 — Engine fence threading (L4 core) · task #5
 - **Seam (corrected).** The data-plane write ports do **not** flow through `Backend::write`/
   `LogWriter::append` (only the conformance `commit` helper does). They flow through each backend's
-  `commit_locked` → `append_durable` (sqlite/postgres) / `pqueue_projection::commit` (memory), which today
+  `commit_locked` → `append_durable` (sqlite/postgres) / `fireweed_projection::commit` (memory), which today
   **self-stamp the current epoch with no fence**. B1 adds the fence **there**.
 - **Change:** thread `expected_epoch: Option<u64>` from every queue-addressed write port — `PushPort`,
   `ClaimPort` (via `ClaimRequest`), `FinalizePort`, **`UpsertPort`, `RenewLeasePort`, `ReassignLeasePort`,
@@ -101,20 +101,20 @@ Dependencies: B2→B1; B3→B2; B4 independent of B1-B3 (postgres durability) bu
   per shard), so it supplies **each owned shard's** cached acquire-time epoch at that shard's
   `commit_locked` — not one tick-level `Option<u64>`.
 - **Blast radius (must all compile, N5):** traits `port.rs` (`ClaimRequest`, the 8 write ports); commit
-  paths `pqueue-projection/src/lib.rs:248`, `pqueue-memory/src/lib.rs:128`, `pqueue-sqlite/src/lib.rs:138`
-  + `relational.rs`, `pqueue-postgres/src/lib.rs:144` + `relational.rs`, `pqueue-objectlog/src/lib.rs`;
-  callers `pqueue/src/lib.rs` (152/202/248…), `pqueue-resp/src/lib.rs` (512/568/838), `pqueue-conformance`
-  (`claim_req` + `scenarios.rs` finalize sites), `pqueue-bench`.
+  paths `fireweed-projection/src/lib.rs:248`, `fireweed-memory/src/lib.rs:128`, `fireweed-sqlite/src/lib.rs:138`
+  + `relational.rs`, `fireweed-postgres/src/lib.rs:144` + `relational.rs`, `fireweed-objectlog/src/lib.rs`;
+  callers `fireweed/src/lib.rs` (152/202/248…), `fireweed-resp/src/lib.rs` (512/568/838), `fireweed-conformance`
+  (`claim_req` + `scenarios.rs` finalize sites), `fireweed-bench`.
 - **Acceptance:** (a) a stale supplied epoch is rejected `EpochFenced` at commit, state unmutated, on
   memory + sqlite, for **each** write port; (b) `None`/sole-owner path behaves exactly as today; (c)
   conformance core suite green for memory + sqlite.
 - **Gate:** `cargo build --workspace --all-targets` (full blast radius compiles) +
-  `cargo test -p pqueue-engine -p pqueue-memory -p pqueue-sqlite -p pqueue-objectlog -p pqueue -p pqueue-resp -p pqueue-conformance`
+  `cargo test -p fireweed-engine -p fireweed-memory -p fireweed-sqlite -p fireweed-objectlog -p fireweed -p fireweed-resp -p fireweed-conformance`
   + `cargo clippy --all-targets -- -D warnings`.
 - **Testable:** in-env.
 
 ### B2 — Library coordination session · task #6
-- **Change:** `Pqueue` gains an `OwnerId` + control-plane handle + cached `OwnedSession`; per-op **resolve
+- **Change:** `Fireweed` gains an `OwnerId` + control-plane handle + cached `OwnedSession`; per-op **resolve
   ladder** (serve-if-owner / acquire-if-target / `OwnedElsewhere` / drain-split); **target-affinity**
   acquire policy; **bounded per-node** renew/heartbeat driver (host-spawned; one bounded driver, no
   task-per-queue); **re-resolve (not retry)** after timeout; `OwnedElsewhere{owner, epoch}` return value;
@@ -128,31 +128,31 @@ Dependencies: B2→B1; B3→B2; B4 independent of B1-B3 (postgres durability) bu
   via the `OwnedElsewhere` branch (no append occurs); sole-owner unchanged (N2). **Bounded driver**:
   a structural assertion that the renew driver count is O(1) per node, not O(queues) (cheap test; if
   infeasible as a unit test, explicitly mark owed to TP-002 E2 `queue_density_single_node_tests`).
-- **Gate:** `cargo test -p pqueue`; clippy 0; existing single-owner call sites green.
+- **Gate:** `cargo test -p fireweed`; clippy 0; existing single-owner call sites green.
 - **Testable:** in-env.
 
 ### B3 — Encapsulate the published surface · task #7
-- **Change:** static feature-gated per-backend constructors **`Pqueue::open_memory()` /
-  `open_sqlite(path)` / `open_postgres(cfg)` / `open_objectlog(cfg)`** → `Pqueue<impl LibBackend>` (backend
-  built internally, opaque); `Pqueue::new(Arc<B>, …)` → `pub(crate)`; **a `#[doc(hidden)] pub fn
+- **Change:** static feature-gated per-backend constructors **`Fireweed::open_memory()` /
+  `open_sqlite(path)` / `open_postgres(cfg)` / `open_objectlog(cfg)`** → `Fireweed<impl LibBackend>` (backend
+  built internally, opaque); `Fireweed::new(Arc<B>, …)` → `pub(crate)`; **a `#[doc(hidden)] pub fn
   with_backend(...)` (or `internal` feature-gated) injection constructor** so `tests/` integration and
-  bench crates that must inject a backend still compile; `publish = false` on `pqueue-engine`/
-  `pqueue-projection`/`pqueue-conformance`/adapter crates, `pqueue` the only published crate; add the
-  adapter crates as `optional = true` real deps of `pqueue` behind features (today `pqueue/Cargo.toml` has
-  `pqueue-memory`/`pqueue-objectlog` as **dev-deps** and `pqueue-sqlite`/`pqueue-postgres` **absent**, so
+  bench crates that must inject a backend still compile; `publish = false` on `fireweed-engine`/
+  `fireweed-projection`/`fireweed-conformance`/adapter crates, `fireweed` the only published crate; add the
+  adapter crates as `optional = true` real deps of `fireweed` behind features (today `fireweed/Cargo.toml` has
+  `fireweed-memory`/`fireweed-objectlog` as **dev-deps** and `fireweed-sqlite`/`fireweed-postgres` **absent**, so
   this promotes two and adds two; rewrite the `src/lib.rs:11-13` "never on a concrete backend" doc and the
   dependency-direction guard accordingly); `#[doc(hidden)]` port traits + marker supertrait; split guard
   tests.
-- **Call-site migration (must land in the same commits, N5):** every `Pqueue::new(...)` /
-  `Pqueue<MemoryBackend>` site in `pqueue/tests/facade.rs`, `pqueue/tests/product_validation_tests.rs`,
-  `pqueue-bench/src/main.rs`, `pqueue-bench/tests/queue_density_single_node_tests.rs`,
-  `pqueue-bench/tests/performance_cross_queue_scale_out_tests.rs` → use `open_memory()`/`with_backend()`
-  and `Pqueue<impl LibBackend>`/generic annotations.
-- **Acceptance:** (a) manifest-scan guard asserts publish topology (only `pqueue` publishable); (b)
-  `trybuild` compile-fail proves a `pqueue`-only downstream cannot name a port or reach `.backend`; (c)
+- **Call-site migration (must land in the same commits, N5):** every `Fireweed::new(...)` /
+  `Fireweed<MemoryBackend>` site in `fireweed/tests/facade.rs`, `fireweed/tests/product_validation_tests.rs`,
+  `fireweed-bench/src/main.rs`, `fireweed-bench/tests/queue_density_single_node_tests.rs`,
+  `fireweed-bench/tests/performance_cross_queue_scale_out_tests.rs` → use `open_memory()`/`with_backend()`
+  and `Fireweed<impl LibBackend>`/generic annotations.
+- **Acceptance:** (a) manifest-scan guard asserts publish topology (only `fireweed` publishable); (b)
+  `trybuild` compile-fail proves a `fireweed`-only downstream cannot name a port or reach `.backend`; (c)
   feature subsets build (`--no-default-features --features sqlite` doesn't compile postgres/objectlog);
   (d) no public path to a port-bearing handle; (e) all migrated test/bench crates green.
-- **Gate:** `cargo test -p pqueue --no-default-features --features sqlite` and `--features postgres`;
+- **Gate:** `cargo test -p fireweed --no-default-features --features sqlite` and `--features postgres`;
   `cargo build --workspace --all-targets`; dependency-direction test extended + green; clippy 0.
 - **Testable:** in-env.
 
@@ -164,7 +164,7 @@ Dependencies: B2→B1; B3→B2; B4 independent of B1-B3 (postgres durability) bu
 - **Acceptance:** acquire advances exactly one durable epoch; a superseded owner's append is `EpochFenced`
   (`queue-epoch-stale` at the wire) with no crash window; existing postgres tests green; new test for the
   acquire→fence atomicity.
-- **Gate:** `PQUEUE_PG_TEST_URL=… cargo test -p pqueue-postgres` (docker pg); clippy 0.
+- **Gate:** `FIREWEED_PG_TEST_URL=… cargo test -p fireweed-postgres` (docker pg); clippy 0.
 - **Testable:** docker-postgres.
 
 ### B5 — Multi-instance conformance + final alignment · task #8
@@ -172,7 +172,7 @@ Dependencies: B2→B1; B3→B2; B4 independent of B1-B3 (postgres durability) bu
   `InMemoryControlPlane` — admissible because that pair presents the atomic acquire→fence capability
   non-durably (N4a) — testing target-affinity, fence at commit, ownership migration on expiry/drain,
   data-path fail-closed; (b) **runtime-refuse** test against a capability-lacking pair (**sqlite-local**:
-  no shared durable control plane) — a multi-owner `Pqueue` MUST refuse to construct; (c) **postgres-gated**
+  no shared durable control plane) — a multi-owner `Fireweed` MUST refuse to construct; (c) **postgres-gated**
   durable two-instance competition (real durability, restart). Final alignment gate.
 - **Acceptance:** suites (a) and (b) green in-env; (c) green under docker-pg (LOUD-skip ⇒ owed, never
   "done"); full workspace green + clippy 0 + dependency-direction + new guard tests; a final review
@@ -192,9 +192,9 @@ task complete → next step. Never advance on red.
 
 | Risk | Mitigation |
 |---|---|
-| Port signature change (B1) ripples through 6 backend files + pqueue + resp + conformance + bench | Epoch is additive `Option<u64>` with a `None` sole-owner default (N2); B1's gate is `cargo build --workspace --all-targets` so the full blast radius must compile before B1 commits. |
-| `Pqueue::new` privatization breaks `tests/`/bench crates (`pub(crate)` is invisible to them) | B3 ships `open_memory()` + a `#[doc(hidden)] pub with_backend()` injection ctor and migrates every listed call site / `Pqueue<MemoryBackend>` annotation in the same commit. |
-| B3 reverses today's dep direction (backends are dev-deps of `pqueue`) | Promote to `optional = true` real deps behind features; no cycle (backends depend on engine, not `pqueue`); rewrite the lib doc + dependency-direction guard. |
+| Port signature change (B1) ripples through 6 backend files + fireweed + resp + conformance + bench | Epoch is additive `Option<u64>` with a `None` sole-owner default (N2); B1's gate is `cargo build --workspace --all-targets` so the full blast radius must compile before B1 commits. |
+| `Fireweed::new` privatization breaks `tests/`/bench crates (`pub(crate)` is invisible to them) | B3 ships `open_memory()` + a `#[doc(hidden)] pub with_backend()` injection ctor and migrates every listed call site / `Fireweed<MemoryBackend>` annotation in the same commit. |
+| B3 reverses today's dep direction (backends are dev-deps of `fireweed`) | Promote to `optional = true` real deps behind features; no cycle (backends depend on engine, not `fireweed`); rewrite the lib doc + dependency-direction guard. |
 | Postgres unavailable mid-run | docker pg is available; if it ever isn't, B4/B5(c) LOUD-skip and are flagged **owed**, never claimed done. |
 | `EpochFenced` vs `queue-epoch-stale` assertion mismatch | Mapping stated in §0; assert the name the layer exposes. |
 | Reordering vs ADR-009 "L4+BQ-23 ship together" | The *production* guarantee is claimed only once B1+B4 both land (B5 gate); B1 alone is tested on memory/sqlite (single in-process epoch source), not claimed as the postgres guarantee. |
@@ -204,11 +204,11 @@ task complete → next step. Never advance on red.
 
 | Step | Task | Bead area |
 |---|---|---|
-| B1 | #5 | pqueue-engine, pqueue-memory, pqueue-sqlite, pqueue-objectlog, pqueue-conformance (+compile: postgres, pqueue, resp, bench) |
-| B2 | #6 | pqueue |
-| B3 | #7 | pqueue (+ workspace manifests, test/bench migration) |
-| B4 | #4 | pqueue-postgres |
-| B5 | #8 | pqueue-conformance, workspace |
+| B1 | #5 | fireweed-engine, fireweed-memory, fireweed-sqlite, fireweed-objectlog, fireweed-conformance (+compile: postgres, fireweed, resp, bench) |
+| B2 | #6 | fireweed |
+| B3 | #7 | fireweed (+ workspace manifests, test/bench migration) |
+| B4 | #4 | fireweed-postgres |
+| B5 | #8 | fireweed-conformance, workspace |
 
 ## 6. Exit criteria (Phase 4 done)
 
@@ -245,7 +245,7 @@ tested**. Decision 2 (encapsulation) is enforced as far as feasible — see OWED
 
 | # | Item | Status |
 |---|---|---|
-| OWED-1 | `publish=false` hard wall | **INFEASIBLE (documented)** — pqueue depends on pqueue-engine, so cargo can't publish pqueue with an unpublishable dep. Encapsulation is strong-by-default (curated surface + doc-hidden `new`/ports + `open_*` + guard), not absolute (OD-6). `B3b` (`51490af`). |
+| OWED-1 | `publish=false` hard wall | **INFEASIBLE (documented)** — fireweed depends on fireweed-engine, so cargo can't publish fireweed with an unpublishable dep. Encapsulation is strong-by-default (curated surface + doc-hidden `new`/ports + `open_*` + guard), not absolute (OD-6). `B3b` (`51490af`). |
 | OWED-2 | Runtime-refuse multi-owner on a non-atomic backend (N4a/OD-2) | **RESOLVED** (`0abb398`) — `with_control_plane(.., instance_id, ..)` returns `Result` and refuses a control plane whose `binds_storage_epoch()` is false; `with_control_plane_in_process` (doc-hidden) for in-process logic. The instance-id signals a durable multi-instance deployment. |
 | OWED-3 | Drain split (serve in-flight / refuse new claim) | **RESOLVED** (`24b01fb`) — `renew_owned` observes a `Draining` lease; `claim` then refuses with retryable `Unavailable` while finalize/renew/push continue. |
 | OWED-4 | Relational backend fence threading | **RESOLVED** (`0959645`) — both relational backends fence at `commit_command` + the claim CTE; the BQ-23 binding generalizes to bind whichever epoch column the paired backend uses; relational multi-instance test proves cross-instance visibility + claim handoff + durable fence. |
@@ -253,6 +253,6 @@ tested**. Decision 2 (encapsulation) is enforced as far as feasible — see OWED
 | OWED-6 | Coordinated `open_*` / `open_postgres` | **RESOLVED** (`2e7414b`) — `open_postgres` (sole-owner) + `open_postgres_coordinated` (builds backend + binding control plane internally) behind the opt-in `postgres` feature; no dependency cycle. |
 
 **Remaining (newly-found, tracked):** the relational backend mints item ids from a per-connection sequence,
-so two connections each *pushing* a fresh item can collide on `pqueue_items_pkey`; full concurrent
+so two connections each *pushing* a fresh item can collide on `fireweed_items_pkey`; full concurrent
 multi-writer push needs a DB-sequence-based globally-unique id (the fence, cross-instance visibility, and
 claim handoff are unaffected — proven). And OWED-1/OWED-5 above (infeasible / pre-existing-out-of-scope).

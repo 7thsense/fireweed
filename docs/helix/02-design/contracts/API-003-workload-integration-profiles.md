@@ -25,17 +25,17 @@ ddx:
 ## Purpose
 
 This contract defines **Application Workload Integration Profiles**: prescriptive
-guidance for how an application delivery engine should use the native pqueue
+guidance for how an application delivery engine should use the native fireweed
 primitives defined in API-001 (and the operator surface in API-002) to run a
 real workload. It is **not** a new queue primitive and adds **no** new engine
 behavior, fields, options, or semantics. Every obligation here resolves to an
 existing API-001/API-002 operation.
 
 A profile is normative for the **adapter author** (the integrator wiring an
-application onto pqueue) and advisory for everyone else. It must be executable by
+application onto fireweed) and advisory for everyone else. It must be executable by
 an adapter author who has no access to any external chat, ticket, or
 product-specific design doc. Where this contract says an adapter "MUST" do
-something, it constrains the adapter, not the pqueue engine.
+something, it constrains the adapter, not the fireweed engine.
 
 ## Scope and Boundaries
 
@@ -44,13 +44,13 @@ In scope:
 - How to configure a queue for a workload shape.
 - The division of responsibility between the producing side, the claiming
   (worker) side, and the operator surface.
-- How to map application delivery results onto pqueue's existing finalize
+- How to map application delivery results onto fireweed's existing finalize
   outcomes.
 - How to use dynamic gates and `not_before` for caller-driven pacing.
 - Where archive/retention responsibilities live.
 
 Explicitly out of scope (these remain caller-owned application concerns and MUST
-NOT be pushed into pqueue):
+NOT be pushed into fireweed):
 
 - Provider/transport-specific APIs (no SES-, 7snx-, or Seventh-Sense-specific
   surface).
@@ -62,11 +62,11 @@ NOT be pushed into pqueue):
 Domain neutrality: profiles MAY use generic illustrative nouns such as *tenant*,
 *sender*, *domain*, *provider*, or *batch compatibility key*, but every such noun
 is **opaque, caller-owned** data carried in `metadata`, `group_key`, or
-`gate_keys`. pqueue never interprets these values (API-001 Common Types).
+`gate_keys`. fireweed never interprets these values (API-001 Common Types).
 
 ## Preserved Non-Goal: Downstream Rate Limits
 
-pqueue does **not** enforce downstream API rate limits and applies no rate
+fireweed does **not** enforce downstream API rate limits and applies no rate
 admission to claims. A workload paces downstream calls itself, using the native
 levers (PRD non-goal; API-001 "Caller-driven downstream pacing"):
 
@@ -76,7 +76,7 @@ levers (PRD non-goal; API-001 "Caller-driven downstream pacing"):
 - retries (`retry` finalize with a caller-computed backoff `not_before`),
 - caller-owned **dynamic gates** (`SetGates`) to pause/resume a scope.
 
-A profile MUST restate this boundary and MUST NOT describe pqueue as throttling,
+A profile MUST restate this boundary and MUST NOT describe fireweed as throttling,
 shaping, or admitting traffic by downstream capacity.
 
 ## Batching and Durability Profile Guidance
@@ -135,7 +135,7 @@ documents that guarantee, Seventh Sense-style ingest-then-reschedule queues
 MUST stay on an atomic-class backend so the mutable schedule path remains safe.
 
 The example nouns above (*sender*, *provider*, *domain*) are illustrative
-caller-owned keys, not pqueue concepts.
+caller-owned keys, not fireweed concepts.
 
 ### Producer obligations
 
@@ -143,13 +143,13 @@ The producing side (the scheduler/ingest) MUST:
 
 1. Enqueue each unit with `BatchPush`, using a stable `client_item_key` so
    duplicate submissions converge by key (API-001 idempotency). The producer
-   MUST NOT rely on pqueue to dedup by payload content.
+   MUST NOT rely on fireweed to dedup by payload content.
 2. Carry the scheduled due time in `priority` (timestamp model) and, when work
    must not be claimable before a wall-clock instant, also set `not_before`.
    `not_before` and `priority` are distinct (API-001 Common Types).
 3. Put any caller-owned routing/compatibility values (tenant, sender, domain,
    provider, campaign) in `metadata` and, when batch compatibility is needed, in
-   `group_key`. These are opaque to pqueue.
+   `group_key`. These are opaque to fireweed.
 4. Declare `gate_keys` on items only when the queue is `gate_keys = dynamic`,
    to make those items pausable as a scope.
 5. Reschedule still-pending work with `BatchUpdate` (priority / `not_before` /
@@ -160,7 +160,7 @@ The producing side (the scheduler/ingest) MUST:
 The claiming side (the delivery workers) MUST:
 
 1. Claim due work with `BatchClaim`, choosing `max_items` and claim cadence to
-   pace downstream calls (this is the workload's rate control, not pqueue's).
+   pace downstream calls (this is the workload's rate control, not fireweed's).
 2. Treat the claimed item using the **Claimed Item Response Shape** (API-001):
    correlate via `client_item_key`, read the `payload` and structured `fields`,
    apply caller `metadata`, and use `lease_token` + `lease_expires_at` to bound
@@ -184,12 +184,12 @@ outcomes, delivery states, or provider-result semantics:
 |--------------------|------------------|-------|
 | Delivered / accepted by provider | `complete` | Terminal success. |
 | Permanent rejection (won't succeed on retry) | `fail` | Terminal failure; carry a caller-defined `failure_code` if used. |
-| Transient failure (provider 5xx, timeout, throttled-by-provider) | `retry` | Set a caller-computed backoff via `not_before`; pqueue does not compute backoff and does not interpret provider status. |
+| Transient failure (provider 5xx, timeout, throttled-by-provider) | `retry` | Set a caller-computed backoff via `not_before`; fireweed does not compute backoff and does not interpret provider status. |
 | Worker cannot process now but item should stay claimable for others | `release` | Returns the item to eligible without consuming an attempt beyond policy. |
 | Recurring/periodic unit that should re-arm for its next cycle | `rearm` | Only on queues with `recurrence` configured; re-arms without terminating. |
 
 "Throttled by the provider" maps to `retry` with a caller-chosen `not_before` —
-it is an application backoff decision, never a pqueue rate-admission decision.
+it is an application backoff decision, never a fireweed rate-admission decision.
 
 ### Dynamic Gate Usage
 
@@ -220,10 +220,10 @@ This contract does not change any API-002 behavior; it only points to it.
 ## Profile: Embedded Engine Integration
 
 This profile covers **embedded mode** (ADR-006): a host application links the
-top-level `pqueue` crate in-process and drives the public facade directly,
+top-level `fireweed` crate in-process and drives the public facade directly,
 rather than calling a remote API binding. It is the mode a same-process delivery
 host uses for in-process latency and control. The facade types re-exported by
-`pqueue` are the public, versioned embedding contract declared in ADR-006; raw
+`fireweed` are the public, versioned embedding contract declared in ADR-006; raw
 storage ports and backend internals remain outside the application interface.
 
 ### Backend selection (durability is mandatory)
@@ -240,27 +240,27 @@ it.
 
 The embedder maps each workload action onto the public facade operations:
 
-1. **Create queue** via `Pqueue::create_queue` with a validated
+1. **Create queue** via `Fireweed::create_queue` with a validated
    `QueueDefinition` (queue-creation recommendations from the Scheduled Batch
    Delivery profile apply unchanged).
 2. **Enqueue / update / finalize** through the matching facade operation
    (`upsert` / batch push, `update_fields`, `ack` / `nack` / `fail` / `rearm`,
    etc.). The facade/backend commit is the durable ack boundary; an embedder MUST
    treat work as acknowledged only after the durable facade operation returns.
-3. **Claim** via `Pqueue::claim`, which applies the single Eligibility
+3. **Claim** via `Fireweed::claim`, which applies the single Eligibility
    Precedence and returns the claimed-item set (API-001 "Claimed Item Response
    Shape").
 
 Producer/worker obligations, the **finalize-outcome mapping** (the five outcomes
 only), the **dynamic-gate** usage, and the **downstream-rate non-goal** are
 identical to the Scheduled Batch Delivery profile above — this profile changes
-only *where the boundary is bound* (the in-process `pqueue` facade vs another
+only *where the boundary is bound* (the in-process `fireweed` facade vs another
 API-001 binding), not the semantics. The embedder MUST NOT reinterpret finalize
 semantics; it calls native facade operations and lets the engine apply them.
 
 ### Conformance
 
-An embedded delivery adapter MUST pass pqueue's published **embedder delivery
+An embedded delivery adapter MUST pass fireweed's published **embedder delivery
 adapter conformance** suite (ADR-006 §5): push/claim/finalize, duplicate
 convergence by `client_item_key`, retry/expired-lease re-pending, and
 terminal-failure semantics through the embedded surface. A host's own adapter

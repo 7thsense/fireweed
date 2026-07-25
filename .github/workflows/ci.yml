@@ -20,7 +20,7 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_PASSWORD: pq
+          POSTGRES_PASSWORD: fireweed
         ports:
           - 5432:5432
         options: >-
@@ -63,12 +63,12 @@ jobs:
 
       - name: Postgres conformance proof
         env:
-          PQUEUE_PG_TEST_URL: postgres://postgres:pq@127.0.0.1:5432/postgres
+          FIREWEED_PG_TEST_URL: postgres://postgres:fireweed@127.0.0.1:5432/postgres
         run: cargo +1.92.0 test -p fireweed-postgres --test conformance push_then_select_eligible_in_priority_order -- --nocapture
 
       - name: Exact Postgres TP-003 storage-pair proof
         env:
-          PQUEUE_PG_TEST_URL: postgres://postgres:pq@127.0.0.1:5432/postgres
+          FIREWEED_PG_TEST_URL: postgres://postgres:fireweed@127.0.0.1:5432/postgres
         run: |
           matrix_evidence=docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl
           parity_evidence=docs/perf/evidence/tp003-ac-txn-parity-postgres-storage-pairs.jsonl
@@ -95,14 +95,14 @@ jobs:
             curl -sf http://127.0.0.1:9000/minio/health/live && break || sleep 1
           done
           docker run --rm --network host --entrypoint sh minio/mc -c \
-            "mc alias set local http://127.0.0.1:9000 minioadmin minioadmin && mc mb -p local/pqueue-test"
+            "mc alias set local http://127.0.0.1:9000 minioadmin minioadmin && mc mb -p local/fireweed-test"
 
       - name: Embedded S3 + PostgreSQL projection proof
         env:
-          PQUEUE_PG_TEST_URL: postgres://postgres:pq@127.0.0.1:5432/postgres
-          PQUEUE_S3_TEST_ENDPOINT: http://127.0.0.1:9000
-          PQUEUE_S3_TEST_ACCESS_KEY: minioadmin
-          PQUEUE_S3_TEST_SECRET_KEY: minioadmin
+          FIREWEED_PG_TEST_URL: postgres://postgres:fireweed@127.0.0.1:5432/postgres
+          FIREWEED_S3_TEST_ENDPOINT: http://127.0.0.1:9000
+          FIREWEED_S3_TEST_ACCESS_KEY: minioadmin
+          FIREWEED_S3_TEST_SECRET_KEY: minioadmin
         run: >-
           cargo +1.92.0 test -p fireweed --features postgres --lib
           test_embedded_objectlog_postgres::public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection
@@ -112,10 +112,10 @@ jobs:
         env:
           # Run the full postgres conformance/durability suite (not just the single proof test)
           # and the object-log S3 substrate tests inside the enforcing `cargo test --workspace`.
-          PQUEUE_PG_TEST_URL: postgres://postgres:pq@127.0.0.1:5432/postgres
-          PQUEUE_S3_TEST_ENDPOINT: http://127.0.0.1:9000
-          PQUEUE_S3_TEST_ACCESS_KEY: minioadmin
-          PQUEUE_S3_TEST_SECRET_KEY: minioadmin
+          FIREWEED_PG_TEST_URL: postgres://postgres:fireweed@127.0.0.1:5432/postgres
+          FIREWEED_S3_TEST_ENDPOINT: http://127.0.0.1:9000
+          FIREWEED_S3_TEST_ACCESS_KEY: minioadmin
+          FIREWEED_S3_TEST_SECRET_KEY: minioadmin
         run: bash scripts/ci/pr-gate.sh --mode enforcing
 
   deployment:

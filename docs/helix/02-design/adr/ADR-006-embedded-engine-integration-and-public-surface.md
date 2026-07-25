@@ -21,10 +21,10 @@ ddx:
 ## Status
 
 Accepted, with two later amendments: the **client mode** half (API-001 over HTTP or the
-`pqueue-client` SDK) was superseded by ADR-007's clean cutover — those crates are deleted; the client
-faces are now RESP (TD-006) and the `pqueue` library. The **embedded mode** half stands, refined by
-ADR-009: the embedding surface is the published `pqueue` facade crate (structurally enforced), not
-direct `pqueue-core`/`pqueue-storage` trait access; ports are `#[doc(hidden)]` behind a documented
+`fireweed-client` SDK) was superseded by ADR-007's clean cutover — those crates are deleted; the client
+faces are now RESP (TD-006) and the `fireweed` library. The **embedded mode** half stands, refined by
+ADR-009: the embedding surface is the published `fireweed` facade crate (structurally enforced), not
+direct `fireweed-core`/`fireweed-storage` trait access; ports are `#[doc(hidden)]` behind a documented
 `internal` escape hatch.
 
 ADR-016 adds Turso as a feature-gated, object-log-derived projection. It does not replace the standalone
@@ -34,9 +34,9 @@ binds every embedded production profile.
 ## Context
 
 A host application (the first being the 7snx managed-delivery engine) integrates
-pqueue **as an embedded Rust library**: it path-depends on `pqueue-core` and
-`pqueue-storage`, binds the storage traits (`LogStore`, `ProjectionStore`,
-`ControlPlaneStore`), the command types (`pqueue_storage::commands`), and a
+fireweed **as an embedded Rust library**: it path-depends on `fireweed-core` and
+`fireweed-storage`, binds the storage traits (`LogStore`, `ProjectionStore`,
+`ControlPlaneStore`), the command types (`fireweed_storage::commands`), and a
 backend (today the in-memory one), and drives the engine loop itself
 (`append_batch` → `apply_committed` → `batch_claim`).
 
@@ -48,8 +48,8 @@ two prior decisions are in tension with it:
 - TD-001 declares the storage trait surface **internal**, with API-001 as the
   sole external compatibility boundary.
 
-So the surface a real embedder now depends on (`pqueue-core` +
-`pqueue-storage::{traits, commands, memory, types}`) is de-facto public but
+So the surface a real embedder now depends on (`fireweed-core` +
+`fireweed-storage::{traits, commands, memory, types}`) is de-facto public but
 carries no stability guarantee, and an embedder can — as 7snx currently does —
 run the **non-durable in-memory backend** in a production path, silently
 forfeiting the TD-001 durable-ack guarantee (work is lost on restart).
@@ -61,9 +61,9 @@ integration mode with explicit guardrails, rather than leaving it undescribed.
 
 **1. There are two sanctioned integration modes.**
 
-- **Client mode** — consume API-001 over HTTP or the `pqueue-client` SDK facade.
+- **Client mode** — consume API-001 over HTTP or the `fireweed-client` SDK facade.
   API-001 remains the external compatibility boundary for this mode.
-- **Embedded mode** — link `pqueue-core` + `pqueue-storage` and drive the
+- **Embedded mode** — link `fireweed-core` + `fireweed-storage` and drive the
   storage traits in-process. API-003's "Embedded Engine Integration Profile"
   defines how; this ADR defines the surface and its stability.
 
@@ -72,8 +72,8 @@ declared public, SemVer-stable surface (starting at the current `0.x`, with
 breaking changes only on a minor bump pre-1.0 and a major bump post-1.0, plus a
 one-minor deprecation window where feasible):
 
-- `pqueue-core`: the domain types (ids, `QueueDefinition`, priority/lifecycle).
-- `pqueue-storage`: `traits` (`LogStore`/`ProjectionStore`/`ControlPlaneStore`/
+- `fireweed-core`: the domain types (ids, `QueueDefinition`, priority/lifecycle).
+- `fireweed-storage`: `traits` (`LogStore`/`ProjectionStore`/`ControlPlaneStore`/
   `SnapshotStore`), `commands` (`CommandEnvelope`/`QueueCommand`/finalize kinds),
   and `types` (`QueueKey`/`CommandPosition`/`CommandChecksum`).
 
@@ -82,7 +82,7 @@ modules**: they are now an embedding contract, not just a backend-author one.
 Modules not listed here remain internal.
 
 **3. The in-memory backend is dev/test only and MUST NOT back production state.**
-`pqueue_storage::memory` is the conformance/reference backend; it has no durable
+`fireweed_storage::memory` is the conformance/reference backend; it has no durable
 ack boundary and loses all state on restart. An embedder running it in
 production violates the TD-001 durable-ack guarantee. Production embedders MUST
 use a durable backend.
@@ -99,7 +99,7 @@ client — MUST use one of:
   durable boundary is WAL + fsync. (Engine: `rusqlite`/bundled SQLite for v1;
   evaluating a pure-Rust engine is tracked separately and not a blocker.)
 
-**5. Embedded adapters MUST pass an embedder conformance suite.** pqueue
+**5. Embedded adapters MUST pass an embedder conformance suite.** fireweed
 publishes an embedder-facing "delivery adapter conformance" suite (distinct from
 the backend-author conformance of TD-001) asserting push/claim/finalize,
 duplicate convergence, retry/expired-lease re-pending, and terminal-failure
@@ -108,7 +108,7 @@ semantics through the embedded surface. A host's adapter (e.g. 7snx's
 
 ## Alternatives Considered
 
-### Keep the surface internal; require all consumers to use pqueue-client/API-001
+### Keep the surface internal; require all consumers to use fireweed-client/API-001
 Cleanest boundary, but contradicts a shipped reality: 7snx already embeds the
 traits, and the client facade does not yet expose the in-process performance and
 control an embedded host wants. Rejected as denial of the actual integration.
@@ -127,7 +127,7 @@ durable object log; it does not revise this backend's authority or durability bo
 
 - The embedding mode is documented and safe-by-contract: a durable backend is
   required, and the surface an embedder depends on is versioned.
-- TD-001 and ADR-003 are amended: the listed `pqueue-core`/`pqueue-storage`
+- TD-001 and ADR-003 are amended: the listed `fireweed-core`/`fireweed-storage`
   modules are a public embedding contract; API-001 remains the boundary for
   client mode only.
 - A new durable `sqlite` backend is required to give embedded hosts a
@@ -135,5 +135,5 @@ durable object log; it does not revise this backend's authority or durability bo
   `postgres_native` or `object_log_sqlite_projection`.
 - 7snx must move its host runtime off the in-memory backend onto a durable
   backend; its adapter conformance test maps to the published embedder suite.
-- pqueue takes on a SemVer obligation for the embedding surface; refactors of the
+- fireweed takes on a SemVer obligation for the embedding surface; refactors of the
   storage traits/commands now require a deprecation path.

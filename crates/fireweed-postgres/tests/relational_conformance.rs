@@ -1,17 +1,17 @@
 //! BQ-12 — the CORE conformance class + the relational-reconnect class run against the postgres
-//! **relational** backend (`PostgresRelationalBackend`: rebuildable `pqueue_items` cache, real
-//! `FOR UPDATE SKIP LOCKED` claim), **env-gated** on a live database via `PQUEUE_PG_TEST_URL`.
+//! **relational** backend (`PostgresRelationalBackend`: rebuildable `fireweed_items` cache, real
+//! `FOR UPDATE SKIP LOCKED` claim), **env-gated** on a live database via `FIREWEED_PG_TEST_URL`.
 //!
 //! Each scenario gets a process-unique schema (`connect_in_schema`); a scenario's repeated `make()` calls
 //! reopen the SAME schema, so the relational-reconnect scenarios exercise rebuildable-cache recovery.
 //! The TOCTOU prerequisite bead `pqueue-b59f4897` stays explicit in the migration path for the later
 //! multi-node rollout.
 //!
-//! If `PQUEUE_PG_TEST_URL` is ABSENT, every scenario prints a LOUD skip — a green run is then VISIBLY
+//! If `FIREWEED_PG_TEST_URL` is ABSENT, every scenario prints a LOUD skip — a green run is then VISIBLY
 //! partial (postgres unverified against a live DB), never a hidden pass. Compiling this file already proves
 //! `PostgresRelationalBackend` satisfies `ConformanceCore` (the scenarios' generic bound). To run live:
-//!   docker run -d --name pq-pg -p 5433:5432 -e POSTGRES_PASSWORD=pq postgres:16
-//!   PQUEUE_PG_TEST_URL=postgres://postgres:pq@127.0.0.1:5433/postgres cargo test -p fireweed-postgres
+//!   docker run -d --name fireweed-pg -p 5433:5432 -e POSTGRES_PASSWORD=fireweed postgres:16
+//!   FIREWEED_PG_TEST_URL=postgres://postgres:fireweed@127.0.0.1:5433/postgres cargo test -p fireweed-postgres
 //!
 //! NOTE: only `ConformanceCore`-bounded scenarios appear here — the relational backend is log-optional
 //! (no `LogRead`/`SnapshotStore`), so the log-class scenarios (high_water/snapshots/log-replay) do not
@@ -31,7 +31,7 @@ use serde_json::json;
 fn fresh_schema() -> String {
     static N: AtomicU64 = AtomicU64::new(0);
     format!(
-        "pq_rel_{}_{}",
+        "fireweed_rel_{}_{}",
         std::process::id(),
         N.fetch_add(1, Ordering::SeqCst)
     )
@@ -39,8 +39,8 @@ fn fresh_schema() -> String {
 
 #[test]
 fn v0193_upgrade_backfills_item_id_high_water_before_counter_restore() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
-        eprintln!("POSTGRES ITEM-ID UPGRADE SKIPPED — set PQUEUE_PG_TEST_URL to a live DB");
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
+        eprintln!("POSTGRES ITEM-ID UPGRADE SKIPPED — set FIREWEED_PG_TEST_URL to a live DB");
         return;
     };
     let schema = fresh_schema();
@@ -70,8 +70,8 @@ fn v0193_upgrade_backfills_item_id_high_water_before_counter_restore() {
     client
         .batch_execute(&format!(
             "SET search_path TO {schema}; \
-             DELETE FROM pqueue_id_high_water; \
-             DELETE FROM pqueue_schema_migrations WHERE migration_name='item_id_high_water_v2';"
+             DELETE FROM fireweed_id_high_water; \
+             DELETE FROM fireweed_schema_migrations WHERE migration_name='item_id_high_water_v2';"
         ))
         .unwrap();
     drop(client);
@@ -103,17 +103,17 @@ macro_rules! pg_relational {
         $(
             #[test]
             fn $name() {
-                match std::env::var("PQUEUE_PG_TEST_URL") {
+                match std::env::var("FIREWEED_PG_TEST_URL") {
                     Ok(url) => {
                         let schema = fresh_schema();
                         futures::executor::block_on(fireweed_conformance::scenarios::$name(move || {
                             PostgresRelationalBackend::connect_in_schema(&url, &schema)
-                                .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)")
+                                .expect("connect postgres (is FIREWEED_PG_TEST_URL a live DB?)")
                         }));
                     }
                     Err(_) => {
                         eprintln!(
-                            "POSTGRES RELATIONAL SKIPPED ({}) — set PQUEUE_PG_TEST_URL to a live DB",
+                            "POSTGRES RELATIONAL SKIPPED ({}) — set FIREWEED_PG_TEST_URL to a live DB",
                             stringify!($name)
                         );
                     }
@@ -260,18 +260,18 @@ where
 
 #[test]
 fn schema_validation_rejects_before_append_and_idempotency_on_postgres_relational() {
-    match std::env::var("PQUEUE_PG_TEST_URL") {
+    match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) => {
             let schema = fresh_schema();
             futures::executor::block_on(async {
                 let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema)
-                    .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)");
+                    .expect("connect postgres (is FIREWEED_PG_TEST_URL a live DB?)");
                 schema_validation_backend(&backend).await;
             });
         }
         Err(_) => {
             eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (schema_validation_rejects_before_append_and_idempotency_on_postgres_relational) — set PQUEUE_PG_TEST_URL to a live DB"
+                "POSTGRES RELATIONAL SKIPPED (schema_validation_rejects_before_append_and_idempotency_on_postgres_relational) — set FIREWEED_PG_TEST_URL to a live DB"
             );
         }
     }
@@ -281,13 +281,13 @@ fn schema_validation_rejects_before_append_and_idempotency_on_postgres_relationa
 fn commit_transition_shared_scenario_runs_against_postgres_relational() {
     use fireweed_conformance::scenarios::commit_transition_writes_side_records_enqueues_lifecycle_finalizes_and_survives_reopen;
 
-    match std::env::var("PQUEUE_PG_TEST_URL") {
+    match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) => {
             let schema = fresh_schema();
             futures::executor::block_on(async {
                 let make = || {
                     PostgresRelationalBackend::connect_in_schema(&url, &schema)
-                        .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)")
+                        .expect("connect postgres (is FIREWEED_PG_TEST_URL a live DB?)")
                 };
                 commit_transition_writes_side_records_enqueues_lifecycle_finalizes_and_survives_reopen(
                     make,
@@ -297,7 +297,7 @@ fn commit_transition_shared_scenario_runs_against_postgres_relational() {
         }
         Err(_) => {
             eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (commit_transition_shared_scenario_runs_against_postgres_relational) — set PQUEUE_PG_TEST_URL to a live DB"
+                "POSTGRES RELATIONAL SKIPPED (commit_transition_shared_scenario_runs_against_postgres_relational) — set FIREWEED_PG_TEST_URL to a live DB"
             );
         }
     }
@@ -307,19 +307,19 @@ fn commit_transition_shared_scenario_runs_against_postgres_relational() {
 fn commit_transition_explain_commit_shared_scenario_runs_against_postgres_relational() {
     use fireweed_conformance::scenarios::commit_transition_explain_commit_recovers_transition_and_survives_reopen;
 
-    match std::env::var("PQUEUE_PG_TEST_URL") {
+    match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) => {
             let schema = fresh_schema();
             futures::executor::block_on(async {
                 let make = || {
                     PostgresRelationalBackend::connect_in_schema(&url, &schema)
-                        .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)")
+                        .expect("connect postgres (is FIREWEED_PG_TEST_URL a live DB?)")
                 };
                 commit_transition_explain_commit_recovers_transition_and_survives_reopen(make)
                     .await;
 
                 let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema)
-                    .expect("reconnect postgres (is PQUEUE_PG_TEST_URL a live DB?)");
+                    .expect("reconnect postgres (is FIREWEED_PG_TEST_URL a live DB?)");
                 assert_eq!(
                     backend
                         .side_record(&fireweed_conformance::qkey(), b"missing/audit-key")
@@ -331,7 +331,7 @@ fn commit_transition_explain_commit_shared_scenario_runs_against_postgres_relati
         }
         Err(_) => {
             eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (commit_transition_explain_commit_shared_scenario_runs_against_postgres_relational) — set PQUEUE_PG_TEST_URL to a live DB"
+                "POSTGRES RELATIONAL SKIPPED (commit_transition_explain_commit_shared_scenario_runs_against_postgres_relational) — set FIREWEED_PG_TEST_URL to a live DB"
             );
         }
     }
@@ -339,12 +339,12 @@ fn commit_transition_explain_commit_shared_scenario_runs_against_postgres_relati
 
 #[test]
 fn postgres_relational_recovery_high_water() {
-    match std::env::var("PQUEUE_PG_TEST_URL") {
+    match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) => {
             let schema = fresh_schema();
             futures::executor::block_on(async {
                 let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema)
-                    .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)");
+                    .expect("connect postgres (is FIREWEED_PG_TEST_URL a live DB?)");
                 backend
                     .create_queue(fireweed_conformance::qdef())
                     .await
@@ -377,7 +377,7 @@ fn postgres_relational_recovery_high_water() {
             });
 
             let reopened = PostgresRelationalBackend::connect_in_schema(&url, &schema)
-                .expect("reconnect postgres (is PQUEUE_PG_TEST_URL a live DB?)");
+                .expect("reconnect postgres (is FIREWEED_PG_TEST_URL a live DB?)");
             assert_eq!(
                 futures::executor::block_on(
                     reopened.current_position(&fireweed_conformance::shard()),
@@ -389,7 +389,7 @@ fn postgres_relational_recovery_high_water() {
         }
         Err(_) => {
             eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (TestPostgresRelationalRecoveryHighWater) — set PQUEUE_PG_TEST_URL to a live DB"
+                "POSTGRES RELATIONAL SKIPPED (TestPostgresRelationalRecoveryHighWater) — set FIREWEED_PG_TEST_URL to a live DB"
             );
         }
     }
@@ -397,7 +397,7 @@ fn postgres_relational_recovery_high_water() {
 
 #[test]
 fn postgres_relational_truncate_then_recover_exact_state() {
-    match std::env::var("PQUEUE_PG_TEST_URL") {
+    match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) => {
             let schema = fresh_schema();
             let request_id = RequestId::new("replay-1").unwrap();
@@ -413,7 +413,7 @@ fn postgres_relational_truncate_then_recover_exact_state() {
             ];
             let (original_ids, fence_epoch) = futures::executor::block_on(async {
                 let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema)
-                    .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)");
+                    .expect("connect postgres (is FIREWEED_PG_TEST_URL a live DB?)");
                 backend
                     .create_queue(fireweed_conformance::qdef())
                     .await
@@ -455,7 +455,7 @@ fn postgres_relational_truncate_then_recover_exact_state() {
             });
 
             let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema)
-                .expect("reconnect postgres (is PQUEUE_PG_TEST_URL a live DB?)");
+                .expect("reconnect postgres (is FIREWEED_PG_TEST_URL a live DB?)");
             futures::executor::block_on(async {
                 assert_eq!(
                     backend
@@ -521,7 +521,7 @@ fn postgres_relational_truncate_then_recover_exact_state() {
         }
         Err(_) => {
             eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (TestPostgresRelationalTruncateThenRecoverExactState) — set PQUEUE_PG_TEST_URL to a live DB"
+                "POSTGRES RELATIONAL SKIPPED (TestPostgresRelationalTruncateThenRecoverExactState) — set FIREWEED_PG_TEST_URL to a live DB"
             );
         }
     }
@@ -530,7 +530,7 @@ fn postgres_relational_truncate_then_recover_exact_state() {
 // ---------------------------------------------------------------------------
 // ADR-011 typed secondary index conformance — postgres relational backend
 // These tests mirror fireweed-sqlite/tests/relational_conformance.rs §9 and are
-// env-gated on PQUEUE_PG_TEST_URL exactly like the rest of this file.
+// env-gated on FIREWEED_PG_TEST_URL exactly like the rest of this file.
 // ---------------------------------------------------------------------------
 
 use axon_esf::IndexDef;
@@ -577,12 +577,12 @@ fn pg_entity(field: &str, value: &str) -> serde_json::Value {
 
 fn pg_typed_connect(url: &str, schema: &str) -> PostgresRelationalBackend {
     PostgresRelationalBackend::connect_in_schema(url, schema)
-        .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)")
+        .expect("connect postgres (is FIREWEED_PG_TEST_URL a live DB?)")
 }
 
 #[test]
 fn pg_rel_typed_index_push_then_get_unique() {
-    match std::env::var("PQUEUE_PG_TEST_URL") {
+    match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) => {
             let schema = fresh_schema();
             futures::executor::block_on(async {
@@ -612,14 +612,14 @@ fn pg_rel_typed_index_push_then_get_unique() {
             });
         }
         Err(_) => eprintln!(
-            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_index_push_then_get_unique) — set PQUEUE_PG_TEST_URL"
+            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_index_push_then_get_unique) — set FIREWEED_PG_TEST_URL"
         ),
     }
 }
 
 #[test]
 fn pg_rel_typed_index_push_then_lookup_nonunique() {
-    match std::env::var("PQUEUE_PG_TEST_URL") {
+    match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) => {
             let schema = fresh_schema();
             futures::executor::block_on(async {
@@ -659,14 +659,14 @@ fn pg_rel_typed_index_push_then_lookup_nonunique() {
             });
         }
         Err(_) => eprintln!(
-            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_index_push_then_lookup_nonunique) — set PQUEUE_PG_TEST_URL"
+            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_index_push_then_lookup_nonunique) — set FIREWEED_PG_TEST_URL"
         ),
     }
 }
 
 #[test]
 fn pg_rel_typed_unique_index_conflict_is_rejected() {
-    match std::env::var("PQUEUE_PG_TEST_URL") {
+    match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) => {
             let schema = fresh_schema();
             futures::executor::block_on(async {
@@ -706,14 +706,14 @@ fn pg_rel_typed_unique_index_conflict_is_rejected() {
             });
         }
         Err(_) => eprintln!(
-            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_unique_index_conflict_is_rejected) — set PQUEUE_PG_TEST_URL"
+            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_unique_index_conflict_is_rejected) — set FIREWEED_PG_TEST_URL"
         ),
     }
 }
 
 #[test]
 fn pg_rel_typed_unique_index_within_batch_conflict_rejected() {
-    match std::env::var("PQUEUE_PG_TEST_URL") {
+    match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) => {
             let schema = fresh_schema();
             futures::executor::block_on(async {
@@ -751,14 +751,14 @@ fn pg_rel_typed_unique_index_within_batch_conflict_rejected() {
             });
         }
         Err(_) => eprintln!(
-            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_unique_index_within_batch_conflict_rejected) — set PQUEUE_PG_TEST_URL"
+            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_unique_index_within_batch_conflict_rejected) — set FIREWEED_PG_TEST_URL"
         ),
     }
 }
 
 #[test]
 fn pg_rel_typed_index_purge_frees_unique_key() {
-    match std::env::var("PQUEUE_PG_TEST_URL") {
+    match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) => {
             let schema = fresh_schema();
             futures::executor::block_on(async {
@@ -809,14 +809,14 @@ fn pg_rel_typed_index_purge_frees_unique_key() {
             });
         }
         Err(_) => eprintln!(
-            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_index_purge_frees_unique_key) — set PQUEUE_PG_TEST_URL"
+            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_index_purge_frees_unique_key) — set FIREWEED_PG_TEST_URL"
         ),
     }
 }
 
 #[test]
 fn pg_rel_typed_index_replace_pending_updates_index() {
-    match std::env::var("PQUEUE_PG_TEST_URL") {
+    match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) => {
             let schema = fresh_schema();
             futures::executor::block_on(async {
@@ -870,14 +870,14 @@ fn pg_rel_typed_index_replace_pending_updates_index() {
             });
         }
         Err(_) => eprintln!(
-            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_index_replace_pending_updates_index) — set PQUEUE_PG_TEST_URL"
+            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_index_replace_pending_updates_index) — set FIREWEED_PG_TEST_URL"
         ),
     }
 }
 
 #[test]
 fn pg_rel_typed_index_update_fields_moves_index_key() {
-    match std::env::var("PQUEUE_PG_TEST_URL") {
+    match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) => {
             let schema = fresh_schema();
             futures::executor::block_on(async {
@@ -926,14 +926,14 @@ fn pg_rel_typed_index_update_fields_moves_index_key() {
             });
         }
         Err(_) => eprintln!(
-            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_index_update_fields_moves_index_key) — set PQUEUE_PG_TEST_URL"
+            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_index_update_fields_moves_index_key) — set FIREWEED_PG_TEST_URL"
         ),
     }
 }
 
 #[test]
 fn pg_rel_typed_index_update_fields_unique_conflict_is_atomic() {
-    match std::env::var("PQUEUE_PG_TEST_URL") {
+    match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) => {
             let schema = fresh_schema();
             futures::executor::block_on(async {
@@ -989,14 +989,14 @@ fn pg_rel_typed_index_update_fields_unique_conflict_is_atomic() {
             });
         }
         Err(_) => eprintln!(
-            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_index_update_fields_unique_conflict_is_atomic) — set PQUEUE_PG_TEST_URL"
+            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_index_update_fields_unique_conflict_is_atomic) — set FIREWEED_PG_TEST_URL"
         ),
     }
 }
 
 #[test]
 fn pg_rel_typed_index_schema_less_queue_unaffected() {
-    match std::env::var("PQUEUE_PG_TEST_URL") {
+    match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) => {
             let schema = fresh_schema();
             futures::executor::block_on(async {
@@ -1021,7 +1021,7 @@ fn pg_rel_typed_index_schema_less_queue_unaffected() {
             });
         }
         Err(_) => eprintln!(
-            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_index_schema_less_queue_unaffected) — set PQUEUE_PG_TEST_URL"
+            "POSTGRES RELATIONAL SKIPPED (pg_rel_typed_index_schema_less_queue_unaffected) — set FIREWEED_PG_TEST_URL"
         ),
     }
 }

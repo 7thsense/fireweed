@@ -1,6 +1,6 @@
 //! Env-gated hot-projection capability smoke test for the postgres adapter.
 //!
-//! Without `PQUEUE_PG_TEST_URL` this prints a loud skip and returns green, so local CI does not depend
+//! Without `FIREWEED_PG_TEST_URL` this prints a loud skip and returns green, so local CI does not depend
 //! on a live database. When configured, it proves the adapter advertises hot-projection support
 //! explicitly rather than pretending the capability exists.
 
@@ -20,7 +20,7 @@ use fireweed_postgres::{PostgresBackend, PostgresRelationalBackend};
 fn fresh_schema() -> String {
     static N: AtomicU64 = AtomicU64::new(0);
     format!(
-        "pq_hot_projection_{}_{}",
+        "fireweed_hot_projection_{}_{}",
         std::process::id(),
         N.fetch_add(1, Ordering::SeqCst)
     )
@@ -109,15 +109,15 @@ fn assert_commit_transition_is_supported(backend: &PostgresRelationalBackend) {
 
 #[test]
 fn hot_projection_capabilities_are_explicit() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
         eprintln!(
-            "POSTGRES HOT PROJECTION SKIPPED (hot_projection_capabilities_are_explicit) — set PQUEUE_PG_TEST_URL to a live DB"
+            "POSTGRES HOT PROJECTION SKIPPED (hot_projection_capabilities_are_explicit) — set FIREWEED_PG_TEST_URL to a live DB"
         );
         return;
     };
 
     let backend = PostgresBackend::connect_in_schema(&url, &fresh_schema())
-        .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)");
+        .expect("connect postgres (is FIREWEED_PG_TEST_URL a live DB?)");
     let flags = backend.hot_projection_capabilities(&qkey());
     assert_eq!(flags, fireweed::QueryCapabilityFlags::default());
     assert!(!flags.side_record_query);
@@ -138,9 +138,9 @@ fn hot_projection_capabilities_are_explicit() {
 
 #[test]
 fn filtered_lifecycle_metrics_conformance() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
         eprintln!(
-            "POSTGRES FILTERED METRICS SKIPPED (filtered_lifecycle_metrics_conformance) — set PQUEUE_PG_TEST_URL to a live DB"
+            "POSTGRES FILTERED METRICS SKIPPED (filtered_lifecycle_metrics_conformance) — set FIREWEED_PG_TEST_URL to a live DB"
         );
         return;
     };
@@ -161,15 +161,15 @@ fn filtered_lifecycle_metrics_conformance() {
 
 #[test]
 fn read_as_of_unavailable_relational() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
         eprintln!(
-            "POSTGRES READ-AS-OF SKIPPED (read_as_of_unavailable_relational) — set PQUEUE_PG_TEST_URL to a live DB"
+            "POSTGRES READ-AS-OF SKIPPED (read_as_of_unavailable_relational) — set FIREWEED_PG_TEST_URL to a live DB"
         );
         return;
     };
 
     let relational = PostgresRelationalBackend::connect_in_schema(&url, &fresh_schema())
-        .expect("connect postgres-relational (is PQUEUE_PG_TEST_URL a live DB?)");
+        .expect("connect postgres-relational (is FIREWEED_PG_TEST_URL a live DB?)");
     let shard = qkey();
     let position = fireweed_engine::CommandPosition::new(shard.clone(), 0, 0);
     let err = futures::executor::block_on(relational.read_as_of(
@@ -183,7 +183,7 @@ fn read_as_of_unavailable_relational() {
     assert_eq!(err, EngineError::Unavailable);
 
     let composed = PostgresRelationalBackend::connect_in_schema(&url, &fresh_schema())
-        .expect("compose postgres-relational (is PQUEUE_PG_TEST_URL a live DB?)");
+        .expect("compose postgres-relational (is FIREWEED_PG_TEST_URL a live DB?)");
     let err = futures::executor::block_on(composed.read_as_of(
         &shard,
         position,
@@ -197,18 +197,18 @@ fn read_as_of_unavailable_relational() {
 
 #[test]
 fn commit_transition_capabilities_are_explicit() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
         eprintln!(
-            "POSTGRES COMMIT-TRANSITION SKIPPED (commit_transition_capabilities_are_explicit) — set PQUEUE_PG_TEST_URL to a live DB"
+            "POSTGRES COMMIT-TRANSITION SKIPPED (commit_transition_capabilities_are_explicit) — set FIREWEED_PG_TEST_URL to a live DB"
         );
         return;
     };
 
     let postgres = PostgresBackend::connect_in_schema(&url, &fresh_schema())
-        .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)");
+        .expect("connect postgres (is FIREWEED_PG_TEST_URL a live DB?)");
     assert_commit_transition_is_explicitly_declined(&postgres);
 
     let relational = PostgresRelationalBackend::connect_in_schema(&url, &fresh_schema())
-        .expect("connect postgres-relational (is PQUEUE_PG_TEST_URL a live DB?)");
+        .expect("connect postgres-relational (is FIREWEED_PG_TEST_URL a live DB?)");
     assert_commit_transition_is_supported(&relational);
 }

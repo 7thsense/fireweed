@@ -17,7 +17,7 @@ use tokio::net::TcpStream;
 fn fresh_schema() -> String {
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     format!(
-        "pq_server_cp_{}_{}",
+        "fireweed_server_cp_{}_{}",
         std::process::id(),
         SEQUENCE.fetch_add(1, Ordering::SeqCst)
     )
@@ -97,9 +97,9 @@ async fn raw_resp(address: std::net::SocketAddr, parts: &[&str]) -> String {
 
 #[test]
 fn two_service_runtimes_share_owner_membership_and_monotonic_epochs() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
         eprintln!(
-            "POSTGRES CONTROL-PLANE SERVER WIRING SKIPPED — set PQUEUE_PG_TEST_URL to a live DB"
+            "POSTGRES CONTROL-PLANE SERVER WIRING SKIPPED — set FIREWEED_PG_TEST_URL to a live DB"
         );
         return;
     };
@@ -179,9 +179,9 @@ fn two_service_runtimes_share_owner_membership_and_monotonic_epochs() {
 
 #[test]
 fn peer_endpoint_discovery_returns_one_hop_moved() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
         eprintln!(
-            "POSTGRES ENDPOINT-DISCOVERY WIRING SKIPPED — set PQUEUE_PG_TEST_URL to a live DB"
+            "POSTGRES ENDPOINT-DISCOVERY WIRING SKIPPED — set FIREWEED_PG_TEST_URL to a live DB"
         );
         return;
     };

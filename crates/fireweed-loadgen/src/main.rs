@@ -1046,7 +1046,7 @@ fn cmd_emit_row(args: &[String]) -> ! {
 }
 
 fn cmd_density_run(args: &[String]) -> ! {
-    let addr = arg_value(args, "--addr").unwrap_or_else(|| "pqueue:8080".into());
+    let addr = arg_value(args, "--addr").unwrap_or_else(|| "fireweed:8080".into());
     let queue_prefix = arg_value(args, "--queue-prefix").unwrap_or_else(|| "density:q".into());
     let total_queues = parse_usize_arg(args, "--queue-count", 1001);
     let items = parse_u64_arg(args, "--items", 300_000);

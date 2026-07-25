@@ -25,7 +25,7 @@ thread_local! {
 fn db_path() -> String {
     std::env::temp_dir()
         .join(format!(
-            "pqueue-composed-log-reconnect-{:?}.db",
+            "fireweed-composed-log-reconnect-{:?}.db",
             std::thread::current().id()
         ))
         .to_str()
@@ -49,7 +49,7 @@ fireweed_conformance::durable_reconnect_suite!(make);
 fn unique_path(tag: &str) -> String {
     std::env::temp_dir()
         .join(format!(
-            "pqueue-composed-log-reconnect-{}-{}.db",
+            "fireweed-composed-log-reconnect-{}-{}.db",
             std::process::id(),
             tag
         ))

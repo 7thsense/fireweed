@@ -2,7 +2,7 @@
 //! # fireweed-server
 //!
 //! The **composition root**: the single place that selects a concrete backend (memory / sqlite /
-//! objectlog) and wires it to the two faces of pqueue. It binds the RESP front ([`fireweed_resp::serve`])
+//! objectlog) and wires it to the two faces of fireweed. It binds the RESP front ([`fireweed_resp::serve`])
 //! and runs a **background [`ReclaimDriver`] task** that periodically `tick`s the engine so expired
 //! leases are reclaimed on a *quiet* queue with no client traffic — closing the orphan-on-quiet-queue
 //! gap (TD-007 §3) that the client-triggered `XAUTOCLAIM` alone leaves open.
@@ -324,7 +324,7 @@ impl ObjectLogSpec {
 pub enum ProjectionSpec {
     /// In-memory `ProjectionData` projection, rebuilt by log replay on open.
     InMemory,
-    /// Derived relational sqlite projection (`pqueue_items` is the read model) at `path`.
+    /// Derived relational sqlite projection (`fireweed_items` is the read model) at `path`.
     Sqlite { path: PathBuf },
     /// Native-async local Turso derived projection. Selection is accepted only by builds carrying the
     /// `turso-projection` feature and only with an object-log authority.
@@ -374,7 +374,7 @@ type ObjectLogHybridBackend =
 /// production replicas use the shared transactional Postgres authority.
 #[derive(Debug, Clone)]
 pub enum ControlPlaneSpec {
-    /// Development/test only. Environment parsing rejects this profile when `PQUEUE_REPLICA_COUNT > 1`.
+    /// Development/test only. Environment parsing rejects this profile when `FIREWEED_REPLICA_COUNT > 1`.
     InProcess,
     /// Shared production membership, queue-lease, and monotonic assignment-epoch authority.
     Postgres {
@@ -393,14 +393,14 @@ fn change_record_sink_profile_is_wired(log: &LogSpec, projection: &ProjectionSpe
 }
 
 /// Typed configuration for the embedded fjord surface that fireweed-server boots behind the composition
-/// root seam. The namespace root is isolated from pqueue's own queue storage roots so the Kafka surface
+/// root seam. The namespace root is isolated from fireweed's own queue storage roots so the Kafka surface
 /// state never shares a directory with the queue commit path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddedFjordConfig {
     pub namespace_root: PathBuf,
     pub cluster_id: String,
     /// Optional TCP listen address (`host:port` or `kafka://host:port`) for the embedded broker's
-    /// EXTERNAL-consumer Kafka surface. `None` (the default) keeps the change log purely in-process: pqueue
+    /// EXTERNAL-consumer Kafka surface. `None` (the default) keeps the change log purely in-process: fireweed
     /// appends change records directly to the shared log and the write path binds no socket (ADR-014). Set
     /// this only when a deployment wants external Kafka consumers to read the change log over TCP; the
     /// surface then serves fetches from the SAME in-process log the sink appends to.
@@ -410,8 +410,8 @@ pub struct EmbeddedFjordConfig {
 impl Default for EmbeddedFjordConfig {
     fn default() -> Self {
         Self {
-            namespace_root: PathBuf::from("/var/lib/pqueue/fjord"),
-            cluster_id: "pqueue-fjord".to_string(),
+            namespace_root: PathBuf::from("/var/lib/fireweed/fjord"),
+            cluster_id: "fireweed-fjord".to_string(),
             broker_listen: None,
         }
     }
@@ -533,7 +533,7 @@ fn parse_fjord_topic_name(topic: &str) -> EngineResult<QueueKey> {
 
 /// In-process topic readiness for the shared embedded surface.
 ///
-/// Because pqueue now owns the surface, topic existence is a synchronous in-process property: we create
+/// Because fireweed now owns the surface, topic existence is a synchronous in-process property: we create
 /// each queue topic in the shared `FjordLog` and register it in the shared `FjordTopicRegistry` before the
 /// broker starts serving. This replaces the former loopback metadata poll — no Kafka client, no
 /// socket round-trip — and it fails closed if any expected topic is missing after creation.
@@ -618,7 +618,7 @@ fn parse_kafka_bootstrap(input: &str) -> EngineResult<(String, u16)> {
 ///
 /// The broker is built over the caller's `surface` — the same `Arc<dyn LogBackend>` / offset store the
 /// change-record sink appends to — so change records written in-process are immediately fetchable by
-/// external Kafka consumers over this TCP surface. There is no loopback socket on the write path: pqueue
+/// external Kafka consumers over this TCP surface. There is no loopback socket on the write path: fireweed
 /// appends directly to `surface.log`; only external consumers use this socket (ADR-014).
 pub async fn spawn_embedded_fjord_broker(
     surface: &EmbeddedFjordSurface,
@@ -710,7 +710,7 @@ pub async fn spawn_embedded_fjord_broker(
 
 /// A single change record decoded back out of the embedded fjord log (partition 0). The consumer-contract
 /// introspection type: it exposes the exact record shape an external Kafka consumer would observe — the
-/// broker-assigned `offset`, the TD-008 idempotency `key`, the `pq-*` `headers`, and the `ChangeRecord`
+/// broker-assigned `offset`, the TD-008 idempotency `key`, the `fireweed-*` `headers`, and the `ChangeRecord`
 /// JSON `value` — read through the same in-process log the embedded `HeimqServer` fetches from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddedChangeRecord {
@@ -823,8 +823,8 @@ impl BackendSpec {
 }
 
 /// Resolve the postgres [`LogSpec`] from the runtime environment, using the env names the Helm Lakebase
-/// profile renders. The DSN secret is `PQUEUE_POSTGRES_LOG_DATABASE_URL` (the chart's log-backend Secret
-/// ref); `PQUEUE_PG_URL` is the local/dev fallback, and the documented default is the last resort. A
+/// profile renders. The DSN secret is `FIREWEED_POSTGRES_LOG_DATABASE_URL` (the chart's log-backend Secret
+/// ref); `FIREWEED_PG_URL` is the local/dev fallback, and the documented default is the last resort. A
 /// Databricks service-principal/PAT credential provider is attached when `DATABRICKS_HOST` is present.
 ///
 /// No plaintext fallback: if the DSN demands `sslmode=require` but this binary was built WITHOUT the `tls`
@@ -838,7 +838,6 @@ pub fn resolve_postgres_log(
 ) -> Result<LogSpec, String> {
     let nonempty = |suffix: &str| {
         env.get(&format!("FIREWEED_{suffix}"))
-            .or_else(|| env.get(&format!("PQUEUE_{suffix}")))
             .filter(|s| !s.is_empty())
             .cloned()
     };
@@ -879,8 +878,8 @@ pub fn resolve_postgres_log(
 }
 
 /// Resolve the postgres [`ProjectionSpec`] from the runtime environment, using the env name the Helm chart's
-/// `storage.projection.postgres` axis renders. The DSN secret is `PQUEUE_POSTGRES_PROJECTION_DATABASE_URL`;
-/// `PQUEUE_PG_PROJECTION_URL` is the local/dev fallback, and the documented default is the last resort.
+/// `storage.projection.postgres` axis renders. The DSN secret is `FIREWEED_POSTGRES_PROJECTION_DATABASE_URL`;
+/// `FIREWEED_PG_PROJECTION_URL` is the local/dev fallback, and the documented default is the last resort.
 ///
 /// No plaintext fallback: if the DSN demands `sslmode=require` but this binary was built WITHOUT the `tls`
 /// feature, this fails at config time rather than letting the runtime silently downgrade to `NoTls`.
@@ -893,7 +892,6 @@ pub fn resolve_postgres_projection(
 ) -> Result<ProjectionSpec, String> {
     let nonempty = |suffix: &str| {
         env.get(&format!("FIREWEED_{suffix}"))
-            .or_else(|| env.get(&format!("PQUEUE_{suffix}")))
             .filter(|s| !s.is_empty())
             .cloned()
     };
@@ -918,9 +916,9 @@ pub fn resolve_postgres_projection(
     Ok(ProjectionSpec::Postgres { url })
 }
 
-/// The single authoritative, fully-typed runtime configuration for a pqueue server. Every knob the server
+/// The single authoritative, fully-typed runtime configuration for a fireweed server. Every knob the server
 /// needs lives here as a typed field; there is exactly ONE optional env populator (`Config::from_env`, in
-/// the `fireweed-service` bin) that maps the documented `PQUEUE_*`/`DATABRICKS_*` env names onto these fields.
+/// the `fireweed-service` bin) that maps the documented `FIREWEED_*`/`DATABRICKS_*` env names onto these fields.
 /// A pure-library embedder constructs this struct directly and never touches the process environment — the
 /// library reads no env vars at all.
 pub struct Config {
@@ -951,20 +949,20 @@ pub struct Config {
     /// queue` — provision them up front.
     pub queues: Vec<QueueDefinition>,
     /// Recovery-window budget (max object-log tail commands) before an object-log+SQLite reopen logs a
-    /// recovery-window warning. Parsed from `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS` (default
+    /// recovery-window warning. Parsed from `FIREWEED_RECOVERY_MAX_TAIL_COMMANDS` (default
     /// [`DEFAULT_RECOVERY_MAX_TAIL`]); applied by [`start`] to the objectlog+sqlite backend.
     pub recovery_max_tail: u64,
     /// Opt-in group-commit telemetry for the segmented+SQLite object-log backend (the typed form of
-    /// `PQUEUE_DEBUG_SEGMENTS`).
+    /// `FIREWEED_DEBUG_SEGMENTS`).
     pub debug_segments: bool,
     /// Validated finite admission bounds shared by every object-log commit profile on this node.
     pub objectlog_byte_limits: ObjectLogByteLimits,
-    /// Tokio worker-thread cap (the typed form of `PQUEUE_WORKER_THREADS`). `None` = one worker per core.
+    /// Tokio worker-thread cap (the typed form of `FIREWEED_WORKER_THREADS`). `None` = one worker per core.
     /// Consumed by the bin when building the runtime, not by [`start`].
     pub worker_threads: Option<usize>,
     /// Fixed number of sync PostgreSQL connections owned by the `postgres/inmemory` production backend.
     /// Queue affinity multiplexes any number of queues over this bounded pool; the value never grows from
-    /// queue creation or load. Parsed from `PQUEUE_POSTGRES_POOL_SIZE`.
+    /// queue creation or load. Parsed from `FIREWEED_POSTGRES_POOL_SIZE`.
     pub postgres_pool_size: usize,
     /// Optional path for the service binary's atomic Tokio worker/live-task gauge snapshot. `None`
     /// disables the reporter. The env-config form requires an absolute, non-empty path.
@@ -972,14 +970,14 @@ pub struct Config {
     /// Per-queue bounds on `objectlog/hybrid-async` async SQLite apply debt (bead pqueue-6da52695): the
     /// hard lag/bytes/depth/age limits and the apply-retry poison threshold that drive backpressure and
     /// fail-closed poison (TD-004 §"Async apply debt, backpressure, and poison thresholds"). The typed form
-    /// of the `PQUEUE_HYBRID_ASYNC_*` env names; applied by the hybrid-async projection's apply pipeline.
+    /// of the `FIREWEED_HYBRID_ASYNC_*` env names; applied by the hybrid-async projection's apply pipeline.
     pub hybrid_async: HybridAsyncThresholds,
     /// Cap on how many deferred SQLite-checkpoint commands one `objectlog/hybrid` or
     /// `objectlog/hybrid-async` deferred-flush call applies (bead pqueue-8e5e7846). `flush_deferred` runs
     /// under the composed backend's unit-of-work mutex, so bounding this bounds the worst-case time one
     /// call can block concurrent push/claim callers; the periodic flusher's 250ms cadence drains a larger
     /// backlog over several calls instead of one unbounded transaction. The typed form of
-    /// `PQUEUE_HYBRID_DEFERRED_FLUSH_CHUNK`, defaulting to
+    /// `FIREWEED_HYBRID_DEFERRED_FLUSH_CHUNK`, defaulting to
     /// [`fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK`]; applied to the hybrid projection store on open.
     pub deferred_flush_chunk: usize,
     // Background change-record emission settings (TD-008). Disabled by default; enabled deployments
@@ -2352,7 +2350,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         }
         #[cfg(not(feature = "turso-projection"))]
         (LogSpec::ObjectLog(_), ProjectionSpec::Turso { .. }) => Err(EngineError::Invalid(
-            "PQUEUE_PROJECTION_BACKEND=turso requires a fireweed-server build with the `turso-projection` cargo feature",
+            "FIREWEED_PROJECTION_BACKEND=turso requires a fireweed-server build with the `turso-projection` cargo feature",
         )),
         (LogSpec::ObjectLog(spec), ProjectionSpec::Hybrid { path }) => {
             let backends = tokio::task::spawn_blocking(move || {
@@ -3382,7 +3380,7 @@ mod byte_admission_wiring_tests {
     #[test]
     fn production_hybrid_constructor_consumes_node_and_queue_caps() {
         let path = std::env::temp_dir().join(format!(
-            "pqueue-byte-admission-hybrid-{}-{}.db",
+            "fireweed-byte-admission-hybrid-{}-{}.db",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -3425,7 +3423,7 @@ mod byte_admission_wiring_tests {
     #[tokio::test]
     async fn hybrid_flusher_does_not_retain_backend_or_resident_permits_on_shutdown() {
         let path = std::env::temp_dir().join(format!(
-            "pqueue-byte-admission-hybrid-drop-{}-{}.db",
+            "fireweed-byte-admission-hybrid-drop-{}-{}.db",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -3493,7 +3491,7 @@ mod byte_admission_wiring_tests {
     #[tokio::test]
     async fn start_rejects_programmatic_objectlog_limits_below_segment_target() {
         let path = std::env::temp_dir().join(format!(
-            "pqueue-invalid-byte-config-{}-{}",
+            "fireweed-invalid-byte-config-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

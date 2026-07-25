@@ -37,7 +37,7 @@
 //!     the sibling `queue_density_single_node_durable_tests` above). Bar (d) — per-queue background
 //!     work (lease-expiry sweeps, progress-bound aggregation, summary recompute, recurring rearm, retention
 //!     GC) multiplexed onto BOUNDED shared per-node pools, never one loop/connection per queue — is a
-//!     pqueue-SERVER RUNTIME property (the library facade runs NO background loops at all). It and "every
+//!     fireweed-SERVER RUNTIME property (the library facade runs NO background loops at all). It and "every
 //!     active queue meeting its progress bound under a live sweeper" are the server-runtime + live-cluster
 //!     run's job (deferred to bead pqueue-c33c367e and the live run). Aggregate single-node throughput is
 //!     REPORTED, not required to be 1000x the per-queue floor (TP-002 §E2: multi-node provides aggregate
@@ -108,7 +108,7 @@ fn qk(tenant: &str, queue: &str) -> QueueKey {
     QueueKey::new(TenantId::new(tenant).unwrap(), QueueId::new(queue).unwrap())
 }
 
-async fn seed(pq: &Fireweed, key: &QueueKey, items: u64, batch: usize) {
+async fn seed(fireweed: &Fireweed, key: &QueueKey, items: u64, batch: usize) {
     let mut pushed = 0u64;
     while pushed < items {
         let n = (items - pushed).min(batch as u64) as usize;
@@ -118,27 +118,27 @@ async fn seed(pq: &Fireweed, key: &QueueKey, items: u64, batch: usize) {
                 ..Default::default()
             })
             .collect();
-        pq.push_batch(key, batch_items).await.unwrap();
+        fireweed.push_batch(key, batch_items).await.unwrap();
         pushed += n as u64;
     }
 }
 
 /// Drive one queue through a full push + claim + ack of `items`, returning (push_rate, claim_rate) in items/s.
-async fn run_hot(pq: &Fireweed, key: &QueueKey, items: u64, batch: usize) -> (f64, f64) {
+async fn run_hot(fireweed: &Fireweed, key: &QueueKey, items: u64, batch: usize) -> (f64, f64) {
     let t_push = Instant::now();
-    seed(pq, key, items, batch).await;
+    seed(fireweed, key, items, batch).await;
     let push_rate = items as f64 / t_push.elapsed().as_secs_f64();
 
     let t_claim = Instant::now();
     let mut drained = 0u64;
     while drained < items {
-        let claimed = pq.claim(key, batch, 3_600_000).await.unwrap();
+        let claimed = fireweed.claim(key, batch, 3_600_000).await.unwrap();
         if claimed.is_empty() {
             break;
         }
         let ids: Vec<ItemId> = claimed.iter().map(|c| c.item_id).collect();
         drained += ids.len() as u64;
-        pq.ack(key, ids).await.unwrap();
+        fireweed.ack(key, ids).await.unwrap();
     }
     assert_eq!(drained, items, "the hot queue must fully drain");
     let claim_rate = items as f64 / t_claim.elapsed().as_secs_f64();
@@ -171,22 +171,22 @@ fn measure_residency_on<F>(
 where
     F: FnOnce() -> Fireweed,
 {
-    let pq = make_backend();
+    let fireweed = make_backend();
     futures::executor::block_on(async {
         for i in 0..density {
             let key = qk("density", &format!("cold{i}"));
-            pq.create_queue(qdef("density", &format!("cold{i}")))
+            fireweed.create_queue(qdef("density", &format!("cold{i}")))
                 .await
                 .unwrap();
-            seed(&pq, &key, cold_each, batch).await;
+            seed(&fireweed, &key, cold_each, batch).await;
         }
         let hot = qk("density", "hot");
-        pq.create_queue(qdef("density", "hot")).await.unwrap();
-        let (hot_push_rate, hot_claim_rate) = run_hot(&pq, &hot, hot_items, batch).await;
+        fireweed.create_queue(qdef("density", "hot")).await.unwrap();
+        let (hot_push_rate, hot_claim_rate) = run_hot(&fireweed, &hot, hot_items, batch).await;
 
         let mut cold_resident_after = 0usize;
         for i in 0..density {
-            let m = pq
+            let m = fireweed
                 .metrics(&qk("density", &format!("cold{i}")))
                 .await
                 .unwrap();
@@ -233,21 +233,21 @@ fn measure_hot_under_concurrent_load(
     hot_items: u64,
     batch: usize,
 ) -> (f64, f64, u64) {
-    let pq = Arc::new(open_memory(Arc::new(SysClock)));
+    let fireweed = Arc::new(open_memory(Arc::new(SysClock)));
     futures::executor::block_on(async {
         for i in 0..cold {
-            pq.create_queue(qdef("noisy", &format!("c{i}")))
+            fireweed.create_queue(qdef("noisy", &format!("c{i}")))
                 .await
                 .unwrap();
         }
-        pq.create_queue(qdef("noisy", "hot")).await.unwrap();
+        fireweed.create_queue(qdef("noisy", "hot")).await.unwrap();
     });
 
     let stop = Arc::new(AtomicBool::new(false));
     let barrier = Arc::new(Barrier::new(workers + 1));
     let handles: Vec<_> = (0..workers)
         .map(|w| {
-            let pq = Arc::clone(&pq);
+            let fireweed = Arc::clone(&fireweed);
             let stop = Arc::clone(&stop);
             let barrier = Arc::clone(&barrier);
             thread::spawn(move || {
@@ -264,16 +264,16 @@ fn measure_hot_under_concurrent_load(
                         idx += 1;
                         // Push a small batch then fully drain it: keeps the cold queue genuinely active
                         // (real concurrent work) and its resident set bounded while contending the shared node.
-                        seed(&pq, q, NOISY_BATCH, NOISY_BATCH as usize).await;
+                        seed(&fireweed, q, NOISY_BATCH, NOISY_BATCH as usize).await;
                         let mut d = 0u64;
                         while d < NOISY_BATCH {
-                            let c = pq.claim(q, NOISY_BATCH as usize, 3_600_000).await.unwrap();
+                            let c = fireweed.claim(q, NOISY_BATCH as usize, 3_600_000).await.unwrap();
                             if c.is_empty() {
                                 break;
                             }
                             let ids: Vec<ItemId> = c.iter().map(|x| x.item_id).collect();
                             d += ids.len() as u64;
-                            pq.ack(q, ids).await.unwrap();
+                            fireweed.ack(q, ids).await.unwrap();
                         }
                         ops += NOISY_BATCH;
                     }
@@ -286,7 +286,7 @@ fn measure_hot_under_concurrent_load(
     // Hot driver: wait for the noisy pool to be running, then measure the hot queue under concurrent load.
     barrier.wait();
     let hot = qk("noisy", "hot");
-    let (push_rate, claim_rate) = futures::executor::block_on(run_hot(&pq, &hot, hot_items, batch));
+    let (push_rate, claim_rate) = futures::executor::block_on(run_hot(&fireweed, &hot, hot_items, batch));
     stop.store(true, Ordering::Relaxed);
     let noisy_ops: u64 = handles.into_iter().map(|h| h.join().unwrap()).sum();
     (push_rate, claim_rate, noisy_ops)
@@ -467,7 +467,7 @@ fn durable_tmp(tag: &str) -> std::path::PathBuf {
         .unwrap()
         .as_nanos();
     std::env::temp_dir().join(format!(
-        "pqueue-density-durable-{tag}-{}-{nanos}-{n}",
+        "fireweed-density-durable-{tag}-{}-{nanos}-{n}",
         std::process::id()
     ))
 }
@@ -611,7 +611,7 @@ fn queue_density_single_node_durable_tests() {
     // sqlite_log_sqlite_projection substrates at 1000 above are the required deliverable; this is a
     // supporting, honestly-reduced point.
     let pg_densities = [0usize, 100];
-    let pg_points: Vec<ResidencyPoint> = match std::env::var("PQUEUE_PG_TEST_URL") {
+    let pg_points: Vec<ResidencyPoint> = match std::env::var("FIREWEED_PG_TEST_URL") {
         Ok(url) if !url.trim().is_empty() => {
             println!(
                 "\nTP-002 E2 queue density — DURABLE residency ladder (single node, postgres, REDUCED 0->100):"
@@ -624,7 +624,7 @@ fn queue_density_single_node_durable_tests() {
                 let p = measure_residency_on(
                     || {
                         let schema = format!(
-                            "pq_density_{}_{}",
+                            "fireweed_density_{}_{}",
                             std::process::id(),
                             std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
@@ -674,7 +674,7 @@ fn queue_density_single_node_durable_tests() {
         }
         _ => {
             eprintln!(
-                "LOUD-SKIP: postgres durable density point — set PQUEUE_PG_TEST_URL to a live DB to run the reduced 0->100 postgres ladder (object_log_sqlite_projection at 1000 is the required deliverable and ran above)"
+                "LOUD-SKIP: postgres durable density point — set FIREWEED_PG_TEST_URL to a live DB to run the reduced 0->100 postgres ladder (object_log_sqlite_projection at 1000 is the required deliverable and ran above)"
             );
             Vec::new()
         }
@@ -683,7 +683,7 @@ fn queue_density_single_node_durable_tests() {
     // ---- Emit durable-backend E2 density evidence (REAL measured numbers) ----
     // Normal test and PR-gate runs validate a disposable ledger so timing noise does not
     // dirty the tracked evidence artifact. Opt in when intentionally refreshing evidence.
-    let update_tracked_evidence = std::env::var("PQUEUE_UPDATE_PERF_EVIDENCE")
+    let update_tracked_evidence = std::env::var("FIREWEED_UPDATE_PERF_EVIDENCE")
         .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
     let evidence_path = if update_tracked_evidence {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -732,7 +732,7 @@ fn queue_density_single_node_durable_tests() {
         let pg_claim_keep = pg_top.hot_claim_rate / pg_base.hot_claim_rate;
         let pg_row = durable_density_row(
             "postgres",
-            "PQUEUE_PG_TEST_URL=postgres://... cargo test --manifest-path crates/fireweed-bench/Cargo.toml --test queue_density_single_node_tests queue_density_single_node_durable_tests -- --nocapture",
+            "FIREWEED_PG_TEST_URL=postgres://... cargo test --manifest-path crates/fireweed-bench/Cargo.toml --test queue_density_single_node_tests queue_density_single_node_durable_tests -- --nocapture",
             &format!(
                 "in-process single node, live postgres (sync client, per-queue schema); reduced smoke residency ladder 0->100 durable co-resident queues; release density is covered by the live production-topology lane; cold_each={DURABLE_COLD_EACH}, hot_items={DURABLE_HOT_ITEMS}, batch={DURABLE_BATCH}"
             ),

@@ -80,7 +80,7 @@ fn lineage(epoch: u64, segment: &str) -> CheckpointLineage {
 
 fn temp_path(tag: &str) -> std::path::PathBuf {
     let p = std::env::temp_dir().join(format!(
-        "pqueue-hybrid-async-checkpoint-{tag}-{}.db",
+        "fireweed-hybrid-async-checkpoint-{tag}-{}.db",
         std::process::id()
     ));
     for suffix in ["", "-wal", "-shm"] {

@@ -1,4 +1,4 @@
-//! C9/C6 (epic pqueue-2201fd37, bead pqueue-593007ee): the `pqueue_side_records` / `pqueue_instance_fences`
+//! C9/C6 (epic pqueue-2201fd37, bead pqueue-593007ee): the `fireweed_side_records` / `fireweed_instance_fences`
 //! tables on `PostgresRelationalBackend`. Proves `WriteSideRecords`/`AdvanceInstanceFence` commands persist
 //! and survive a reconnect.
 //!
@@ -8,10 +8,10 @@
 //! test instead drives the two commands directly through the typed raw-commit seam and reads the persisted rows back with a
 //! raw SQL query against the same schema (no read port exists yet to exercise).
 //!
-//! ENV-GATED on `PQUEUE_PG_TEST_URL` (a live database). Without it this prints a LOUD skip and returns —
+//! ENV-GATED on `FIREWEED_PG_TEST_URL` (a live database). Without it this prints a LOUD skip and returns —
 //! a green run is then VISIBLY partial, never a hidden pass. To run live:
-//!   docker run -d --name pq-pg -p 5433:5432 -e POSTGRES_PASSWORD=pq postgres:16
-//!   PQUEUE_PG_TEST_URL=postgres://postgres:pq@127.0.0.1:5433/postgres \
+//!   docker run -d --name fireweed-pg -p 5433:5432 -e POSTGRES_PASSWORD=fireweed postgres:16
+//!   FIREWEED_PG_TEST_URL=postgres://postgres:fireweed@127.0.0.1:5433/postgres \
 //!     cargo test -p fireweed-postgres --test relational_side_records_and_instance_fences
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,7 +27,7 @@ use fireweed_postgres::{PostgresConnectConfig, PostgresRelationalBackend, connec
 fn fresh_schema() -> String {
     static N: AtomicU64 = AtomicU64::new(0);
     format!(
-        "pq_side_fence_{}_{}",
+        "fireweed_side_fence_{}_{}",
         std::process::id(),
         N.fetch_add(1, Ordering::SeqCst)
     )
@@ -55,7 +55,7 @@ fn read_side_record(url: &str, schema: &str, key: &[u8]) -> Option<Vec<u8>> {
         .expect("set search_path");
     client
         .query_opt(
-            "SELECT payload FROM pqueue_side_records \
+            "SELECT payload FROM fireweed_side_records \
              WHERE tenant_id=$1 AND queue_id=$2 AND key=$3",
             &[
                 &qkey().tenant_id.as_str().to_string(),
@@ -63,7 +63,7 @@ fn read_side_record(url: &str, schema: &str, key: &[u8]) -> Option<Vec<u8>> {
                 &key,
             ],
         )
-        .expect("query pqueue_side_records")
+        .expect("query fireweed_side_records")
         .map(|row| row.get(0))
 }
 
@@ -74,7 +74,7 @@ fn read_instance_fence(url: &str, schema: &str, instance_key: &[u8]) -> Option<i
         .expect("set search_path");
     client
         .query_opt(
-            "SELECT fence FROM pqueue_instance_fences \
+            "SELECT fence FROM fireweed_instance_fences \
              WHERE tenant_id=$1 AND queue_id=$2 AND instance_key=$3",
             &[
                 &qkey().tenant_id.as_str().to_string(),
@@ -82,15 +82,15 @@ fn read_instance_fence(url: &str, schema: &str, instance_key: &[u8]) -> Option<i
                 &instance_key,
             ],
         )
-        .expect("query pqueue_instance_fences")
+        .expect("query fireweed_instance_fences")
         .map(|row| row.get(0))
 }
 
 #[test]
 fn write_side_records_and_advance_instance_fence_persist_and_survive_reconnect() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
         eprintln!(
-            "POSTGRES SIDE-RECORD/INSTANCE-FENCE SKIPPED (write_side_records_and_advance_instance_fence_persist_and_survive_reconnect) — set PQUEUE_PG_TEST_URL to a live DB"
+            "POSTGRES SIDE-RECORD/INSTANCE-FENCE SKIPPED (write_side_records_and_advance_instance_fence_persist_and_survive_reconnect) — set FIREWEED_PG_TEST_URL to a live DB"
         );
         return;
     };

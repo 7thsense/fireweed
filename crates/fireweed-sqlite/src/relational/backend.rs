@@ -370,14 +370,14 @@ fn hot_query_candidate_page(
     let (tenant, queue) = parts(shard);
     let descending = direction == fireweed_core::SortDirection::Descending;
     let index = if descending {
-        "pqueue_item_index_key_item_desc_idx"
+        "fireweed_item_index_key_item_desc_idx"
     } else {
-        "pqueue_item_index_key_item_asc_idx"
+        "fireweed_item_index_key_item_asc_idx"
     };
     let mut sql = format!(
         "SELECT x.index_key,i.item_id,i.entity_document,i.fields,i.item_version,i.lifecycle_state,i.fenced,i.superseded \
-         FROM pqueue_item_index AS x INDEXED BY {index} \
-         JOIN pqueue_items AS i ON i.tenant_id=x.tenant_id AND i.queue_id=x.queue_id AND i.item_id=x.item_id \
+         FROM fireweed_item_index AS x INDEXED BY {index} \
+         JOIN fireweed_items AS i ON i.tenant_id=x.tenant_id AND i.queue_id=x.queue_id AND i.item_id=x.item_id \
          WHERE x.tenant_id=? AND x.queue_id=? AND x.index_name=?"
     );
     let mut values = vec![
@@ -522,7 +522,7 @@ fn for_each_hot_query_candidate(
 // SqliteRelationalBackend
 // ---------------------------------------------------------------------------
 
-/// Sqlite-backed **relational** projection family: `pqueue_items` holds the durable item projection and
+/// Sqlite-backed **relational** projection family: `fireweed_items` holds the durable item projection and
 /// `relational_cursor` persists the applied high-water for reopen / recovery. Atomic durability class.
 pub struct SqliteRelationalBackend {
     pub(crate) inner: Mutex<Inner>,
@@ -681,8 +681,8 @@ impl Backend for SqliteRelationalBackend {
     /// Rebuildable-commit capabilities (epic pqueue-2201fd37). The relational backend implements the full
     /// vectorized claimed-work commit boundary in one sqlite transaction: atomic per-entry transition,
     /// vectorized commit, lease-token (hash) + version + lease-expiry validation, retained whole-body
-    /// request-id idempotency (`pqueue_request_idempotency`), opaque non-work side records
-    /// (`pqueue_side_records`), and recovery/explain reads against the durable projection cache.
+    /// request-id idempotency (`fireweed_request_idempotency`), opaque non-work side records
+    /// (`fireweed_side_records`), and recovery/explain reads against the durable projection cache.
     /// Delayed/timer lifecycle work is supported (`not_before`). The boundary is `Atomic`
     /// (single-transaction durability).
     fn commit_capabilities(&self) -> CommitCapabilities {
@@ -1008,7 +1008,7 @@ impl ProjectionRead for SqliteRelationalBackend {
     }
 }
 
-/// ADR-011 (pqueue-f4ffd679): typed secondary index queries backed by `pqueue_item_index`.
+/// ADR-011 (pqueue-f4ffd679): typed secondary index queries backed by `fireweed_item_index`.
 impl IndexQueryPort for SqliteRelationalBackend {
     fn index_get_unique(
         &self,
@@ -1039,8 +1039,8 @@ impl IndexQueryPort for SqliteRelationalBackend {
                 .conn
                 .query_row(
                     "SELECT i.item_id, i.client_item_key, i.item_version \
-                     FROM pqueue_item_index idx \
-                     JOIN pqueue_items i \
+                     FROM fireweed_item_index idx \
+                     JOIN fireweed_items i \
                        ON i.tenant_id=idx.tenant_id AND i.queue_id=idx.queue_id \
                       AND i.item_id=idx.item_id \
                      WHERE idx.tenant_id=?1 AND idx.queue_id=?2 \
@@ -1083,8 +1083,8 @@ impl IndexQueryPort for SqliteRelationalBackend {
             let (t, q) = parts(shard);
             let mut stmt = st(g.conn.prepare(
                 "SELECT i.item_id, i.client_item_key, i.item_version \
-                 FROM pqueue_item_index idx \
-                 JOIN pqueue_items i \
+                 FROM fireweed_item_index idx \
+                 JOIN fireweed_items i \
                    ON i.tenant_id=idx.tenant_id AND i.queue_id=idx.queue_id \
                   AND i.item_id=idx.item_id \
                  WHERE idx.tenant_id=?1 AND idx.queue_id=?2 \
@@ -1316,7 +1316,7 @@ impl ClaimPort for SqliteRelationalBackend {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
             // BQ-14a/b: resolve the claim unit from the compatibility options. Item-level (the default) is
-            // byte-identical; WholeGroup / SameGroupKey select group-aware from `pqueue_group_summary`;
+            // byte-identical; WholeGroup / SameGroupKey select group-aware from `fireweed_group_summary`;
             // WholeCohort is gated to `Unavailable` until BQ-14c. An invalid combo propagates the
             // structured validation error.
             let unit = if req.compatibility != ClaimCompatibility::default() {
@@ -1517,7 +1517,7 @@ impl UpsertPort for SqliteRelationalBackend {
             let existing: Option<(String, String)> = st(g
                 .conn
                 .query_row(
-                    "SELECT item_id, lifecycle_state FROM pqueue_items \
+                    "SELECT item_id, lifecycle_state FROM fireweed_items \
                      WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3 AND superseded=0",
                     params![t, q, client_item_key.as_str()],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
@@ -1547,7 +1547,7 @@ impl UpsertPort for SqliteRelationalBackend {
                     let retained: Option<i64> = st(g
                         .conn
                         .query_row(
-                            "SELECT expires_at FROM pqueue_item_key_retention \
+                            "SELECT expires_at FROM fireweed_item_key_retention \
                              WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3",
                             params![t, q, client_item_key.as_str()],
                             |row| row.get(0),
@@ -1559,7 +1559,7 @@ impl UpsertPort for SqliteRelationalBackend {
                         }
                         // Expired: the key is reusable again — clear the stale tombstone, then insert.
                         st(g.conn.execute(
-                            "DELETE FROM pqueue_item_key_retention \
+                            "DELETE FROM fireweed_item_key_retention \
                              WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3",
                             params![t, q, client_item_key.as_str()],
                         ))?;
@@ -1736,7 +1736,7 @@ impl fireweed_engine::CommitTransitionPort for SqliteRelationalBackend {
                     let (it, iq) = parts(shard);
                     let stored: i64 = st(tx
                         .query_row(
-                            "SELECT fence FROM pqueue_instance_fences \
+                            "SELECT fence FROM fireweed_instance_fences \
                              WHERE tenant_id=?1 AND queue_id=?2 AND instance_key=?3",
                             params![it, iq, fence.instance_key],
                             |row| row.get(0),
@@ -1848,7 +1848,7 @@ impl fireweed_engine::CommitTransitionPort for SqliteRelationalBackend {
 }
 
 impl RecoveryReadPort for SqliteRelationalBackend {
-    /// Reconstruct a committed transition from the retained `pqueue_request_idempotency` record (epic
+    /// Reconstruct a committed transition from the retained `fireweed_request_idempotency` record (epic
     /// pqueue-2201fd37 acceptance #5). The durable `response_payload` already holds every per-entry recovery
     /// field; we only re-attach the `request_id`. `Ok(None)` when nothing is retained under that id. Survives
     /// a reopen (the record is a durable table row).
@@ -1868,8 +1868,8 @@ impl RecoveryReadPort for SqliteRelationalBackend {
         std::future::ready(result)
     }
 
-    /// Read an opaque non-work side record by key from `pqueue_side_records` (recovery/audit read). Disjoint
-    /// from `pqueue_items`, so it never reflects claimable work and survives input finalization + reopen.
+    /// Read an opaque non-work side record by key from `fireweed_side_records` (recovery/audit read). Disjoint
+    /// from `fireweed_items`, so it never reflects claimable work and survives input finalization + reopen.
     fn side_record(
         &self,
         shard: &QueueKey,
@@ -1881,7 +1881,7 @@ impl RecoveryReadPort for SqliteRelationalBackend {
             let payload: Option<Vec<u8>> = st(g
                 .conn
                 .query_row(
-                    "SELECT payload FROM pqueue_side_records \
+                    "SELECT payload FROM fireweed_side_records \
                      WHERE tenant_id=?1 AND queue_id=?2 AND key=?3",
                     params![t, q, key],
                     |row| row.get(0),
@@ -1952,8 +1952,8 @@ impl fireweed_engine::HotProjectionQueryPort for SqliteRelationalBackend {
             if let Some(state) = &cursor_state {
                 let (tenant, queue) = parts(shard);
                 let anchor: Option<(Vec<u8>, Option<String>)> = st(g.conn.query_row(
-                    "SELECT x.index_key,i.entity_document FROM pqueue_item_index x \
-                     JOIN pqueue_items i ON i.tenant_id=x.tenant_id AND i.queue_id=x.queue_id AND i.item_id=x.item_id \
+                    "SELECT x.index_key,i.entity_document FROM fireweed_item_index x \
+                     JOIN fireweed_items i ON i.tenant_id=x.tenant_id AND i.queue_id=x.queue_id AND i.item_id=x.item_id \
                      WHERE x.tenant_id=?1 AND x.queue_id=?2 AND x.index_name=?3 AND x.item_id=?4",
                     params![tenant, queue, spec.name, state.anchor_item_id.to_string()],
                     |row| Ok((row.get(0)?, row.get(1)?)),
@@ -2159,13 +2159,13 @@ impl fireweed_engine::HotProjectionQueryPort for SqliteRelationalBackend {
             if !paused {
                 let descending = direction == fireweed_core::SortDirection::Descending;
                 let index = if descending {
-                    "pqueue_item_index_key_item_desc_idx"
+                    "fireweed_item_index_key_item_desc_idx"
                 } else {
-                    "pqueue_item_index_key_item_asc_idx"
+                    "fireweed_item_index_key_item_asc_idx"
                 };
                 let mut sql = format!(
-                    "SELECT i.item_id,i.item_version,i.entity_document FROM pqueue_item_index AS x INDEXED BY {index} \
-                     JOIN pqueue_items AS i ON i.tenant_id=x.tenant_id AND i.queue_id=x.queue_id AND i.item_id=x.item_id \
+                    "SELECT i.item_id,i.item_version,i.entity_document FROM fireweed_item_index AS x INDEXED BY {index} \
+                     JOIN fireweed_items AS i ON i.tenant_id=x.tenant_id AND i.queue_id=x.queue_id AND i.item_id=x.item_id \
                      WHERE x.tenant_id=? AND x.queue_id=? AND x.index_name=?"
                 );
                 let mut values = vec![
@@ -2183,8 +2183,8 @@ impl fireweed_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                 }
                 sql.push_str(" AND i.lifecycle_state='Pending' AND i.superseded=0 AND i.fenced=0 \
                     AND i.cohort_size IS NULL AND (i.not_before IS NULL OR i.not_before<=?) \
-                    AND i.eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
-                    JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+                    AND i.eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
+                    JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
                     AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id \
                     AND ig.item_id=i.item_id)");
                 values.push(SqlValue::Integer(eligibility_nanos));
@@ -2240,8 +2240,8 @@ impl fireweed_engine::HotProjectionQueryPort for SqliteRelationalBackend {
             let mut updated = HashSet::new();
             if !selected.is_empty() {
                 st(tx.execute_batch(
-                    "CREATE TEMP TABLE IF NOT EXISTS pqueue_hot_query_stage(ordinal INTEGER PRIMARY KEY,item_id TEXT NOT NULL,item_version INTEGER NOT NULL); \
-                     DELETE FROM pqueue_hot_query_stage;",
+                    "CREATE TEMP TABLE IF NOT EXISTS fireweed_hot_query_stage(ordinal INTEGER PRIMARY KEY,item_id TEXT NOT NULL,item_version INTEGER NOT NULL); \
+                     DELETE FROM fireweed_hot_query_stage;",
                 ))?;
                 let values_clause = std::iter::repeat_n("(?,?,?)", selected.len())
                     .collect::<Vec<_>>()
@@ -2255,25 +2255,25 @@ impl fireweed_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                     ]);
                 }
                 st(tx.execute(
-                    &format!("INSERT INTO pqueue_hot_query_stage(ordinal,item_id,item_version) VALUES {values_clause}"),
+                    &format!("INSERT INTO fireweed_hot_query_stage(ordinal,item_id,item_version) VALUES {values_clause}"),
                     params_from_iter(stage_values),
                 ))?;
                 let mut update = st(tx.prepare(
-                    "UPDATE pqueue_items SET lifecycle_state='Leased', lease_token_hash=?1, \
+                    "UPDATE fireweed_items SET lifecycle_state='Leased', lease_token_hash=?1, \
                      lease_expires_at=?2, worker_id=?3, retry_count=retry_count+1, \
                      item_version=item_version+1, updated_at=?4, last_command_sequence=?5 \
-                     WHERE rowid IN (SELECT i2.rowid FROM pqueue_hot_query_stage s \
-                         JOIN pqueue_items i2 ON i2.tenant_id=?6 AND i2.queue_id=?7 \
+                     WHERE rowid IN (SELECT i2.rowid FROM fireweed_hot_query_stage s \
+                         JOIN fireweed_items i2 ON i2.tenant_id=?6 AND i2.queue_id=?7 \
                          AND i2.item_id=s.item_id AND i2.item_version=s.item_version) \
                      AND lifecycle_state='Pending' AND superseded=0 AND fenced=0 \
                      AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?8) \
                      AND eligible_since IS NOT NULL \
-                     AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+                     AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
                          ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
                          AND gs.gate_key=ig.gate_key \
-                         WHERE ig.tenant_id=pqueue_items.tenant_id \
-                         AND ig.queue_id=pqueue_items.queue_id \
-                         AND ig.item_id=pqueue_items.item_id) RETURNING item_id",
+                         WHERE ig.tenant_id=fireweed_items.tenant_id \
+                         AND ig.queue_id=fireweed_items.queue_id \
+                         AND ig.item_id=fireweed_items.item_id) RETURNING item_id",
                 ))?;
                 let rows = st(update.query_map(
                     params![
@@ -2668,7 +2668,7 @@ impl fireweed_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                         continue;
                     }
                     let holder: Option<String> = st(tx.query_row(
-                        "SELECT item_id FROM pqueue_item_index WHERE tenant_id=?1 AND queue_id=?2 \
+                        "SELECT item_id FROM fireweed_item_index WHERE tenant_id=?1 AND queue_id=?2 \
                          AND index_name=?3 AND index_key=?4 AND item_id!=?5 LIMIT 1",
                         params![tenant, queue, name, key, item_id],
                         |row| row.get(0),
@@ -2705,12 +2705,12 @@ impl fireweed_engine::HotProjectionQueryPort for SqliteRelationalBackend {
             let mut updated = HashSet::new();
             if !planned.is_empty() {
                 st(tx.execute_batch(
-                    "CREATE TEMP TABLE IF NOT EXISTS pqueue_hot_mutation_stage(ordinal INTEGER PRIMARY KEY,item_id TEXT NOT NULL UNIQUE,item_version INTEGER NOT NULL,fields TEXT NOT NULL,entity TEXT NOT NULL); \
-                     DELETE FROM pqueue_hot_mutation_stage;",
+                    "CREATE TEMP TABLE IF NOT EXISTS fireweed_hot_mutation_stage(ordinal INTEGER PRIMARY KEY,item_id TEXT NOT NULL UNIQUE,item_version INTEGER NOT NULL,fields TEXT NOT NULL,entity TEXT NOT NULL); \
+                     DELETE FROM fireweed_hot_mutation_stage;",
                 ))?;
             }
             for planned_chunk in planned.chunks(1_000) {
-                st(tx.execute("DELETE FROM pqueue_hot_mutation_stage", []))?;
+                st(tx.execute("DELETE FROM fireweed_hot_mutation_stage", []))?;
                 let values_clause = std::iter::repeat_n("(?,?,?,?,?)", planned_chunk.len())
                     .collect::<Vec<_>>()
                     .join(",");
@@ -2726,13 +2726,13 @@ impl fireweed_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                     ));
                 }
                 st(tx.execute(
-                    &format!("INSERT INTO pqueue_hot_mutation_stage(ordinal,item_id,item_version,fields,entity) VALUES {values_clause}"),
+                    &format!("INSERT INTO fireweed_hot_mutation_stage(ordinal,item_id,item_version,fields,entity) VALUES {values_clause}"),
                     params_from_iter(values),
                 ))?;
                 let mut statement = st(tx.prepare(
-                    "UPDATE pqueue_items AS i SET fields=m.fields,entity_document=m.entity, \
+                    "UPDATE fireweed_items AS i SET fields=m.fields,entity_document=m.entity, \
                      item_version=i.item_version+1,updated_at=?1,last_command_sequence=?2 \
-                     FROM pqueue_hot_mutation_stage AS m WHERE i.tenant_id=?3 AND i.queue_id=?4 \
+                     FROM fireweed_hot_mutation_stage AS m WHERE i.tenant_id=?3 AND i.queue_id=?4 \
                      AND i.item_id=m.item_id AND i.item_version=m.item_version \
                      AND i.lifecycle_state='Pending' AND i.fenced=0 AND i.superseded=0 RETURNING item_id",
                 ))?;
@@ -2754,13 +2754,13 @@ impl fireweed_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                             .collect::<Vec<_>>()
                             .join(",");
                         st(tx.execute(
-                            &format!("DELETE FROM pqueue_hot_mutation_stage WHERE item_id NOT IN ({placeholders})"),
+                            &format!("DELETE FROM fireweed_hot_mutation_stage WHERE item_id NOT IN ({placeholders})"),
                             params_from_iter(chunk_updated.iter()),
                         ))?;
                     }
                     st(tx.execute(
-                        "DELETE FROM pqueue_item_index WHERE rowid IN (SELECT x.rowid FROM pqueue_hot_mutation_stage m \
-                         JOIN pqueue_item_index x ON x.tenant_id=?1 AND x.queue_id=?2 AND x.item_id=m.item_id)",
+                        "DELETE FROM fireweed_item_index WHERE rowid IN (SELECT x.rowid FROM fireweed_hot_mutation_stage m \
+                         JOIN fireweed_item_index x ON x.tenant_id=?1 AND x.queue_id=?2 AND x.item_id=m.item_id)",
                         params![tenant, queue],
                     ))?;
 
@@ -2787,7 +2787,7 @@ impl fireweed_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                                 .collect::<Vec<_>>()
                                 .join(",");
                             let insert_sql = format!(
-                                "INSERT INTO pqueue_item_index \
+                                "INSERT INTO fireweed_item_index \
                                  (tenant_id,queue_id,index_name,index_key,item_id) VALUES {values_clause}"
                             );
                             let mut index_values = Vec::with_capacity(chunk.len() * 5);
@@ -2816,7 +2816,7 @@ impl fireweed_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                     .collect::<Vec<_>>()
                     .join(",");
                 let sql = format!(
-                    "SELECT item_id FROM pqueue_items WHERE tenant_id=? AND queue_id=? \
+                    "SELECT item_id FROM fireweed_items WHERE tenant_id=? AND queue_id=? \
                      AND item_id IN ({placeholders})"
                 );
                 let mut values = vec![
@@ -3076,7 +3076,7 @@ impl UpdateFieldsPort for SqliteRelationalBackend {
             let row: Option<(String, i64, i64, i64)> = st(g
                 .conn
                 .query_row(
-                    "SELECT lifecycle_state, superseded, fenced, item_version FROM pqueue_items \
+                    "SELECT lifecycle_state, superseded, fenced, item_version FROM fireweed_items \
                      WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
                     params![t, q, item_id.to_string()],
                     |row| {
@@ -3139,7 +3139,7 @@ impl ReclaimPort for SqliteRelationalBackend {
             let (t, q) = parts(shard);
             let now_n = ts_nanos(now);
             // This queue's leases expired strictly before `now` (half-open, like the tick), optionally capped.
-            let base = "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+            let base = "SELECT item_id FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
                         AND lifecycle_state='Leased' AND lease_expires_at IS NOT NULL \
                         AND lease_expires_at<?3 ORDER BY item_id";
             let id_strs: Vec<String> = {
@@ -3239,7 +3239,7 @@ impl ReclaimDriver for SqliteRelationalBackend {
             let now_n = ts_nanos(now);
             let expired: Vec<(QueueKey, Vec<ItemId>)> = {
                 let mut stmt = st(g.conn.prepare(
-                    "SELECT tenant_id, queue_id, item_id FROM pqueue_items \
+                    "SELECT tenant_id, queue_id, item_id FROM fireweed_items \
                      WHERE lifecycle_state='Leased' AND lease_expires_at IS NOT NULL \
                      AND lease_expires_at<?1 ORDER BY tenant_id, queue_id",
                 ))?;
@@ -3279,7 +3279,7 @@ impl ReclaimDriver for SqliteRelationalBackend {
                 let mut stmt = st(g.conn.prepare(
                     "SELECT c.tenant_id, c.queue_id, c.group_key, c.cohort_created_at, \
                      c.first_eligible_at, r.assignment_epoch \
-                     FROM pqueue_cohorts c \
+                     FROM fireweed_cohorts c \
                      JOIN relational_cursor r ON r.tenant=c.tenant_id AND r.queue=c.queue_id \
                      WHERE c.state IN ('forming','complete') \
                      ORDER BY c.tenant_id, c.queue_id, c.group_key \
@@ -3496,13 +3496,13 @@ mod hot_query_sql_tests {
     }
 
     fn count_set_gates_statement(sql: &str) {
-        if sql.starts_with("INSERT INTO pqueue_gate_state") {
+        if sql.starts_with("INSERT INTO fireweed_gate_state") {
             SET_GATES_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
         }
     }
 
     fn count_side_record_statement(sql: &str) {
-        if sql.starts_with("INSERT INTO pqueue_side_records") {
+        if sql.starts_with("INSERT INTO fireweed_side_records") {
             SIDE_RECORD_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -4080,7 +4080,7 @@ mod hot_query_sql_tests {
             .unwrap()
             .conn
             .query_row(
-                "SELECT lifecycle_state,updated_at FROM pqueue_items WHERE item_id=?1",
+                "SELECT lifecycle_state,updated_at FROM fireweed_items WHERE item_id=?1",
                 params![item_id.to_string()],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -4165,7 +4165,7 @@ mod hot_query_sql_tests {
             .unwrap()
             .conn
             .execute_batch(&format!(
-                "CREATE TEMP TRIGGER skip_hot_mutation BEFORE UPDATE ON pqueue_items \
+                "CREATE TEMP TRIGGER skip_hot_mutation BEFORE UPDATE ON fireweed_items \
              WHEN OLD.item_id='{}' BEGIN SELECT RAISE(IGNORE); END;",
                 loser
             ))
@@ -4206,7 +4206,7 @@ mod hot_query_sql_tests {
         .unwrap()
         .unwrap();
         let retained: i64 = backend.inner.lock().unwrap().conn.query_row(
-            "SELECT COUNT(*) FROM pqueue_item_index WHERE tenant_id='tenant' AND queue_id='queue' AND index_name='by_status' AND item_id=?1 AND index_key=?2",
+            "SELECT COUNT(*) FROM fireweed_item_index WHERE tenant_id='tenant' AND queue_id='queue' AND index_name='by_status' AND item_id=?1 AND index_key=?2",
             params![loser.to_string(), key], |row| row.get(0),
         ).unwrap();
         assert_eq!(retained, 1);
@@ -4250,7 +4250,7 @@ mod hot_query_sql_tests {
         let cursor = first.next_cursor.clone().unwrap();
         let state: RangeScanCursorState = serde_json::from_str(&cursor.0).unwrap();
         backend.inner.lock().unwrap().conn.execute(
-            "DELETE FROM pqueue_item_index WHERE tenant_id='tenant' AND queue_id='queue' AND index_name='by_status' AND item_id=?1",
+            "DELETE FROM fireweed_item_index WHERE tenant_id='tenant' AND queue_id='queue' AND index_name='by_status' AND item_id=?1",
             params![state.anchor_item_id.to_string()],
         ).unwrap();
         assert!(matches!(
@@ -4442,7 +4442,7 @@ mod hot_query_sql_tests {
         .unwrap()
         .unwrap();
         let holders: i64 = inner.conn.query_row(
-            "SELECT COUNT(*) FROM pqueue_item_index WHERE tenant_id=?1 AND queue_id=?2 AND index_name='by_code' AND index_key=?3",
+            "SELECT COUNT(*) FROM fireweed_item_index WHERE tenant_id=?1 AND queue_id=?2 AND index_name='by_code' AND index_key=?3",
             params!["tenant", "queue", key], |row| row.get(0),
         ).unwrap();
         assert_eq!(holders, 1);
@@ -4552,9 +4552,9 @@ mod hot_query_sql_tests {
     fn high_cardinality_matches_stop_at_the_sql_limit() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE pqueue_items (tenant_id TEXT,queue_id TEXT,item_id TEXT,entity_document TEXT,fields TEXT,item_version INTEGER,lifecycle_state TEXT,fenced INTEGER,superseded INTEGER,PRIMARY KEY(tenant_id,queue_id,item_id));
-             CREATE TABLE pqueue_item_index (tenant_id TEXT,queue_id TEXT,index_name TEXT,index_key BLOB,item_id TEXT,PRIMARY KEY(tenant_id,queue_id,index_name,item_id));
-             CREATE INDEX pqueue_item_index_key_item_asc_idx ON pqueue_item_index(tenant_id,queue_id,index_name,index_key,item_id);",
+            "CREATE TABLE fireweed_items (tenant_id TEXT,queue_id TEXT,item_id TEXT,entity_document TEXT,fields TEXT,item_version INTEGER,lifecycle_state TEXT,fenced INTEGER,superseded INTEGER,PRIMARY KEY(tenant_id,queue_id,item_id));
+             CREATE TABLE fireweed_item_index (tenant_id TEXT,queue_id TEXT,index_name TEXT,index_key BLOB,item_id TEXT,PRIMARY KEY(tenant_id,queue_id,index_name,item_id));
+             CREATE INDEX fireweed_item_index_key_item_asc_idx ON fireweed_item_index(tenant_id,queue_id,index_name,index_key,item_id);",
         ).unwrap();
         let key = axon_esf::encode_compound_index_key(&[(
             &JsonValue::String("ready".into()),
@@ -4565,9 +4565,9 @@ mod hot_query_sql_tests {
         let tx = conn.transaction().unwrap();
         for ordinal in 0..20_000_u32 {
             let item_id = ItemId::mint(1, 0, ordinal).to_string();
-            tx.execute("INSERT INTO pqueue_items VALUES('tenant','queue',?1,'{\"status\":\"ready\"}','{}',1,'Pending',0,0)", params![item_id]).unwrap();
+            tx.execute("INSERT INTO fireweed_items VALUES('tenant','queue',?1,'{\"status\":\"ready\"}','{}',1,'Pending',0,0)", params![item_id]).unwrap();
             tx.execute(
-                "INSERT INTO pqueue_item_index VALUES('tenant','queue','by_status',?1,?2)",
+                "INSERT INTO fireweed_item_index VALUES('tenant','queue','by_status',?1,?2)",
                 params![key, item_id],
             )
             .unwrap();
@@ -4619,11 +4619,11 @@ mod hot_query_sql_tests {
     fn grouped_refresh_cost(groups: usize) -> usize {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE pqueue_items(tenant_id TEXT,queue_id TEXT,item_id TEXT,group_key TEXT,lifecycle_state TEXT,superseded INTEGER,not_before INTEGER,eligible_since INTEGER,priority_sort BLOB,created_at INTEGER,created_seq INTEGER,PRIMARY KEY(tenant_id,queue_id,item_id));
-             CREATE TABLE pqueue_item_gates(tenant_id TEXT,queue_id TEXT,item_id TEXT,gate_key TEXT);
-             CREATE TABLE pqueue_gate_state(tenant_id TEXT,queue_id TEXT,gate_key TEXT);
-             CREATE TABLE pqueue_group_summary(tenant_id TEXT,queue_id TEXT,group_key TEXT,oldest_eligible_at INTEGER,rep_progress_guard_sort BLOB,rep_priority_sort BLOB,rep_created_at INTEGER,rep_item_id TEXT,eligible_item_count INTEGER NOT NULL,at_risk_count INTEGER NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(tenant_id,queue_id,group_key));
-             CREATE INDEX pqueue_items_group_due_idx ON pqueue_items(tenant_id,queue_id,lifecycle_state,group_key,not_before,priority_sort,created_seq);",
+            "CREATE TABLE fireweed_items(tenant_id TEXT,queue_id TEXT,item_id TEXT,group_key TEXT,lifecycle_state TEXT,superseded INTEGER,not_before INTEGER,eligible_since INTEGER,priority_sort BLOB,created_at INTEGER,created_seq INTEGER,PRIMARY KEY(tenant_id,queue_id,item_id));
+             CREATE TABLE fireweed_item_gates(tenant_id TEXT,queue_id TEXT,item_id TEXT,gate_key TEXT);
+             CREATE TABLE fireweed_gate_state(tenant_id TEXT,queue_id TEXT,gate_key TEXT);
+             CREATE TABLE fireweed_group_summary(tenant_id TEXT,queue_id TEXT,group_key TEXT,oldest_eligible_at INTEGER,rep_progress_guard_sort BLOB,rep_priority_sort BLOB,rep_created_at INTEGER,rep_item_id TEXT,eligible_item_count INTEGER NOT NULL,at_risk_count INTEGER NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(tenant_id,queue_id,group_key));
+             CREATE INDEX fireweed_items_group_due_idx ON fireweed_items(tenant_id,queue_id,lifecycle_state,group_key,not_before,priority_sort,created_seq);",
         ).unwrap();
         conn.trace(Some(count_group_statement));
         let steps = Arc::new(AtomicUsize::new(0));
@@ -4640,7 +4640,7 @@ mod hot_query_sql_tests {
         for ordinal in 0..groups {
             let group = format!("group-{ordinal:04}");
             tx.execute(
-                "INSERT INTO pqueue_items VALUES('tenant','queue',?1,?2,'Pending',0,NULL,0,X'00',0,?3)",
+                "INSERT INTO fireweed_items VALUES('tenant','queue',?1,?2,'Pending',0,NULL,0,X'00',0,?3)",
                 params![ordinal.to_string(), group, ordinal as i64],
             ).unwrap();
             keys.push(GroupKey::new(group).unwrap());
@@ -4660,7 +4660,7 @@ mod hot_query_sql_tests {
         assert_eq!(GROUP_TRACE_COUNT.load(Ordering::Relaxed), 1);
         let summary_count: i64 = tx
             .query_row(
-                "SELECT COUNT(*) FROM pqueue_group_summary WHERE eligible_item_count=1",
+                "SELECT COUNT(*) FROM fireweed_group_summary WHERE eligible_item_count=1",
                 [],
                 |row| row.get(0),
             )
@@ -4688,17 +4688,17 @@ mod hot_query_sql_tests {
     fn indexed_candidate_seek_ignores_a_large_nonmatching_inventory() {
         let mut conn = Connection::open_in_memory().expect("sqlite");
         conn.execute_batch(
-            "CREATE TABLE pqueue_items (
+            "CREATE TABLE fireweed_items (
                 tenant_id TEXT,queue_id TEXT,item_id TEXT,entity_document TEXT,fields TEXT,
                 item_version INTEGER,lifecycle_state TEXT,fenced INTEGER,superseded INTEGER,
                 PRIMARY KEY(tenant_id,queue_id,item_id));
-             CREATE TABLE pqueue_item_index (
+             CREATE TABLE fireweed_item_index (
                 tenant_id TEXT,queue_id TEXT,index_name TEXT,index_key BLOB,item_id TEXT,
                 PRIMARY KEY(tenant_id,queue_id,index_name,item_id));
-             CREATE INDEX pqueue_item_index_key_item_asc_idx ON pqueue_item_index
+             CREATE INDEX fireweed_item_index_key_item_asc_idx ON fireweed_item_index
                 (tenant_id,queue_id,index_name,index_key,item_id);
              WITH RECURSIVE n(v) AS (VALUES(1) UNION ALL SELECT v+1 FROM n WHERE v<100000)
-             INSERT INTO pqueue_item_index
+             INSERT INTO fireweed_item_index
                 SELECT 'tenant','queue','by_status',X'000000056F74686572',printf('noise-%06d',v) FROM n;",
         )
         .expect("seed nonmatches");
@@ -4718,12 +4718,12 @@ mod hot_query_sql_tests {
         for ordinal in 0..32 {
             let item_id = ItemId::mint(1, 0, ordinal).to_string();
             tx.execute(
-                "INSERT INTO pqueue_items VALUES(?1,?2,?3,?4,'{}',1,'Pending',0,0)",
+                "INSERT INTO fireweed_items VALUES(?1,?2,?3,?4,'{}',1,'Pending',0,0)",
                 params!["tenant", "queue", item_id, r#"{"status":"ready"}"#],
             )
             .expect("item");
             tx.execute(
-                "INSERT INTO pqueue_item_index VALUES(?1,?2,?3,?4,?5)",
+                "INSERT INTO fireweed_item_index VALUES(?1,?2,?3,?4,?5)",
                 params!["tenant", "queue", spec.name, key, item_id],
             )
             .expect("index row");
@@ -4742,8 +4742,8 @@ mod hot_query_sql_tests {
         let plan = conn
             .prepare(
                 "EXPLAIN QUERY PLAN SELECT x.index_key,i.item_id,i.entity_document,i.fields,\
-                i.item_version,i.lifecycle_state,i.fenced,i.superseded FROM pqueue_item_index x \
-                INDEXED BY pqueue_item_index_key_item_asc_idx JOIN pqueue_items i ON \
+                i.item_version,i.lifecycle_state,i.fenced,i.superseded FROM fireweed_item_index x \
+                INDEXED BY fireweed_item_index_key_item_asc_idx JOIN fireweed_items i ON \
                 i.tenant_id=x.tenant_id AND i.queue_id=x.queue_id AND i.item_id=x.item_id \
                 WHERE x.tenant_id=?1 AND x.queue_id=?2 AND x.index_name=?3 AND x.index_key>=?4 \
                 AND x.index_key<?5 ORDER BY x.index_key,x.item_id LIMIT 1000",
@@ -4758,7 +4758,7 @@ mod hot_query_sql_tests {
             .expect("plan details")
             .join("\n");
         assert!(
-            plan.contains("pqueue_item_index_key_item_asc_idx"),
+            plan.contains("fireweed_item_index_key_item_asc_idx"),
             "{plan}"
         );
         assert!(!plan.contains("SCAN i"), "{plan}");

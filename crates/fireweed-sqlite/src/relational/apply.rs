@@ -38,7 +38,7 @@ pub(crate) struct Inner {
 
 impl Inner {
     /// Rebuild the in-RAM definition cache from the durable `queues` table. The item projection itself is
-    /// already durable in `pqueue_items` as a rebuildable cache - nothing to replay.
+    /// already durable in `fireweed_items` as a rebuildable cache - nothing to replay.
     pub(crate) fn reload(&mut self) -> EngineResult<()> {
         let rows: Vec<String> = {
             let mut stmt = st(self.conn.prepare("SELECT definition FROM queues"))?;
@@ -66,7 +66,7 @@ impl Inner {
         }
         self.grouped_shards.clear();
         let mut stmt = st(self.conn.prepare(
-            "SELECT DISTINCT tenant_id, queue_id FROM pqueue_items WHERE group_key IS NOT NULL",
+            "SELECT DISTINCT tenant_id, queue_id FROM fireweed_items WHERE group_key IS NOT NULL",
         ))?;
         let mapped = st(stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -83,7 +83,7 @@ impl Inner {
         Ok(())
     }
 
-    /// Assign the next command sequence for `shard`, apply `command` to `pqueue_items`, and advance the
+    /// Assign the next command sequence for `shard`, apply `command` to `fireweed_items`, and advance the
     /// cursor — all in one transaction (the atomic append+apply UoW the async ports rely on).
     ///
     /// BQ-20/BQ-21/BQ-22 (bead pqueue-7bac12ce): the owner's cached `fence_epoch` is now threaded through
@@ -152,7 +152,7 @@ impl Inner {
 // apply: the 14-arm command -> SQL projection write (the BQ-11a headline)
 // ---------------------------------------------------------------------------
 
-/// Max rows per dynamically-built multi-row / `IN (...)` statement. Each `pqueue_items` row binds 19
+/// Max rows per dynamically-built multi-row / `IN (...)` statement. Each `fireweed_items` row binds 19
 /// params; 1,500 rows ≈ 28.5k params, under sqlite's 32,766 bound-variable ceiling (bundled SQLite) while
 /// cutting large Push materialization from tens of thousands of statements to a few thousand.
 pub(crate) const SQLITE_BATCH: usize = 1_500;
@@ -170,7 +170,7 @@ pub(crate) fn opt_blob(v: Option<Vec<u8>>) -> Value {
 }
 
 /// Batch-insert all `items` of a Push (or the single ReplacePending replacement) as set-based statements:
-/// chunked multi-row INSERTs into `pqueue_items`, `pqueue_item_gates`, and `pqueue_cohorts` — replacing the
+/// chunked multi-row INSERTs into `fireweed_items`, `fireweed_item_gates`, and `fireweed_cohorts` — replacing the
 /// former per-item `insert_item` (N+ round-trips → a handful, chunked to the bound-variable limit). Column
 /// values, the `fields` TEXT-JSON encoding, and the `eligible_since`/`not_before` pairing are identical to
 /// the per-item path; `created_seq` is bulk-allocated (`base + i`) so the FIFO order is preserved.
@@ -237,7 +237,7 @@ pub(crate) fn insert_items(
     for chunk in rows.chunks(SQLITE_BATCH) {
         let values = vec![ROW_PH; chunk.len()].join(",");
         let sql = format!(
-            "INSERT INTO pqueue_items \
+            "INSERT INTO fireweed_items \
              (tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
               not_before,eligible_since,group_key,cohort_size,payload,fields,metadata,entity_document,retry_count,\
               item_version,lease_token_hash,lease_expires_at,worker_id,last_command_sequence,created_at,\
@@ -279,7 +279,7 @@ pub(crate) fn insert_default_empty_items(
     for (chunk_idx, chunk) in items.chunks(SQLITE_BATCH).enumerate() {
         let values = vec![ROW_PH; chunk.len()].join(",");
         let sql = format!(
-            "INSERT INTO pqueue_items \
+            "INSERT INTO fireweed_items \
              (tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
               not_before,eligible_since,group_key,cohort_size,payload,fields,metadata,entity_document,retry_count,\
              item_version,lease_token_hash,lease_expires_at,worker_id,last_command_sequence,created_at,\
@@ -329,7 +329,7 @@ pub(crate) fn insert_gates(
     for chunk in pairs.chunks(SQLITE_BATCH) {
         let values = vec!["(?,?,?,?)"; chunk.len()].join(",");
         let sql = format!(
-            "INSERT INTO pqueue_item_gates (tenant_id,queue_id,item_id,gate_key) VALUES {values} \
+            "INSERT INTO fireweed_item_gates (tenant_id,queue_id,item_id,gate_key) VALUES {values} \
              ON CONFLICT(tenant_id,queue_id,item_id,gate_key) DO NOTHING"
         );
         let mut p: Vec<Value> = Vec::with_capacity(chunk.len() * 4);
@@ -405,7 +405,7 @@ pub(crate) fn upsert_cohorts(
     for (gk, (size, added)) in cohorts {
         let existing: Option<(i64, i64, String, Option<i64>)> = st(tx
             .query_row(
-                "SELECT cohort_size, member_count, state, retention_until FROM pqueue_cohorts \
+                "SELECT cohort_size, member_count, state, retention_until FROM fireweed_cohorts \
                  WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3",
                 params![t, q, gk],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -423,7 +423,7 @@ pub(crate) fn upsert_cohorts(
                     None
                 };
                 st(tx.execute(
-                    "INSERT INTO pqueue_cohorts \
+                    "INSERT INTO fireweed_cohorts \
                      (tenant_id,queue_id,group_key,cohort_id,cohort_size,member_count,state,\
                       cohort_created_at,first_eligible_at,created_at) \
                      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?8)",
@@ -455,7 +455,7 @@ pub(crate) fn upsert_cohorts(
                         None
                     };
                     st(tx.execute(
-                        "UPDATE pqueue_cohorts SET cohort_id=?4, cohort_size=?5, member_count=?6, \
+                        "UPDATE fireweed_cohorts SET cohort_id=?4, cohort_size=?5, member_count=?6, \
                          state=?7, cohort_created_at=?8, first_eligible_at=?9, expire_command_pos=NULL, \
                          cohort_lease_token_hash=NULL, retention_until=NULL, created_at=?8 \
                          WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3",
@@ -487,7 +487,7 @@ pub(crate) fn upsert_cohorts(
                 };
                 let set_first = next_state == "complete";
                 st(tx.execute(
-                    "UPDATE pqueue_cohorts SET member_count=?4, state=?5, \
+                    "UPDATE fireweed_cohorts SET member_count=?4, state=?5, \
                      first_eligible_at=CASE WHEN ?6 AND first_eligible_at IS NULL THEN ?7 ELSE first_eligible_at END \
                      WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3",
                     params![t, q, gk, next_count, next_state, set_first, now_n],
@@ -543,7 +543,7 @@ pub(crate) fn reap_terminal_items_sql(
             return Ok(Vec::new());
         };
         (
-            "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+            "SELECT item_id FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
              AND superseded=0 AND lifecycle_state IN ('Complete','Failed') \
              AND terminal_at IS NOT NULL AND terminal_at<=?3 \
              AND terminal_command_epoch IS NOT NULL \
@@ -560,7 +560,7 @@ pub(crate) fn reap_terminal_items_sql(
         )
     } else {
         (
-            "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+            "SELECT item_id FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
              AND superseded=0 AND lifecycle_state IN ('Complete','Failed') \
              AND terminal_at IS NOT NULL AND terminal_at<=?3"
                 .to_string(),
@@ -588,7 +588,7 @@ pub(crate) fn reap_terminal_items_sql(
     }
     exec_items_in(
         tx,
-        "DELETE FROM pqueue_items WHERE tenant_id=? AND queue_id=? AND item_id IN",
+        "DELETE FROM fireweed_items WHERE tenant_id=? AND queue_id=? AND item_id IN",
         &[],
         &t,
         &q,
@@ -597,14 +597,14 @@ pub(crate) fn reap_terminal_items_sql(
     let id_strs = ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
     exec_items_in(
         tx,
-        "DELETE FROM pqueue_item_gates WHERE tenant_id=? AND queue_id=? AND item_id IN",
+        "DELETE FROM fireweed_item_gates WHERE tenant_id=? AND queue_id=? AND item_id IN",
         &[],
         &t,
         &q,
         &id_strs,
     )?;
     delete_typed_index_rows(tx, &t, &q, &id_strs)?;
-    // Preserve the mint-counter recovery floor BEFORE the deleted rows vanish: the surviving `pqueue_items`
+    // Preserve the mint-counter recovery floor BEFORE the deleted rows vanish: the surviving `fireweed_items`
     // are no longer the complete minted set, so recovery must restore the id ceiling from here or it could
     // re-mint a reaped id (ADR-009 id-uniqueness). Runs in the same reap transaction, so the floor advance is
     // atomic with the deletion — a crash never leaves rows deleted without the floor recorded.
@@ -614,7 +614,7 @@ pub(crate) fn reap_terminal_items_sql(
 
 /// A deferred mutation of the in-RAM live-token map, collected during apply and replayed onto the map
 /// ONLY after the transaction commits — so a commit failure can never leave the RAM tokens ahead of the
-/// durable `pqueue_items` state (F4).
+/// durable `fireweed_items` state (F4).
 pub(crate) enum TokenOp {
     Set(QueueKey, ItemId, LeaseToken),
     Clear(QueueKey, ItemId),
@@ -689,7 +689,7 @@ pub(crate) fn groups_of(
     for chunk in id_strs.chunks(SQLITE_BATCH) {
         let ph = vec!["?"; chunk.len()].join(",");
         let sql = format!(
-            "SELECT DISTINCT group_key FROM pqueue_items WHERE tenant_id=? AND queue_id=? \
+            "SELECT DISTINCT group_key FROM fireweed_items WHERE tenant_id=? AND queue_id=? \
              AND item_id IN ({ph}) AND group_key IS NOT NULL"
         );
         let mut p: Vec<Value> = vec![Value::Text(t.clone()), Value::Text(q.clone())];
@@ -715,7 +715,7 @@ pub(crate) fn cohort_group_for_id(
 ) -> EngineResult<GroupKey> {
     let (t, q) = parts(shard);
     let group: String = st(tx.query_row(
-        "SELECT group_key FROM pqueue_cohorts WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3",
+        "SELECT group_key FROM fireweed_cohorts WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3",
         params![t, q, cohort_id.as_str()],
         |row| row.get(0),
     ))?;
@@ -730,7 +730,7 @@ pub(crate) fn cohort_item_ids(
     let (t, q) = parts(shard);
     let group = cohort_group_for_id(tx, shard, cohort_id)?;
     let mut stmt = st(tx.prepare(
-        "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
+        "SELECT item_id FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
          AND superseded=0 AND cohort_size IS NOT NULL AND lifecycle_state NOT IN ('Complete','Failed') \
          ORDER BY priority_sort, created_seq",
     ))?;
@@ -742,7 +742,7 @@ pub(crate) fn cohort_item_ids(
     Ok(out)
 }
 
-/// Recompute `pqueue_group_summary` for one group from `pqueue_items` (exact aggregate over the group's
+/// Recompute `fireweed_group_summary` for one group from `fireweed_items` (exact aggregate over the group's
 /// currently-eligible items, in the SAME transaction as the mutation that touched it). The representative
 /// is the would-be-first-claimed eligible item (strict-claim key `priority_sort, created_seq`), matching
 /// the claim selection, including live gate state; `rep_progress_guard_sort`/`at_risk_count` stay NULL/0
@@ -774,15 +774,15 @@ pub(crate) fn refresh_group_summaries(
     st(tx.execute(
         "WITH target(group_key) AS (SELECT DISTINCT value FROM json_each(?3)), \
          eligible AS (SELECT i.group_key,i.eligible_since,i.priority_sort,i.created_at,i.item_id,i.created_seq \
-           FROM pqueue_items i JOIN target t ON t.group_key=i.group_key \
+           FROM fireweed_items i JOIN target t ON t.group_key=i.group_key \
            WHERE i.tenant_id=?1 AND i.queue_id=?2 AND i.lifecycle_state='Pending' AND i.superseded=0 \
            AND (i.not_before IS NULL OR i.not_before<=?4) AND NOT EXISTS (SELECT 1 \
-             FROM pqueue_item_gates ig JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id \
+             FROM fireweed_item_gates ig JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id \
              AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=i.tenant_id \
              AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id)), \
          ranked AS (SELECT *,ROW_NUMBER() OVER (PARTITION BY group_key ORDER BY priority_sort,created_seq) AS rn FROM eligible), \
          aggregate AS (SELECT group_key,COUNT(*) AS item_count,MIN(eligible_since) AS oldest FROM eligible GROUP BY group_key) \
-         INSERT INTO pqueue_group_summary \
+         INSERT INTO fireweed_group_summary \
          (tenant_id,queue_id,group_key,oldest_eligible_at,rep_progress_guard_sort,rep_priority_sort,\
           rep_created_at,rep_item_id,eligible_item_count,at_risk_count,updated_at) \
          SELECT ?1,?2,t.group_key,a.oldest,NULL,r.priority_sort,r.created_at,r.item_id,COALESCE(a.item_count,0),0,?4 \
@@ -799,11 +799,11 @@ pub(crate) fn refresh_group_summaries(
     Ok(())
 }
 
-/// Apply one command to `pqueue_items` as SQL. Mirrors `ProjectionData::apply_command` arm-for-arm. The
+/// Apply one command to `fireweed_items` as SQL. Mirrors `ProjectionData::apply_command` arm-for-arm. The
 /// caller must have pre-validated rejectable commands (commit has no rollback past this point), so the
 /// only errors here are storage/`NotFound` faults, never behavioral rejections. Live-token mutations are
 /// appended to `token_ops` (applied post-commit by the caller), never mutated in place. Grouped-item
-/// mutations also refresh `pqueue_group_summary` for the affected group(s) in this same transaction.
+/// mutations also refresh `fireweed_group_summary` for the affected group(s) in this same transaction.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_command_sql(
     tx: &Transaction<'_>,
@@ -858,7 +858,7 @@ pub(crate) fn apply_command_sql(
                     fifo_rowid_range_for_id_strings(tx, shard, &ids, Some("Pending"))?
             {
                 let changed = st(tx.execute(
-                    "UPDATE pqueue_items SET lifecycle_state='Leased', lease_token_hash=?1, \
+                    "UPDATE fireweed_items SET lifecycle_state='Leased', lease_token_hash=?1, \
                      lease_expires_at=?2, worker_id=?3, retry_count=retry_count+1, \
                      item_version=item_version+1, updated_at=?4, last_command_sequence=?5 \
                      WHERE tenant_id=?6 AND queue_id=?7 AND rowid BETWEEN ?8 AND ?9",
@@ -881,7 +881,7 @@ pub(crate) fn apply_command_sql(
             } else {
                 exec_items_in(
                     tx,
-                    "UPDATE pqueue_items SET lifecycle_state='Leased', lease_token_hash=?, \
+                    "UPDATE fireweed_items SET lifecycle_state='Leased', lease_token_hash=?, \
                      lease_expires_at=?, worker_id=?, retry_count=retry_count+1, \
                      item_version=item_version+1, updated_at=?, last_command_sequence=? \
                      WHERE tenant_id=? AND queue_id=? AND item_id IN",
@@ -920,7 +920,7 @@ pub(crate) fn apply_command_sql(
             let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
             exec_items_in(
                 tx,
-                "UPDATE pqueue_items SET lifecycle_state='Leased', lease_token_hash=?, \
+                "UPDATE fireweed_items SET lifecycle_state='Leased', lease_token_hash=?, \
                  lease_expires_at=?, retry_count=retry_count+1, item_version=item_version+1, \
                  updated_at=?, last_command_sequence=? WHERE tenant_id=? AND queue_id=? AND item_id IN",
                 &[
@@ -934,7 +934,7 @@ pub(crate) fn apply_command_sql(
                 &ids,
             )?;
             st(tx.execute(
-                "UPDATE pqueue_cohorts SET state='leased', cohort_lease_token_hash=?4 \
+                "UPDATE fireweed_cohorts SET state='leased', cohort_lease_token_hash=?4 \
                  WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3",
                 params![t, q, c.cohort_id.as_str(), hash],
             ))?;
@@ -952,7 +952,7 @@ pub(crate) fn apply_command_sql(
             let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
             exec_items_in(
                 tx,
-                "UPDATE pqueue_items SET lease_expires_at=?, item_version=item_version+1, \
+                "UPDATE fireweed_items SET lease_expires_at=?, item_version=item_version+1, \
                  updated_at=?, last_command_sequence=? WHERE tenant_id=? AND queue_id=? AND item_id IN",
                 &[
                     Value::Integer(exp),
@@ -977,7 +977,7 @@ pub(crate) fn apply_command_sql(
             let exp = ts_nanos(c.lease_expires_at);
             exec_items_in(
                 tx,
-                "UPDATE pqueue_items SET lease_expires_at=?, item_version=item_version+1, \
+                "UPDATE fireweed_items SET lease_expires_at=?, item_version=item_version+1, \
                  updated_at=?, last_command_sequence=? WHERE tenant_id=? AND queue_id=? AND item_id IN",
                 &[
                     Value::Integer(exp),
@@ -996,7 +996,7 @@ pub(crate) fn apply_command_sql(
             let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
             exec_items_in(
                 tx,
-                "UPDATE pqueue_items SET lease_token_hash=?, lease_expires_at=?, \
+                "UPDATE fireweed_items SET lease_token_hash=?, lease_expires_at=?, \
                  retry_count=retry_count+1, item_version=item_version+1, updated_at=?, \
                  last_command_sequence=? WHERE tenant_id=? AND queue_id=? AND item_id IN",
                 &[
@@ -1022,7 +1022,7 @@ pub(crate) fn apply_command_sql(
             // (a divergence) we apply nothing rather than fault, mirroring the in-memory `debug_assert`.
             let current: Option<(String, String, Option<String>, Option<i64>, i64, Option<Vec<u8>>, String)> = st(tx
                 .query_row(
-                    "SELECT fields,lifecycle_state,priority,not_before,eligible_since,payload,metadata FROM pqueue_items \
+                    "SELECT fields,lifecycle_state,priority,not_before,eligible_since,payload,metadata FROM fireweed_items \
                      WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 \
                      AND lifecycle_state IN ('Pending','Leased') AND superseded=0 AND fenced=0",
                     params![t, q, c.item_id.to_string()],
@@ -1081,7 +1081,7 @@ pub(crate) fn apply_command_sql(
                         .priority_model,
                 );
                 st(tx.execute(
-                    "UPDATE pqueue_items SET fields=?4,payload=?5,metadata=?6,priority=?7,priority_sort=?8, \
+                    "UPDATE fireweed_items SET fields=?4,payload=?5,metadata=?6,priority=?7,priority_sort=?8, \
                      not_before=?9,eligible_since=?10,item_version=item_version+1,updated_at=?11,last_command_sequence=?12 \
                      WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 \
                      AND lifecycle_state IN ('Pending','Leased') AND superseded=0 AND fenced=0",
@@ -1090,19 +1090,19 @@ pub(crate) fn apply_command_sql(
                 ))?;
                 if let Some(gate_keys) = &c.set_gate_keys {
                     st(tx.execute(
-                        "DELETE FROM pqueue_item_gates WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                        "DELETE FROM fireweed_item_gates WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
                         params![t, q, c.item_id.to_string()],
                     ))?;
                     for gate_key in gate_keys {
                         st(tx.execute(
-                            "INSERT OR IGNORE INTO pqueue_item_gates(tenant_id,queue_id,item_id,gate_key) VALUES(?1,?2,?3,?4)",
+                            "INSERT OR IGNORE INTO fireweed_item_gates(tenant_id,queue_id,item_id,gate_key) VALUES(?1,?2,?3,?4)",
                             params![t, q, c.item_id.to_string(), gate_key],
                         ))?;
                     }
                 }
                 if let Some(ref doc) = c.set_entity_document {
                     st(tx.execute(
-                        "UPDATE pqueue_items SET entity_document=?4 \
+                        "UPDATE fireweed_items SET entity_document=?4 \
                          WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
                         params![t, q, c.item_id.to_string(), to_json(doc)?],
                     ))?;
@@ -1140,7 +1140,7 @@ pub(crate) fn apply_command_sql(
                 }
                 let ph = vec!["?"; chunk.len()].join(",");
                 let sql = format!(
-                    "SELECT item_id, retry_count, max_attempts FROM pqueue_items \
+                    "SELECT item_id, retry_count, max_attempts FROM fireweed_items \
                      WHERE tenant_id=? AND queue_id=? AND item_id IN ({ph})"
                 );
                 let mut p: Vec<Value> = vec![Value::Text(t.clone()), Value::Text(q.clone())];
@@ -1217,7 +1217,7 @@ pub(crate) fn apply_command_sql(
                 }
                 token_ops.push(TokenOp::Clear(shard.clone(), o.item_id));
             }
-            const FINALIZE_SET: &str = "UPDATE pqueue_items SET lifecycle_state=?, lease_token_hash=NULL, \
+            const FINALIZE_SET: &str = "UPDATE fireweed_items SET lifecycle_state=?, lease_token_hash=NULL, \
                  lease_expires_at=NULL, worker_id=NULL, fenced=0, item_version=item_version+1, \
                  retry_count=CASE WHEN ? THEN 0 ELSE retry_count END, terminal_at=?, \
                  terminal_command_epoch=?, updated_at=?, last_command_sequence=? \
@@ -1259,7 +1259,7 @@ pub(crate) fn apply_command_sql(
                         fifo_rowid_range_for_id_strings(tx, shard, ids, Some("Leased"))?
                 {
                     let changed = st(tx.execute(
-                        "UPDATE pqueue_items SET lifecycle_state=?1, lease_token_hash=NULL, \
+                        "UPDATE fireweed_items SET lifecycle_state=?1, lease_token_hash=NULL, \
                          lease_expires_at=NULL, worker_id=NULL, fenced=0, item_version=item_version+1, \
                          retry_count=CASE WHEN ?2 THEN 0 ELSE retry_count END, terminal_at=?3, \
                          terminal_command_epoch=?4, updated_at=?5, last_command_sequence=?6 \
@@ -1304,7 +1304,7 @@ pub(crate) fn apply_command_sql(
             for (nb_n, ids) in &backoff {
                 exec_items_in(
                     tx,
-                    "UPDATE pqueue_items SET not_before=?, eligible_since=? \
+                    "UPDATE fireweed_items SET not_before=?, eligible_since=? \
                      WHERE tenant_id=? AND queue_id=? AND item_id IN",
                     &[Value::Integer(*nb_n), Value::Integer(*nb_n)],
                     &t,
@@ -1315,7 +1315,7 @@ pub(crate) fn apply_command_sql(
             for ((not_before, eligible_since), ids) in &rearm_schedule {
                 exec_items_in(
                     tx,
-                    "UPDATE pqueue_items SET not_before=?, eligible_since=? \
+                    "UPDATE fireweed_items SET not_before=?, eligible_since=? \
                      WHERE tenant_id=? AND queue_id=? AND item_id IN",
                     &[opt_int(*not_before), Value::Integer(*eligible_since)],
                     &t,
@@ -1349,7 +1349,7 @@ pub(crate) fn apply_command_sql(
                     .collect::<Vec<_>>()
                     .join(",");
                 let sql = format!(
-                    "SELECT retry_count,max_attempts FROM pqueue_items \
+                    "SELECT retry_count,max_attempts FROM fireweed_items \
                      WHERE tenant_id=? AND queue_id=? AND item_id IN ({placeholders})"
                 );
                 let mut stmt = st(tx.prepare(&sql))?;
@@ -1411,7 +1411,7 @@ pub(crate) fn apply_command_sql(
                 None
             };
             st(tx.execute(
-                "UPDATE pqueue_cohorts SET state=?4, cohort_lease_token_hash=NULL, retention_until=?5 \
+                "UPDATE fireweed_cohorts SET state=?4, cohort_lease_token_hash=NULL, retention_until=?5 \
                  WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3",
                 params![t, q, c.cohort_id.as_str(), next_state, retention_until],
             ))?;
@@ -1426,7 +1426,7 @@ pub(crate) fn apply_command_sql(
             let superseded_str = c.superseded_item_id.to_string();
             delete_typed_index_rows(tx, &t, &q, std::slice::from_ref(&superseded_str))?;
             st(tx.execute(
-                "UPDATE pqueue_items SET superseded=1, updated_at=?4, last_command_sequence=?5 \
+                "UPDATE fireweed_items SET superseded=1, updated_at=?4, last_command_sequence=?5 \
                  WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
                 params![t, q, c.superseded_item_id.to_string(), now_n, seq as i64],
             ))?;
@@ -1463,7 +1463,7 @@ pub(crate) fn apply_command_sql(
             let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
             exec_items_in(
                 tx,
-                "UPDATE pqueue_items SET lifecycle_state='Pending', lease_token_hash=NULL, \
+                "UPDATE fireweed_items SET lifecycle_state='Pending', lease_token_hash=NULL, \
                  lease_expires_at=NULL, worker_id=NULL, item_version=item_version+1, updated_at=?, \
                  last_command_sequence=? WHERE tenant_id=? AND queue_id=? AND item_id IN",
                 &[Value::Integer(now_n), Value::Integer(seq as i64)],
@@ -1484,7 +1484,7 @@ pub(crate) fn apply_command_sql(
             // Force every non-terminal member of the cohort to Failed (cohort-incomplete).
             let ids: Vec<ItemId> = {
                 let mut stmt = st(tx.prepare(
-                    "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+                    "SELECT item_id FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
                      AND group_key=?3 AND lifecycle_state NOT IN ('Complete','Failed')",
                 ))?;
                 let mapped = st(stmt.query_map(params![t, q, c.group_key.as_str()], |row| {
@@ -1501,7 +1501,7 @@ pub(crate) fn apply_command_sql(
             // now-terminal row); the live token is dropped from the RAM map post-commit.
             exec_items_in(
                 tx,
-                "UPDATE pqueue_items SET lifecycle_state='Failed', item_version=item_version+1, \
+                "UPDATE fireweed_items SET lifecycle_state='Failed', item_version=item_version+1, \
                  terminal_at=?, terminal_command_epoch=?, updated_at=?, last_command_sequence=? \
                  WHERE tenant_id=? AND queue_id=? AND item_id IN",
                 &[
@@ -1518,7 +1518,7 @@ pub(crate) fn apply_command_sql(
                 token_ops.push(TokenOp::Clear(shard.clone(), *id));
             }
             st(tx.execute(
-                "UPDATE pqueue_cohorts SET state='terminal', expire_command_pos=?4, \
+                "UPDATE fireweed_cohorts SET state='terminal', expire_command_pos=?4, \
                  cohort_lease_token_hash=NULL, retention_until=?5 \
                  WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3",
                 params![
@@ -1538,7 +1538,7 @@ pub(crate) fn apply_command_sql(
             let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
             exec_items_in(
                 tx,
-                "UPDATE pqueue_items SET fenced=1 WHERE tenant_id=? AND queue_id=? AND item_id IN",
+                "UPDATE fireweed_items SET fenced=1 WHERE tenant_id=? AND queue_id=? AND item_id IN",
                 &[],
                 &t,
                 &q,
@@ -1550,7 +1550,7 @@ pub(crate) fn apply_command_sql(
             let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
             exec_items_in(
                 tx,
-                "UPDATE pqueue_items SET fenced=0 WHERE tenant_id=? AND queue_id=? AND item_id IN",
+                "UPDATE fireweed_items SET fenced=0 WHERE tenant_id=? AND queue_id=? AND item_id IN",
                 &[],
                 &t,
                 &q,
@@ -1586,7 +1586,7 @@ pub(crate) fn apply_command_sql(
             for chunk in id_strs.chunks(SQLITE_BATCH) {
                 let ph = vec!["?"; chunk.len()].join(",");
                 let sql = format!(
-                    "SELECT item_id, group_key, client_item_key, lifecycle_state FROM pqueue_items \
+                    "SELECT item_id, group_key, client_item_key, lifecycle_state FROM fireweed_items \
                      WHERE tenant_id=? AND queue_id=? AND item_id IN ({ph})"
                 );
                 let mut p: Vec<Value> = vec![Value::Text(t.clone()), Value::Text(q.clone())];
@@ -1626,7 +1626,7 @@ pub(crate) fn apply_command_sql(
                 for chunk in retention.chunks(SQLITE_BATCH) {
                     let values = vec!["(?,?,?,?,?)"; chunk.len()].join(",");
                     let sql = format!(
-                        "INSERT INTO pqueue_item_key_retention \
+                        "INSERT INTO fireweed_item_key_retention \
                          (tenant_id,queue_id,client_item_key,item_id,expires_at) VALUES {values} \
                          ON CONFLICT(tenant_id,queue_id,client_item_key) \
                          DO UPDATE SET item_id=excluded.item_id, expires_at=excluded.expires_at"
@@ -1645,7 +1645,7 @@ pub(crate) fn apply_command_sql(
             // Set-based deletes (item rows + their gate membership) — one round-trip per chunk each.
             exec_items_in(
                 tx,
-                "DELETE FROM pqueue_items WHERE tenant_id=? AND queue_id=? AND item_id IN",
+                "DELETE FROM fireweed_items WHERE tenant_id=? AND queue_id=? AND item_id IN",
                 &[],
                 &t,
                 &q,
@@ -1654,7 +1654,7 @@ pub(crate) fn apply_command_sql(
             // BQ-14d: drop the purged items' gate membership (the anti-join source).
             exec_items_in(
                 tx,
-                "DELETE FROM pqueue_item_gates WHERE tenant_id=? AND queue_id=? AND item_id IN",
+                "DELETE FROM fireweed_item_gates WHERE tenant_id=? AND queue_id=? AND item_id IN",
                 &[],
                 &t,
                 &q,
@@ -1686,7 +1686,7 @@ pub(crate) fn apply_command_sql(
                     }
                     st(tx.execute(
                         &format!(
-                            "INSERT INTO pqueue_gate_state (tenant_id,queue_id,gate_key) VALUES {values} \
+                            "INSERT INTO fireweed_gate_state (tenant_id,queue_id,gate_key) VALUES {values} \
                              ON CONFLICT(tenant_id,queue_id,gate_key) DO NOTHING"
                         ),
                         params_from_iter(parameters.iter()),
@@ -1704,7 +1704,7 @@ pub(crate) fn apply_command_sql(
                     );
                     st(tx.execute(
                         &format!(
-                            "DELETE FROM pqueue_gate_state WHERE tenant_id=? AND queue_id=? \
+                            "DELETE FROM fireweed_gate_state WHERE tenant_id=? AND queue_id=? \
                              AND gate_key IN ({placeholders})"
                         ),
                         params_from_iter(parameters.iter()),
@@ -1714,7 +1714,7 @@ pub(crate) fn apply_command_sql(
             Ok(())
         }
         // C9 (epic pqueue-2201fd37): opaque NON-WORK side records (Snorri authoritative-commit boundary).
-        // Upsert each (key,payload) into `pqueue_side_records` — a table disjoint from `pqueue_items`, so a
+        // Upsert each (key,payload) into `fireweed_side_records` — a table disjoint from `fireweed_items`, so a
         // side record is never claimable/eligible/peekable nor counted as work. Apply is infallible
         // (insert-or-overwrite by key), exactly like the in-memory `side_records` map.
         QueueCommand::WriteSideRecords(c) => {
@@ -1731,7 +1731,7 @@ pub(crate) fn apply_command_sql(
                 }
                 st(tx.execute(
                     &format!(
-                        "INSERT INTO pqueue_side_records (tenant_id,queue_id,key,payload) \
+                        "INSERT INTO fireweed_side_records (tenant_id,queue_id,key,payload) \
                          VALUES {values} ON CONFLICT(tenant_id,queue_id,key) DO UPDATE SET \
                          payload=excluded.payload"
                     ),
@@ -1742,10 +1742,10 @@ pub(crate) fn apply_command_sql(
         }
         // C6 (epic pqueue-2201fd37): advance a caller-supplied opaque instance/state fence. Validated
         // pre-commit (stored==expected, next>expected), so the upsert is infallible. Disjoint from
-        // `pqueue_items` — a fence is never claimable/peekable work.
+        // `fireweed_items` — a fence is never claimable/peekable work.
         QueueCommand::AdvanceInstanceFence(c) => {
             st(tx.execute(
-                "INSERT INTO pqueue_instance_fences (tenant_id,queue_id,instance_key,fence) \
+                "INSERT INTO fireweed_instance_fences (tenant_id,queue_id,instance_key,fence) \
                  VALUES (?1,?2,?3,?4) \
                  ON CONFLICT(tenant_id,queue_id,instance_key) DO UPDATE SET fence=excluded.fence",
                 params![t, q, c.instance_key, c.next as i64],

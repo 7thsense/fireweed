@@ -20,7 +20,7 @@ ddx:
 
 ## Context
 
-pqueue is intended to work as an embedded Rust library and as a stateless
+fireweed is intended to work as an embedded Rust library and as a stateless
 service. The service form must not rely only on an outer application auth gate:
 tenant boundaries need to reach API authorization, control-plane routing, and
 storage predicates so noisy or unauthorized tenants cannot read, mutate, or
@@ -44,7 +44,7 @@ responsibility. TD-001 and TD-002 require `tenant_id` in storage keys.
 
 ## Decision
 
-pqueue will use a layered auth and tenancy model:
+fireweed will use a layered auth and tenancy model:
 
 1. **Principal**: authenticated actor resolved by the host service or embedding
    application. Examples: service account, machine token, user session, or local
@@ -97,7 +97,7 @@ defined by API-002. Operator mutations may act on leased and terminal items and
 therefore require these stronger, deny-by-default grants distinct from the
 API-001 data-plane permissions.
 
-The policy engine may be RBAC, ABAC, or host-provided callback. The pqueue
+The policy engine may be RBAC, ABAC, or host-provided callback. The fireweed
 service surface sees only a policy decision:
 
 ```rust
@@ -150,9 +150,9 @@ requires:
 - queue and tenant identifiers in metrics;
 - configurable max batch size and lease duration per queue;
 - backend profile per queue;
-- pqueue deployment/tenant rate-limit and capacity outcomes in API-001 error
+- fireweed deployment/tenant rate-limit and capacity outcomes in API-001 error
   semantics (the envelope rate-limit error and the per-item `rate_limited`
-  partial-batch status protect the pqueue deployment, not a caller's downstream
+  partial-batch status protect the fireweed deployment, not a caller's downstream
   API);
 - progress-bound metrics per queue;
 - load tests where one hot queue does not prevent another queue from claiming
@@ -167,16 +167,16 @@ requires:
   the 1000th active queue costs no more than bounded incremental resource and
   every active queue still meets its progress bound.
 
-pqueue deployment-level rate limits, quotas, and tenant capacity controls are P1
+fireweed deployment-level rate limits, quotas, and tenant capacity controls are P1
 product features, but v1 storage and metrics must not make them impossible.
 Enforcing a caller's downstream API rate limits or quotas is a permanent
-non-goal of the pqueue engine; callers pace their own claim output (claim batch
-size, claim cadence, `not_before`, and group selection) and pqueue performs no
+non-goal of the fireweed engine; callers pace their own claim output (claim batch
+size, claim cadence, `not_before`, and group selection) and fireweed performs no
 downstream-rate admission.
 
 ## Security Rules
 
-- Resolve the principal before route handling reaches pqueue core.
+- Resolve the principal before route handling reaches fireweed core.
 - Authorize before loading queue data or returning whether an unauthorized queue
   exists.
 - Tenant-wide reads (discovery) MUST authorize `queue:read` per candidate queue

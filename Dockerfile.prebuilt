@@ -19,9 +19,9 @@ RUN chmod 0755 /usr/local/bin/fireweed-service /usr/local/bin/fireweed-verify-le
 
 USER fireweed
 
-ENV PQUEUE_LISTEN_ADDR=0.0.0.0:8080 \
-    PQUEUE_LOG_BACKEND=objectlog \
-    PQUEUE_PROJECTION_BACKEND=inmemory
+ENV FIREWEED_LISTEN_ADDR=0.0.0.0:8080 \
+    FIREWEED_LOG_BACKEND=objectlog \
+    FIREWEED_PROJECTION_BACKEND=inmemory
 
 EXPOSE 8080
 

@@ -25,7 +25,7 @@ the *only* model — it removes the `shard_count > 1` opt-in and all the cross-s
 it, so the cascade stops asserting a capability we no longer offer.
 
 Two adjacent items ride along:
-- **Two projection families** (in-memory log-replay + the relational `pqueue_items`/SQL-claim projection that
+- **Two projection families** (in-memory log-replay + the relational `fireweed_items`/SQL-claim projection that
   TD-002 already specifies), held identical by the **conformance suite as contract**. This reconciles
   ADR-007's "one shared projection / fused-vs-split disappears" premise, which contradicts the standing TDs.
 - **A pluggable `ControlPlaneStore` seam** (so a no-Postgres / object-store control plane is *possible*).
@@ -81,8 +81,8 @@ Source-of-truth first; each independently committable; re-stamp affected `ddx:` 
   it is a section, not a line: remove fan-out/k-way-merge/claim-intent-plan/cross-shard-progress; claim is
   single-owner-local. Add the pluggable control-plane capability + the relational `ProjectionStore` variant +
   conformance-as-contract (core/log suites). Capability-class table.
-- **C6 — TD-002.** Confirm the relational `pqueue_items` projection is per-queue single-owner; drop the
-  `pqueue_group_summary` `shard_id` dimension (new key `(tenant,queue,group_key)`); remove cross-shard; keep
+- **C6 — TD-002.** Confirm the relational `fireweed_items` projection is per-queue single-owner; drop the
+  `fireweed_group_summary` `shard_id` dimension (new key `(tenant,queue,group_key)`); remove cross-shard; keep
   the schema + claim CTE as source of truth (edit, don't replace); Postgres = one control-plane option;
   log-optional + idempotency.
 - **C7 — API-001.** Enumerate and edit every cross-shard site: `CreateQueue.shard_count` (`:163`) + echo

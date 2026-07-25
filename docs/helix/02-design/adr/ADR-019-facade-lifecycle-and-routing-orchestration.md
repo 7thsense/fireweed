@@ -32,7 +32,7 @@ frontier. ADR-004 fixes the effective claim domain; ADR-008 makes one queue the 
 Rust-library callers need narrower conveniences: worker-loop names, one call that fans out independent
 claims across queues, an exact stamp around queue-local discovery, and a deterministic way to disperse
 workers within an oldest-first prefix. These conveniences must not imply a cross-queue transaction, change
-backend ordering, conceal missing discovery descriptors, or add scheduler state to pqueue.
+backend ordering, conceal missing discovery descriptors, or add scheduler state to fireweed.
 
 This ADR governs B-005 through B-007 and the discovery contract required from B-011. It is an additive
 Rust-facade contract only. **API-001 remains unchanged**: no operation, field, error, atomicity rule, or
@@ -99,7 +99,7 @@ repair the discovery source before B-007 depends on it:
   before keyed (`Some`) groups; keyed values then use their stable key order. This tie-break refines
   deterministic representation only; oldest-first age remains the primary rank.
 
-The relational implementation uses a partial `pqueue_items_active_scope_idx` over pending,
+The relational implementation uses a partial `fireweed_items_active_scope_idx` over pending,
 non-superseded rows keyed by `(tenant_id, queue_id, group_key, eligible_since, not_before, item_id)`, plus
 the existing item-gate and gate-state primary keys for the eligibility anti-join. Discovery now aggregates
 the addressed queue's live pending rows at read time: O(live pending rows in that queue), rather than the
@@ -212,7 +212,7 @@ prefix, or ignore urgency. B-011's time-only-crossed descriptors must be able to
 | Option | Pros | Cons | Evaluation |
 |--------|------|------|------------|
 | Extend API-001 with multi-queue claim and selector operations | Makes every transport implement one shape | Falsely elevates library orchestration into a server atomicity/compatibility obligation | Rejected |
-| Add scheduler/router state and worker-capacity traits to pqueue | Centralizes routing | Crosses the scheduler boundary, creates lifecycle/persistence requirements, and duplicates caller policy | Rejected |
+| Add scheduler/router state and worker-capacity traits to fireweed | Centralizes routing | Crosses the scheduler boundary, creates lifecycle/persistence requirements, and duplicates caller policy | Rejected |
 | Hide ungrouped omission in the selector | Avoids relational query work | Makes discovery untruthful and permanently excludes valid work | Rejected |
 | Short-circuit fan-in on first target error | Lower latency on failure | Loses correlated results and leaves completed sibling effects unobserved | Rejected |
 | **Add bounded stateless Rust-facade orchestration** | Keeps API-001 and queue-local authority intact while reducing caller boilerplate | Requires explicit partial-effect and cancellation documentation | **Selected** |

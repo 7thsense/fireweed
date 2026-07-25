@@ -90,7 +90,7 @@ fn run_owner(
     items_per_queue: u64,
     batch: usize,
 ) -> Vec<f64> {
-    let pq = open_memory(Arc::new(SysClock));
+    let fireweed = open_memory(Arc::new(SysClock));
     futures::executor::block_on(async {
         let mut per_queue_rates = Vec::with_capacity(queues_per_owner);
         for qi in 0..queues_per_owner {
@@ -100,7 +100,7 @@ fn run_owner(
                 TenantId::new(&tenant).unwrap(),
                 QueueId::new(&qname).unwrap(),
             );
-            pq.create_queue(qdef(&tenant, &qname)).await.unwrap();
+            fireweed.create_queue(qdef(&tenant, &qname)).await.unwrap();
             let q_start = Instant::now();
             // Push.
             let mut pushed = 0u64;
@@ -112,19 +112,19 @@ fn run_owner(
                         ..Default::default()
                     })
                     .collect();
-                pq.push_batch(&qk, items).await.unwrap();
+                fireweed.push_batch(&qk, items).await.unwrap();
                 pushed += n as u64;
             }
             // Claim + ack (drain).
             let mut drained = 0u64;
             while drained < items_per_queue {
-                let claimed = pq.claim(&qk, batch, 3_600_000).await.unwrap();
+                let claimed = fireweed.claim(&qk, batch, 3_600_000).await.unwrap();
                 if claimed.is_empty() {
                     break;
                 }
                 let ids: Vec<ItemId> = claimed.iter().map(|c| c.item_id).collect();
                 drained += ids.len() as u64;
-                pq.ack(&qk, ids).await.unwrap();
+                fireweed.ack(&qk, ids).await.unwrap();
             }
             assert_eq!(drained, items_per_queue, "every pushed item must drain");
             per_queue_rates.push(items_per_queue as f64 / q_start.elapsed().as_secs_f64());
@@ -367,15 +367,15 @@ fn performance_cross_queue_scale_out_tests() {
 // sustained load; the orchestrator only repoints kubeconfig at the control-plane BRIDGE IP for the control
 // plane traffic, exactly as documented.
 //
-// ENV-GATED. Without `PQUEUE_E2_LIVE=1` it LOUD-skips and returns green (so `cargo test --workspace` and a
+// ENV-GATED. Without `FIREWEED_E2_LIVE=1` it LOUD-skips and returns green (so `cargo test --workspace` and a
 // default `fireweed-bench` run never spin up an 8-pod cluster) — mirroring the loud-skip pattern of the sibling
 // live suite `performance_multi_node_object_log_e2_tests`. With the flag set it provisions a UNIQUELY-named
 // kind cluster (never the pre-existing fjord-e2e/heimq-e2e/kind clusters), runs the sweep, ASSERTS the four
 // E2 bars from the emitted ledger (teeth: it re-checks the measured values, it does not merely trust the
 // orchestrator's exit code), and TEARS THE CLUSTER + IMAGE DOWN via a Drop guard even if an assertion panics.
 //
-// Tunables (env, all optional): PQUEUE_E2_SWEEPS (default 1 — one full 2/4/8 sweep is enough for the entry
-// point to be green; the closed-bead evidence ran 3), PQUEUE_E2_CLUSTER, PQUEUE_E2_IMAGE.
+// Tunables (env, all optional): FIREWEED_E2_SWEEPS (default 1 — one full 2/4/8 sweep is enough for the entry
+// point to be green; the closed-bead evidence ran 3), FIREWEED_E2_CLUSTER, FIREWEED_E2_IMAGE.
 
 /// The E2 headline cross-node multiple: the 8-owner ingest aggregate must be at least this times the 2-owner.
 const SCALE_MULTIPLE_BAR: f64 = 3.5;
@@ -409,9 +409,9 @@ fn tool_present(tool: &str, probe: &str) -> bool {
 
 #[test]
 fn live_multi_node_object_log_sqlite_projection_e2() {
-    if std::env::var("PQUEUE_E2_LIVE").is_err() {
+    if std::env::var("FIREWEED_E2_LIVE").is_err() {
         eprintln!(
-            "TP-002 E2 LIVE multi-node object_log_sqlite_projection headline SKIPPED — set PQUEUE_E2_LIVE=1 \
+            "TP-002 E2 LIVE multi-node object_log_sqlite_projection headline SKIPPED — set FIREWEED_E2_LIVE=1 \
              to provision a kind cluster (scripts/perf/tp002-e2-kind.sh: CPU-limited owner pods at 2/4/8 + a \
              lean in-cluster load Job) and assert the four E2 release bars (ingest non-decreasing 2->4->8; \
              all owner counts and every queue make progress; measured rates/ratios are capacity diagnostics; \
@@ -446,10 +446,10 @@ fn live_multi_node_object_log_sqlite_projection_e2() {
     // pre-existing fjord-e2e/heimq-e2e/kind clusters that must stay untouched.
     let tag = std::process::id();
     let cluster =
-        std::env::var("PQUEUE_E2_CLUSTER").unwrap_or_else(|_| format!("pq-e2-live-{tag}"));
+        std::env::var("FIREWEED_E2_CLUSTER").unwrap_or_else(|_| format!("fireweed-e2-live-{tag}"));
     let image =
-        std::env::var("PQUEUE_E2_IMAGE").unwrap_or_else(|_| format!("pqueue-e2-live:{tag}"));
-    let sweeps = std::env::var("PQUEUE_E2_SWEEPS").unwrap_or_else(|_| "1".to_string());
+        std::env::var("FIREWEED_E2_IMAGE").unwrap_or_else(|_| format!("fireweed-e2-live:{tag}"));
+    let sweeps = std::env::var("FIREWEED_E2_SWEEPS").unwrap_or_else(|_| "1".to_string());
     let ledger_out = std::env::temp_dir().join(format!("tp002-e2-live-{tag}.jsonl"));
 
     // Arm teardown BEFORE provisioning so a panic anywhere below still deletes the cluster + image.
@@ -648,7 +648,7 @@ fn tp002_e2_release_rows_emit_only_on_pass() {
     );
     // Strict-validate + confirm the gate counts E2 as RELEASE (headline) evidence, not smoke.
     let dir = std::env::temp_dir();
-    let path = dir.join(format!("pq-e2-pass-{}.jsonl", std::process::id()));
+    let path = dir.join(format!("fireweed-e2-pass-{}.jsonl", std::process::id()));
     let _ = std::fs::remove_file(&path);
     fireweed_release::append_row(&path, &row).expect("emit release row");
     let summary =

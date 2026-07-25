@@ -53,7 +53,7 @@ futures = "0.3"
 [features]
 default = ["env-config"]
 # The OPTIONAL env-var populator: `Config::from_env(&BTreeMap)` + `ConfigError`, the single place that maps
-# the documented `PQUEUE_*`/`DATABRICKS_*` env NAMES onto the typed `Config`. Default-on so the `fireweed-service`
+# the documented `FIREWEED_*`/`DATABRICKS_*` env NAMES onto the typed `Config`. Default-on so the `fireweed-service`
 # bin builds; a pure-library embedder can `default-features = false` to drop ALL env-name knowledge — the core
 # library API (`Config` + `start`/`start_with_ownership`) carries no env dependency either way (the populator
 # is pure over a caller-supplied map; the only process-env read, `std::env::vars()`, lives in the bin's `main`).

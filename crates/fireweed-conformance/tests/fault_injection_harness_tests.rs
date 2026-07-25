@@ -95,7 +95,7 @@ impl Backend for ControlledOwnedCommitBackend {
 fn unique_dir(tag: &str) -> std::path::PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let p = std::env::temp_dir().join(format!(
-        "pqueue-fault-harness-{tag}-{}-{n}",
+        "fireweed-fault-harness-{tag}-{}-{n}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&p);

@@ -1,6 +1,6 @@
 //! BQ-11d — the relational-reconnect conformance class against the DB-authoritative
 //! `SqliteRelationalBackend`: a reopen of the same sqlite file recovers committed state from
-//! `pqueue_items` itself, with NO command log to replay.
+//! `fireweed_items` itself, with NO command log to replay.
 //!
 //! Two layers:
 //! 1. The shared `relational_reconnect_suite!` (also run against the log-backed backend in
@@ -37,7 +37,7 @@ thread_local! {
 fn suite_db_path() -> String {
     std::env::temp_dir()
         .join(format!(
-            "pqueue-rel-reconnect-suite-{:?}.db",
+            "fireweed-rel-reconnect-suite-{:?}.db",
             std::thread::current().id()
         ))
         .to_str()
@@ -63,7 +63,7 @@ fireweed_conformance::relational_reconnect_suite!(make);
 fn unique_path(tag: &str) -> String {
     std::env::temp_dir()
         .join(format!(
-            "pqueue-rel-reconnect-{tag}-{}.db",
+            "fireweed-rel-reconnect-{tag}-{}.db",
             std::process::id()
         ))
         .to_str()
@@ -78,7 +78,7 @@ fn open_upgrades_existing_relational_items_table_with_metadata_column() {
     {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
-            "CREATE TABLE pqueue_items (
+            "CREATE TABLE fireweed_items (
                 tenant_id TEXT NOT NULL,
                 queue_id TEXT NOT NULL,
                 item_id TEXT NOT NULL,
@@ -114,7 +114,7 @@ fn open_upgrades_existing_relational_items_table_with_metadata_column() {
 
     let _backend = SqliteRelationalBackend::open(&path).unwrap();
     let conn = Connection::open(&path).unwrap();
-    let mut stmt = conn.prepare("PRAGMA table_info(pqueue_items)").unwrap();
+    let mut stmt = conn.prepare("PRAGMA table_info(fireweed_items)").unwrap();
     let columns: Vec<String> = stmt
         .query_map([], |row| row.get::<_, String>(1))
         .unwrap()
@@ -122,7 +122,7 @@ fn open_upgrades_existing_relational_items_table_with_metadata_column() {
         .unwrap();
     assert!(
         columns.iter().any(|column| column == "metadata"),
-        "open() must upgrade old relational pqueue_items tables with metadata"
+        "open() must upgrade old relational fireweed_items tables with metadata"
     );
 }
 
@@ -171,7 +171,7 @@ async fn recovery_high_water_tracks_applied_position_after_reopen() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// The `pqueue_item_key_retention` tombstone is durable: a terminal item purged before a reopen still
+/// The `fireweed_item_key_retention` tombstone is durable: a terminal item purged before a reopen still
 /// blocks re-push of its `client_item_key` (within retention) AFTER the reopen — proving the tombstone
 /// recovers from the DB, not from any in-process state.
 #[tokio::test]
@@ -271,7 +271,7 @@ async fn reopened_queue_accepts_new_push_and_claim() {
     } // crash
 
     let b = SqliteRelationalBackend::open(&path).unwrap();
-    // A fresh push: the id must NOT collide with the pre-reopen id (cmd_seq restored from pqueue_items).
+    // A fresh push: the id must NOT collide with the pre-reopen id (cmd_seq restored from fireweed_items).
     let new_ids = b
         .push(&shard(), vec![PushSpec::default()], ts(10), None)
         .await
@@ -288,7 +288,7 @@ async fn reopened_queue_accepts_new_push_and_claim() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// The documented token contract across reopen: a leased item survives as `Leased` in `pqueue_items`
+/// The documented token contract across reopen: a leased item survives as `Leased` in `fireweed_items`
 /// (metrics), but is OMITTED from `pending()` after reopen because its cleartext token is gone (hash-only
 /// at rest). It remains reclaimable by the owner via the reclaim tick.
 #[tokio::test]

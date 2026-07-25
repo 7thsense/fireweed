@@ -156,5 +156,5 @@ ready-future shims, and composition-root blocking wrappers are removed only afte
 
 - `docs/helix/02-design/technical-designs/TD-001-storage-architecture-backend-contracts.md`
 - `docs/helix/02-design/adr/ADR-012-orthogonal-log-projection-composition.md`
-- `crates/pqueue-engine/src/port.rs`
-- `crates/pqueue-engine/src/compose.rs`
+- `crates/fireweed-engine/src/port.rs`
+- `crates/fireweed-engine/src/compose.rs`

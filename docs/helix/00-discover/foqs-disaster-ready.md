@@ -19,7 +19,7 @@ ddx:
 
 Meta describes FOQS's migration from region-isolated installations to a global service that follows
 failed-over MySQL primaries and hides physical placement behind a routing service. The account is most
-useful to pqueue as evidence about discovery-cache staleness, thundering-herd behavior, starvation, and
+useful to fireweed as evidence about discovery-cache staleness, thundering-herd behavior, starvation, and
 the operational cost of exposing placement decisions to clients.
 
 ## Relevant Findings
@@ -37,21 +37,21 @@ the operational cost of exposing placement decisions to clients.
 
 ## HELIX Usage
 
-This resource informs future design review of pqueue's `DiscoverActiveScopes` routing behavior and its
+This resource informs future design review of fireweed's `DiscoverActiveScopes` routing behavior and its
 queue-owner discovery path. Use it when evaluating how many workers consume the same top-N discovery
 result, how stale routing summaries are bounded, and whether a priority-preserving dispersion mechanism
 is needed before multi-region placement becomes product scope.
 
 ## Authority Boundary
 
-The post does not establish that pqueue needs multi-region routing, client-visible region preferences, or
+The post does not establish that fireweed needs multi-region routing, client-visible region preferences, or
 FOQS's MySQL topology. It supplies failure modes for advisory discovery. Queue ownership and fencing remain
-governed by pqueue's architecture and ADRs; API changes remain governed by API-001.
+governed by fireweed's architecture and ADRs; API changes remain governed by API-001.
 
 ## Review Checklist
 
 - [x] Source URL and access date are present
 - [x] Summary is concise and source-faithful
-- [x] Findings are relevant to pqueue discovery
+- [x] Findings are relevant to fireweed discovery
 - [x] HELIX usage is specific
 - [x] Boundary prevents over-applying the source

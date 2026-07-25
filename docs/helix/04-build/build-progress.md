@@ -50,15 +50,15 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   is DONE; STOP the loop (no further ScheduleWakeup).
 - **Old Phase-6 cursor (done):** delete legacy + supersede docs. Phases 1–5 context:
   conformance harness; 3 adapters (memory/sqlite/objectlog); RESP front (full §3) + library facade
-  (`pqueue`) + composition root (`pqueue-server`) — the hexagonal "one engine, two interfaces" is built,
+  (`fireweed`) + composition root (`fireweed-server`) — the hexagonal "one engine, two interfaces" is built,
   all reviewed/green (workspace 25 suites). This chunk removes the OLD architecture. STEP 1 (verify
   safety): confirm NO new-architecture crate (core/engine/projection/conformance/memory/sqlite/objectlog/
-  resp/pqueue/pqueue-server) depends on any legacy crate — `cargo tree`/grep the path-deps. STEP 2
-  (delete): remove `pqueue-service`, `pqueue-client`, `pqueue-kafka`, `pqueue-storage`, AND the
-  OLD-architecture `pqueue-postgres` (it implements the dead storage traits + depends on pqueue-storage;
+  resp/fireweed/fireweed-server) depends on any legacy crate — `cargo tree`/grep the path-deps. STEP 2
+  (delete): remove `fireweed-service`, `fireweed-client`, `fireweed-kafka`, `fireweed-storage`, AND the
+  OLD-architecture `fireweed-postgres` (it implements the dead storage traits + depends on fireweed-storage;
   the DEFERRED postgres adapter will be created FRESH to the engine ports when a DB is available — note
   this in the deferral). Delete their `crates/<name>` dirs + remove from `Cargo.toml` members AND
-  default-members; drop the now-moot "pqueue-service excluded" comment. STEP 3: `cargo build`/`test`
+  default-members; drop the now-moot "fireweed-service excluded" comment. STEP 3: `cargo build`/`test`
   the whole default workspace stays green (now nothing is excluded). STEP 4 (docs): supersede/rewrite the
   helix docs that describe the OLD HTTP-service/Kafka/storage-trait architecture so they match the
   hexagonal engine + RESP/library model (ADRs/TDs/contracts that reference the deleted surface) — at
@@ -70,7 +70,7 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   shutdown drain). Postgres adapter (fresh, engine-ports) lands when a DB is provisioned.
 - **Old Phase-5 server cursor (done):** composition root. Earlier facade cursor: verbs
   over `PushPort`/Claim/Finalize/etc., backend+clock injected, fresh-eyes reviewed, B1/B2 fixed via the
-  new PushPort, 6 green). Build `pqueue-server`: a binary/lib composition root that (1) selects a backend
+  new PushPort, 6 green). Build `fireweed-server`: a binary/lib composition root that (1) selects a backend
   by config (memory / sqlite path / objectlog root) + builds a `SystemClock`; (2) starts the RESP
   `serve(listener, backend, clock)` task; (3) starts a **background ReclaimDriver task** that periodically
   calls `tick(clock.now())` (e.g. via `tokio::time::interval`) so expired leases are reclaimed on a quiet
@@ -88,9 +88,9 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   incl. drain-reconcile, upsert-dedup, fence-stale, superseded-ack, reclaim-after-expiry, crash-recovery
   (sqlite reopen), and collisions — all reviewed/green. (Part-3 polish — XCLAIM specific-id, two-consumer
   race e2e, paginated XAUTOCLAIM cursor — is deferred, low priority.) This chunk builds the LIBRARY
-  interface + the composition root that wires it all: (1) a `pqueue` facade crate exposing the ergonomic
+  interface + the composition root that wires it all: (1) a `fireweed` facade crate exposing the ergonomic
   Rust library API (push/claim/ack/nack/renew/peek over the engine ports — the second of the "exactly two
-  interfaces"); (2) `pqueue-server` composition root: DI that selects a backend (memory/sqlite/objectlog)
+  interfaces"); (2) `fireweed-server` composition root: DI that selects a backend (memory/sqlite/objectlog)
   + a `SystemClock` + an `IdGen`, starts the RESP `serve` task, AND runs a **background ReclaimDriver
   task** (periodic `tick(clock.now())` so leases are reclaimed without client traffic — the orphan-on-
   quiet-queue gap, TD-007 §3 — currently only XAUTOCLAIM triggers reclaim). Wire an ops/health probe.
@@ -100,8 +100,8 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
 - **Old Phase-4 cursor (done):** RESP clock + reclaim. Part 1 done (XADD-upsert, XPENDING, e2e; reviewed).
   This chunk adds the time-dependent surface. (1) Inject a `Clock` into `serve` (`serve(listener, backend,
   clock)`) — change the existing call sites/e2e; provide a real system clock for production (a small
-  `SystemClock` in pqueue-resp or via the Phase-5 composition root) and let tests inject
-  `pqueue_memory::ManualClock`. (2) XREADGROUP: set `lease_expires_at = clock.now() + queue
+  `SystemClock` in fireweed-resp or via the Phase-5 composition root) and let tests inject
+  `fireweed_memory::ManualClock`. (2) XREADGROUP: set `lease_expires_at = clock.now() + queue
   .max_lease_duration_ms` (read the qdef) and `now = clock.now()` — leases now actually expire. (3)
   XAUTOCLAIM `key group consumer min-idle-time start [COUNT n]`: call `ReclaimDriver::tick(clock.now())` to
   reclaim expired leases (→ pending), then claim+redeliver them (attempt_count bumped); reply
@@ -112,11 +112,11 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   continues); a basic two-consumer claim race (no double-delivery). Also clear part-1 TRACKED: I4
   (leased-collision + terminal-collision XADD e2e), M1 (QueueDefinitionConflict→a sane token). STRUCTURED
   errors, off-the-shelf redis client. Real production logic → fresh-eyes review. After Phase 4: Phase 5
-  (library facade + `pqueue-server` composition root + a background ReclaimDriver task), Phase 6 (delete
+  (library facade + `fireweed-server` composition root + a background ReclaimDriver task), Phase 6 (delete
   legacy service/client/kafka/storage + supersede docs), Phase 7 (reconciliation). Postgres slots in when
   a DB is available.
 - **Old sqlite cursor (done):** durable LOG in sqlite + projection rebuilt-from-log. Model notes:
-  rewrite `pqueue-sqlite` in place to a backend holding a `rusqlite::Connection` (per `:memory:` or
+  rewrite `fireweed-sqlite` in place to a backend holding a `rusqlite::Connection` (per `:memory:` or
   temp-file db) for the durable log/control-plane, plus an in-memory `HashMap<ShardKey, (LogData?,
   ProjectionData)>` materialization. Concretely:
   - SCHEMA (sqlite, the durability of record): `queues(tenant,queue,definition_json)`,
@@ -129,12 +129,12 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   - REBUILD: on `create_queue`/open, replay `log_entries` for the shard through `apply_command` to
     reconstruct `ProjectionData` (proves the log is the source of truth; conformance's reconstruct test
     already exercises replay).
-  - Reuse `pqueue_projection::{ProjectionData, apply_command, decision helpers}`; do NOT reuse the
+  - Reuse `fireweed_projection::{ProjectionData, apply_command, decision helpers}`; do NOT reuse the
     memory-only `commit`/`LogData` for the durable path (build the sqlite log + an in-mem ProjectionData).
   - Ports: `Backend`/`LogWriter`/`LogRead`/`ProjectionWriter`/`ProjectionRead`/`ControlPlaneStore`/
     `ClaimPort`/`UpsertPort`/`FinalizePort`/`ReclaimDriver`/`SnapshotStore`. rusqlite is sync behind
     async-fn-in-trait — keep the closure synchronous (no `.await` inside), like memory.
-  - GATE: `tests/conformance.rs` = `pqueue_conformance::conformance_suite!(<factory>)` green (fresh db per
+  - GATE: `tests/conformance.rs` = `fireweed_conformance::conformance_suite!(<factory>)` green (fresh db per
     scenario). STRUCTURED errors. NOTE this is real production logic → fresh-eyes review; may span 2
     iterations (schema + log + Backend/Control/Snapshot/Read first; then Claim/Upsert/Finalize/Reclaim).
   - OPEN QUESTION for the user (non-blocking; proceeding with the log-rebuilt default): TD-004 frames
@@ -151,22 +151,22 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
 - [x] TD-006 refolded to semantic-fidelity model (v3) — done by prior edit
 - [x] TD-007 authored — `docs/helix/02-design/technical-designs/TD-007-...md`
 - [x] Adversarial review ADR-007 + TD-007 + TD-006 consistency → GO-with-conditions, all applied
-- [x] Resolve: PQFIN post-launch (recorded); D2 → meter-only; D1/D3 deferred (tune in Phase 1/3)
+- [x] Resolve: optional custom finalize command post-launch (recorded); D2 → meter-only; D1/D3 deferred (tune in Phase 1/3)
 
 ### Phase 1 — ports + reference engine + early RESP smoke
-- [x] Define ports in `pqueue-engine` (LogWriter/Read, ProjectionWriter/Read, Backend, ClaimPort, UpsertPort, ControlPlaneStore, SnapshotStore, ReclaimDriver, Clock, IdGen) — green, reviewed
-- [x] Extract `pqueue-memory` reference impl (atomic class) — storage/projection core + 5 behavioral tests, reviewed
+- [x] Define ports in `fireweed-engine` (LogWriter/Read, ProjectionWriter/Read, Backend, ClaimPort, UpsertPort, ControlPlaneStore, SnapshotStore, ReclaimDriver, Clock, IdGen) — green, reviewed
+- [x] Extract `fireweed-memory` reference impl (atomic class) — storage/projection core + 5 behavioral tests, reviewed
 - [x] 1c: `ClaimPort` + `UpsertPort` + `ReclaimDriver` on `MemoryBackend` (Inv 1&2 + timed reclaim) — 12 tests, reviewed
 - [x] Engine priority claim/lease/ack + Inv 1&2 + ReclaimDriver realized over memory (via backend ports)
 - [x] Backend-conformance (behavioral no-op-fails) green on memory — 12 tests
-- [x] 1d: `pqueue-resp` minimal front + drain-and-reconcile e2e with off-the-shelf redis client — XADD/XREADGROUP/XACK smoke path
+- [x] 1d: `fireweed-resp` minimal front + drain-and-reconcile e2e with off-the-shelf redis client — XADD/XREADGROUP/XACK smoke path
 
 ### Phase 2 — migrate domain logic (move-and-delete, test-first)
-- [x] Drop `pqueue-service` from default-members (Cargo.toml `default-members` excludes only service)
+- [x] Drop `fireweed-service` from default-members (Cargo.toml `default-members` excludes only service)
 - [x] §4a unit: **auth** (AuthContext + authorize_tenant/authorize_operator + hash_lease_token +
-  RedactedLeaseToken) → `pqueue-engine::auth` with 3 engine tests; deleted from service. Added
+  RedactedLeaseToken) → `fireweed-engine::auth` with 3 engine tests; deleted from service. Added
   `EngineError::Forbidden` (→ `-NOPERM`) + fixed RESP `err_reply` to emit `-NOPERM` (not generic).
-- [x] §4a unit: request-id idempotency (DURABLE — TD-007 §4) → `pqueue-engine::QueueIdempotencyCache`
+- [x] §4a unit: request-id idempotency (DURABLE — TD-007 §4) → `fireweed-engine::QueueIdempotencyCache`
   (Proceed/Replay/Conflict/Expired decisions, retention/compaction, replay-from-retained-window test);
   added `EngineError::RequestIdConflict`/`RequestExpired` (distinct wire tokens). Operator replay→409
   deletes from service WITH the operator-op-store unit (it reuses this cache).
@@ -178,28 +178,28 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   advanced on every commit; added 3 conformance tests (advances-on-commit, item_version monotonic
   per item 1→2→3→4, **survives log compaction / not recomputed from entries**) + field doc. Tests-only
   over already-reviewed code paths.
-- [x] §4a unit: **claim-compatibility validation** (most load-bearing) → `pqueue-engine::claim_validation`
+- [x] §4a unit: **claim-compatibility validation** (most load-bearing) → `fireweed-engine::claim_validation`
   (`validate_claim_compatibility` → ClaimUnit; charset re-check since GroupKey newtype only checks
   non-empty; structured `EngineError::BatchTooLarge` added → `-ERR fireweed batch_too_large`). 7 engine
   tests, parity-reviewed vs original (rule-by-rule GO). Deleted from service.
-- [x] §4a unit: **finalize/rearm/purge validation** → `pqueue-engine::finalize_validation`
+- [x] §4a unit: **finalize/rearm/purge validation** → `fireweed-engine::finalize_validation`
   (validate_finalize_targeting, validate_rearm [Invalid/Terminal], validate_purge_targeting,
   validate_purge_force). 6 engine tests, parity-reviewed. Service keeps compatibility wrappers that
   delegate to engine validation while it is still compiling. CORRECTED canonical purge-force gate
   (leased+!force→Conflict vs service's historical unconditional !force→Conflict) — documented.
-- [x] §4a unit (sub A): **operator-operation store** → `pqueue-engine::operator`
+- [x] §4a unit (sub A): **operator-operation store** → `fireweed-engine::operator`
   (`OperatorOperationStore<R>`: lookup[replay/RequestIdConflict] / record / get / advance / cancel;
   `OperationId`, `OperatorOperationState{Accepted,Running,Succeeded,Partial,Failed,Canceled}`,
   `OperationHandle`). 9 engine tests, fresh-eyes reviewed (1 BLOCKING fixed → converged). NOT YET WIRED.
   DEVIATION: does NOT reuse QueueIdempotencyCache — owns a permanent `request_id→operation_id` index
   (B1: the expiry-windowed cache would re-execute a destructive op after retention). CORRECTED cancel
   (terminal states left intact vs service's unconditional flip).
-- [x] §4a unit (sub B): **active-scope rollup** → `pqueue-engine::active_scope` (`ActiveScope`,
+- [x] §4a unit (sub B): **active-scope rollup** → `fireweed-engine::active_scope` (`ActiveScope`,
   `DiscoveryGranularity`, `default_for`/`resolve_granularity`, `validate_discovery_request`,
   `project_scopes`, `roll_up_queue_scopes`/`sum_optional`). 7 engine tests, documented self-review
   (pure parity). Faithfully reproduces the service's two-presence-notion quirk (empty queue_id defaults
   to Group then rejected); `sum_optional` uses `saturating_add` (safety refinement). **§4a COMPLETE.**
-- [ ] Final: delete pqueue-service entirely (Phase 6)
+- [ ] Final: delete fireweed-service entirely (Phase 6)
 
 ### Phase 3 — driven adapters
 - [x] **Durable-log serde enabler** (sqlite prerequisite): added `Serialize`/`Deserialize` to the engine
@@ -207,7 +207,7 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   `Kind`, `CommandId`, `CommandChecksum`, `ShardId`) + `PriorityValue` (core) + `bytes` serde feature
   (payload). Round-trip test over every variant (JSON-string equality, no PartialEq needed). Unblocks ALL
   durable adapters (each persists the command log). engine 43 + full gate green, clippy 0. Self-review.
-- [x] **Projection state machine extracted** → new `pqueue-projection` crate: `ProjectionData`
+- [x] **Projection state machine extracted** → new `fireweed-projection` crate: `ProjectionData`
   (apply_command/transition/eligibility + read+decision queries: eligible_candidates/select_eligible/
   peek/pending_leases/metrics/render_claimed/lookup_by_key/item_state/finalize_validate/expired_leases)
   + `LogData` (append/read_from/high_water/set_high_water/snapshots) + free `commit`. Memory re-pointed
@@ -215,25 +215,25 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   memory incl. conformance macro + 2 projection white-box), byte-identical logic. Fresh-eyes GO (no
   blocking). The DURABLE adapters reuse `apply_command` + the decision helpers (NOT the memory-only
   `commit`/`LogData`); seam design recorded in decisions log.
-- [x] **Conformance harness extracted** → new `pqueue-conformance` crate: the 16 port-level behavioral
-  scenarios (no-stub, plan §6) lifted out of `pqueue-memory` into reusable
+- [x] **Conformance harness extracted** → new `fireweed-conformance` crate: the 16 port-level behavioral
+  scenarios (no-stub, plan §6) lifted out of `fireweed-memory` into reusable
   `scenarios::*<B: ConformanceBackend>(make)` + `run_conformance(make)` + `conformance_suite!(make)`
   macro. `ConformanceBackend` = umbrella over all engine ports (blanket impl). Memory re-pointed via the
   macro; still 19 green (16 shared + 3 white-box kept in-crate: item_version/log-compaction via private
   state, ManualClock/SeqIdGen helpers). Behavior-preserving (same count). clippy 0. Documented self-review.
-- [x] **sqlite adapter** → `pqueue-sqlite` rewritten in place (old storage-trait modules + 7 test files
+- [x] **sqlite adapter** → `fireweed-sqlite` rewritten in place (old storage-trait modules + 7 test files
   deleted). Durable LOG in sqlite (rusqlite) + projection rebuilt-from-log (reuses
-  `pqueue_projection::ProjectionData`). All 11 engine ports. **Conformance green (16) + 4 durability
+  `fireweed_projection::ProjectionData`). All 11 engine ports. **Conformance green (16) + 4 durability
   tests** (reopen rebuilds projection + eligibility order; cmd_seq survives reopen w/o id collision;
   high_water persists; snapshots round-trip). Fresh-eyes GO-with-conditions → all cleared: B1 (cmd_seq
   restored on rebuild), B2 (post-commit apply panics not silently diverges), I1 (`MAX(seq)+1` not
   `COUNT(*)`, compaction-safe), I4/M1 (serialize/query errors → `EngineError::Storage`, no panic/swallow).
   clippy 0.
-- [x] **objectlog adapter** (EVENTUAL-APPLY class) → `pqueue-objectlog` rewritten in place (dropped the
+- [x] **objectlog adapter** (EVENTUAL-APPLY class) → `fireweed-objectlog` rewritten in place (dropped the
   external S3 `object-log` git dep). Durable log = immutable per-command JSON **objects** on a local
   filesystem (S3 stand-in, no server); projection rebuilt-from-objects. `durability_class()=EventualApply`;
   upsert banned → `Unavailable` (enforced at BOTH `replace_if_pending` AND the durable write chokepoint
-  `append_object`). New **eventual-apply conformance variant** (`pqueue_conformance::eventual_apply_suite!`
+  `append_object`). New **eventual-apply conformance variant** (`fireweed_conformance::eventual_apply_suite!`
   = 12 non-upsert scenarios + `upsert_is_unavailable`). 13 conformance + 4 durability green. Fresh-eyes
   GO-with-conditions → cleared: I-1 (ReplacePending refused at write path + test), I-2 (torn trailing
   object skipped on reopen, not a hard open() failure, + test), M-2 (snapshot ref-id `max+1`). clippy 0.
@@ -243,14 +243,14 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
 - [ ] Conformance green each: concurrent-claim races, intra-group exclusion, class guarantees
 
 ### Phase 4 — full RESP adapter + e2e
-- [~] `pqueue-resp` PART 1 (clock-independent surface): wired `client_item_key` into XADD (real
+- [~] `fireweed-resp` PART 1 (clock-independent surface): wired `client_item_key` into XADD (real
   XADD-on-key upsert dedup), added XPENDING (summary + extended, count-honoring, lease-token consumer,
   numeric id order). e2e via off-the-shelf `redis` crate: drain+reconcile (existing) + upsert-dedup +
   XPENDING shrink-on-ack + operator-fence→XACK-stale + superseded-id-ack→`superseded`. Fresh-eyes
   GO-with-conditions → I1 FIXED (shared `finalize_validate` now returns `Superseded` for a superseded-id
   ack, not generic `Invalid` — TD-006 §3/§6.5; wire-tested), I2/I3 FIXED (XPENDING count + numeric id
   bounds + consistent consumer). resp 1+5 green, clippy 0.
-- [x] `pqueue-resp` PART 2 (clock + reclaim): injected `Clock` into `serve(listener, backend, clock)` +
+- [x] `fireweed-resp` PART 2 (clock + reclaim): injected `Clock` into `serve(listener, backend, clock)` +
   a `SystemClock` (tests inject `ManualClock`); XREADGROUP sets real lease TTL = `now +
   max_lease_duration_ms`; **XAUTOCLAIM** (tick-reclaim + redeliver); XPENDING honors real `idle-ms`;
   err_reply maps `QueueDefinitionConflict` (M1 cleared). e2e: XAUTOCLAIM-after-clock-advance redelivers
@@ -261,22 +261,22 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   TD-006:129 reconciliation), I1 (global tick is correct: reclaims any expired lease, redelivery is
   shard-scoped — documented), I2 (min-idle ignored — documented + non-zero-value test), I3 (half-open
   assertion strengthened). resp 1+8 green, clippy 0.
-- [~] `pqueue-resp` PART 3 (optional polish, lower priority): XCLAIM (specific-id) is implemented and
+- [~] `fireweed-resp` PART 3 (optional polish, lower priority): XCLAIM (specific-id) is implemented and
   covered (`xclaim_self_renews_no_charge_cross_consumer_reclaims_with_attempt_bump`; conformance covers
   `ReassignLeasePort` and `claimed_view`). Still owed: two-consumer claim race e2e, paginated XAUTOCLAIM
   cursor (TD-006 §3 PEL coverage), plus XLEN/XINFO/XDEL.
 
 ### Phase 5 — library + composition root
-- [x] **`pqueue` facade crate** (the ergonomic Rust LIBRARY interface — 2nd of the two faces):
-  `Pqueue<B>` over the `LibBackend` bound, verbs create_queue/push/push_batch/upsert/claim/ack/nack/fail/
+- [x] **`fireweed` facade crate** (the ergonomic Rust LIBRARY interface — 2nd of the two faces):
+  `Fireweed<B>` over the `LibBackend` bound, verbs create_queue/push/push_batch/upsert/claim/ack/nack/fail/
   peek/metrics; backend + clock injected (hexagonal). Fresh-eyes GO-with-conditions → BLOCKING fixed:
   **added a `PushPort`** (engine + memory/sqlite/objectlog) so `push` no longer reaches for
   `Backend::write` — backend-assigned ids (cmd_seq-derived, restart-safe, unique across handles; B2) +
   divergence-safe commit_locked with a shard-exists pre-check (B1/M4); removed the `backend()` escape
   hatch (I1); added `fail` verb (I3); `renew`/`rearm` documented as deferred (need a RenewLeasePort, I2);
   push dedup key defaults to the item id, no synthetic key (I4). 6 tests incl. two-handle-no-collision +
-  ack-of-nonleased-error + fail. pqueue 6 + full workspace 22 green, clippy 0.
-- [x] **`pqueue-server` composition root** (the ONLY crate naming concrete adapters): `start(Config)`
+  ack-of-nonleased-error + fail. fireweed 6 + full workspace 22 green, clippy 0.
+- [x] **`fireweed-server` composition root** (the ONLY crate naming concrete adapters): `start(Config)`
   selects backend (Memory/Sqlite/ObjectLog) + `SystemClock` + provisions `Config.queues`; `start_with`
   is the generic core (tests inject a backend + clock). Spawns the RESP `serve` task AND a **background
   ReclaimDriver task** (`tokio::time::interval` → `tick(clock.now())`) closing the TD-007 §3 orphan gap.
@@ -287,11 +287,11 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   M1 (bind err→Storage) documented/tracked. server 3 tests + full workspace 25 green, clippy 0.
 
 ### Phase 6 — delete legacy
-- [x] **Deleted the 5 legacy crates** (`pqueue-service`, `pqueue-client`, `pqueue-kafka`, `pqueue-storage`,
-  and the OLD-arch `pqueue-postgres`) — `git rm` + removed leftover untracked `target/` dirs. Verified
+- [x] **Deleted the 5 legacy crates** (`fireweed-service`, `fireweed-client`, `fireweed-kafka`, `fireweed-storage`,
+  and the OLD-arch `fireweed-postgres`) — `git rm` + removed leftover untracked `target/` dirs. Verified
   pre-deletion that NO new-arch crate path-deps any legacy crate (the legacy set was closed). Cargo.toml
   simplified: members = the 10 hexagonal crates, `default-members` dropped (nothing excluded), moot
-  "service excluded" comment removed, `pqueue` facade now in the default set. **Full default workspace
+  "service excluded" comment removed, `fireweed` facade now in the default set. **Full default workspace
   green: 38 test-suites, 0 fails, clippy 0, `cargo metadata` resolves cleanly.** Docs: ADR-005 (Kafka)
   marked SUPERSEDED-by-ADR-007 (crate deleted); TD-002 (postgres) noted deleted-old/deferred-fresh-to-
   engine-ports. Remaining design docs' concepts are realized (mapped in the Phase-7 report). Documented
@@ -307,7 +307,7 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   conformance scenarios (`peek_is_priority_ordered_and_nondestructive`, `pending_lists_leased_items`,
   `snapshots_write_read_latest`) to BOTH suites so the claim is now TRUE across all adapters; (M1)
   softened the dep-direction-test phrasing to "static manifest-scan". Also ADDED the missing DoD
-  dependency-direction test (`pqueue-engine/tests/dependency_direction.rs`). Final full default workspace:
+  dependency-direction test (`fireweed-engine/tests/dependency_direction.rs`). Final full default workspace:
   **39 suites green, 0 failures, clippy 0.** **MIGRATION COMPLETE.**
 
 ## Decisions log (append as resolved)
@@ -325,20 +325,20 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   (loud on divergent replay; apply stays infallible) and extended the conformance scenario to pin the
   Invalid(not-leased) reject. `renew_extends_lease_and_rejects` runs on all 3 backends. Owed-F port-portion
   RESOLVED; facade `renew`/`rearm` verbs + doc hygiene remain Chunk 7. Full workspace green, clippy 0.
-  **Chunk 4 (this commit):** postgres adapter REBUILT — `pqueue-postgres` recreated fresh to the engine
+  **Chunk 4 (this commit):** postgres adapter REBUILT — `fireweed-postgres` recreated fresh to the engine
   ports via the durable-adapter template over the SYNC `postgres` client (durable LOG in postgres tables +
   projection rebuilt-from-log; atomic class), implementing every port incl. PushPort/UpsertPort/
   RenewLeasePort; re-added to workspace `members` (already in the dep-direction ADAPTERS list). Conformance
-  (20) + 2 durability reopen tests GREEN against a live postgres:16 via `PQUEUE_PG_TEST_URL` (schema-
+  (20) + 2 durability reopen tests GREEN against a live postgres:16 via `FIREWEED_PG_TEST_URL` (schema-
   isolated, one connection per scenario); LOUD `eprintln!` skip when the env var is absent so the default
   workspace stays green + visibly partial. **I1 blocking-executor caveat recorded** (the sync client PANICS
   under an ambient tokio runtime → tests use `futures::block_on`; not yet server-wired; spawn_blocking+pool+
   row-locking is post-launch). Fresh-eyes review: no BLOCKING; recorded the post-pooling MAX(seq)/high-water
   serialization caveat in the crate docs. Owed-A RESOLVED. **CI note (M2 / DoD):** the live run is
   in-session; the PHASE-7 "conformance on …+postgres" gate is **PASS (live), CI-job owed** — a CI service-
-  container job exporting `PQUEUE_PG_TEST_URL` (container `postgres:16`; `cargo test -p pqueue-postgres`)
+  container job exporting `FIREWEED_PG_TEST_URL` (container `postgres:16`; `cargo test -p fireweed-postgres`)
   is still owed and tracked here.
-  **Chunk 5 (this commit):** graceful connection drain — `pqueue-resp` gained `serve_with_shutdown(…,
+  **Chunk 5 (this commit):** graceful connection drain — `fireweed-resp` gained `serve_with_shutdown(…,
   CancellationToken)` owning the per-connection handlers in a `tokio::task::JoinSet`; on cancel it stops
   accepting and each `handle_conn` observes the token between commands (finishing any in-flight command),
   then drains. `Server::shutdown()` stays SYNC (token + abort; Drop-safe, I4); new async
@@ -392,7 +392,7 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   high_water are real durable rows. create_queue is control-plane (writes the queue row + empty
   projection; not a log entry) — the log is replay-complete only together with the queues table.
 - 2026-06-23 DURABLE-ADAPTER PERSISTENCE SEAM (from projection-extraction fresh-eyes review, 2 IMPORTANT
-  forward conditions): (a) the free `pqueue_projection::commit` and `LogData` are a MEMORY-only
+  forward conditions): (a) the free `fireweed_projection::commit` and `LogData` are a MEMORY-only
   convenience — their atomicity boundary is the `Mutex`. A durable adapter's boundary is a DB txn, so it
   does NOT reuse `commit`; the reusable units are `ProjectionData::apply_command` + the decision helpers
   (`finalize_validate`/`item_state`/`eligible_candidates`/`expired_leases`). (b) `apply_command` mutates
@@ -406,13 +406,13 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   a `&ShardKey` the caller must pass correctly (convention, not type-enforced); `apply_command` is `pub`
   and pre-validation is a documented caller contract across the crate boundary (each adapter must honor
   it — the memory wrapper does).
-- 2026-06-23 ADAPTER STRATEGY — rewrite-in-place: the existing `pqueue-sqlite`/`pqueue-postgres`/
-  `pqueue-objectlog` crates implement the OLD storage traits (their own backend/control_plane/log
-  modules), consumed by the now-being-demolished `pqueue-service`. Rather than add parallel new adapter
+- 2026-06-23 ADAPTER STRATEGY — rewrite-in-place: the existing `fireweed-sqlite`/`fireweed-postgres`/
+  `fireweed-objectlog` crates implement the OLD storage traits (their own backend/control_plane/log
+  modules), consumed by the now-being-demolished `fireweed-service`. Rather than add parallel new adapter
   crates, REWRITE each crate's `lib.rs`/modules in place to implement the ENGINE ports. Rationale: the
   old trait surface is dead the moment the engine is the only consumer (service/client/kafka are deleted
   in Phase 6); a parallel crate would just be a second thing to delete. Keep the crate names/slots. Each
-  rewrite lands with the shared `pqueue-conformance` suite green as its no-stub gate. (Not a user-
+  rewrite lands with the shared `fireweed-conformance` suite green as its no-stub gate. (Not a user-
   blocking decision — the plan already says Phase 3 rewrites these to the engine ports.)
 - 2026-06-23 OPERATOR-OP STORE — PLAN DEVIATION (B1, fresh-eyes BLOCKING): the plan said "reuse
   QueueIdempotencyCache for the replay→409 anchor." `OperatorOperationStore` does NOT — it owns its own
@@ -445,7 +445,7 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   (b) lease-token / PEL-ownership fencing — finalize validates operator-fencing only; token/PEL
   ownership (TD-006 §5.3) deferred (any holder can finalize a leased item until then). Both honestly
   marked in port + RESP docs.
-- 2026-06-23 Phase 2 deviation (recorded): pqueue-service is kept COMPILING during demolition via
+- 2026-06-23 Phase 2 deviation (recorded): fireweed-service is kept COMPILING during demolition via
   logic-free re-exports of the canonical engine types + a transitional `From<EngineError>` error
   shim, rather than left broken, until its REST handlers (which consume them) are deleted as their
   own units. The migrated LOGIC lives SOLELY in the engine — no duplication. Strict "delete-in-the-
@@ -454,7 +454,7 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   error From-shim is transitional dead code in the EXCLUDED crate; SURVIVING adapters (RESP/library)
   map `Forbidden`→`-NOPERM` uniformly with NO string dispatch. Durable §4a units
   (idempotency/fence/pause) MUST use STRUCTURED engine errors, not string-sniffing (review B2).
-- 2026-06-23: Plan v4 converged (3 review rounds, GO). Single-shard launch; ReclaimDriver; UpsertPort; semantic-fidelity RESP (Inv 1&2); zero required PQ*; -ERR fireweed {stale_lease,superseded,unavailable}.
+- 2026-06-23: Plan v4 converged (3 review rounds, GO). Single-shard launch; ReclaimDriver; UpsertPort; semantic-fidelity RESP (Inv 1&2); no required Fireweed-specific commands; -ERR fireweed {stale_lease,superseded,unavailable}.
 
 ## Review ledger (append per chunk)
 - 2026-06-24 Phase 7 reconciliation report: adversarial audit of the report against the actual tree →
@@ -472,7 +472,7 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   live depended on the deleted code; no lingering source/config references. Docs: ADR-005 superseded,
   TD-002 deferred-note. The "real deletion → adversarial review" bar is met by the green full-workspace +
   zero-reference evidence (stronger than a code-reading review for a pure deletion).
-- 2026-06-23 Phase 5 composition root (`pqueue-server`): fresh-eyes **GO-with-conditions**, 1 BLOCKING.
+- 2026-06-23 Phase 5 composition root (`fireweed-server`): fresh-eyes **GO-with-conditions**, 1 BLOCKING.
   Reviewer confirmed the reclaim-loop core is correct (tick idempotent, no lock-across-await — backends
   use `std::future::ready` so the Mutex is released before any await; no claim/reclaim deadlock) and the
   background-reclaim test genuinely proves orphan recovery with zero client traffic. B1 (BLOCKING):
@@ -484,7 +484,7 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   drops; is_running() doc re-scoped to liveness. M2 (timing-coupled test) → poll-with-timeout. I2 (abort
   leaves in-flight connection handlers; not a graceful drain — they live in `serve`) + M1 (bind err →
   Storage category overload) documented + tracked for follow-up. Gate: server 3 + workspace 25 + clippy 0.
-- 2026-06-23 Phase 5 library facade (`pqueue`): fresh-eyes **GO-with-conditions**, 2 BLOCKING + cleared.
+- 2026-06-23 Phase 5 library facade (`fireweed`): fresh-eyes **GO-with-conditions**, 2 BLOCKING + cleared.
   B1 (push via `Backend::write` relied on a cross-crate lockstep for divergence-safety; the "infallible"
   comment was wrong — `ProjectionWriter::apply` errors AFTER append if the shard projection is absent,
   durable on objectlog) + B2 (facade-generated ids from a per-handle AtomicU64 → two handles / a restart
@@ -495,7 +495,7 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   handle-no-collision test directly proves B2. I1 (backend() escape hatch leaked the write seam) removed;
   I3 (fail verb) added; I2 (renew/rearm need a RenewLeasePort) documented as deferred; I4 (synthetic
   client_item_key) → defaults to the item id. Dependency direction clean (depends on engine+core only).
-  Gate: pqueue 6 tests + full workspace 22 suites + clippy 0; backends' conformance unchanged (PushPort
+  Gate: fireweed 6 tests + full workspace 22 suites + clippy 0; backends' conformance unchanged (PushPort
   is additive).
 - 2026-06-23 Phase 4 RESP part-2 (clock + reclaim): fresh-eyes **GO-with-conditions**. Time arithmetic
   (`add_millis` i128 nanos, `ts_ms`, XPENDING idle), clock injection (Send+Sync), half-open boundary
@@ -513,7 +513,7 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   blocking. Wire framing (RESP2 bulk/array/null), upsert-over-XADD contract, and structured-error mapping
   (no string-sniffing) all confirmed correct. I1 (IMPORTANT, real shared-core bug): superseded-id XACK
   returned `Invalid("item is not leased")` instead of `Superseded` because `finalize_validate` lacked a
-  superseded branch before the not-leased catch-all → FIXED in `pqueue-projection` + new wire e2e
+  superseded branch before the not-leased catch-all → FIXED in `fireweed-projection` + new wire e2e
   `xack_of_superseded_id_is_superseded_over_the_wire`; no regression (19 suites). I2/I3 (XPENDING fidelity)
   FIXED: numeric `{n}` id ordering (not lexical, which mis-orders past 10 items), honor the extended-form
   `count`, consumer axis = lease token consistently in both forms. TRACKED for part-2: I4 (collision e2e
@@ -548,8 +548,8 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   feature. Round-trip test exercises all 12 QueueCommand variants + payload Bytes + Int64 priority via
   JSON-string equality. Note: DecimalValue.mantissa is i128 — not exercised by conformance (Int64
   priorities); serde_json supports i128 natively. Gate: 24 test-suites green, clippy 0.
-- 2026-06-23 Phase 3 projection-core extraction (`pqueue-projection`): fresh-eyes review verdict **GO**,
-  NO blocking. Reviewer diffed every moved block against `HEAD:pqueue-memory/src/lib.rs` and confirmed
+- 2026-06-23 Phase 3 projection-core extraction (`fireweed-projection`): fresh-eyes review verdict **GO**,
+  NO blocking. Reviewer diffed every moved block against `HEAD:fireweed-memory/src/lib.rs` and confirmed
   apply_command/transition/elig_key/insert_pending/metrics/peek/expired_leases/read_from/set_high_water
   byte-identical; claim `paused→empty` and select_eligible consolidation result-equivalent (improvement,
   no drift); commit INVARIANT preserved on all 5 reachable command paths (Finalize pre-validates via
@@ -623,7 +623,7 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   invariant docstring; (I3) tautological reconstruction test → replaced with a check-then-record flow
   (proves a live request_id is never overwritten) + a retained-window rebuild test (compacted cache ==
   replay of only retained entries). Also added not-yet-wired note + relationship to
-  `pqueue_core::check_idempotency`. Engine 12 tests + clippy green. (NOT yet wired into push/claim/
+  `fireweed_core::check_idempotency`. Engine 12 tests + clippy green. (NOT yet wired into push/claim/
   finalize or ReclaimDriver compaction — tracked.)
 - 2026-06-23 Phase 2 §4a auth: fresh-eyes review GO-with-conditions. Confirmed: hash+redaction byte-
   parity, tenant set-membership + operator-prefix rules exact, durability classification correct,
@@ -632,14 +632,14 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   `-ERR fireweed error`, with a unit test; (I1) added `Forbidden.resp_token()==None` assertion.
   Recorded deviation for B1/B2 (service delegation shim — see decisions log; logic lives only in
   engine, durable units will use structured errors). Engine 6 + RESP lib 1 + e2e 1 green, clippy clean.
-- 2026-06-23 Phase 1d (minimal RESP smoke front): implemented `pqueue-resp` as a driving adapter over
+- 2026-06-23 Phase 1d (minimal RESP smoke front): implemented `fireweed-resp` as a driving adapter over
   engine ports with no concrete backend dependency. The e2e uses the off-the-shelf `redis` crate over
   real TCP to `XADD` 10 mixed-priority items, drain them via `XREADGROUP GROUP ... STREAMS ... >`,
   `XACK` each batch, and reconcile exact delivered set plus ascending priority order. Confirmed no
   silent stubs for unsupported commands (`-ERR`). Deferred by design: auth, idempotency, pending
   history/replay, `XAUTOCLAIM`, full Redis flavor matrix, and composition-root server packaging.
-  `cargo test -p pqueue-resp`; `cargo clippy -p pqueue-resp --all-targets -- -D warnings`; and
-  `cargo test -p pqueue-engine -p pqueue-memory -p pqueue-resp` green after formatting.
+  `cargo test -p fireweed-resp`; `cargo clippy -p fireweed-resp --all-targets -- -D warnings`; and
+  `cargo test -p fireweed-engine -p fireweed-memory -p fireweed-resp` green after formatting.
   Fresh-eyes review: GO-with-conditions, NO blocking; codec binary-safe, error encoding single-dash
   canonical, hexagonal dep direction confirmed. Conditions applied — marked the 3 silent deferrals
   (XACK lease/PEL validation + requested-not-acked count; stub clock; XGROUP/HELLO no-op OKs), dropped
@@ -656,7 +656,7 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   every leased candidate renders. Deferred (tracked): cohort-timeout + progress-bound tick metering
   (need cohort-deadline/eligible_since state — land with those features); retry-exhaustion wiring.
   12 tests + clippy green.
-- 2026-06-23 Phase 1b (pqueue-memory): fresh-eyes review GO-with-conditions. Confirmed correct:
+- 2026-06-23 Phase 1b (fireweed-memory): fresh-eyes review GO-with-conditions. Confirmed correct:
   priority ordering (both directions), transition() eligibility re-add on retry (Invariant 1, no
   orphan/dup), version/attempt semantics, disjoint-borrow UoW. Fixes applied — (1) transition()
   rejects superseded items (`-ERR fireweed superseded`, prevents state corruption); (2) select_eligible

@@ -629,7 +629,9 @@ mod tests {
         ] {
             assert!(sql.contains(predicate));
         }
-        assert!(fireweed_relational::RELATIONAL_SCHEMA.contains("pqueue_items_expired_lease_idx"));
+        assert!(
+            fireweed_relational::RELATIONAL_SCHEMA.contains("fireweed_items_expired_lease_idx")
+        );
     }
 
     fn shard() -> QueueKey {
@@ -958,7 +960,7 @@ mod tests {
     #[tokio::test]
     async fn active_lease_reopen_uses_durable_hash_for_renew_validation() {
         let path = std::env::temp_dir().join(format!(
-            "pqueue-renew-{}-{}.db",
+            "fireweed-renew-{}-{}.db",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1108,7 +1110,7 @@ mod tests {
                 let g = projection.lock();
                 g.conn
                     .execute(
-                        "UPDATE pqueue_items SET superseded=1 WHERE tenant_id='tenant' \
+                        "UPDATE fireweed_items SET superseded=1 WHERE tenant_id='tenant' \
                          AND queue_id='queue' AND client_item_key='item'",
                         [],
                     )
@@ -1229,7 +1231,7 @@ mod tests {
                 let g = projection.lock();
                 g.conn
                     .execute(
-                        "UPDATE pqueue_request_idempotency SET request_fingerprint=?1 \
+                        "UPDATE fireweed_request_idempotency SET request_fingerprint=?1 \
                          WHERE tenant_id='tenant' AND queue_id='queue' AND operation='push' \
                          AND request_id='durable-push'",
                         [BodyHash(42).0.to_be_bytes().as_slice()],
@@ -1291,7 +1293,7 @@ mod tests {
                 let g = projection.lock();
                 g.conn
                     .execute(
-                        "INSERT INTO pqueue_item_key_retention \
+                        "INSERT INTO fireweed_item_key_retention \
                          (tenant_id,queue_id,client_item_key,item_id,expires_at) \
                          VALUES ('tenant','queue','retained-key','old',10000000000)",
                         [],
@@ -1354,7 +1356,7 @@ mod tests {
                 let g = projection.lock();
                 g.conn
                     .execute(
-                        "INSERT INTO pqueue_cohorts \
+                        "INSERT INTO fireweed_cohorts \
                          (tenant_id,queue_id,group_key,cohort_id,cohort_size,member_count,state,\
                           cohort_created_at,retention_until,created_at) \
                          VALUES ('tenant','queue','generation','old-generation',5,5,'terminal',0,10000000000,0)",
@@ -1678,7 +1680,7 @@ mod tests {
         static NEXT_PATH: AtomicUsize = AtomicUsize::new(0);
         let suffix = NEXT_PATH.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "pqueue-async-projection-{}-{suffix}.sqlite",
+            "fireweed-async-projection-{}-{suffix}.sqlite",
             std::process::id()
         ));
         let path_string = path.to_string_lossy().into_owned();

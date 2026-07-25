@@ -863,7 +863,7 @@ mod tests {
 
     fn root() -> PathBuf {
         std::env::temp_dir().join(format!(
-            "pqueue-async-objectlog-{}-{}",
+            "fireweed-async-objectlog-{}-{}",
             std::process::id(),
             NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
         ))

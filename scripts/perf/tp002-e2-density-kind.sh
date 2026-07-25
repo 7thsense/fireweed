@@ -3,7 +3,7 @@
 set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-CLUSTER=${CLUSTER:-pqueue-density}
+CLUSTER=${CLUSTER:-fireweed-density}
 IMAGE=${IMAGE:-fireweed-service:density-e2}
 QUEUE_COUNT=${QUEUE_COUNT:-1001}
 ITEMS=${ITEMS:-300000}
@@ -18,14 +18,14 @@ PROJECTION_BACKEND=${PROJECTION_BACKEND:-sqlite}
 THREAD_LIMIT=4
 CONNECTION_LIMIT=32
 TASK_LIMIT=64
-LEDGER_OUT=${LEDGER_OUT:-$REPO_ROOT/target/pqueue-ledger/tp002-e2-density-kind.jsonl}
-DIAGNOSTICS_DIR=${DIAGNOSTICS_DIR:-$REPO_ROOT/target/pqueue-ledger/tp002-e2-density-kind-diagnostics}
+LEDGER_OUT=${LEDGER_OUT:-$REPO_ROOT/target/fireweed-ledger/tp002-e2-density-kind.jsonl}
+DIAGNOSTICS_DIR=${DIAGNOSTICS_DIR:-$REPO_ROOT/target/fireweed-ledger/tp002-e2-density-kind-diagnostics}
 KUBECONFIG_FILE=$(mktemp)
 RESULT_FILE=$(mktemp)
 RESOURCE_FILE=$(mktemp)
 SAMPLER_STOP=$(mktemp)
 rm -f "$SAMPLER_STOP"
-NAMESPACE="pqueue-density-${RANDOM}"
+NAMESPACE="fireweed-density-${RANDOM}"
 SAMPLER_PID=
 LOG_WATCH_PID=
 OWNER_BASHPID=$BASHPID
@@ -59,7 +59,7 @@ capture_diagnostics() {
   kubectl -n "$NAMESPACE" get job density-load -o yaml >"$DIAGNOSTICS_DIR/job.yaml" 2>"$DIAGNOSTICS_DIR/job.err" || true
   kubectl -n "$NAMESPACE" get pods -o wide >"$DIAGNOSTICS_DIR/pods.txt" 2>"$DIAGNOSTICS_DIR/pods.err" || true
   kubectl -n "$NAMESPACE" logs job/density-load >"$DIAGNOSTICS_DIR/load.log" 2>"$DIAGNOSTICS_DIR/load.err" || true
-  kubectl -n "$NAMESPACE" logs deployment/pqueue >"$DIAGNOSTICS_DIR/server.log" 2>"$DIAGNOSTICS_DIR/server.err" || true
+  kubectl -n "$NAMESPACE" logs deployment/fireweed >"$DIAGNOSTICS_DIR/server.log" 2>"$DIAGNOSTICS_DIR/server.err" || true
 }
 
 cleanup() {
@@ -107,31 +107,31 @@ kubectl create namespace "$NAMESPACE"
 cat <<YAML | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
-metadata: { name: pqueue, namespace: $NAMESPACE }
+metadata: { name: fireweed, namespace: $NAMESPACE }
 spec:
   replicas: 1
-  selector: { matchLabels: { app: pqueue } }
+  selector: { matchLabels: { app: fireweed } }
   template:
-    metadata: { labels: { app: pqueue } }
+    metadata: { labels: { app: fireweed } }
     spec:
       containers:
-        - name: pqueue
+        - name: fireweed
           image: $IMAGE
           imagePullPolicy: Never
           ports: [ { containerPort: 8080 } ]
           env:
-            - { name: PQUEUE_LOG_BACKEND, value: objectlog }
-            # Keep the governed E2 identity exact. PQUEUE_OBJECT_LOG_MODE is a retired pseudo-axis and
+            - { name: FIREWEED_LOG_BACKEND, value: objectlog }
+            # Keep the governed E2 identity exact. FIREWEED_OBJECT_LOG_MODE is a retired pseudo-axis and
             # is intentionally absent; setting it would falsely imply that it selects behavior.
-            - { name: PQUEUE_PROJECTION_BACKEND, value: "$PROJECTION_BACKEND" }
-            - { name: PQUEUE_OBJECT_LOG_ROOT, value: /data/object-log }
-            - { name: PQUEUE_SQLITE_PROJECTION_PATH, value: /data/projection.db }
-            - { name: PQUEUE_LISTEN_ADDR, value: "0.0.0.0:8080" }
-            - { name: PQUEUE_WORKER_THREADS, value: "$SERVER_WORKERS" }
-            - { name: PQUEUE_RUNTIME_RESOURCE_METRICS_PATH, value: /tmp/pqueue-runtime-resources.json }
-            - { name: PQUEUE_BOOTSTRAP_GENERATED_COUNT, value: "$QUEUE_COUNT" }
-            - { name: PQUEUE_BOOTSTRAP_GENERATED_TENANT, value: density }
-            - { name: PQUEUE_BOOTSTRAP_GENERATED_PREFIX, value: q }
+            - { name: FIREWEED_PROJECTION_BACKEND, value: "$PROJECTION_BACKEND" }
+            - { name: FIREWEED_OBJECT_LOG_ROOT, value: /data/object-log }
+            - { name: FIREWEED_SQLITE_PROJECTION_PATH, value: /data/projection.db }
+            - { name: FIREWEED_LISTEN_ADDR, value: "0.0.0.0:8080" }
+            - { name: FIREWEED_WORKER_THREADS, value: "$SERVER_WORKERS" }
+            - { name: FIREWEED_RUNTIME_RESOURCE_METRICS_PATH, value: /tmp/fireweed-runtime-resources.json }
+            - { name: FIREWEED_BOOTSTRAP_GENERATED_COUNT, value: "$QUEUE_COUNT" }
+            - { name: FIREWEED_BOOTSTRAP_GENERATED_TENANT, value: density }
+            - { name: FIREWEED_BOOTSTRAP_GENERATED_PREFIX, value: q }
           readinessProbe:
             tcpSocket: { port: 8080 }
             periodSeconds: 1
@@ -147,21 +147,21 @@ spec:
 ---
 apiVersion: v1
 kind: Service
-metadata: { name: pqueue, namespace: $NAMESPACE }
+metadata: { name: fireweed, namespace: $NAMESPACE }
 spec:
-  selector: { app: pqueue }
+  selector: { app: fireweed }
   ports: [ { port: 8080, targetPort: 8080 } ]
 YAML
-until [[ "$(kubectl -n "$NAMESPACE" get deployment pqueue -o jsonpath='{.status.availableReplicas}' 2>/dev/null)" == 1 ]]; do
-  failed_reason=$(kubectl -n "$NAMESPACE" get pods -l app=pqueue -o jsonpath='{range .items[*].status.containerStatuses[*].state.terminated}{.reason}{end}' 2>/dev/null || true)
+until [[ "$(kubectl -n "$NAMESPACE" get deployment fireweed -o jsonpath='{.status.availableReplicas}' 2>/dev/null)" == 1 ]]; do
+  failed_reason=$(kubectl -n "$NAMESPACE" get pods -l app=fireweed -o jsonpath='{range .items[*].status.containerStatuses[*].state.terminated}{.reason}{end}' 2>/dev/null || true)
   if [[ -n "$failed_reason" ]]; then
     capture_diagnostics
-    echo "pqueue deployment terminated before readiness: $failed_reason" >&2
+    echo "fireweed deployment terminated before readiness: $failed_reason" >&2
     exit 1
   fi
   sleep 2
 done
-SERVER_POD=$(kubectl -n "$NAMESPACE" get pod -l app=pqueue -o jsonpath='{.items[0].metadata.name}')
+SERVER_POD=$(kubectl -n "$NAMESPACE" get pod -l app=fireweed -o jsonpath='{.items[0].metadata.name}')
 SERVER_IMAGE_ID=$(kubectl -n "$NAMESPACE" get pod "$SERVER_POD" -o jsonpath='{.status.containerStatuses[0].imageID}')
 [[ "$SERVER_IMAGE_ID" == *"$IMAGE_DIGEST" ]]
 
@@ -187,7 +187,7 @@ spec:
             - /usr/local/bin/fireweed-loadgen
             - density-run
             - --addr
-            - pqueue.$NAMESPACE.svc.cluster.local:8080
+            - fireweed.$NAMESPACE.svc.cluster.local:8080
             - --queue-count
             - "$QUEUE_COUNT"
             - --items
@@ -228,7 +228,7 @@ LOG_WATCH_PID=$!
   trap - EXIT
   while [[ ! -e "$SAMPLER_STOP" ]]; do
     if grep -q '^DENSITY_PHASE HOT_START ' "$PHASE_LOG" && ! grep -q '^DENSITY_PHASE HOT_END ' "$PHASE_LOG"; then
-      runtime=$(kubectl -n "$NAMESPACE" exec "$SERVER_POD" -- cat /tmp/pqueue-runtime-resources.json 2>/dev/null) || continue
+      runtime=$(kubectl -n "$NAMESPACE" exec "$SERVER_POD" -- cat /tmp/fireweed-runtime-resources.json 2>/dev/null) || continue
       threads=$(jq -r '.tokio_worker_threads' <<<"$runtime")
       tasks=$(jq -r '.tokio_alive_tasks' <<<"$runtime")
       memory_current=$(jq -r '.memory_current_bytes' <<<"$runtime")
@@ -295,7 +295,7 @@ read -r OBSERVED_THREADS OBSERVED_CONNECTIONS OBSERVED_TASKS HOT_PHASE_RESOURCE_
 # Release bounds come from allocation-time enforcement and process-lifetime high-water counters, not
 # sampling luck. The phase sampler is retained as diagnostics only and may legitimately capture zero
 # samples on a fast host.
-FINAL_RUNTIME=$(kubectl -n "$NAMESPACE" exec "$SERVER_POD" -- cat /tmp/pqueue-runtime-resources.json)
+FINAL_RUNTIME=$(kubectl -n "$NAMESPACE" exec "$SERVER_POD" -- cat /tmp/fireweed-runtime-resources.json)
 OBSERVED_THREADS=$(jq -r '.tokio_worker_threads' <<<"$FINAL_RUNTIME")
 OBSERVED_CONNECTIONS=$(jq -r '.max_live_connections' <<<"$FINAL_RUNTIME")
 OBSERVED_TASKS=$(jq -r '.tokio_max_alive_tasks' <<<"$FINAL_RUNTIME")
@@ -342,7 +342,7 @@ if [[ "$EVIDENCE_MODE" == d5-diagnostic ]]; then
     --arg memory_accounting_source "$MEMORY_ACCOUNTING_SOURCE" \
     --argjson resource_samples "$HOT_PHASE_RESOURCE_SAMPLES" '
       {
-        suite: "pqueue-d5-live-density-diagnostic",
+        suite: "fireweed-d5-live-density-diagnostic",
         revision: $revision,
         image_digest: $image_digest,
         topology: $topology,

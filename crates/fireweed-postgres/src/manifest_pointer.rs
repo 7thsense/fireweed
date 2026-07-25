@@ -5,13 +5,13 @@ use fireweed_objectlog::segmented::{ManifestHeadBlob, ManifestPointerStore, Vers
 use postgres::{Client, NoTls};
 
 const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS pqueue_objectlog_manifest_pointer (
+CREATE TABLE IF NOT EXISTS fireweed_objectlog_manifest_pointer (
     pointer_key TEXT PRIMARY KEY,
     version BIGINT NOT NULL,
     assignment_epoch BIGINT NOT NULL,
     head_json TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS pqueue_objectlog_immutable_claim (
+CREATE TABLE IF NOT EXISTS fireweed_objectlog_immutable_claim (
     object_key TEXT PRIMARY KEY,
     content_sha256 TEXT NOT NULL
 )";
@@ -41,7 +41,7 @@ impl ManifestPointerStore for PostgresManifestPointer {
         let row = client
             .query_opt(
                 "SELECT version, assignment_epoch, head_json \
-                 FROM pqueue_objectlog_manifest_pointer WHERE pointer_key=$1",
+                 FROM fireweed_objectlog_manifest_pointer WHERE pointer_key=$1",
                 &[&pointer_key],
             )
             .map_err(storage)?;
@@ -85,7 +85,7 @@ impl ManifestPointerStore for PostgresManifestPointer {
         let changed = match expected {
             None => transaction
                 .execute(
-                    "INSERT INTO pqueue_objectlog_manifest_pointer \
+                    "INSERT INTO fireweed_objectlog_manifest_pointer \
                      (pointer_key,version,assignment_epoch,head_json) VALUES($1,0,$2,$3) \
                      ON CONFLICT(pointer_key) DO NOTHING",
                     &[&pointer_key, &epoch, &head_json],
@@ -93,7 +93,7 @@ impl ManifestPointerStore for PostgresManifestPointer {
                 .map_err(storage)?,
             Some(expected) => transaction
                 .execute(
-                    "UPDATE pqueue_objectlog_manifest_pointer \
+                    "UPDATE fireweed_objectlog_manifest_pointer \
                      SET version=$2+1, assignment_epoch=$3, head_json=$4 \
                      WHERE pointer_key=$1 AND version=$2",
                     &[&pointer_key, &expected, &epoch, &head_json],
@@ -111,7 +111,7 @@ impl ManifestPointerStore for PostgresManifestPointer {
             .expect("manifest pointer client poisoned");
         let changed = client
             .execute(
-                "INSERT INTO pqueue_objectlog_immutable_claim(object_key,content_sha256) \
+                "INSERT INTO fireweed_objectlog_immutable_claim(object_key,content_sha256) \
                  VALUES($1,$2) ON CONFLICT(object_key) DO NOTHING",
                 &[&key, &content_sha256],
             )
@@ -121,7 +121,7 @@ impl ManifestPointerStore for PostgresManifestPointer {
         }
         let existing: String = client
             .query_one(
-                "SELECT content_sha256 FROM pqueue_objectlog_immutable_claim WHERE object_key=$1",
+                "SELECT content_sha256 FROM fireweed_objectlog_immutable_claim WHERE object_key=$1",
                 &[&key],
             )
             .map_err(storage)?

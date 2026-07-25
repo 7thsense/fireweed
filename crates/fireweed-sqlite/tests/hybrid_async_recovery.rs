@@ -69,7 +69,7 @@ fn identity(epoch: u64, next_seq: u64) -> LogLineageIdentity {
 
 fn temp_path(tag: &str) -> std::path::PathBuf {
     let p = std::env::temp_dir().join(format!(
-        "pqueue-hybrid-async-recovery-{tag}-{}.db",
+        "fireweed-hybrid-async-recovery-{tag}-{}.db",
         std::process::id()
     ));
     for suffix in ["", "-wal", "-shm"] {

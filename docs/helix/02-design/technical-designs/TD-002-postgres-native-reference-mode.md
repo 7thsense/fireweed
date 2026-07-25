@@ -28,7 +28,7 @@ ddx:
 
 # Technical Design: TD-002 Postgres-Native Reference Mode
 
-> **Implementation status (hexagonal migration, Phase 6):** the original `pqueue-postgres` crate (which
+> **Implementation status (hexagonal migration, Phase 6):** the original `fireweed-postgres` crate (which
 > implemented the now-removed storage traits) has been **deleted**. The postgres adapter is **deferred**
 > and will be (re)built **fresh to the engine ports** following the durable-adapter template proven by
 > sqlite (durable command log + projection rebuilt-from-log) when a database is provisioned. The
@@ -42,7 +42,7 @@ ddx:
 
 ## Scope
 
-This technical design defines the first concrete storage backend for pqueue:
+This technical design defines the first concrete storage backend for fireweed:
 `postgres_native`. In this mode, Postgres provides the control plane, durable
 command log, operational projection (the **relational projection family**),
 idempotency state, leases, and queue metrics. Per ADR-008 the queue is the unit
@@ -57,11 +57,11 @@ In scope:
 - Transaction boundaries for API-001 mutating operations.
 - Claim query shape for strict and bounded-relaxed ordering.
 - The Postgres binding of TD-003's queue-epoch fence (the `assignment_epoch`
-  column + the append-transaction stale-epoch reject) without pqueue-owned node
+  column + the append-transaction stale-epoch reject) without fireweed-owned node
   discovery or cluster consensus; the queue-owner lease lifecycle that allocates
   and advances `assignment_epoch` (and durably fences it into the queue-owner row
   at acquire time) is specified in TD-003 (`td-sharding-and-shard-ownership`) and
-  stored in `pqueue_queue_owners`.
+  stored in `fireweed_queue_owners`.
 - Retention and compaction rules needed for bounded storage growth.
 - Indexing and internal table-partitioning assumptions for 10M-item hot queues.
 
@@ -72,7 +72,7 @@ Out of scope:
   is a pluggable seam (ADR-008); Postgres is the default and the one this TD
   specifies. The deferred object-store control plane is spike-gated elsewhere.
 - P1 operator APIs for redrive, repair, and migration. (Active-scope discovery is
-  in-contract, served from `pqueue_group_summary`; targeted recurring teardown
+  in-contract, served from `fireweed_group_summary`; targeted recurring teardown
   `PurgeItems` is in-band native scope. Broad operator purge/redrive/repair remains
   a separate P1 operator contract.)
 - Exact SQL migration filenames and generated Rust structs.
@@ -82,7 +82,7 @@ Out of scope:
 
 `postgres_native` is the reference correctness backend and the reference member
 of the **relational projection family** (ADR-008, as amended by ADR-013):
-`pqueue_items` is a materialized cache with a persisted applied-high-water and
+`fireweed_items` is a materialized cache with a persisted applied-high-water and
 claim is an SQL `FOR UPDATE SKIP LOCKED` statement. It uses ordinary
 Postgres transactions to commit the durable command record and the operational
 projection together — the command log row is fully durable in the same
@@ -92,8 +92,8 @@ client acknowledged). This keeps the first implementation simple, gives
 low-latency small-batch commits, and creates executable semantics for later
 backends to match through conformance tests. The DB-resident projection runs
 the **relational reconnect-after-crash** conformance class (TD-001) in addition
-to the ADR-013 rebuild-from-log obligation: `pqueue_items` and its peers MUST be
-reconstructable by replaying `pqueue_commands` from genesis or from a snapshot,
+to the ADR-013 rebuild-from-log obligation: `fireweed_items` and its peers MUST be
+reconstructable by replaying `fireweed_commands` from genesis or from a snapshot,
 and the log is never optional.
 
 The backend still follows TD-001's capability boundaries:
@@ -115,7 +115,7 @@ preserve these records and indexes.
 ### Control Plane
 
 ```sql
-create table pqueue_queues (
+create table fireweed_queues (
   tenant_id text not null,
   queue_id text not null,
   priority_model jsonb not null,
@@ -136,7 +136,7 @@ create table pqueue_queues (
   primary key (tenant_id, queue_id)
 );
 
-create table pqueue_queue_owners (
+create table fireweed_queue_owners (
   tenant_id text not null,
   queue_id text not null,
   assignment_epoch bigint not null,
@@ -147,12 +147,12 @@ create table pqueue_queue_owners (
   updated_at timestamptz not null,
   primary key (tenant_id, queue_id),
   foreign key (tenant_id, queue_id)
-    references pqueue_queues (tenant_id, queue_id)
+    references fireweed_queues (tenant_id, queue_id)
 );
 ```
 
 There is no `shard_count` column: the queue is the unit of sharding (ADR-008), so
-a queue maps to exactly one owner. `pqueue_queue_owners` holds at most one active
+a queue maps to exactly one owner. `fireweed_queue_owners` holds at most one active
 owner lease per `(tenant_id, queue_id)`. Service nodes consume assignments from
 Postgres and pass `assignment_epoch` into data-plane mutations as a fencing token.
 
@@ -196,7 +196,7 @@ finalize returns an item to `pending` without a terminal transition (see
 ### Durable Command Log
 
 ```sql
-create table pqueue_commands (
+create table fireweed_commands (
   tenant_id text not null,
   queue_id text not null,
   sequence bigint not null,
@@ -216,13 +216,13 @@ create table pqueue_commands (
 
 `sequence` is allocated under the same transaction that validates the queue
 epoch. Implementations may use a per-queue sequence table, advisory locks scoped
-to `tenant_id/queue_id`, or row locking on `pqueue_queue_owners`. The result must
+to `tenant_id/queue_id`, or row locking on `fireweed_queue_owners`. The result must
 be a monotonic command position per queue.
 
 ### Projection
 
 ```sql
-create table pqueue_items (
+create table fireweed_items (
   tenant_id text not null,
   queue_id text not null,
   item_id text not null,
@@ -271,18 +271,18 @@ identical across both projection families (the conformance core class).
 
 ### Per-Group Summary Projection
 
-There is exactly ONE per-group summary projection, `pqueue_group_summary`, keyed
+There is exactly ONE per-group summary projection, `fireweed_group_summary`, keyed
 by `(tenant_id, queue_id, group_key)`. It is the single source of truth
 for (a) `group_batching` oldest-group selection (g1), (b) `DiscoverActiveScopes`
 group-granularity ranking (g4), and (c) per-group observability. There is no
-separate `pqueue_active_scope_summary` table. This projection is authored once
+separate `fireweed_active_scope_summary` table. This projection is authored once
 here and is consumed by g1 selection/locking and g4 discovery alike.
 
 ```sql
 -- Single canonical per-group summary projection.
 -- Consumers: (a) g1 whole-group selection + per-group lock anchor;
 --            (b) g4 DiscoverActiveScopes ranking; (c) per-group observability.
-create table pqueue_group_summary (
+create table fireweed_group_summary (
   tenant_id text not null,
   queue_id  text not null,
   group_key text not null,
@@ -302,16 +302,16 @@ create table pqueue_group_summary (
 );
 
 -- g1 selection: oldest-N groups by representative claim key.
-create index pqueue_group_summary_select_idx
-  on pqueue_group_summary (
+create index fireweed_group_summary_select_idx
+  on fireweed_group_summary (
     tenant_id, queue_id,
     rep_progress_guard_sort, rep_priority_sort, rep_created_at, rep_item_id
   )
   where oldest_eligible_at is not null;
 
 -- g4 discovery: rank the queue's groups by oldest-eligible age (local to the owner).
-create index pqueue_group_summary_rank_idx
-  on pqueue_group_summary (tenant_id, queue_id, oldest_eligible_at)
+create index fireweed_group_summary_rank_idx
+  on fireweed_group_summary (tenant_id, queue_id, oldest_eligible_at)
   where oldest_eligible_at is not null;
 ```
 
@@ -334,13 +334,13 @@ Consistency model (binding):
    and changes no item's `eligible_since`. The summary keeps the authoritative
    fields correct WITHOUT a per-group rewrite via exact-on-read: the read path (g1
    selection, g4 discovery, metrics) joins the candidate group's gate keys to
-   current gate state (`pqueue_gate_state`), and if the stored representative item
+   current gate state (`fireweed_gate_state`), and if the stored representative item
    is gate-blocked at read time it advances to the group's next item open under
    all gate keys; a group all of whose items are gate-blocked is excluded
    entirely. This distinguishes "whole group blocked" (group excluded) from
    "oldest item blocked" (advance to the next open item). Because a group is
    gate-blocked as a unit only when a shared gate key it carries is blocked, the
-   join is O(blocked keys), not O(items). (`pqueue_gate_state` is the queue's
+   join is O(blocked keys), not O(items). (`fireweed_gate_state` is the queue's
    gate-state projection maintained by `SetGates` (g2): one row per gate key
    carrying its current open/blocked generation; its authoritative shape is owned
    by the g2 gate model in API-001. TD-002 consumes it read-only at gate-revalidation
@@ -362,7 +362,7 @@ Consistency model (binding):
 ### Cohort Projection
 
 ```sql
-create table pqueue_cohorts (
+create table fireweed_cohorts (
   tenant_id          text    not null,
   queue_id           text    not null,
   group_key          text    not null,   -- cohort key (logical identity)
@@ -378,24 +378,24 @@ create table pqueue_cohorts (
   primary key (tenant_id, queue_id, group_key)
 );
 
-create index pqueue_cohorts_claim_idx
-  on pqueue_cohorts (tenant_id, queue_id, state)
+create index fireweed_cohorts_claim_idx
+  on fireweed_cohorts (tenant_id, queue_id, state)
   where state = 'complete';
 
-create index pqueue_cohorts_expiry_idx
-  on pqueue_cohorts (tenant_id, queue_id, cohort_created_at)
+create index fireweed_cohorts_expiry_idx
+  on fireweed_cohorts (tenant_id, queue_id, cohort_created_at)
   where state in ('forming', 'complete');
 ```
 
-`pqueue_cohorts` is a projection of the command log (ADR-001 log-is-truth),
+`fireweed_cohorts` is a projection of the command log (ADR-001 log-is-truth),
 maintained transactionally with member mutations. `member_count` and `state` MUST
 be updated in the same transaction as member inserts, AFTER `client_item_key`
 idempotency convergence, so duplicate pushes do not increment `member_count` or
 overfill. A new distinct member insert that would exceed `cohort_size` MUST be
 rejected (`conflict`). `state=complete` is set only when
-`member_count == cohort_size`. `pqueue_cohorts` records cohort completion state
+`member_count == cohort_size`. `fireweed_cohorts` records cohort completion state
 ONLY; `oldest_eligible_at` and eligible counts for cohort members come from the
-single `pqueue_group_summary` projection (which excludes not-yet-claim-eligible
+single `fireweed_group_summary` projection (which excludes not-yet-claim-eligible
 members). `first_eligible_at` is set the first time the row is `complete` AND every
 member satisfies Eligibility Precedence conditions 1-5, and is never moved
 backward. `retention_until` is set on terminal transition; while non-null and in
@@ -411,8 +411,8 @@ semantics.
 `cohort_size` is set only on cohort members (queues with `cohort_policy.enabled`,
 g6); the cohort key is the existing `group_key`, co-resident on the queue's owner
 by construction, so no cohort-to-shard derivation exists. Cohort completion state
-lives in `pqueue_cohorts` (below), not on the item row. `pqueue_cohorts.cohort_size`
-is authoritative; the `pqueue_items.cohort_size` copy is denormalized and MUST
+lives in `fireweed_cohorts` (below), not on the item row. `fireweed_cohorts.cohort_size`
+is authoritative; the `fireweed_items.cohort_size` copy is denormalized and MUST
 match (a divergent push value is a `conflict`).
 
 `recurrence_until` is the optional per-item recurrence drain instant on a
@@ -422,7 +422,7 @@ instead of re-arming it.
 ### Idempotency
 
 ```sql
-create table pqueue_request_idempotency (
+create table fireweed_request_idempotency (
   tenant_id text not null,
   queue_id text not null,
   operation text not null,
@@ -435,7 +435,7 @@ create table pqueue_request_idempotency (
   primary key (tenant_id, queue_id, operation, request_id)
 );
 
-create table pqueue_item_key_retention (
+create table fireweed_item_key_retention (
   tenant_id text not null,
   queue_id text not null,
   client_item_key text not null,
@@ -450,7 +450,7 @@ when the operation can be replayed directly. If response storage fails after a
 command commit, retry may reconstruct the response from committed command and
 projection state, then backfill the idempotency response.
 
-`pqueue_item_key_retention` keeps duplicate push convergence after terminal item
+`fireweed_item_key_retention` keeps duplicate push convergence after terminal item
 records are purged, until `client_item_key_retention_ms` expires.
 
 ## Required Indexes
@@ -458,8 +458,8 @@ records are purged, until `client_item_key_retention_ms` expires.
 The first implementation must include indexes equivalent to:
 
 ```sql
-create index pqueue_items_claim_strict_idx
-  on pqueue_items (
+create index fireweed_items_claim_strict_idx
+  on fireweed_items (
     tenant_id,
     queue_id,
     lifecycle_state,
@@ -469,8 +469,8 @@ create index pqueue_items_claim_strict_idx
   )
   where lifecycle_state = 'pending';
 
-create index pqueue_items_eligible_age_idx
-  on pqueue_items (
+create index fireweed_items_eligible_age_idx
+  on fireweed_items (
     tenant_id,
     queue_id,
     lifecycle_state,
@@ -478,8 +478,8 @@ create index pqueue_items_eligible_age_idx
   )
   where lifecycle_state = 'pending';
 
-create index pqueue_items_lease_expiry_idx
-  on pqueue_items (
+create index fireweed_items_lease_expiry_idx
+  on fireweed_items (
     tenant_id,
     queue_id,
     lifecycle_state,
@@ -487,8 +487,8 @@ create index pqueue_items_lease_expiry_idx
   )
   where lifecycle_state = 'leased';
 
-create index pqueue_items_group_claim_idx
-  on pqueue_items (
+create index fireweed_items_group_claim_idx
+  on fireweed_items (
     tenant_id,
     queue_id,
     group_key,
@@ -498,11 +498,11 @@ create index pqueue_items_group_claim_idx
   )
   where lifecycle_state = 'pending';
 
-create index pqueue_commands_replay_idx
-  on pqueue_commands (tenant_id, queue_id, sequence);
+create index fireweed_commands_replay_idx
+  on fireweed_commands (tenant_id, queue_id, sequence);
 
-create index pqueue_request_idempotency_expiry_idx
-  on pqueue_request_idempotency (expires_at);
+create index fireweed_request_idempotency_expiry_idx
+  on fireweed_request_idempotency (expires_at);
 ```
 
 Implementations may use partial indexes per lifecycle state and internal
@@ -510,9 +510,9 @@ declarative table partitioning by `hash(tenant_id, queue_id)` (the storage detai
 above) for vacuum/index-size isolation. A 10M-item hot queue must not rely on a
 full-table scan for claim, lease expiry, idempotency, or progress metrics.
 
-Discovery is served from `pqueue_group_summary` and its rank index
-(`pqueue_group_summary_rank_idx`, joined to `pqueue_gate_state` at read time), not
-from ad hoc aggregates on `pqueue_items`. The item indexes ordered by
+Discovery is served from `fireweed_group_summary` and its rank index
+(`fireweed_group_summary_rank_idx`, joined to `fireweed_gate_state` at read time), not
+from ad hoc aggregates on `fireweed_items`. The item indexes ordered by
 `priority_sort`/`eligible_since` are insufficient for
 `GROUP BY group_key ORDER BY min(oldest_eligible_at)` at 10M-item scale; the
 per-group summary exists specifically to avoid that aggregate scan.
@@ -520,8 +520,8 @@ per-group summary exists specifically to avoid that aggregate scan.
 ## Active-Scope Discovery Reads
 
 `DiscoverActiveScopes` (g4) serves from the maintained per-group summary projection
-`pqueue_group_summary`, keyed `(tenant_id, queue_id, group_key)`. No separate
-`pqueue_active_scope_summary` table exists. Discovery never scans `pqueue_items`,
+`fireweed_group_summary`, keyed `(tenant_id, queue_id, group_key)`. No separate
+`fireweed_active_scope_summary` table exists. Discovery never scans `fireweed_items`,
 and because the queue has one owner there is no cross-owner merge.
 
 Group-granularity read (local to the owner; joins live gate state):
@@ -531,11 +531,11 @@ select gs.group_key,
        gs.oldest_eligible_at,
        gs.eligible_item_count,
        gs.updated_at
-from pqueue_group_summary gs
+from fireweed_group_summary gs
 where gs.tenant_id = $1 and gs.queue_id = $2
   and gs.oldest_eligible_at is not null
 -- gate-current derivation (advance past a gate-blocked representative) is applied
--- by the read path joining pqueue_gate_state; see the consistency model.
+-- by the read path joining fireweed_gate_state; see the consistency model.
 order by gs.oldest_eligible_at asc
 limit $3;   -- top-N by oldest-eligible age
 ```
@@ -551,7 +551,7 @@ projection's `group_key` column is `not null`.
 exact as of `as_of`. `eligible_item_count` MAY be lagged/approximate and MUST be
 documented as such. A g2 `SetGates` flip is queue-scoped, O(1), and writes no item
 or summary rows; discovery applies the gate predicate at read time by joining
-`pqueue_gate_state`, advancing past a gate-blocked representative to the next
+`fireweed_gate_state`, advancing past a gate-blocked representative to the next
 Eligibility-Precedence-eligible item, and omits a group only when no item in it is
 currently eligible.
 
@@ -592,9 +592,9 @@ otherwise stated:
 - Insert item-key retention record for duplicate convergence.
 - On a cohort-enabled queue (`cohort_policy.enabled`), validate
   `cohort_size <= max_cohort_size` and that `cohort_size` matches the existing
-  `pqueue_cohorts` row (else `conflict`). After `client_item_key` idempotency
+  `fireweed_cohorts` row (else `conflict`). After `client_item_key` idempotency
   convergence (duplicate is a no-op with no count change), for a new distinct
-  member upsert `pqueue_cohorts` incrementing `member_count` (reject overfill with
+  member upsert `fireweed_cohorts` incrementing `member_count` (reject overfill with
   `conflict`), set `cohort_id` and `cohort_created_at` on the first member, and
   recompute `state`; if newly complete-and-eligible, set `first_eligible_at`. New
   members are `pending` but are not claim-eligible to non-cohort claims while any
@@ -621,7 +621,7 @@ cross-owner fan-out.
 -- generated from queue policy and the API-001 claim request.
 with candidates as (
   select item_id
-  from pqueue_items
+  from fireweed_items
   where tenant_id = $1
     and queue_id = $2
     and lifecycle_state = 'pending'
@@ -633,7 +633,7 @@ with candidates as (
   limit $3
   for update skip locked
 )
-update pqueue_items i
+update fireweed_items i
 set lifecycle_state = 'leased',
     lease_token_hash = $4,
     lease_expires_at = $5,
@@ -647,7 +647,7 @@ returning i.*;
 
 `progress_guard_sort` is conceptual: it is a **query-time derivation** (over
 `eligible_since` against `progress_bound_ms`, ahead of `priority_sort`), NOT a
-stored `pqueue_items` column. The strict-claim index orders by
+stored `fireweed_items` column. The strict-claim index orders by
 `priority_sort, created_at, item_id` (the covering subset for the normal window);
 the progress-protection window is the derivation prepended at claim time.
 Implementations must ensure items near `progress_bound_ms` cannot be bypassed
@@ -687,7 +687,7 @@ group-level locking. Because the queue has one owner, every group is owner-local
 by construction (ADR-008); selection is over the queue's groups with no shard
 resolution.
 
-1. **Overfetch candidates.** Open a cursor over `pqueue_group_summary` for the
+1. **Overfetch candidates.** Open a cursor over `fireweed_group_summary` for the
    queue, ordered by each group's representative claim key
    (`rep_progress_guard_sort, rep_priority_sort, rep_created_at, rep_item_id`),
    honoring the queue-global progress-protection window first under `ordering_mode`.
@@ -726,7 +726,7 @@ guarantees two concurrent claims never split a group.
 -- Run inside one transaction on the queue's owner; every group is owner-local.
 with candidate_groups as (
   select group_key
-  from pqueue_group_summary           -- single per-group summary (also backs discovery)
+  from fireweed_group_summary           -- single per-group summary (also backs discovery)
   where tenant_id = $1 and queue_id = $2
     and oldest_eligible_at is not null            -- has a current eligible representative
     -- and metadata_equals predicate satisfiable for the group (if present)
@@ -748,8 +748,8 @@ with candidate_groups as (
 For `compatibility.whole_cohort` (g6) the claim is one transaction, owner-local, and
 locks the cohort first:
 
-1. Candidate select: most-urgent `pqueue_cohorts` row with `state='complete'` (via
-   `pqueue_cohorts_claim_idx`), ordered by the cohort's representative
+1. Candidate select: most-urgent `fireweed_cohorts` row with `state='complete'` (via
+   `fireweed_cohorts_claim_idx`), ordered by the cohort's representative
    `priority_sort`, limit 1.
 2. Lock the cohort row `FOR UPDATE` (no `SKIP LOCKED` for the chosen cohort), then
    lock all members `FOR UPDATE` in deterministic claim order. Recheck
@@ -758,13 +758,13 @@ locks the cohort first:
    the next complete cohort; if none, return empty. NEVER block, NEVER partially
    lease.
 3. Transition every member to `leased` under one `cohort_lease_token`, set
-   `pqueue_cohorts.state='leased'` and `cohort_lease_token_hash`, increment
+   `fireweed_cohorts.state='leased'` and `cohort_lease_token_hash`, increment
    `item_version` per member, append one claim command covering the whole cohort.
 4. If the selected cohort's `cohort_size > max_items`, fail the envelope with
    `batch-too-large` (cannot occur when `max_items >= max_cohort_size`).
 
 Item and `group_batching` claims on a cohort-enabled queue MUST take the same
-`pqueue_cohorts` row lock and exclude every member of any non-terminal cohort. The
+`fireweed_cohorts` row lock and exclude every member of any non-terminal cohort. The
 cohort lock uses the same canonical lock identity and ordering as `group_batching`,
 so g1 and g6 share one lock regime.
 
@@ -795,11 +795,11 @@ so g1 and g6 share one lock regime.
   `item_version`, WITHOUT marking terminal — mirroring the `retry` path's
   return-to-pending. A `rearm` past `recurrence_until` MUST terminate the item
   instead. The same transaction recomputes only the rearmed item's
-  `pqueue_group_summary` row (recompute `oldest_eligible_at` from the scope's
+  `fireweed_group_summary` row (recompute `oldest_eligible_at` from the scope's
   remaining eligible items; `oldest_eligible_at` stays authoritative/exact,
   `eligible_item_count` MAY be served lagged). Recurring observability counters
   (`recurring_pending` / `recurring_leased`) are served from the metrics
-  projection, NOT from `pqueue_group_summary`. (The metrics projection is the
+  projection, NOT from `fireweed_group_summary`. (The metrics projection is the
   maintained per-queue metrics record of TD-001's Logical Projection Records —
   lifecycle counts, active leases, recurring counters, `oldest_eligible_age_ms`,
   `progress_bound_risk_count` — keyed `(tenant_id, queue_id)` on the owner; its
@@ -818,7 +818,7 @@ epoch fenced, batch-limited, and safe to run concurrently.
 
 ## Cohort Completion and Expiry
 
-A queue- and epoch-fenced sweeper MUST, for any `pqueue_cohorts` row in
+A queue- and epoch-fenced sweeper MUST, for any `fireweed_cohorts` row in
 `forming`/`complete` whose expiry deadline
 `min(cohort_created_at, first_eligible_at) + completion_bound_ms` has passed: take
 the cohort row lock, recheck the deadline and state under the lock, append
@@ -828,14 +828,14 @@ one transaction. The sweeper and any claim contend on the same row lock,
 linearizing claim-vs-expiry (leased XOR expired). Because `CreateQueue` enforces
 `completion_bound_ms <= progress_bound_ms`, expiry always linearizes before a
 withheld eligible member can breach the queue-global progress bound (FR-12).
-Whole-cohort finalize/release/retry update `pqueue_items` and `pqueue_cohorts.state`
+Whole-cohort finalize/release/retry update `fireweed_items` and `fireweed_cohorts.state`
 in one transaction.
 
 ## Recurring Item Teardown (`PurgeItems`)
 
 Targeted recurring teardown (`PurgeItems`) is in-band native scope (P0); broad
 operator purge/redrive/retention remains a separate P1 operator contract, and the
-two MUST NOT be conflated. A `PurgeItems` removal deletes the `pqueue_items` row
+two MUST NOT be conflated. A `PurgeItems` removal deletes the `fireweed_items` row
 (and, with `force`, the lease), MUST be recorded as a durable `PurgeItemsCommand`,
 and MUST write a tombstone keyed by `(tenant_id, queue_id, client_item_key)`
 retained for at least `client_item_key_retention_ms`. A purge that targets an item
@@ -844,7 +844,7 @@ with an active lease MUST return `conflict` unless `force=true`. The existing
 single-live-recurring-item-per-key invariant; once purged, the tombstone (not a
 retained item row) carries replay/audit, and a re-push after the tombstone window
 inserts a fresh item. The same transaction recomputes the affected
-`pqueue_group_summary` row. Retention/GC MUST exclude live recurring rows and MUST
+`fireweed_group_summary` row. Retention/GC MUST exclude live recurring rows and MUST
 retain purge command positions per the replay/audit window rule below.
 
 ## Retention and Compaction
@@ -922,8 +922,8 @@ resource blow-up. The Postgres-native reference backend therefore:
   queue;
 - runs ONE shared lease-expiry sweeper per node that scans due leases across many
   `(tenant, queue)` partitions per pass with a bounded batch and bounded cadence
-  (using `pqueue_items_lease_expiry_idx`), instead of one sweeper task per queue;
-- runs idempotency/terminal-retention GC and `pqueue_group_summary` reconcile as
+  (using `fireweed_items_lease_expiry_idx`), instead of one sweeper task per queue;
+- runs idempotency/terminal-retention GC and `fireweed_group_summary` reconcile as
   bounded shared batch jobs across queues, not per-queue loops;
 - relies on shared, partial, partition-pruned indexes so 1000+ active queues do
   not each require dedicated hot index memory beyond what their resident set
@@ -973,10 +973,10 @@ Postgres instance:
 - Atomic cohort lease is never split or double-leased under concurrency or across
   writer restart; `CohortExpired` appears in the log before any claimability change
   and survives replay; duplicate-push no-op survives replay; `group_key` reuse
-  yields a new `cohort_id`; cohort benchmark uses `pqueue_cohorts_claim_idx` /
-  `pqueue_cohorts_expiry_idx`, not a full scan.
-- Discovery on a 10M-item hot queue reads `pqueue_group_summary` via index (no
-  `pqueue_items` scan in the captured plan); a gate flip blocking only the oldest
+  yields a new `cohort_id`; cohort benchmark uses `fireweed_cohorts_claim_idx` /
+  `fireweed_cohorts_expiry_idx`, not a full scan.
+- Discovery on a 10M-item hot queue reads `fireweed_group_summary` via index (no
+  `fireweed_items` scan in the captured plan); a gate flip blocking only the oldest
   item of a group still reports the group at the next eligible item's age; the
   ranking is the true owner-local top-N by oldest-eligible age; `as_of` is the
   minimum watermark across the rows read.
@@ -990,7 +990,7 @@ Postgres instance:
 | Risk | Prob | Impact | Mitigation |
 |------|------|--------|------------|
 | One Postgres deployment becomes a hidden central data plane and is mistaken for the horizontal-scale story | M | H | Horizontal scale is delivered by cross-queue scale-out (ADR-008) — per-queue ownership (TD-003) and the `object_log_sqlite_projection` backend (TD-004), each with a benchmark gate (TP-002 E2/E3). Keep the per-queue ownership boundary and backend-profile boundaries in schema and tests so a single-queue deployment is never mistaken for the scaled envelope. |
-| Per-group summary grain diverges across backends | M | M | Single `pqueue_group_summary` keyed `(tenant_id, queue_id, group_key)`; one row per active group; same grain in the SQLite local projection (TD-004). |
+| Per-group summary grain diverges across backends | M | M | Single `fireweed_group_summary` keyed `(tenant_id, queue_id, group_key)`; one row per active group; same grain in the SQLite local projection (TD-004). |
 | JSON priority or metadata predicates cause slow scans | M | H | Use canonical `priority_sort`, narrow v1 predicates, and partial indexes. |
 | `SKIP LOCKED` hides starvation under contention | M | H | Add progress-bound tests with skew and explicit oldest-eligible metrics. |
 | Idempotency response reconstruction is inconsistent | M | M | Prefer transactional response persistence in Postgres-native mode. |

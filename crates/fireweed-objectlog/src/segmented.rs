@@ -1481,7 +1481,7 @@ impl SegmentCounters {
 // blob with manifest FNV-1a. V3 stores `len + record CRC32C + JSON`, then a full-frame CRC32C trailer; its
 // manifest also carries SHA-256 over the complete stored bytes.
 //
-//   magic   : b"PQSG"          (4 bytes)
+//   magic   : b"FWSG"          (4 bytes)
 //   version : u8  = SEG_VERSION (segment-format marker; bumped from the JSON form)
 //   epoch   : u64 little-endian (the assignment epoch the run committed under)
 //   first_seq: u64 little-endian (the sequence of the first record)
@@ -9618,8 +9618,10 @@ mod fs_blob_store_tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0);
-            let path = std::env::temp_dir()
-                .join(format!("pqueue-fsblob-{}-{n}-{nanos}", std::process::id()));
+            let path = std::env::temp_dir().join(format!(
+                "fireweed-fsblob-{}-{n}-{nanos}",
+                std::process::id()
+            ));
             fs::create_dir_all(&path).unwrap();
             Self { path }
         }

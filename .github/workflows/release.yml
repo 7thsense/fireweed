@@ -22,7 +22,7 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_PASSWORD: pq
+          POSTGRES_PASSWORD: fireweed
         ports:
           - 5432:5432
         options: >-
@@ -120,7 +120,7 @@ jobs:
 
       - name: Exact Postgres TP-003 storage-pair proof
         env:
-          PQUEUE_PG_TEST_URL: postgres://postgres:pq@127.0.0.1:5432/postgres
+          FIREWEED_PG_TEST_URL: postgres://postgres:fireweed@127.0.0.1:5432/postgres
         run: |
           matrix_evidence=docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl
           parity_evidence=docs/perf/evidence/tp003-ac-txn-parity-postgres-storage-pairs.jsonl
@@ -155,7 +155,7 @@ jobs:
 
       - name: Fresh smoke and governed TP-002 release gate
         env:
-          PQUEUE_PG_TEST_URL: postgres://postgres:pq@127.0.0.1:5432/postgres
+          FIREWEED_PG_TEST_URL: postgres://postgres:fireweed@127.0.0.1:5432/postgres
         run: |
           bash scripts/ci/verify-governed-release-composite.sh \
             --contract target/tp002-release/composite-contract.json \
@@ -176,7 +176,7 @@ jobs:
         env:
           KIND_NODE_IMAGE: kindest/node:v1.31.0
           FIREWEED_RELEASE_VERSION: ${{ steps.release.outputs.version }}
-          PQUEUE_PG_TEST_URL: postgres://postgres:pq@127.0.0.1:5432/postgres
+          FIREWEED_PG_TEST_URL: postgres://postgres:fireweed@127.0.0.1:5432/postgres
         run: bash scripts/ci/deployment-release-gate.sh
 
       - name: Package binaries

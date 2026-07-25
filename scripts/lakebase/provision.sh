@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
-# Provision a Databricks Lakebase instance for pqueue live acceptance tests.
+# Provision a Databricks Lakebase instance for fireweed live acceptance tests.
 #
 # Requires an authenticated Databricks CLI:
 #   databricks auth login --profile "$DATABRICKS_PROFILE"
 #
 # Usage:
 #   scripts/lakebase/provision.sh            # create + print connection info
-#   PQUEUE_LB_NAME=my-instance scripts/lakebase/provision.sh
+#   FIREWEED_LB_NAME=my-instance scripts/lakebase/provision.sh
 #
-# Then export the printed PQUEUE_LAKEBASE_DSN and run:
-#   cargo test -p pqueue-postgres --features tls --test lakebase_live_tests -- --ignored --nocapture
+# Then export the printed FIREWEED_LAKEBASE_DSN and run:
+#   cargo test -p fireweed-postgres --features tls --test lakebase_live_tests -- --ignored --nocapture
 #
 # Tear down with scripts/lakebase/teardown.sh when done (instances cost money).
 set -euo pipefail
 
-NAME="${PQUEUE_LB_NAME:-pqueue-lakebase-test}"
-CAPACITY="${PQUEUE_LB_CAPACITY:-CU_1}"
+NAME="${FIREWEED_LB_NAME:-fireweed-lakebase-test}"
+CAPACITY="${FIREWEED_LB_CAPACITY:-CU_1}"
 PROFILE="${DATABRICKS_PROFILE:-dbw-dev-eus2}"
-DB="${PQUEUE_LB_DBNAME:-databricks_postgres}"
+DB="${FIREWEED_LB_DBNAME:-databricks_postgres}"
 
 db() { databricks --profile "$PROFILE" "$@"; }
 
@@ -32,7 +32,7 @@ db database create-database-instance "$NAME" \
   --capacity "$CAPACITY" \
   --enable-pg-native-login \
   --node-count 1 \
-  -o json >/tmp/pqueue-lb-create.json || {
+  -o json >/tmp/fireweed-lb-create.json || {
     echo ">> create failed or instance exists; fetching existing" >&2
   }
 
@@ -57,7 +57,7 @@ USER=$(db current-user me -o json 2>/dev/null | python3 -c 'import sys,json;prin
 
 echo "" >&2
 echo ">> instance ready. OAuth-direct DSN (token expires ~60 min):" >&2
-echo "export PQUEUE_LAKEBASE_DSN=\"host=$HOST port=5432 user=$USER password=$TOKEN dbname=$DB sslmode=require\""
+echo "export FIREWEED_LAKEBASE_DSN=\"host=$HOST port=5432 user=$USER password=$TOKEN dbname=$DB sslmode=require\""
 echo "" >&2
 echo ">> for a stable native-password DSN, create a Postgres role + password on the" >&2
 echo "   instance and use that instead of the OAuth token." >&2

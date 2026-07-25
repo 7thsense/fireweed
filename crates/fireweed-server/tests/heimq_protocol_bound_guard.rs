@@ -7,7 +7,7 @@
 //! Upstream `kafka-protocol` (all published versions) pre-allocates `Vec::with_capacity(n)` from an
 //! attacker-controlled `Array`/`CompactArray` count field BEFORE reading any element — a
 //! remotely-triggerable OOM DoS. heimq **vendored** a bounded fork as the `heimq-protocol` crate
-//! (`Vec::with_capacity((n as usize).min(buf.remaining()))`), and pqueue + fjord now use it exclusively.
+//! (`Vec::with_capacity((n as usize).min(buf.remaining()))`), and fireweed + fjord now use it exclusively.
 //! The upstream `kafka-protocol` crate must NOT appear in the dependency graph.
 //!
 //! This guard asserts, against the lockfile:

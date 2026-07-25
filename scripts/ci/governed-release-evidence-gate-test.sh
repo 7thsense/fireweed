@@ -7,7 +7,7 @@ HELPER="${SCRIPT_DIR}/governed-release-evidence-gate.sh"
 VALID_MANIFEST="${SCRIPT_DIR}/fixtures/release-manifest/manifest.json"
 VALID_E3_CONTRACT="${SCRIPT_DIR}/fixtures/e3-contract/valid/contract.json"
 E3_REVISION=0123456789abcdef0123456789abcdef01234567
-CASE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pqueue-governed-gate.XXXXXX")"
+CASE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fireweed-governed-gate.XXXXXX")"
 trap 'rm -rf "${CASE_DIR}"' EXIT
 
 fail() {
@@ -30,7 +30,7 @@ bash "${HELPER}" --mode semantic --manifest "${VALID_MANIFEST}" \
 # A former test hook allowed /bin/true to replace Cargo. It must now be inert: malformed evidence stays red.
 printf '{}\n' >"${CASE_DIR}/invalid-manifest.json"
 expect_failure cargo_override_cannot_bypass \
-    env PQUEUE_CARGO_BIN=/bin/true bash "${HELPER}" \
+    env FIREWEED_CARGO_BIN=/bin/true bash "${HELPER}" \
     --mode semantic --manifest "${CASE_DIR}/invalid-manifest.json" \
     --e3-contract "${VALID_E3_CONTRACT}" --expected-revision "${E3_REVISION}"
 

@@ -30,7 +30,10 @@ fn poll_pending<F: Future>(future: Pin<&mut F>) {
 
 fn tmp_root(tag: &str) -> std::path::PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let p = std::env::temp_dir().join(format!("pqueue-objlog-gc-{tag}-{}-{n}", std::process::id()));
+    let p = std::env::temp_dir().join(format!(
+        "fireweed-objlog-gc-{tag}-{}-{n}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&p);
     p
 }
@@ -38,7 +41,7 @@ fn tmp_root(tag: &str) -> std::path::PathBuf {
 fn tmp_db(tag: &str) -> std::path::PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let p = std::env::temp_dir().join(format!(
-        "pqueue-objlog-gc-{tag}-{}-{n}.db",
+        "fireweed-objlog-gc-{tag}-{}-{n}.db",
         std::process::id()
     ));
     let _ = std::fs::remove_file(&p);

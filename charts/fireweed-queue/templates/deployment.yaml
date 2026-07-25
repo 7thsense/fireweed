@@ -49,20 +49,20 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-            - name: PQUEUE_OWNER_ID
+            - name: FIREWEED_OWNER_ID
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
-            - name: PQUEUE_ADVERTISE_ADDR
+            - name: FIREWEED_ADVERTISE_ADDR
               value: "$(POD_IP):{{ .Values.containerPort }}"
             {{- end }}
             {{- if and (eq .Values.storage.log.backend "objectlog") (eq .Values.storage.log.objectLog.store "s3") }}
-            - name: PQUEUE_OBJECT_LOG_S3_ACCESS_KEY_ID
+            - name: FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.storage.log.objectLog.s3.credentials.existingSecret | quote }}
                   key: {{ .Values.storage.log.objectLog.s3.credentials.accessKeyIdKey | quote }}
-            - name: PQUEUE_OBJECT_LOG_S3_SECRET_ACCESS_KEY
+            - name: FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.storage.log.objectLog.s3.credentials.existingSecret | quote }}
@@ -70,8 +70,8 @@ spec:
             {{- end }}
             {{- if eq .Values.storage.log.backend "postgres" }}
             {{- /* Self-sufficient libpq DSN (host/port/db + sslmode=require). The binary connects from
-                   this DSN alone; it does not read the lakebase.* metadata. Preferred over PQUEUE_PG_URL. */}}
-            - name: PQUEUE_POSTGRES_LOG_DATABASE_URL
+                   this DSN alone; it does not read the lakebase.* metadata. Preferred over FIREWEED_PG_URL. */}}
+            - name: FIREWEED_POSTGRES_LOG_DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.storage.log.postgres.existingSecret | quote }}
@@ -81,14 +81,14 @@ spec:
             {{- /* Relational-projection DSN: consumed by the postgres/postgres combo
                    (ComposedBackend<PostgresLog, PostgresRelational, ..>, crates/fireweed-server/src/lib.rs).
                    The Lakebase profile uses projection=inmemory, so this never renders there. */}}
-            - name: PQUEUE_POSTGRES_PROJECTION_DATABASE_URL
+            - name: FIREWEED_POSTGRES_PROJECTION_DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.storage.projection.postgres.existingSecret | quote }}
                   key: {{ .Values.storage.projection.postgres.databaseUrlKey | quote }}
             {{- end }}
             {{- if eq .Values.storage.controlPlane.backend "postgres" }}
-            - name: PQUEUE_POSTGRES_CONTROL_PLANE_DATABASE_URL
+            - name: FIREWEED_POSTGRES_CONTROL_PLANE_DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.storage.controlPlane.postgres.existingSecret | quote }}
@@ -101,7 +101,7 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.storage.lakebase.auth.existingSecret | quote }}
                   key: {{ .Values.storage.lakebase.auth.databricksHostKey | quote }}
-            - name: PQUEUE_DATABRICKS_DATABASE_INSTANCE_NAME
+            - name: FIREWEED_DATABRICKS_DATABASE_INSTANCE_NAME
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.storage.lakebase.auth.existingSecret | quote }}
@@ -125,7 +125,7 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.storage.lakebase.auth.existingSecret | quote }}
                   key: {{ .Values.storage.lakebase.auth.tokenKey | quote }}
-            - name: PQUEUE_DATABRICKS_POSTGRES_USER
+            - name: FIREWEED_DATABRICKS_POSTGRES_USER
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.storage.lakebase.auth.existingSecret | quote }}

@@ -21,7 +21,7 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 fn tmp_root(tag: &str) -> std::path::PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let p = std::env::temp_dir().join(format!(
-        "pqueue-objlog-seg-{tag}-{}-{n}",
+        "fireweed-objlog-seg-{tag}-{}-{n}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&p);

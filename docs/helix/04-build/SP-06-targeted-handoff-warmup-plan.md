@@ -72,7 +72,7 @@ valid completed iteration.
 
 ## Spike Evidence and Decision
 
-Command: `cargo test -p pqueue-server sp06_full_handoff_profile_classifies_metadata_and_required_tail -- --ignored --nocapture`.
+Command: `cargo test -p fireweed-server sp06_full_handoff_profile_classifies_metadata_and_required_tail -- --ignored --nocapture`.
 The final explicit matrix passed in 45.75 seconds. Each arm ran 200 handoffs for 256 and 1,000 resident items.
 
 | Arm | 25 ms total / p95 | 100 ms total / p95 | Physical requests | Immutable GETs | Avoidable/repeated GETs | Tail replay |
@@ -116,6 +116,6 @@ attempts/bytes. Disable by configuration or revert the isolated iteration; no du
 
 ## Exit Criteria
 
-**Met by negative spike.** pqueue retains cold authoritative recovery. Immutable candidates were identified,
+**Met by negative spike.** fireweed retains cold authoritative recovery. Immutable candidates were identified,
 but projected relative p95 gain was only 8.97% to 11.69%, below the 20% adoption gate. No live comparison is
 applicable because no intervention landed, and production contains no dormant warmup code.

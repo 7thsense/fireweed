@@ -162,154 +162,154 @@ fn claim_due_scheduled_actions_request() -> ClaimByQueryRequest {
 
 #[tokio::test]
 async fn safe_recycling_rule_update_marks_only_act_001() {
-    let memory_pq = RuntimeCore::new(
+    let memory_fireweed = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
-    assert_safe_recycling_rule_update_on_backend(&memory_pq).await;
+    assert_safe_recycling_rule_update_on_backend(&memory_fireweed).await;
 
     let sqlite_path = std::env::temp_dir()
         .join(format!(
-            "pqueue-hot-projection-queries-bounded-{}.db",
+            "fireweed-hot-projection-queries-bounded-{}.db",
             std::process::id()
         ))
         .to_str()
         .unwrap()
         .to_string();
     let _ = std::fs::remove_file(&sqlite_path);
-    let sqlite_pq = RuntimeCore::new(
+    let sqlite_fireweed = RuntimeCore::new(
         Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
         Arc::new(ManualClock::at(0)),
     );
-    assert_safe_recycling_rule_update_on_backend(&sqlite_pq).await;
+    assert_safe_recycling_rule_update_on_backend(&sqlite_fireweed).await;
 }
 
 #[tokio::test]
 async fn bounded_mutation_rejects_claimed_records_without_losing_the_claim() {
-    let memory_pq = RuntimeCore::new(
+    let memory_fireweed = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
-    assert_bounded_mutation_rejects_claimed_records_without_losing_the_claim(&memory_pq).await;
+    assert_bounded_mutation_rejects_claimed_records_without_losing_the_claim(&memory_fireweed).await;
 
     let sqlite_path = std::env::temp_dir()
         .join(format!(
-            "pqueue-hot-projection-queries-bounded-claim-{}.db",
+            "fireweed-hot-projection-queries-bounded-claim-{}.db",
             std::process::id()
         ))
         .to_str()
         .unwrap()
         .to_string();
     let _ = std::fs::remove_file(&sqlite_path);
-    let sqlite_pq = RuntimeCore::new(
+    let sqlite_fireweed = RuntimeCore::new(
         Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
         Arc::new(ManualClock::at(0)),
     );
-    assert_bounded_mutation_rejects_claimed_records_without_losing_the_claim(&sqlite_pq).await;
+    assert_bounded_mutation_rejects_claimed_records_without_losing_the_claim(&sqlite_fireweed).await;
 }
 
 #[tokio::test]
 async fn claim_due_scheduled_actions_by_query() {
-    let memory_pq = RuntimeCore::new(
+    let memory_fireweed = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
-    assert_claim_due_scheduled_actions_by_query_on_backend(&memory_pq).await;
+    assert_claim_due_scheduled_actions_by_query_on_backend(&memory_fireweed).await;
 
     let sqlite_path = std::env::temp_dir()
         .join(format!(
-            "pqueue-hot-projection-queries-claim-by-query-{}.db",
+            "fireweed-hot-projection-queries-claim-by-query-{}.db",
             std::process::id()
         ))
         .to_str()
         .unwrap()
         .to_string();
     let _ = std::fs::remove_file(&sqlite_path);
-    let sqlite_pq = RuntimeCore::new(
+    let sqlite_fireweed = RuntimeCore::new(
         Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
         Arc::new(ManualClock::at(0)),
     );
-    assert_claim_due_scheduled_actions_by_query_on_backend(&sqlite_pq).await;
+    assert_claim_due_scheduled_actions_by_query_on_backend(&sqlite_fireweed).await;
 }
 
 #[tokio::test]
 async fn hourly_distribution_by_status() {
-    let memory_pq = RuntimeCore::new(
+    let memory_fireweed = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
-    assert_hourly_distribution_by_status_on_backend(&memory_pq).await;
+    assert_hourly_distribution_by_status_on_backend(&memory_fireweed).await;
 
     let sqlite_path = std::env::temp_dir()
         .join(format!(
-            "pqueue-hot-projection-queries-hourly-{}.db",
+            "fireweed-hot-projection-queries-hourly-{}.db",
             std::process::id()
         ))
         .to_str()
         .unwrap()
         .to_string();
     let _ = std::fs::remove_file(&sqlite_path);
-    let sqlite_pq = RuntimeCore::new(
+    let sqlite_fireweed = RuntimeCore::new(
         Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
         Arc::new(ManualClock::at(0)),
     );
-    assert_hourly_distribution_by_status_on_backend(&sqlite_pq).await;
+    assert_hourly_distribution_by_status_on_backend(&sqlite_fireweed).await;
 }
 
 #[tokio::test]
 async fn recycling_preview_by_hour() {
-    let memory_pq = RuntimeCore::new(
+    let memory_fireweed = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
-    assert_recycling_preview_by_hour_on_backend(&memory_pq).await;
+    assert_recycling_preview_by_hour_on_backend(&memory_fireweed).await;
 
     let sqlite_path = std::env::temp_dir()
         .join(format!(
-            "pqueue-hot-projection-queries-recycling-{}.db",
+            "fireweed-hot-projection-queries-recycling-{}.db",
             std::process::id()
         ))
         .to_str()
         .unwrap()
         .to_string();
     let _ = std::fs::remove_file(&sqlite_path);
-    let sqlite_pq = RuntimeCore::new(
+    let sqlite_fireweed = RuntimeCore::new(
         Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
         Arc::new(ManualClock::at(0)),
     );
-    assert_recycling_preview_by_hour_on_backend(&sqlite_pq).await;
+    assert_recycling_preview_by_hour_on_backend(&sqlite_fireweed).await;
 }
 
 #[tokio::test]
 async fn engagement_probability_segments() {
-    let memory_pq = RuntimeCore::new(
+    let memory_fireweed = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
-    assert_engagement_probability_segments_on_backend(&memory_pq).await;
+    assert_engagement_probability_segments_on_backend(&memory_fireweed).await;
 
     let sqlite_path = std::env::temp_dir()
         .join(format!(
-            "pqueue-hot-projection-queries-engagement-{}.db",
+            "fireweed-hot-projection-queries-engagement-{}.db",
             std::process::id()
         ))
         .to_str()
         .unwrap()
         .to_string();
     let _ = std::fs::remove_file(&sqlite_path);
-    let sqlite_pq = RuntimeCore::new(
+    let sqlite_fireweed = RuntimeCore::new(
         Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
         Arc::new(ManualClock::at(0)),
     );
-    assert_engagement_probability_segments_on_backend(&sqlite_pq).await;
+    assert_engagement_probability_segments_on_backend(&sqlite_fireweed).await;
 }
 
 // ---------------------------------------------------------------------------
 // Snorri-shaped hot projection conformance fixture (pqueue-4529ede9)
 //
 // Domain-neutral scheduled-action-shaped records, seeded as ordinary CLAIMABLE queue items over a
-// typed indexed queue (ADR-011). This fixture does not embed Snorri semantics into pqueue: the field
-// names are the caller's entity document, not a pqueue schema. See API-004 "Example Fixture".
+// typed indexed queue (ADR-011). This fixture does not embed Snorri semantics into fireweed: the field
+// names are the caller's entity document, not a fireweed schema. See API-004 "Example Fixture".
 // ---------------------------------------------------------------------------
 
 fn typed_index(name: &str, declaration: IndexDeclaration) -> QueueIndex {
@@ -584,25 +584,29 @@ fn assert_grouped_recycling_counts(
 }
 
 async fn seed_scheduled_action_fixture<B: LibBackend>(
-    pq: &RuntimeCore<B>,
+    fireweed: &RuntimeCore<B>,
 ) -> Vec<(ItemId, String)> {
     let q = qkey();
-    pq.create_queue(scheduled_action_queue_definition())
+    fireweed
+        .create_queue(scheduled_action_queue_definition())
         .await
         .unwrap();
     let mut ids = Vec::new();
     for record in scheduled_action_fixture_records() {
         let action_id = record["action_id"].as_str().unwrap().to_string();
-        let minted = pq.push(&q, scheduled_action_item(&record)).await.unwrap();
+        let minted = fireweed
+            .push(&q, scheduled_action_item(&record))
+            .await
+            .unwrap();
         ids.push((minted, action_id));
     }
     ids
 }
 
-async fn assert_hourly_distribution_by_status_on_backend<B: LibBackend>(pq: &RuntimeCore<B>) {
+async fn assert_hourly_distribution_by_status_on_backend<B: LibBackend>(fireweed: &RuntimeCore<B>) {
     let q = qkey();
-    let _ = seed_scheduled_action_fixture(pq).await;
-    let response = pq
+    let _ = seed_scheduled_action_fixture(fireweed).await;
+    let response = fireweed
         .grouped_aggregate(&q, hourly_distribution_request())
         .await
         .unwrap();
@@ -637,10 +641,10 @@ async fn assert_hourly_distribution_by_status_on_backend<B: LibBackend>(pq: &Run
     );
 }
 
-async fn assert_recycling_preview_by_hour_on_backend<B: LibBackend>(pq: &RuntimeCore<B>) {
+async fn assert_recycling_preview_by_hour_on_backend<B: LibBackend>(fireweed: &RuntimeCore<B>) {
     let q = qkey();
-    let _ = seed_scheduled_action_fixture(pq).await;
-    let response = pq
+    let _ = seed_scheduled_action_fixture(fireweed).await;
+    let response = fireweed
         .grouped_aggregate(&q, recycling_preview_request())
         .await
         .unwrap();
@@ -680,10 +684,12 @@ async fn assert_recycling_preview_by_hour_on_backend<B: LibBackend>(pq: &Runtime
     );
 }
 
-async fn assert_engagement_probability_segments_on_backend<B: LibBackend>(pq: &RuntimeCore<B>) {
+async fn assert_engagement_probability_segments_on_backend<B: LibBackend>(
+    fireweed: &RuntimeCore<B>,
+) {
     let q = qkey();
-    let _ = seed_scheduled_action_fixture(pq).await;
-    let response = pq
+    let _ = seed_scheduled_action_fixture(fireweed).await;
+    let response = fireweed
         .declared_bucket_segment(&q, engagement_probability_request())
         .await
         .unwrap();
@@ -712,10 +718,10 @@ async fn assert_engagement_probability_segments_on_backend<B: LibBackend>(pq: &R
     );
 }
 
-async fn assert_safe_recycling_rule_update_on_backend<B: LibBackend>(pq: &RuntimeCore<B>) {
+async fn assert_safe_recycling_rule_update_on_backend<B: LibBackend>(fireweed: &RuntimeCore<B>) {
     let q = qkey();
-    seed_scheduled_action_fixture(pq).await;
-    let before = pq
+    seed_scheduled_action_fixture(fireweed).await;
+    let before = fireweed
         .query_index_unique_typed(
             &q,
             "by_target_key",
@@ -725,7 +731,7 @@ async fn assert_safe_recycling_rule_update_on_backend<B: LibBackend>(pq: &Runtim
         .unwrap()
         .expect("contact:001 should be indexed");
 
-    let response = pq
+    let response = fireweed
         .bounded_mutation(&q, bounded_mutation_request())
         .await
         .unwrap();
@@ -733,7 +739,7 @@ async fn assert_safe_recycling_rule_update_on_backend<B: LibBackend>(pq: &Runtim
     assert_eq!(response.results[0].item_id, before.item_id);
     assert_eq!(response.results[0].outcome, MutationOutcome::Updated);
 
-    let after = pq
+    let after = fireweed
         .query_index_unique_typed(
             &q,
             "by_target_key",
@@ -756,11 +762,11 @@ async fn assert_safe_recycling_rule_update_on_backend<B: LibBackend>(pq: &Runtim
 }
 
 async fn assert_bounded_mutation_rejects_claimed_records_without_losing_the_claim<B: LibBackend>(
-    pq: &RuntimeCore<B>,
+    fireweed: &RuntimeCore<B>,
 ) {
     let q = qkey();
-    seed_scheduled_action_fixture(pq).await;
-    let target = pq
+    seed_scheduled_action_fixture(fireweed).await;
+    let target = fireweed
         .query_index_unique_typed(
             &q,
             "by_target_key",
@@ -769,7 +775,7 @@ async fn assert_bounded_mutation_rejects_claimed_records_without_losing_the_clai
         .await
         .unwrap()
         .expect("contact:001 should be indexed");
-    let claimed = pq.claim(&q, 6, 30_000).await.unwrap();
+    let claimed = fireweed.claim(&q, 6, 30_000).await.unwrap();
     assert_eq!(claimed.len(), 6);
     let claimed_item = claimed
         .iter()
@@ -777,7 +783,7 @@ async fn assert_bounded_mutation_rejects_claimed_records_without_losing_the_clai
         .expect("contact:001 should be claimed");
     let claimed_version = claimed_item.item_version;
 
-    let conflict = pq
+    let conflict = fireweed
         .bounded_mutation(&q, claim_conflict_bounded_mutation_request())
         .await
         .unwrap();
@@ -785,27 +791,28 @@ async fn assert_bounded_mutation_rejects_claimed_records_without_losing_the_clai
     assert_eq!(conflict.results[0].item_id, target.item_id);
     assert_eq!(conflict.results[0].outcome, MutationOutcome::Conflict);
 
-    let still_claimed = pq.claimed(&q, &[target.item_id]).await.unwrap();
+    let still_claimed = fireweed.claimed(&q, &[target.item_id]).await.unwrap();
     assert_eq!(still_claimed.len(), 1);
     assert_eq!(still_claimed[0].item_version, claimed_version);
 }
 
 async fn assert_claim_due_scheduled_actions_by_query_on_backend<B: LibBackend>(
-    pq: &RuntimeCore<B>,
+    fireweed: &RuntimeCore<B>,
 ) {
     let q = qkey();
-    let ids = seed_scheduled_action_fixture(pq).await;
-    let ordinarily_claimed = pq.claim(&q, 1, 60_000).await.unwrap();
+    let ids = seed_scheduled_action_fixture(fireweed).await;
+    let ordinarily_claimed = fireweed.claim(&q, 1, 60_000).await.unwrap();
     assert_eq!(ordinarily_claimed.len(), 1);
 
-    let claimed = pq
+    let claimed = fireweed
         .claim_by_query(&q, claim_due_scheduled_actions_request())
         .await
         .unwrap();
     let mut invalid_changed_body = claim_due_scheduled_actions_request();
     invalid_changed_body.index = Some("missing-index".to_string());
     assert_eq!(
-        pq.claim_by_query(&q, invalid_changed_body)
+        fireweed
+            .claim_by_query(&q, invalid_changed_body)
             .await
             .unwrap_err(),
         EngineError::RequestIdConflict,
@@ -864,7 +871,7 @@ async fn assert_claim_due_scheduled_actions_by_query_on_backend<B: LibBackend>(
             instance_fence: None,
         })
         .collect::<Vec<_>>();
-    let outcomes = pq
+    let outcomes = fireweed
         .commit(
             &q,
             CommitRequest {
@@ -880,7 +887,7 @@ async fn assert_claim_due_scheduled_actions_by_query_on_backend<B: LibBackend>(
             .all(|outcome| matches!(outcome, fireweed::EntryOutcome::Committed { .. }))
     );
 
-    let metrics = pq.metrics(&q).await.unwrap();
+    let metrics = fireweed.metrics(&q).await.unwrap();
     assert_eq!(metrics.complete, 1);
     assert_eq!(metrics.leased, 1);
     assert_eq!(metrics.pending, 4);
@@ -912,7 +919,7 @@ async fn backend_capability_advertising_is_explicit() {
 
     let sqlite_path = std::env::temp_dir()
         .join(format!(
-            "pqueue-hot-projection-queries-capabilities-{}.db",
+            "fireweed-hot-projection-queries-capabilities-{}.db",
             std::process::id()
         ))
         .to_str()
@@ -1157,15 +1164,19 @@ fn action_id_map(ids: &[(ItemId, String)], rows: &[RangeScanRow]) -> Vec<String>
 async fn ordered_cursor_pagination_is_stable() {
     let q = qkey();
     let backend = Arc::new(composed_memory_backend());
-    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
-    pq.create_queue(scheduled_action_queue_definition())
+    let fireweed = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
+    fireweed
+        .create_queue(scheduled_action_queue_definition())
         .await
         .unwrap();
 
     let mut ids = Vec::new();
     for record in scheduled_action_fixture_records() {
         let action_id = record["action_id"].as_str().unwrap().to_string();
-        let minted = pq.push(&q, scheduled_action_item(&record)).await.unwrap();
+        let minted = fireweed
+            .push(&q, scheduled_action_item(&record))
+            .await
+            .unwrap();
         ids.push((minted, action_id));
     }
 
@@ -1196,9 +1207,9 @@ async fn ordered_cursor_pagination_is_stable() {
         cursor: None,
     };
 
-    let page1 = pq.range_scan(&q, request.clone()).await.unwrap();
+    let page1 = fireweed.range_scan(&q, request.clone()).await.unwrap();
     assert_eq!(action_id_map(&ids, &page1.rows), vec!["act_001", "act_002"]);
-    let page2 = pq
+    let page2 = fireweed
         .range_scan(
             &q,
             RangeScanRequest {
@@ -1209,7 +1220,7 @@ async fn ordered_cursor_pagination_is_stable() {
         .await
         .unwrap();
     assert_eq!(action_id_map(&ids, &page2.rows), vec!["act_003", "act_004"]);
-    let page3 = pq
+    let page3 = fireweed
         .range_scan(
             &q,
             RangeScanRequest {
@@ -1239,12 +1250,15 @@ async fn ordered_cursor_pagination_is_stable() {
         "suppressed_by_recycling": false,
         "is_enrolled_using_open_rate_filter": true
     });
-    let minted = pq.push(&q, scheduled_action_item(&late)).await.unwrap();
+    let minted = fireweed
+        .push(&q, scheduled_action_item(&late))
+        .await
+        .unwrap();
     ids.push((minted, "act_999".to_string()));
 
-    let page1 = pq.range_scan(&q, request.clone()).await.unwrap();
+    let page1 = fireweed.range_scan(&q, request.clone()).await.unwrap();
     assert_eq!(action_id_map(&ids, &page1.rows), vec!["act_001", "act_002"]);
-    let page2 = pq
+    let page2 = fireweed
         .range_scan(
             &q,
             RangeScanRequest {
@@ -1255,7 +1269,7 @@ async fn ordered_cursor_pagination_is_stable() {
         .await
         .unwrap();
     assert_eq!(action_id_map(&ids, &page2.rows), vec!["act_003", "act_004"]);
-    let page3 = pq
+    let page3 = fireweed
         .range_scan(
             &q,
             RangeScanRequest {
@@ -1283,7 +1297,7 @@ async fn detail_range_filter_by_run_status_and_schedule() {
     let q = qkey();
     let sqlite_path = std::env::temp_dir()
         .join(format!(
-            "pqueue-hot-projection-queries-range-{}.db",
+            "fireweed-hot-projection-queries-range-{}.db",
             std::process::id()
         ))
         .to_str()
@@ -1291,15 +1305,19 @@ async fn detail_range_filter_by_run_status_and_schedule() {
         .to_string();
     let _ = std::fs::remove_file(&sqlite_path);
     let backend = Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap());
-    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
-    pq.create_queue(scheduled_action_queue_definition())
+    let fireweed = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
+    fireweed
+        .create_queue(scheduled_action_queue_definition())
         .await
         .unwrap();
 
     let mut ids = Vec::new();
     for record in scheduled_action_fixture_records() {
         let action_id = record["action_id"].as_str().unwrap().to_string();
-        let minted = pq.push(&q, scheduled_action_item(&record)).await.unwrap();
+        let minted = fireweed
+            .push(&q, scheduled_action_item(&record))
+            .await
+            .unwrap();
         ids.push((minted, action_id));
     }
 
@@ -1335,9 +1353,9 @@ async fn detail_range_filter_by_run_status_and_schedule() {
         cursor: None,
     };
 
-    let page1 = pq.range_scan(&q, request.clone()).await.unwrap();
+    let page1 = fireweed.range_scan(&q, request.clone()).await.unwrap();
     assert_eq!(action_id_map(&ids, &page1.rows), vec!["act_001", "act_002"]);
-    let page2 = pq
+    let page2 = fireweed
         .range_scan(
             &q,
             RangeScanRequest {
@@ -1359,23 +1377,27 @@ async fn detail_range_filter_by_run_status_and_schedule() {
 #[tokio::test]
 async fn hot_projection_fixture_seeds_six_claimable_records_and_resolves_target_key_lookup() {
     let backend = Arc::new(composed_memory_backend());
-    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
+    let fireweed = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
-    pq.create_queue(scheduled_action_queue_definition())
+    fireweed
+        .create_queue(scheduled_action_queue_definition())
         .await
         .unwrap();
 
     let records = scheduled_action_fixture_records();
     for record in &records {
-        pq.push(&q, scheduled_action_item(record)).await.unwrap();
+        fireweed
+            .push(&q, scheduled_action_item(record))
+            .await
+            .unwrap();
     }
 
     // All six records are ordinary CLAIMABLE (pending) queue items — not side/projection records.
-    let metrics = pq.metrics(&q).await.unwrap();
+    let metrics = fireweed.metrics(&q).await.unwrap();
     assert_eq!(metrics.pending, 6);
 
     // Exact typed lookup by (tenant_id, run_id, target_key) for contact:001.
-    let hit = pq
+    let hit = fireweed
         .query_index_unique_typed(
             &q,
             "by_target_key",
@@ -1386,7 +1408,7 @@ async fn hot_projection_fixture_seeds_six_claimable_records_and_resolves_target_
         .expect("contact:001 is indexed by (tenant_id, run_id, target_key)");
 
     // Stable row materialization: claim the resolved item and check the fixture fields survive.
-    let claimed = pq.claim(&q, 6, 30_000).await.unwrap();
+    let claimed = fireweed.claim(&q, 6, 30_000).await.unwrap();
     let claimed_contact_001 = claimed
         .iter()
         .find(|item| item.item_id == hit.item_id)

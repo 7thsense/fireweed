@@ -6,15 +6,15 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fireweed::{
-    Bytes, ClaimRef, CommitEntry, CommitRequest, CompoundIndexDef, CompoundIndexField,
-    ConfigSecret, EligibilityPolicy, EmbeddedDurabilityConfig, EmbeddedObjectLogConfig,
-    EmbeddedProjectionConfig, EmbeddedRecoveryPolicy, EmbeddedResponseBarrier, EmbeddedSecret,
-    EmbeddedSegmentConfig, EngineError, EntryOutcome, FinalizeKind, IndexDeclaration, IndexType,
-    InstanceFence, NewItem, ObjectLogRuntimeConfig, ObjectLogStorage, OrderingMode,
+    Bytes, ClaimRef, CommitEntry, CommitRequest, CommitResponseBarrier, ComposedStorageConfig,
+    CompoundIndexDef, CompoundIndexField, ConfigSecret, EligibilityPolicy, EngineError,
+    EntryOutcome, FilterOp, FinalizeKind, IndexDeclaration, IndexType, InstanceFence, NewItem,
+    ObjectLogConfig, ObjectLogRuntimeConfig, ObjectLogStorage, OrderField, OrderingMode,
     PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
-    ProjectionConfig, QueueDefinition, QueueId, QueueIndex, QueueKey, RangeScanRequest,
-    RecoveryPolicy, RecurrencePolicy, RequestId, ResponseBarrier, RetryPolicy, SegmentConfig,
-    SideRecord, TenantId,
+    ProjectionConfig, ProjectionRecoveryPolicy, ProjectionStoreConfig, QueryFilter,
+    QueueDefinition, QueueId, QueueIndex, QueueKey, RangeScanRequest, RecoveryPolicy,
+    RecurrencePolicy, RequestId, ResponseBarrier, RetryPolicy, SecretValue, SegmentConfig,
+    SegmentSettings, SideRecord, SortDirection, TenantId, TypedValue,
 };
 use fireweed_engine::DurabilityClass;
 use fireweed_memory::ManualClock;
@@ -24,7 +24,6 @@ use postgres::{Client, NoTls};
 
 fn runtime_env(suffix: &str) -> Result<String, std::env::VarError> {
     std::env::var(format!("FIREWEED_{suffix}"))
-        .or_else(|_| std::env::var(format!("PQUEUE_{suffix}")))
 }
 
 fn unique_fixture(name: &str) -> (PathBuf, String) {
@@ -33,8 +32,8 @@ fn unique_fixture(name: &str) -> (PathBuf, String) {
         .unwrap()
         .as_nanos();
     (
-        std::env::temp_dir().join(format!("pqueue-{name}-{nonce}")),
-        format!("pqueue_{name}_{nonce}"),
+        std::env::temp_dir().join(format!("fireweed-{name}-{nonce}")),
+        format!("fireweed_{name}_{nonce}"),
     )
 }
 
@@ -43,21 +42,21 @@ fn unique_bucket(tag: &str) -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    format!("pqueue-{tag}-{}", nonce % 1_000_000_000)
+    format!("fireweed-{tag}-{}", nonce % 1_000_000_000)
 }
 
-fn config(root: &Path, schema: &str, url: &str) -> EmbeddedDurabilityConfig {
-    EmbeddedDurabilityConfig {
-        object_log: EmbeddedObjectLogConfig::Local {
+fn config(root: &Path, schema: &str, url: &str) -> ComposedStorageConfig {
+    ComposedStorageConfig {
+        object_log: ObjectLogConfig::Local {
             root: root.to_path_buf(),
         },
-        projection: EmbeddedProjectionConfig::Postgres {
-            url: EmbeddedSecret::new(url),
+        projection: ProjectionStoreConfig::Postgres {
+            url: SecretValue::new(url),
         },
-        response_barrier: EmbeddedResponseBarrier::Strict,
-        segments: EmbeddedSegmentConfig::new(64 * 1024, 5).unwrap(),
+        response_barrier: CommitResponseBarrier::Strict,
+        segments: SegmentSettings::new(64 * 1024, 5).unwrap(),
         namespace: schema.to_owned(),
-        recovery: EmbeddedRecoveryPolicy::default(),
+        recovery: ProjectionRecoveryPolicy::default(),
     }
 }
 
@@ -78,7 +77,7 @@ fn public_config(root: &Path, schema: &str, url: &str) -> ObjectLogRuntimeConfig
 
 fn definition() -> QueueDefinition {
     QueueDefinition {
-        tenant_id: TenantId::new("embedded-tenant").unwrap(),
+        tenant_id: TenantId::new("composed-tenant").unwrap(),
         queue_id: QueueId::new("durable-queue").unwrap(),
         priority_model: PriorityModel {
             kind: PriorityModelKind::Int64,
@@ -123,7 +122,7 @@ fn definition() -> QueueDefinition {
 
 fn queue() -> QueueKey {
     QueueKey::new(
-        TenantId::new("embedded-tenant").unwrap(),
+        TenantId::new("composed-tenant").unwrap(),
         QueueId::new("durable-queue").unwrap(),
     )
 }
@@ -133,7 +132,7 @@ fn item(priority: i64) -> NewItem {
         priority: Some(PriorityValue::Int64(priority)),
         payload: Some(format!("payload-{priority}").into()),
         entity: Some(serde_json::json!({
-            "kind": "embedded-lifecycle",
+            "kind": "composed-lifecycle",
             "priority": priority,
         })),
         ..NewItem::default()
@@ -188,66 +187,91 @@ fn drop_schema(url: &str, namespace: &str) {
 }
 
 #[test]
-fn public_objectlog_postgres_delete_and_rehydrate() {
+fn public_objectlog_postgres_delete_and_rebuild() {
     let Ok(url) = runtime_env("PG_TEST_URL") else {
         eprintln!(
-            "SKIP public_objectlog_postgres_delete_and_rehydrate: PQUEUE_PG_TEST_URL is unset"
+            "SKIP public_objectlog_postgres_delete_and_rebuild: FIREWEED_PG_TEST_URL is unset"
         );
         return;
     };
     let (root, schema) = unique_fixture("public_objectlog_postgres");
     let durability = config(&root, &schema, &url);
     let clock = Arc::new(ManualClock::at(1_000));
-    let pq = fireweed::open_embedded(durability.clone(), clock.clone()).unwrap();
+    let fireweed = fireweed::open_composed_postgres(durability.clone(), clock.clone()).unwrap();
     let key = queue();
 
-    block_on(pq.create_queue(definition())).unwrap();
-    let query_caps = pq.hot_projection_capabilities(&key);
-    assert_eq!(query_caps, Default::default());
+    block_on(fireweed.create_queue(definition())).unwrap();
+    let query_caps = fireweed.hot_projection_capabilities(&key);
+    assert!(query_caps.range_scan);
+    assert!(query_caps.grouped_aggregate);
+    assert!(query_caps.declared_bucket_segment);
+    assert!(query_caps.bounded_mutation);
+    assert!(query_caps.claim_by_query);
+    assert!(!query_caps.side_record_query);
     assert!(query_caps.paired_capabilities_consistent());
-    assert!(matches!(
-        block_on(pq.range_scan(
+    assert!(
+        block_on(fireweed.range_scan(
             &key,
             RangeScanRequest {
-                index: None,
-                filters: vec![],
-                order_by: vec![],
+                index: Some("by_kind_priority".to_owned()),
+                filters: vec![QueryFilter {
+                    field: "kind".to_owned(),
+                    op: FilterOp::Eq,
+                    value: TypedValue::String("composed-lifecycle".to_owned()),
+                }],
+                order_by: vec![OrderField {
+                    field: "priority".to_owned(),
+                    direction: SortDirection::Ascending,
+                }],
                 page_size: 1,
                 cursor: None,
             }
-        )),
-        Err(EngineError::Unavailable)
-    ));
-    let first_request = RequestId::new("embedded-request-1").unwrap();
-    let first = block_on(pq.push_with_request_id(&key, first_request.clone(), item(10))).unwrap();
-    let second = block_on(pq.push(&key, item(20))).unwrap();
+        ))
+        .unwrap()
+        .rows
+        .is_empty()
+    );
+    let first_request = RequestId::new("composed-request-1").unwrap();
+    let first =
+        block_on(fireweed.push_with_request_id(&key, first_request.clone(), item(10))).unwrap();
+    let second = block_on(fireweed.push(&key, item(20))).unwrap();
 
     // Strict visibility: acknowledgement means the durable PostgreSQL image is queryable immediately.
-    let expected = block_on(pq.metrics(&key)).unwrap();
+    let expected = block_on(fireweed.metrics(&key)).unwrap();
     assert_eq!(expected.pending, 2);
-    assert_eq!(block_on(pq.peek(&key, 10)).unwrap().len(), 2);
-    let caps = pq.commit_capabilities(&key).unwrap();
+    assert_eq!(block_on(fireweed.peek(&key, 10)).unwrap().len(), 2);
+    let caps = fireweed.commit_capabilities(&key).unwrap();
     assert_authoritative_commit_capabilities(&caps);
     assert_eq!(
-        block_on(pq.verify_projection())
-            .unwrap()
-            .projection_sequence,
-        block_on(pq.verify_projection())
-            .unwrap()
-            .authoritative_sequence
+        block_on(
+            fireweed
+                .projection_control()
+                .expect("projection control")
+                .verify()
+        )
+        .unwrap()
+        .projection_sequence,
+        block_on(
+            fireweed
+                .projection_control()
+                .expect("projection control")
+                .verify()
+        )
+        .unwrap()
+        .authoritative_sequence
     );
 
-    let claimed = block_on(pq.claim(&key, 1, 30_000)).unwrap();
+    let claimed = block_on(fireweed.claim(&key, 1, 30_000)).unwrap();
     let claim = &claimed[0];
-    block_on(pq.ack(&key, [claim.item_id])).unwrap();
-    let lifecycle_id = block_on(pq.push(&key, item(30))).unwrap();
-    let expected = block_on(pq.metrics(&key)).unwrap();
+    block_on(fireweed.ack(&key, [claim.item_id])).unwrap();
+    let lifecycle_id = block_on(fireweed.push(&key, item(30))).unwrap();
+    let expected = block_on(fireweed.metrics(&key)).unwrap();
     assert_eq!(
         (expected.pending, expected.leased, expected.complete),
         (2, 0, 1)
     );
     assert_eq!(
-        block_on(pq.peek(&key, 10))
+        block_on(fireweed.peek(&key, 10))
             .unwrap()
             .iter()
             .map(|view| view.item_id)
@@ -259,49 +283,68 @@ fn public_objectlog_postgres_delete_and_rehydrate() {
     let mut postgres = postgres_in_schema(&url, &schema);
     let last_sequence: i64 = postgres
         .query_one(
-            "SELECT MAX(last_command_sequence) FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2",
-            &[&"embedded-tenant", &"durable-queue"],
+            "SELECT MAX(last_command_sequence) FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2",
+            &[&"composed-tenant", &"durable-queue"],
         )
         .unwrap()
         .get::<_, Option<i64>>(0)
         .unwrap();
     postgres
         .execute(
-            "DELETE FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND last_command_sequence=$3",
-            &[&"embedded-tenant", &"durable-queue", &last_sequence],
+            "DELETE FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 AND last_command_sequence=$3",
+            &[&"composed-tenant", &"durable-queue", &last_sequence],
         )
         .unwrap();
     postgres
         .execute(
             "UPDATE relational_cursor SET next_seq=$3 WHERE tenant=$1 AND queue=$2",
-            &[&"embedded-tenant", &"durable-queue", &last_sequence],
+            &[&"composed-tenant", &"durable-queue", &last_sequence],
         )
         .unwrap();
-    let tail = block_on(pq.rehydrate_projection()).unwrap();
+    let tail = block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .rebuild(),
+    )
+    .unwrap();
     assert_eq!(tail.tail_commands_replayed, 1);
-    assert_eq!(block_on(pq.metrics(&key)).unwrap(), expected);
+    assert_eq!(block_on(fireweed.metrics(&key)).unwrap(), expected);
 
     // An ahead image fails closed, then restoring its cursor makes it valid again.
-    let authoritative_next = block_on(pq.verify_projection())
-        .unwrap()
-        .authoritative_sequence
+    let authoritative_next = block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .verify(),
+    )
+    .unwrap()
+    .authoritative_sequence
         + 1;
     postgres
         .execute(
             "UPDATE relational_cursor SET next_seq=$3 WHERE tenant=$1 AND queue=$2",
             &[
-                &"embedded-tenant",
+                &"composed-tenant",
                 &"durable-queue",
                 &((authoritative_next + 2) as i64),
             ],
         )
         .unwrap();
-    assert!(block_on(pq.verify_projection()).is_err());
+    assert!(
+        block_on(
+            fireweed
+                .projection_control()
+                .expect("projection control")
+                .verify()
+        )
+        .is_err()
+    );
     postgres
         .execute(
             "UPDATE relational_cursor SET next_seq=$3 WHERE tenant=$1 AND queue=$2",
             &[
-                &"embedded-tenant",
+                &"composed-tenant",
                 &"durable-queue",
                 &(authoritative_next as i64),
             ],
@@ -311,11 +354,17 @@ fn public_objectlog_postgres_delete_and_rehydrate() {
 
     // Deleting the disposable image does not touch authoritative objects or durable request outcomes.
     let objects_before_delete = object_count(&root);
-    block_on(pq.delete_projection()).unwrap();
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .delete(),
+    )
+    .unwrap();
     assert_eq!(object_count(&root), objects_before_delete);
     let mut deleted_postgres = postgres_in_schema(&url, &schema);
     let stale_component_count: i64 = deleted_postgres
-        .query_one("SELECT COUNT(*) FROM pqueue_item_index_component", &[])
+        .query_one("SELECT COUNT(*) FROM fireweed_item_index_component", &[])
         .unwrap()
         .get(0);
     assert_eq!(
@@ -323,18 +372,30 @@ fn public_objectlog_postgres_delete_and_rehydrate() {
         "projection deletion must clear decomposed typed-index rows before replay"
     );
     drop(deleted_postgres);
-    let deleted = block_on(pq.verify_projection()).unwrap();
+    let deleted = block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .verify(),
+    )
+    .unwrap();
     assert!(!deleted.compatible);
     assert_eq!(deleted.projection_sequence, 0);
     assert!(deleted.authoritative_sequence > 0);
-    let rebuilt = block_on(pq.rehydrate_projection()).unwrap();
+    let rebuilt = block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .rebuild(),
+    )
+    .unwrap();
     assert!(
         rebuilt.tail_commands_replayed >= 2,
         "projection rebuild must replay the authoritative tail"
     );
-    assert_eq!(block_on(pq.metrics(&key)).unwrap(), expected);
+    assert_eq!(block_on(fireweed.metrics(&key)).unwrap(), expected);
     assert_eq!(
-        block_on(pq.peek(&key, 10))
+        block_on(fireweed.peek(&key, 10))
             .unwrap()
             .iter()
             .map(|view| view.item_id)
@@ -343,13 +404,13 @@ fn public_objectlog_postgres_delete_and_rehydrate() {
     );
 
     let replayed =
-        block_on(pq.push_with_request_id(&key, first_request.clone(), item(10))).unwrap();
+        block_on(fireweed.push_with_request_id(&key, first_request.clone(), item(10))).unwrap();
     assert_eq!(replayed, first);
     assert_eq!(object_count(&root), objects_before_delete);
 
     // A fresh public facade reconstructs exact normalized state and the durable request-id outcome.
-    drop(pq);
-    let reopened = fireweed::open_embedded(durability, clock).unwrap();
+    drop(fireweed);
+    let reopened = fireweed::open_composed_postgres(durability, clock).unwrap();
     assert_eq!(block_on(reopened.metrics(&key)).unwrap(), expected);
     assert_eq!(
         block_on(reopened.peek(&key, 10))
@@ -377,11 +438,11 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
         Err(_) => {
             if std::env::var_os("CI").is_some() {
                 panic!(
-                    "CI must set PQUEUE_S3_TEST_URL or PQUEUE_S3_TEST_ENDPOINT; S3+Postgres coverage cannot be skipped"
+                    "CI must set FIREWEED_S3_TEST_URL or FIREWEED_S3_TEST_ENDPOINT; S3+Postgres coverage cannot be skipped"
                 );
             }
             eprintln!(
-                "SKIP public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection: PQUEUE_S3_TEST_URL and PQUEUE_S3_TEST_ENDPOINT are unset"
+                "SKIP public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection: FIREWEED_S3_TEST_URL and FIREWEED_S3_TEST_ENDPOINT are unset"
             );
             return;
         }
@@ -391,7 +452,7 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
     let secret = runtime_env("S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into());
     let region = runtime_env("S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
     let pg_url = runtime_env("PG_TEST_URL")
-        .expect("PQUEUE_PG_TEST_URL must be set when exercising the postgres projection");
+        .expect("FIREWEED_PG_TEST_URL must be set when exercising the postgres projection");
     let allow_insecure_http = endpoint.starts_with("http://");
 
     S3BlobStore::new(&endpoint, &bucket, &access, &secret, &region)
@@ -426,27 +487,29 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
     let clock = Arc::new(ManualClock::at(1_000));
 
     let postgres_caps = {
-        let pq = fireweed::open_objectlog_postgres(durability.clone(), clock.clone()).unwrap();
+        let fireweed =
+            fireweed::open_objectlog_postgres(durability.clone(), clock.clone()).unwrap();
         let key = queue();
-        block_on(pq.create_queue(definition())).unwrap();
-        block_on(pq.push(&key, item(10))).unwrap();
-        block_on(pq.push(&key, item(20))).unwrap();
-        assert_eq!(block_on(pq.metrics(&key)).unwrap().pending, 2);
-        let control = pq
+        block_on(fireweed.create_queue(definition())).unwrap();
+        block_on(fireweed.push(&key, item(10))).unwrap();
+        block_on(fireweed.push(&key, item(20))).unwrap();
+        assert_eq!(block_on(fireweed.metrics(&key)).unwrap().pending, 2);
+        let control = fireweed
             .projection_control()
             .expect("object-log/Postgres owns a disposable projection");
         assert!(block_on(control.verify()).unwrap().compatible);
-        let caps = pq.commit_capabilities(&key).unwrap();
+        let caps = fireweed.commit_capabilities(&key).unwrap();
         assert_authoritative_commit_capabilities(&caps);
         caps
     };
 
     {
-        let pq = fireweed::open_objectlog_postgres(durability.clone(), clock.clone()).unwrap();
+        let fireweed =
+            fireweed::open_objectlog_postgres(durability.clone(), clock.clone()).unwrap();
         let key = queue();
-        assert_eq!(block_on(pq.metrics(&key)).unwrap().pending, 2);
-        assert_eq!(block_on(pq.peek(&key, 10)).unwrap().len(), 2);
-        let control = pq
+        assert_eq!(block_on(fireweed.metrics(&key)).unwrap().pending, 2);
+        assert_eq!(block_on(fireweed.peek(&key, 10)).unwrap().len(), 2);
+        let control = fireweed
             .projection_control()
             .expect("reopened object-log/Postgres exposes projection maintenance");
         block_on(control.delete()).unwrap();
@@ -462,8 +525,8 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
         sqlite_durability.projection = ProjectionConfig::Sqlite {
             path: std::env::temp_dir().join(format!("{sqlite_projection}.sqlite")),
         };
-        let pq = fireweed::open_objectlog_sqlite(sqlite_durability, clock).unwrap();
-        let sqlite_caps = pq.commit_capabilities(&queue()).unwrap();
+        let fireweed = fireweed::open_objectlog_sqlite(sqlite_durability, clock).unwrap();
+        let sqlite_caps = fireweed.commit_capabilities(&queue()).unwrap();
         assert_eq!(postgres_caps, sqlite_caps);
     }
 
@@ -491,17 +554,17 @@ async fn synchronous_open_inside_tokio_returns_typed_error() {
 #[tokio::test(flavor = "current_thread")]
 async fn asynchronous_open_is_safe_inside_tokio() {
     let Ok(url) = runtime_env("PG_TEST_URL") else {
-        eprintln!("SKIP asynchronous_open_is_safe_inside_tokio: PQUEUE_PG_TEST_URL is unset");
+        eprintln!("SKIP asynchronous_open_is_safe_inside_tokio: FIREWEED_PG_TEST_URL is unset");
         return;
     };
     let (root, schema) = unique_fixture("tokio_async_open");
-    let pq = fireweed::open_objectlog_postgres_async(
+    let fireweed = fireweed::open_objectlog_postgres_async(
         public_config(&root, &schema, &url),
         Arc::new(ManualClock::at(1_000)),
     )
     .await
     .unwrap();
-    drop(pq);
+    drop(fireweed);
     tokio::task::spawn_blocking(move || drop_schema(&url, &schema))
         .await
         .unwrap();
@@ -511,20 +574,20 @@ async fn asynchronous_open_is_safe_inside_tokio() {
 /// Full recovery proof for the authoritative rich-transition protocol. It remains ignored by default because
 /// it requires a live PostgreSQL instance; CI exercises the shorter S3/Postgres capability and reopen proof.
 #[test]
-#[ignore = "US-009 recovery proof requires PQUEUE_PG_TEST_URL"]
+#[ignore = "US-009 recovery proof requires FIREWEED_PG_TEST_URL"]
 fn us009_objectlog_postgres_rich_commit_recovery_promotion() {
     let url =
-        runtime_env("PG_TEST_URL").expect("US-009 promotion proof requires PQUEUE_PG_TEST_URL");
+        runtime_env("PG_TEST_URL").expect("US-009 promotion proof requires FIREWEED_PG_TEST_URL");
     let (root, schema) = unique_fixture("us009_objectlog_postgres_commit");
     let durability = config(&root, &schema, &url);
     let clock = Arc::new(ManualClock::at(1_000));
-    let pq = fireweed::open_embedded(durability.clone(), clock.clone()).unwrap();
+    let fireweed = fireweed::open_composed_postgres(durability.clone(), clock.clone()).unwrap();
     let key = queue();
-    block_on(pq.create_queue(definition())).unwrap();
-    assert_authoritative_commit_capabilities(&pq.commit_capabilities(&key).unwrap());
+    block_on(fireweed.create_queue(definition())).unwrap();
+    assert_authoritative_commit_capabilities(&fireweed.commit_capabilities(&key).unwrap());
 
-    block_on(pq.push(&key, item(10))).unwrap();
-    let claim = block_on(pq.claim(&key, 1, 30_000)).unwrap().remove(0);
+    block_on(fireweed.push(&key, item(10))).unwrap();
+    let claim = block_on(fireweed.claim(&key, 1, 30_000)).unwrap().remove(0);
     let claim_ref = ClaimRef {
         item_id: claim.item_id,
         lease_token: claim.lease_token.clone().expect("claim token"),
@@ -549,22 +612,37 @@ fn us009_objectlog_postgres_rich_commit_recovery_promotion() {
             }),
         }],
     };
-    let outcomes = block_on(pq.commit(&key, transition())).unwrap();
+    let outcomes = block_on(fireweed.commit(&key, transition())).unwrap();
     let lifecycle_id = match outcomes.as_slice() {
         [EntryOutcome::Committed { lifecycle_item_ids }] => lifecycle_item_ids[0],
         other => panic!("expected committed rich transition, got {other:?}"),
     };
     assert_eq!(
-        block_on(pq.side_record(&key, b"state/run-1"))
+        block_on(fireweed.side_record(&key, b"state/run-1"))
             .unwrap()
             .as_deref(),
         Some(b"audit-bytes".as_slice())
     );
 
-    block_on(pq.delete_projection()).unwrap();
-    block_on(pq.rehydrate_projection()).unwrap();
-    assert_eq!(block_on(pq.commit(&key, transition())).unwrap(), outcomes);
-    let recovery = block_on(pq.explain_commit(&key, request_id))
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .delete(),
+    )
+    .unwrap();
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .rebuild(),
+    )
+    .unwrap();
+    assert_eq!(
+        block_on(fireweed.commit(&key, transition())).unwrap(),
+        outcomes
+    );
+    let recovery = block_on(fireweed.explain_commit(&key, request_id))
         .unwrap()
         .expect("rich transition survives projection rebuild");
     assert_eq!(recovery.entries[0].consumed_input_id, claim.item_id);
@@ -574,7 +652,7 @@ fn us009_objectlog_postgres_rich_commit_recovery_promotion() {
         vec![b"state/run-1".to_vec()]
     );
 
-    drop(pq);
+    drop(fireweed);
     drop_schema(&url, &schema);
     let _ = fs::remove_dir_all(root);
 }

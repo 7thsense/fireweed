@@ -2,7 +2,6 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/.." && pwd)"
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
@@ -29,98 +28,110 @@ expect_rejects() {
     fi
 }
 
-mkdir -p "$tmp_dir/src" "$tmp_dir/docs/helix/history" "$tmp_dir/docs/deployment" \
-    "$tmp_dir/crates/fireweed-core/src" "$tmp_dir/crates/fireweed-server" \
-    "$tmp_dir/crates/fireweed-release/src" "$tmp_dir/charts/fireweed-queue/templates" \
-    "$tmp_dir/.github/workflows"
+expect_accepts() {
+    local fixture="$1"
+    local label="$2"
+    local list_file="$tmp_dir/files-$label.txt"
+    write_file_list "$list_file" "$fixture"
+    if ! "$script_dir/verify-public-identity.sh" --root "$tmp_dir" --files-from "$list_file" >"$tmp_dir/$label.out" 2>"$tmp_dir/$label.err"; then
+        echo "expected verifier to accept $label fixture" >&2
+        cat "$tmp_dir/$label.out" >&2
+        cat "$tmp_dir/$label.err" >&2
+        exit 1
+    fi
+}
 
-cat >"$tmp_dir/src/lowercase.md" <<'EOF'
-The pqueue CLI is the public command.
-EOF
-cat >"$tmp_dir/src/uppercase.md" <<'EOF'
-Set PQUEUE_PG_URL before running.
-EOF
-cat >"$tmp_dir/src/queueyard.md" <<'EOF'
-Queueyard is the public product name.
-EOF
-cat >"$tmp_dir/src/repository.md" <<'EOF'
-Clone https://github.com/telepathdata/7thsense-pqueue.git for the public repo.
-EOF
+expect_allowlist_rejects() {
+    local allowlist="$1"
+    local label="$2"
+    local list_file="$tmp_dir/files-$label.txt"
+    write_file_list "$list_file" "src/fireweed.md"
+    if "$script_dir/verify-public-identity.sh" \
+        --root "$tmp_dir" \
+        --files-from "$list_file" \
+        --allowlist "$allowlist" \
+        >"$tmp_dir/$label.out" 2>"$tmp_dir/$label.err"; then
+        echo "expected verifier to reject $label allowlist" >&2
+        cat "$tmp_dir/$label.out" >&2
+        cat "$tmp_dir/$label.err" >&2
+        exit 1
+    fi
+}
+
+mkdir -p "$tmp_dir/src" \
+    "$tmp_dir/docs/helix/00-discover" \
+    "$tmp_dir/docs/helix/02-design/adr" \
+    "$tmp_dir/crates/fireweed-core/src" \
+    "$tmp_dir/scripts/ci/fixtures/public-crate-boundary/src"
+
+printf '%s\n' 'The pqueue CLI is public.' >"$tmp_dir/src/lowercase.md"
+printf '%s\n' 'fn construct_pqueue_runtime() {}' >"$tmp_dir/src/snake-case.md"
+printf '%s\n' 'The Pqueue type is public.' >"$tmp_dir/src/camelcase.md"
+printf '%s\n' 'The EmbeddedPqueue type is public.' >"$tmp_dir/src/embedded-camelcase.md"
+printf '%s\n' 'Set PQUEUE_PG_URL before running.' >"$tmp_dir/src/uppercase.md"
+printf '%s\n' 'Queueyard is the public product name.' >"$tmp_dir/src/queueyard.md"
+printf '%s\n' 'Clone https://github.com/telepathdata/7thsense-pqueue.git.' >"$tmp_dir/src/repository.md"
+printf '%s\n' 'Send PQ.CLAIM over RESP.' >"$tmp_dir/src/resp-uppercase.md"
+printf '%s\n' 'No PQ* extension commands are required.' >"$tmp_dir/src/resp-prefix.md"
+printf '%s\n' "ERR wrong number of arguments for 'pq.mget'" >"$tmp_dir/src/resp-lowercase.md"
+printf '%s\n' 'Set the pq-tenant-id header.' >"$tmp_dir/src/short-prefix.md"
+printf '%s\n' 'use pqueue_core::QueueId;' >"$tmp_dir/crates/fireweed-core/src/lib.rs"
+printf '%s\n' '[package]' 'name = "pqueue-core"' >"$tmp_dir/crates/fireweed-core/Cargo.toml"
+printf '%s\n' 'Current identity is Fireweed.' >"$tmp_dir/src/fireweed.md"
+printf '%s\n' 'Audit item pqueue-a997391c is immutable.' >"$tmp_dir/src/bead-id.md"
+printf '%s\n' 'This longer pqueue-a997391c-alias is not an immutable bead ID.' >"$tmp_dir/src/bead-prefix.md"
+printf '%s\n' 'No content residue.' >"$tmp_dir/src/old-pqueue-path.md"
 
 expect_rejects "src/lowercase.md" "lowercase"
+expect_rejects "src/snake-case.md" "snake-case"
+expect_rejects "src/camelcase.md" "camelcase"
+expect_rejects "src/embedded-camelcase.md" "embedded-camelcase"
 expect_rejects "src/uppercase.md" "uppercase"
 expect_rejects "src/queueyard.md" "queueyard"
 expect_rejects "src/repository.md" "repository"
-
-cat >"$tmp_dir/crates/fireweed-core/src/lib.rs" <<'EOF'
-use pqueue_core::QueueId;
-EOF
-cat >"$tmp_dir/crates/fireweed-core/Cargo.toml" <<'EOF'
-[package]
-name = "pqueue-core"
-version = "0.20.0"
-EOF
-
-# The broad Rust-runtime allowlist permits retained protocol, persistence, and
-# audit tokens under crates/fireweed*. These two fixtures prove the dedicated
-# namespace layer still rejects old Rust imports and Cargo package names there.
+expect_rejects "src/resp-uppercase.md" "resp-uppercase"
+expect_rejects "src/resp-prefix.md" "resp-prefix"
+expect_rejects "src/resp-lowercase.md" "resp-lowercase"
+expect_rejects "src/short-prefix.md" "short-prefix"
 expect_rejects "crates/fireweed-core/src/lib.rs" "rust-namespace"
 expect_rejects "crates/fireweed-core/Cargo.toml" "cargo-namespace"
+expect_rejects "src/bead-prefix.md" "bead-prefix"
+expect_rejects "src/old-pqueue-path.md" "path-residue"
+expect_accepts "src/fireweed.md" "fireweed"
+expect_accepts "src/bead-id.md" "immutable-bead-id"
 
-cat >"$tmp_dir/crates/fireweed-server/Cargo.toml" <<'EOF'
-[package]
-name = "pqueue-service"
-version = "0.20.0"
-EOF
-expect_rejects "crates/fireweed-server/Cargo.toml" "binary-alias-outside-bin"
+# Exact historical paths may retain only the token classes declared for them.
+printf '%s\n' 'ADR-020 records the old pqueue namespace.' \
+    >"$tmp_dir/docs/helix/02-design/adr/ADR-020-public-namespace-and-compatibility.md"
+expect_accepts \
+    "docs/helix/02-design/adr/ADR-020-public-namespace-and-compatibility.md" \
+    "exact-historical-path"
 
-cat >"$tmp_dir/crates/fireweed-release/src/lib.rs" <<'EOF'
-fn legacy_only() { let _ = std::env::var("PQUEUE_LEDGER_DIR"); }
-EOF
-expect_rejects "crates/fireweed-release/src/lib.rs" "runtime-env-without-primary"
+printf '%s\n' 'An unrelated document may not claim the pqueue exception.' \
+    >"$tmp_dir/docs/helix/02-design/adr/unapproved-history.md"
+expect_rejects \
+    "docs/helix/02-design/adr/unapproved-history.md" \
+    "adjacent-history-path"
 
-cat >"$tmp_dir/crates/fireweed-release/Cargo.toml" <<'EOF'
-[package]
-name = "fireweed-release"
-version = "0.20.0"
-[[bin]]
-name = "pqueue-verify-ledger"
-path = "src/bin/fireweed-verify-ledger.rs"
-EOF
-cat >"$tmp_dir/crates/fireweed-release/src/lib.rs" <<'EOF'
-fn compatible() {
-    let _ = std::env::var("FIREWEED_LEDGER_DIR")
-        .or_else(|_| std::env::var("PQUEUE_LEDGER_DIR"));
-}
-EOF
+# The negative compile fixtures are exact exceptions; copying one elsewhere is not.
+printf '%s\n' 'use fireweed::Pqueue;' \
+    >"$tmp_dir/scripts/ci/fixtures/public-crate-boundary/src/rejected_retired_generic_facade.rs"
+expect_accepts \
+    "scripts/ci/fixtures/public-crate-boundary/src/rejected_retired_generic_facade.rs" \
+    "exact-negative-fixture"
 
-cat >"$tmp_dir/charts/fireweed-queue/templates/deployment.yaml" <<'EOF'
-app.kubernetes.io/name: pqueue
-EOF
-expect_rejects "charts/fireweed-queue/templates/deployment.yaml" "deployment-namespace"
+printf '%s\n' 'use fireweed::Pqueue;' >"$tmp_dir/src/copied-negative.rs"
+expect_rejects "src/copied-negative.rs" "copied-negative-fixture"
 
-cat >"$tmp_dir/.github/workflows/stale-command.yml" <<'EOF'
-steps:
-  - run: cargo test -p pqueue-server
-EOF
-expect_rejects ".github/workflows/stale-command.yml" "operational-namespace"
+# Schema v2 cannot express a broad subtree exception or a compatibility class.
+printf '%s\n' \
+    '{"schema":"fireweed-public-identity-allowlist-v2","adr":"ADR-023","entries":[{"id":"broad","class":"historical/audit","reason":"test","owner_surface":"test","removal_condition":"test","paths":["docs/*"],"match_pattern":"pqueue"}]}' \
+    >"$tmp_dir/broad-allowlist.json"
+expect_allowlist_rejects "$tmp_dir/broad-allowlist.json" "broad-path"
 
-cat >"$tmp_dir/docs/helix/history/queueyard.md" <<'EOF'
-Queueyard remains in naming-analysis history for audit traceability.
-EOF
-cat >"$tmp_dir/docs/deployment/persistence.md" <<'EOF'
-The persisted path /var/lib/pqueue/object-log and compatibility variable PQUEUE_OBJECT_LOG_DIR remain documented.
-EOF
+printf '%s\n' \
+    '{"schema":"fireweed-public-identity-allowlist-v2","adr":"ADR-023","entries":[{"id":"compat","class":"temporary compatibility","reason":"test","owner_surface":"test","removal_condition":"test","paths":["src/fireweed.md"],"match_pattern":"pqueue"}]}' \
+    >"$tmp_dir/compatibility-allowlist.json"
+expect_allowlist_rejects "$tmp_dir/compatibility-allowlist.json" "compatibility-class"
 
-approved_list="$tmp_dir/approved-files.txt"
-write_file_list "$approved_list" \
-    "docs/helix/history/queueyard.md" \
-    "docs/deployment/persistence.md" \
-    "crates/fireweed-release/Cargo.toml" \
-    "crates/fireweed-release/src/lib.rs"
-"$script_dir/verify-public-identity.sh" --root "$tmp_dir" --files-from "$approved_list" >/dev/null
-
-"$script_dir/verify-public-identity.sh" >/dev/null
-git -C "$repo_root" diff --check
-
-echo "public identity residue verifier tests passed"
+echo "public identity residue verifier focused tests passed"

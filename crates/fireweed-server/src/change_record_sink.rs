@@ -162,7 +162,7 @@ where
 
     fn supports_change_record_emission_cursor(&self) -> bool {
         self.backend_for_queue(&QueueKey::new(
-            fireweed_core::TenantId::new("pqueue-internal").expect("valid tenant"),
+            fireweed_core::TenantId::new("fireweed-internal").expect("valid tenant"),
             fireweed_core::QueueId::new("emission-capability").expect("valid queue"),
         ))
         .supports_change_record_emission_cursor()
@@ -234,8 +234,8 @@ fn build_delivery_request(
     write_request_line(&mut request, endpoint, body.len())?;
     write_header(&mut request, "Content-Type", "application/json")?;
     write_header(&mut request, "Connection", "close")?;
-    write_header(&mut request, "X-Pqueue-Tenant", shard.tenant_id.as_str())?;
-    write_header(&mut request, "X-Pqueue-Queue", shard.queue_id.as_str())?;
+    write_header(&mut request, "X-Fireweed-Tenant", shard.tenant_id.as_str())?;
+    write_header(&mut request, "X-Fireweed-Queue", shard.queue_id.as_str())?;
     for (name, value) in headers {
         write_header(&mut request, name, value)?;
     }
@@ -302,32 +302,35 @@ fn change_record_key(record: &fireweed_engine::ChangeRecord) -> String {
 }
 
 /// The ADR-014 "Normative consumer contract" change-record headers, in the PINNED wire order
-/// (ADR-014:116): `pq-tenant-id`, `pq-queue-id`, `pq-item-id`, `pq-backend-epoch`, `pq-sequence`,
-/// `pq-command-kind`. Kafka headers are an ordered list and the order is part of the consumer contract, so
-/// `pq-item-id` sits in its pinned position (third) when present and is omitted only for queue-scoped
+/// (ADR-014:116): `fireweed-tenant-id`, `fireweed-queue-id`, `fireweed-item-id`, `fireweed-backend-epoch`, `fireweed-sequence`,
+/// `fireweed-command-kind`. Kafka headers are an ordered list and the order is part of the consumer contract, so
+/// `fireweed-item-id` sits in its pinned position (third) when present and is omitted only for queue-scoped
 /// records. This is the SINGLE source of truth for header key/value/order shared by the in-process embedded
 /// encoder and the external-Kafka producer path.
 fn change_record_headers(record: &fireweed_engine::ChangeRecord) -> Vec<(&'static str, Vec<u8>)> {
     let mut headers = vec![
         (
-            "pq-tenant-id",
+            "fireweed-tenant-id",
             record.tenant_id.as_str().as_bytes().to_vec(),
         ),
-        ("pq-queue-id", record.queue_id.as_str().as_bytes().to_vec()),
+        (
+            "fireweed-queue-id",
+            record.queue_id.as_str().as_bytes().to_vec(),
+        ),
     ];
     if let Some(item_id) = record.item_id {
-        headers.push(("pq-item-id", item_id.to_string().into_bytes()));
+        headers.push(("fireweed-item-id", item_id.to_string().into_bytes()));
     }
     headers.push((
-        "pq-backend-epoch",
+        "fireweed-backend-epoch",
         record.position.backend_epoch.to_string().into_bytes(),
     ));
     headers.push((
-        "pq-sequence",
+        "fireweed-sequence",
         record.position.sequence.to_string().into_bytes(),
     ));
     headers.push((
-        "pq-command-kind",
+        "fireweed-command-kind",
         change_record_kind_wire_value(record.command_kind)
             .as_bytes()
             .to_vec(),
@@ -338,7 +341,7 @@ fn change_record_headers(record: &fireweed_engine::ChangeRecord) -> Vec<(&'stati
 /// Encode a batch of change records as a single Kafka v2 record batch (partition 0), the exact wire form
 /// `heimq_broker::storage::RecordBatchView::from_bytes` decodes and `FjordLog::append` stores. Each record
 /// carries the ADR-014 "Normative consumer contract" shape: key `"{item_id}:{backend_epoch}:{sequence}"`,
-/// the pinned `pq-*` headers, and the TD-008 `ChangeRecord` JSON as the payload.
+/// the pinned `fireweed-*` headers, and the TD-008 `ChangeRecord` JSON as the payload.
 fn encode_change_record_batch(records: &[fireweed_engine::ChangeRecord]) -> EngineResult<Vec<u8>> {
     let mut kafka_records = Vec::with_capacity(records.len());
     for (index, record) in records.iter().enumerate() {
@@ -1470,8 +1473,8 @@ mod tests {
             .expect("request should build");
         let request = String::from_utf8(request).expect("request should be utf8");
         assert!(request.contains("POST /ingest HTTP/1.1"));
-        assert!(request.contains("X-Pqueue-Tenant: tenant-a"));
-        assert!(request.contains("X-Pqueue-Queue: queue-a"));
+        assert!(request.contains("X-Fireweed-Tenant: tenant-a"));
+        assert!(request.contains("X-Fireweed-Queue: queue-a"));
         assert!(request.contains("authorization: Bearer test"));
         assert!(request.contains("x-custom-header: custom-value"));
     }
@@ -1510,12 +1513,12 @@ mod tests {
 
         let headers = change_record_headers(&record);
         let command_kind = &headers[4];
-        assert_eq!(command_kind.0, "pq-command-kind");
+        assert_eq!(command_kind.0, "fireweed-command-kind");
         assert_eq!(command_kind.1, b"pause-queue".to_vec());
     }
 
     #[test]
-    fn record_key_includes_pq_item_id() {
+    fn record_key_includes_fireweed_item_id() {
         let shard = QueueKey::new(
             fireweed_core::TenantId::new("tenant-a").unwrap(),
             fireweed_core::QueueId::new("queue-a").unwrap(),
@@ -1550,29 +1553,29 @@ mod tests {
         assert_eq!(
             keys,
             vec![
-                "pq-tenant-id",
-                "pq-queue-id",
-                "pq-item-id",
-                "pq-backend-epoch",
-                "pq-sequence",
-                "pq-command-kind",
+                "fireweed-tenant-id",
+                "fireweed-queue-id",
+                "fireweed-item-id",
+                "fireweed-backend-epoch",
+                "fireweed-sequence",
+                "fireweed-command-kind",
             ]
         );
-        let pq_item_id = &headers_with_item[2];
-        assert_eq!(pq_item_id.0, "pq-item-id");
-        assert_eq!(pq_item_id.1, b"17".to_vec());
+        let fireweed_item_id = &headers_with_item[2];
+        assert_eq!(fireweed_item_id.0, "fireweed-item-id");
+        assert_eq!(fireweed_item_id.1, b"17".to_vec());
 
-        // Queue-scoped record: pq-item-id omitted entirely, the rest keep their pinned order.
+        // Queue-scoped record: fireweed-item-id omitted entirely, the rest keep their pinned order.
         let headers_without_item = change_record_headers(&without_item);
         let keys_without: Vec<&str> = headers_without_item.iter().map(|(k, _)| *k).collect();
         assert_eq!(
             keys_without,
             vec![
-                "pq-tenant-id",
-                "pq-queue-id",
-                "pq-backend-epoch",
-                "pq-sequence",
-                "pq-command-kind",
+                "fireweed-tenant-id",
+                "fireweed-queue-id",
+                "fireweed-backend-epoch",
+                "fireweed-sequence",
+                "fireweed-command-kind",
             ]
         );
     }
@@ -1663,21 +1666,21 @@ mod tests {
         let decoded: fireweed_engine::ChangeRecord =
             serde_json::from_slice(record_view.value.expect("payload")).expect("json");
         assert_eq!(decoded, record);
-        // Headers: the pinned pq-* order.
+        // Headers: the pinned fireweed-* order.
         let headers: Vec<(String, Option<Vec<u8>>)> = record_view
             .headers()
             .map(|(k, v)| (k.to_string(), v.map(|b| b.to_vec())))
             .collect();
-        // ADR-014:116 pinned wire order: pq-item-id sits third (before backend-epoch/sequence/command-kind).
+        // ADR-014:116 pinned wire order: fireweed-item-id sits third (before backend-epoch/sequence/command-kind).
         assert_eq!(
             headers,
             vec![
-                ("pq-tenant-id".to_string(), Some(b"tenant-a".to_vec())),
-                ("pq-queue-id".to_string(), Some(b"queue-a".to_vec())),
-                ("pq-item-id".to_string(), Some(b"17".to_vec())),
-                ("pq-backend-epoch".to_string(), Some(b"9".to_vec())),
-                ("pq-sequence".to_string(), Some(b"3".to_vec())),
-                ("pq-command-kind".to_string(), Some(b"push".to_vec())),
+                ("fireweed-tenant-id".to_string(), Some(b"tenant-a".to_vec())),
+                ("fireweed-queue-id".to_string(), Some(b"queue-a".to_vec())),
+                ("fireweed-item-id".to_string(), Some(b"17".to_vec())),
+                ("fireweed-backend-epoch".to_string(), Some(b"9".to_vec())),
+                ("fireweed-sequence".to_string(), Some(b"3".to_vec())),
+                ("fireweed-command-kind".to_string(), Some(b"push".to_vec())),
             ]
         );
     }
@@ -2270,8 +2273,8 @@ mod tests {
         let (head, body) = request
             .split_once("\r\n\r\n")
             .expect("request should include headers and body");
-        assert!(head.contains("X-Pqueue-Tenant: tenant-a"));
-        assert!(head.contains("X-Pqueue-Queue: queue-a"));
+        assert!(head.contains("X-Fireweed-Tenant: tenant-a"));
+        assert!(head.contains("X-Fireweed-Queue: queue-a"));
         let parsed: Vec<fireweed_engine::ChangeRecord> =
             serde_json::from_str(body).expect("request body should be valid json");
         assert_eq!(parsed, records);

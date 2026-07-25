@@ -1,23 +1,23 @@
 //! TD-004 **production** object-log substrate: configurable group-commit segments on an S3-compatible
 //! store, ack withheld until segment+manifest commit, manifest-CAS epoch fencing, and release-measurable
 //! segment/object counters. The in-memory store exercises the whole pipeline with NO network; the MinIO
-//! integration test (env-gated on `PQUEUE_S3_TEST_ENDPOINT`) runs the SAME flow against a real S3 endpoint.
+//! integration test (env-gated on `FIREWEED_S3_TEST_ENDPOINT`) runs the SAME flow against a real S3 endpoint.
 //!
 //! ## Running the MinIO integration test (orbstack networking)
 //!
 //! ```text
-//! docker run -d --name pqueue-minio -e MINIO_ROOT_USER=minioadmin \
+//! docker run -d --name fireweed-minio -e MINIO_ROOT_USER=minioadmin \
 //!     -e MINIO_ROOT_PASSWORD=minioadmin minio/minio server /data
-//! IP=$(docker inspect pqueue-minio --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
-//! PQUEUE_S3_TEST_ENDPOINT="http://$IP:9000" \
+//! IP=$(docker inspect fireweed-minio --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+//! FIREWEED_S3_TEST_ENDPOINT="http://$IP:9000" \
 //!     cargo test -p fireweed-objectlog --test segmented_s3_substrate_tests \
 //!     segmented_object_log_commits_through_minio -- --nocapture
 //! ```
 //!
 //! This host CANNOT reach docker *published* ports (`localhost:9000` fails in the orbstack namespace), so the
-//! container IP must be used directly. Optional overrides: `PQUEUE_S3_TEST_BUCKET` (default `pqueue-test`),
-//! `PQUEUE_S3_TEST_ACCESS_KEY` / `PQUEUE_S3_TEST_SECRET_KEY` (default `minioadmin`). Absent the endpoint env,
-//! the test prints a LOUD skip and returns green (mirroring the postgres `PQUEUE_PG_TEST_URL` gate).
+//! container IP must be used directly. Optional overrides: `FIREWEED_S3_TEST_BUCKET` (default `fireweed-test`),
+//! `FIREWEED_S3_TEST_ACCESS_KEY` / `FIREWEED_S3_TEST_SECRET_KEY` (default `minioadmin`). Absent the endpoint env,
+//! the test prints a LOUD skip and returns green (mirroring the postgres `FIREWEED_PG_TEST_URL` gate).
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -3072,7 +3072,7 @@ fn counters_surface_emits_a_release_ledger_row() {
         seed: 0,
         environment:
             "in-memory BlobStore substrate (no network); group-commit segments, manifest-CAS epoch fence; \
-             the live MinIO run is gated on PQUEUE_S3_TEST_ENDPOINT"
+             the live MinIO run is gated on FIREWEED_S3_TEST_ENDPOINT"
                 .into(),
         exit_status: 0,
         ac_ids: vec![],
@@ -3100,24 +3100,27 @@ fn counters_surface_emits_a_release_ledger_row() {
     assert!(summary.smoke_evidence_ids.contains("E3"));
 }
 
-/// LIVE MinIO integration (env-gated on `PQUEUE_S3_TEST_ENDPOINT`; LOUD skip otherwise). Runs the full
+/// LIVE MinIO integration (env-gated on `FIREWEED_S3_TEST_ENDPOINT`; LOUD skip otherwise). Runs the full
 /// substrate against a real S3-compatible endpoint: group-commit segments, ack-after-manifest-commit, the
 /// create-only manifest CAS, the epoch fence, recovery, and the measured counters.
 #[test]
 fn segmented_object_log_commits_through_minio() {
-    let Ok(endpoint) = std::env::var("PQUEUE_S3_TEST_ENDPOINT") else {
+    let Ok(endpoint) = std::env::var("FIREWEED_S3_TEST_ENDPOINT") else {
         eprintln!(
             "\n================================================================\n\
              MINIO INTEGRATION SKIPPED (segmented_object_log_commits_through_minio)\n\
-             set PQUEUE_S3_TEST_ENDPOINT=http://<container-ip>:9000 to run it.\n\
+             set FIREWEED_S3_TEST_ENDPOINT=http://<container-ip>:9000 to run it.\n\
              (this host cannot reach docker PUBLISHED ports; use the container IP)\n\
              ================================================================\n"
         );
         return;
     };
-    let bucket = std::env::var("PQUEUE_S3_TEST_BUCKET").unwrap_or_else(|_| "pqueue-test".into());
-    let access = std::env::var("PQUEUE_S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into());
-    let secret = std::env::var("PQUEUE_S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into());
+    let bucket =
+        std::env::var("FIREWEED_S3_TEST_BUCKET").unwrap_or_else(|_| "fireweed-test".into());
+    let access =
+        std::env::var("FIREWEED_S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into());
+    let secret =
+        std::env::var("FIREWEED_S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into());
 
     let s3 = S3BlobStore::new(&endpoint, &bucket, &access, &secret, "us-east-1").unwrap();
     s3.create_bucket().expect("create/ensure bucket");
@@ -7401,11 +7404,11 @@ fn TestPartialExpireVisibilityDecisionReadRecoveryBootstrapCompatibility() {
     TestManifestDeletionWatermarkStorageLegacyBootstrap();
 }
 
-/// TestObjectlogPqueueC33c367eReleaseNote: the release-note claim about pqueue-c33c367e is backed by the
+/// TestObjectlogFireweedC33c367eReleaseNote: the release-note claim about pqueue-c33c367e is backed by the
 /// documented owner-fence evaluation test.
 #[test]
 #[allow(non_snake_case)]
-fn TestObjectlogPqueueC33c367eReleaseNote() {
+fn TestObjectlogFireweedC33c367eReleaseNote() {
     TestManifestWatermarkReadPathOwnerFenceEvaluationDocumented();
 }
 
@@ -8819,7 +8822,7 @@ fn TestObjectlogRetainedFloorHeadReplayStillSucceeds() {
     );
 }
 
-/// TestObjectlogPqueueC33c367eInteractionRecorded: pqueue-c33c367e interaction is evaluated before
+/// TestObjectlogFireweedC33c367eInteractionRecorded: pqueue-c33c367e interaction is evaluated before
 /// landing and the objectlog-specific conclusion is recorded for release notes handoff. The deferred
 /// server-side owner-fence wiring (pqueue-c33c367e) does not change the deleted-manifest fail-closed
 /// signal at the objectlog level — the signal is gated on the durable retention floor and manifest
@@ -8827,7 +8830,7 @@ fn TestObjectlogRetainedFloorHeadReplayStillSucceeds() {
 /// remains the stale-writer fence; the watermark is a read-cost helper, not an ownership fence.
 #[test]
 #[allow(non_snake_case)]
-fn TestObjectlogPqueueC33c367eInteractionRecorded() {
+fn TestObjectlogFireweedC33c367eInteractionRecorded() {
     // Verify the existing owner-fence independence test is wired through.
     TestDeletionWatermarkOwnerFenceIndependence();
     // Also verify the test that asserts the fail-closed signal is distinct.

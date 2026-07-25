@@ -3,13 +3,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use fireweed::{
-    CohortOnIncomplete, CohortPolicy, CreateQueue, EligibilityPolicy, EmbeddedDurabilityConfig,
-    EmbeddedObjectLogConfig, EmbeddedProjectionConfig, EmbeddedRecoveryPolicy,
-    EmbeddedResponseBarrier, EmbeddedSegmentConfig, EnsureQueueError, EntitySchemaDocument,
-    Fireweed, GateKeyPolicy, IndexDeclaration, IndexDef, IndexSpec, IndexType, MetadataValue,
-    OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker,
-    QueueCreationPolicy, QueueDefinition, QueueId, QueueIndex, QueueKey, QueueTemplate,
-    RecurrenceMode, RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp,
+    CohortOnIncomplete, CohortPolicy, CommitResponseBarrier, ComposedStorageConfig, CreateQueue,
+    EligibilityPolicy, EnsureQueueError, EntitySchemaDocument, Fireweed, GateKeyPolicy,
+    IndexDeclaration, IndexDef, IndexSpec, IndexType, MetadataValue, ObjectLogConfig, OrderingMode,
+    PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker,
+    ProjectionRecoveryPolicy, ProjectionStoreConfig, QueueCreationPolicy, QueueDefinition, QueueId,
+    QueueIndex, QueueKey, QueueTemplate, RecurrenceMode, RecurrencePolicy, RetryPolicy,
+    SegmentSettings, TenantId, UtcTimestamp,
 };
 use fireweed_memory::ManualClock;
 
@@ -218,12 +218,12 @@ fn template_discards_prototype_identity_and_diagnostics_are_not_identity() {
 #[tokio::test]
 async fn memory_ensure_is_exact_typed_and_field_complete() {
     let queue = key("tenant", "queue");
-    let pqueue = fireweed::open_memory(Arc::new(ManualClock::at(10)));
-    let first = pqueue.ensure_queue(&queue, &template()).await.unwrap();
+    let fireweed = fireweed::open_memory(Arc::new(ManualClock::at(10)));
+    let first = fireweed.ensure_queue(&queue, &template()).await.unwrap();
     assert!(first.created);
     assert_eq!(first.template_name.as_deref(), Some("workers"));
     assert_eq!(first.template_revision.as_deref(), Some("2026-07"));
-    let second = pqueue.ensure_queue(&queue, &template()).await.unwrap();
+    let second = fireweed.ensure_queue(&queue, &template()).await.unwrap();
     assert!(!second.created);
     assert_eq!(second.definition, first.definition);
 
@@ -235,7 +235,7 @@ async fn memory_ensure_is_exact_typed_and_field_complete() {
         .with_name("drift")
         .with_revision("2");
         let desired = desired_template.resolve(&queue).unwrap();
-        match pqueue.ensure_queue(&queue, &desired_template).await {
+        match fireweed.ensure_queue(&queue, &desired_template).await {
             Err(EnsureQueueError::DefinitionConflict {
                 created,
                 desired: reported_desired,
@@ -257,14 +257,14 @@ async fn memory_ensure_is_exact_typed_and_field_complete() {
 #[tokio::test]
 async fn validation_and_policy_divergence_are_caller_visible() {
     let queue = key("tenant", "validation");
-    let pqueue = fireweed::open_memory(Arc::new(ManualClock::at(10)));
+    let fireweed = fireweed::open_memory(Arc::new(ManualClock::at(10)));
     let mut invalid = rich_create();
     invalid.progress_bound_ms = 0;
     let invalid = QueueTemplate::new(invalid, QueueCreationPolicy::default())
         .with_name("invalid")
         .with_revision("1");
     assert!(matches!(
-        pqueue.ensure_queue(&queue, &invalid).await,
+        fireweed.ensure_queue(&queue, &invalid).await,
         Err(EnsureQueueError::Validation {
             template_name,
             template_revision,
@@ -281,7 +281,10 @@ async fn validation_and_policy_divergence_are_caller_visible() {
         default_max_gates_per_request: 5,
     };
     let first_template = QueueTemplate::new(policy_create.clone(), first_policy);
-    let created = pqueue.ensure_queue(&queue, &first_template).await.unwrap();
+    let created = fireweed
+        .ensure_queue(&queue, &first_template)
+        .await
+        .unwrap();
     assert!(created.created);
     let other_template = QueueTemplate::new(
         policy_create,
@@ -291,7 +294,7 @@ async fn validation_and_policy_divergence_are_caller_visible() {
         },
     );
     assert!(matches!(
-        pqueue.ensure_queue(&queue, &other_template).await,
+        fireweed.ensure_queue(&queue, &other_template).await,
         Err(EnsureQueueError::DefinitionConflict {
             created: false,
             desired,
@@ -301,8 +304,8 @@ async fn validation_and_policy_divergence_are_caller_visible() {
     ));
 }
 
-async fn assert_ensure(pqueue: &Fireweed, queue: &QueueKey, created: bool) {
-    let outcome = pqueue.ensure_queue(queue, &template()).await.unwrap();
+async fn assert_ensure(fireweed: &Fireweed, queue: &QueueKey, created: bool) {
+    let outcome = fireweed.ensure_queue(queue, &template()).await.unwrap();
     assert_eq!(outcome.created, created);
     assert_eq!(outcome.definition, template().resolve(queue).unwrap());
 }
@@ -356,46 +359,46 @@ async fn durable_public_constructors_reopen_idempotently() {
     assert_ensure(&handle, &queue, false).await;
     drop(handle);
 
-    let embedded_root = temporary_path("embedded-root");
-    let embedded_sqlite = temporary_path("embedded.sqlite");
-    let embedded_config = embedded_config(&embedded_root, &embedded_sqlite);
+    let composed_root = temporary_path("composed-root");
+    let composed_sqlite = temporary_path("composed.sqlite");
+    let composed_config = composed_config(&composed_root, &composed_sqlite);
     let handle =
-        fireweed::open_embedded_sqlite(embedded_config.clone(), Arc::new(ManualClock::at(10)))
+        fireweed::open_composed_sqlite(composed_config.clone(), Arc::new(ManualClock::at(10)))
             .unwrap();
     assert_ensure(&handle, &queue, true).await;
     drop(handle);
     let handle =
-        fireweed::open_embedded_sqlite(embedded_config, Arc::new(ManualClock::at(20))).unwrap();
+        fireweed::open_composed_sqlite(composed_config, Arc::new(ManualClock::at(20))).unwrap();
     assert_ensure(&handle, &queue, false).await;
     drop(handle);
 
     std::fs::remove_file(sqlite).unwrap();
     std::fs::remove_file(relational).unwrap();
     std::fs::remove_dir_all(objectlog).unwrap();
-    std::fs::remove_dir_all(embedded_root).unwrap();
-    std::fs::remove_file(embedded_sqlite).unwrap();
+    std::fs::remove_dir_all(composed_root).unwrap();
+    std::fs::remove_file(composed_sqlite).unwrap();
 }
 
-fn embedded_config(root: &Path, sqlite: &Path) -> EmbeddedDurabilityConfig {
-    EmbeddedDurabilityConfig {
-        object_log: EmbeddedObjectLogConfig::Local {
+fn composed_config(root: &Path, sqlite: &Path) -> ComposedStorageConfig {
+    ComposedStorageConfig {
+        object_log: ObjectLogConfig::Local {
             root: root.to_path_buf(),
         },
-        projection: EmbeddedProjectionConfig::Sqlite {
+        projection: ProjectionStoreConfig::Sqlite {
             path: sqlite.to_path_buf(),
         },
-        response_barrier: EmbeddedResponseBarrier::Strict,
-        segments: EmbeddedSegmentConfig::new(64 * 1024, 5).unwrap(),
+        response_barrier: CommitResponseBarrier::Strict,
+        segments: SegmentSettings::new(64 * 1024, 5).unwrap(),
         namespace: "queue-template-reopen".to_string(),
-        recovery: EmbeddedRecoveryPolicy::default(),
+        recovery: ProjectionRecoveryPolicy::default(),
     }
 }
 
 #[cfg(feature = "postgres")]
 #[test]
-fn postgres_public_constructors_and_embedded_reopen_idempotently() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
-        eprintln!("queue template PostgreSQL checks skipped: PQUEUE_PG_TEST_URL is unset");
+fn postgres_public_constructors_and_composed_reopen_idempotently() {
+    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
+        eprintln!("queue template PostgreSQL checks skipped: FIREWEED_PG_TEST_URL is unset");
         return;
     };
     let nonce = std::time::SystemTime::now()
@@ -423,26 +426,28 @@ fn postgres_public_constructors_and_embedded_reopen_idempotently() {
     futures::executor::block_on(assert_ensure(&handle, &coordinated_queue, false));
     drop(handle);
 
-    let embedded_root = temporary_path("embedded-postgres-root");
-    let embedded_config = EmbeddedDurabilityConfig {
-        object_log: EmbeddedObjectLogConfig::Local {
-            root: embedded_root.clone(),
+    let composed_root = temporary_path("composed-postgres-root");
+    let composed_config = ComposedStorageConfig {
+        object_log: ObjectLogConfig::Local {
+            root: composed_root.clone(),
         },
-        projection: EmbeddedProjectionConfig::Postgres {
-            url: fireweed::EmbeddedSecret::new(url),
+        projection: ProjectionStoreConfig::Postgres {
+            url: fireweed::SecretValue::new(url),
         },
-        response_barrier: EmbeddedResponseBarrier::Strict,
-        segments: EmbeddedSegmentConfig::new(64 * 1024, 5).unwrap(),
+        response_barrier: CommitResponseBarrier::Strict,
+        segments: SegmentSettings::new(64 * 1024, 5).unwrap(),
         namespace: format!("queue-template-{nonce}"),
-        recovery: EmbeddedRecoveryPolicy::default(),
+        recovery: ProjectionRecoveryPolicy::default(),
     };
-    let embedded_queue = key("template-live", &format!("embedded-{nonce}"));
+    let composed_queue = key("template-live", &format!("composed-{nonce}"));
     let handle =
-        fireweed::open_embedded(embedded_config.clone(), Arc::new(ManualClock::at(10))).unwrap();
-    futures::executor::block_on(assert_ensure(&handle, &embedded_queue, true));
+        fireweed::open_composed_postgres(composed_config.clone(), Arc::new(ManualClock::at(10)))
+            .unwrap();
+    futures::executor::block_on(assert_ensure(&handle, &composed_queue, true));
     drop(handle);
-    let handle = fireweed::open_embedded(embedded_config, Arc::new(ManualClock::at(20))).unwrap();
-    futures::executor::block_on(assert_ensure(&handle, &embedded_queue, false));
+    let handle =
+        fireweed::open_composed_postgres(composed_config, Arc::new(ManualClock::at(20))).unwrap();
+    futures::executor::block_on(assert_ensure(&handle, &composed_queue, false));
     drop(handle);
-    std::fs::remove_dir_all(embedded_root).unwrap();
+    std::fs::remove_dir_all(composed_root).unwrap();
 }

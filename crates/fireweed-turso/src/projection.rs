@@ -269,7 +269,7 @@ async fn validation_rows_by_item(
         .collect::<Vec<_>>()
         .join(",");
     let query = format!(
-        "SELECT item_id,{columns} FROM pqueue_items \
+        "SELECT item_id,{columns} FROM fireweed_items \
          WHERE tenant_id=?1 AND queue_id=?2 AND item_id IN ({placeholders})"
     );
     let mut params = Vec::with_capacity(ids.len() + 2);
@@ -369,7 +369,7 @@ async fn insert_push_items_batched(
         transaction
             .execute(
                 format!(
-                    "INSERT INTO pqueue_items ({COLUMNS}) VALUES {}",
+                    "INSERT INTO fireweed_items ({COLUMNS}) VALUES {}",
                     vec![ROW; chunk.len()].join(",")
                 ),
                 parameters,
@@ -407,7 +407,7 @@ async fn insert_push_gates_batched(
         transaction
             .execute(
                 format!(
-                    "INSERT INTO pqueue_item_gates (tenant_id,queue_id,item_id,gate_key) \
+                    "INSERT INTO fireweed_item_gates (tenant_id,queue_id,item_id,gate_key) \
                      VALUES {} ON CONFLICT(tenant_id,queue_id,item_id,gate_key) DO NOTHING",
                     values_rows(chunk.len(), 4)
                 ),
@@ -471,7 +471,7 @@ async fn check_typed_unique_conflicts(
             transaction,
             &format!(
                 "WITH incoming(index_name,index_key) AS (VALUES {}) \
-                 SELECT 1 FROM pqueue_item_index existing JOIN incoming \
+                 SELECT 1 FROM fireweed_item_index existing JOIN incoming \
                  ON existing.index_name=incoming.index_name AND existing.index_key=incoming.index_key \
                  WHERE existing.tenant_id=? AND existing.queue_id=? LIMIT 1",
                 values_rows(chunk.len(), 2)
@@ -508,7 +508,7 @@ async fn insert_typed_index_rows(
         transaction
             .execute(
                 format!(
-                    "INSERT INTO pqueue_item_index \
+                    "INSERT INTO fireweed_item_index \
                      (tenant_id,queue_id,index_name,index_key,item_id) VALUES {} \
                      ON CONFLICT(tenant_id,queue_id,index_name,item_id) DO UPDATE SET \
                      index_key=excluded.index_key",
@@ -595,7 +595,7 @@ async fn maintain_typed_indexes_on_insert(
         parameters.push(queue.to_string().into());
         let query = format!(
             "WITH incoming(index_name,index_key) AS (VALUES {}) \
-             SELECT 1 FROM pqueue_item_index existing JOIN incoming \
+             SELECT 1 FROM fireweed_item_index existing JOIN incoming \
              ON existing.index_name=incoming.index_name AND existing.index_key=incoming.index_key \
              WHERE existing.tenant_id=? AND existing.queue_id=? LIMIT 1",
             values_rows(chunk.len(), 2)
@@ -626,7 +626,7 @@ async fn maintain_typed_indexes_on_insert(
         transaction
             .execute(
                 format!(
-                    "INSERT INTO pqueue_item_index \
+                    "INSERT INTO fireweed_item_index \
                      (tenant_id,queue_id,index_name,index_key,item_id) VALUES {} \
                      ON CONFLICT(tenant_id,queue_id,index_name,item_id) DO UPDATE SET \
                      index_key=excluded.index_key",
@@ -676,7 +676,7 @@ async fn upsert_cohorts(
             .query(
                 format!(
                     "SELECT group_key,cohort_size,member_count,state,retention_until \
-                     FROM pqueue_cohorts WHERE tenant_id=?1 AND queue_id=?2 \
+                     FROM fireweed_cohorts WHERE tenant_id=?1 AND queue_id=?2 \
                      AND group_key IN ({placeholders})"
                 ),
                 params,
@@ -765,7 +765,7 @@ async fn upsert_cohorts(
         transaction
             .execute(
                 format!(
-                    "INSERT INTO pqueue_cohorts \
+                    "INSERT INTO fireweed_cohorts \
                      (tenant_id,queue_id,group_key,cohort_id,cohort_size,member_count,state,\
                       cohort_created_at,first_eligible_at,created_at) VALUES {} \
                      ON CONFLICT(tenant_id,queue_id,group_key) DO UPDATE SET \
@@ -803,7 +803,7 @@ async fn upsert_cohorts(
             .execute(
                 format!(
                     "WITH updates(group_key,member_count,state,completed_at) AS (VALUES {}) \
-                     UPDATE pqueue_cohorts AS c SET member_count=u.member_count,state=u.state,\
+                     UPDATE fireweed_cohorts AS c SET member_count=u.member_count,state=u.state,\
                       first_eligible_at=CASE WHEN u.state='complete' AND c.first_eligible_at IS NULL \
                       THEN u.completed_at ELSE c.first_eligible_at END \
                      FROM updates AS u WHERE c.group_key=u.group_key \
@@ -826,7 +826,7 @@ async fn cohort_item_ids(
 ) -> EngineResult<(GroupKey, Vec<ItemId>)> {
     let row = one_row(
         transaction,
-        "SELECT group_key FROM pqueue_cohorts WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3",
+        "SELECT group_key FROM fireweed_cohorts WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3",
         vec![
             tenant.to_string().into(),
             queue.to_string().into(),
@@ -838,7 +838,7 @@ async fn cohort_item_ids(
     let group = GroupKey::new(text(&row[0])?).map_err(storage)?;
     let mut rows = transaction
         .query(
-            "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
+            "SELECT item_id FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
              AND superseded=0 AND cohort_size IS NOT NULL AND lifecycle_state NOT IN ('Complete','Failed') \
              ORDER BY priority_sort,created_seq",
             vec![
@@ -875,7 +875,7 @@ async fn groups_for_items(
         let mut rows = transaction
             .query(
                 format!(
-                    "SELECT DISTINCT group_key FROM pqueue_items WHERE tenant_id=? AND queue_id=? \
+                    "SELECT DISTINCT group_key FROM fireweed_items WHERE tenant_id=? AND queue_id=? \
                      AND group_key IS NOT NULL AND item_id IN ({})",
                     vec!["?"; chunk.len()].join(",")
                 ),
@@ -908,15 +908,15 @@ async fn refresh_group_summaries(
             "WITH target_input(group_key) AS (VALUES {target_rows}), \
              target AS (SELECT DISTINCT group_key FROM target_input), \
              eligible AS (SELECT i.group_key,i.eligible_since,i.priority_sort,i.created_at,i.item_id,i.created_seq \
-               FROM pqueue_items i JOIN target t ON t.group_key=i.group_key \
+               FROM fireweed_items i JOIN target t ON t.group_key=i.group_key \
                WHERE i.tenant_id=?1 AND i.queue_id=?2 AND i.lifecycle_state='Pending' AND i.superseded=0 \
                AND (i.not_before IS NULL OR i.not_before<=?3) AND NOT EXISTS (SELECT 1 \
-                 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id \
+                 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id \
                  AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=i.tenant_id \
                  AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id)), \
              ranked AS (SELECT *,ROW_NUMBER() OVER (PARTITION BY group_key ORDER BY priority_sort,created_seq) AS rn FROM eligible), \
              aggregate AS (SELECT group_key,COUNT(*) AS item_count,MIN(eligible_since) AS oldest FROM eligible GROUP BY group_key) \
-             INSERT INTO pqueue_group_summary \
+             INSERT INTO fireweed_group_summary \
              (tenant_id,queue_id,group_key,oldest_eligible_at,rep_progress_guard_sort,rep_priority_sort,\
               rep_created_at,rep_item_id,eligible_item_count,at_risk_count,updated_at) \
              SELECT ?1,?2,t.group_key,a.oldest,NULL,r.priority_sort,r.created_at,r.item_id,COALESCE(a.item_count,0),0,?3 \
@@ -961,13 +961,13 @@ async fn refresh_due_group_summaries(
 ) -> EngineResult<()> {
     let mut rows = transaction
         .query(
-            "SELECT DISTINCT i.group_key FROM pqueue_items i \
-             LEFT JOIN pqueue_group_summary gs ON gs.tenant_id=i.tenant_id \
+            "SELECT DISTINCT i.group_key FROM fireweed_items i \
+             LEFT JOIN fireweed_group_summary gs ON gs.tenant_id=i.tenant_id \
              AND gs.queue_id=i.queue_id AND gs.group_key=i.group_key \
              WHERE i.tenant_id=?1 AND i.queue_id=?2 AND i.lifecycle_state='Pending' \
              AND i.superseded=0 AND i.group_key IS NOT NULL AND i.eligible_since IS NOT NULL \
              AND (i.not_before IS NULL OR i.not_before<=?3) \
-             AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gstate \
+             AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gstate \
              ON gstate.tenant_id=ig.tenant_id AND gstate.queue_id=ig.queue_id \
              AND gstate.gate_key=ig.gate_key WHERE ig.tenant_id=i.tenant_id \
              AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id) \
@@ -1012,15 +1012,15 @@ async fn group_eligible_items(
     let mut rows = transaction
         .query(
             format!(
-                "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+                "SELECT item_id FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
                  AND group_key=?3 AND lifecycle_state='Pending' AND superseded=0 \
                  AND {cohort_predicate} AND (not_before IS NULL OR not_before<=?4) \
-                 AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
-                 JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id \
+                 AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
+                 JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id \
                  AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
-                 WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
-                 AND ig.item_id=pqueue_items.item_id) AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted \
-                 WHERE NOT EXISTS (SELECT 1 FROM json_each(pqueue_items.metadata) actual \
+                 WHERE ig.tenant_id=fireweed_items.tenant_id AND ig.queue_id=fireweed_items.queue_id \
+                 AND ig.item_id=fireweed_items.item_id) AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted \
+                 WHERE NOT EXISTS (SELECT 1 FROM json_each(fireweed_items.metadata) actual \
                    WHERE actual.key=wanted.key AND actual.value=wanted.value AND actual.type=wanted.type)) \
                  ORDER BY priority_sort,created_seq,item_id LIMIT ?5"
             ),
@@ -1064,28 +1064,28 @@ async fn select_group_batching(
             "WITH candidate_raw AS MATERIALIZED (SELECT s.group_key,e.priority_sort rep_priority_sort,\
                e.created_at rep_created_at,e.item_id rep_item_id,e.created_seq,ROW_NUMBER() OVER \
                (PARTITION BY s.group_key ORDER BY e.priority_sort,e.created_seq,e.item_id) rn \
-               FROM pqueue_group_summary s JOIN pqueue_items e ON e.tenant_id=?1 AND e.queue_id=?2 \
+               FROM fireweed_group_summary s JOIN fireweed_items e ON e.tenant_id=?1 AND e.queue_id=?2 \
                  AND e.group_key=s.group_key WHERE s.tenant_id=?1 AND s.queue_id=?2 \
                AND s.oldest_eligible_at IS NOT NULL AND e.lifecycle_state='Pending' AND e.superseded=0 \
                AND e.cohort_size IS NULL AND (e.not_before IS NULL OR e.not_before<=?3) \
-               AND e.eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
-                 JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+               AND e.eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
+                 JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
                  AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=e.tenant_id \
                  AND ig.queue_id=e.queue_id AND ig.item_id=e.item_id) \
                AND NOT EXISTS (SELECT 1 FROM json_each(?5) wanted WHERE NOT EXISTS \
                  (SELECT 1 FROM json_each(e.metadata) actual WHERE actual.key=wanted.key \
                   AND actual.value=wanted.value AND actual.type=wanted.type)) \
-               AND NOT EXISTS (SELECT 1 FROM pqueue_items leased WHERE leased.tenant_id=?1 \
+               AND NOT EXISTS (SELECT 1 FROM fireweed_items leased WHERE leased.tenant_id=?1 \
                  AND leased.queue_id=?2 AND leased.group_key=s.group_key AND leased.superseded=0 \
                  AND leased.cohort_size IS NULL AND leased.lifecycle_state='Leased')), \
              candidate AS MATERIALIZED (SELECT group_key,rep_priority_sort,rep_created_at,rep_item_id \
                FROM candidate_raw WHERE rn=1 ORDER BY rep_priority_sort,created_seq,rep_item_id,group_key LIMIT ?4), \
              eligible AS MATERIALIZED (SELECT c.group_key,c.rep_priority_sort,c.rep_created_at,\
                c.rep_item_id,i.item_id,i.priority_sort,i.created_seq FROM candidate c \
-               JOIN pqueue_items i ON i.tenant_id=?1 AND i.queue_id=?2 AND i.group_key=c.group_key \
+               JOIN fireweed_items i ON i.tenant_id=?1 AND i.queue_id=?2 AND i.group_key=c.group_key \
                WHERE i.lifecycle_state='Pending' AND i.superseded=0 AND i.cohort_size IS NULL \
                  AND (i.not_before IS NULL OR i.not_before<=?3) AND i.eligible_since IS NOT NULL \
-                 AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+                 AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
                    ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
                    WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id) \
                  AND NOT EXISTS (SELECT 1 FROM json_each(?5) wanted WHERE NOT EXISTS \
@@ -1148,23 +1148,23 @@ async fn select_same_group(
         compatibility.metadata_equals.clone(),
     ))?;
     let mut rows = transaction.query(
-        "WITH candidate AS (SELECT s.group_key FROM pqueue_group_summary s WHERE s.tenant_id=?1 \
+        "WITH candidate AS (SELECT s.group_key FROM fireweed_group_summary s WHERE s.tenant_id=?1 \
          AND s.queue_id=?2 AND s.oldest_eligible_at IS NOT NULL AND (?5 IS NULL OR s.group_key=?5) \
-         AND EXISTS (SELECT 1 FROM pqueue_items e WHERE e.tenant_id=?1 AND e.queue_id=?2 \
+         AND EXISTS (SELECT 1 FROM fireweed_items e WHERE e.tenant_id=?1 AND e.queue_id=?2 \
            AND e.group_key=s.group_key AND e.lifecycle_state='Pending' AND e.superseded=0 \
            AND e.cohort_size IS NULL AND (e.not_before IS NULL OR e.not_before<=?3) \
-           AND e.eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
-             JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+           AND e.eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
+             JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
              AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=e.tenant_id AND ig.queue_id=e.queue_id \
              AND ig.item_id=e.item_id) AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted \
              WHERE NOT EXISTS (SELECT 1 FROM json_each(e.metadata) actual \
                WHERE actual.key=wanted.key AND actual.value=wanted.value AND actual.type=wanted.type))) \
          ORDER BY s.rep_priority_sort,s.rep_created_at,s.rep_item_id,s.group_key LIMIT 1) \
-         SELECT i.item_id FROM candidate c JOIN pqueue_items i ON i.tenant_id=?1 AND i.queue_id=?2 \
+         SELECT i.item_id FROM candidate c JOIN fireweed_items i ON i.tenant_id=?1 AND i.queue_id=?2 \
          AND i.group_key=c.group_key WHERE i.lifecycle_state='Pending' AND i.superseded=0 \
          AND i.cohort_size IS NULL AND (i.not_before IS NULL OR i.not_before<=?3) \
-         AND i.eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
-           JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+         AND i.eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
+           JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
            AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id \
            AND ig.item_id=i.item_id) AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted \
            WHERE NOT EXISTS (SELECT 1 FROM json_each(i.metadata) actual WHERE actual.key=wanted.key \
@@ -1192,16 +1192,16 @@ async fn select_whole_cohort(
         compatibility.metadata_equals.clone(),
     ))?;
     let mut rows = transaction.query(
-        "SELECT c.group_key,c.cohort_id,c.cohort_size FROM pqueue_cohorts c \
+        "SELECT c.group_key,c.cohort_id,c.cohort_size FROM fireweed_cohorts c \
          WHERE c.tenant_id=?1 AND c.queue_id=?2 AND c.state='complete' \
-         AND (SELECT COUNT(*) FROM pqueue_items a WHERE a.tenant_id=?1 AND a.queue_id=?2 \
+         AND (SELECT COUNT(*) FROM fireweed_items a WHERE a.tenant_id=?1 AND a.queue_id=?2 \
            AND a.group_key=c.group_key AND a.superseded=0 AND a.cohort_size IS NOT NULL \
            AND a.lifecycle_state NOT IN ('Complete','Failed'))=c.cohort_size \
-         AND NOT EXISTS (SELECT 1 FROM pqueue_items i WHERE i.tenant_id=?1 AND i.queue_id=?2 \
+         AND NOT EXISTS (SELECT 1 FROM fireweed_items i WHERE i.tenant_id=?1 AND i.queue_id=?2 \
            AND i.group_key=c.group_key AND i.superseded=0 AND i.cohort_size IS NOT NULL \
            AND i.lifecycle_state NOT IN ('Complete','Failed') AND NOT (i.lifecycle_state='Pending' \
              AND (i.not_before IS NULL OR i.not_before<=?3) AND i.eligible_since IS NOT NULL \
-             AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+             AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
                ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
                WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id) \
              AND NOT EXISTS (SELECT 1 FROM json_each(?4) wanted WHERE NOT EXISTS \
@@ -1247,7 +1247,7 @@ async fn cohort_state(
 ) -> EngineResult<String> {
     let row = one_row(
         transaction,
-        "SELECT state FROM pqueue_cohorts WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3",
+        "SELECT state FROM fireweed_cohorts WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3",
         vec![
             tenant.to_string().into(),
             queue.to_string().into(),
@@ -1318,7 +1318,7 @@ async fn update_item_schedules(
             .execute(
                 format!(
                     "WITH schedules(item_id,not_before,eligible_since) AS (VALUES {}) \
-                     UPDATE pqueue_items AS i SET not_before=s.not_before,\
+                     UPDATE fireweed_items AS i SET not_before=s.not_before,\
                       eligible_since=s.eligible_since FROM schedules AS s \
                      WHERE i.item_id=s.item_id AND i.tenant_id=? AND i.queue_id=?",
                     values_rows(chunk.len(), 3)
@@ -1381,12 +1381,12 @@ async fn extend_claim_by_query_replays(
     .map_err(storage)?;
     transaction
         .execute(
-            "UPDATE pqueue_request_idempotency SET expires_at=max(expires_at,?4) \
+            "UPDATE fireweed_request_idempotency SET expires_at=max(expires_at,?4) \
          WHERE tenant_id=?1 AND queue_id=?2 AND operation='claim_by_query' AND request_id IN ( \
-           SELECT edge.request_id FROM pqueue_claim_replay_items edge \
+           SELECT edge.request_id FROM fireweed_claim_replay_items edge \
            JOIN json_each(?3) renewed ON renewed.value=edge.item_id \
            WHERE edge.tenant_id=?1 AND edge.queue_id=?2 GROUP BY edge.request_id \
-           HAVING COUNT(*)=(SELECT COUNT(*) FROM pqueue_claim_replay_items all_edges \
+           HAVING COUNT(*)=(SELECT COUNT(*) FROM fireweed_claim_replay_items all_edges \
              WHERE all_edges.tenant_id=?1 AND all_edges.queue_id=?2 \
                AND all_edges.request_id=edge.request_id))",
             vec![
@@ -1594,15 +1594,15 @@ async fn apply_owned(
                     let canonical =
                         fireweed_engine::push_items_fingerprint_sha256(&push.items)?.to_vec();
                     let affected = transaction.execute(
-                        "INSERT INTO pqueue_request_idempotency \
+                        "INSERT INTO fireweed_request_idempotency \
                          (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,command_positions,expires_at,created_at) \
                          VALUES (?1,?2,'push',?3,?4,?5,?6,?7,?8) \
                          ON CONFLICT(tenant_id,queue_id,operation,request_id) DO UPDATE SET \
                          request_fingerprint=excluded.request_fingerprint,response_payload=excluded.response_payload,\
                          command_positions=excluded.command_positions,expires_at=excluded.expires_at,created_at=excluded.created_at \
-                         WHERE pqueue_request_idempotency.expires_at<=excluded.created_at OR \
-                         (pqueue_request_idempotency.request_fingerprint=excluded.request_fingerprint \
-                         AND pqueue_request_idempotency.response_payload=excluded.response_payload)",
+                         WHERE fireweed_request_idempotency.expires_at<=excluded.created_at OR \
+                         (fireweed_request_idempotency.request_fingerprint=excluded.request_fingerprint \
+                         AND fireweed_request_idempotency.response_payload=excluded.response_payload)",
                         vec![tenant.clone().into(), queue.clone().into(), request_id.as_str().to_string().into(),
                              Value::Blob(canonical), response.into(), command_positions.into(),
                              Value::Integer(expires_at), Value::Integer(now)],
@@ -1671,14 +1671,14 @@ async fn apply_owned(
                         serde_json::to_string(&vec![(position.backend_epoch, position.sequence)])
                             .map_err(storage)?;
                     let affected = transaction.execute(
-                        "INSERT INTO pqueue_request_idempotency \
+                        "INSERT INTO fireweed_request_idempotency \
                          (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,\
                           command_positions,expires_at,created_at) \
                          VALUES (?1,?2,'claim_by_query',?3,?4,?5,?6,?7,?8) \
                          ON CONFLICT(tenant_id,queue_id,operation,request_id) DO UPDATE SET \
-                         expires_at=max(pqueue_request_idempotency.expires_at,excluded.expires_at) \
-                         WHERE pqueue_request_idempotency.request_fingerprint=excluded.request_fingerprint \
-                           AND pqueue_request_idempotency.response_payload=excluded.response_payload",
+                         expires_at=max(fireweed_request_idempotency.expires_at,excluded.expires_at) \
+                         WHERE fireweed_request_idempotency.request_fingerprint=excluded.request_fingerprint \
+                           AND fireweed_request_idempotency.response_payload=excluded.response_payload",
                         vec![tenant.clone().into(),queue.clone().into(),request_id.as_str().to_string().into(),
                              Value::Blob(fingerprint.to_be_bytes().to_vec()),response.into(),positions.into(),
                              Value::Integer(ts_nanos(claim.lease_expires_at)),
@@ -1693,7 +1693,7 @@ async fn apply_owned(
                     .map_err(storage)?;
                     transaction
                         .execute(
-                            "INSERT OR IGNORE INTO pqueue_claim_replay_items \
+                            "INSERT OR IGNORE INTO fireweed_claim_replay_items \
                          (tenant_id,queue_id,request_id,item_id) \
                          SELECT ?1,?2,?3,value FROM json_each(?4)",
                             vec![
@@ -1742,7 +1742,7 @@ async fn apply_owned(
                 }
                 let cohort_changed = transaction
                     .execute(
-                        "UPDATE pqueue_cohorts SET state='leased',cohort_lease_token_hash=?4 \
+                        "UPDATE fireweed_cohorts SET state='leased',cohort_lease_token_hash=?4 \
                          WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3 AND state='complete'",
                         vec![
                             tenant.clone().into(),
@@ -2030,7 +2030,7 @@ async fn apply_owned(
                     };
                 let changed = transaction
                     .execute(
-                        "UPDATE pqueue_cohorts SET state=?4,cohort_lease_token_hash=NULL,\
+                        "UPDATE fireweed_cohorts SET state=?4,cohort_lease_token_hash=NULL,\
                          retention_until=?5 WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3 \
                          AND state='leased'",
                         vec![
@@ -2300,7 +2300,7 @@ async fn apply_owned(
             QueueCommand::CohortExpired(expired) => {
                 let cohort = one_row(
                     &transaction,
-                    "SELECT state FROM pqueue_cohorts WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3",
+                    "SELECT state FROM fireweed_cohorts WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3",
                     vec![
                         tenant.clone().into(),
                         queue.clone().into(),
@@ -2314,7 +2314,7 @@ async fn apply_owned(
                 }
                 let mut rows = transaction
                     .query(
-                        "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+                        "SELECT item_id FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
                          AND group_key=?3 AND superseded=0 AND cohort_size IS NOT NULL \
                          AND lifecycle_state NOT IN ('Complete','Failed')",
                         vec![
@@ -2350,7 +2350,7 @@ async fn apply_owned(
                     &transaction,
                     |count| {
                         format!(
-                            "UPDATE pqueue_items SET lifecycle_state='Failed',\
+                            "UPDATE fireweed_items SET lifecycle_state='Failed',\
                              item_version=item_version+1,terminal_at=?,terminal_command_epoch=?,\
                              updated_at=?,last_command_sequence=? WHERE tenant_id=? AND queue_id=? \
                              AND item_id IN ({})",
@@ -2367,7 +2367,7 @@ async fn apply_owned(
                 let definition = definition_in_transaction(&transaction, &position.queue).await?;
                 let cohort_changed = transaction
                     .execute(
-                        "UPDATE pqueue_cohorts SET state='terminal',expire_command_pos=?4,\
+                        "UPDATE fireweed_cohorts SET state='terminal',expire_command_pos=?4,\
                          cohort_lease_token_hash=NULL,retention_until=?5 \
                          WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 AND state!='terminal'",
                         vec![
@@ -2454,7 +2454,7 @@ async fn apply_owned(
                         }
                         (
                             format!(
-                                "INSERT INTO pqueue_gate_state (tenant_id,queue_id,gate_key) \
+                                "INSERT INTO fireweed_gate_state (tenant_id,queue_id,gate_key) \
                                  VALUES {} ON CONFLICT(tenant_id,queue_id,gate_key) DO NOTHING",
                                 values_rows(chunk.len(), 3)
                             ),
@@ -2470,7 +2470,7 @@ async fn apply_owned(
                         );
                         (
                             format!(
-                                "DELETE FROM pqueue_gate_state WHERE tenant_id=? AND queue_id=? \
+                                "DELETE FROM fireweed_gate_state WHERE tenant_id=? AND queue_id=? \
                                  AND gate_key IN ({})",
                                 vec!["?"; chunk.len()].join(",")
                             ),
@@ -2497,7 +2497,7 @@ async fn apply_owned(
                     transaction
                         .execute(
                             format!(
-                                "INSERT INTO pqueue_side_records (tenant_id,queue_id,key,payload) \
+                                "INSERT INTO fireweed_side_records (tenant_id,queue_id,key,payload) \
                                  VALUES {} ON CONFLICT(tenant_id,queue_id,key) \
                                  DO UPDATE SET payload=excluded.payload",
                                 values_rows(chunk.len(), 4)
@@ -2511,7 +2511,7 @@ async fn apply_owned(
             QueueCommand::AdvanceInstanceFence(command) => {
                 transaction
                     .execute(
-                        "INSERT INTO pqueue_instance_fences (tenant_id,queue_id,instance_key,fence) \
+                        "INSERT INTO fireweed_instance_fences (tenant_id,queue_id,instance_key,fence) \
                          VALUES (?1,?2,?3,?4) ON CONFLICT(tenant_id,queue_id,instance_key) \
                          DO UPDATE SET fence=excluded.fence",
                         vec![
@@ -2569,7 +2569,7 @@ async fn apply_owned(
                         transaction
                             .execute(
                                 format!(
-                                    "INSERT INTO pqueue_item_key_retention \
+                                    "INSERT INTO fireweed_item_key_retention \
                                      (tenant_id,queue_id,client_item_key,item_id,expires_at) VALUES {} \
                                      ON CONFLICT(tenant_id,queue_id,client_item_key) DO UPDATE SET \
                                      item_id=excluded.item_id,expires_at=excluded.expires_at",
@@ -2726,7 +2726,7 @@ impl TursoRelational {
         let limit = i64::try_from(limit).map_err(storage)?;
         let rows = self
             .query(
-                "SELECT item_id,client_item_key,priority,item_version FROM pqueue_items \
+                "SELECT item_id,client_item_key,priority,item_version FROM fireweed_items \
              WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
              ORDER BY priority_sort,created_seq LIMIT ?3",
                 vec![
@@ -2752,7 +2752,7 @@ impl TursoRelational {
     pub async fn server_pending(&self, shard: &QueueKey) -> EngineResult<Vec<LeaseView>> {
         let rows = self
             .query(
-                "SELECT item_id,lease_expires_at,retry_count FROM pqueue_items \
+                "SELECT item_id,lease_expires_at,retry_count FROM fireweed_items \
              WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' AND superseded=0 \
              ORDER BY item_id",
                 vec![
@@ -2825,7 +2825,7 @@ impl TursoRelational {
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!(
-                "SELECT item_id,lease_expires_at,retry_count FROM pqueue_items \
+                "SELECT item_id,lease_expires_at,retry_count FROM fireweed_items \
                  WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' \
                  AND lease_expires_at IS NOT NULL AND item_id IN ({placeholders})"
             );
@@ -2931,7 +2931,7 @@ impl TursoRelational {
         for key in keys {
             let rows = self.query(
                 "SELECT item_id,client_item_key,item_version,lifecycle_state,priority,group_key,not_before,retry_count,payload,fields \
-                 FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3 \
+                 FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3 \
                  AND lifecycle_state IN ('Pending','Leased') AND superseded=0 LIMIT 1",
                 vec![shard.tenant_id.as_str().to_string().into(), shard.queue_id.as_str().to_string().into(), key.as_str().to_string().into()],
             ).await.map_err(storage)?;
@@ -2961,7 +2961,7 @@ impl TursoRelational {
 
     pub async fn server_metrics(&self, shard: &QueueKey) -> EngineResult<QueueMetrics> {
         let rows = self.query(
-            "SELECT lifecycle_state,COUNT(*) FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+            "SELECT lifecycle_state,COUNT(*) FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
              AND superseded=0 GROUP BY lifecycle_state",
             vec![shard.tenant_id.as_str().to_string().into(), shard.queue_id.as_str().to_string().into()],
         ).await.map_err(storage)?;
@@ -3072,10 +3072,10 @@ impl AsyncProjectionStore for TursoRelational {
                         &transaction,
                         &format!(
                             "WITH requested(item_id,client_item_key) AS (VALUES {}) \
-                             SELECT 1 FROM requested r WHERE EXISTS (SELECT 1 FROM pqueue_items i \
+                             SELECT 1 FROM requested r WHERE EXISTS (SELECT 1 FROM fireweed_items i \
                                WHERE i.tenant_id=?1 AND i.queue_id=?2 AND \
                                (i.item_id=r.item_id OR (i.client_item_key=r.client_item_key AND i.superseded=0))) \
-                             OR EXISTS (SELECT 1 FROM pqueue_item_key_retention k \
+                             OR EXISTS (SELECT 1 FROM fireweed_item_key_retention k \
                                WHERE k.tenant_id=?1 AND k.queue_id=?2 \
                                AND k.client_item_key=r.client_item_key AND k.expires_at>?3) LIMIT 1",
                             numbered_values_rows(chunk.len(), 2, 4)
@@ -3100,7 +3100,7 @@ impl AsyncProjectionStore for TursoRelational {
                         let mut rows = transaction
                             .query(
                                 format!(
-                                    "SELECT group_key,COUNT(*) FROM pqueue_items \
+                                    "SELECT group_key,COUNT(*) FROM fireweed_items \
                                      WHERE tenant_id=?1 AND queue_id=?2 \
                                      AND group_key IN ({placeholders}) \
                                      AND lifecycle_state IN ('Pending','Leased') AND superseded=0 \
@@ -3175,7 +3175,7 @@ impl AsyncProjectionStore for TursoRelational {
         async move {
             let connection = writer.lock().await;
             let row = one_row(&connection,
-                "SELECT request_fingerprint,response_payload,expires_at FROM pqueue_request_idempotency \
+                "SELECT request_fingerprint,response_payload,expires_at FROM fireweed_request_idempotency \
                  WHERE tenant_id=?1 AND queue_id=?2 AND operation='push' AND request_id=?3",
                 vec![shard.tenant_id.as_str().to_string().into(), shard.queue_id.as_str().to_string().into(), request_id.as_str().to_string().into()]).await?;
             let Some(row) = row else {
@@ -3339,7 +3339,7 @@ impl AsyncProjectionStore for TursoRelational {
                 let row = one_row(
                     &transaction,
                     "SELECT group_key,state,cohort_size,member_count,cohort_lease_token_hash \
-                     FROM pqueue_cohorts WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3",
+                     FROM fireweed_cohorts WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3",
                     vec![
                         tenant.clone().into(),
                         queue.clone().into(),
@@ -3367,7 +3367,7 @@ impl AsyncProjectionStore for TursoRelational {
                 let mut rows = transaction
                     .query(
                         "SELECT item_id,lifecycle_state,fenced,superseded,lease_expires_at,retry_count,max_attempts \
-                         FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
+                         FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
                          AND cohort_size IS NOT NULL AND superseded=0 \
                          AND lifecycle_state NOT IN ('Complete','Failed') \
                          ORDER BY priority_sort,created_seq",
@@ -3447,7 +3447,7 @@ impl AsyncProjectionStore for TursoRelational {
             let connection = writer.lock().await;
             let mut rows = connection
                 .query(
-                    "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+                    "SELECT item_id FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
                  AND lifecycle_state='Leased' AND cohort_size IS NULL AND fenced=0 AND superseded=0 \
                  AND lease_expires_at IS NOT NULL \
                  AND lease_expires_at<?3 ORDER BY item_id LIMIT ?4",
@@ -3579,18 +3579,18 @@ impl AsyncProjectionStore for TursoRelational {
                     ))?;
                     let mut rows = transaction
                         .query(
-                            "SELECT item_id FROM pqueue_items \
+                            "SELECT item_id FROM fireweed_items \
                              WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' \
                              AND superseded=0 AND cohort_size IS NULL \
                              AND (not_before IS NULL OR not_before<=?3) AND eligible_since IS NOT NULL \
-                             AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
-                               JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id \
+                             AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
+                               JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id \
                                AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
-                               WHERE ig.tenant_id=pqueue_items.tenant_id \
-                               AND ig.queue_id=pqueue_items.queue_id AND ig.item_id=pqueue_items.item_id) \
+                               WHERE ig.tenant_id=fireweed_items.tenant_id \
+                               AND ig.queue_id=fireweed_items.queue_id AND ig.item_id=fireweed_items.item_id) \
                              AND (?5 IS NULL OR group_key=?5) \
                              AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted \
-                               WHERE NOT EXISTS (SELECT 1 FROM json_each(pqueue_items.metadata) actual \
+                               WHERE NOT EXISTS (SELECT 1 FROM json_each(fireweed_items.metadata) actual \
                                  WHERE actual.key=wanted.key AND actual.value=wanted.value \
                                    AND actual.type=wanted.type)) \
                              ORDER BY priority_sort,created_seq LIMIT ?4",
@@ -3735,7 +3735,7 @@ impl AsyncProjectionStore for TursoRelational {
                 params.extend(chunk.iter().map(|id| id.to_string().into()));
                 let item_sql = format!(
                     "SELECT item_id,client_item_key,item_version,priority,group_key,not_before,\
-                     lease_expires_at,retry_count,payload,fields,metadata FROM pqueue_items \
+                     lease_expires_at,retry_count,payload,fields,metadata FROM fireweed_items \
                      WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' \
                      AND item_id IN ({placeholders})"
                 );
@@ -3748,7 +3748,7 @@ impl AsyncProjectionStore for TursoRelational {
                     item_rows.insert(id, row.values[1..].to_vec());
                 }
                 let gate_sql = format!(
-                    "SELECT item_id,gate_key FROM pqueue_item_gates WHERE tenant_id=?1 \
+                    "SELECT item_id,gate_key FROM fireweed_item_gates WHERE tenant_id=?1 \
                      AND queue_id=?2 AND item_id IN ({placeholders}) ORDER BY item_id,gate_key"
                 );
                 for row in self.query(gate_sql, params).await.map_err(storage)? {

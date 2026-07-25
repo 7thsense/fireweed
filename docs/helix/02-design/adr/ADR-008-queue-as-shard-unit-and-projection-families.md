@@ -39,7 +39,7 @@ Two costs surfaced in review:
 2. **ADR-007's projection premise contradicts the standing designs.** ADR-007 consolidated storage to "one
    shared in-memory projection + swappable log stores" and recorded that *"the 'fused vs split' special case
    disappears (a backend is just a durability class)."* But TD-002 still specifies the relational
-   `pqueue_items` projection with an SQL `FOR UPDATE SKIP LOCKED` claim — a genuinely different projection.
+   `fireweed_items` projection with an SQL `FOR UPDATE SKIP LOCKED` claim — a genuinely different projection.
    The code shipped the one-projection version (PHASE-7: `ShardId::ZERO`, an in-memory projection,
    `postgres_native` rebuilt as a log-store rather than the relational projection), leaving large queues
    RAM-bound to a single process and the multi-shard horizontal envelope unbuildable.
@@ -68,7 +68,7 @@ sharding, create more queues."**
    unit, and it does not bound how many nodes the queue population spreads across.)
 
 2. **Two projection families, one behavior and transaction contract.** The system supports (a) the **in-memory log-replay**
-   projection (embedded / object-log) and (b) the **relational / DB-resident** projection (`pqueue_items` +
+   projection (embedded / object-log) and (b) the **relational / DB-resident** projection (`fireweed_items` +
    SQL claim, sqlite/postgres). They share **behavior, not code**: the **conformance suite is the contract**
    that holds them identical. Partition principle: the **core** suite is all observable queue behavior
    *independent of durability substrate* — ordering, eligibility, claim atomicity, idempotency, lease/epoch

@@ -5,13 +5,13 @@
 //! ([`lease_decide_acquire`] / `_renew` / `_begin_drain` / `_release`, [`lease_resolution`],
 //! [`resolve_target`]). Each lease op is ONE postgres transaction: `SELECT ... FOR UPDATE` the authority
 //! row (so concurrent acquires linearize — TD-003 "at most one succeeds vs a prior epoch"), apply the pure
-//! decision, persist the next record, commit. The owner registry (`pqueue_workers`) supplies the live set
+//! decision, persist the next record, commit. The owner registry (`fireweed_workers`) supplies the live set
 //! for the assignment function and the fail-closed owner-liveness gate.
 //!
 //! Two durable tables in the control-plane schema:
-//! - `pqueue_queue_owner` — the per-queue authority record `(active_owner, target_owner, assignment_epoch,
+//! - `fireweed_queue_owner` — the per-queue authority record `(active_owner, target_owner, assignment_epoch,
 //!   lease_expires_at, state)`. A missing row materializes as the genesis `unassigned`/epoch-0 lease.
-//! - `pqueue_workers` — `(owner_id, heartbeat_at)`; an owner is live while `heartbeat_at + ttl > now`.
+//! - `fireweed_workers` — `(owner_id, heartbeat_at)`; an owner is live while `heartbeat_at + ttl > now`.
 //!
 //! BINDING TO THE STORAGE FENCE (BQ-23): when a postgres storage schema is present in the same search path,
 //! acquire advances that schema's append-fence `assignment_epoch` inside the same transaction as the owner
@@ -33,13 +33,13 @@ use postgres::Client;
 use crate::{PostgresConnectConfig, connect};
 
 const CONTROL_PLANE_SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS pqueue_workers (
+CREATE TABLE IF NOT EXISTS fireweed_workers (
     owner_id TEXT NOT NULL PRIMARY KEY,
     heartbeat_at BIGINT NOT NULL,                -- nanoseconds since epoch
     endpoint TEXT
 );
-ALTER TABLE pqueue_workers ADD COLUMN IF NOT EXISTS endpoint TEXT;
-CREATE TABLE IF NOT EXISTS pqueue_queue_owner (
+ALTER TABLE fireweed_workers ADD COLUMN IF NOT EXISTS endpoint TEXT;
+CREATE TABLE IF NOT EXISTS fireweed_queue_owner (
     tenant TEXT NOT NULL, queue TEXT NOT NULL,
     state TEXT NOT NULL,                          -- 'unassigned' | 'pending_fence' | 'assigned' | 'draining'
     active_owner_id TEXT,                         -- NULL while unassigned
@@ -126,14 +126,14 @@ WITH input AS MATERIALIZED (
 locked AS MATERIALIZED (
     SELECT q.tenant, q.queue, q.state, q.active_owner_id, q.target_owner_id,
            q.assignment_epoch, q.lease_expires_at
-    FROM pqueue_queue_owner q
+    FROM fireweed_queue_owner q
     JOIN (SELECT DISTINCT tenant, queue FROM input) i
       ON i.tenant = q.tenant AND i.queue = q.queue
     ORDER BY q.tenant, q.queue
     FOR UPDATE OF q
 ),
 updated AS (
-    UPDATE pqueue_queue_owner q
+    UPDATE fireweed_queue_owner q
        SET lease_expires_at = GREATEST(q.lease_expires_at, $6)
       FROM input i, locked l
      WHERE q.tenant = i.tenant AND q.queue = i.queue
@@ -164,7 +164,7 @@ SELECT i.ord,
 const BATCH_RESOLVE_SQL: &str = r#"
 WITH live AS MATERIALIZED (
     SELECT COALESCE(array_agg(owner_id ORDER BY owner_id), ARRAY[]::text[]) AS owners
-      FROM pqueue_workers
+      FROM fireweed_workers
      WHERE heartbeat_at > $3
 ), input AS MATERIALIZED (
     SELECT tenant, queue, ord
@@ -174,7 +174,7 @@ SELECT i.ord, q.state, q.active_owner_id, q.target_owner_id,
        q.assignment_epoch, q.lease_expires_at,
        CASE WHEN i.ord = 1 THEN live.owners END
   FROM input i
-  LEFT JOIN pqueue_queue_owner q ON q.tenant = i.tenant AND q.queue = i.queue
+  LEFT JOIN fireweed_queue_owner q ON q.tenant = i.tenant AND q.queue = i.queue
  CROSS JOIN live
  ORDER BY i.ord
 "#;
@@ -224,7 +224,7 @@ fn upsert_lease(
         .map(|o| o.as_str().to_string());
     let expires = lease.lease_expires_at.map(ts_nanos);
     st(tx.execute(
-        "INSERT INTO pqueue_queue_owner \
+        "INSERT INTO fireweed_queue_owner \
          (tenant,queue,state,active_owner_id,target_owner_id,assignment_epoch,lease_expires_at) \
          VALUES ($1,$2,$3,$4,$5,$6,$7) \
          ON CONFLICT (tenant,queue) DO UPDATE SET state=EXCLUDED.state, \
@@ -381,14 +381,14 @@ impl PostgresControlPlane {
         q: &str,
     ) -> EngineResult<QueueLease> {
         st(tx.execute(
-            "INSERT INTO pqueue_queue_owner \
+            "INSERT INTO fireweed_queue_owner \
              (tenant,queue,state,active_owner_id,target_owner_id,assignment_epoch,lease_expires_at) \
              VALUES ($1,$2,'unassigned',NULL,NULL,0,NULL) ON CONFLICT (tenant,queue) DO NOTHING",
             &[&t, &q],
         ))?;
         let row = st(tx.query_opt(
             &format!(
-                "SELECT {SELECT_LEASE_COLS} FROM pqueue_queue_owner \
+                "SELECT {SELECT_LEASE_COLS} FROM fireweed_queue_owner \
                  WHERE tenant=$1 AND queue=$2 FOR UPDATE"
             ),
             &[&t, &q],
@@ -400,7 +400,7 @@ impl PostgresControlPlane {
         }
     }
 
-    /// Whether `owner` has a live heartbeat at `now` (the fail-closed liveness gate). Reads `pqueue_workers`.
+    /// Whether `owner` has a live heartbeat at `now` (the fail-closed liveness gate). Reads `fireweed_workers`.
     fn owner_is_live(
         &self,
         client: &mut Client,
@@ -408,7 +408,7 @@ impl PostgresControlPlane {
         now: UtcTimestamp,
     ) -> EngineResult<bool> {
         let row = st(client.query_opt(
-            "SELECT heartbeat_at FROM pqueue_workers WHERE owner_id=$1",
+            "SELECT heartbeat_at FROM fireweed_workers WHERE owner_id=$1",
             &[&owner.as_str()],
         ))?;
         Ok(match row {
@@ -425,7 +425,7 @@ impl QueueControlPlane for PostgresControlPlane {
     fn register_owner(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()> {
         let mut client = self.inner.lock().expect("poisoned");
         st(client.execute(
-            "INSERT INTO pqueue_workers (owner_id, heartbeat_at) VALUES ($1,$2) \
+            "INSERT INTO fireweed_workers (owner_id, heartbeat_at) VALUES ($1,$2) \
              ON CONFLICT (owner_id) DO UPDATE SET heartbeat_at=EXCLUDED.heartbeat_at",
             &[&owner.as_str(), &ts_nanos(now)],
         ))?;
@@ -440,7 +440,7 @@ impl QueueControlPlane for PostgresControlPlane {
     ) -> EngineResult<()> {
         let mut client = self.inner.lock().expect("poisoned");
         st(client.execute(
-            "INSERT INTO pqueue_workers (owner_id, heartbeat_at, endpoint) VALUES ($1,$2,$3) \
+            "INSERT INTO fireweed_workers (owner_id, heartbeat_at, endpoint) VALUES ($1,$2,$3) \
              ON CONFLICT (owner_id) DO UPDATE SET heartbeat_at=EXCLUDED.heartbeat_at, endpoint=EXCLUDED.endpoint",
             &[&owner.as_str(), &ts_nanos(now), &endpoint],
         ))?;
@@ -455,7 +455,7 @@ impl QueueControlPlane for PostgresControlPlane {
             ts_nanos(now) - (self.config.heartbeat_ttl_ms as i64).saturating_mul(1_000_000);
         let mut client = self.inner.lock().expect("poisoned");
         let rows = st(client.query(
-            "SELECT owner_id, endpoint, heartbeat_at FROM pqueue_workers \
+            "SELECT owner_id, endpoint, heartbeat_at FROM fireweed_workers \
              WHERE heartbeat_at > $1 AND endpoint IS NOT NULL ORDER BY owner_id",
             &[&cutoff],
         ))?;
@@ -491,7 +491,7 @@ impl QueueControlPlane for PostgresControlPlane {
         let cutoff =
             ts_nanos(now) - (self.config.heartbeat_ttl_ms as i64).saturating_mul(1_000_000);
         let rows = st(client.query(
-            "SELECT owner_id FROM pqueue_workers WHERE heartbeat_at > $1",
+            "SELECT owner_id FROM fireweed_workers WHERE heartbeat_at > $1",
             &[&cutoff],
         ))?;
         let live: Vec<OwnerId> = rows
@@ -502,7 +502,7 @@ impl QueueControlPlane for PostgresControlPlane {
         // Current authority record (no lock needed for a read-only resolve).
         let current = match st(client.query_opt(
             &format!(
-                "SELECT {SELECT_LEASE_COLS} FROM pqueue_queue_owner WHERE tenant=$1 AND queue=$2"
+                "SELECT {SELECT_LEASE_COLS} FROM fireweed_queue_owner WHERE tenant=$1 AND queue=$2"
             ),
             &[&t, &q],
         ))? {
@@ -761,7 +761,7 @@ impl QueueControlPlane for PostgresControlPlane {
         // FAIL-CLOSED (I2): surface the read error rather than fabricate a genesis epoch-0 record.
         match st(client.query_opt(
             &format!(
-                "SELECT {SELECT_LEASE_COLS} FROM pqueue_queue_owner WHERE tenant=$1 AND queue=$2"
+                "SELECT {SELECT_LEASE_COLS} FROM fireweed_queue_owner WHERE tenant=$1 AND queue=$2"
             ),
             &[&t, &q],
         ))? {
@@ -778,8 +778,8 @@ mod sql_shape_tests {
 
     #[test]
     fn schema_declares_both_control_plane_tables() {
-        assert!(CONTROL_PLANE_SCHEMA.contains("pqueue_workers"));
-        assert!(CONTROL_PLANE_SCHEMA.contains("pqueue_queue_owner"));
+        assert!(CONTROL_PLANE_SCHEMA.contains("fireweed_workers"));
+        assert!(CONTROL_PLANE_SCHEMA.contains("fireweed_queue_owner"));
         assert!(
             CONTROL_PLANE_SCHEMA.contains("assignment_epoch BIGINT NOT NULL"),
             "the durable monotonic epoch column (TD-003 fence authority)"
@@ -793,7 +793,9 @@ mod sql_shape_tests {
     #[test]
     fn batch_renewal_is_one_ordered_set_based_statement() {
         assert_eq!(
-            BATCH_RENEW_SQL.matches("UPDATE pqueue_queue_owner").count(),
+            BATCH_RENEW_SQL
+                .matches("UPDATE fireweed_queue_owner")
+                .count(),
             1
         );
         assert!(
@@ -821,7 +823,7 @@ mod sql_shape_tests {
         // LIVE proof that two concurrent first-acquires don't both win is the env-gated
         // `genesis_concurrent_acquire_has_a_single_winner` integration test.
         let select = format!(
-            "SELECT {SELECT_LEASE_COLS} FROM pqueue_queue_owner WHERE tenant=$1 AND queue=$2 FOR UPDATE"
+            "SELECT {SELECT_LEASE_COLS} FROM fireweed_queue_owner WHERE tenant=$1 AND queue=$2 FOR UPDATE"
         );
         assert!(select.contains("FOR UPDATE"));
         // The genesis INSERT (in `lease_for_update`) is what serializes concurrent first-acquires.

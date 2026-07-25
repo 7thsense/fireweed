@@ -1,7 +1,7 @@
 # Plan: Wired-up SQLite backend (TD-005 / ADR-006) — v2 (post adversarial review)
 
 Scope decisions (locked with user):
-- **B6 = pqueue-side only**: land tasks 1–3 + the embedder delivery-adapter conformance
+- **B6 = fireweed-side only**: land tasks 1–3 + the embedder delivery-adapter conformance
   suite (bead `pqueue-9ff01321`). The 7snx edit + git-rev bump (bead `pqueue-a4846118`)
   is **deferred but ON the critical path** — see "B6 honesty caveat" below.
 - **B4 = shared generic harness**, instantiated for memory + sqlite.
@@ -14,7 +14,7 @@ Task3→`3b6f857e`, Task4→`9ff01321`.
 - `SqliteLogStore`/`SqliteProjectionStore`/`SqliteControlPlaneStore` each own a SEPARATE
   `Mutex<Connection>` → append + apply are separate txns today.
 - TWO projections exist: `SqliteProjection` (lib.rs:34 — group/cohort, owns
-  `pqueue_applied_position(id,sequence)` lib.rs:350) and `SqliteProjectionStore`
+  `fireweed_applied_position(id,sequence)` lib.rs:350) and `SqliteProjectionStore`
   (projection.rs:26 — full item lifecycle, NO applied-position table). **The wired backend
   composes `SqliteProjectionStore` (projection.rs).** TD-005's "reuses SqliteProjection"
   wording is stale; TD-005 will be amended to name `SqliteProjectionStore`.
@@ -24,18 +24,18 @@ Task3→`3b6f857e`, Task4→`9ff01321`.
   the `BatchClaim` apply arm ALSO leases + increments (projection.rs:222-241). Applying a
   `BatchClaim` command to already-`batch_claim`'d rows double-increments `attempts`.
 - `BackendProfile` (runtime.rs:46) is a config/readiness enum ONLY — the service never
-  constructs a store from it (no `LogStore`/`ProjectionStore` use in pqueue-service/src).
+  constructs a store from it (no `LogStore`/`ProjectionStore` use in fireweed-service/src).
 - Exhaustive `match backend_profile` at runtime.rs:285-291 and :314-330; ledger validator
   rejects unknown profiles at verification_ledger.rs:415 (`_ => Err`); two-profile strings
   in `UnsupportedBackendProfile` Display (runtime.rs:197), `help_text` (runtime.rs:921),
   doc comment (runtime.rs:42). Scale/attestation matrices hardcode the 2 committed
   profiles (product_validation_tests.rs:66, invariant_stress_matrix_tests.rs:59,
   seventh_sense_validation_tests.rs:10, recurrence_scale_both_profiles_tests.rs:9).
-- 7snx (`/Users/erik/Projects/7snx`) pins pqueue by git rev; depends on
-  `pqueue-core/-postgres/-storage` only; `PqueueDeliveryQueue.commit()` does append THEN
+- 7snx (`/Users/erik/Projects/7snx`) pins fireweed by git rev; depends on
+  `fireweed-core/-postgres/-storage` only; `FireweedDeliveryQueue.commit()` does append THEN
   apply as two awaits (lib.rs:752-760); `claim_batch_at` calls `batch_claim` then commits
   a `BatchClaim` (lib.rs:642-666) — the double-increment pattern above; dedupe by
-  `client_item_key` is adapter-level (`pushed_client_keys`, lib.rs:545,603), NOT pqueue.
+  `client_item_key` is adapter-level (`pushed_client_keys`, lib.rs:545,603), NOT fireweed.
 
 ---
 
@@ -54,13 +54,13 @@ Task3→`3b6f857e`, Task4→`9ff01321`.
   `From` impls; `SqliteBackend` methods return it.
 
 **1b. `backend.rs`: `SqliteBackend`** — one `Mutex<Connection>`, union schema (log +
-projection.rs + control plane). NO new `pqueue_applied_position` table (avoids the lib.rs
+projection.rs + control plane). NO new `fireweed_applied_position` table (avoids the lib.rs
 collision; not needed — see recovery).
 - `open(path, SqliteDurability)`: PRAGMA WAL + synchronous (FULL default / NORMAL knob) +
   busy_timeout; init union schema; **acquire single-writer ownership** (see 1e); NO replay
   needed (see 1d).
 - `create_queue(def)`: control-plane insert + **epoch bootstrap in the SAME tx** — insert
-  `pqueue_log_shard(epoch=1)` for each shard so log & control-plane agree (fixes 0-vs-1).
+  `fireweed_log_shard(epoch=1)` for each shard so log & control-plane agree (fixes 0-vs-1).
 - `append_and_apply(shard, expected_epoch, commands) -> Result<AppendBatchResult, _>`
   (**headline**): one tx → `append_into_tx` → `apply_into_tx(shard, commands)` → single
   `commit()` (one WAL fsync). Strict read-after-write. Synchronous body, `!Send` guard held
@@ -81,7 +81,7 @@ collision; not needed — see recovery).
   build on a stable contract.
 
 **1c. Epoch on open** (TD-005:98-99 "bump on open"): bump each existing shard's epoch in
-lockstep across `pqueue_log_shard` AND `pqueue_shard_assignment` within `open`'s tx.
+lockstep across `fireweed_log_shard` AND `fireweed_shard_assignment` within `open`'s tx.
 Rationale documented: single-writer means this is observability/restart-fencing, not CAS.
 `append_and_apply` accepts `expected_epoch: Option<u64>` (None = no fence, matching the
 embedder pattern); callers that fence read current epoch from the control plane.
@@ -101,7 +101,7 @@ writers, so this is explicit). Mechanism left to implementation (e.g.
 row for observability. **Gate: a test where a second `open()` on the same path returns an
 error.**
 
-**Tests (pqueue-sqlite unit):** atomic read-after-write; file-backed reopen preserves
+**Tests (fireweed-sqlite unit):** atomic read-after-write; file-backed reopen preserves
 push/claim/finalize state; epoch bootstrap (no `StaleEpoch` after create_queue);
 `claim` increments `attempts` exactly once (parity with memory); rollback atomicity (apply
 failure → no orphan log row); second-open rejection.
@@ -116,8 +116,8 @@ service serve sqlite traffic). Stated so "done" isn't mistaken for a served back
   (runtime.rs:197), `help_text` (runtime.rs:921), doc comment (runtime.rs:42), and the
   tests asserting those strings (runtime.rs:1014,1035).
 - Fill BOTH exhaustive matches (runtime.rs:285-291, :314-330) with a `Sqlite` arm.
-- New `SqliteRuntimeConfig { db_path: PathBuf, synchronous }` from `PQUEUE_SQLITE_DB_PATH`
-  (required) + `PQUEUE_SQLITE_SYNCHRONOUS` (full|normal, default full).
+- New `SqliteRuntimeConfig { db_path: PathBuf, synchronous }` from `FIREWEED_SQLITE_DB_PATH`
+  (required) + `FIREWEED_SQLITE_SYNCHRONOUS` (full|normal, default full).
 - `ReadinessCheck::Sqlite(..)` arm (db path openable / parent writable).
 - **Ledger validator: NO change needed** (corrected in review). The profile checks in
   verification_ledger.rs are suite-scoped (only the object-log / scale / attestation suites,
@@ -136,8 +136,8 @@ service serve sqlite traffic). Stated so "done" isn't mistaken for a served back
 - **Shared harness location — implementer's choice, no feature-gating on production
   crates** (no tokio/test-support leak into release builds). Preferred: a shared
   `tests/support` harness module (matches the existing repo pattern, e.g.
-  `crates/pqueue-service/tests/support/`) reused across crates via `#[path]` include; fall
-  back to a dev-only `crates/pqueue-conformance` crate only if cross-crate include proves
+  `crates/fireweed-service/tests/support/`) reused across crates via `#[path]` include; fall
+  back to a dev-only `crates/fireweed-conformance` crate only if cross-crate include proves
   awkward. Either way the harness is generic over a small `ConformanceBackend` factory
   exposing create_queue / append_and_apply / claim / metrics / read_from (one logical
   backend; sqlite's log+projection share a connection only via the unified backend → Task 3
@@ -154,13 +154,13 @@ service serve sqlite traffic). Stated so "done" isn't mistaken for a served back
   harness against BOTH adapters in the new crate (proves the harness is faithful to memory
   AND that sqlite reaches parity), keeping the legacy memory suite untouched as a
   regression anchor.
-- `crates/pqueue-sqlite/tests/sqlite_conformance.rs` (or in the conformance crate) adds the
+- `crates/fireweed-sqlite/tests/sqlite_conformance.rs` (or in the conformance crate) adds the
   file-backed reopen-recovery case.
 - Confirm parity points the reviewers named: unknown-shard `claim` → `QueueNotFound`
   (projection.rs:70 vs memory); `attempts` single-increment; which cases run file-backed
   (recovery/durability) vs `:memory:` (logic).
 
-## Task 4 — B6 pqueue-side: embedder delivery-adapter conformance (bead 9ff01321)
+## Task 4 — B6 fireweed-side: embedder delivery-adapter conformance (bead 9ff01321)
 
 **Acknowledged: this includes designing a small public embedder surface, not just a test.**
 - Design + export an embedder-facing surface on `SqliteBackend` an embedder can drive like
@@ -168,22 +168,22 @@ service serve sqlite traffic). Stated so "done" isn't mistaken for a served back
   `summary`. Method/error contract reviewed as part of this task (depends on Task 1).
 - Embedder delivery-adapter conformance suite against sqlite: push → claim → finalize;
   retry + expired-lease re-pending; terminal-failure semantics; **idempotent re-push by
-  `item_id`** (pqueue's actual guarantee). Add a TP-001 coverage row.
+  `item_id`** (fireweed's actual guarantee). Add a TP-001 coverage row.
 - **client_item_key**: cite 7snx evidence (dedupe is adapter-level: `pushed_client_keys`,
-  7snx lib.rs:545,603). pqueue dedupes by `item_id` only (projection.rs:203). Bead 9ff01321
+  7snx lib.rs:545,603). fireweed dedupes by `item_id` only (projection.rs:203). Bead 9ff01321
   says "convergence by client_item_key" — FLAG to the owner (do not silently narrow): the
-  pqueue suite tests item_id idempotency; client_item_key convergence is the adapter's
+  fireweed suite tests item_id idempotency; client_item_key convergence is the adapter's
   responsibility. Recommend amending the bead text or adding an explicit adapter-layer row.
 
-**B6 honesty caveat**: pqueue-side closure does NOT satisfy TD-005's completion evidence
+**B6 honesty caveat**: fireweed-side closure does NOT satisfy TD-005's completion evidence
 "the embedder delivery-adapter conformance suite passes on the `sqlite` backend" /
-durability-on-restart FOR 7snx — that only manifests when 7snx's `PqueueDeliveryQueue`
-switches off Memory (bead `a4846118`), which requires pushing pqueue + bumping the git rev.
+durability-on-restart FOR 7snx — that only manifests when 7snx's `FireweedDeliveryQueue`
+switches off Memory (bead `a4846118`), which requires pushing fireweed + bumping the git rev.
 That bead remains REQUIRED for full B6 acceptance; this plan explicitly leaves it open.
 
 **7snx integration shape (for Task 4 surface design)**: `SqliteBackend` is ONE unified
 object with inherent `append_and_apply`/`claim` methods — it does NOT expose separable
-`log`/`projection` trait fields the way 7snx's Memory `PqueueDeliveryQueue` is built
+`log`/`projection` trait fields the way 7snx's Memory `FireweedDeliveryQueue` is built
 (7snx lib.rs:544-545). So the future 7snx Sqlite variant (bead a4846118) is a PARALLEL
 struct calling `SqliteBackend::claim()`, not a field swap. Design Task 4's surface to that
 shape now so the deferred adapter can adopt it without rework.
@@ -202,7 +202,7 @@ re-stamping leaves the doc in stale-hash drift the ddx gate flags). Edits:
 - Re-run the ddx stamp for TD-005 after edits.
 
 ## Out of scope (deferred, with TD-005 amendments)
-- **Retention/pruning of `pqueue_command_log`** (TD-005:127-128): no retention wiring
+- **Retention/pruning of `fireweed_command_log`** (TD-005:127-128): no retention wiring
   exists; the new log table is unbounded as built. Defer via a new follow-up bead; amend
   TD-005 to mark retention as future work. Durability/reopen do not depend on it.
 - Snapshot store (TD-005 says optional/no-op for v1) — unchanged.

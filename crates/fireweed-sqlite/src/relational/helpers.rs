@@ -81,7 +81,7 @@ pub(crate) fn check_request_idempotency(
     let prior: Option<(Vec<u8>, String, i64)> = st(tx
         .query_row(
             "SELECT request_fingerprint, response_payload, expires_at \
-             FROM pqueue_request_idempotency \
+             FROM fireweed_request_idempotency \
              WHERE tenant_id=?1 AND queue_id=?2 AND operation=?3 AND request_id=?4",
             params![t, q, operation, request_id.as_str()],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -92,7 +92,7 @@ pub(crate) fn check_request_idempotency(
     };
     if expires_at <= now_n {
         st(tx.execute(
-            "DELETE FROM pqueue_request_idempotency \
+            "DELETE FROM fireweed_request_idempotency \
              WHERE tenant_id=?1 AND queue_id=?2 AND operation=?3 AND request_id=?4",
             params![t, q, operation, request_id.as_str()],
         ))?;
@@ -118,7 +118,7 @@ pub(crate) fn record_request_idempotency(
 ) -> EngineResult<()> {
     let (t, q) = parts(shard);
     st(tx.execute(
-        "INSERT INTO pqueue_request_idempotency \
+        "INSERT INTO fireweed_request_idempotency \
          (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,\
           command_positions,expires_at,created_at) \
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) \
@@ -170,7 +170,7 @@ pub(crate) fn check_claim_by_query_idempotency(
     let prior: Option<(Vec<u8>, String, i64)> = st(tx
         .query_row(
             "SELECT request_fingerprint, response_payload, expires_at \
-             FROM pqueue_request_idempotency \
+             FROM fireweed_request_idempotency \
              WHERE tenant_id=?1 AND queue_id=?2 AND operation=?3 AND request_id=?4",
             params![
                 t,
@@ -200,7 +200,7 @@ pub(crate) fn check_claim_by_query_idempotency(
     let (active_count, earliest_expiry): (i64, Option<i64>) = st(tx.query_row(
         "SELECT COUNT(*), MIN(i.lease_expires_at) \
          FROM json_each(?3) AS requested \
-         JOIN pqueue_items AS i \
+         JOIN fireweed_items AS i \
            ON i.tenant_id=?1 AND i.queue_id=?2 \
           AND i.item_id=CAST(requested.value AS TEXT) \
           AND i.lifecycle_state='Leased' AND i.superseded=0 AND i.fenced=0 \
@@ -231,7 +231,7 @@ pub(crate) fn record_claim_by_query_idempotency(
     let response_payload =
         serde_json::to_string(replay).map_err(|e| EngineError::Storage(e.to_string()))?;
     st(tx.execute(
-        "INSERT INTO pqueue_request_idempotency \
+        "INSERT INTO fireweed_request_idempotency \
          (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,\
           command_positions,expires_at,created_at) \
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
@@ -256,7 +256,7 @@ pub(crate) fn record_claim_by_query_idempotency(
     )
     .map_err(|error| EngineError::Storage(error.to_string()))?;
     st(tx.execute(
-        "INSERT OR IGNORE INTO pqueue_claim_replay_items \
+        "INSERT OR IGNORE INTO fireweed_claim_replay_items \
          (tenant_id,queue_id,request_id,item_id) \
          SELECT ?1,?2,?3,value FROM json_each(?4)",
         params![t, q, request_id.as_str(), item_ids],
@@ -283,12 +283,12 @@ pub(crate) fn extend_claim_by_query_idempotency_for_renewal(
     .map_err(|error| EngineError::Storage(error.to_string()))?;
     let renewed_expires_at = ts_nanos(renewed_expires_at);
     st(tx.execute(
-        "UPDATE pqueue_request_idempotency SET expires_at=max(expires_at,?4) \
+        "UPDATE fireweed_request_idempotency SET expires_at=max(expires_at,?4) \
          WHERE tenant_id=?1 AND queue_id=?2 AND operation=?3 AND request_id IN ( \
-           SELECT edge.request_id FROM pqueue_claim_replay_items edge \
+           SELECT edge.request_id FROM fireweed_claim_replay_items edge \
            JOIN json_each(?5) renewed ON renewed.value=edge.item_id \
            WHERE edge.tenant_id=?1 AND edge.queue_id=?2 GROUP BY edge.request_id \
-           HAVING COUNT(*)=(SELECT COUNT(*) FROM pqueue_claim_replay_items all_edges \
+           HAVING COUNT(*)=(SELECT COUNT(*) FROM fireweed_claim_replay_items all_edges \
              WHERE all_edges.tenant_id=?1 AND all_edges.queue_id=?2 \
                AND all_edges.request_id=edge.request_id))",
         params![
@@ -308,7 +308,7 @@ pub(crate) fn extend_claim_by_query_idempotency_for_renewal(
 // ---------------------------------------------------------------------------
 
 /// The retained-request-id operation key for the vectorized commit path, distinct from the push key so the
-/// two operations never collide on a shared `request_id` in `pqueue_request_idempotency`.
+/// two operations never collide on a shared `request_id` in `fireweed_request_idempotency`.
 pub(crate) const IDEMPOTENCY_OPERATION_COMMIT: &str = "commit";
 
 /// Stable body fingerprint for the commit path: SHA-256 over the serialized entries (the `request_id` is the
@@ -323,7 +323,7 @@ pub(crate) fn commit_request_fingerprint(
 
 /// Durable, replay-faithful mirror of an [`EntryRecovery`] (which carries non-`Serialize` types — an
 /// [`EngineError`] in its rejected arm and an [`ItemId`]). Projected to this shape for the
-/// `pqueue_request_idempotency.response_payload` column and reconstructed verbatim on replay AND for the
+/// `fireweed_request_idempotency.response_payload` column and reconstructed verbatim on replay AND for the
 /// recovery/explain read (epic pqueue-2201fd37 acceptance #5). A `None` `rejected` means the entry committed.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct StoredEntryRecovery {
@@ -522,7 +522,7 @@ pub(crate) fn check_commit_idempotency(
     let prior: Option<(Vec<u8>, String, i64)> = st(tx
         .query_row(
             "SELECT request_fingerprint, response_payload, expires_at \
-             FROM pqueue_request_idempotency \
+             FROM fireweed_request_idempotency \
              WHERE tenant_id=?1 AND queue_id=?2 AND operation=?3 AND request_id=?4",
             params![t, q, IDEMPOTENCY_OPERATION_COMMIT, request_id.as_str()],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -533,7 +533,7 @@ pub(crate) fn check_commit_idempotency(
     };
     if expires_at <= now_n {
         st(tx.execute(
-            "DELETE FROM pqueue_request_idempotency \
+            "DELETE FROM fireweed_request_idempotency \
              WHERE tenant_id=?1 AND queue_id=?2 AND operation=?3 AND request_id=?4",
             params![t, q, IDEMPOTENCY_OPERATION_COMMIT, request_id.as_str()],
         ))?;
@@ -556,7 +556,7 @@ pub(crate) fn read_commit_recovery(
     let (t, q) = parts(shard);
     let payload: Option<String> = st(conn
         .query_row(
-            "SELECT response_payload FROM pqueue_request_idempotency \
+            "SELECT response_payload FROM fireweed_request_idempotency \
              WHERE tenant_id=?1 AND queue_id=?2 AND operation=?3 AND request_id=?4",
             params![t, q, IDEMPOTENCY_OPERATION_COMMIT, request_id.as_str()],
             |row| row.get(0),
@@ -583,7 +583,7 @@ pub(crate) fn record_commit_idempotency(
 ) -> EngineResult<()> {
     let (t, q) = parts(shard);
     st(tx.execute(
-        "INSERT INTO pqueue_request_idempotency \
+        "INSERT INTO fireweed_request_idempotency \
          (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,\
           command_positions,expires_at,created_at) \
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) \
@@ -607,7 +607,7 @@ pub(crate) fn record_commit_idempotency(
     Ok(())
 }
 
-/// Pre-commit validation of one [`ClaimRef`] against the durable `pqueue_items` row, with rejection
+/// Pre-commit validation of one [`ClaimRef`] against the durable `fireweed_items` row, with rejection
 /// precedence IDENTICAL to the in-memory [`fireweed_projection::ProjectionData::commit_validate`]: absent ->
 /// `NotFound`, fenced -> `StaleLease`, terminal -> `Terminal`, superseded -> `Superseded`, non-leased ->
 /// `Invalid`, presented-token mismatch -> `StaleLease`, expired lease (half-open: `lease_expires_at < now`)
@@ -629,7 +629,7 @@ pub(crate) fn commit_validate_sql(
     let row: Option<CommitRow> = st(tx
         .query_row(
             "SELECT lifecycle_state, fenced, superseded, lease_token_hash, lease_expires_at, item_version \
-             FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+             FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
             params![t, q, claim_ref.item_id.to_string()],
             |row| {
                 Ok((
@@ -687,7 +687,7 @@ pub(crate) fn ensure_item_text_column(
         return Err(EngineError::Invalid("column name must be [A-Za-z0-9_]"));
     }
     let sql = format!(
-        "ALTER TABLE pqueue_items ADD COLUMN {column} TEXT NOT NULL DEFAULT '{default_json}'"
+        "ALTER TABLE fireweed_items ADD COLUMN {column} TEXT NOT NULL DEFAULT '{default_json}'"
     );
     match conn.execute(&sql, []) {
         Ok(_) => Ok(()),
@@ -725,7 +725,7 @@ pub(crate) fn ensure_item_metadata_column(conn: &Connection) -> EngineResult<()>
 
 pub(crate) fn ensure_item_entity_document_column(conn: &Connection) -> EngineResult<()> {
     match conn.execute(
-        "ALTER TABLE pqueue_items ADD COLUMN entity_document TEXT",
+        "ALTER TABLE fireweed_items ADD COLUMN entity_document TEXT",
         [],
     ) {
         Ok(_) => Ok(()),
@@ -745,7 +745,7 @@ pub(crate) fn ensure_item_integer_column(conn: &Connection, column: &str) -> Eng
     {
         return Err(EngineError::Invalid("column name must be [A-Za-z0-9_]"));
     }
-    let sql = format!("ALTER TABLE pqueue_items ADD COLUMN {column} INTEGER");
+    let sql = format!("ALTER TABLE fireweed_items ADD COLUMN {column} INTEGER");
     match conn.execute(&sql, []) {
         Ok(_) => Ok(()),
         Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
@@ -772,7 +772,7 @@ pub(crate) fn ensure_cohort_column(
     {
         return Err(EngineError::Invalid("column name must be [A-Za-z0-9_]"));
     }
-    let sql = format!("ALTER TABLE pqueue_cohorts ADD COLUMN {column} {definition}");
+    let sql = format!("ALTER TABLE fireweed_cohorts ADD COLUMN {column} {definition}");
     match conn.execute(&sql, []) {
         Ok(_) => Ok(()),
         Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
@@ -794,31 +794,31 @@ pub(crate) fn ensure_cohort_lifecycle_columns(conn: &Connection) -> EngineResult
     ensure_cohort_column(conn, "cohort_lease_token_hash", "BLOB")?;
     ensure_cohort_column(conn, "retention_until", "INTEGER")?;
     st(conn.execute(
-        "UPDATE pqueue_cohorts SET cohort_id=group_key WHERE cohort_id IS NULL",
+        "UPDATE fireweed_cohorts SET cohort_id=group_key WHERE cohort_id IS NULL",
         [],
     ))?;
     st(conn.execute(
-        "UPDATE pqueue_cohorts SET cohort_created_at=created_at WHERE cohort_created_at IS NULL",
+        "UPDATE fireweed_cohorts SET cohort_created_at=created_at WHERE cohort_created_at IS NULL",
         [],
     ))?;
     st(conn.execute(
-        "UPDATE pqueue_cohorts SET member_count=(SELECT COUNT(*) FROM pqueue_items i \
-         WHERE i.tenant_id=pqueue_cohorts.tenant_id AND i.queue_id=pqueue_cohorts.queue_id \
-         AND i.group_key=pqueue_cohorts.group_key AND i.superseded=0 AND i.cohort_size IS NOT NULL \
+        "UPDATE fireweed_cohorts SET member_count=(SELECT COUNT(*) FROM fireweed_items i \
+         WHERE i.tenant_id=fireweed_cohorts.tenant_id AND i.queue_id=fireweed_cohorts.queue_id \
+         AND i.group_key=fireweed_cohorts.group_key AND i.superseded=0 AND i.cohort_size IS NOT NULL \
          AND i.lifecycle_state NOT IN ('Complete','Failed'))",
         [],
     ))?;
     st(conn.execute(
-        "UPDATE pqueue_cohorts SET state=CASE \
+        "UPDATE fireweed_cohorts SET state=CASE \
          WHEN member_count >= cohort_size THEN 'complete' ELSE 'forming' END \
          WHERE state IS NULL OR state='forming' OR state='complete'",
         [],
     ))?;
     st(conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS pqueue_cohorts_claim_idx \
-             ON pqueue_cohorts (tenant_id, queue_id, state) WHERE state='complete';\
-         CREATE INDEX IF NOT EXISTS pqueue_cohorts_expiry_idx \
-             ON pqueue_cohorts (tenant_id, queue_id, cohort_created_at) \
+        "CREATE INDEX IF NOT EXISTS fireweed_cohorts_claim_idx \
+             ON fireweed_cohorts (tenant_id, queue_id, state) WHERE state='complete';\
+         CREATE INDEX IF NOT EXISTS fireweed_cohorts_expiry_idx \
+             ON fireweed_cohorts (tenant_id, queue_id, cohort_created_at) \
              WHERE state IN ('forming','complete');",
     ))?;
     Ok(())
@@ -944,7 +944,7 @@ pub(crate) fn check_typed_unique_conflicts(
         let holder: Option<String> = match exclude_item_id {
             Some(excl) => st(tx
                 .query_row(
-                    "SELECT item_id FROM pqueue_item_index \
+                    "SELECT item_id FROM fireweed_item_index \
                      WHERE tenant_id=?1 AND queue_id=?2 AND index_name=?3 AND index_key=?4 \
                      AND item_id!=?5 LIMIT 1",
                     params![t, q, name, key.as_slice(), excl],
@@ -953,7 +953,7 @@ pub(crate) fn check_typed_unique_conflicts(
                 .optional())?,
             None => st(tx
                 .query_row(
-                    "SELECT item_id FROM pqueue_item_index \
+                    "SELECT item_id FROM fireweed_item_index \
                      WHERE tenant_id=?1 AND queue_id=?2 AND index_name=?3 AND index_key=?4 \
                      LIMIT 1",
                     params![t, q, name, key.as_slice()],
@@ -968,7 +968,7 @@ pub(crate) fn check_typed_unique_conflicts(
     Ok(())
 }
 
-/// Insert `pqueue_item_index` rows for one item's `(name, key)` pairs (upsert so a retry is safe).
+/// Insert `fireweed_item_index` rows for one item's `(name, key)` pairs (upsert so a retry is safe).
 pub(crate) fn insert_typed_index_rows(
     tx: &Transaction<'_>,
     t: &str,
@@ -1019,7 +1019,7 @@ fn check_typed_unique_conflicts_batch(
             .query_row(
                 &format!(
                     "WITH incoming(item_id,index_name,index_key) AS (VALUES {values}) \
-                     SELECT 1 FROM pqueue_item_index existing JOIN incoming \
+                     SELECT 1 FROM fireweed_item_index existing JOIN incoming \
                        ON existing.index_name=incoming.index_name \
                       AND existing.index_key=incoming.index_key \
                       AND existing.item_id!=incoming.item_id \
@@ -1060,7 +1060,7 @@ fn insert_typed_index_rows_batch(
         }
         st(tx.execute(
             &format!(
-                "INSERT INTO pqueue_item_index \
+                "INSERT INTO fireweed_item_index \
                  (tenant_id,queue_id,index_name,index_key,item_id) VALUES {values} \
                  ON CONFLICT(tenant_id,queue_id,index_name,item_id) DO UPDATE SET \
                  index_key=excluded.index_key"
@@ -1071,7 +1071,7 @@ fn insert_typed_index_rows_batch(
     Ok(())
 }
 
-/// Delete all `pqueue_item_index` rows for the given item IDs.
+/// Delete all `fireweed_item_index` rows for the given item IDs.
 pub(crate) fn delete_typed_index_rows(
     tx: &Transaction<'_>,
     t: &str,
@@ -1081,7 +1081,7 @@ pub(crate) fn delete_typed_index_rows(
     for chunk in item_ids.chunks(SQLITE_BATCH) {
         let ph = vec!["?"; chunk.len()].join(",");
         let sql = format!(
-            "DELETE FROM pqueue_item_index \
+            "DELETE FROM fireweed_item_index \
              WHERE tenant_id=? AND queue_id=? AND item_id IN ({ph})"
         );
         let mut p: Vec<Value> = vec![Value::Text(t.to_string()), Value::Text(q.to_string())];
@@ -1243,7 +1243,7 @@ pub(crate) fn advance_claim_scan_hint_for_ids(
             "SELECT COUNT(*), MAX(rowid), \
              COALESCE(SUM(CASE WHEN priority IS NOT NULL OR not_before IS NOT NULL \
              OR group_key IS NOT NULL OR cohort_size IS NOT NULL THEN 1 ELSE 0 END), 0) \
-             FROM pqueue_items WHERE tenant_id=? AND queue_id=? AND item_id IN ({ph})"
+             FROM fireweed_items WHERE tenant_id=? AND queue_id=? AND item_id IN ({ph})"
         );
         let mut p: Vec<Value> = vec![Value::Text(t.clone()), Value::Text(q.clone())];
         for id in chunk {
@@ -1295,7 +1295,7 @@ pub(crate) fn fifo_rowid_range_for_id_strings(
             "SELECT COUNT(*), MIN(rowid), MAX(rowid), \
              COALESCE(SUM(CASE WHEN priority IS NOT NULL OR not_before IS NOT NULL \
              OR group_key IS NOT NULL OR cohort_size IS NOT NULL THEN 1 ELSE 0 END), 0) \
-             FROM pqueue_items WHERE tenant_id=? AND queue_id=? AND item_id IN ({ph})"
+             FROM fireweed_items WHERE tenant_id=? AND queue_id=? AND item_id IN ({ph})"
         );
         let mut p: Vec<Value> = vec![Value::Text(t.clone()), Value::Text(q.clone())];
         for id in chunk {
@@ -1322,14 +1322,14 @@ pub(crate) fn fifo_rowid_range_for_id_strings(
     };
     let range_count: i64 = if let Some(state) = expected_state {
         st(conn.query_row(
-            "SELECT COUNT(*) FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+            "SELECT COUNT(*) FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
              AND rowid BETWEEN ?3 AND ?4 AND lifecycle_state=?5",
             params![t, q, min_rowid, max_rowid, state],
             |row| row.get(0),
         ))?
     } else {
         st(conn.query_row(
-            "SELECT COUNT(*) FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+            "SELECT COUNT(*) FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
              AND rowid BETWEEN ?3 AND ?4",
             params![t, q, min_rowid, max_rowid],
             |row| row.get(0),

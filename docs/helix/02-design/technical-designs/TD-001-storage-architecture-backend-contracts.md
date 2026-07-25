@@ -78,7 +78,7 @@ Out of scope:
 
 ## Technical Approach
 
-**Strategy**: implement pqueue as a command-log-backed queue engine with a
+**Strategy**: implement fireweed as a command-log-backed queue engine with a
 backend capability layer. The native API commits durable command records first,
 then applies those records to a query-optimized projection used for priority
 claim, lease renewal, finalization, and metrics. Postgres is the preferred
@@ -105,9 +105,9 @@ and projection in one transactional backend.
   and the log plus snapshots must recover acknowledged state after node loss.
   There is no production log-less posture; a no-op log exists for tests only and
   is rejected by production configuration surfaces.
-- **The projection is a family, held by conformance (ADR-008)**: pqueue supports
+- **The projection is a family, held by conformance (ADR-008)**: fireweed supports
   two projection families — an **in-memory log-replay** projection
-  (embedded/object-log) and a **relational/DB-resident** projection (`pqueue_items`
+  (embedded/object-log) and a **relational/DB-resident** projection (`fireweed_items`
   + SQL `FOR UPDATE SKIP LOCKED` claim, sqlite/postgres). They share **behavior,
   not code**; the conformance suite is the contract that holds them identical (see
   "Projection Families and Conformance as Contract").
@@ -125,7 +125,7 @@ and projection in one transactional backend.
   is **committed direction** (ADR-008 §4, product-owner decision 2026-07-05),
   not v1-settled: its S3-CAS acquire→fence atomicity proof is sequenced build
   work and it ships only after passing the TD-003 seam invariants.
-- **Queue epochs fence execution**: pqueue does not run node discovery or
+- **Queue epochs fence execution**: fireweed does not run node discovery or
   cluster consensus. A control-plane assignment gives a worker authority for a
   `(tenant_id, queue_id)` epoch; stale workers must be fenced before they can
   append new commands (TD-003 Single Authoritative Fencing Rule).
@@ -137,7 +137,7 @@ and projection in one transactional backend.
   via the API-001 pacing knobs (`max_items`, claim cadence, `not_before`, group
   selection). Any future deployment-level capacity control (P1) is an
   envelope-level admission concern outside the per-item eligibility/claim pipeline,
-  and protects the pqueue deployment — never a caller's downstream API.
+  and protects the fireweed deployment — never a caller's downstream API.
 - **Conformance tests define backend eligibility**: no backend implementation is
   usable until it passes the same durability, idempotency, lease, replay, and
   progress-bound scenarios.
@@ -157,46 +157,46 @@ and projection in one transactional backend.
 
 ## Component Changes
 
-### New: `pqueue-core`
+### New: `fireweed-core`
 
 - **Purpose**: queue semantics, command validation, state transitions, ordering
   helpers, idempotency rules, and error types shared by all backends.
 - **Interfaces**: receives API-001 operation structs; emits durable commands,
   projection mutations, per-item results, and metrics snapshots.
-- **Files**: `crates/pqueue-core/src/**`
+- **Files**: `crates/fireweed-core/src/**`
 
-### `pqueue-engine`, `pqueue-projection`, `pqueue-conformance` (realized layout)
+### `fireweed-engine`, `fireweed-projection`, `fireweed-conformance` (realized layout)
 
 Per ADR-007 (hexagonal) and ADR-012 (orthogonal composition), the capability
-layer originally sketched as a `pqueue-storage` crate is realized as:
+layer originally sketched as a `fireweed-storage` crate is realized as:
 
-- **`pqueue-engine`**: the ports and orchestration — command envelopes, command
+- **`fireweed-engine`**: the ports and orchestration — command envelopes, command
   positions, the `LogStore` / `ProjectionStore` / `ControlPlane` axis traits, and
   the generic `ComposedBackend` write/recovery choke point
-  (`crates/pqueue-engine/src/compose.rs`).
-- **`pqueue-projection`**: the shared in-memory projection state machine
+  (`crates/fireweed-engine/src/compose.rs`).
+- **`fireweed-projection`**: the shared in-memory projection state machine
   (`ProjectionData`) that all log-replay members apply commands through.
-- **`pqueue-conformance`**: the backend-parameterized conformance harness — the
+- **`fireweed-conformance`**: the backend-parameterized conformance harness — the
   contract that holds backends behaviorally identical.
 
-### New: `pqueue-postgres`
+### New: `fireweed-postgres`
 
 - **Purpose**: Postgres `ControlPlaneStore`; later TD-002 expands this to
   Postgres-native `LogStore` and `ProjectionStore`.
 - **Interfaces**: Postgres connection pool in; trait implementations out.
-- **Files**: `crates/pqueue-postgres/src/**`
+- **Files**: `crates/fireweed-postgres/src/**`
 
-### Driving adapters and composition root (supersedes the `pqueue-service` HTTP binding)
+### Driving adapters and composition root (supersedes the `fireweed-service` HTTP binding)
 
 The HTTP service crate originally planned here was deleted in the ADR-007 clean
 cutover. API-001 is realized through exactly two driving faces plus one
 composition root:
 
-- **`pqueue-resp`**: the RESP wire adapter (TD-006) — the stock-Redis-client hot
+- **`fireweed-resp`**: the RESP wire adapter (TD-006) — the stock-Redis-client hot
   path, with `-MOVED` owner routing.
-- **`pqueue`**: the Rust library facade (ADR-009) — the full-power interface and
+- **`fireweed`**: the Rust library facade (ADR-009) — the full-power interface and
   the only published crate.
-- **`pqueue-server`**: the composition root binary — dependency injection,
+- **`fireweed-server`**: the composition root binary — dependency injection,
   ReclaimDriver ticker, ownership renewal loop, health probe.
 
 ### New: Backend Profiles
@@ -239,7 +239,7 @@ behaviorally identical:
 
 - **In-memory log-replay** projection: the projection is rebuilt by replaying the
   durable log (embedded and `object_log_sqlite_projection` use this for recovery).
-- **Relational / DB-resident** projection: `pqueue_items` is a **materialized
+- **Relational / DB-resident** projection: `fireweed_items` is a **materialized
   cache with a persisted applied-high-water** (ADR-013 retired the
   "authoritative in-place" framing) and claim is an SQL `FOR UPDATE SKIP LOCKED`
   statement (`postgres_native`, and the SQLite local projection). The relational
@@ -495,7 +495,7 @@ transition to a terminal state. The appended finalize command MUST record the
 effective `not_before`, recorded `eligible_since`, effective `priority`, reset
 counter, released lease state, and resulting `item_version` so the response is
 reconstructable per Durable Ack and Response Replay. The same transaction MUST
-maintain the single per-group summary projection `pqueue_group_summary` for the
+maintain the single per-group summary projection `fireweed_group_summary` for the
 item's `(tenant_id, queue_id, group_key)` row: re-arm sets the item ineligible
 until its new `not_before`, so the row's `oldest_eligible_at` MUST be recomputed
 from the remaining eligible items of that scope.
@@ -553,7 +553,7 @@ per-item results.
 
 Hot data-plane operations execute against a resolved `QueueKey` on the queue's
 one owner. The `ControlPlaneStore` owns queue-to-owner assignment metadata and
-monotonically increasing assignment epochs. pqueue service nodes consume those
+monotonically increasing assignment epochs. fireweed service nodes consume those
 assignments; they do not discover each other, elect leaders, or coordinate
 ownership directly.
 
@@ -565,7 +565,7 @@ reading the latest snapshot and log tail for the queue epoch that is now
 assigned.
 
 This keeps the hot path bounded to tenant/queue routing plus backend fencing. It
-does not require pqueue to maintain a cluster membership protocol, but it does
+does not require fireweed to maintain a cluster membership protocol, but it does
 require each backend profile to document how epoch fencing is enforced.
 
 The full ownership lifecycle — deterministic queue-to-owner assignment (target
@@ -609,7 +609,7 @@ defined for each backend (TD-002 / TD-004), and is atomic per API-001
 | Rule | Requirement |
 |------|-------------|
 | One local bound | The queue has ONE queue-global progress bound (D1; FR-9/FR-12), computed **locally** on its one owner from its own projection. There is NO per-group/per-owner aggregation, k-way merge, or sum. There is NO per-group/per-shard progress invariant. |
-| Source | `oldest_eligible_age_ms` MUST equal `now() - min(oldest_eligible_at)` over the queue's `pqueue_group_summary` rows on its owner (gate-aware: the read MUST exclude rows whose eligibility is voided by the current gate generation, regardless of the stored `oldest_eligible_at`; the gate-generation mechanism is TD-002/TD-004's, G2). Eligible counts MAY be lagged/approximate; the effective oldest age MUST be authoritative. |
+| Source | `oldest_eligible_age_ms` MUST equal `now() - min(oldest_eligible_at)` over the queue's `fireweed_group_summary` rows on its owner (gate-aware: the read MUST exclude rows whose eligibility is voided by the current gate generation, regardless of the stored `oldest_eligible_at`; the gate-generation mechanism is TD-002/TD-004's, G2). Eligible counts MAY be lagged/approximate; the effective oldest age MUST be authoritative. |
 | Enforcement (state vs owner) | TD-001 owns clause (i): the owner's claim planner MUST claim any item near `progress_bound_ms` before the bound (TD-002 claim shape). Clause (ii) — that the queue has a live owner so the planner can run at all — is TD-003's owner-liveness guard; see TD-003 for the guard and its stalled/draining-queue rules. Queue-global compliance is the conjunction of the two. |
 | Worker routing / fairness | Per-group fairness is achieved by routing workers via `DiscoverActiveScopes` (G4), NOT by an engine invariant (D1). Because the queue has one owner, `DiscoverActiveScopes` ranks the queue's scopes from the owner's summary index with no cross-owner merge. |
 
@@ -716,7 +716,7 @@ Projection stores must represent:
 - metrics state: lifecycle counts, retry backlog, active leases,
   `oldest_eligible_age_ms`, `progress_bound_risk_count`
 
-There is exactly one per-group summary projection, `pqueue_group_summary`, keyed
+There is exactly one per-group summary projection, `fireweed_group_summary`, keyed
 `(tenant_id, queue_id, group_key)`: exactly one row per `(queue, group_key)`.
 Because the whole queue lives on one owner, a group has exactly one summary row;
 the grain stays coherent for the relational projection and for the local-SQLite
@@ -727,21 +727,21 @@ A queue-level gate flip MUST NOT synchronously rewrite every group's summary row
 `oldest_eligible_age_ms` stays authoritative (computed against the current gate
 generation at read) while counts MAY lag.
 
-Cohort queues add a `pqueue_cohorts` projection for cohort identity (logical key
+Cohort queues add a `fireweed_cohorts` projection for cohort identity (logical key
 `(tenant_id, queue_id, group_key)`; size, member count, state,
 `cohort_created_at`, first-eligible time, expire command position, cohort lease
 token hash, `retention_until`) (G6). Cohort eligible-age and counts are NOT
-duplicated here; they come from the single `pqueue_group_summary`.
+duplicated here; they come from the single `fireweed_group_summary`.
 
 ## Integration Points
 
 | From | To | Method | Data |
 |------|----|--------|------|
-| `pqueue-resp` / `pqueue` (library) | `pqueue-engine` | Direct Rust call | API-001 operation structs |
-| `pqueue-engine` | `ControlPlaneStore` | Trait | queue definitions, queue assignment, backend profile |
-| `pqueue-engine` | `LogStore` | Trait | durable command envelopes |
-| `pqueue-engine` | `ProjectionStore` | Trait | committed commands, claim plans, metrics reads |
-| `pqueue-engine` | `SnapshotStore` | Trait | projection snapshots and recovery checkpoints |
+| `fireweed-resp` / `fireweed` (library) | `fireweed-engine` | Direct Rust call | API-001 operation structs |
+| `fireweed-engine` | `ControlPlaneStore` | Trait | queue definitions, queue assignment, backend profile |
+| `fireweed-engine` | `LogStore` | Trait | durable command envelopes |
+| `fireweed-engine` | `ProjectionStore` | Trait | committed commands, claim plans, metrics reads |
+| `fireweed-engine` | `SnapshotStore` | Trait | projection snapshots and recovery checkpoints |
 | Backend conformance tests | Backend crates | Trait test harness | deterministic scenarios and crash/replay fixtures |
 
 ### External Dependencies
@@ -785,7 +785,7 @@ duplicated here; they come from the single `pqueue_group_summary`.
 - **Queue density (at least 1,001 active queues per node)**: backend implementations of
   the capability traits MUST NOT allocate unbounded per-queue resources.
   Background work — lease-expiry sweeps, progress-bound aggregation,
-  `pqueue_group_summary` recompute, recurring rearm, and idempotency/retention GC
+  `fireweed_group_summary` recompute, recurring rearm, and idempotency/retention GC
   — MUST be multiplexed onto bounded shared per-node pools (a batched sweeper that
   scans many queues per pass, a shared connection pool, a bounded/LRU set of open
   per-queue projection handles), never one task, loop, or connection per queue. A
@@ -902,14 +902,14 @@ duplicated here; they come from the single `pqueue_group_summary`.
 
 ## Implementation Sequence
 
-1. Define `pqueue-core` domain types and API-001 operation structs.
-   Files: `crates/pqueue-core/src/**`.
+1. Define `fireweed-core` domain types and API-001 operation structs.
+   Files: `crates/fireweed-core/src/**`.
    Tests: unit tests for validation, lifecycle, idempotency, and version rules.
-2. Define `pqueue-storage` traits and conformance harness.
-   Files: `crates/pqueue-storage/src/**`.
+2. Define `fireweed-storage` traits and conformance harness.
+   Files: `crates/fireweed-storage/src/**`.
    Tests: backend-agnostic conformance fixtures (core / log / relational-durability).
 3. Implement Postgres `ControlPlaneStore`.
-   Files: `crates/pqueue-postgres/src/control_plane/**`.
+   Files: `crates/fireweed-postgres/src/control_plane/**`.
    Tests: tenant-scoped queue create/read, queue assignment, backend profile.
 4. Implement Postgres-native `LogStore` and `ProjectionStore` per TD-002
    (single-deployment envelope; relational projection family).
@@ -920,13 +920,13 @@ duplicated here; they come from the single `pqueue_group_summary`.
    `ProjectionStore` (with in-flight claim reservations), S3 `SnapshotStore`,
    bounded replay, and the per-queue epoch binding to TD-003 (horizontal envelope
    cost/scale).
-   Files: `crates/pqueue-objectlog/src/**`, `crates/pqueue-sqlite/src/**`.
+   Files: `crates/fireweed-objectlog/src/**`, `crates/fireweed-sqlite/src/**`.
    Tests: shared conformance suite (including the object-log rows) plus the
    TD-004 scale/cost evidence record (TP-002 E3 vs E0).
 7. Implement the driving faces after core structs and first backend compile:
-   the RESP wire adapter (`pqueue-resp`, TD-006), the library facade (`pqueue`,
-   ADR-009), and the `pqueue-server` composition root. (The originally planned
-   `pqueue-service` HTTP binding was superseded by the ADR-007 clean cutover.)
+   the RESP wire adapter (`fireweed-resp`, TD-006), the library facade (`fireweed`,
+   ADR-009), and the `fireweed-server` composition root. (The originally planned
+   `fireweed-service` HTTP binding was superseded by the ADR-007 clean cutover.)
 8. Migrate storage axes to ADR-015 in dependency order: typed commit/fault seam,
    reference composition and memory, whole-transaction blocking adapters, then
    removal of legacy synchronous traits and composition-root wrappers.
@@ -970,6 +970,6 @@ traceability; Rust workspace setup bead filed from ADR-003.
       relational-durability capability classes).
 - [x] Unified `ClaimPlan {item, whole_group, whole_cohort}` with claim-unit
       reachability rules; `same_group_key` is an item-level filter only.
-- [x] Single `pqueue_group_summary` projection keyed `(tenant, queue, group_key)`;
+- [x] Single `fireweed_group_summary` projection keyed `(tenant, queue, group_key)`;
       recurrence, cohort, and tombstone records added; no rate stage in the claim
       pipeline; no `shard_count` / `group_co_residency`.

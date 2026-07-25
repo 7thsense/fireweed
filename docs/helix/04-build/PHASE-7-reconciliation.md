@@ -11,12 +11,12 @@ Final gap review of the finished system against `hexagonal-migration-plan.md`, i
 vocabulary: **DONE** = implemented + tested (cited); **OWED** = intentionally deferred with reason (not
 dropped); **N/A** = not applicable to launch scope.
 
-Workspace at reconciliation: **10 crates** (`pqueue-core`, `pqueue-engine`, `pqueue-projection`,
-`pqueue-conformance`, `pqueue-memory`, `pqueue-sqlite`, `pqueue-objectlog`, `pqueue-resp`, `pqueue`,
-`pqueue-server`). Full **default** workspace green: ~38 test-suites, **0 failures, clippy 0**,
+Workspace at reconciliation: **10 crates** (`fireweed-core`, `fireweed-engine`, `fireweed-projection`,
+`fireweed-conformance`, `fireweed-memory`, `fireweed-sqlite`, `fireweed-objectlog`, `fireweed-resp`, `fireweed`,
+`fireweed-server`). Full **default** workspace green: ~38 test-suites, **0 failures, clippy 0**,
 `cargo metadata` resolves. Test totals: core 84, engine 44, projection 2, memory 20 (19 shared
 conformance + 1), sqlite 23 (19 conformance + 4 durability), objectlog 20 (16 eventual-apply conformance
-+ 4 durability), resp 9 (1 unit + 8 e2e), pqueue 6, server 3.
++ 4 durability), resp 9 (1 unit + 8 e2e), fireweed 6, server 3.
 
 ---
 
@@ -24,9 +24,9 @@ conformance + 1), sqlite 23 (19 conformance + 4 durability), objectlog 20 (16 ev
 
 | Item | Status | Evidence |
 |---|---|---|
-| One engine — CQRS priority projection over a log store | **DONE** | `pqueue-projection` (`ProjectionData` + `LogData` + `commit`); the durable log is the source of truth, projection rebuilt-from-log on every durable adapter. |
-| Two interfaces, asymmetric (RESP limited / library full) | **DONE** | RESP front `pqueue-resp`; library facade `pqueue`. Asymmetry recorded in TD-006 capability matrix (library-only cells marked). |
-| Hexagonal, dependency-direction enforced by a test | **DONE** | `pqueue-engine/tests/dependency_direction.rs` (`domain_crates_do_not_depend_on_adapters`) — a static manifest-scan guard that fails on a DIRECT core/engine→adapter dependency edge (cargo already forbids the cycles that a transitive edge would require). |
+| One engine — CQRS priority projection over a log store | **DONE** | `fireweed-projection` (`ProjectionData` + `LogData` + `commit`); the durable log is the source of truth, projection rebuilt-from-log on every durable adapter. |
+| Two interfaces, asymmetric (RESP limited / library full) | **DONE** | RESP front `fireweed-resp`; library facade `fireweed`. Asymmetry recorded in TD-006 capability matrix (library-only cells marked). |
+| Hexagonal, dependency-direction enforced by a test | **DONE** | `fireweed-engine/tests/dependency_direction.rs` (`domain_crates_do_not_depend_on_adapters`) — a static manifest-scan guard that fails on a DIRECT core/engine→adapter dependency edge (cargo already forbids the cycles that a transitive edge would require). |
 | Clean cutover, no stubs/fallbacks/shims; service/client/kafka deleted | **DONE** | Phase 6: 5 legacy crates deleted; `grep` finds zero `NativeRoute/axum//v1/problem+json/ApiProblem` and zero `todo!/unimplemented!` in live `src/`. |
 | Single-shard launch scope (multi-shard coordination post-launch) | **DONE (recorded subset)** | `ShardId::ZERO` everywhere; ports carry `shard_id`/`ShardKey`; no multi-shard owner-assignment loop (intentional, §2.5). |
 | Verified completeness — implement→review→test each phase | **DONE** | Every chunk has a review-ledger entry in `build-progress.md`; fresh-eyes reviews on all production-logic chunks. |
@@ -37,16 +37,16 @@ conformance + 1), sqlite 23 (19 conformance + 4 durability), objectlog 20 (16 ev
 
 All target crates exist with the prescribed roles and outward deps **except postgres**:
 
-- `pqueue-core` (none), `pqueue-engine` (core), `pqueue-memory`/`pqueue-sqlite`/`pqueue-objectlog`
-  (engine+core+io), `pqueue-resp` (engine+tokio), `pqueue` facade (engine), `pqueue-server` (all) —
+- `fireweed-core` (none), `fireweed-engine` (core), `fireweed-memory`/`fireweed-sqlite`/`fireweed-objectlog`
+  (engine+core+io), `fireweed-resp` (engine+tokio), `fireweed` facade (engine), `fireweed-server` (all) —
   **DONE**, dependency-direction test green.
-- `pqueue-projection` + `pqueue-conformance` — net-new shared crates not named in the original table but
+- `fireweed-projection` + `fireweed-conformance` — net-new shared crates not named in the original table but
   in its spirit: the projection state machine (shared by all backends, no per-adapter re-implementation)
   and the backend-conformance harness. **DONE.**
-- `pqueue-postgres` — **DONE** (owed-resolution Chunk 4). Rebuilt **fresh to the engine ports** via the
+- `fireweed-postgres` — **DONE** (owed-resolution Chunk 4). Rebuilt **fresh to the engine ports** via the
   durable-adapter template (durable log + projection rebuilt-from-log; same as sqlite) over the sync
   `postgres` client; the full conformance suite + a reconnect/durability test run green against a live DB
-  (env-gated on `PQUEUE_PG_TEST_URL`, loud-skip otherwise). The blocking-executor caveat (the sync client
+  (env-gated on `FIREWEED_PG_TEST_URL`, loud-skip otherwise). The blocking-executor caveat (the sync client
   must not be driven from a tokio runtime) is recorded in the crate docs; not yet server-wired.
 
 ---
@@ -57,7 +57,7 @@ All target crates exist with the prescribed roles and outward deps **except post
   order, `peek`, `pending`, `metrics`), `Backend` (atomic `write(|log,proj|)` UoW), `ClaimPort`,
   `UpsertPort`, `FinalizePort`, **`PushPort`** (added in Phase 5 — append via a validated port, backend-
   assigned restart-safe ids), `ControlPlaneStore`, `SnapshotStore`, `ReclaimDriver`, `Clock`, `IdGen`.
-  **DONE.** No-stub is **behavioral**: the `pqueue-conformance` suite has ≥1 fail-on-no-op test per port
+  **DONE.** No-stub is **behavioral**: the `fireweed-conformance` suite has ≥1 fail-on-no-op test per port
   method — including the read-only `peek`/`pending` and the `SnapshotStore` write/read/latest round-trip
   (added in Phase 7 after the reconciliation audit flagged them as previously suite-uncovered) — run
   across every adapter: **19 atomic scenarios on memory + sqlite, 16 eventual-apply on objectlog**.
@@ -65,14 +65,14 @@ All target crates exist with the prescribed roles and outward deps **except post
 - **§2.2 Two-class durability** — **Atomic** (memory lock, sqlite txn): append+apply commit together;
   Invariants 1&2 strong. **Eventual-apply** (objectlog): upsert **forbidden** → `EngineError::Unavailable`
   (`-ERR fireweed unavailable`), enforced at BOTH the `replace_if_pending` port and the durable write
-  chokepoint. **DONE** — `pqueue-conformance::eventual_apply_suite!` + `upsert_is_unavailable` scenario;
+  chokepoint. **DONE** — `fireweed-conformance::eventual_apply_suite!` + `upsert_is_unavailable` scenario;
   objectlog `DurabilityClass::EventualApply`.
 - **§2.3 Single logical claim path** — claim authority is the engine; backends select eligible candidates
   from the projection then commit a `Claim` command; upsert/claim mutually exclude under one lock.
   **DONE** (memory/sqlite/objectlog claim via `eligible_candidates` + `commit_locked`).
 - **§2.4 ReclaimDriver** — `tick(now)` reclaims expired leases with **zero** intervening client commands.
   **DONE.** Engine-level: conformance `tick_reclaims_expired_lease_with_no_client_traffic`,
-  `tick_lease_boundary_is_half_open`. Composition-root: `pqueue-server` background task,
+  `tick_lease_boundary_is_half_open`. Composition-root: `fireweed-server` background task,
   `background_reclaim_recovers_orphaned_lease_without_client_traffic` (DoD met). Synchronous embedding
   drives it via the same `tick(now)` entry point.
 - **§2.5 Sharding** — single shard fully implemented; multi-shard coordination post-launch. **DONE
@@ -80,7 +80,7 @@ All target crates exist with the prescribed roles and outward deps **except post
 
 ---
 
-## §3 RESP surface — pqueue-flavored Redis
+## §3 RESP surface — fireweed-flavored Redis
 
 **Invariants:**
 - **Invariant 1** (per-item delivery, cursorless, no orphaning) — **DONE.** e2e
@@ -154,9 +154,9 @@ nicety — `STREAM`/`GROUPS` are implemented).
   rewrite of API-001 + TP-001 was partially done across the cascade; a final pass to scrub any remaining
   HTTP-era phrasing is folded into Owed Item F (doc hygiene).
 - **§4d tests** — service invariant tests re-homed to engine; behavioral suite migrated to
-  `pqueue-conformance`. **DONE** (conformance is the single behavioral suite).
+  `fireweed-conformance`. **DONE** (conformance is the single behavioral suite).
 - **§4e beads** — **OWED.** Re-scope beads tied to deleted crates (claimed-item-shape → transport-neutral;
-  Lakebase → `pqueue-server` image + health probe). None halted; tracked.
+  Lakebase → `fireweed-server` image + health probe). None halted; tracked.
 
 ---
 
@@ -168,10 +168,10 @@ nicety — `STREAM`/`GROUPS` are implemented).
 | No-stub = behavioral conformance per adapter × port method | **PASS** (memory/sqlite atomic suite 19 scenarios; objectlog eventual-apply suite 16; ≥1 fail-on-no-op test per port method incl. peek/pending/snapshot, run across all adapters). |
 | Capability matrix {RESP-stock, library} signed, no unmarked library-only cells | **PARTIAL** — matrix present in TD-006 with library-only annotations; a final "every API-001/002 op classified" audit is OWED (Owed Item F). |
 | Every migrated invariant has an engine-level test | **PASS** (auth, idempotency, operator-op, fencing, pause, recurrence-validation, command_position, purge-validation — engine tests). |
-| ReclaimDriver: reclaim with zero intervening client commands | **PASS** (`pqueue-server` background-reclaim test + engine conformance). |
+| ReclaimDriver: reclaim with zero intervening client commands | **PASS** (`fireweed-server` background-reclaim test + engine conformance). |
 | e2e RESP green: drain-reconcile, cursor loop, crash recovery, fence, upsert effects+collision+superseded, intra-group exclusion | **PARTIAL** — drain-reconcile ✅, crash-recovery ✅ (sqlite reopen), fence ✅, upsert effects+collision+superseded ✅; **cursor-pagination loop + intra-group exclusion e2e OWED** (Owed Item E). |
 | One conformance suite green on memory+sqlite+postgres+objectlog; eventual-apply weaker; upsert-on-eventual→unavailable | **PARTIAL** — memory+sqlite+objectlog ✅; **postgres OWED** (Owed Item A). |
-| Two driving adapters + one composition root; dependency-direction test passes | **PASS** (RESP + facade + `pqueue-server`; dep-direction test green). |
+| Two driving adapters + one composition root; dependency-direction test passes | **PASS** (RESP + facade + `fireweed-server`; dep-direction test green). |
 | Durable-state reconstructable from the log (idempotency/fences/pause/command_position) | **PASS** (sqlite/objectlog rebuild-from-log durability tests; engine replay-reconstruction tests). |
 | Docs consistent; ADR-007/TD-006/TD-007 recorded; asymmetry recorded | **PASS** (architectural docs); minor doc-hygiene OWED (Owed Item F). |
 | Single-shard launch recorded; multi-shard post-launch | **PASS** (§2.5). |
@@ -181,26 +181,26 @@ nicety — `STREAM`/`GROUPS` are implemented).
 
 ## Owed items (tracked, with rationale — none are silent drops)
 
-- **A. Postgres adapter — RESOLVED** (owed-resolution Chunk 4). `pqueue-postgres` was rebuilt fresh to the
+- **A. Postgres adapter — RESOLVED** (owed-resolution Chunk 4). `fireweed-postgres` was rebuilt fresh to the
   engine ports via the durable-adapter template (durable command LOG in postgres tables + projection
   rebuilt-from-log; atomic class) over the SYNC `postgres` client, implementing EVERY port incl. PushPort
   + UpsertPort(new) + RenewLeasePort, and re-added to workspace `members`. The full conformance suite (20
   scenarios) + 2 durability reopen tests run GREEN against a live postgres:16 (schema-isolated, one
-  connection per scenario). Without `PQUEUE_PG_TEST_URL` they LOUD-skip (`eprintln!` + pass) so a green
+  connection per scenario). Without `FIREWEED_PG_TEST_URL` they LOUD-skip (`eprintln!` + pass) so a green
   default run is visibly partial, never a hidden pass. **Blocking-executor caveat (I1) recorded** in the
   crate docs + here: the sync client runs its own internal tokio runtime per call and PANICS if driven
   from an ambient tokio runtime (tests use `futures::executor::block_on`); the launch posture is single-
-  node durable-log + in-mem projection (guarantees identical to sqlite), and `pqueue-server` does NOT yet
+  node durable-log + in-mem projection (guarantees identical to sqlite), and `fireweed-server` does NOT yet
   wire postgres into its selector, so no tokio path reaches it. Production refinement (spawn_blocking +
   pool + row-level locking for the MAX(seq)/high-water serialization the process Mutex provides today) is a
   recorded POST-LAUNCH item. **CI gate (M2):** the live run is in-session; `PHASE-7` marks the
-  "conformance on …+postgres" gate **PASS (live), CI-job owed** — a `PQUEUE_PG_TEST_URL` service-container
+  "conformance on …+postgres" gate **PASS (live), CI-job owed** — a `FIREWEED_PG_TEST_URL` service-container
   job is still owed (see build-progress).
 - **B. Attempt-count on reclaim — RESOLVED** (owed-resolution Chunk 1). The reclaim (`LeaseExpired`) no
   longer charges; `attempt_count` = number of deliveries (charged only by `Claim`). TD-006:74/128-129 +
   the RESP XAUTOCLAIM doc updated; e2e asserts exactly 2 (claim + redeliver), conformance comment fixed.
 - **B'. Retry-exhaustion — RESOLVED** (owed-resolution Chunk 8). The `Finalize` apply arm's `Retry` branch
-  now calls the canonical `pqueue_core::failure_event(attempt_count, max_attempts)` predicate: a
+  now calls the canonical `fireweed_core::failure_event(attempt_count, max_attempts)` predicate: a
   `Finalize{Retry}` that has used all `max_attempts` deliveries (`attempt_count >= max_attempts`) goes
   TERMINAL (`Failed`) instead of back to pending; a retry under the bound returns it to pending (claimable
   again). The `#[allow(dead_code)]` on `ItemRecord.max_attempts` is removed. The decision is a pure function
@@ -220,7 +220,7 @@ nicety — `STREAM`/`GROUPS` are implemented).
   -with-key through the new `UpsertPort`; the facade `upsert` drops its counter. e2e
   `two_servers_on_one_backend_assign_distinct_xadd_ids` proves two RESP servers on one backend mint
   distinct ids and both items coexist.
-- **D. Graceful connection drain on shutdown — RESOLVED** (owed-resolution Chunk 5). `pqueue-resp`'s new
+- **D. Graceful connection drain on shutdown — RESOLVED** (owed-resolution Chunk 5). `fireweed-resp`'s new
   `serve_with_shutdown` takes a `CancellationToken` and owns the per-connection handlers in a
   `tokio::task::JoinSet`; on cancel it stops accepting and each handler observes the token BETWEEN commands
   (finishing any in-flight command first), then the drain awaits them all. `Server::shutdown()` stays SYNC
@@ -238,7 +238,7 @@ nicety — `STREAM`/`GROUPS` are implemented).
   Chunk 7). The `RenewLeasePort`/`ReassignLeasePort`/`PurgePort` exist and pre-validate via the shared
   `validate_leased` helper (mirrors `finalize_validate`: NotFound / fenced→StaleLease / terminal→Terminal /
   superseded→Superseded / not-Leased→Invalid) BEFORE any log append.
-  - **F.2a facade verbs** — the `pqueue` facade now exposes the full surface: `renew` (RenewLeasePort, no
+  - **F.2a facade verbs** — the `fireweed` facade now exposes the full surface: `renew` (RenewLeasePort, no
     attempt charge), `reassign` (ReassignLeasePort, +1 delivery + fresh token), `rearm` (`Finalize{Rearm}`
     → re-queue + reset attempt_count), `purge` (PurgePort, force gate + count), and `claimed`
     (`ProjectionRead::claimed_view`). Five facade tests added (every new verb exercised over a real
@@ -248,18 +248,18 @@ nicety — `STREAM`/`GROUPS` are implemented).
     retry/release/rearm, reclaim via XCLAIM/XAUTOCLAIM, rich metrics, XDEL, force-purge all marked).
   - **F.2c doc hygiene** — API-001 now carries a "Realized surfaces (ADR-007)" note: the contract is
     realized through the **two** built faces (Rust library + RESP); the HTTP/JSON `/v1` route table is kept
-    as a transport-neutral illustration but marked NOT-built (the legacy `pqueue-service` was deleted).
-    TP-001's Test-Layers table was rewritten off the deleted `pqueue-storage`/`pqueue-service` crates onto
+    as a transport-neutral illustration but marked NOT-built (the legacy `fireweed-service` was deleted).
+    TP-001's Test-Layers table was rewritten off the deleted `fireweed-storage`/`fireweed-service` crates onto
     the real locations (conformance/postgres/resp-e2e/facade/server).
   - **F.2d beads** — re-scoping recorded here (the tracker's `close` asserts full acceptance, which these
     do not all meet): the claimed-item-shape beads (`pqueue-9c77d5e7`, `pqueue-922eaf00`, acceptance keyed
-    to the deleted `pqueue-client`/`pqueue-storage` suites) are **superseded** by the transport-neutral
-    `pqueue_engine::ClaimedItem` — the claim path returns the full shape across all backends and conformance
+    to the deleted `fireweed-client`/`fireweed-storage` suites) are **superseded** by the transport-neutral
+    `fireweed_engine::ClaimedItem` — the claim path returns the full shape across all backends and conformance
     (`claim_returns_priority_ordered_rich_items`, `claimed_view_renders_leased_items`) + the facade
     `claimed` verb cover it; `metadata`/`gate_keys`/whole-cohort remain intentionally deferred to the
     API-003 epic (`pqueue-f6fbde17`). The Lakebase/connect-helper/profile beads (`pqueue-692471c5`,
     `pqueue-607be5bf`, `pqueue-2f57fbe4`, `pqueue-ea625701`, `pqueue-9cdafdaa`) now target the rebuilt
-    `pqueue-postgres` + `pqueue-server` + RESP/library faces rather than the deleted `pqueue-service`; the
+    `fireweed-postgres` + `fireweed-server` + RESP/library faces rather than the deleted `fireweed-service`; the
     rebuilt postgres adapter is `NoTls`-only, so the Lakebase TLS seam is genuine remaining product work.
 
 ---
@@ -280,4 +280,4 @@ library verbs + doc hygiene. **No plan item is silently dropped.** Two scope bou
 dropped: the postgres backend is not yet server-wired (blocking-executor caveat) and is `NoTls`-only
 (Lakebase TLS seam is owed product work); and retry-exhaustion bounds the explicit-retry path only — the
 lease-drop reclaim poison-loop is a separate owed policy (B′ scope note). The DoD CI job that runs postgres
-conformance against `PQUEUE_PG_TEST_URL` in CI (vs the in-session live run) is also still owed.
+conformance against `FIREWEED_PG_TEST_URL` in CI (vs the in-session live run) is also still owed.

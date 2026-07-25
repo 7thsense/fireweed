@@ -18,7 +18,7 @@ ddx:
 
 ## Context
 
-pqueue must provide durable priority queue semantics without making application
+fireweed must provide durable priority queue semantics without making application
 nodes durable authorities, requiring node-to-node discovery, or embedding a
 cluster consensus algorithm. It must support batch push, priority update, batch
 claim, lease renewal, finalize, retry, failure, progress bounds, and recovery at
@@ -52,7 +52,7 @@ log backend to achieve lower commit latency for small batches.
 ## Decision Drivers
 
 - Avoid node discovery, leader election, Raft/Paxos, ZooKeeper, and etcd inside
-  pqueue.
+  fireweed.
 - Keep the queue data plane horizontally scalable by tenant, queue, and shard.
 - Prefer Postgres for control-plane metadata, assignment, epoch, and backend
   configuration across all data-plane storage profiles.
@@ -76,7 +76,7 @@ log backend to achieve lower commit latency for small batches.
 ### Option 1: Postgres/Transactional Database as Queue Authority
 
 Postgres, Aurora, or DynamoDB own durable writes, claim concurrency, leases,
-finalization, and fencing directly. In the Postgres-native mode, pqueue uses
+finalization, and fencing directly. In the Postgres-native mode, fireweed uses
 Postgres both as the durable command log and as the operational queue store
 accessed through ordinary Postgres connections.
 
@@ -89,17 +89,17 @@ database partitions, tables, schemas, or clusters.
 
 ### Option 2: Kafka/Redpanda-Style Durable Log
 
-A partitioned streaming log owns durable append and replay. pqueue projects log
+A partitioned streaming log owns durable append and replay. fireweed projects log
 commands into a local execution index and uses the log partition model as the
 data-plane serialization boundary.
 
-This fits high-throughput append workloads and avoids pqueue-owned consensus,
+This fits high-throughput append workloads and avoids fireweed-owned consensus,
 but claim/finalize semantics still need a carefully designed projection,
 checkpoint, and compaction model.
 
 ### Option 3: S3-Compatible Object Log with Batched Commits
 
-pqueue buffers command batches, writes sealed immutable log segments to object
+fireweed buffers command batches, writes sealed immutable log segments to object
 storage, commits a manifest entry, acknowledges commands in the committed
 segment, and projects the commands into SQLite. SQLite snapshots are also stored
 in object storage so old log segments can expire after a safe recovery window.
@@ -120,7 +120,7 @@ the projection, not the only authority.
 
 ## Decision
 
-pqueue will use a CQRS-style log projection storage model.
+fireweed will use a CQRS-style log projection storage model.
 
 The durable command log is the source of truth. Local SQLite is the first
 candidate projection store for priority ordering, eligibility scans, leases,
@@ -151,7 +151,7 @@ including:
 - release
 - repair or administrative state transition
 
-pqueue acknowledges a command only after the configured `LogStore` durability
+fireweed acknowledges a command only after the configured `LogStore` durability
 profile says the command is committed and the operation's accepted effects are
 visible through the serving projection or equivalent response barrier. The
 chosen backend defines the latency and cost tradeoff; it does not define a
@@ -321,7 +321,7 @@ Directional monthly cost for the baseline:
 | DynamoDB on-demand | ~$625 non-transactional writes; ~$1,250 transactional writes; + up to ~$250/TiB storage retained | Per-command write units | Good low-latency authority, but steady high write volume is meaningfully more expensive than batched S3. |
 | MSK provisioned | ~$441 broker floor + storage | Fixed cluster floor | Good fast log option once traffic justifies the cluster; inefficient for small deployments. |
 | MSK Express | ~$881 broker floor + ~$10/TiB ingest + storage | Fixed cluster floor | Higher floor; may buy operational/performance characteristics rather than raw cost efficiency. |
-| Redpanda self-managed proxy | ~$372 for 3 `i4i.large` nodes before license/support/ops | Compute and operations | Potentially cheaper fixed floor than MSK, but pqueue users inherit more operational responsibility unless managed Redpanda is used. |
+| Redpanda self-managed proxy | ~$372 for 3 `i4i.large` nodes before license/support/ops | Compute and operations | Potentially cheaper fixed floor than MSK, but fireweed users inherit more operational responsibility unless managed Redpanda is used. |
 | Aurora PostgreSQL standard | ~$397 for two `db.r7g.large` instances + ~$100/TiB storage + ~$200 per billion I/Os per I/O touched | Compute plus I/O | Strong transactional semantics; must shard carefully to avoid central data-plane bottleneck. |
 | Aurora PostgreSQL I/O-Optimized | ~$517 for two `db.r7g.large` instances + ~$225/TiB storage | Compute plus storage | More predictable for I/O-heavy logs, but fixed cost and centralized write limits still matter. |
 
@@ -335,7 +335,7 @@ Interpretation:
 - DynamoDB and Aurora are simpler correctness authorities for low-latency
   writes, but their per-command or I/O economics matter at billions of
   transitions.
-- MSK and Redpanda are attractive when pqueue needs a fast append log with high
+- MSK and Redpanda are attractive when fireweed needs a fast append log with high
   throughput and replay, and the fixed cluster cost is acceptable.
 - Seventh Sense-like workloads may be a strong fit for S3 object-log durability
   if producers send large batches and business latency tolerates batched
@@ -345,7 +345,7 @@ Interpretation:
 
 Positive:
 
-- pqueue avoids implementing cluster consensus and avoids node-to-node ownership
+- fireweed avoids implementing cluster consensus and avoids node-to-node ownership
   negotiation in the data plane.
 - The durability model is explicit: acknowledged state is in the durable log.
 - Users can choose latency/cost tradeoffs by selecting a backend and batch

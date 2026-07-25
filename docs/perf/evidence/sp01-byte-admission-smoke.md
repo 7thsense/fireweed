@@ -2,7 +2,7 @@
 
 Date: 2026-07-18. Command:
 
-`cargo test -p pqueue-objectlog byte_admission_serialization_microbenchmark --lib -- --ignored --nocapture`
+`cargo test -p fireweed-objectlog byte_admission_serialization_microbenchmark --lib -- --ignored --nocapture`
 
 The local debug-build smoke encoded 100 commands for 2,000 iterations. The pre-SP-01 single-serialization
 shape took 2.939 s; serialization plus exact peak-charge arithmetic and record-vector ownership took 2.942 s

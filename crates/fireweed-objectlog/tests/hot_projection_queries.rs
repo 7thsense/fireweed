@@ -1,6 +1,6 @@
 //! Env-gated hot-projection capability smoke test for the object-log adapter.
 //!
-//! Without `PQUEUE_OBJECTLOG_TEST_ROOT` this prints a loud skip and returns green, so local CI does not
+//! Without `FIREWEED_OBJECTLOG_TEST_ROOT` this prints a loud skip and returns green, so local CI does not
 //! depend on a configured filesystem root. When configured, it proves the adapter advertises hot-
 //! projection support explicitly rather than pretending the capability exists.
 
@@ -13,7 +13,7 @@ use fireweed_objectlog::ObjectLogBackend;
 
 fn skip_loudly() {
     eprintln!(
-        "OBJECTLOG HOT PROJECTION SKIPPED (hot_projection_capabilities_are_explicit) — set PQUEUE_OBJECTLOG_TEST_ROOT to a writable root"
+        "OBJECTLOG HOT PROJECTION SKIPPED (hot_projection_capabilities_are_explicit) — set FIREWEED_OBJECTLOG_TEST_ROOT to a writable root"
     );
 }
 
@@ -72,7 +72,7 @@ where
 
 #[tokio::test]
 async fn hot_projection_capabilities_are_explicit() {
-    let Ok(root) = std::env::var("PQUEUE_OBJECTLOG_TEST_ROOT") else {
+    let Ok(root) = std::env::var("FIREWEED_OBJECTLOG_TEST_ROOT") else {
         skip_loudly();
         return;
     };
@@ -101,7 +101,7 @@ async fn hot_projection_capabilities_are_explicit() {
 
 #[tokio::test]
 async fn commit_transition_capabilities_are_explicit() {
-    let Ok(root) = std::env::var("PQUEUE_OBJECTLOG_TEST_ROOT") else {
+    let Ok(root) = std::env::var("FIREWEED_OBJECTLOG_TEST_ROOT") else {
         skip_loudly();
         return;
     };

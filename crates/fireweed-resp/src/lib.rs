@@ -721,7 +721,7 @@ async fn xadd_admission<H: RespHooks>(
         }
         Ok(RouteDecision::NoPerm) => return Err(Resp::Error("NOPERM unauthorized".into())),
         Ok(RouteDecision::Unavailable) => {
-            return Err(Resp::Error("ERR pqueue unavailable".into()));
+            return Err(Resp::Error("ERR fireweed unavailable".into()));
         }
         Err(error) => return Err(err_reply(&error)),
     }
@@ -788,7 +788,7 @@ async fn dispatch<B: RespBackend, H: RespHooks>(
             }
             Ok(RouteDecision::NoPerm) => return Resp::Error("NOPERM unauthorized".into()),
             Ok(RouteDecision::Unavailable) => {
-                return Resp::Error("ERR pqueue unavailable".into());
+                return Resp::Error("ERR fireweed unavailable".into());
             }
             Err(e) => return err_reply(&e),
         }
@@ -810,9 +810,9 @@ async fn dispatch<B: RespBackend, H: RespHooks>(
         "XLEN" => xlen(backend, args).await,
         "XDEL" => xdel(backend, hooks, state, args).await,
         "XINFO" => xinfo(backend, args).await,
-        "PQ.MGET" => pq_mget(backend, args).await,
-        "PQ.HGETALL" => pq_hgetall(backend, args).await,
-        "PQ.HMGET" => pq_hmget(backend, args).await,
+        "FW.MGET" => fireweed_mget(backend, args).await,
+        "FW.HGETALL" => fireweed_hgetall(backend, args).await,
+        "FW.HMGET" => fireweed_hmget(backend, args).await,
         other => Resp::Error(format!("ERR unknown command '{other}'")),
     }
 }
@@ -826,8 +826,8 @@ fn routing_key_for<'a>(name: &str, args: &'a [Vec<u8>]) -> Option<&'a [u8]> {
             args.get(streams_at + 1).map(Vec::as_slice)
         }
         "XINFO" => args.get(2).map(Vec::as_slice),
-        "XADD" | "XACK" | "XPENDING" | "XAUTOCLAIM" | "XCLAIM" | "XLEN" | "XDEL" | "PQ.MGET"
-        | "PQ.HGETALL" | "PQ.HMGET" => args.get(1).map(Vec::as_slice),
+        "XADD" | "XACK" | "XPENDING" | "XAUTOCLAIM" | "XCLAIM" | "XLEN" | "XDEL" | "FW.MGET"
+        | "FW.HGETALL" | "FW.HMGET" => args.get(1).map(Vec::as_slice),
         _ => None,
     }
 }
@@ -1226,9 +1226,9 @@ fn live_field_value(item: &LiveItemView, field: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-async fn pq_mget<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
+async fn fireweed_mget<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
     if args.len() < 3 {
-        return Resp::Error("ERR wrong number of arguments for 'pq.mget'".into());
+        return Resp::Error("ERR wrong number of arguments for 'fireweed.mget'".into());
     }
     let shard = match parse_shard(&args[1]) {
         Ok(s) => s,
@@ -1255,9 +1255,9 @@ async fn pq_mget<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
     }
 }
 
-async fn pq_hgetall<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
+async fn fireweed_hgetall<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
     if args.len() != 3 {
-        return Resp::Error("ERR wrong number of arguments for 'pq.hgetall'".into());
+        return Resp::Error("ERR wrong number of arguments for 'fireweed.hgetall'".into());
     }
     let shard = match parse_shard(&args[1]) {
         Ok(s) => s,
@@ -1285,9 +1285,9 @@ async fn pq_hgetall<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp 
     }
 }
 
-async fn pq_hmget<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
+async fn fireweed_hmget<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
     if args.len() < 4 {
-        return Resp::Error("ERR wrong number of arguments for 'pq.hmget'".into());
+        return Resp::Error("ERR wrong number of arguments for 'fireweed.hmget'".into());
     }
     let shard = match parse_shard(&args[1]) {
         Ok(s) => s,
@@ -1369,7 +1369,7 @@ async fn xack<B: RespBackend, H: RespHooks>(
 /// `XPENDING key group [start end count [consumer]]` — the in-flight (leased, not-yet-acked) items.
 ///
 /// Summary form (`XPENDING key group`): `[count, min-id, max-id, [[consumer, count]]]`, where the
-/// `consumer` axis is the **lease token** (pqueue's closest analog of a Redis consumer — who holds the
+/// `consumer` axis is the **lease token** (fireweed's closest analog of a Redis consumer — who holds the
 /// lease). Extended form (`XPENDING key group start end count`): one `[id, consumer(=lease token),
 /// idle-ms, delivery-count]` per leased item, capped at the requested `count`.
 ///
@@ -1435,14 +1435,14 @@ async fn xpending<B: RespBackend>(
         b"-" => None,
         raw => match ItemId::new(String::from_utf8_lossy(raw)) {
             Ok(id) => Some(id),
-            Err(_) => return Resp::Error("ERR pqueue invalid".into()),
+            Err(_) => return Resp::Error("ERR fireweed invalid".into()),
         },
     };
     let end = match &args[4][..] {
         b"+" => None,
         raw => match ItemId::new(String::from_utf8_lossy(raw)) {
             Ok(id) => Some(id),
-            Err(_) => return Resp::Error("ERR pqueue invalid".into()),
+            Err(_) => return Resp::Error("ERR fireweed invalid".into()),
         },
     };
     let consumer = args
@@ -1450,7 +1450,7 @@ async fn xpending<B: RespBackend>(
         .map(|raw| LeaseToken::new(String::from_utf8_lossy(raw)));
     let consumer = match consumer.transpose() {
         Ok(token) => token,
-        Err(_) => return Resp::Error("ERR pqueue invalid".into()),
+        Err(_) => return Resp::Error("ERR fireweed invalid".into()),
     };
     let leases = match backend
         .pending_range(&shard, start, end, consumer.as_ref(), limit)
@@ -1492,8 +1492,8 @@ async fn xpending<B: RespBackend>(
 /// transferred to `consumer` via [`ReassignLeasePort`] (a re-delivery), keeping its id so the cursor is
 /// stable across the reclaim.
 ///
-/// pqueue-flavored divergences:
-/// - **`min-idle-time` is ignored** — pqueue reclaims strictly by **lease expiry** (the engine's timed
+/// fireweed-flavored divergences:
+/// - **`min-idle-time` is ignored** — fireweed reclaims strictly by **lease expiry** (the engine's timed
 ///   transition: a lease is held THROUGH `lease_expires_at`, idle once `now > lease_expires_at`), not a
 ///   caller-supplied idle floor.
 /// - **attempt accounting** (TD-006:129): `attempt_count` = number of deliveries. Reclaiming an idle
@@ -1522,7 +1522,7 @@ async fn xautoclaim<B: RespBackend, H: RespHooks>(
     let consumer = String::from_utf8_lossy(&args[3]).to_string();
     let consumer_token = match LeaseToken::new(consumer) {
         Ok(t) => t,
-        Err(_) => return Resp::Error("ERR pqueue invalid".into()),
+        Err(_) => return Resp::Error("ERR fireweed invalid".into()),
     };
     let start = String::from_utf8_lossy(&args[5]).to_string();
     let mut count = 100usize;
@@ -1557,7 +1557,7 @@ async fn xautoclaim<B: RespBackend, H: RespHooks>(
     } else {
         match ItemId::new(start.clone()) {
             Ok(id) => Some(id),
-            Err(_) => return Resp::Error("ERR pqueue invalid".into()),
+            Err(_) => return Resp::Error("ERR fireweed invalid".into()),
         }
     };
     // Read only the COUNT-sized PEL window and one cursor row.
@@ -1622,14 +1622,14 @@ async fn xautoclaim<B: RespBackend, H: RespHooks>(
 /// `XCLAIM key group consumer min-idle-time id [id ...] [IDLE ms] [TIME ms] [RETRYCOUNT n] [FORCE]
 /// [JUSTID] [LASTID id]` — transfer ownership of specific in-flight (leased) entries to `consumer`.
 ///
-/// pqueue semantics (TD-006 §3): the **consumer name IS the lease token** (the identity `XPENDING`
+/// fireweed semantics (TD-006 §3): the **consumer name IS the lease token** (the identity `XPENDING`
 /// reports). So per id:
 /// - `consumer` == the id's CURRENT lease token → **renew** (extend the lease, [`RenewLeasePort`], NO
 ///   attempt charge — §3 flavor #7, a worker re-affirming its own claim).
 /// - `consumer` != the current token (or a different worker) → **reassign** ([`ReassignLeasePort`]):
 ///   swap the token to `consumer` and charge exactly one delivery (TD-006:129).
 ///
-/// Divergences: **`min-idle-time` is ignored** (pqueue gates by lease expiry, like `XAUTOCLAIM`); the
+/// Divergences: **`min-idle-time` is ignored** (fireweed gates by lease expiry, like `XAUTOCLAIM`); the
 /// `IDLE`/`TIME`/`RETRYCOUNT`/`FORCE`/`LASTID` options are accepted and ignored (the lease deadline is
 /// reset to the queue's `max_lease_duration`). Repeated ids are de-duplicated (Redis treats them
 /// idempotently; without this a duplicated id would charge the delivery count twice). A mixed batch
@@ -1663,7 +1663,7 @@ async fn xclaim<B: RespBackend, H: RespHooks>(
     while i < args.len() && !is_opt(&args[i]) {
         match ItemId::new(String::from_utf8_lossy(&args[i])) {
             Ok(id) => ids.push(id),
-            Err(_) => return Resp::Error("ERR pqueue invalid".into()),
+            Err(_) => return Resp::Error("ERR fireweed invalid".into()),
         }
         i += 1;
     }
@@ -1679,7 +1679,7 @@ async fn xclaim<B: RespBackend, H: RespHooks>(
     let consumer = String::from_utf8_lossy(&args[3]).to_string();
     let consumer_token = match LeaseToken::new(consumer.clone()) {
         Ok(t) => t,
-        Err(_) => return Resp::Error("ERR pqueue invalid".into()),
+        Err(_) => return Resp::Error("ERR fireweed invalid".into()),
     };
 
     // Partition by CURRENT owner: ids already owned by `consumer` → renew; the rest → reassign. An id that
@@ -1762,8 +1762,8 @@ async fn xclaim<B: RespBackend, H: RespHooks>(
 }
 
 /// `XLEN key` — the number of LIVE entries in the stream: pending + in-flight (leased). Like Redis,
-/// terminal entries (complete/failed, the pqueue analog of acked) are NOT counted, and purged (`XDEL`)
-/// entries are gone. A pqueue-flavored read over `metrics` (TD-006 §3).
+/// terminal entries (complete/failed, the fireweed analog of acked) are NOT counted, and purged (`XDEL`)
+/// entries are gone. A fireweed-flavored read over `metrics` (TD-006 §3).
 async fn xlen<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
     if args.len() != 2 {
         return Resp::Error("ERR wrong number of arguments for 'xlen'".into());
@@ -1798,7 +1798,7 @@ async fn xdel<B: RespBackend, H: RespHooks>(
     for a in &args[2..] {
         match ItemId::new(String::from_utf8_lossy(a)) {
             Ok(id) => ids.push(id),
-            Err(_) => return Resp::Error("ERR pqueue invalid".into()),
+            Err(_) => return Resp::Error("ERR fireweed invalid".into()),
         }
     }
     let now = state.now();
@@ -1813,7 +1813,7 @@ async fn xdel<B: RespBackend, H: RespHooks>(
 }
 
 /// `XINFO STREAM key` / `XINFO GROUPS key` — summary reads over `metrics`/`pending`. Only the `STREAM`
-/// and `GROUPS` subcommands are offered (a documented divergence; `CONSUMERS`/`FULL` are owed). pqueue
+/// and `GROUPS` subcommands are offered (a documented divergence; `CONSUMERS`/`FULL` are owed). fireweed
 /// flavor (TD-006 §3): there is no meaningful `last-delivered-id` / stream-id high-water (delivery is
 /// priority-ordered + cursorless, not id-monotonic), so that field is reported as `0-0`.
 async fn xinfo<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
@@ -1852,7 +1852,7 @@ async fn xinfo<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
             Resp::Bulk(b"resident-terminal-count".to_vec()),
             Resp::Int(terminal_metrics.resident_terminal_count as i64),
             Resp::Bulk(b"groups".to_vec()),
-            Resp::Int(1), // single implicit consumer group (pqueue has no named-group state)
+            Resp::Int(1), // single implicit consumer group (fireweed has no named-group state)
             Resp::Bulk(b"last-generated-id".to_vec()),
             Resp::Bulk(b"0-0".to_vec()),
             Resp::Bulk(b"last-delivered-id".to_vec()),
@@ -1889,17 +1889,17 @@ fn err_reply(e: &EngineError) -> Resp {
         EngineError::NotFound => Resp::Error("ERR no such queue".into()),
         // A client-caused incompatible re-create, not an internal fault (queue-create is library-only
         // over RESP today, so this is latent — but the token must be honest).
-        EngineError::QueueDefinitionConflict => Resp::Error("ERR pqueue queue_conflict".into()),
+        EngineError::QueueDefinitionConflict => Resp::Error("ERR fireweed queue_conflict".into()),
         EngineError::Storage(_) | EngineError::DurableDataCorrupt { .. } => {
             // Keep adapter/storage details out of the client-visible RESP token, but do not erase them
             // from operator diagnostics. Live release evidence relies on the server log to distinguish a
             // durable fault from an intentionally retryable admission response.
             eprintln!("[fireweed-resp] internal engine error: {e}");
-            Resp::Error("ERR pqueue internal".into())
+            Resp::Error("ERR fireweed internal".into())
         }
         // Every other variant carries a `-ERR fireweed …` token via `resp_token()` above; this arm is
         // unreachable, but stays total.
-        _ => Resp::Error("ERR pqueue internal".into()),
+        _ => Resp::Error("ERR fireweed internal".into()),
     }
 }
 
@@ -2023,8 +2023,14 @@ mod tests {
         // TD-006 §2: cross-tenant / operator denial → -NOPERM (NOT a fake -ERR fireweed token).
         assert!(err_text(&EngineError::Forbidden("nope")).starts_with("NOPERM"));
         // `-ERR fireweed …` tokened errors pass through verbatim.
-        assert_eq!(err_text(&EngineError::StaleLease), "ERR pqueue stale_lease");
-        assert_eq!(err_text(&EngineError::Superseded), "ERR pqueue superseded");
+        assert_eq!(
+            err_text(&EngineError::StaleLease),
+            "ERR fireweed stale_lease"
+        );
+        assert_eq!(
+            err_text(&EngineError::Superseded),
+            "ERR fireweed superseded"
+        );
         assert_eq!(err_text(&EngineError::NotFound), "ERR no such queue");
     }
 
@@ -2117,7 +2123,7 @@ mod tests {
         assert!(spy.calls.lock().unwrap().is_empty());
         assert_eq!(
             replies,
-            vec![Resp::Error("ERR pqueue unavailable".into()); 100]
+            vec![Resp::Error("ERR fireweed unavailable".into()); 100]
         );
 
         let hooks = CountingAdmission::default();

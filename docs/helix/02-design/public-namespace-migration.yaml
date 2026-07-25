@@ -1,435 +1,82 @@
-format: fireweed-queue-public-namespace-migration-v1
+format: fireweed-public-namespace-cutover-v2
+governed_by: ADR-023
 generated_from: repository-state
-selected:
-  display_name:
-    value: Fireweed Queue
-    classification: rename-now
-  short_name:
-    value: Fireweed
-    classification: rename-now
-  repository_stem:
-    value: fireweed
-    classification: rename-now
-  cli_stem:
-    value: fireweed
-    classification: rename-now
-  rust_stem:
-    value: fireweed
-    classification: rename-now
-  environment_prefix:
-    value: FIREWEED_
-    classification: rename-now
-  abbreviation:
-    value: FWQ
-    classification: rename-now
-  first_renamed_release:
-    value: v0.20.0
-    classification: rename-now
+mode: hard-pre-release-cutover
+
+identity:
+  display_name: Fireweed
+  repository_stem: fireweed
+  cli_stem: fireweed
+  rust_stem: fireweed
+  environment_prefix: FIREWEED_
+  abbreviation: FW
+
 policy:
+  compatibility_aliases: forbidden
+  fallback_reads: forbidden
+  dual_writes: forbidden
+  migration_shims: forbidden
+  compatibility_binaries: forbidden
+  clean_start_required: true
   history_rewriting: forbidden
-  notes:
-    - Public renames are additive and must not rewrite published history.
-    - Retained identifiers remain stable until a separate migration owns them.
-inventory:
+
+canonical_surfaces:
   cargo_packages:
-    - current: pqueue
-      target: fireweed
-      classification: temporary compatibility alias
-      evidence:
-        - Cargo.toml
-        - crates/pqueue/Cargo.toml
-    - current: pqueue-core
-      target: fireweed-core
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-core/Cargo.toml
-    - current: pqueue-engine
-      target: fireweed-engine
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-engine/Cargo.toml
-    - current: pqueue-projection
-      target: fireweed-projection
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-projection/Cargo.toml
-    - current: pqueue-relational
-      target: fireweed-relational
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-relational/Cargo.toml
-    - current: pqueue-memory
-      target: fireweed-memory
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-memory/Cargo.toml
-    - current: pqueue-sqlite
-      target: fireweed-sqlite
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-sqlite/Cargo.toml
-    - current: pqueue-postgres
-      target: fireweed-postgres
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-postgres/Cargo.toml
-    - current: pqueue-objectlog
-      target: fireweed-objectlog
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-objectlog/Cargo.toml
-    - current: pqueue-resp
-      target: fireweed-resp
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-resp/Cargo.toml
-    - current: pqueue-server
-      target: fireweed-server
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-server/Cargo.toml
-    - current: pqueue-release
-      target: fireweed-release
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-release/Cargo.toml
-    - current: pqueue-loadgen
-      target: fireweed-loadgen
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-loadgen/Cargo.toml
-    - current: pqueue-conformance
-      target: fireweed-conformance
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-conformance/Cargo.toml
-    - current: pqueue-sim-support
-      target: fireweed-sim-support
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-sim-support/Cargo.toml
-    - current: pqueue-turso
-      target: fireweed-turso
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-turso/Cargo.toml
-    - current: pqueue-bench
-      target: fireweed-bench
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-bench/Cargo.toml
-    - current: pqueue-turso-compat-probe
-      target: fireweed-turso-compat-probe
-      classification: temporary compatibility alias
-      evidence:
-        - tools/turso-compat-probe/Cargo.toml
-  rust_crate_paths:
-    - current: crates/pqueue
-      target: crates/fireweed
-      classification: temporary compatibility alias
-    - current: crates/pqueue-core
-      target: crates/fireweed-core
-      classification: temporary compatibility alias
-    - current: crates/pqueue-engine
-      target: crates/fireweed-engine
-      classification: temporary compatibility alias
-    - current: crates/pqueue-projection
-      target: crates/fireweed-projection
-      classification: temporary compatibility alias
-    - current: crates/pqueue-relational
-      target: crates/fireweed-relational
-      classification: temporary compatibility alias
-    - current: crates/pqueue-memory
-      target: crates/fireweed-memory
-      classification: temporary compatibility alias
-    - current: crates/pqueue-sqlite
-      target: crates/fireweed-sqlite
-      classification: temporary compatibility alias
-    - current: crates/pqueue-postgres
-      target: crates/fireweed-postgres
-      classification: temporary compatibility alias
-    - current: crates/pqueue-objectlog
-      target: crates/fireweed-objectlog
-      classification: temporary compatibility alias
-    - current: crates/pqueue-resp
-      target: crates/fireweed-resp
-      classification: temporary compatibility alias
-    - current: crates/pqueue-server
-      target: crates/fireweed-server
-      classification: temporary compatibility alias
-    - current: crates/pqueue-release
-      target: crates/fireweed-release
-      classification: temporary compatibility alias
-    - current: crates/pqueue-loadgen
-      target: crates/fireweed-loadgen
-      classification: temporary compatibility alias
-    - current: crates/pqueue-conformance
-      target: crates/fireweed-conformance
-      classification: temporary compatibility alias
-    - current: crates/pqueue-sim-support
-      target: crates/fireweed-sim-support
-      classification: temporary compatibility alias
-    - current: crates/pqueue-turso
-      target: crates/fireweed-turso
-      classification: temporary compatibility alias
-    - current: crates/pqueue-bench
-      target: crates/fireweed-bench
-      classification: temporary compatibility alias
-    - current: tools/turso-compat-probe
-      target: tools/fireweed-turso-compat-probe
-      classification: temporary compatibility alias
+    - fireweed
+    - fireweed-core
+    - fireweed-engine
+    - fireweed-projection
+    - fireweed-relational
+    - fireweed-memory
+    - fireweed-sqlite
+    - fireweed-postgres
+    - fireweed-objectlog
+    - fireweed-resp
+    - fireweed-server
+    - fireweed-release
+    - fireweed-loadgen
+    - fireweed-conformance
+    - fireweed-sim-support
+    - fireweed-turso
+    - fireweed-bench
   binaries:
-    - current: pqueue-service
-      target: fireweed-service
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-server/Cargo.toml
-    - current: pqueue-postgres-migrate
-      target: fireweed-postgres-migrate
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-postgres/Cargo.toml
-    - current: pqueue-loadgen
-      target: fireweed-loadgen
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-loadgen/Cargo.toml
-    - current: pqueue-bench
-      target: fireweed-bench
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-bench/Cargo.toml
-    - current: pqueue-verify-ledger
-      target: fireweed-verify-ledger
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-release/Cargo.toml
-    - current: pqueue-verify-evidence-attestation
-      target: fireweed-verify-evidence-attestation
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-release/Cargo.toml
-    - current: pqueue-verify-transaction-evidence
-      target: fireweed-verify-transaction-evidence
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-release/Cargo.toml
-    - current: pqueue-verify-e2-failover
-      target: fireweed-verify-e2-failover
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-release/Cargo.toml
-    - current: pqueue-verify-e3-contract
-      target: fireweed-verify-e3-contract
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-release/Cargo.toml
-    - current: pqueue-build-e3-contract
-      target: fireweed-build-e3-contract
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-release/Cargo.toml
-    - current: pqueue-cost-model
-      target: fireweed-cost-model
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-release/Cargo.toml
-  cli:
-    - current: pqueue
-      target: fireweed
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue/src/lib.rs
-    - current: pqueue-service
-      target: fireweed-service
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-server/Cargo.toml
-  environment:
-    - current: PQUEUE_
-      target: FIREWEED_
-      classification: temporary compatibility alias
-      evidence:
-        - docs/deployment/container-runtime-contract.md
-        - charts/pqueue/templates/configmap.yaml
-    - current: DATABRICKS_*
-      target: DATABRICKS_*
-      classification: intentionally retained persistence/wire identifier
-      evidence:
-        - docs/deployment/container-runtime-contract.md
-        - charts/pqueue/templates/deployment.yaml
-    - current: PQUEUE_PG_TEST_URL
-      target: FIREWEED_PG_TEST_URL
-      classification: temporary compatibility alias
-      evidence:
-        - .github/workflows/ci.yml
-        - crates/pqueue-postgres/tests/relational_conformance.rs
-    - current: PQUEUE_S3_TEST_*
-      target: FIREWEED_S3_TEST_*
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue/tests/embedded_objectlog_sqlite.rs
-        - crates/pqueue/tests/embedded_objectlog_postgres.rs
-    - current: PQUEUE_LEDGER_DIR
-      target: FIREWEED_LEDGER_DIR
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-release/src/lib.rs
-        - docs/perf/tp002-objectlog-hybrid-evidence.md
-  config:
-    - current: charts/pqueue
-      target: charts/fireweed-queue
-      classification: temporary compatibility alias
-      evidence:
-        - charts/pqueue/Chart.yaml
-        - charts/pqueue/values.yaml
-    - current: chart package pqueue-<version>.tgz
-      target: fireweed-queue-<version>.tgz
-      classification: temporary compatibility alias
-      evidence:
-        - docs/deployment/operator-release-artifacts.md
-        - .github/workflows/release.yml
-    - current: values.schema.json keys such as storage.*, bootstrap.*
-      target: same keys
-      classification: intentionally retained persistence/wire identifier
-      evidence:
-        - charts/pqueue/values.schema.json
-        - charts/pqueue/templates/configmap.yaml
-    - current: runtime config prefix PQUEUE_ in chart-rendered manifests
-      target: FIREWEED_ in new manifests
-      classification: temporary compatibility alias
-      evidence:
-        - charts/pqueue/templates/configmap.yaml
-        - docs/deployment/container-runtime-contract.md
-  protocol:
-    - current: RESP command surface and item semantics
-      target: same protocol
-      classification: intentionally retained persistence/wire identifier
-      evidence:
-        - crates/pqueue-resp/src/lib.rs
-        - docs/helix/02-design/contracts/API-001-native-client-interface.md
-    - current: durable event and table names such as pqueue_request_idempotency
-      target: same names
-      classification: intentionally retained persistence/wire identifier
-      evidence:
-        - crates/pqueue-postgres/src/relational.rs
-        - crates/pqueue-sqlite/src/relational.rs
-  services:
-    - current: pqueue-service Kubernetes workload names
-      target: fireweed-service workload names
-      classification: temporary compatibility alias
-      evidence:
-        - charts/pqueue/templates/deployment.yaml
-        - charts/pqueue/templates/service.yaml
-    - current: pqueue operator docs and deployment examples
-      target: fireweed operator docs and deployment examples
-      classification: temporary compatibility alias
-      evidence:
-        - docs/deployment/operator-guide.md
-        - docs/deployment/operator-release-artifacts.md
-  images:
-    - current: ghcr.io/<owner>/pqueue-service
-      target: ghcr.io/<owner>/fireweed-service
-      classification: temporary compatibility alias
-      evidence:
-        - .github/workflows/release.yml
-        - docs/deployment/operator-release-artifacts.md
-    - current: pqueue:ci and pqueue:tls build tags
-      target: fireweed:ci and fireweed:tls build tags
-      classification: temporary compatibility alias
-      evidence:
-        - docs/deployment/container-runtime-contract.md
-        - docs/deployment/helm-static-validation.md
+    - fireweed-service
+    - fireweed-postgres-migrate
+    - fireweed-loadgen
+    - fireweed-bench
+    - fireweed-verify-ledger
+    - fireweed-verify-evidence-attestation
+    - fireweed-verify-transaction-evidence
+    - fireweed-verify-e2-failover
+    - fireweed-verify-e3-contract
+    - fireweed-build-e3-contract
+    - fireweed-cost-model
+  repository:
+    url: https://github.com/telepathdata/fireweed.git
+  container:
+    image: ghcr.io/telepathdata/fireweed-service
   helm:
-    - current: Helm chart name pqueue
-      target: fireweed-queue
-      classification: temporary compatibility alias
-      evidence:
-        - charts/pqueue/Chart.yaml
-        - docs/deployment/operator-release-artifacts.md
-    - current: release artifacts pqueue-helm-chart.txt
-      target: fireweed-helm-chart.txt
-      classification: temporary compatibility alias
-      evidence:
-        - docs/deployment/operator-release-artifacts.md
-        - .github/workflows/release.yml
-    - current: chart templates under charts/pqueue/
-      target: chart templates under charts/fireweed-queue/
-      classification: temporary compatibility alias
-      evidence:
-        - charts/pqueue/templates/deployment.yaml
-        - charts/pqueue/templates/configmap.yaml
-  persisted_data:
-    - current: /var/lib/pqueue/object-log
-      target: same path
-      classification: intentionally retained persistence/wire identifier
-      evidence:
-        - docs/deployment/container-runtime-contract.md
-        - charts/pqueue/values.schema.json
-    - current: /var/lib/pqueue/pqueue-log.db
-      target: same path
-      classification: intentionally retained persistence/wire identifier
-      evidence:
-        - docs/deployment/container-runtime-contract.md
-    - current: /var/lib/pqueue/pqueue-projection.db
-      target: same path
-      classification: intentionally retained persistence/wire identifier
-      evidence:
-        - docs/deployment/container-runtime-contract.md
-    - current: table and file names prefixed with pqueue_
-      target: same prefix
-      classification: intentionally retained persistence/wire identifier
-      evidence:
-        - crates/pqueue-postgres/src/relational.rs
-        - crates/pqueue-sqlite/src/relational.rs
-  repository_urls:
-    - current: https://github.com/telepathdata/7thsense-pqueue.git
-      target: https://github.com/telepathdata/fireweed.git
-      classification: historical allowlist
-      evidence:
-        - .github/workflows/release.yml
-        - docs/deployment/operator-release-artifacts.md
-  downstream_consumers:
-    - current: GitHub Actions workflows that check out the repo as pqueue
-      target: workflows that check out fireweed
-      classification: temporary compatibility alias
-      evidence:
-        - .github/workflows/ci.yml
-        - .github/workflows/nightly.yml
-        - .github/workflows/release.yml
-    - current: docs that instruct operators to install pqueue artifacts
-      target: docs that instruct operators to install fireweed artifacts
-      classification: temporary compatibility alias
-      evidence:
-        - docs/deployment/operator-guide.md
-        - docs/deployment/operator-release-artifacts.md
-    - current: test and perf harness references to pqueue binaries
-      target: fireweed binary references
-      classification: temporary compatibility alias
-      evidence:
-        - crates/pqueue-bench/tests/*.rs
-        - docs/perf/*.md
-    - current: Helm fixtures under charts/pqueue/ci
-      target: charts/fireweed-queue/ci
-      classification: temporary compatibility alias
-      evidence:
-        - charts/pqueue/ci/*.yaml
-  historical_audit_identifiers:
-    - current: v0.19.x releases and their notes
-      target: same history
-      classification: historical allowlist
-      evidence:
-        - docs/releases/v0.19.0.md
-        - docs/releases/v0.19.6.md
-    - current: bead IDs with the pqueue- prefix
-      target: same history
-      classification: historical allowlist
-      evidence:
-        - docs/helix/00-discover/name-and-positioning-analysis.md
-        - docs/helix/04-build/build-progress.md
-    - current: legacy execution and release artifacts named pqueue-*
-      target: same history
-      classification: historical allowlist
-      evidence:
-        - docs/deployment/operator-release-artifacts.md
-        - crates/pqueue-release/tests/*.rs
+    chart: fireweed-queue
+    path: charts/fireweed-queue
+  runtime:
+    state_root: /var/lib/fireweed
+    object_log_root: /var/lib/fireweed/object-log
+    log_database: /var/lib/fireweed/fireweed-log.db
+    projection_database: /var/lib/fireweed/fireweed-projection.db
+  persistence:
+    sql_prefix: fireweed_
+    object_prefix: fireweed/
+  protocol:
+    resp_extension_prefix: FW.
+    http_header_prefix: X-Fireweed-
+
+exceptions:
+  - immutable DDx bead IDs and execution paths with their original audit identifiers
+  - verbatim historical evidence whose rewriting would falsify the record
+  - negative tests that prove a retired namespace is rejected
+
+verification:
+  - no executable alias or fallback accepts a retired identifier
+  - no current example, operator instruction, schema, path, prefix, or wire identifier emits a retired identifier
+  - fresh SQLite, PostgreSQL, Turso, and object-log configurations pass functional and close/reopen durability suites
+  - identity residue verification uses exact path-and-pattern exceptions only

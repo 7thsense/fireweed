@@ -23,7 +23,7 @@ use serde_json::json;
 
 fn unique_paths(tag: &str) -> (String, String) {
     let base = std::env::temp_dir().join(format!(
-        "pqueue-composed-dupidx-{tag}-{}-{:?}",
+        "fireweed-composed-dupidx-{tag}-{}-{:?}",
         std::process::id(),
         std::thread::current().id()
     ));
@@ -65,11 +65,11 @@ fn lifecycle_with_email(priority: i64, email: &str) -> PushSpec {
     }
 }
 
-/// Count durable `pqueue_item_index` rows for the unique index in the projection db.
+/// Count durable `fireweed_item_index` rows for the unique index in the projection db.
 fn count_index_rows(projection_path: &str) -> i64 {
     let conn = Connection::open(projection_path).unwrap();
     conn.query_row(
-        "SELECT COUNT(*) FROM pqueue_item_index WHERE index_name='by_email'",
+        "SELECT COUNT(*) FROM fireweed_item_index WHERE index_name='by_email'",
         [],
         |row| row.get(0),
     )

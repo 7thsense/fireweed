@@ -4,11 +4,11 @@
 //! their observable read-state (metrics, eligibility order, peek, the token-bearing pending set) is
 //! identical at every step:
 //!   - in-memory log-replay family  → `fireweed_memory::composed_memory_backend` (shared `ProjectionData`)
-//!   - relational DB-authoritative  → `fireweed_sqlite::SqliteRelationalBackend` (`pqueue_items` SQL)
+//!   - relational DB-authoritative  → `fireweed_sqlite::SqliteRelationalBackend` (`fireweed_items` SQL)
 //!
 //! This is a stronger guarantee than each family independently passing the same fixed `core_suite!`
 //! scenarios: it pins them identical on an arbitrary sequence, head to head. The postgres-relational half
-//! of the matrix is exercised by the same `core_suite!`/reconnect scenarios under `PQUEUE_PG_TEST_URL`
+//! of the matrix is exercised by the same `core_suite!`/reconnect scenarios under `FIREWEED_PG_TEST_URL`
 //! (env-gated, deferred-with-reason here — no live DB); a postgres-vs-in-memory differential is the live-DB
 //! extension of this test (convergence-review I3).
 

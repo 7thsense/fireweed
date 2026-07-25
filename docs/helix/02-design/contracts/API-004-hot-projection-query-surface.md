@@ -32,7 +32,7 @@ epic pqueue-45e13e4d (ship Snorri hot projection query substrate)
 This contract defines the **hot projection query substrate**: a domain-neutral set of typed,
 indexed-record query capabilities that let a caller (Snorri, or any other embedder) read, group,
 paginate, and safely mutate hot (pre-archival) queue-resident and side/projection records without
-pqueue interpreting the caller's business semantics.
+fireweed interpreting the caller's business semantics.
 
 It exists because API-001's read surface (`peek`, `claimed`, `live_items`, `metrics`, and exact typed
 index lookup via `IndexQueryPort`) is sufficient for claim-oriented work but insufficient for
@@ -40,10 +40,10 @@ operational reporting over a hot queue: range scans over an ordered index, group
 aggregation, stable cursor pagination, and bounded (predicate-scoped, version-fenced) mutation outside
 the claim/finalize lifecycle.
 
-pqueue MUST remain domain-neutral. This contract defines the generic substrate only. Snorri-specific
+fireweed MUST remain domain-neutral. This contract defines the generic substrate only. Snorri-specific
 workflow vocabulary (job/run/instance semantics, recycling policy, open-rate filters, engagement
 classification) is **out of scope** and MUST be built by Snorri on top of these primitives, not folded
-into pqueue.
+into fireweed.
 
 ## Scope and Boundaries
 
@@ -56,12 +56,12 @@ into pqueue.
   API. Those are downstream build beads (epic pqueue-45e13e4d) and MUST cite this contract rather than
   redefine it.
 - Out of scope: arbitrary SQL, JSONPath, or other caller-supplied expression execution (see Non-Goals).
-- Owning system or team: pqueue core.
+- Owning system or team: fireweed core.
 
 ## Example Fixture (illustrative, non-normative)
 
 The six scheduled-action records from the superseded task pqueue-630dbeaa are retained here as a
-worked example of a typed indexed record populated by an embedder. They are **not** a pqueue schema;
+worked example of a typed indexed record populated by an embedder. They are **not** a fireweed schema;
 `scheduled_action_projection`-style field names are Snorri/7th-Sense domain vocabulary, shown only so
 the capability definitions below have a concrete referent.
 
@@ -77,7 +77,7 @@ the capability definitions below have a concrete referent.
 ```
 
 Implementation beads under epic pqueue-45e13e4d extend this fixture in
-`crates/pqueue/tests/hot_projection_queries.rs`; this contract does not itself define that Rust type.
+`crates/fireweed/tests/hot_projection_queries.rs`; this contract does not itself define that Rust type.
 
 ## Normative Surface
 
@@ -88,8 +88,8 @@ Use MUST, MUST NOT, MAY, and SHOULD intentionally.
 | Element | Type / Shape | Required | Rules | Notes |
 |---------|--------------|----------|-------|-------|
 | indexed record | queue item or side/projection record | yes | MUST carry an ESF-typed entity document (ADR-011 `EntitySchemaDocument`) whose declared `typed_indexes` (`QueueIndex`, ADR-011) back every range scan, grouping, and bucket query in this contract. | Same typed-index vocabulary as API-001/ADR-011; this contract adds query shapes over it, not a new index model. |
-| declared index | `QueueIndex { name, declaration }` | yes | The caller declares which fields compose an index at `CreateQueue` time (ADR-011). A range scan, order-by, or group-by field used by a query MUST be a field of some declared index; pqueue MUST reject a query naming a field outside every declared index with `unindexed-field`. | `action_id`-style caller identifiers are NOT automatically indexed fields; if a caller wants to filter/sort by such a field it MUST be a member of a declared index. |
-| record identity | internal item id | yes | Every indexed record MUST carry pqueue's internal item id (`item_id` for queue items; an equivalent stable id for side/projection records), used only as the ultimate ordering tie-break (see Cursor Ordering) and never required as a caller-visible filter/sort field. | Distinct from `client_item_key`/business keys. |
+| declared index | `QueueIndex { name, declaration }` | yes | The caller declares which fields compose an index at `CreateQueue` time (ADR-011). A range scan, order-by, or group-by field used by a query MUST be a field of some declared index; fireweed MUST reject a query naming a field outside every declared index with `unindexed-field`. | `action_id`-style caller identifiers are NOT automatically indexed fields; if a caller wants to filter/sort by such a field it MUST be a member of a declared index. |
+| record identity | internal item id | yes | Every indexed record MUST carry fireweed's internal item id (`item_id` for queue items; an equivalent stable id for side/projection records), used only as the ultimate ordering tie-break (see Cursor Ordering) and never required as a caller-visible filter/sort field. | Distinct from `client_item_key`/business keys. |
 
 ### Query Capability Names
 
@@ -119,15 +119,15 @@ not an operation on the API-005 `Fireweed` facade.
 |---------|--------------|----------|-------|-------|
 | `as_of` (implicit read watermark) | opaque, monotonic per queue | yes | Every hot-projection query reads at an implicit watermark: the owner's locally-applied projection position at query-selection start. A query MUST NOT observe a mutation whose committing command has not yet applied to that local projection, and MUST observe every mutation the owner had already applied before selection started (read-your-writes on the owner). | Same single-owner-projection model as API-001 claims (ADR-008); no cross-shard fan-out. |
 | staleness | none (by construction) | yes | Because the queue is the unit of sharding (ADR-008), a hot-projection query against one queue is always served from that queue's single owner projection; there is no replica-lag or multi-shard-merge staleness to bound. | Distinct from any future read-replica design, which is out of scope here. |
-| grouped/bucketed counts | approximate under concurrent writes | may | `grouped_aggregate` and `declared_bucket_segment` results MAY reflect a torn read across concurrently-committing rows (a row may be counted in its pre- or post-mutation bucket, never both and never neither, for any single group-by/bucket dimension). Detail-page `range_scan` rows MUST NOT be torn: each returned row is a single committed record version. | Aggregate torn-read tolerance mirrors API-001's existing "counts MAY lag" rule for `pqueue_group_summary`. |
+| grouped/bucketed counts | approximate under concurrent writes | may | `grouped_aggregate` and `declared_bucket_segment` results MAY reflect a torn read across concurrently-committing rows (a row may be counted in its pre- or post-mutation bucket, never both and never neither, for any single group-by/bucket dimension). Detail-page `range_scan` rows MUST NOT be torn: each returned row is a single committed record version. | Aggregate torn-read tolerance mirrors API-001's existing "counts MAY lag" rule for `fireweed_group_summary`. |
 
 ### Range Scan
 
 | Element | Type / Shape | Required | Rules | Notes |
 |---------|--------------|----------|-------|-------|
 | `RangeScan` | operation | yes (`range_scan`) | MUST scan a declared index in index order, applying equality filters on a leading prefix of the index's fields and an inclusive/exclusive range on the next field, returning cursor-paginated rows. | Backs "detail page" style queries (filter by leading fields, range on a trailing timestamp/numeric field). |
-| `RangeScan.filters[]` | array of `{field, op, value}` | yes | `field` MUST be a member of the declared index named by the query (or omitted to let pqueue select a matching declared index). `op` MUST be one of `eq`, `gte`, `gt`, `lte`, `lt`. Fields other than the last non-equality field MUST use `eq`. | Leading-prefix-equality-then-range shape, matching ESF compound index leftmost-prefix semantics (ADR-011). |
-| `RangeScan.order_by[]` | array of `{field, direction}` | yes | Every `field` MUST be a member of the same declared index used for the scan, in an order consistent with that index's declared field order (or its exact reverse). pqueue MUST NOT support ordering by a field outside the declared index. | See Cursor Ordering for the mandatory implicit tie-break. |
+| `RangeScan.filters[]` | array of `{field, op, value}` | yes | `field` MUST be a member of the declared index named by the query (or omitted to let fireweed select a matching declared index). `op` MUST be one of `eq`, `gte`, `gt`, `lte`, `lt`. Fields other than the last non-equality field MUST use `eq`. | Leading-prefix-equality-then-range shape, matching ESF compound index leftmost-prefix semantics (ADR-011). |
+| `RangeScan.order_by[]` | array of `{field, direction}` | yes | Every `field` MUST be a member of the same declared index used for the scan, in an order consistent with that index's declared field order (or its exact reverse). fireweed MUST NOT support ordering by a field outside the declared index. | See Cursor Ordering for the mandatory implicit tie-break. |
 | `RangeScan.page_size` | integer | yes | MUST be greater than 0 and MUST NOT exceed the deployment's max page size. | Bounds one page's row count. |
 | `RangeScan.cursor` | opaque token | no | Absent on the first page. MUST encode the last returned row's `order_by` field values plus its internal item id. | See Cursor Ordering / Cursor Invalidation. |
 | `RangeScan.response.rows[]` | array | yes | MUST preserve `order_by` order. Each row MUST include every field of the record's declared index used by the scan and MAY include the record's other declared/indexed fields; it MUST NOT include undeclared/unindexed fields (this is an index query, not a full-record fetch). | Callers needing the full record fetch it via `BatchGetLiveItems` (API-001) or an equivalent side-record read by the record's own key. |
@@ -150,7 +150,7 @@ sort behavior without naming a tie-break field.
 | Element | Type / Shape | Required | Rules | Notes |
 |---------|--------------|----------|-------|-------|
 | cursor validity | opaque token semantics | yes | A cursor issued by page N MUST resolve page N+1 to rows strictly after the last returned `(order_by..., item_id)` tuple, regardless of insertions/deletions/mutations elsewhere in the index. A row already returned on an earlier page MUST NOT reappear (no duplication); a row that existed and matched the filter at scan start MUST NOT be silently skipped (no loss) solely because of a later, unrelated mutation. | Matches the pqueue-630dbeaa requirement that later inserts must not duplicate or skip already-visible rows. |
-| explicit invalidation | error | yes | If a cursor's anchor row was deleted or mutated such that it would no longer match the original scan's filters in a way that makes correct resumption impossible (for example, a range-narrowing update to the anchor row's ordering field), pqueue MUST return a structured, explicitly retryable `cursor-invalidated` error rather than returning an incorrect page. | "Retryable" means: the caller MAY restart pagination from an empty cursor and MAY safely deduplicate by item id across the restarted sequence. |
+| explicit invalidation | error | yes | If a cursor's anchor row was deleted or mutated such that it would no longer match the original scan's filters in a way that makes correct resumption impossible (for example, a range-narrowing update to the anchor row's ordering field), fireweed MUST return a structured, explicitly retryable `cursor-invalidated` error rather than returning an incorrect page. | "Retryable" means: the caller MAY restart pagination from an empty cursor and MAY safely deduplicate by item id across the restarted sequence. |
 
 ### Grouping / Aggregation
 
@@ -165,16 +165,16 @@ sort behavior without naming a tie-break field.
 ### Declared Numeric Buckets
 
 Numeric segmentation (for example, the engagement-probability example fixture) is entirely
-**caller-declared**, not a fixed pqueue bucket ladder. A `declared_bucket_segment` query supplies an
+**caller-declared**, not a fixed fireweed bucket ladder. A `declared_bucket_segment` query supplies an
 explicit, ordered list of half-open or closed intervals over one declared numeric-indexed field, each
 with a caller-chosen label, plus a null-handling rule.
 
 | Element | Type / Shape | Required | Rules | Notes |
 |---------|--------------|----------|-------|-------|
 | `DeclaredBucketSegment.field` | string | yes | MUST be a member of a declared numeric (`Float` or `Integer`) index. | |
-| `DeclaredBucketSegment.buckets[]` | array of `{label, exact?, gt?, gte?, lt?, lte?}` | yes | Each bucket MUST be either an exact-value match (`exact`) or a half-open/closed range (`gt`/`gte` lower bound with `lt`/`lte` upper bound). Buckets MUST NOT overlap; pqueue MUST reject an overlapping bucket set with `invalid-request`. A row not matched by any declared bucket and not null is excluded from every bucket's count (not an error). | The canonical conformance fixture (below) is the worked example. |
+| `DeclaredBucketSegment.buckets[]` | array of `{label, exact?, gt?, gte?, lt?, lte?}` | yes | Each bucket MUST be either an exact-value match (`exact`) or a half-open/closed range (`gt`/`gte` lower bound with `lt`/`lte` upper bound). Buckets MUST NOT overlap; fireweed MUST reject an overlapping bucket set with `invalid-request`. A row not matched by any declared bucket and not null is excluded from every bucket's count (not an error). | The canonical conformance fixture (below) is the worked example. |
 | `DeclaredBucketSegment.null_bucket_label` | string | yes | Names the bucket that reports rows where the declared field is null or absent from the record. | Required, not optional — a query with numeric buckets and no `null_bucket_label` MUST fail `invalid-request`, so null handling is never silently omitted. |
-| null accounting | counting rule | yes | The `null_bucket_label` count MUST equal (rows matching the query's base filters) minus (rows counted in any non-null declared bucket) minus (rows whose field value is non-null but unmatched by every declared bucket). Equivalently: it is computed as a base-filter row count minus indexed non-null-bucketed rows, **not** via a null-sentinel index key. | Resolves REQUIRED DECISION 1: a record with a null/missing indexed field is absent from the field's own index (`index_key` returns `None`, `crates/pqueue-projection/src/lib.rs`); pqueue answers "how many have no value" by subtracting indexed-and-bucketed counts from a base-filter count over the record set, not by minting a synthetic null key into the index. |
+| null accounting | counting rule | yes | The `null_bucket_label` count MUST equal (rows matching the query's base filters) minus (rows counted in any non-null declared bucket) minus (rows whose field value is non-null but unmatched by every declared bucket). Equivalently: it is computed as a base-filter row count minus indexed non-null-bucketed rows, **not** via a null-sentinel index key. | Resolves REQUIRED DECISION 1: a record with a null/missing indexed field is absent from the field's own index (`index_key` returns `None`, `crates/fireweed-projection/src/lib.rs`); fireweed answers "how many have no value" by subtracting indexed-and-bucketed counts from a base-filter count over the record set, not by minting a synthetic null key into the index. |
 
 **Canonical conformance fixture** (over `engagement_probability`, informed by the pqueue-630dbeaa
 example fixture, with the bucket ladder made explicit and caller-declared rather than a fixed 1%-wide
@@ -206,8 +206,8 @@ Against the fixture in "Example Fixture" above (filtered to `action_type = messa
 |---------|--------------|----------|-------|-------|
 | `BoundedMutation` | operation | yes (`bounded_mutation`) | MUST scan a declared-index predicate (same filter shape as `RangeScan.filters[]`) and apply a caller-specified field update to every matching record, with per-record optimistic concurrency. | Backs "safe recycling rule update" style operations. |
 | `BoundedMutation.filters[]` | array | yes | Same leading-prefix rule as `RangeScan.filters[]`. | Scopes which records are touched; this is not an arbitrary predicate (see Non-Goals). |
-| `BoundedMutation.set_fields` | map field -> value | yes | MUST replace only the named fields on each matched record; MUST NOT be interpreted by pqueue beyond type validation against the record's entity schema. | Same "caller data, uninterpreted" posture as API-001 `BatchUpdate`. |
-| `BoundedMutation.per_record_cas` | implicit | yes | Each matched record's mutation MUST be conditioned on the record's version observed at match time (equivalent to API-001's `expected_item_version`). If a concurrent claim, finalize, or other mutation changes a record's version between match and apply, that record's update MUST fail per-record `conflict` (not abort the whole batch) and MUST NOT be silently retried by pqueue. | Preserves the "must reject or retry cleanly on concurrent claim/commit" requirement without inventing whole-batch atomicity `BoundedMutation` does not claim. |
+| `BoundedMutation.set_fields` | map field -> value | yes | MUST replace only the named fields on each matched record; MUST NOT be interpreted by fireweed beyond type validation against the record's entity schema. | Same "caller data, uninterpreted" posture as API-001 `BatchUpdate`. |
+| `BoundedMutation.per_record_cas` | implicit | yes | Each matched record's mutation MUST be conditioned on the record's version observed at match time (equivalent to API-001's `expected_item_version`). If a concurrent claim, finalize, or other mutation changes a record's version between match and apply, that record's update MUST fail per-record `conflict` (not abort the whole batch) and MUST NOT be silently retried by fireweed. | Preserves the "must reject or retry cleanly on concurrent claim/commit" requirement without inventing whole-batch atomicity `BoundedMutation` does not claim. |
 | `BoundedMutation.response.results[]` | array | yes | MUST report one outcome (`updated`, `conflict`, or `not_found`) per matched record at scan time. | Best-effort per record, matching API-001's batch-result posture. |
 | leased records | interaction rule | yes | `BoundedMutation` MUST NOT bypass an active lease: a record with an active lease follows the same `conflict` rule as any other version mismatch caused by concurrent activity, per the `per_record_cas` rule above. It MUST NOT use a separate leased-record code path. | Keeps one conflict semantics for "something else touched this record concurrently." |
 
@@ -239,15 +239,15 @@ This contract defines the **shape and the capability flag only**:
 
 ## Non-Goals
 
-- **No Snorri-specific vocabulary in pqueue.** Job/run/instance semantics, recycling policy, open-rate
+- **No Snorri-specific vocabulary in fireweed.** Job/run/instance semantics, recycling policy, open-rate
   filter membership, and engagement classification are Snorri/Cayce policy and MUST be implemented
-  above this contract, not inside pqueue.
+  above this contract, not inside fireweed.
 - **No Niflheim/ClickHouse archival analytics.** Long-retention, cold, or cross-run analytical queries
   are out of scope; this contract governs only hot (pre-archival), queue-resident and side/projection
   records.
 - **No arbitrary SQL, JSONPath, or caller-supplied expression execution.** Every filter, order-by,
   group-by, and bucket definition in this contract is a bounded, declared-index-constrained shape
-  (leading-prefix equality + range, declared time-bucket enum, declared numeric interval list). pqueue
+  (leading-prefix equality + range, declared time-bucket enum, declared numeric interval list). fireweed
   MUST NOT accept a caller-supplied query expression, SQL fragment, or JSONPath string for evaluation.
 - **No RESP-specific reporting surface.** Per ADR-007/TD-006, richer read/report operations are
   `library-only`; this contract's capabilities are exposed through the Rust library face. A RESP

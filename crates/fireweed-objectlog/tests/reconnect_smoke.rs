@@ -1,4 +1,4 @@
-//! Durable reconnect conformance for the object-log backend. The external pqueue contract is the same
+//! Durable reconnect conformance for the object-log backend. The external fireweed contract is the same
 //! across implementations: accepted mutations survive restart, rejected mutations leave no durable effect,
 //! and recovered state is visible through the same ports.
 

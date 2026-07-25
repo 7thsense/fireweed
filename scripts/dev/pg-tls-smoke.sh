@@ -2,9 +2,9 @@
 # Disposable TLS-postgres harness for the `postgres_tls_connection_succeeds` proof.
 #
 # Spins up a self-signed `postgres:16 -c ssl=on` in docker, points the env-gated live TLS test at it
-# (`PQUEUE_PG_TLS_TEST_URL` with sslmode=require), runs the test under `--features tls`, and tears the
+# (`FIREWEED_PG_TLS_TEST_URL` with sslmode=require), runs the test under `--features tls`, and tears the
 # container + image down on exit. This is the reproducible companion to
-# crates/pqueue-postgres/tests/tls_connection.rs — it proves the native-tls transport end-to-end without a
+# crates/fireweed-postgres/tests/tls_connection.rs — it proves the native-tls transport end-to-end without a
 # managed cloud database.
 #
 # Usage: bash scripts/dev/pg-tls-smoke.sh
@@ -13,9 +13,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-CONTAINER="pqueue-pgtls-smoke"
-IMAGE="pqueue-pgtls-smoke:local"
-HOST_PORT="${PQUEUE_PG_TLS_PORT:-55433}"
+CONTAINER="fireweed-pgtls-smoke"
+IMAGE="fireweed-pgtls-smoke:local"
+HOST_PORT="${FIREWEED_PG_TLS_PORT:-55433}"
 WORKDIR="$(mktemp -d)"
 
 CARGO="${CARGO:-cargo}"
@@ -47,22 +47,22 @@ docker build -t "${IMAGE}" "${WORKDIR}" >/dev/null
 echo "=== starting ${CONTAINER} on 127.0.0.1:${HOST_PORT} (ssl=on) ==="
 docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
 docker run -d --name "${CONTAINER}" \
-    -e POSTGRES_USER=pqueue -e POSTGRES_PASSWORD=pqueue -e POSTGRES_DB=pqueue \
+    -e POSTGRES_USER=fireweed -e POSTGRES_PASSWORD=fireweed -e POSTGRES_DB=fireweed \
     -p "127.0.0.1:${HOST_PORT}:5432" \
     "${IMAGE}" \
     -c ssl=on -c ssl_cert_file=/etc/pg/server.crt -c ssl_key_file=/etc/pg/server.key >/dev/null
 
 echo "=== waiting for the database to accept connections ==="
 for _ in {1..30}; do
-    if docker exec "${CONTAINER}" pg_isready -U pqueue -d pqueue >/dev/null 2>&1; then
+    if docker exec "${CONTAINER}" pg_isready -U fireweed -d fireweed >/dev/null 2>&1; then
         break
     fi
     sleep 1
 done
 
-export PQUEUE_PG_TLS_TEST_URL="postgres://pqueue:pqueue@127.0.0.1:${HOST_PORT}/pqueue?sslmode=require"
+export FIREWEED_PG_TLS_TEST_URL="postgres://fireweed:fireweed@127.0.0.1:${HOST_PORT}/fireweed?sslmode=require"
 echo "=== running the live TLS round-trip proof ==="
-echo "    PQUEUE_PG_TLS_TEST_URL=${PQUEUE_PG_TLS_TEST_URL}"
-( cd "${REPO_ROOT}" && "${CARGO}" test -p pqueue-postgres --features tls --test tls_connection -- --nocapture )
+echo "    FIREWEED_PG_TLS_TEST_URL=${FIREWEED_PG_TLS_TEST_URL}"
+( cd "${REPO_ROOT}" && "${CARGO}" test -p fireweed-postgres --features tls --test tls_connection -- --nocapture )
 
 echo "=== TLS smoke PASSED ==="

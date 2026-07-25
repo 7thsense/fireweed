@@ -9,15 +9,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fireweed::{
     BoundedMutationRequest, Bytes, ClaimByQueryAt, ClaimByQueryRequest, ClaimRef, Clock,
-    CommitCapabilities, CommitEntry, CommitRequest, CompoundIndexDef, CompoundIndexField,
-    EligibilityPolicy, EmbeddedDurabilityConfig, EmbeddedObjectLogConfig, EmbeddedProjectionConfig,
-    EmbeddedRecoveryPolicy, EmbeddedResponseBarrier, EmbeddedSecret, EmbeddedSegmentConfig,
-    EngineError, EntryOutcome, FilterOp, FinalizeKind, IndexDeclaration, IndexType, InstanceFence,
-    LeaseToken, MetricsByQueryRequest, MultiClaimCommitEntry, MultiClaimCommitRequest, NewItem,
-    OrderField, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-    PriorityTieBreaker, PriorityValue, QueryFilter, QueueDefinition, QueueId, QueueIndex, QueueKey,
-    RangeScanRequest, RecurrencePolicy, RequestId, RetryPolicy, SideRecord, SortDirection,
-    TenantId, TypedValue, UtcTimestamp,
+    CommitEntry, CommitRequest, CommitResponseBarrier, ComposedStorageConfig, CompoundIndexDef,
+    CompoundIndexField, EligibilityPolicy, EngineError, EntryOutcome, FilterOp, FinalizeKind,
+    IndexDeclaration, IndexType, InstanceFence, MetricsByQueryRequest, MultiClaimCommitEntry,
+    MultiClaimCommitRequest, NewItem, ObjectLogConfig, OrderField, OrderingMode, PriorityDirection,
+    PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, ProjectionRecoveryPolicy,
+    ProjectionStoreConfig, QueryFilter, QueueDefinition, QueueId, QueueIndex, QueueKey,
+    RangeScanRequest, RecurrencePolicy, RequestId, RetryPolicy, SecretValue, SegmentSettings,
+    SideRecord, SortDirection, TenantId, TypedValue, UtcTimestamp,
 };
 use fireweed_engine::DurabilityClass;
 use fireweed_memory::ManualClock;
@@ -27,7 +26,6 @@ use rusqlite::{Connection, params};
 
 fn runtime_env(suffix: &str) -> Result<String, std::env::VarError> {
     std::env::var(format!("FIREWEED_{suffix}"))
-        .or_else(|_| std::env::var(format!("PQUEUE_{suffix}")))
 }
 
 fn nonce() -> u128 {
@@ -39,7 +37,7 @@ fn nonce() -> u128 {
 
 fn definition(queue_id: &str) -> QueueDefinition {
     QueueDefinition {
-        tenant_id: TenantId::new("embedded-tenant").unwrap(),
+        tenant_id: TenantId::new("composed-tenant").unwrap(),
         queue_id: QueueId::new(queue_id).unwrap(),
         priority_model: PriorityModel {
             kind: PriorityModelKind::Int64,
@@ -69,7 +67,7 @@ fn definition(queue_id: &str) -> QueueDefinition {
 
 fn queue(queue_id: &str) -> QueueKey {
     QueueKey::new(
-        TenantId::new("embedded-tenant").unwrap(),
+        TenantId::new("composed-tenant").unwrap(),
         QueueId::new(queue_id).unwrap(),
     )
 }
@@ -104,75 +102,93 @@ impl Clock for PanicClock {
     }
 }
 
-fn local_config(root: &Path, sqlite: &Path) -> EmbeddedDurabilityConfig {
-    EmbeddedDurabilityConfig {
-        object_log: EmbeddedObjectLogConfig::Local {
+fn local_config(root: &Path, sqlite: &Path) -> ComposedStorageConfig {
+    ComposedStorageConfig {
+        object_log: ObjectLogConfig::Local {
             root: root.to_path_buf(),
         },
-        projection: EmbeddedProjectionConfig::Sqlite {
+        projection: ProjectionStoreConfig::Sqlite {
             path: sqlite.to_path_buf(),
         },
-        response_barrier: EmbeddedResponseBarrier::Strict,
-        segments: EmbeddedSegmentConfig::new(64 * 1024, 5).unwrap(),
+        response_barrier: CommitResponseBarrier::Strict,
+        segments: SegmentSettings::new(64 * 1024, 5).unwrap(),
         namespace: format!("sqlite-local-{}", nonce()),
-        recovery: EmbeddedRecoveryPolicy::default(),
+        recovery: ProjectionRecoveryPolicy::default(),
     }
 }
 
-fn assert_delete_rehydrate(
-    config: EmbeddedDurabilityConfig,
+fn assert_delete_rebuild(
+    config: ComposedStorageConfig,
     queue_id: &str,
 ) -> (fireweed::QueueMetrics, fireweed::ItemId, fireweed::ItemId) {
     let clock = Arc::new(ManualClock::at(1_000));
-    let pq = fireweed::open_embedded_sqlite(config, clock).unwrap();
+    let fireweed = fireweed::open_composed_sqlite(config, clock).unwrap();
     let key = queue(queue_id);
-    block_on(pq.create_queue(definition(queue_id))).unwrap();
+    block_on(fireweed.create_queue(definition(queue_id))).unwrap();
     let request = RequestId::new(format!("request-{queue_id}")).unwrap();
-    let first = block_on(pq.push_with_request_id(&key, request.clone(), item(10))).unwrap();
-    let second = block_on(pq.push(&key, item(20))).unwrap();
+    let first = block_on(fireweed.push_with_request_id(&key, request.clone(), item(10))).unwrap();
+    let second = block_on(fireweed.push(&key, item(20))).unwrap();
 
-    let expected = block_on(pq.metrics(&key)).unwrap();
+    let expected = block_on(fireweed.metrics(&key)).unwrap();
     assert_eq!(expected.pending, 2);
-    let verification = block_on(pq.verify_projection()).unwrap();
+    let verification = block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .verify(),
+    )
+    .unwrap();
     assert_eq!(
         verification.projection_sequence, verification.authoritative_sequence,
         "strict success is immediately visible in the durable SQLite image"
     );
 
-    block_on(pq.delete_projection()).unwrap();
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .delete(),
+    )
+    .unwrap();
     assert_eq!(
-        block_on(pq.metrics(&key)).unwrap(),
+        block_on(fireweed.metrics(&key)).unwrap(),
         expected,
         "deleting SQLite leaves the hot projection untouched"
     );
-    let rebuilt = block_on(pq.rehydrate_projection()).unwrap();
+    let rebuilt = block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .rebuild(),
+    )
+    .unwrap();
     assert_eq!(rebuilt.tail_commands_replayed, 2);
-    assert_eq!(block_on(pq.metrics(&key)).unwrap(), expected);
+    assert_eq!(block_on(fireweed.metrics(&key)).unwrap(), expected);
     assert_eq!(
-        block_on(pq.peek(&key, 10))
+        block_on(fireweed.peek(&key, 10))
             .unwrap()
             .into_iter()
             .map(|view| view.item_id)
             .collect::<Vec<_>>(),
         vec![first, second],
-        "rehydration reconstructs the exact normalized resident set"
+        "rebuild reconstructs the exact normalized resident set"
     );
     assert_eq!(
-        block_on(pq.push_with_request_id(&key, request, item(10))).unwrap(),
+        block_on(fireweed.push_with_request_id(&key, request, item(10))).unwrap(),
         first,
         "same-body replay returns the original item without a duplicate transition"
     );
-    assert_eq!(block_on(pq.metrics(&key)).unwrap(), expected);
+    assert_eq!(block_on(fireweed.metrics(&key)).unwrap(), expected);
     (expected, first, second)
 }
 
-fn assert_strict_commit_transition_round_trip(config: EmbeddedDurabilityConfig, queue_id: &str) {
+fn assert_strict_commit_transition_round_trip(config: ComposedStorageConfig, queue_id: &str) {
     let clock = Arc::new(ManualClock::at(1_000));
-    let pq = fireweed::open_embedded_sqlite(config, clock).unwrap();
+    let fireweed = fireweed::open_composed_sqlite(config, clock).unwrap();
     let key = queue(queue_id);
-    block_on(pq.create_queue(definition(queue_id))).unwrap();
+    block_on(fireweed.create_queue(definition(queue_id))).unwrap();
 
-    let caps = pq.commit_capabilities(&key).unwrap();
+    let caps = fireweed.commit_capabilities(&key).unwrap();
     assert!(caps.atomic_transition_commit);
     assert!(caps.vectorized_commit);
     assert!(caps.lease_validation);
@@ -181,9 +197,9 @@ fn assert_strict_commit_transition_round_trip(config: EmbeddedDurabilityConfig, 
     assert_eq!(caps.durability_class, DurabilityClass::Atomic);
 
     let request = RequestId::new(format!("request-{queue_id}")).unwrap();
-    let first = block_on(pq.push_with_request_id(&key, request.clone(), item(10))).unwrap();
-    let second = block_on(pq.push(&key, item(20))).unwrap();
-    let claimed = block_on(pq.claim(&key, 1, 30_000)).unwrap();
+    let first = block_on(fireweed.push_with_request_id(&key, request.clone(), item(10))).unwrap();
+    let second = block_on(fireweed.push(&key, item(20))).unwrap();
+    let claimed = block_on(fireweed.claim(&key, 1, 30_000)).unwrap();
     let claim = &claimed[0];
     let claim_ref = ClaimRef {
         item_id: claim.item_id,
@@ -212,7 +228,7 @@ fn assert_strict_commit_transition_round_trip(config: EmbeddedDurabilityConfig, 
             }),
         }],
     };
-    let outcomes = block_on(pq.commit(&key, transition)).unwrap();
+    let outcomes = block_on(fireweed.commit(&key, transition)).unwrap();
     assert_eq!(outcomes.len(), 1);
     let lifecycle_id = match &outcomes[0] {
         EntryOutcome::Committed { lifecycle_item_ids } => {
@@ -222,13 +238,13 @@ fn assert_strict_commit_transition_round_trip(config: EmbeddedDurabilityConfig, 
         other => panic!("expected committed outcome, got {other:?}"),
     };
 
-    let expected = block_on(pq.metrics(&key)).unwrap();
+    let expected = block_on(fireweed.metrics(&key)).unwrap();
     assert_eq!(
         (expected.pending, expected.leased, expected.complete),
         (2, 0, 1)
     );
     assert_eq!(
-        block_on(pq.peek(&key, 10))
+        block_on(fireweed.peek(&key, 10))
             .unwrap()
             .iter()
             .map(|view| view.item_id)
@@ -236,20 +252,46 @@ fn assert_strict_commit_transition_round_trip(config: EmbeddedDurabilityConfig, 
         vec![second, lifecycle_id]
     );
     assert_eq!(
-        block_on(pq.side_record(&key, b"state/run-1"))
+        block_on(fireweed.side_record(&key, b"state/run-1"))
             .unwrap()
             .as_deref(),
         Some(b"audit-bytes".as_slice())
     );
 
-    block_on(pq.delete_projection()).unwrap();
-    assert!(block_on(pq.verify_projection()).is_err());
-    block_on(pq.rehydrate_projection()).unwrap();
-    block_on(pq.verify_projection()).unwrap();
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .delete(),
+    )
+    .unwrap();
+    assert!(
+        block_on(
+            fireweed
+                .projection_control()
+                .expect("projection control")
+                .verify()
+        )
+        .is_err()
+    );
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .rebuild(),
+    )
+    .unwrap();
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .verify(),
+    )
+    .unwrap();
 
-    assert_eq!(block_on(pq.metrics(&key)).unwrap(), expected);
+    assert_eq!(block_on(fireweed.metrics(&key)).unwrap(), expected);
     assert_eq!(
-        block_on(pq.peek(&key, 10))
+        block_on(fireweed.peek(&key, 10))
             .unwrap()
             .iter()
             .map(|view| view.item_id)
@@ -257,12 +299,12 @@ fn assert_strict_commit_transition_round_trip(config: EmbeddedDurabilityConfig, 
         vec![second, lifecycle_id]
     );
     assert_eq!(
-        block_on(pq.side_record(&key, b"state/run-1"))
+        block_on(fireweed.side_record(&key, b"state/run-1"))
             .unwrap()
             .as_deref(),
         Some(b"audit-bytes".as_slice())
     );
-    let replay = block_on(pq.commit(
+    let replay = block_on(fireweed.commit(
         &key,
         CommitRequest {
             request_id: Some(transition_request_id.clone()),
@@ -292,9 +334,9 @@ fn assert_strict_commit_transition_round_trip(config: EmbeddedDurabilityConfig, 
     ))
     .unwrap();
     assert_eq!(replay, outcomes);
-    let recovery = block_on(pq.explain_commit(&key, transition_request_id))
+    let recovery = block_on(fireweed.explain_commit(&key, transition_request_id))
         .unwrap()
-        .expect("committed transition survives delete + rehydrate");
+        .expect("committed transition survives delete + rebuild");
     assert_eq!(recovery.entries.len(), 1);
     assert_eq!(recovery.entries[0].consumed_input_id, claim.item_id);
     assert_eq!(
@@ -304,22 +346,22 @@ fn assert_strict_commit_transition_round_trip(config: EmbeddedDurabilityConfig, 
     assert_eq!(recovery.entries[0].lifecycle_item_ids, vec![lifecycle_id]);
     assert_eq!(recovery.entries[0].instance, Some((b"wf-1".to_vec(), 1)));
     assert_eq!(
-        block_on(pq.push_with_request_id(&key, request, item(10))).unwrap(),
+        block_on(fireweed.push_with_request_id(&key, request, item(10))).unwrap(),
         first
     );
 }
 
 #[test]
-fn public_objectlog_sqlite_delete_and_rehydrate() {
-    let fixture = std::env::temp_dir().join(format!("pqueue-public-sqlite-{}", nonce()));
+fn public_objectlog_sqlite_delete_and_rebuild() {
+    let fixture = std::env::temp_dir().join(format!("fireweed-public-sqlite-{}", nonce()));
     let root = fixture.join("objects");
     let sqlite = fixture.join("projection.sqlite");
     let config = local_config(&root, &sqlite);
     let queue_id = "durable-local";
-    let (expected, first, second) = assert_delete_rehydrate(config.clone(), queue_id);
+    let (expected, first, second) = assert_delete_rebuild(config.clone(), queue_id);
 
     let reopened =
-        fireweed::open_embedded_sqlite(config, Arc::new(ManualClock::at(2_000))).unwrap();
+        fireweed::open_composed_sqlite(config, Arc::new(ManualClock::at(2_000))).unwrap();
     let key = queue(queue_id);
     assert_eq!(block_on(reopened.metrics(&key)).unwrap(), expected);
     assert_eq!(
@@ -338,7 +380,8 @@ fn public_objectlog_sqlite_delete_and_rehydrate() {
 fn public_objectlog_sqlite_bounded_mutation_replays_from_authoritative_log() {
     let fixture = std::env::temp_dir().join(format!("fireweed-public-mutation-{}", nonce()));
     let config = local_config(&fixture.join("objects"), &fixture.join("projection.sqlite"));
-    let pq = fireweed::open_embedded_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap();
+    let fireweed =
+        fireweed::open_composed_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap();
     let key = queue("durable-mutation");
     let mut queue_definition = definition("durable-mutation");
     queue_definition.typed_indexes = vec![QueueIndex {
@@ -357,8 +400,8 @@ fn public_objectlog_sqlite_bounded_mutation_replays_from_authoritative_log() {
             unique: false,
         }),
     }];
-    block_on(pq.create_queue(queue_definition)).unwrap();
-    let item_id = block_on(pq.push(
+    block_on(fireweed.create_queue(queue_definition)).unwrap();
+    let item_id = block_on(fireweed.push(
         &key,
         NewItem {
             entity: Some(serde_json::json!({ "kind": "effect", "suppressed": false })),
@@ -368,7 +411,7 @@ fn public_objectlog_sqlite_bounded_mutation_replays_from_authoritative_log() {
     .unwrap();
     let mut set_fields = BTreeMap::new();
     set_fields.insert("suppressed".into(), TypedValue::Bool(true));
-    let result = block_on(pq.bounded_mutation(
+    let result = block_on(fireweed.bounded_mutation(
         &key,
         BoundedMutationRequest {
             index: Some("by_kind_suppressed".into()),
@@ -384,9 +427,21 @@ fn public_objectlog_sqlite_bounded_mutation_replays_from_authoritative_log() {
     .unwrap();
     assert_eq!(result.results[0].item_id, item_id);
 
-    block_on(pq.delete_projection()).unwrap();
-    block_on(pq.rehydrate_projection()).unwrap();
-    let rows = block_on(pq.range_scan(
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .delete(),
+    )
+    .unwrap();
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .rebuild(),
+    )
+    .unwrap();
+    let rows = block_on(fireweed.range_scan(
         &key,
         RangeScanRequest {
             index: Some("by_kind_suppressed".into()),
@@ -406,13 +461,14 @@ fn public_objectlog_sqlite_bounded_mutation_replays_from_authoritative_log() {
     .unwrap();
     assert_eq!(rows.rows.len(), 1);
     assert_eq!(rows.rows[0].item_id, item_id);
-    drop(pq);
+    drop(fireweed);
     let _ = fs::remove_dir_all(fixture);
 }
 
 #[test]
 fn public_objectlog_sqlite_strict_commit_transition_round_trip() {
-    let fixture = std::env::temp_dir().join(format!("pqueue-public-strict-transition-{}", nonce()));
+    let fixture =
+        std::env::temp_dir().join(format!("fireweed-public-strict-transition-{}", nonce()));
     let root = fixture.join("objects");
     let sqlite = fixture.join("projection.sqlite");
     let config = local_config(&root, &sqlite);
@@ -421,16 +477,16 @@ fn public_objectlog_sqlite_strict_commit_transition_round_trip() {
 }
 
 #[test]
-fn public_objectlog_sqlite_multi_claim_continuation_rehydrates_exactly_once() {
-    let fixture = std::env::temp_dir().join(format!("pqueue-public-multi-claim-{}", nonce()));
+fn public_objectlog_sqlite_multi_claim_continuation_rebuilds_exactly_once() {
+    let fixture = std::env::temp_dir().join(format!("fireweed-public-multi-claim-{}", nonce()));
     let config = local_config(&fixture.join("objects"), &fixture.join("projection.sqlite"));
     let queue_id = "multi-claim-transition";
     let key = queue(queue_id);
-    let pq =
-        fireweed::open_embedded_sqlite(config.clone(), Arc::new(ManualClock::at(1_000))).unwrap();
-    block_on(pq.create_queue(definition(queue_id))).unwrap();
-    block_on(pq.push_batch(&key, vec![item(10), item(11)])).unwrap();
-    let claimed = block_on(pq.claim(&key, 2, 30_000)).unwrap();
+    let fireweed =
+        fireweed::open_composed_sqlite(config.clone(), Arc::new(ManualClock::at(1_000))).unwrap();
+    block_on(fireweed.create_queue(definition(queue_id))).unwrap();
+    block_on(fireweed.push_batch(&key, vec![item(10), item(11)])).unwrap();
+    let claimed = block_on(fireweed.claim(&key, 2, 30_000)).unwrap();
     assert_eq!(claimed.len(), 2);
     let to_ref = |item: &fireweed::ClaimedItem| ClaimRef {
         item_id: item.item_id,
@@ -462,21 +518,33 @@ fn public_objectlog_sqlite_multi_claim_continuation_rehydrates_exactly_once() {
             }),
         }],
     };
-    let first = block_on(pq.commit_multi_claim(&key, request.clone())).unwrap();
+    let first = block_on(fireweed.commit_multi_claim(&key, request.clone())).unwrap();
     let continuation_id = match &first[0] {
         EntryOutcome::Committed { lifecycle_item_ids } => lifecycle_item_ids[0],
         other => panic!("expected committed multi-claim entry, got {other:?}"),
     };
-    block_on(pq.delete_projection()).unwrap();
-    block_on(pq.rehydrate_projection()).unwrap();
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .delete(),
+    )
+    .unwrap();
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .rebuild(),
+    )
+    .unwrap();
     assert_eq!(
-        block_on(pq.commit_multi_claim(&key, request)).unwrap(),
+        block_on(fireweed.commit_multi_claim(&key, request)).unwrap(),
         first
     );
-    drop(pq);
+    drop(fireweed);
 
     let reopened =
-        fireweed::open_embedded_sqlite(config, Arc::new(ManualClock::at(2_000))).unwrap();
+        fireweed::open_composed_sqlite(config, Arc::new(ManualClock::at(2_000))).unwrap();
     let recovery = block_on(reopened.explain_commit(&key, request_id))
         .unwrap()
         .expect("multi-claim commit survives strict reopen");
@@ -504,170 +572,279 @@ fn public_objectlog_sqlite_multi_claim_continuation_rehydrates_exactly_once() {
 }
 
 #[test]
-fn public_objectlog_sqlite_async_projection_remains_non_authoritative() {
-    let fixture = std::env::temp_dir().join(format!("pqueue-public-async-{}", nonce()));
+fn public_objectlog_sqlite_async_supports_authoritative_log_commit() {
+    let fixture = std::env::temp_dir().join(format!("fireweed-public-async-{}", nonce()));
     let mut config = local_config(&fixture.join("objects"), &fixture.join("projection.sqlite"));
-    config.response_barrier = EmbeddedResponseBarrier::AsyncProjection;
-    let pq = fireweed::open_embedded_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap();
+    config.response_barrier = CommitResponseBarrier::AsyncProjection;
+    let fireweed =
+        fireweed::open_composed_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap();
     let key = queue("async-queue");
-    block_on(pq.create_queue(definition("async-queue"))).unwrap();
+    block_on(fireweed.create_queue(definition("async-queue"))).unwrap();
 
-    let caps = pq.commit_capabilities(&key).unwrap();
-    assert_eq!(caps, CommitCapabilities::default());
+    let caps = fireweed.commit_capabilities(&key).unwrap();
+    assert!(caps.atomic_transition_commit);
+    assert!(caps.vectorized_commit);
+    assert!(caps.lease_validation);
+    assert!(caps.retained_commit_idempotency);
+    assert!(caps.non_work_side_records);
+    assert!(caps.authoritative_recovery_reads);
+    assert_eq!(caps.durability_class, DurabilityClass::EventualApply);
+
+    block_on(fireweed.push(&key, item(1))).unwrap();
+    let claimed = block_on(fireweed.claim(&key, 1, 30_000)).unwrap();
+    let claimed = &claimed[0];
+    let outcomes = block_on(fireweed.commit(
+        &key,
+        CommitRequest {
+            request_id: None,
+            entries: vec![CommitEntry {
+                claim_ref: ClaimRef {
+                    item_id: claimed.item_id,
+                    lease_token: claimed.lease_token.clone().unwrap(),
+                    lease_expires_at: claimed.lease_expires_at,
+                    item_version: claimed.item_version,
+                },
+                finalize: FinalizeKind::Complete,
+                side_records: vec![],
+                lifecycle_items: vec![],
+                instance_fence: None,
+            }],
+        },
+    ))
+    .unwrap();
     assert!(matches!(
-        block_on(pq.commit(
-            &key,
-            CommitRequest {
-                request_id: None,
-                entries: vec![CommitEntry {
-                    claim_ref: ClaimRef {
-                        item_id: fireweed::ItemId::new("1").unwrap(),
-                        lease_token: LeaseToken::new("lease-1").unwrap(),
-                        lease_expires_at: UtcTimestamp::new(1, 0).unwrap(),
-                        item_version: 0,
-                    },
-                    finalize: FinalizeKind::Complete,
-                    side_records: vec![],
-                    lifecycle_items: vec![],
-                    instance_fence: None,
-                }],
-            }
-        )),
-        Err(EngineError::Unavailable)
+        outcomes.as_slice(),
+        [EntryOutcome::Committed { .. }]
     ));
+    let metrics = block_on(fireweed.metrics(&key)).unwrap();
+    assert_eq!(
+        (metrics.pending, metrics.leased, metrics.complete),
+        (0, 0, 1)
+    );
 
-    drop(pq);
+    drop(fireweed);
     let _ = fs::remove_dir_all(fixture);
 }
 
 #[test]
 fn public_objectlog_sqlite_verification_is_exact_per_queue() {
-    let fixture = std::env::temp_dir().join(format!("pqueue-public-verify-{}", nonce()));
+    let fixture = std::env::temp_dir().join(format!("fireweed-public-verify-{}", nonce()));
     let root = fixture.join("objects");
     let sqlite = fixture.join("projection.sqlite");
     let config = local_config(&root, &sqlite);
-    let pq = fireweed::open_embedded_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap();
+    let fireweed =
+        fireweed::open_composed_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap();
     let dominant = queue("dominant-queue");
     let behind = queue("behind-queue");
-    block_on(pq.create_queue(definition("dominant-queue"))).unwrap();
-    block_on(pq.create_queue(definition("behind-queue"))).unwrap();
-    block_on(pq.push(&dominant, item(1))).unwrap();
-    block_on(pq.push(&dominant, item(2))).unwrap();
-    block_on(pq.push(&behind, item(3))).unwrap();
-    block_on(pq.verify_projection()).unwrap();
+    block_on(fireweed.create_queue(definition("dominant-queue"))).unwrap();
+    block_on(fireweed.create_queue(definition("behind-queue"))).unwrap();
+    block_on(fireweed.push(&dominant, item(1))).unwrap();
+    block_on(fireweed.push(&dominant, item(2))).unwrap();
+    block_on(fireweed.push(&behind, item(3))).unwrap();
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .verify(),
+    )
+    .unwrap();
 
     let connection = Connection::open(&sqlite).unwrap();
     connection
         .execute(
             "UPDATE relational_cursor SET next_seq=0 WHERE tenant=?1 AND queue=?2",
-            params!["embedded-tenant", "behind-queue"],
+            params!["composed-tenant", "behind-queue"],
         )
         .unwrap();
     drop(connection);
     assert!(
-        block_on(pq.verify_projection()).is_err(),
+        block_on(
+            fireweed
+                .projection_control()
+                .expect("projection control")
+                .verify()
+        )
+        .is_err(),
         "a caught-up higher-sequence queue must not mask a behind queue"
     );
-    let rebuilt = block_on(pq.rehydrate_projection()).unwrap();
+    let rebuilt = block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .rebuild(),
+    )
+    .unwrap();
     assert_eq!(rebuilt.tail_commands_replayed, 3);
-    block_on(pq.verify_projection()).unwrap();
-    drop(pq);
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .verify(),
+    )
+    .unwrap();
+    drop(fireweed);
     let _ = fs::remove_dir_all(fixture);
 }
 
 #[test]
 fn public_objectlog_sqlite_lifecycle_interleaves_without_replay_gaps() {
-    let fixture = std::env::temp_dir().join(format!("pqueue-public-interleave-{}", nonce()));
+    let fixture = std::env::temp_dir().join(format!("fireweed-public-interleave-{}", nonce()));
     let root = fixture.join("objects");
     let sqlite = fixture.join("projection.sqlite");
     let mut config = local_config(&root, &sqlite);
-    config.response_barrier = EmbeddedResponseBarrier::AsyncProjection;
-    let pq =
-        Arc::new(fireweed::open_embedded_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap());
+    config.response_barrier = CommitResponseBarrier::AsyncProjection;
+    let fireweed =
+        Arc::new(fireweed::open_composed_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap());
     let key = queue("interleaved-queue");
-    block_on(pq.create_queue(definition("interleaved-queue"))).unwrap();
-    block_on(pq.push(&key, item(0))).unwrap();
+    block_on(fireweed.create_queue(definition("interleaved-queue"))).unwrap();
+    block_on(fireweed.push(&key, item(0))).unwrap();
 
-    block_on(pq.delete_projection()).unwrap();
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .delete(),
+    )
+    .unwrap();
     assert!(matches!(
-        block_on(pq.push(&key, item(1))),
+        block_on(fireweed.push(&key, item(1))),
         Err(fireweed::EngineError::Unavailable)
     ));
-    assert_eq!(block_on(pq.metrics(&key)).unwrap().pending, 1);
-    assert!(block_on(pq.verify_projection()).is_err());
-    block_on(pq.rehydrate_projection()).unwrap();
-    block_on(pq.push(&key, item(1))).unwrap();
-    block_on(pq.verify_projection()).unwrap();
+    assert_eq!(block_on(fireweed.metrics(&key)).unwrap().pending, 1);
+    assert!(
+        block_on(
+            fireweed
+                .projection_control()
+                .expect("projection control")
+                .verify()
+        )
+        .is_err()
+    );
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .rebuild(),
+    )
+    .unwrap();
+    block_on(fireweed.push(&key, item(1))).unwrap();
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .verify(),
+    )
+    .unwrap();
 
-    let writer = Arc::clone(&pq);
+    let writer = Arc::clone(&fireweed);
     let writer_key = key.clone();
     let thread = std::thread::spawn(move || {
         for priority in 2..22 {
             block_on(writer.push(&writer_key, item(priority))).unwrap();
         }
     });
-    block_on(pq.rehydrate_projection()).unwrap();
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .rebuild(),
+    )
+    .unwrap();
     thread.join().unwrap();
-    block_on(pq.rehydrate_projection()).unwrap();
-    block_on(pq.verify_projection()).unwrap();
-    assert_eq!(block_on(pq.metrics(&key)).unwrap().pending, 22);
-    drop(pq);
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .rebuild(),
+    )
+    .unwrap();
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .verify(),
+    )
+    .unwrap();
+    assert_eq!(block_on(fireweed.metrics(&key)).unwrap().pending, 22);
+    drop(fireweed);
     let _ = fs::remove_dir_all(fixture);
 }
 
 #[test]
 fn public_objectlog_sqlite_async_verify_drains_deferred_checkpoint() {
-    let fixture = std::env::temp_dir().join(format!("pqueue-public-verify-drain-{}", nonce()));
+    let fixture = std::env::temp_dir().join(format!("fireweed-public-verify-drain-{}", nonce()));
     let root = fixture.join("objects");
     let sqlite = fixture.join("projection.sqlite");
     let mut config = local_config(&root, &sqlite);
-    config.response_barrier = EmbeddedResponseBarrier::AsyncProjection;
-    config.segments = EmbeddedSegmentConfig::new(1, 60_000).unwrap();
-    let pq = fireweed::open_embedded_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap();
+    config.response_barrier = CommitResponseBarrier::AsyncProjection;
+    config.segments = SegmentSettings::new(1, 60_000).unwrap();
+    let fireweed =
+        fireweed::open_composed_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap();
     let key = queue("verify-drain-queue");
-    block_on(pq.create_queue(definition("verify-drain-queue"))).unwrap();
-    block_on(pq.push(&key, item(1))).unwrap();
+    block_on(fireweed.create_queue(definition("verify-drain-queue"))).unwrap();
+    block_on(fireweed.push(&key, item(1))).unwrap();
 
-    let verification = block_on(pq.verify_projection()).unwrap();
+    let verification = block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .verify(),
+    )
+    .unwrap();
     assert_eq!(
         verification.projection_sequence, verification.authoritative_sequence,
         "verification must synchronously drain an already-admitted async SQLite checkpoint"
     );
-    drop(pq);
+    drop(fireweed);
     let _ = fs::remove_dir_all(fixture);
 }
 
 #[test]
 fn public_objectlog_sqlite_strict_writes_fail_closed_while_projection_is_deleted() {
-    let fixture = std::env::temp_dir().join(format!("pqueue-public-strict-offline-{}", nonce()));
+    let fixture = std::env::temp_dir().join(format!("fireweed-public-strict-offline-{}", nonce()));
     let config = local_config(&fixture.join("objects"), &fixture.join("projection.sqlite"));
-    let pq = fireweed::open_embedded_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap();
+    let fireweed =
+        fireweed::open_composed_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap();
     let key = queue("strict-offline-queue");
-    block_on(pq.create_queue(definition("strict-offline-queue"))).unwrap();
-    block_on(pq.push(&key, item(0))).unwrap();
-    let claimed = block_on(pq.claim(&key, 1, 30_000)).unwrap();
-    block_on(pq.delete_projection()).unwrap();
+    block_on(fireweed.create_queue(definition("strict-offline-queue"))).unwrap();
+    block_on(fireweed.push(&key, item(0))).unwrap();
+    let claimed = block_on(fireweed.claim(&key, 1, 30_000)).unwrap();
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .delete(),
+    )
+    .unwrap();
     assert!(matches!(
-        block_on(pq.push(&key, item(1))),
+        block_on(fireweed.push(&key, item(1))),
         Err(fireweed::EngineError::Unavailable)
     ));
     assert!(matches!(
-        block_on(pq.ack(&key, [claimed[0].item_id])),
+        block_on(fireweed.ack(&key, [claimed[0].item_id])),
         Err(fireweed::EngineError::Unavailable)
     ));
-    block_on(pq.rehydrate_projection()).unwrap();
-    block_on(pq.ack(&key, [claimed[0].item_id])).unwrap();
-    block_on(pq.push(&key, item(2))).unwrap();
-    assert_eq!(block_on(pq.metrics(&key)).unwrap().pending, 1);
-    drop(pq);
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .rebuild(),
+    )
+    .unwrap();
+    block_on(fireweed.ack(&key, [claimed[0].item_id])).unwrap();
+    block_on(fireweed.push(&key, item(2))).unwrap();
+    assert_eq!(block_on(fireweed.metrics(&key)).unwrap().pending, 1);
+    drop(fireweed);
     let _ = fs::remove_dir_all(fixture);
 }
 
 #[test]
-fn public_objectlog_sqlite_filtered_metrics_survive_delete_and_rehydrate() {
-    let fixture = std::env::temp_dir().join(format!("pqueue-public-filtered-metrics-{}", nonce()));
+fn public_objectlog_sqlite_filtered_metrics_survive_delete_and_rebuild() {
+    let fixture =
+        std::env::temp_dir().join(format!("fireweed-public-filtered-metrics-{}", nonce()));
     let config = local_config(&fixture.join("objects"), &fixture.join("projection.sqlite"));
-    let pq = fireweed::open_embedded_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap();
+    let fireweed =
+        fireweed::open_composed_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap();
     let key = queue("filtered-metrics-queue");
     let mut queue_definition = definition("filtered-metrics-queue");
     queue_definition.typed_indexes = vec![QueueIndex {
@@ -686,7 +863,7 @@ fn public_objectlog_sqlite_filtered_metrics_survive_delete_and_rehydrate() {
             unique: false,
         }),
     }];
-    block_on(pq.create_queue(queue_definition)).unwrap();
+    block_on(fireweed.create_queue(queue_definition)).unwrap();
 
     let mut items = Vec::new();
     for (priority_base, state) in [
@@ -710,20 +887,20 @@ fn public_objectlog_sqlite_filtered_metrics_survive_delete_and_rehydrate() {
             });
         }
     }
-    let ids = block_on(pq.push_batch(&key, items)).unwrap();
-    let complete = block_on(pq.claim(&key, 4, 30_000)).unwrap();
+    let ids = block_on(fireweed.push_batch(&key, items)).unwrap();
+    let complete = block_on(fireweed.claim(&key, 4, 30_000)).unwrap();
     assert_eq!(
         complete.iter().map(|item| item.item_id).collect::<Vec<_>>(),
         ids[0..4]
     );
-    block_on(pq.ack(&key, complete.iter().map(|item| item.item_id))).unwrap();
-    let failed = block_on(pq.claim(&key, 4, 30_000)).unwrap();
+    block_on(fireweed.ack(&key, complete.iter().map(|item| item.item_id))).unwrap();
+    let failed = block_on(fireweed.claim(&key, 4, 30_000)).unwrap();
     assert_eq!(
         failed.iter().map(|item| item.item_id).collect::<Vec<_>>(),
         ids[4..8]
     );
-    block_on(pq.fail(&key, failed.iter().map(|item| item.item_id))).unwrap();
-    let leased = block_on(pq.claim(&key, 4, 30_000)).unwrap();
+    block_on(fireweed.fail(&key, failed.iter().map(|item| item.item_id))).unwrap();
+    let leased = block_on(fireweed.claim(&key, 4, 30_000)).unwrap();
     assert_eq!(
         leased.iter().map(|item| item.item_id).collect::<Vec<_>>(),
         ids[8..12]
@@ -737,7 +914,7 @@ fn public_objectlog_sqlite_filtered_metrics_survive_delete_and_rehydrate() {
             value: TypedValue::String("transition".to_string()),
         }],
     };
-    let ordinary_before = block_on(pq.metrics(&key)).unwrap();
+    let ordinary_before = block_on(fireweed.metrics(&key)).unwrap();
     assert_eq!(
         (
             ordinary_before.pending,
@@ -747,7 +924,7 @@ fn public_objectlog_sqlite_filtered_metrics_survive_delete_and_rehydrate() {
         ),
         (4, 4, 4, 4)
     );
-    let expected = block_on(pq.metrics_by_query(&key, request.clone())).unwrap();
+    let expected = block_on(fireweed.metrics_by_query(&key, request.clone())).unwrap();
     assert_eq!(
         (
             expected.pending,
@@ -766,28 +943,46 @@ fn public_objectlog_sqlite_filtered_metrics_survive_delete_and_rehydrate() {
         }],
     };
     assert!(matches!(
-        block_on(pq.metrics_by_query(&key, invalid)),
+        block_on(fireweed.metrics_by_query(&key, invalid)),
         Err(EngineError::Invalid(_))
     ));
 
-    block_on(pq.delete_projection()).unwrap();
-    block_on(pq.rehydrate_projection()).unwrap();
-    block_on(pq.verify_projection()).unwrap();
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .delete(),
+    )
+    .unwrap();
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .rebuild(),
+    )
+    .unwrap();
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .verify(),
+    )
+    .unwrap();
     assert_eq!(
-        block_on(pq.metrics_by_query(&key, request)).unwrap(),
+        block_on(fireweed.metrics_by_query(&key, request)).unwrap(),
         expected
     );
-    assert_eq!(block_on(pq.metrics(&key)).unwrap(), ordinary_before);
-    drop(pq);
+    assert_eq!(block_on(fireweed.metrics(&key)).unwrap(), ordinary_before);
+    drop(fireweed);
     let _ = fs::remove_dir_all(fixture);
 }
 
 #[test]
-fn public_objectlog_sqlite_filtered_claim_survives_delete_and_rehydrate() {
-    let fixture = std::env::temp_dir().join(format!("pqueue-public-filtered-claim-{}", nonce()));
+fn public_objectlog_sqlite_filtered_claim_survives_delete_and_rebuild() {
+    let fixture = std::env::temp_dir().join(format!("fireweed-public-filtered-claim-{}", nonce()));
     let config = local_config(&fixture.join("objects"), &fixture.join("projection.sqlite"));
     let clock = Arc::new(PanicClock::new());
-    let pq = fireweed::open_embedded_sqlite(config, clock.clone()).unwrap();
+    let fireweed = fireweed::open_composed_sqlite(config, clock.clone()).unwrap();
     let key = queue("filtered-claim-queue");
     let mut queue_definition = definition("filtered-claim-queue");
     queue_definition.typed_indexes = vec![QueueIndex {
@@ -806,9 +1001,9 @@ fn public_objectlog_sqlite_filtered_claim_survives_delete_and_rehydrate() {
             unique: false,
         }),
     }];
-    block_on(pq.create_queue(queue_definition)).unwrap();
+    block_on(fireweed.create_queue(queue_definition)).unwrap();
 
-    let caps = pq.hot_projection_capabilities(&key);
+    let caps = fireweed.hot_projection_capabilities(&key);
     assert!(caps.paired_capabilities_consistent());
     assert!(caps.range_scan);
     assert!(caps.claim_by_query);
@@ -821,7 +1016,7 @@ fn public_objectlog_sqlite_filtered_claim_survives_delete_and_rehydrate() {
         ("transition", "1970-01-01T00:03:20Z", 200),
     ];
     let ids = block_on(
-        pq.push_batch(
+        fireweed.push_batch(
             &key,
             records
                 .into_iter()
@@ -860,7 +1055,7 @@ fn public_objectlog_sqlite_filtered_claim_survives_delete_and_rehydrate() {
         request_id: Some(RequestId::new("transition-query-1").unwrap()),
     };
     let first = block_on(
-        pq.claim_by_query_at(
+        fireweed.claim_by_query_at(
             &key,
             request.clone(),
             ClaimByQueryAt::new()
@@ -875,14 +1070,36 @@ fn public_objectlog_sqlite_filtered_claim_survives_delete_and_rehydrate() {
         first.items[0].lease_expires_at,
         UtcTimestamp::new(1_030, 0).unwrap()
     );
-    assert!(block_on(pq.claimed(&key, &ids[1..4])).unwrap().is_empty());
+    assert!(
+        block_on(fireweed.claimed(&key, &ids[1..4]))
+            .unwrap()
+            .is_empty()
+    );
 
-    block_on(pq.delete_projection()).unwrap();
-    block_on(pq.rehydrate_projection()).unwrap();
-    block_on(pq.verify_projection()).unwrap();
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .delete(),
+    )
+    .unwrap();
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .rebuild(),
+    )
+    .unwrap();
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .verify(),
+    )
+    .unwrap();
 
     let second = block_on(
-        pq.claim_by_query_at(
+        fireweed.claim_by_query_at(
             &key,
             ClaimByQueryRequest {
                 request_id: Some(RequestId::new("transition-query-2").unwrap()),
@@ -896,45 +1113,67 @@ fn public_objectlog_sqlite_filtered_claim_survives_delete_and_rehydrate() {
     .unwrap();
     assert_eq!(second.items.len(), 1);
     assert_eq!(second.items[0].item_id, ids[4]);
-    assert!(block_on(pq.claimed(&key, &ids[1..4])).unwrap().is_empty());
+    assert!(
+        block_on(fireweed.claimed(&key, &ids[1..4]))
+            .unwrap()
+            .is_empty()
+    );
 
-    drop(pq);
+    drop(fireweed);
     let _ = fs::remove_dir_all(fixture);
 }
 
 #[test]
 fn public_objectlog_sqlite_lifecycle_seals_already_buffered_writes_before_reset() {
-    let fixture = std::env::temp_dir().join(format!("pqueue-public-buffered-{}", nonce()));
+    let fixture = std::env::temp_dir().join(format!("fireweed-public-buffered-{}", nonce()));
     let mut config = local_config(&fixture.join("objects"), &fixture.join("projection.sqlite"));
-    config.segments = EmbeddedSegmentConfig::new(16 * 1024 * 1024, 1_000).unwrap();
-    let pq =
-        Arc::new(fireweed::open_embedded_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap());
+    config.segments = SegmentSettings::new(16 * 1024 * 1024, 1_000).unwrap();
+    let fireweed =
+        Arc::new(fireweed::open_composed_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap());
     let key = queue("buffered-lifecycle-queue");
-    block_on(pq.create_queue(definition("buffered-lifecycle-queue"))).unwrap();
+    block_on(fireweed.create_queue(definition("buffered-lifecycle-queue"))).unwrap();
 
-    let writer = Arc::clone(&pq);
+    let writer = Arc::clone(&fireweed);
     let writer_key = key.clone();
     let thread = std::thread::spawn(move || block_on(writer.push(&writer_key, item(7))));
-    while pq.buffered_group_commit_commands() != Some(1) {
+    while fireweed.test_buffered_group_commit_commands() != Some(1) {
         std::thread::yield_now();
     }
 
-    block_on(pq.delete_projection()).unwrap();
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .delete(),
+    )
+    .unwrap();
     assert!(
         thread.join().unwrap().is_ok(),
         "quiescence must seal the waiting push"
     );
-    let rebuilt = block_on(pq.rehydrate_projection()).unwrap();
+    let rebuilt = block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .rebuild(),
+    )
+    .unwrap();
     assert_eq!(rebuilt.tail_commands_replayed, 1);
-    block_on(pq.verify_projection()).unwrap();
-    assert_eq!(block_on(pq.metrics(&key)).unwrap().pending, 1);
-    drop(pq);
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .verify(),
+    )
+    .unwrap();
+    assert_eq!(block_on(fireweed.metrics(&key)).unwrap().pending, 1);
+    drop(fireweed);
     let _ = fs::remove_dir_all(fixture);
 }
 
 #[test]
 fn public_objectlog_sqlite_namespaces_isolate_shared_object_root() {
-    let fixture = std::env::temp_dir().join(format!("pqueue-public-namespace-{}", nonce()));
+    let fixture = std::env::temp_dir().join(format!("fireweed-public-namespace-{}", nonce()));
     let root = fixture.join("shared-objects");
     let mut first_config = local_config(&root, &fixture.join("first.sqlite"));
     first_config.namespace = "first namespace".into();
@@ -943,14 +1182,14 @@ fn public_objectlog_sqlite_namespaces_isolate_shared_object_root() {
     let key = queue("shared-queue-name");
 
     let first =
-        fireweed::open_embedded_sqlite(first_config.clone(), Arc::new(ManualClock::at(1_000)))
+        fireweed::open_composed_sqlite(first_config.clone(), Arc::new(ManualClock::at(1_000)))
             .unwrap();
     block_on(first.create_queue(definition("shared-queue-name"))).unwrap();
     block_on(first.push(&key, item(11))).unwrap();
     drop(first);
 
     let second =
-        fireweed::open_embedded_sqlite(second_config.clone(), Arc::new(ManualClock::at(1_000)))
+        fireweed::open_composed_sqlite(second_config.clone(), Arc::new(ManualClock::at(1_000)))
             .unwrap();
     assert!(
         block_on(second.create_queue(definition("shared-queue-name")))
@@ -962,9 +1201,9 @@ fn public_objectlog_sqlite_namespaces_isolate_shared_object_root() {
     drop(second);
 
     let first =
-        fireweed::open_embedded_sqlite(first_config, Arc::new(ManualClock::at(2_000))).unwrap();
+        fireweed::open_composed_sqlite(first_config, Arc::new(ManualClock::at(2_000))).unwrap();
     let second =
-        fireweed::open_embedded_sqlite(second_config, Arc::new(ManualClock::at(2_000))).unwrap();
+        fireweed::open_composed_sqlite(second_config, Arc::new(ManualClock::at(2_000))).unwrap();
     assert_eq!(
         block_on(first.peek(&key, 10)).unwrap()[0].priority,
         Some(PriorityValue::Int64(11))
@@ -978,15 +1217,15 @@ fn public_objectlog_sqlite_namespaces_isolate_shared_object_root() {
 }
 
 #[test]
-fn public_s3_sqlite_delete_and_rehydrate() {
+fn public_s3_sqlite_delete_and_rebuild() {
     let endpoint = match runtime_env("S3_TEST_URL") {
         Ok(value) => value,
         Err(_) => {
-            eprintln!("SKIP public_s3_sqlite_delete_and_rehydrate: PQUEUE_S3_TEST_URL is unset");
+            eprintln!("SKIP public_s3_sqlite_delete_and_rebuild: FIREWEED_S3_TEST_URL is unset");
             return;
         }
     };
-    let bucket = runtime_env("S3_TEST_BUCKET").unwrap_or_else(|_| "pqueue-test".into());
+    let bucket = runtime_env("S3_TEST_BUCKET").unwrap_or_else(|_| "fireweed-test".into());
     let access = runtime_env("S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into());
     let secret = runtime_env("S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into());
     let region = runtime_env("S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
@@ -995,25 +1234,25 @@ fn public_s3_sqlite_delete_and_rehydrate() {
         .create_bucket()
         .unwrap();
 
-    let fixture = std::env::temp_dir().join(format!("pqueue-public-s3-sqlite-{}", nonce()));
+    let fixture = std::env::temp_dir().join(format!("fireweed-public-s3-sqlite-{}", nonce()));
     let queue_id = format!("durable-s3-{}", nonce());
-    let config = EmbeddedDurabilityConfig {
-        object_log: EmbeddedObjectLogConfig::S3Compatible {
+    let config = ComposedStorageConfig {
+        object_log: ObjectLogConfig::S3Compatible {
             endpoint,
             bucket,
             region,
-            access_key_id: EmbeddedSecret::new(access),
-            secret_access_key: EmbeddedSecret::new(secret),
+            access_key_id: SecretValue::new(access),
+            secret_access_key: SecretValue::new(secret),
             allow_insecure_http: true,
         },
-        projection: EmbeddedProjectionConfig::Sqlite {
+        projection: ProjectionStoreConfig::Sqlite {
             path: fixture.join("projection.sqlite"),
         },
-        response_barrier: EmbeddedResponseBarrier::Strict,
-        segments: EmbeddedSegmentConfig::new(64 * 1024, 5).unwrap(),
+        response_barrier: CommitResponseBarrier::Strict,
+        segments: SegmentSettings::new(64 * 1024, 5).unwrap(),
         namespace: format!("sqlite-s3-{}", nonce()),
-        recovery: EmbeddedRecoveryPolicy::default(),
+        recovery: ProjectionRecoveryPolicy::default(),
     };
-    let _ = assert_delete_rehydrate(config, &queue_id);
+    let _ = assert_delete_rebuild(config, &queue_id);
     let _ = fs::remove_dir_all(fixture);
 }

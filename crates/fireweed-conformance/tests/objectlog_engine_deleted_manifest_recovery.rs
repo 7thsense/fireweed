@@ -231,13 +231,13 @@ fn TestEngineHybridAsyncMissingFrontierRetainsGenesisRecovery() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// TestSqliteEnginePqueueC33c367eReleaseNote: release notes record the evaluated
+/// TestSqliteEngineFireweedC33c367eReleaseNote: release notes record the evaluated
 /// pqueue-c33c367e interaction before landing, including whether it affects
 /// SQLite, engine, retained floor/head replay, retention-floor semantics,
 /// source-pin semantics, or fail-closed behavior.
 #[test]
 #[allow(non_snake_case)]
-fn TestSqliteEnginePqueueC33c367eReleaseNote() {
+fn TestSqliteEngineFireweedC33c367eReleaseNote() {
     let release_notes = include_str!("../../../docs/releases/v0.14.0.md");
     // pqueue-c33c367e evaluation must be recorded
     assert!(
@@ -352,8 +352,8 @@ fn TestDeletedManifestVerificationEvidence() {
         "engine sibling test symbol TestEngineObjectlogFloorHeadReplayRecovery must be named in evidence"
     );
     assert!(
-        evidence.contains("TestSqliteEnginePqueueC33c367eReleaseNote"),
-        "engine sibling test symbol TestSqliteEnginePqueueC33c367eReleaseNote must be named in evidence"
+        evidence.contains("TestSqliteEngineFireweedC33c367eReleaseNote"),
+        "engine sibling test symbol TestSqliteEngineFireweedC33c367eReleaseNote must be named in evidence"
     );
     assert!(
         evidence.contains("TestDeletedManifestReleaseNoteArtifacts"),
@@ -370,8 +370,8 @@ fn TestDeletedManifestVerificationEvidence() {
         "SQLite sibling test symbol TestSqliteDeletedManifestErrorPreservesGuarantees must be named in evidence"
     );
     assert!(
-        evidence.contains("TestSqlitePropagationPqueueC33c367eInteractionRecorded"),
-        "SQLite sibling test symbol TestSqlitePropagationPqueueC33c367eInteractionRecorded must be named in evidence"
+        evidence.contains("TestSqlitePropagationFireweedC33c367eInteractionRecorded"),
+        "SQLite sibling test symbol TestSqlitePropagationFireweedC33c367eInteractionRecorded must be named in evidence"
     );
     assert!(
         evidence.contains("TestSqliteObjectlogFloorHeadReplayRecovery"),
@@ -382,8 +382,8 @@ fn TestDeletedManifestVerificationEvidence() {
         "SQLite sibling test symbol TestSqliteFloorHeadReplayPreservesFailClosedBoundary must be named in evidence"
     );
     assert!(
-        evidence.contains("TestSqlitePqueueC33c367eInteractionRecorded"),
-        "SQLite sibling test symbol TestSqlitePqueueC33c367eInteractionRecorded must be named in evidence"
+        evidence.contains("TestSqliteFireweedC33c367eInteractionRecorded"),
+        "SQLite sibling test symbol TestSqliteFireweedC33c367eInteractionRecorded must be named in evidence"
     );
 }
 

@@ -11,11 +11,11 @@
 //!   `XAUTOCLAIM` (see below) get a retryable `-ERR fireweed unavailable` until handoff completes (then the
 //!   BQ-31 `MOVED`-on-miss redirects new claims to the new owner).
 //!
-//! This classifier feeds [`crate::route`]'s `is_new_claim`. Two pqueue-specific subtleties (in pqueue "the
+//! This classifier feeds [`crate::route`]'s `is_new_claim`. Two fireweed-specific subtleties (in fireweed "the
 //! consumer name IS the lease token", TD-006 §3):
 //! - `XAUTOCLAIM` here reclaims only IDLE (lease-EXPIRED) entries and ALWAYS REASSIGNS them (a re-delivery,
 //!   never a renew — see the `xautoclaim` handler) — so TD-006's "XAUTOCLAIM of the caller's own (live) PEL"
-//!   in-flight case is unreachable in pqueue. It is therefore classified [`DrainClass::NewClaim`] (refused
+//!   in-flight case is unreachable in fireweed. It is therefore classified [`DrainClass::NewClaim`] (refused
 //!   during drain); no worker holding a LIVE lease is affected (an expired lease is not "mid-lease").
 //! - `XCLAIM` is RUNTIME-dependent AND can be MIXED: the `xclaim` handler splits one command into renews
 //!   (same lease token → in-flight) and reassigns (different token → new delivery). A single `is_new_claim`
@@ -28,7 +28,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DrainClass {
     /// A NEW delivery — a draining owner refuses it (`-ERR fireweed unavailable`). `XREADGROUP >`, and
-    /// `XAUTOCLAIM` (which in pqueue always re-delivers idle/expired entries).
+    /// `XAUTOCLAIM` (which in fireweed always re-delivers idle/expired entries).
     NewClaim,
     /// In-flight or a push/mutation — a draining owner SERVES it (leases finalize; pushes/updates continue
     /// per TD-003 §Graceful Drain). `XACK`, `XADD`, an explicit-id `XREADGROUP` (own-PEL read), `XDEL`.
@@ -60,12 +60,12 @@ pub fn drain_class(name: &str, args: &[Vec<u8>]) -> DrainClass {
         // Acks finalize in-flight leases; pushes/updates MAY continue during drain (TD-003 §Graceful Drain
         // step 2). XADD is a push; XDEL is a mutation, not a NEW CLAIM, so the drain split does not refuse it.
         "XACK" | "XADD" | "XDEL" => DrainClass::InFlight,
-        // XAUTOCLAIM always re-delivers idle/expired entries (a new delivery) in pqueue → refused on drain.
+        // XAUTOCLAIM always re-delivers idle/expired entries (a new delivery) in fireweed → refused on drain.
         "XAUTOCLAIM" => DrainClass::NewClaim,
         // XCLAIM is per-entry renew(in-flight)/reassign(new-delivery) — runtime + mixed; dispatch splits it.
         "XCLAIM" => DrainClass::RuntimeConsumerDependent,
         // Pure reads — bounded-stale.
-        "XLEN" | "XPENDING" | "XINFO" | "PQ.MGET" | "PQ.HGETALL" | "PQ.HMGET" => DrainClass::Read,
+        "XLEN" | "XPENDING" | "XINFO" | "FW.MGET" | "FW.HGETALL" | "FW.HMGET" => DrainClass::Read,
         // PING, CLUSTER, COMMAND, CLIENT, HELLO, XGROUP, and anything unknown — not queue-addressed.
         _ => DrainClass::Control,
     }
@@ -159,7 +159,7 @@ mod tests {
             ),
             DrainClass::RuntimeConsumerDependent
         );
-        // XAUTOCLAIM in pqueue only re-delivers idle/expired entries → a new delivery, refused on drain.
+        // XAUTOCLAIM in fireweed only re-delivers idle/expired entries → a new delivery, refused on drain.
         assert_eq!(
             drain_class(
                 "XAUTOCLAIM",
@@ -175,9 +175,9 @@ mod tests {
             "XLEN",
             "XPENDING",
             "XINFO",
-            "PQ.MGET",
-            "PQ.HGETALL",
-            "PQ.HMGET",
+            "FW.MGET",
+            "FW.HGETALL",
+            "FW.HMGET",
         ] {
             assert_eq!(drain_class(name, &argv(&[name, "t1:q1"])), DrainClass::Read);
         }
