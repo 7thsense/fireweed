@@ -7,12 +7,14 @@ use fireweed::{
     BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateRequest, BatchUpdateValue, Bytes, ClaimRef,
     ClientItemKey, CommitEntry, CommitRequest, CompoundIndexDef, CompoundIndexField,
     DiscoveryGranularity, EligibilityPolicy, EngineError, EntryOutcome, FilterOp, FinalizeKind,
-    Fireweed, GateKeyPolicy, IndexDeclaration, IndexSpec, IndexType, NewItem,
+    Fireweed, GateKeyPolicy, IndexDeclaration, IndexSpec, IndexType, ItemMutationOperation,
+    ItemMutationOutcome, ItemMutationRequest, ItemMutationResponse, ItemMutationReturning,
+    ItemPatch, ItemPredicate, ItemSelector, ItemSelectorScope, LeaseGuard, LifecyclePatch, NewItem,
     ObjectLogRuntimeConfig, ObjectLogStorage, OrderingMode, PriorityDirection, PriorityModel,
     PriorityModelKind, PriorityTieBreaker, PriorityValue, ProjectionConfig, QueryFilter,
     QueueDefinition, QueueId, QueueIndex, QueueKey, RecoveryAction, RecoveryPolicy,
     RecurrencePolicy, RequestId, ResponseBarrier, RetryPolicy, ScheduleUpdate, SegmentConfig,
-    SideRecord, SystemClock, TenantId, TypedValue,
+    SelectedMutation, SideRecord, SystemClock, TenantId, TypedValue, UtcTimestamp,
 };
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -140,6 +142,114 @@ fn batch_request(item_id: fireweed::ItemId) -> BatchUpdateRequest {
     }
 }
 
+fn selector_mutation(
+    request_id: &str,
+    key: &str,
+    field: &str,
+    value: &'static [u8],
+    priority: i64,
+) -> ItemMutationRequest {
+    ItemMutationRequest {
+        request_id: RequestId::new(request_id).unwrap(),
+        evaluated_at: UtcTimestamp::new(1_800_000_000, 0).unwrap(),
+        dry_run: false,
+        returning: ItemMutationReturning::BeforeSnapshot,
+        gate_changes: vec![],
+        operation: ItemMutationOperation::SelectFirst {
+            clauses: vec![
+                SelectedMutation {
+                    selector_id: "eligible-before-patch".into(),
+                    selector: ItemSelector {
+                        scope: ItemSelectorScope::Live,
+                        predicates: vec![
+                            ItemPredicate::ClientItemKeyEq(ClientItemKey::new(key).unwrap()),
+                            ItemPredicate::FieldEq {
+                                name: field.into(),
+                                value: None,
+                            },
+                        ],
+                    },
+                    predicates: vec![],
+                    lease_guard: LeaseGuard::RejectActive,
+                    patch: ItemPatch {
+                        priority: BatchUpdateValue::Replace(Some(PriorityValue::Int64(priority))),
+                        field_edits: BTreeMap::from([(
+                            field.into(),
+                            Some(Bytes::from_static(value)),
+                        )]),
+                        ..ItemPatch::default()
+                    },
+                },
+                SelectedMutation {
+                    selector_id: "must-not-run-on-replay".into(),
+                    selector: ItemSelector {
+                        scope: ItemSelectorScope::Live,
+                        predicates: vec![ItemPredicate::ClientItemKeyEq(
+                            ClientItemKey::new(key).unwrap(),
+                        )],
+                    },
+                    predicates: vec![],
+                    lease_guard: LeaseGuard::RejectActive,
+                    patch: ItemPatch {
+                        priority: BatchUpdateValue::Replace(Some(PriorityValue::Int64(99))),
+                        ..ItemPatch::default()
+                    },
+                },
+            ],
+        },
+    }
+}
+
+fn lease_invalidation_mutation(item_key: &str, evaluated_at: UtcTimestamp) -> ItemMutationRequest {
+    ItemMutationRequest {
+        request_id: RequestId::new("mutation-lease-invalidation-v1").unwrap(),
+        evaluated_at,
+        dry_run: false,
+        returning: ItemMutationReturning::BeforeSnapshot,
+        gate_changes: vec![],
+        operation: ItemMutationOperation::SelectFirst {
+            clauses: vec![
+                SelectedMutation {
+                    selector_id: "active-lease".into(),
+                    selector: ItemSelector {
+                        scope: ItemSelectorScope::Live,
+                        predicates: vec![
+                            ItemPredicate::ClientItemKeyEq(ClientItemKey::new(item_key).unwrap()),
+                            ItemPredicate::LeaseActive(true),
+                        ],
+                    },
+                    predicates: vec![],
+                    lease_guard: LeaseGuard::InvalidateActive,
+                    patch: ItemPatch {
+                        lifecycle: LifecyclePatch::SetPending,
+                        priority: BatchUpdateValue::Replace(Some(PriorityValue::Int64(-90))),
+                        field_edits: BTreeMap::from([(
+                            "lease-invalidated".into(),
+                            Some(Bytes::from_static(b"yes")),
+                        )]),
+                        ..ItemPatch::default()
+                    },
+                },
+                SelectedMutation {
+                    selector_id: "must-not-run-on-replay".into(),
+                    selector: ItemSelector {
+                        scope: ItemSelectorScope::Live,
+                        predicates: vec![ItemPredicate::ClientItemKeyEq(
+                            ClientItemKey::new(item_key).unwrap(),
+                        )],
+                    },
+                    predicates: vec![],
+                    lease_guard: LeaseGuard::InvalidateActive,
+                    patch: ItemPatch {
+                        priority: BatchUpdateValue::Replace(Some(PriorityValue::Int64(99))),
+                        ..ItemPatch::default()
+                    },
+                },
+            ],
+        },
+    }
+}
+
 fn objectlog_sqlite(root: &Path, barrier: ResponseBarrier, cell: &str) -> Fireweed {
     fireweed::open_objectlog_sqlite(
         ObjectLogRuntimeConfig {
@@ -221,6 +331,200 @@ async fn seed(cell: &str, fireweed: &Fireweed) -> SeededState {
         .unwrap();
     assert_eq!(mutation.results.len(), 1);
     assert_eq!(mutation.results[0].item_id, primary_id);
+
+    let before_selector = fireweed
+        .live_item(&queue, ClientItemKey::new("primary").unwrap())
+        .await
+        .unwrap()
+        .expect("primary exists before selector mutation");
+    let selector_request = selector_mutation(
+        "mutation-selector-v1",
+        "primary",
+        "selector-durable",
+        b"yes",
+        2,
+    );
+    let mut selector_preview = selector_request.clone();
+    selector_preview.dry_run = true;
+    let preview = fireweed
+        .mutate_items(&queue, selector_preview)
+        .await
+        .unwrap();
+    assert!(preview.position.is_none());
+    assert_eq!(preview.summary.changed, 1);
+    assert_eq!(
+        preview.results[0].selector_id.as_deref(),
+        Some("eligible-before-patch")
+    );
+    assert!(matches!(
+        preview.results[0].outcome,
+        ItemMutationOutcome::WouldUpdate { .. }
+    ));
+    let after_preview = fireweed
+        .live_item(&queue, ClientItemKey::new("primary").unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_preview.item_version, before_selector.item_version);
+    assert_eq!(after_preview.priority, before_selector.priority);
+    assert!(!after_preview.fields.contains_key("selector-durable"));
+    let selector_response = fireweed
+        .mutate_items(&queue, selector_request.clone())
+        .await
+        .unwrap();
+    assert!(selector_response.position.is_some());
+    assert_eq!(selector_response.summary.changed, 1);
+    assert_eq!(
+        selector_response.results[0].selector_id.as_deref(),
+        Some("eligible-before-patch")
+    );
+    assert_eq!(
+        fireweed
+            .mutate_items(&queue, selector_request.clone())
+            .await
+            .unwrap(),
+        selector_response,
+        "selector replay must return the retained outcome without reevaluating the now-divergent selector"
+    );
+    let after_selector = fireweed
+        .live_item(&queue, ClientItemKey::new("primary").unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after_selector.item_version,
+        before_selector.item_version + 1
+    );
+    assert_eq!(after_selector.priority, Some(PriorityValue::Int64(2)));
+    assert_eq!(after_selector.fields["selector-durable"].as_ref(), b"yes");
+
+    let dry_reopen_id = fireweed
+        .push(
+            &queue,
+            NewItem {
+                client_item_key: Some(ClientItemKey::new("dry-run-reopen").unwrap()),
+                priority: Some(PriorityValue::Int64(30)),
+                gate_keys: vec!["hold".into()],
+                ..NewItem::default()
+            },
+        )
+        .await
+        .unwrap();
+    let dry_reopen_before = fireweed
+        .live_item(&queue, ClientItemKey::new("dry-run-reopen").unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let dry_reopen_request = selector_mutation(
+        "mutation-dry-reopen-v1",
+        "dry-run-reopen",
+        "dry-run-cross-reopen",
+        b"committed-after-reopen",
+        25,
+    );
+    let mut dry_reopen_preview = dry_reopen_request.clone();
+    dry_reopen_preview.dry_run = true;
+    let dry_preview = fireweed
+        .mutate_items(&queue, dry_reopen_preview)
+        .await
+        .unwrap();
+    assert!(dry_preview.position.is_none());
+    assert_eq!(dry_preview.summary.changed, 1);
+    let dry_after_preview = fireweed
+        .live_item(&queue, ClientItemKey::new("dry-run-reopen").unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        dry_after_preview.item_version,
+        dry_reopen_before.item_version
+    );
+    assert_eq!(dry_after_preview.priority, dry_reopen_before.priority);
+    assert!(
+        !dry_after_preview
+            .fields
+            .contains_key("dry-run-cross-reopen")
+    );
+
+    let lease_item_id = fireweed
+        .push(
+            &queue,
+            NewItem {
+                client_item_key: Some(ClientItemKey::new("lease-invalidation").unwrap()),
+                priority: Some(PriorityValue::Int64(-100)),
+                ..NewItem::default()
+            },
+        )
+        .await
+        .unwrap();
+    let leased = fireweed.claim(&queue, 1, 30_000).await.unwrap().remove(0);
+    assert_eq!(leased.item_id, lease_item_id);
+    let old_claim_ref = ClaimRef {
+        item_id: leased.item_id,
+        lease_token: leased.lease_token.clone().unwrap(),
+        lease_expires_at: leased.lease_expires_at,
+        item_version: leased.item_version,
+    };
+    let old_token = old_claim_ref.lease_token.clone();
+    let lease_request = lease_invalidation_mutation(
+        "lease-invalidation",
+        UtcTimestamp::new(
+            leased.lease_expires_at.seconds.saturating_sub(1),
+            leased.lease_expires_at.nanoseconds,
+        )
+        .unwrap(),
+    );
+    let lease_response = fireweed
+        .mutate_items(&queue, lease_request.clone())
+        .await
+        .unwrap();
+    assert_eq!(lease_response.summary.changed, 1);
+    assert_eq!(
+        lease_response.results[0].selector_id.as_deref(),
+        Some("active-lease")
+    );
+    assert!(
+        fireweed
+            .claimed(&queue, &[lease_item_id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let replacement = fireweed.claim(&queue, 1, 30_000).await.unwrap().remove(0);
+    assert_eq!(replacement.item_id, lease_item_id);
+    assert_ne!(replacement.lease_token.as_ref(), Some(&old_token));
+    assert!(replacement.item_version > leased.item_version);
+    assert!(matches!(
+        fireweed
+            .commit(
+                &queue,
+                CommitRequest {
+                    request_id: Some(RequestId::new("mutation-stale-lease-v1").unwrap()),
+                    entries: vec![CommitEntry {
+                        claim_ref: old_claim_ref.clone(),
+                        finalize: FinalizeKind::Complete,
+                        side_records: vec![],
+                        lifecycle_items: vec![],
+                        instance_fence: None,
+                    }],
+                },
+            )
+            .await
+            .unwrap()
+            .as_slice(),
+        [EntryOutcome::Rejected(EngineError::StaleLease)]
+    ));
+    fireweed.release(&queue, [lease_item_id]).await.unwrap();
+    fireweed
+        .update(
+            &queue,
+            lease_item_id,
+            ScheduleUpdate::Keep,
+            ScheduleUpdate::Set(Some(UtcTimestamp::new(1_900_000_000, 0).unwrap())),
+            None,
+        )
+        .await
+        .unwrap();
 
     let source_id = fireweed
         .push(
@@ -304,6 +608,15 @@ async fn seed(cell: &str, fireweed: &Fireweed) -> SeededState {
         primary_id,
         batch,
         batch_response,
+        selector_request,
+        selector_response,
+        dry_reopen_id,
+        dry_reopen_before_version: dry_reopen_before.item_version,
+        dry_reopen_request,
+        lease_item_id,
+        lease_request,
+        lease_response,
+        old_claim_ref,
         commit_request_id,
         commit_request,
         commit_response,
@@ -315,6 +628,15 @@ struct SeededState {
     primary_id: fireweed::ItemId,
     batch: BatchUpdateRequest,
     batch_response: fireweed::BatchUpdateResponse,
+    selector_request: ItemMutationRequest,
+    selector_response: ItemMutationResponse,
+    dry_reopen_id: fireweed::ItemId,
+    dry_reopen_before_version: u64,
+    dry_reopen_request: ItemMutationRequest,
+    lease_item_id: fireweed::ItemId,
+    lease_request: ItemMutationRequest,
+    lease_response: ItemMutationResponse,
+    old_claim_ref: ClaimRef,
     commit_request_id: RequestId,
     commit_request: CommitRequest,
     commit_response: Vec<EntryOutcome>,
@@ -355,6 +677,102 @@ async fn verify_reopen(cell: &str, fireweed: &Fireweed, state: SeededState) {
         state.batch_response
     );
     assert_eq!(
+        fireweed
+            .mutate_items(&queue, state.selector_request.clone())
+            .await
+            .unwrap(),
+        state.selector_response,
+        "selector mutation must replay its exact retained response after reopen without reevaluation"
+    );
+
+    let dry_before_reopen = fireweed
+        .live_item(&queue, ClientItemKey::new("dry-run-reopen").unwrap())
+        .await
+        .unwrap()
+        .expect("dry-run witness survives reopen");
+    assert_eq!(dry_before_reopen.item_id, state.dry_reopen_id);
+    assert_eq!(
+        dry_before_reopen.item_version,
+        state.dry_reopen_before_version
+    );
+    assert_eq!(dry_before_reopen.priority, Some(PriorityValue::Int64(30)));
+    assert!(
+        !dry_before_reopen
+            .fields
+            .contains_key("dry-run-cross-reopen")
+    );
+    let dry_committed = fireweed
+        .mutate_items(&queue, state.dry_reopen_request.clone())
+        .await
+        .unwrap();
+    assert!(dry_committed.position.is_some());
+    assert_eq!(dry_committed.summary.changed, 1);
+    assert_eq!(
+        dry_committed.results[0].selector_id.as_deref(),
+        Some("eligible-before-patch")
+    );
+    assert_eq!(
+        fireweed
+            .mutate_items(&queue, state.dry_reopen_request.clone())
+            .await
+            .unwrap(),
+        dry_committed,
+        "the request id reused after a pre-close dry-run must become exactly replayable after its real commit"
+    );
+    let dry_after_commit = fireweed
+        .live_item(&queue, ClientItemKey::new("dry-run-reopen").unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        dry_after_commit.item_version,
+        state.dry_reopen_before_version + 1
+    );
+    assert_eq!(dry_after_commit.priority, Some(PriorityValue::Int64(25)));
+    assert_eq!(
+        dry_after_commit.fields["dry-run-cross-reopen"].as_ref(),
+        b"committed-after-reopen"
+    );
+
+    assert_eq!(
+        fireweed
+            .mutate_items(&queue, state.lease_request.clone())
+            .await
+            .unwrap(),
+        state.lease_response,
+        "lease-invalidation mutation must replay after reopen without selecting the fallback clause"
+    );
+    assert!(
+        fireweed
+            .claimed(&queue, &[state.lease_item_id])
+            .await
+            .unwrap()
+            .is_empty(),
+        "the invalidated claim selection must stay absent after reopen"
+    );
+    assert!(matches!(
+        fireweed
+            .commit(
+                &queue,
+                CommitRequest {
+                    request_id: Some(RequestId::new("mutation-stale-lease-after-reopen").unwrap(),),
+                    entries: vec![CommitEntry {
+                        claim_ref: state.old_claim_ref.clone(),
+                        finalize: FinalizeKind::Complete,
+                        side_records: vec![],
+                        lifecycle_items: vec![],
+                        instance_fence: None,
+                    }],
+                },
+            )
+            .await
+            .unwrap()
+            .as_slice(),
+        [EntryOutcome::Rejected(EngineError::Invalid(
+            "item is not leased"
+        ))]
+    ));
+    assert_eq!(
         fireweed.commit(&queue, state.commit_request).await.unwrap(),
         state.commit_response
     );
@@ -365,10 +783,11 @@ async fn verify_reopen(cell: &str, fireweed: &Fireweed, state: SeededState) {
         .unwrap()
         .expect("primary item survives reopen");
     assert_eq!(primary.item_id, state.primary_id);
-    assert_eq!(primary.priority, Some(PriorityValue::Int64(7)));
+    assert_eq!(primary.priority, Some(PriorityValue::Int64(2)));
     assert_eq!(primary.payload.as_deref(), Some(b"batched".as_slice()));
     assert_eq!(primary.fields["customer"].as_ref(), b"acme");
     assert_eq!(primary.fields["region"].as_ref(), b"east");
+    assert_eq!(primary.fields["selector-durable"].as_ref(), b"yes");
 
     let secondary = fireweed
         .query_index_unique(

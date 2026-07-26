@@ -1465,9 +1465,15 @@ async fn exercise_mutation(cell: &str, fw: &Fireweed, failures: &mut Vec<String>
                     selector_id: "matching-clause".into(),
                     selector: ItemSelector {
                         scope: ItemSelectorScope::Live,
-                        predicates: vec![ItemPredicate::ClientItemKeyEq(
-                            ClientItemKey::new("mutation-item").unwrap(),
-                        )],
+                        predicates: vec![
+                            ItemPredicate::ClientItemKeyEq(
+                                ClientItemKey::new("mutation-item").unwrap(),
+                            ),
+                            ItemPredicate::FieldEq {
+                                name: "selector-mutated".into(),
+                                value: None,
+                            },
+                        ],
                     },
                     predicates: vec![],
                     lease_guard: LeaseGuard::RejectActive,
@@ -1484,7 +1490,9 @@ async fn exercise_mutation(cell: &str, fw: &Fireweed, failures: &mut Vec<String>
                     selector_id: "must-not-run".into(),
                     selector: ItemSelector {
                         scope: ItemSelectorScope::Live,
-                        predicates: vec![],
+                        predicates: vec![ItemPredicate::ClientItemKeyEq(
+                            ClientItemKey::new("mutation-item").unwrap(),
+                        )],
                     },
                     predicates: vec![],
                     lease_guard: LeaseGuard::RejectActive,
@@ -1497,7 +1505,6 @@ async fn exercise_mutation(cell: &str, fw: &Fireweed, failures: &mut Vec<String>
         },
     };
     let mut dry_run = mutation_request.clone();
-    dry_run.request_id = RequestId::new("selector-mutation-dry-run").unwrap();
     dry_run.dry_run = true;
     let preview = call(
         cell,
@@ -1609,6 +1616,205 @@ async fn exercise_mutation(cell: &str, fw: &Fireweed, failures: &mut Vec<String>
             })
         }),
         "selector mutation state, first-match ownership, or version increment was incorrect",
+    );
+
+    // Lease invalidation must remove the old claimed-row selection and token/version reference before the
+    // item can be selected for a replacement claim. The first selector deliberately stops matching after
+    // the mutation; a replay that reevaluates would fall through to the priority-99 clause.
+    let lease_queue = create(cell, fw, failures, "mutation-lease").await;
+    let lease_key = ClientItemKey::new("mutation-leased-item").unwrap();
+    let leased_id = call(
+        cell,
+        "mutate_items[lease].push",
+        failures,
+        fw.push(
+            &lease_queue,
+            NewItem {
+                client_item_key: Some(lease_key.clone()),
+                priority: Some(PriorityValue::Int64(10)),
+                ..NewItem::default()
+            },
+        ),
+    )
+    .await;
+    let claimed = call(
+        cell,
+        "mutate_items[lease].claim",
+        failures,
+        fw.claim(&lease_queue, 1, 60_000),
+    )
+    .await
+    .unwrap_or_default();
+    let Some(old_claimed) = claimed.first().cloned() else {
+        failures.push(format!(
+            "{cell}.mutate_items[lease]: no claimed item prerequisite"
+        ));
+        return;
+    };
+    check(
+        cell,
+        "mutate_items[lease].claim",
+        failures,
+        leased_id == Some(old_claimed.item_id),
+        "claim did not return the seeded lease-invalidation item",
+    );
+    let Some(old_ref) = claim_ref(&old_claimed) else {
+        failures.push(format!(
+            "{cell}.mutate_items[lease]: claimed item omitted its claim reference"
+        ));
+        return;
+    };
+    let old_token = old_ref.lease_token.clone();
+    let lease_request = ItemMutationRequest {
+        request_id: RequestId::new("selector-lease-invalidation").unwrap(),
+        evaluated_at: UtcTimestamp::new(
+            old_claimed.lease_expires_at.seconds.saturating_sub(1),
+            old_claimed.lease_expires_at.nanoseconds,
+        )
+        .unwrap(),
+        dry_run: false,
+        returning: ItemMutationReturning::BeforeSnapshot,
+        gate_changes: vec![],
+        operation: ItemMutationOperation::SelectFirst {
+            clauses: vec![
+                SelectedMutation {
+                    selector_id: "active-old-claim".into(),
+                    selector: ItemSelector {
+                        scope: ItemSelectorScope::Live,
+                        predicates: vec![
+                            ItemPredicate::ClientItemKeyEq(lease_key.clone()),
+                            ItemPredicate::LeaseActive(true),
+                        ],
+                    },
+                    predicates: vec![],
+                    lease_guard: LeaseGuard::InvalidateActive,
+                    patch: ItemPatch {
+                        lifecycle: fireweed::LifecyclePatch::SetPending,
+                        priority: BatchUpdateValue::Replace(Some(PriorityValue::Int64(5))),
+                        field_edits: BTreeMap::from([(
+                            "lease-invalidated".into(),
+                            Some(bytes::Bytes::from_static(b"yes")),
+                        )]),
+                        ..ItemPatch::default()
+                    },
+                },
+                SelectedMutation {
+                    selector_id: "must-not-reevaluate".into(),
+                    selector: ItemSelector {
+                        scope: ItemSelectorScope::Live,
+                        predicates: vec![ItemPredicate::ClientItemKeyEq(lease_key.clone())],
+                    },
+                    predicates: vec![],
+                    lease_guard: LeaseGuard::InvalidateActive,
+                    patch: ItemPatch {
+                        priority: BatchUpdateValue::Replace(Some(PriorityValue::Int64(99))),
+                        ..ItemPatch::default()
+                    },
+                },
+            ],
+        },
+    };
+    let invalidated = call(
+        cell,
+        "mutate_items[lease]",
+        failures,
+        fw.mutate_items(&lease_queue, lease_request.clone()),
+    )
+    .await;
+    let invalidated_replay = call(
+        cell,
+        "mutate_items[lease][idempotent]",
+        failures,
+        fw.mutate_items(&lease_queue, lease_request),
+    )
+    .await;
+    check(
+        cell,
+        "mutate_items[lease]",
+        failures,
+        invalidated.as_ref().is_some_and(|response| {
+            response.summary.changed == 1
+                && response.results[0].selector_id.as_deref() == Some("active-old-claim")
+                && matches!(
+                    response.results[0].outcome,
+                    ItemMutationOutcome::Updated {
+                        state: fireweed::ItemState::Pending,
+                        ..
+                    }
+                )
+        }) && invalidated == invalidated_replay,
+        "active lease was not invalidated exactly once or replay reevaluated its selector",
+    );
+    let old_claim_selection = call(
+        cell,
+        "mutate_items[lease].claimed_after_invalidation",
+        failures,
+        fw.claimed(&lease_queue, &[old_claimed.item_id]),
+    )
+    .await;
+    let lease_metrics = call(
+        cell,
+        "mutate_items[lease].metrics_after_invalidation",
+        failures,
+        fw.metrics(&lease_queue),
+    )
+    .await;
+    check(
+        cell,
+        "mutate_items[lease].selection_invalidation",
+        failures,
+        old_claim_selection.as_ref().is_some_and(Vec::is_empty)
+            && lease_metrics
+                .as_ref()
+                .is_some_and(|metrics| metrics.pending == 1 && metrics.leased == 0),
+        "old claimed-row selection remained visible after lease invalidation",
+    );
+    let replacement = call(
+        cell,
+        "mutate_items[lease].replacement_claim",
+        failures,
+        fw.claim(&lease_queue, 1, 60_000),
+    )
+    .await
+    .unwrap_or_default();
+    check(
+        cell,
+        "mutate_items[lease].replacement_claim",
+        failures,
+        matches!(replacement.as_slice(), [fresh]
+            if fresh.item_id == old_claimed.item_id
+                && fresh.lease_token.as_ref().is_some_and(|token| token != &old_token)
+                && fresh.item_version > old_claimed.item_version),
+        "replacement claim did not receive a fresh token/version after every old reference was invalidated",
+    );
+    let stale_commit = fw
+        .commit(
+            &lease_queue,
+            CommitRequest {
+                request_id: Some(RequestId::new("stale-invalidated-claim").unwrap()),
+                entries: vec![CommitEntry {
+                    claim_ref: old_ref,
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![],
+                    lifecycle_items: vec![],
+                    instance_fence: None,
+                }],
+            },
+        )
+        .await;
+    check(
+        cell,
+        "mutate_items[lease].stale_claim_ref",
+        failures,
+        matches!(
+            stale_commit,
+            Ok(ref outcomes)
+                if matches!(
+                    outcomes.as_slice(),
+                    [fireweed::EntryOutcome::Rejected(EngineError::StaleLease)]
+                )
+        ),
+        "old lease token/version claim reference remained usable after replacement claiming",
     );
 }
 
