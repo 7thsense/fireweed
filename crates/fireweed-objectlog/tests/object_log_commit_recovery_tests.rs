@@ -95,19 +95,15 @@ fn manifest_head_prefix_s(shard: &fireweed_engine::QueueKey) -> String {
     format!("{}manifest_head/", shard_prefix_s(shard))
 }
 
-fn manifest_head_key_s(shard: &fireweed_engine::QueueKey, index: u64) -> String {
-    format!("{}{index:020}.json", manifest_head_prefix_s(shard))
-}
-
 fn manifest_key_s(shard: &fireweed_engine::QueueKey, index: u64) -> String {
     format!("{}{index:020}.json", manifest_prefix_s(shard))
 }
 
-fn read_horizon_key_s(shard: &fireweed_engine::QueueKey) -> String {
+fn retired_horizon_fixture_key(shard: &fireweed_engine::QueueKey) -> String {
     format!("{}read_horizon.json", shard_prefix_s(shard))
 }
 
-fn legacy_manifest_entry_bytes(
+fn retired_manifest_fixture_bytes(
     index: u64,
     epoch: u64,
     first_seq: u64,
@@ -134,7 +130,7 @@ fn legacy_manifest_entry_bytes(
     .unwrap()
 }
 
-fn write_legacy_manifest_entry<S: BlobStore>(
+fn write_retired_manifest_fixture<S: BlobStore>(
     store: &S,
     shard: &fireweed_engine::QueueKey,
     index: u64,
@@ -146,23 +142,12 @@ fn write_legacy_manifest_entry<S: BlobStore>(
     store
         .put(
             &manifest_key_s(shard, index),
-            &legacy_manifest_entry_bytes(index, epoch, first_seq, last_seq, fence),
+            &retired_manifest_fixture_bytes(index, epoch, first_seq, last_seq, fence),
         )
         .unwrap();
 }
 
 fn delete_watermark_marker<S: BlobStore>(store: &S, shard: &fireweed_engine::QueueKey) {
-    for prefix in [manifest_head_prefix_s(shard), manifest_prefix_s(shard)] {
-        for key in store.list(&prefix).unwrap() {
-            if key.ends_with("~watermark.json") {
-                store.delete(&key).unwrap();
-            }
-        }
-    }
-    let _ = store.delete(&read_horizon_key_s(shard));
-}
-
-fn delete_watermark_markers_only<S: BlobStore>(store: &S, shard: &fireweed_engine::QueueKey) {
     for prefix in [manifest_head_prefix_s(shard), manifest_prefix_s(shard)] {
         for key in store.list(&prefix).unwrap() {
             if key.ends_with("~watermark.json") {
@@ -358,7 +343,10 @@ fn TestManifestDeletionWatermarkRecoveryRoundTrip() {
     }
     seg_trim_cycle(&log, &shard, 3, 0, 1_000);
 
-    let recovered = log.read_read_horizon(&shard).unwrap().unwrap();
+    let recovered = log
+        .read_manifest_deletion_watermark(&shard)
+        .unwrap()
+        .unwrap();
     let marker_keys: Vec<String> = store
         .list(&manifest_head_prefix_s(&shard))
         .unwrap()
@@ -380,7 +368,7 @@ fn TestManifestDeletionWatermarkRecoveryRoundTrip() {
     let reopened = SegmentedObjectLog::open(store.clone(), cfg);
     reopened.create_queue(&def).unwrap();
     assert_eq!(
-        reopened.read_read_horizon(&shard).unwrap(),
+        reopened.read_manifest_deletion_watermark(&shard).unwrap(),
         Some(recovered),
         "reopen restores the same manifest deletion watermark"
     );
@@ -398,7 +386,9 @@ fn TestManifestDeletionWatermarkRecoveryRoundTrip() {
     let reopened_again = SegmentedObjectLog::open(store.clone(), cfg);
     reopened_again.create_queue(&def).unwrap();
     assert_eq!(
-        reopened_again.read_read_horizon(&shard).unwrap(),
+        reopened_again
+            .read_manifest_deletion_watermark(&shard)
+            .unwrap(),
         Some(recovered),
         "a second reopen preserves the same recovered watermark"
     );
@@ -426,7 +416,7 @@ fn manifest_watermark_restart_and_fallback_round_trip() {
 
     seg_trim_cycle(&log, &shard, 3, 0, 1_000);
     let persisted = log
-        .read_read_horizon(&shard)
+        .read_manifest_deletion_watermark(&shard)
         .unwrap()
         .expect("watermark persisted after reclaim");
     assert_eq!(
@@ -437,7 +427,7 @@ fn manifest_watermark_restart_and_fallback_round_trip() {
     let reopened = SegmentedObjectLog::open(store.clone(), cfg);
     reopened.create_queue(&def).unwrap();
     assert_eq!(
-        reopened.read_read_horizon(&shard).unwrap(),
+        reopened.read_manifest_deletion_watermark(&shard).unwrap(),
         Some(persisted),
         "restart reloads the durable deletion watermark"
     );
@@ -457,19 +447,16 @@ fn manifest_watermark_restart_and_fallback_round_trip() {
     let conservative = SegmentedObjectLog::open(store.clone(), cfg);
     conservative.create_queue(&def).unwrap();
     assert!(
-        conservative.read_read_horizon(&shard).unwrap().is_none(),
+        conservative
+            .read_manifest_deletion_watermark(&shard)
+            .unwrap()
+            .is_none(),
         "without persisted watermark metadata the recovery path falls back conservatively"
     );
-    assert_eq!(
-        conservative
-            .read_from(&shard, 4)
-            .unwrap()
-            .iter()
-            .map(|(pos, _)| pos.sequence)
-            .collect::<Vec<_>>(),
-        vec![4, 5, 6, 7],
-        "the conservative fallback still exposes undeleted below-floor manifest objects"
-    );
+    assert!(matches!(
+        conservative.read_from(&shard, 4),
+        Err(fireweed_engine::EngineError::Conflict)
+    ));
 }
 
 #[test]
@@ -485,33 +472,6 @@ fn TestOwnerFenceDeleteOnlyEvaluation() {
     // cheaper delete-only compaction variant remains unsupported here. Recovery must stay conservative and
     // must not infer deletion from the cache alone.
     manifest_watermark_restart_and_fallback_round_trip();
-}
-
-#[test]
-#[allow(non_snake_case)]
-fn TestManifestDeletionWatermarkLegacyBootstrap() {
-    let store = std::sync::Arc::new(InMemoryBlobStore::new());
-    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
-    let shard = sk("watermark", "legacy");
-    let def = big_qdef("watermark", "legacy");
-    let log = SegmentedObjectLog::open(store.clone(), cfg);
-    log.create_queue(&def).unwrap();
-
-    for i in 0..4u64 {
-        log.enqueue(&shard, &seg_pushes(2), 0, (i as i64 + 1) * 10)
-            .unwrap();
-        log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
-    }
-    seg_trim_cycle(&log, &shard, 3, 0, 1_000);
-
-    delete_watermark_marker(store.as_ref(), &shard);
-
-    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
-    reopened.create_queue(&def).unwrap();
-    assert!(
-        reopened.read_read_horizon(&shard).unwrap().is_none(),
-        "legacy manifests without the watermark marker bootstrap conservatively"
-    );
 }
 
 #[test]
@@ -545,7 +505,7 @@ fn TestManifestDeletionWatermarkPersistsAndRecoversMetadata() {
     log.expire_segments_through(&shard, 1, 1_000).unwrap();
 
     let persisted = log
-        .read_read_horizon(&shard)
+        .read_manifest_deletion_watermark(&shard)
         .unwrap()
         .expect("watermark persisted after reclamation");
     assert_eq!(
@@ -561,7 +521,7 @@ fn TestManifestDeletionWatermarkPersistsAndRecoversMetadata() {
     let reopened = SegmentedObjectLog::open(store.clone(), cfg);
     reopened.create_queue(&qdef).unwrap();
     assert_eq!(
-        reopened.read_read_horizon(&shard).unwrap(),
+        reopened.read_manifest_deletion_watermark(&shard).unwrap(),
         Some(persisted),
         "reopening recovers the same durable manifest deletion watermark"
     );
@@ -574,141 +534,52 @@ fn TestManifestDeletionWatermarkPersistsAndRecoversMetadata() {
 
 #[test]
 #[allow(non_snake_case)]
-fn TestLegacyManifestBootstrapStillWorks() {
-    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+fn TestRetiredDurableNamespacesAreRejected() {
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
-    let shard = sk("legacy", "bootstrap");
-    let qdef = big_qdef("legacy", "bootstrap");
 
-    let log = SegmentedObjectLog::open(store.clone(), cfg);
-    log.create_queue(&qdef).unwrap();
-    log.enqueue(&shard, &segmented_pushes(2), 0, 10).unwrap();
-    log.seal(&shard, 0, 11).unwrap();
-
-    store
+    let cache_store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cache_shard = sk("retired", "cache");
+    let cache_def = big_qdef("retired", "cache");
+    let cache_log = SegmentedObjectLog::open(cache_store.clone(), cfg);
+    cache_log.create_queue(&cache_def).unwrap();
+    cache_store
         .put(
-            &read_horizon_key_s(&shard),
-            &serde_json::to_vec(&serde_json::json!({ "index": 0u64 })).unwrap(),
+            &retired_horizon_fixture_key(&cache_shard),
+            br#"{"index":0}"#,
         )
         .unwrap();
-    delete_watermark_markers_only(store.as_ref(), &shard);
+    assert!(matches!(
+        SegmentedObjectLog::open(cache_store, cfg).create_queue(&cache_def),
+        Err(fireweed_engine::EngineError::DurableDataCorrupt { .. })
+    ));
 
-    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
-    reopened.create_queue(&qdef).unwrap();
-    assert!(
-        reopened.read_read_horizon(&shard).unwrap().is_some(),
-        "legacy metadata still carries the cached watermark value"
-    );
-    assert_eq!(
-        reopened
-            .read_from(&shard, 0)
-            .unwrap()
-            .iter()
-            .map(|(pos, _)| pos.sequence)
-            .collect::<Vec<_>>(),
-        vec![0, 1],
-        "legacy bootstrap keeps the physically present below-floor manifest entries visible when marker history is missing"
-    );
-    assert_eq!(
-        reopened.current_epoch(&shard).unwrap(),
+    let mirror_store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let mirror_shard = sk("retired", "mirror");
+    let mirror_def = big_qdef("retired", "mirror");
+    let mirror_log = SegmentedObjectLog::open(mirror_store.clone(), cfg);
+    mirror_log.create_queue(&mirror_def).unwrap();
+    write_retired_manifest_fixture(mirror_store.as_ref(), &mirror_shard, 0, 0, 0, 0, false);
+    assert!(matches!(
+        SegmentedObjectLog::open(mirror_store, cfg).create_queue(&mirror_def),
+        Err(fireweed_engine::EngineError::DurableDataCorrupt { .. })
+    ));
+
+    let append_only_store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let append_only_shard = sk("retired", "append-only");
+    let append_only_def = big_qdef("retired", "append-only");
+    write_retired_manifest_fixture(
+        append_only_store.as_ref(),
+        &append_only_shard,
         0,
-        "legacy bootstrap preserves the permanent-head fence"
-    );
-}
-
-#[test]
-#[allow(non_snake_case)]
-fn TestRecoverManifestPrefersHeadWithLegacyBootstrap() {
-    let store = std::sync::Arc::new(InMemoryBlobStore::new());
-    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
-    let shard = sk("recover", "prefers-head");
-    let qdef = big_qdef("recover", "prefers-head");
-
-    let log = SegmentedObjectLog::open(store.clone(), cfg);
-    log.create_queue(&qdef).unwrap();
-    log.enqueue(&shard, &segmented_pushes(1), 0, 10).unwrap();
-    log.seal(&shard, 0, 11).unwrap();
-
-    write_legacy_manifest_entry(store.as_ref(), &shard, 1, 99, 100, 100, false);
-    let objects_before = store.object_count();
-
-    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
-    reopened.create_queue(&qdef).unwrap();
-    assert_eq!(
-        reopened.current_epoch(&shard).unwrap(),
-        0,
-        "the permanent head wins over a divergent legacy manifest tail"
-    );
-    assert_eq!(
-        store.object_count(),
-        objects_before,
-        "recovery does not delete or rewrite any manifest object"
-    );
-
-    reopened
-        .enqueue(&shard, &segmented_pushes(1), 0, 20)
-        .unwrap();
-    let positions = reopened.seal(&shard, 0, 21).unwrap();
-    assert_eq!(
-        positions[0].sequence, 1,
-        "the recovered permanent head tuple keeps the next sequence contiguous"
-    );
-    assert!(
-        store
-            .get(&manifest_head_key_s(&shard, 1))
-            .unwrap()
-            .is_some(),
-        "the next sealed entry lands at the recovered head index"
-    );
-    assert!(
-        store
-            .get(&manifest_head_key_s(&shard, 2))
-            .unwrap()
-            .is_none(),
-        "the stale legacy tail was ignored instead of advancing the head twice"
-    );
-}
-
-#[test]
-#[allow(non_snake_case)]
-fn TestLegacyAppendOnlyRecoveryBootstrapsWithoutHeadDeletion() {
-    let store = std::sync::Arc::new(InMemoryBlobStore::new());
-    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
-    let shard = sk("recover", "legacy-only");
-    let qdef = big_qdef("recover", "legacy-only");
-
-    write_legacy_manifest_entry(store.as_ref(), &shard, 0, 7, 0, 0, false);
-    write_legacy_manifest_entry(store.as_ref(), &shard, 1, 7, 1, 1, false);
-    let objects_before = store.object_count();
-
-    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
-    reopened.create_queue(&qdef).unwrap();
-    assert_eq!(
-        reopened.current_epoch(&shard).unwrap(),
         7,
-        "legacy append-only manifests bootstrap the same recovered epoch"
+        0,
+        0,
+        false,
     );
-    assert_eq!(
-        store.object_count(),
-        objects_before,
-        "bootstrap recovery does not delete any manifest object"
-    );
-
-    reopened
-        .enqueue(&shard, &segmented_pushes(1), 7, 20)
-        .unwrap();
-    let positions = reopened.seal(&shard, 7, 21).unwrap();
-    assert_eq!(
-        positions[0].sequence, 2,
-        "the recovered legacy tail keeps the next sequence at the legacy tail + 1"
-    );
-    assert!(
-        store
-            .get(&manifest_head_key_s(&shard, 2))
-            .unwrap()
-            .is_some(),
-        "the recovered manifest head advances from the legacy append-only tail"
-    );
+    assert!(matches!(
+        SegmentedObjectLog::open(append_only_store, cfg).create_queue(&append_only_def),
+        Err(fireweed_engine::EngineError::DurableDataCorrupt { .. })
+    ));
 }
 
 #[test]
@@ -742,7 +613,7 @@ fn TestPartialExpireRecoveryKeepsVisibleUndeletedSegments() {
         "the injected delete failure must abort the partial expire"
     );
     assert_eq!(
-        log.read_read_horizon(&shard).unwrap(),
+        log.read_manifest_deletion_watermark(&shard).unwrap(),
         None,
         "no safe reclaimed prefix is recorded when the first reclaim delete fails"
     );
@@ -750,20 +621,18 @@ fn TestPartialExpireRecoveryKeepsVisibleUndeletedSegments() {
     drop(log);
     store.disarm();
 
-    for index in 0..4u64 {
-        assert!(
-            store
-                .get(&manifest_head_key_s(&shard, index))
-                .unwrap()
-                .is_some(),
-            "the interrupted reclaim leaves manifest entry {index} physically present"
-        );
-    }
+    assert!(
+        !store
+            .list(&format!("{}manifest_candidates/", shard_prefix_s(&shard)))
+            .unwrap()
+            .is_empty(),
+        "the interrupted reclaim preserves authoritative manifest candidates"
+    );
 
     let reopened = SegmentedObjectLog::open(store.clone(), cfg);
     reopened.create_queue(&qdef).unwrap();
     assert_eq!(
-        reopened.read_read_horizon(&shard).unwrap(),
+        reopened.read_manifest_deletion_watermark(&shard).unwrap(),
         None,
         "reopen preserves the absence of a manifest-deletion watermark from the interrupted reclaim"
     );

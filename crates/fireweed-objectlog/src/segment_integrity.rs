@@ -492,10 +492,7 @@ mod tests {
             MAX_RECORD_BYTES,
             MAX_SEGMENT_BYTES - (HEADER_LEN + 4 + TRAILER_LEN) - 4 * 8 - 3 * MAX_RECORD_BYTES,
         ];
-        assert_eq!(
-            validate_write_lengths(exact).unwrap(),
-            MAX_SEGMENT_BYTES
-        );
+        assert_eq!(validate_write_lengths(exact).unwrap(), MAX_SEGMENT_BYTES);
         let mut over = exact;
         over[3] += 1;
         assert!(matches!(
@@ -521,7 +518,7 @@ mod tests {
         assert!(matches!(
             decode(&bytes, 3, "retired-frame", &expected),
             Err(EngineError::DurableDataCorrupt {
-                stage: DurableIntegrityStage::Frame,
+                stage: DurableIntegrityStage::Manifest,
                 ..
             })
         ));

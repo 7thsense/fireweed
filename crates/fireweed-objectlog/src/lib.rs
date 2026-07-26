@@ -28,9 +28,7 @@ pub use compose_log::{
     ComposedObjectLogBackend, ObjectLog, composed_objectlog_backend,
     composed_objectlog_backend_group_commit,
 };
-pub use segmented::{
-    FaultCutPoint, FaultHook, SegmentConfig, SerializedCommandEnvelope,
-};
+pub use segmented::{FaultCutPoint, FaultHook, SegmentConfig, SerializedCommandEnvelope};
 
 use std::collections::HashMap;
 use std::fs;

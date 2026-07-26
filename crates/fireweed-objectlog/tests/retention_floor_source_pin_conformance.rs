@@ -151,10 +151,13 @@ fn retention_floor_fail_closed_and_recovery(store: Arc<InMemoryBlobStore>, cfg: 
         .create_queue(&qdef("rfsp", "conformance"))
         .expect("reopen: create queue");
 
-    let horizon = reopened
-        .read_read_horizon(&shard)
-        .expect("read horizon after reopen");
-    assert!(horizon.is_some(), "read-horizon watermark must persist");
+    let deletion_watermark = reopened
+        .read_manifest_deletion_watermark(&shard)
+        .expect("deletion watermark after reopen");
+    assert!(
+        deletion_watermark.is_some(),
+        "deletion watermark watermark must persist"
+    );
 
     let recovered_floor = reopened
         .read_retention_floor(&shard)
@@ -214,26 +217,17 @@ fn source_pin_blocks_reclamation(store: Arc<InMemoryBlobStore>, cfg: SegmentConf
     assert_eq!(pinned_seq, 0, "segment first_seq=0 is pinned");
 
     // The watermark is NOT persisted because the pinned segment blocks it.
-    let horizon_before = log
-        .read_read_horizon(&shard)
-        .expect("read horizon before pin release");
-    assert!(horizon_before.is_none(), "watermark blocked by pin");
+    let watermark_before = log
+        .read_manifest_deletion_watermark(&shard)
+        .expect("deletion watermark before pin release");
+    assert!(watermark_before.is_none(), "watermark blocked by pin");
 
-    // Reads below the floor still succeed (no watermark = no fail-closed guard).
-    // Data from the pinned segment (seq 0-1) is present; the reclaimed segment
-    // (seq 2-3) is skipped via manifest marker; segment above the floor (seq 4-5)
-    // is also returned.
-    let available: Vec<u64> = log
+    // A gap in the reclaimed prefix still fails closed even while the first segment remains pinned.
+    // The watermark is progress metadata, not permission to skip missing current-format history.
+    let err = log
         .read_from(&shard, 0)
-        .expect("read_from(0) succeeds without watermark")
-        .iter()
-        .map(|(pos, _)| pos.sequence)
-        .collect();
-    assert_eq!(
-        available,
-        vec![0, 1, 4, 5],
-        "pinned segment (0-1) + above-floor segment (4-5); reclaimed (2-3) skipped"
-    );
+        .expect_err("read_from(0) fails closed across a reclaimed gap");
+    assert!(matches!(err, EngineError::Storage(_)));
 
     // Above-floor reads still succeed.
     let tail: Vec<u64> = log
@@ -258,11 +252,11 @@ fn source_pin_blocks_reclamation(store: Arc<InMemoryBlobStore>, cfg: SegmentConf
         .expect("expire after pin release");
 
     // Now the watermark should have advanced, so reads below the floor fail closed.
-    let horizon_after = log
-        .read_read_horizon(&shard)
-        .expect("read horizon after pin release + re-expire");
+    let watermark_after = log
+        .read_manifest_deletion_watermark(&shard)
+        .expect("deletion watermark after pin release + re-expire");
     assert!(
-        horizon_after.is_some(),
+        watermark_after.is_some(),
         "watermark advances after pin release"
     );
 

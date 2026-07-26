@@ -181,8 +181,8 @@ This realizes the 8-step ADR-001 §"S3/Object-Log Commit Model" sequence. Each s
 
 | Step | Rule |
 |------|------|
-| 1. Buffer | Commands MUST be buffered per `tenant/queue`. Before dispatch, the adapter serializes each `CommandEnvelope` exactly once, validates the complete governed frame, and acquires a non-cloneable byte permit covering retained records plus the temporary seal-frame copy. Exact accounting is format-specific: v2 has 25 fixed bytes plus 4 framing bytes per record; v3 has 29 fixed bytes plus 8 framing bytes per record. Each independently admitted request reserves its own fixed/per-record framing, so co-batching MAY overcharge the one merged frame but MUST never undercharge it. The same bytes move through coordinator and segment buffer in arrival order. Because the queue is the unit of sharding (ADR-008), every command for the queue — including every member of a `group_key` — lands in the one queue buffer on the queue's owner, so `whole_group` (G1 `compatibility.group_batching`) and `whole_cohort` (G6 `cohort_policy`) claims are owner-local by construction. |
-| 2. Seal | A segment MUST seal when EITHER the buffered byte size reaches `segment_target_bytes` OR the oldest buffered command's age reaches `segment_max_latency_ms`, whichever comes first. Sealing assigns each command a monotonic per-queue `sequence` (TD-001 `CommandPosition.sequence`) contiguous with the prior segment. V2 computes manifest FNV-1a over the records blob. V3 computes payload CRC32C per record, full-frame CRC32C, and stored-object SHA-256. `CommandEnvelope.checksum` remains application/legacy metadata, not v3 framing authority. |
+| 1. Buffer | Commands MUST be buffered per `tenant/queue`. Before dispatch, the adapter serializes each `CommandEnvelope` exactly once, validates the complete governed frame, and acquires a non-cloneable byte permit covering retained records plus the temporary seal-frame copy. Exact accounting is 29 fixed bytes plus 8 framing bytes per record. Each independently admitted request reserves its own fixed/per-record framing, so co-batching MAY overcharge the merged frame but MUST never undercharge it. The same bytes move through coordinator and segment buffer in arrival order. |
+| 2. Seal | A segment MUST seal when EITHER the buffered byte size reaches `segment_target_bytes` OR the oldest buffered command's age reaches `segment_max_latency_ms`, whichever comes first. Sealing assigns contiguous per-queue sequences, computes payload CRC32C per record, full-frame CRC32C, and stored-object SHA-256, then publishes the segment and manifest candidate before the authority-head CAS. |
 | 3. Write segment | The sealed, immutable segment MUST be written to object storage under a deterministic key (see "Object Layout") before any manifest commit references it. The write SHOULD use an idempotent PUT keyed by `(queue, first_sequence)` so retried writes do not create divergent objects. |
 | 4. Commit manifest | A manifest entry naming the segment, its `[first_sequence, last_sequence]` range, its checksum, and the writer's `assignment_epoch` MUST be appended via a conditional write that succeeds only if (a) the manifest's tail still equals the writer's expected tail AND (b) the writer's `assignment_epoch` is the **current** epoch for the queue (see "Manifest Commit and Epoch Fencing"). A failed CAS MUST abort the commit, roll back the in-flight reservation, and the writer MUST treat itself as raced or fenced. |
 | 5. Ack-eligibility | Only after the manifest entry is durably committed MAY the commands in that segment become eligible for acknowledgement. Manifest commit alone is not permission to return success before the operation's own visibility barrier is satisfied. |
@@ -233,20 +233,19 @@ Provider adapters classify errors before preserving the outward `EngineError`: S
 retryable transport, malformed HTTP is non-retryable corruption, 429/503 is throttling, other 5xx/408 is
 retryable transport, and other HTTP status is non-retryable. Timeout remains reserved-zero until the
 transport exposes a real typed timeout. Display strings are never parsed. Bounded acquire, fence, and branch
-loops record a separate logical completion with iterations and `iterations - 1` retries; physical calls and
-legacy winner mirrors remain zero-retry primitive rows.
+loops record a separate logical completion with iterations and `iterations - 1` retries; physical calls
+remain zero-retry primitive rows.
 
 The default enabled recorder is fixed-cardinality and process-shared; a disabled shared recorder has no
 bucket allocation and bypasses clocks and atomics. Evidence harnesses inject a scoped recorder when isolation
 is required. Nested-wrapper detection disables outer attribution and reports the inner recorder. Pull
-snapshots and monotonic deltas are the request/response byte and request-count source of truth, and legacy
-`SegmentCounters` are reconciled to an explicit recorder baseline during migration.
+snapshots and monotonic deltas are the request/response byte and request-count source of truth.
 
 | Field | Unit and exact meaning |
 |---|---|
 | `completions` | Count of completed trait calls or named logical protocol calls. One row increment per returned `Ok` or `Err`; GET/DELETE miss and create precondition loss are successful completions, not errors. |
 | `attempts` | Count of physical provider requests for primitive rows. Each S3 LIST page is one attempt; `list_page(limit=0)` is zero. For logical acquire/fence/branch rows it is loop iterations, not provider calls. |
-| `retries` | Count of logical protocol re-attempts (`iterations - 1`) on acquire/fence/branch rows. Primitive calls, S3 pagination, composite primitives, and legacy winner mirrors always record zero. |
+| `retries` | Count of logical protocol re-attempts (`iterations - 1`) on acquire/fence/branch rows. Primitive calls, S3 pagination, and composite primitives always record zero. |
 | `request_bytes` | Bytes in provider request bodies, summed over attempts. PUT/create uses the exact body length. GET/DELETE/LIST keys, paths, query strings, and HTTP headers are excluded. Unknown generic-provider payloads are zero. |
 | `response_bytes` | Bytes in provider response bodies after HTTP headers, summed over all attempts, including prior LIST pages and a terminal error page. S3 GET uses object-body length; S3 LIST uses XML-body length; PUT/DELETE use their actual response-body lengths. Key-length estimates are prohibited. Unknown generic-provider payloads are zero. |
 | `latency_ns` | Monotonic elapsed nanoseconds summed once per completed row. A paged LIST records one aggregate duration across all pages. Logical head/protocol span duration is separate from primitive duration and is never added to the physical in-flight gauge. |
@@ -270,30 +269,18 @@ snapshots and monotonic deltas are the request/response byte and request-count s
 | Manifest | `t/{tenant}/q/{queue}/manifest` | Ordered, append-only data/fence/floor/watermark entries. Data entries are the sole format-dispatch authority; control entries are explicitly non-data. Conditionally written (CAS). |
 | Snapshot | `t/{tenant}/q/{queue}/snap/{snapshot_sequence:020}.sqlite` | SQLite projection image at `snapshot_sequence`, plus snapshot metadata `{snapshot_sequence, segment_range_covered, projection_schema_version, checksum}`. |
 
-### Segment format compatibility and integrity
+### Segment format and integrity
 
-The segment header is `FWSG`, one version byte, `segment_epoch` (`u64` little-endian), and
-`first_sequence` (`u64` little-endian). V2 then stores `count` followed by repeated `length + canonical JSON`
-records. Its manifest `checksum` is FNV-1a over `count + records`. V3 stores `count`, repeated
-`length + payload_crc32c + canonical JSON`, and a final CRC32C over every preceding byte. Length fields are
-covered by the frame CRC; record CRCs cover payload bytes. V3 manifests add `segment_format: 3`,
-`entry_kind: "data"`, `segment_epoch`, `frame_crc32c`, `content_sha256`, and algorithm IDs
-`crc32c-castagnoli`/`sha256`. Missing `segment_format` on a data entry means v2; partial or unknown metadata
-fails closed. Serde defaults permit additive JSON evolution but MUST NOT select the frame decoder.
+The segment header is `FWSG`, the one current version byte, `segment_epoch` and `first_sequence` as little-
+endian `u64`, followed by a record count, repeated `length + payload_crc32c + canonical JSON`, and a final
+CRC32C over every preceding byte. The manifest requires `entry_kind: "data"`, the current `segment_format`,
+`segment_epoch`, `frame_crc32c`, `content_sha256`, and exact `crc32c-castagnoli`/`sha256` algorithm IDs.
+Unknown or missing fields, other versions, partial metadata, and kind/field disagreement fail closed.
 
-`entry_kind` has stable snake-case values `data`, `fence`, `retention_floor`, `deletion_watermark`, and
-`reclaimed`. New entries always write it and v3 data requires `data`. A reclaimed entry retains its immutable
-segment identity/integrity fields but sets `entry_kind: "reclaimed"` and the exact reclamation watermark;
-readers skip its object only after validating that shape and its same-queue canonical key. Legacy v2 entries
-may omit `entry_kind` and are inferred only from one exact, non-mixed historical field shape. Any explicit
-kind/field disagreement, mixed controls, invalid range, or cross-queue/coordinate key fails at manifest
-validation before a segment GET.
-
-`ManifestEntry.epoch` is logical manifest authority. `segment_epoch` is the physical immutable header epoch.
-Branch copies preserve the source `segment_epoch` while assigning their own logical epoch. Historical v2
-branch manifests created before this field exist: only a committed branch with absent `segment_epoch` may use
-the decoded header epoch. Ordinary v2 data entries infer `segment_epoch = epoch`; every new data entry writes
-it explicitly. Fence, retention-floor, and deletion-watermark entries carry no segment integrity metadata.
+`entry_kind` values are `data`, `fence`, `retention_floor`, and `deletion_watermark`. Data is immutable;
+reclamation deletes proven-unreachable segment objects and advances the deletion watermark rather than
+rewriting manifest identity. `ManifestEntry.epoch` is logical authority and `segment_epoch` is the immutable
+physical header epoch; branch copies preserve the latter. Control entries carry no segment integrity fields.
 
 Readers validate object-size, record-count, and record-length bounds with checked arithmetic, preflight the
 complete frame before allocating the decoded-command vector, then validate CRC/identity, JSON payloads,
@@ -301,14 +288,9 @@ epoch (where applicable), first sequence, count-derived last sequence, and manif
 typed by validation stage and include only manifest index plus an opaque locator. Physical GET accounting is
 unchanged; logical segment validation emits one success/corrupt observation without object keys or error text.
 New writes are capped at 64 MiB per complete stored frame, 16 MiB per canonical record, and 1,000,000
-records; configuration above the frame cap is rejected. These are also the governed historical decode caps:
-operators must retain/upgrade or explicitly migrate any pre-release v2 object exceeding them before rollout.
-The two-pass decoder prevents attacker-controlled length/count fields from causing secondary allocations.
-
-Release N reads v2/v3 and defaults `FIREWEED_SEGMENT_WRITER_FORMAT=v2`; `v3` is an opt-in soak setting. Runtime
-rollback may emit v2 after v3, so replay, branch, retention, and recovery MUST accept arbitrary interleaving.
-Release N+1 may default to v3 only after mixed-history and performance evidence passes. Downgrading binaries
-below release N is unsupported while any v3 object remains retained. Committed objects are never rewritten.
+records; configuration above the frame cap is rejected. The two-pass decoder prevents attacker-controlled
+length/count fields from causing secondary allocations. There is no runtime format selector or fallback
+decoder; retired pre-release objects and namespaces are rejected during open.
 
 Object naming is implementation-refinable but MUST keep `tenant`, `queue` as the leading key
 components (tenant isolation, TD-001 §Security) and MUST keep segment keys monotonically orderable by
@@ -346,7 +328,7 @@ disabled while pending, and every `E` commit attempt after the storage head adva
 | — (b) epoch fence published to manifest before serving handoff | CP first enters non-serving `PendingFence(E+1)`, stopping new old-owner admission. Storage then publishes `E+1` into the manifest head before the new owner hydrates or serves. An already-admitted `E` operation may linearize before that storage CAS; every `E` attempt after it loses to the higher head. Recovery MUST publish/confirm the storage fence before hydration and CP `Assigned(E+1)`. |
 | Manifest tail CAS | In addition to the epoch validation, manifest commit MUST be conditional on the manifest tail still matching the writer's expected tail, so two writers at the same epoch (transient split-brain) cannot both extend the log from the same point. |
 | Fenced writer | A writer whose commit fails because the current epoch has advanced (or a fence record now records a higher epoch) MUST treat itself as fenced: it MUST discard its in-flight buffer and roll back its in-flight claim reservations (see "Claim Reservation") without ack, and MUST NOT retry the commit under the old epoch. Unacked commands are re-driven by the new epoch holder on the normal replay path (caller retries by `request_id`). |
-| Recovery read | A newly assigned epoch holder MUST (1) under implementation (b), publish its epoch fence to the manifest as its first write; (2) read the latest committed snapshot; (3) replay manifest segments with `sequence > snapshot_sequence`, dispatching each from manifest-authoritative v2/v3 metadata and validating frame/record integrity and identity; before sealing any new data segment. This reproduces acknowledged state (TD-001 conformance: snapshot recovery). |
+| Recovery read | A newly assigned epoch holder MUST publish its epoch fence, read the latest committed snapshot, and replay current-format manifest segments with `sequence > snapshot_sequence`, validating frame, record, position, and identity before sealing new data. |
 | No consensus | This mechanism MUST NOT introduce node discovery, leader election, or embedded consensus (ADR-001 / D4(c)). The object store's conditional write plus the Postgres-backed TD-003 lease/epoch are the only coordination primitives. |
 
 ## Claim Reservation (in-flight reservations before durable commit) (normative)
@@ -695,7 +677,7 @@ Sequenced metadata uses two non-interchangeable typed protocols. The retention f
 advance-then-delete: its epoch-fenced monotone manifest publication completes before segment deletion, and
 the create-only manifest address remains occupied as a stale-writer collision fence. The deletion watermark
 is delete-then-advance: every segment in the contiguous prefix is proven physically absent before an
-append-only marker advances. `read_horizon.json` is a compatibility cache, never deletion authority.
+append-only marker advances. There is no secondary watermark cache.
 
 Create-only head publication distinguishes applied, identical already-applied, precondition-lost, and
 ambiguous outcomes. A failed response is resolved by rereading the exact authoritative address before retry
@@ -709,9 +691,9 @@ Key and authority map:
 | Metadata class | Typed identity | Durable key/address | Authority and retention |
 |---|---|---|---|
 | Authority head / epoch fence | `HeadVersion`, `AssignmentEpoch` | `authority_head/{version}.json` names an immutable `manifest_candidates/...` object | Versioned head is authoritative and retained; a candidate is visible only when named by the winning head. |
-| Retention floor | `CommandSequence`, `ManifestIndex`, `AssignmentEpoch` | Floor fields in the winning authority candidate/head, or retained legacy `manifest_head/{index}.json` | Winning fenced publication is authoritative; its collision address is retained. |
-| Deletion watermark | `ManifestIndex` | Append-only `manifest_head/{index}~watermark.json` | Marker history is authoritative and retained. `read_horizon.json` is a rebuildable compatibility cache only. |
-| Reclaimed data | `ManifestIndex` | Segment object plus legacy `manifest/{index}.json` mirror | These addresses are `FreeAddress` targets after proof; the corresponding head/candidate collision history remains retained. |
+| Retention floor | `CommandSequence`, `ManifestIndex`, `AssignmentEpoch` | Floor fields in the winning authority candidate/head | Winning fenced publication is authoritative; its collision address is retained. |
+| Deletion watermark | `ManifestIndex` | Append-only `manifest_head/{index}~watermark.json` | Marker history is authoritative and retained. |
+| Reclaimed data | `ManifestIndex` | Content-addressed segment object | Segment objects are deleted only after floor, branch-pin, and authority proofs succeed. |
 
 State-transition matrix:
 
@@ -719,7 +701,7 @@ State-transition matrix:
 |---|---|---|---|
 | Authority head / epoch fence | CP `Assigned(E)` → CP `PendingFence(E+1)` → storage fence `E+1` → projection hydration → CP `Assigned(E+1)` | `PendingFence` never serves. An operation admitted under `E` may linearize before the storage fence; after the fence every `E` retry is rejected. | Winning head reread reports the exact epoch and CP confirm publishes that owner. |
 | Retention floor | Read current floor → validate monotonicity → fenced create-only advance → classify eligible entries → physical expiry | No delete is eligible before the durable advance. Equal advance is a no-op; regression is invalid. | Durable floor is greater than or equal to the requested floor. |
-| Deletion watermark | Delete segment → prove segment absent → delete freeable legacy mirror → prove retained head/authority lineage → publish append-only marker → refresh cache | Readers and seal/recovery consult marker authority, never the cache, for fencing or suppression. | Exact marker body exists; cache may lag without changing authority. |
+| Deletion watermark | Delete segment → prove segment absent → prove retained head/authority lineage → publish append-only marker | Readers and recovery consult marker authority. | Exact marker body exists. |
 | Reclaimed manifest address | Prove entry is behind the durable floor and not branch-pinned → reclaim freeable objects → preserve winning-chain root/collision address | A stale writer must still collide at every retained create-only address. | Freeable objects are absent and retained lineage remains readable. |
 
 Failure and recovery table:
@@ -730,8 +712,6 @@ Failure and recovery table:
 | Create-only response lost after durable effect | Do not blindly retry or report failure. | Exact-key reread with identical body yields `AppliedAfterAmbiguity`. |
 | Exact-key reread is missing/fails, or contains a different body | Missing/failed stays typed `Ambiguous`; different body is `PreconditionLost`. | Caller fails closed or retries from refreshed authority; it must not delete or serve based on the attempted value. |
 | Any segment delete or physical-absence proof fails | Deletion watermark does not advance. | Retry idempotent deletion and proof from the last authoritative marker. |
-| Marker succeeds but cache refresh fails | Marker remains authoritative; cache lag cannot suppress recovery/seal. | Rebuild `read_horizon.json` from append-only marker history. |
-| Cache contains a stale high value | It cannot fence a writer or hide unsealed/recoverable data. | Ignore it for authority decisions and derive the horizon from markers. |
 | Candidate/head lineage required by recovery is missing | Fail closed. | Repair or restore retained authority history; never infer it from LIST or the cache. |
 
 | Element | Rule |
@@ -955,7 +935,7 @@ The following cases define the required evidence surface:
   `replace_if_pending`/`update_fields`/`reschedule` against a concurrent claim
   for the same pending item under group commit; exactly one path succeeds, the
   winner is visible on the response path, and the loser fails closed. The
-  legacy `eventual_apply_suite` keeps asserting `upsert_is_unavailable` for the
+  retired `eventual_apply_suite` keeps asserting `upsert_is_unavailable` for the
   pure lagging-projection profiles, while this case covers the lifted profiles.
 - Hybrid segment retention: prove local SQLite high-water alone never authorizes
   object-log segment expiry; compute the retention frontier as the minimum of

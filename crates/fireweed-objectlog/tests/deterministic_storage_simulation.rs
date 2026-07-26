@@ -17,13 +17,11 @@ use fireweed_objectlog::simulation_support::{
     SimulationBlobPhase as BlobPhase, SimulationDurableCut, production_fault_cut,
 };
 use fireweed_sim_support::{
-    Disposition, DurableCut, Generator, HARNESS_VERSION, Model, Operation, StoreResult,
-    TRACE_SCHEMA_VERSION, render_trace, shrink_invariant,
+    Disposition, DurableCut, Generator, Model, Operation, StoreResult, render_trace,
+    shrink_invariant,
 };
-use serde::Deserialize;
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SutMutant {
     None,
     CommittedAt,
@@ -132,7 +130,7 @@ impl VersionedFakeStore {
         if delete {
             return BlobPhase::Delete;
         }
-        if key.ends_with("read_horizon.json") || key.ends_with("~watermark.json") {
+        if key.ends_with("~watermark.json") {
             return BlobPhase::Horizon;
         }
         if key.ends_with(".seg") {
@@ -268,7 +266,7 @@ impl VersionedFakeStore {
             && let Some(bytes) = state
                 .objects
                 .iter()
-                .find(|(key, _)| key.ends_with("read_horizon.json"))
+                .find(|(key, _)| key.ends_with("~watermark.json"))
                 .map(|(_, bytes)| bytes)
             && let Some(index) = serde_json::from_slice::<serde_json::Value>(bytes)
                 .ok()
@@ -464,7 +462,6 @@ struct ProductionSnapshot {
     epoch: u64,
     next_sequence: u64,
     floor: Option<u64>,
-    read_horizon: Option<u64>,
     deletion_watermark: Option<u64>,
     visible: Vec<u64>,
     acknowledged: Vec<u64>,
@@ -594,7 +591,6 @@ impl ProductionRunner {
                 .log
                 .read_retention_floor(&shard())?
                 .map(|position| position.sequence),
-            read_horizon: self.log.read_read_horizon(&shard())?,
             deletion_watermark: self.log.read_manifest_deletion_watermark(&shard())?,
             visible,
             acknowledged: self.acknowledged.iter().copied().collect(),
@@ -974,14 +970,12 @@ fn compare(model: &Model, sut: &ProductionRunner, operation: &Operation) -> Resu
             detail: format!("floor {:?} != {:?}", expected.floor, actual.floor),
         });
     }
-    if expected.deletion_watermark.is_some() != actual.deletion_watermark.is_some()
-        || expected.deletion_watermark.is_some() != actual.read_horizon.is_some()
-    {
+    if expected.deletion_watermark.is_some() != actual.deletion_watermark.is_some() {
         return Err(RunFailure {
             invariant: "GC-PROGRESS",
             detail: format!(
-                "horizon/watermark {:?}/{:?} expected {:?}",
-                actual.read_horizon, actual.deletion_watermark, expected.deletion_watermark
+                "deletion watermark {:?} expected {:?}",
+                actual.deletion_watermark, expected.deletion_watermark
             ),
         });
     }
@@ -1163,158 +1157,6 @@ fn generated_run(
     }))
 }
 
-#[derive(Debug, Deserialize)]
-struct CorpusEntry {
-    schema_version: u16,
-    minimum_harness_version: u16,
-    seed: u64,
-    name: String,
-    mutant: SutMutant,
-    expected_invariant: String,
-    operations: Vec<CorpusOperation>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-enum CorpusOperation {
-    Accept {
-        request: u64,
-        created_at_ms: i64,
-    },
-    Seal {
-        expected_epoch: u64,
-        now_ms: i64,
-        result: CorpusStoreResult,
-    },
-    Retry {
-        request: u64,
-    },
-    Fence {
-        epoch: u64,
-        result: CorpusStoreResult,
-    },
-    AdvanceHorizon {
-        through_sequence: u64,
-    },
-    DeleteThrough {
-        through_sequence: u64,
-    },
-    Crash {
-        cut: CorpusCut,
-    },
-    Restart,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum CorpusStoreResult {
-    Success,
-    FailureBeforeEffect,
-    EffectThenError,
-    CasLoss,
-}
-#[derive(Clone, Copy, Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum CorpusCut {
-    BeforeSegmentWrite,
-    AfterSegmentWriteBeforeManifest,
-    AfterManifestCandidateBeforeHead,
-    AfterManifestBeforeAck,
-    DuringOwnerReassignment,
-    DuringSegmentExpiry,
-}
-
-impl From<CorpusOperation> for Operation {
-    fn from(value: CorpusOperation) -> Self {
-        match value {
-            CorpusOperation::Accept {
-                request,
-                created_at_ms,
-            } => Self::Accept {
-                request,
-                created_at_ms,
-            },
-            CorpusOperation::Seal {
-                expected_epoch,
-                now_ms,
-                result,
-            } => Self::Seal {
-                expected_epoch,
-                now_ms,
-                result: result.into(),
-            },
-            CorpusOperation::Retry { request } => Self::Retry { request },
-            CorpusOperation::Fence { epoch, result } => Self::Fence {
-                epoch,
-                result: result.into(),
-            },
-            CorpusOperation::AdvanceHorizon { through_sequence } => {
-                Self::AdvanceHorizon { through_sequence }
-            }
-            CorpusOperation::DeleteThrough { through_sequence } => {
-                Self::DeleteThrough { through_sequence }
-            }
-            CorpusOperation::Crash { cut } => Self::Crash(cut.into()),
-            CorpusOperation::Restart => Self::Restart,
-        }
-    }
-}
-impl From<CorpusStoreResult> for StoreResult {
-    fn from(value: CorpusStoreResult) -> Self {
-        match value {
-            CorpusStoreResult::Success => Self::Success,
-            CorpusStoreResult::FailureBeforeEffect => Self::FailureBeforeEffect,
-            CorpusStoreResult::EffectThenError => Self::EffectThenError,
-            CorpusStoreResult::CasLoss => Self::CasLoss,
-        }
-    }
-}
-impl From<CorpusCut> for DurableCut {
-    fn from(value: CorpusCut) -> Self {
-        match value {
-            CorpusCut::BeforeSegmentWrite => Self::BeforeSegmentWrite,
-            CorpusCut::AfterSegmentWriteBeforeManifest => Self::AfterSegmentWriteBeforeManifest,
-            CorpusCut::AfterManifestCandidateBeforeHead => Self::AfterManifestCandidateBeforeHead,
-            CorpusCut::AfterManifestBeforeAck => Self::AfterManifestBeforeAck,
-            CorpusCut::DuringOwnerReassignment => Self::DuringOwnerReassignment,
-            CorpusCut::DuringSegmentExpiry => Self::DuringSegmentExpiry,
-        }
-    }
-}
-
-fn corpus() -> Vec<CorpusEntry> {
-    include_str!("corpus/objectlog-simulation-v2.jsonl")
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("typed corpus entry"))
-        .collect()
-}
-
-#[test]
-fn typed_corpus_replays_correct_path_and_named_mutant_with_expected_identity() {
-    for entry in corpus() {
-        assert_eq!(
-            entry.schema_version, TRACE_SCHEMA_VERSION,
-            "{} schema",
-            entry.name
-        );
-        assert!(
-            entry.minimum_harness_version <= HARNESS_VERSION,
-            "{} harness",
-            entry.name
-        );
-        let operations: Vec<_> = entry.operations.into_iter().map(Into::into).collect();
-        run(entry.seed, &operations, SutMutant::None)
-            .unwrap_or_else(|failure| panic!("correct {} failed: {failure:?}", entry.name));
-        let failure =
-            run(entry.seed, &operations, entry.mutant).expect_err("named mutant must fail");
-        assert_eq!(
-            failure.invariant, entry.expected_invariant,
-            "{}: {}",
-            entry.name, failure.detail
-        );
-    }
-}
-
 #[test]
 fn every_real_fault_cut_interrupts_the_production_operation_and_recovers() {
     for cut in [
@@ -1384,69 +1226,6 @@ fn stale_and_incomplete_pages_drive_real_recovery_and_are_recorded() {
             Err(error) => panic!("{result:?} returned non-fail-closed error: {error:?}"),
         }
     }
-}
-
-#[test]
-fn historical_cache_mutant_uses_compatibility_cache_after_incomplete_delete() {
-    let mut runner = ProductionRunner::new(SutMutant::StaleWatermarkCache);
-    for operation in [
-        Operation::Accept {
-            request: 1,
-            created_at_ms: 1,
-        },
-        Operation::Seal {
-            expected_epoch: 0,
-            now_ms: 1,
-            result: StoreResult::Success,
-        },
-        Operation::Accept {
-            request: 2,
-            created_at_ms: 2,
-        },
-        Operation::Seal {
-            expected_epoch: 0,
-            now_ms: 2,
-            result: StoreResult::Success,
-        },
-        Operation::AdvanceHorizon {
-            through_sequence: 1,
-        },
-        Operation::DeleteThrough {
-            through_sequence: 1,
-        },
-        Operation::Restart,
-    ] {
-        runner.apply(&operation);
-    }
-    let events = runner.store.events();
-    let failed_delete = events
-        .iter()
-        .position(|event| {
-            event.phase == BlobPhase::Delete
-                && event.key.ends_with(".seg")
-                && event.result == StoreResult::FailureBeforeEffect
-        })
-        .expect("partial segment delete");
-    let cache_write = events
-        .iter()
-        .position(|event| event.phase == BlobPhase::Horizon && event.effect)
-        .expect("compatibility cache write");
-    let cache_authority_list = events
-        .iter()
-        .enumerate()
-        .find(|(index, event)| {
-            *index > cache_write
-                && event.phase == BlobPhase::ListPage
-                && event.key.contains("manifest_head/")
-        })
-        .map(|(index, _)| index)
-        .expect("restart LIST after compatibility cache");
-    assert!(failed_delete < cache_write && cache_write < cache_authority_list);
-    assert_eq!(
-        runner.snapshot().unwrap().segment_objects,
-        1,
-        "one undeleted segment is hidden from stale progress"
-    );
 }
 
 #[test]

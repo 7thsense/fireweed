@@ -49,15 +49,13 @@ impl BlobObjectClass {
         if key
             .rsplit('/')
             .next()
-            .is_some_and(|name| name.ends_with("~watermark.json") || name == "read_horizon.json")
+            .is_some_and(|name| name.ends_with("~watermark.json"))
         {
             return Self::DeletionWatermark;
         }
         for component in key.split('/') {
             let class = match component {
-                "segments" | "segment" | "seg_candidates" | "seg_attempt" | "branch-seg" => {
-                    Self::Segment
-                }
+                "segments" | "segment" | "seg_candidates" | "branch-seg" => Self::Segment,
                 "manifest" | "manifest_candidates" => Self::Manifest,
                 "manifest_head"
                 | "manifest-head"
@@ -68,9 +66,7 @@ impl BlobObjectClass {
                 "retention_floor" | "retention-floor" | "retention_floor.json" => {
                     Self::RetentionFloor
                 }
-                "deletion_watermark" | "deletion-watermark" | "read_horizon.json" => {
-                    Self::DeletionWatermark
-                }
+                "deletion_watermark" | "deletion-watermark" => Self::DeletionWatermark,
                 "branch_pin" | "branch-pins" | "branch_pin.json" | "branches" | "branch.json"
                 | "branch.pending" => Self::BranchPin,
                 _ => continue,
@@ -1388,7 +1384,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_storage_error_does_not_fabricate_transport_or_retry_semantics() {
+    fn untyped_storage_error_does_not_fabricate_transport_or_retry_semantics() {
         let fault = BlobStoreFault::from_engine_error(&EngineError::Storage("anything".into()));
         assert_eq!(fault.result, BlobResultClass::OtherError);
         assert!(!fault.retryable);
@@ -1431,24 +1427,12 @@ mod tests {
                 BlobObjectClass::Segment,
             ),
             (
-                "t/aa/q/bb/seg_attempt/e000/i000/s000-1-2.seg",
-                BlobObjectClass::Segment,
-            ),
-            (
                 "t/aa/q/bb/branch-seg/e000/s000.seg",
                 BlobObjectClass::Segment,
             ),
             (
-                "t/aa/q/bb/manifest/00000000000000000001.json",
-                BlobObjectClass::Manifest,
-            ),
-            (
                 "t/aa/q/bb/manifest_candidates/dead.json",
                 BlobObjectClass::Manifest,
-            ),
-            (
-                "t/aa/q/bb/manifest_head/00000000000000000001.json",
-                BlobObjectClass::ManifestHead,
             ),
             (
                 "t/aa/q/bb/authority_head/00000000000000000001.json",
@@ -1459,11 +1443,11 @@ mod tests {
                 BlobObjectClass::ManifestHead,
             ),
             (
-                "t/aa/q/bb/manifest_head/00000000000000000001~watermark.json",
-                BlobObjectClass::DeletionWatermark,
+                "t/aa/q/bb/authority_initialized_v1",
+                BlobObjectClass::ManifestHead,
             ),
             (
-                "t/aa/q/bb/read_horizon.json",
+                "t/aa/q/bb/manifest_head/00000000000000000001~watermark.json",
                 BlobObjectClass::DeletionWatermark,
             ),
             ("t/aa/q/bb/branches/cc/dd.json", BlobObjectClass::BranchPin),
@@ -1581,7 +1565,6 @@ mod tests {
             next_manifest_index: 3,
             retention_floor_through: None,
             tail_candidate_key: None,
-            legacy_next_manifest_index: 0,
             recovery_index: None,
         }
     }

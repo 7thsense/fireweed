@@ -1137,10 +1137,8 @@ async fn prepare_with_configured_policy<P>(
     coordinator: Arc<GroupCommitCoordinator<P>>,
     request: RawCommitRequest,
 ) -> EngineResult<PreparedObjectLogCommit> {
-    let (shard, expected_epoch, fault, serialized, charged_bytes) = prepare_serialized_request(
-        request,
-        coordinator.byte_budget.config().global_limit(),
-    )?;
+    let (shard, expected_epoch, fault, serialized, charged_bytes) =
+        prepare_serialized_request(request, coordinator.byte_budget.config().global_limit())?;
     let tenant = shard.tenant_id.clone();
     let permit = match coordinator.wait_policy {
         ByteAdmissionWaitPolicy::Reject => {
@@ -1272,10 +1270,7 @@ pub fn serialized_peak_charge(
     records: &[SerializedCommandEnvelope],
     limit: usize,
 ) -> EngineResult<usize> {
-    serialized_peak_charge_for_lengths(
-        records.iter().map(|record| record.record.len()),
-        limit,
-    )
+    serialized_peak_charge_for_lengths(records.iter().map(|record| record.record.len()), limit)
 }
 
 fn serialized_peak_charge_for_lengths(
@@ -2570,11 +2565,8 @@ mod tests {
                 .map(|command| serde_json::to_vec(command).unwrap())
                 .collect::<Vec<_>>();
             admitted_bytes += black_box(
-                serialized_peak_charge_for_lengths(
-                    records.iter().map(Vec::len),
-                    usize::MAX,
-                )
-                .unwrap(),
+                serialized_peak_charge_for_lengths(records.iter().map(Vec::len), usize::MAX)
+                    .unwrap(),
             );
             black_box(records);
         }
