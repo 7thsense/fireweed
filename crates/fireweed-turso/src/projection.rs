@@ -4691,7 +4691,7 @@ mod item_mutation_tests {
         fields.insert("phase".to_string(), Bytes::from_static(b"mutated"));
         ResolvedItemMutation {
             item_id: pushed.item_id,
-            action: ResolvedItemMutationAction::Replace(ResolvedItemValues {
+            action: ResolvedItemMutationAction::Replace(Box::new(ResolvedItemValues {
                 state: ItemState::Pending,
                 item_version: version,
                 priority: pushed.priority.clone(),
@@ -4703,7 +4703,7 @@ mod item_mutation_tests {
                 gate_keys: vec!["item-block".to_string()],
                 entity_document: pushed.entity_document.clone(),
                 invalidate_lease: false,
-            }),
+            })),
         }
     }
 

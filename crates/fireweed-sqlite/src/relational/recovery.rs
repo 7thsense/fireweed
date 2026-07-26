@@ -18,17 +18,21 @@ use super::*;
 pub(crate) const IDEMPOTENCY_OPERATION_BATCH_UPDATE: &str = "batch_update";
 pub(crate) const IDEMPOTENCY_OPERATION_ITEM_MUTATION: &str = "item_mutation";
 
+pub(crate) struct ItemMutationIdempotency<'a> {
+    pub(crate) shard: &'a QueueKey,
+    pub(crate) request_id: &'a RequestId,
+    pub(crate) fingerprint: u64,
+    pub(crate) response_payload: &'a str,
+    pub(crate) position: &'a CommandPosition,
+    pub(crate) created_at: UtcTimestamp,
+    pub(crate) expires_at: i64,
+}
+
 pub(crate) fn record_item_mutation_idempotency(
     tx: &Transaction<'_>,
-    shard: &QueueKey,
-    request_id: &RequestId,
-    fingerprint: u64,
-    response_payload: &str,
-    position: &CommandPosition,
-    created_at: UtcTimestamp,
-    expires_at: i64,
+    record: ItemMutationIdempotency<'_>,
 ) -> EngineResult<()> {
-    let (tenant, queue) = parts(shard);
+    let (tenant, queue) = parts(record.shard);
     st(tx.execute(
         "INSERT INTO fireweed_request_idempotency \
          (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,\
@@ -40,12 +44,12 @@ pub(crate) fn record_item_mutation_idempotency(
             tenant,
             queue,
             IDEMPOTENCY_OPERATION_ITEM_MUTATION,
-            request_id.as_str(),
-            fingerprint.to_be_bytes().as_slice(),
-            response_payload,
-            positions_to_json(std::slice::from_ref(position))?,
-            expires_at,
-            ts_nanos(created_at),
+            record.request_id.as_str(),
+            record.fingerprint.to_be_bytes().as_slice(),
+            record.response_payload,
+            positions_to_json(std::slice::from_ref(record.position))?,
+            record.expires_at,
+            ts_nanos(record.created_at),
         ],
     ))?;
     Ok(())
@@ -227,13 +231,15 @@ pub(crate) fn persist_request_outcome_sql(
         let expires_at = request_expires_at(queues, shard, env.created_at)?;
         record_item_mutation_idempotency(
             tx,
-            shard,
-            request_id,
-            fingerprint,
-            response_payload,
-            pos,
-            env.created_at,
-            expires_at,
+            ItemMutationIdempotency {
+                shard,
+                request_id,
+                fingerprint,
+                response_payload,
+                position: pos,
+                created_at: env.created_at,
+                expires_at,
+            },
         )?;
         return Ok(());
     }

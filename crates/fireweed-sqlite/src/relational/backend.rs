@@ -1387,13 +1387,15 @@ impl ItemMutationPort for SqliteRelationalBackend {
                 .map_err(|error| EngineError::Storage(error.to_string()))?;
             record_item_mutation_idempotency(
                 &tx,
-                shard,
-                &request.request_id,
-                fingerprint,
-                &payload,
-                &position,
-                request.evaluated_at,
-                expires_at,
+                ItemMutationIdempotency {
+                    shard,
+                    request_id: &request.request_id,
+                    fingerprint,
+                    response_payload: &payload,
+                    position: &position,
+                    created_at: request.evaluated_at,
+                    expires_at,
+                },
             )?;
             st(tx.commit())?;
             apply_token_ops(committed_tokens, live_tokens_by_consumer, token_ops);

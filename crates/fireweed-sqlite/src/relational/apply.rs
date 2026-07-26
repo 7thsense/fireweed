@@ -16,6 +16,16 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_i
 
 use super::*;
 
+type UpdateFieldsRow = (
+    String,
+    String,
+    Option<String>,
+    Option<i64>,
+    i64,
+    Option<Vec<u8>>,
+    String,
+);
+
 // ---------------------------------------------------------------------------
 // Inner: the durable connection + the queue-definition cache + the live-token map
 // ---------------------------------------------------------------------------
@@ -1021,7 +1031,7 @@ pub(crate) fn apply_command_sql(
             // `fields_from_json`), apply the per-key delta, then UPDATE within this transaction. The caller
             // pre-validated, so the row is live (Pending/Leased, not superseded/fenced); if it is gone here
             // (a divergence) we apply nothing rather than fault, mirroring the in-memory `debug_assert`.
-            let current: Option<(String, String, Option<String>, Option<i64>, i64, Option<Vec<u8>>, String)> = st(tx
+            let current: Option<UpdateFieldsRow> = st(tx
                 .query_row(
                     "SELECT fields,lifecycle_state,priority,not_before,eligible_since,payload,metadata FROM fireweed_items \
                      WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 \

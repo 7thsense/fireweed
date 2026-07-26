@@ -109,7 +109,7 @@ pub struct ResolvedItemMutation {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ResolvedItemMutationAction {
     Purge,
-    Replace(ResolvedItemValues),
+    Replace(Box<ResolvedItemValues>),
 }
 
 /// Complete post-mutation values. Applying this value is deterministic and performs exactly one version

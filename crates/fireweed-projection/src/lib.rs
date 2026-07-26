@@ -3325,7 +3325,7 @@ impl ProjectionData {
             outcome,
             (!dry_run).then_some(ResolvedItemMutation {
                 item_id: record.item_id,
-                action: ResolvedItemMutationAction::Replace(ResolvedItemValues {
+                action: ResolvedItemMutationAction::Replace(Box::new(ResolvedItemValues {
                     state,
                     item_version,
                     priority,
@@ -3337,7 +3337,7 @@ impl ProjectionData {
                     gate_keys,
                     entity_document: entity,
                     invalidate_lease,
-                }),
+                })),
             }),
         ))
     }
