@@ -684,9 +684,9 @@ async fn commit_advances_validates_and_rejects_instance_fence() {
     );
 }
 
-/// Capabilities (C7): memory advertises the full authoritative-commit capability set so Snorri can activate
-/// it; the eventual-apply objectlog backend advertises `atomic_transition_commit = false` so Snorri rejects
-/// it before activation.
+/// Capabilities (C7): memory and object log advertise the full authoritative-commit capability set so Snorri
+/// can activate either. Object-log projection visibility is eventual, while its transition batch remains
+/// atomic at the durable log authority.
 #[tokio::test]
 async fn capabilities_advertise_atomic_commit_on_memory_and_objectlog() {
     let fireweed = RuntimeCore::new(

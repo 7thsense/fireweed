@@ -348,10 +348,10 @@ fn definition_page_from_iter(
 /// safety is not required — the composition is generic (zero-cost, monomorphized).
 pub trait LogStore: Send {
     /// The durability class the composition inherits from its log axis (TD-007 §2). The default is
-    /// [`DurabilityClass::Atomic`] (the in-process/sqlite log-replay logs commit append+apply together under
-    /// one lock); an eventual-apply substrate (the object log's ack-after-seal group commit) overrides this
-    /// to [`DurabilityClass::EventualApply`], which the composition uses to refuse the atomic-only ports
-    /// (upsert / update_fields / reschedule / commit_transition) rather than silently degrading them.
+    /// [`DurabilityClass::Atomic`]; an object-log substrate whose projection may materialize after the
+    /// authoritative append reports [`DurabilityClass::EventualApply`]. This class describes the visibility
+    /// boundary, not whether the log can atomically commit a request-id-bearing command batch: both classes
+    /// provide one durable append authority, and recovery replays that authority into the projection.
     fn durability_class(&self) -> DurabilityClass {
         DurabilityClass::Atomic
     }
@@ -1815,8 +1815,8 @@ pub struct ComposedBackend<L, P, C> {
     node_id: u8,
     counters: QueueCounters,
     /// The durability class inherited from the log axis at assembly (TD-007 §2). Read once from
-    /// `LogStore::durability_class` so the hot path never re-locks to decide whether an atomic-only port
-    /// (upsert / update_fields / reschedule / commit_transition) is available.
+    /// `LogStore::durability_class` so capability introspection can distinguish synchronous projection
+    /// visibility from an authoritative append followed by recoverable eventual projection materialization.
     durability: DurabilityClass,
     supports_gates: bool,
     supports_commit_transition: bool,
@@ -3315,12 +3315,6 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         }
     }
 
-    /// Whether the composition offers the atomic append+apply boundary the atomic-only ports require
-    /// (upsert / update_fields / reschedule / commit_transition). An eventual-apply log refuses them.
-    fn is_atomic(&self) -> bool {
-        self.durability == DurabilityClass::Atomic
-    }
-
     /// Tag this backend with `node_id` — packed into the disambiguation byte of every minted [`ItemId`].
     pub fn with_node_id(mut self, node_id: u8) -> Self {
         self.node_id = node_id;
@@ -3966,6 +3960,14 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> Backend for ComposedBacke
     /// projection may apply after that boundary and recover from the same committed batch on reopen.
     fn commit_capabilities(&self) -> CommitCapabilities {
         if self.supports_commit_transition {
+            let consistency = match self.durability {
+                DurabilityClass::Atomic => {
+                    "atomic durable log batch with synchronous projection apply under one composed unit-of-work lock"
+                }
+                DurabilityClass::EventualApply => {
+                    "atomic durable log batch; projection materialization may follow and recovers from that batch"
+                }
+            };
             CommitCapabilities {
                 atomic_transition_commit: true,
                 vectorized_commit: true,
@@ -3975,7 +3977,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> Backend for ComposedBacke
                 authoritative_recovery_reads: true,
                 delayed_awaits_timers: true,
                 durability_class: self.durability,
-                consistency: "atomic append+apply under one composed unit-of-work lock",
+                consistency,
             }
         } else {
             CommitCapabilities::default()
@@ -4407,9 +4409,6 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::RequestIdReplayPro
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> EngineResult<(CommandEnvelope, BodyHash)> {
-        if !self.is_atomic() {
-            return Err(EngineError::Unavailable);
-        }
         // Fingerprint over the EXACT single-entry commit body `commit_transition(same body)` will hash, so a
         // post-reopen retry computes the identical fingerprint → Replay (not Conflict).
         let entry = crate::port::CommitTransitionEntry {
@@ -4454,9 +4453,6 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::RequestIdReplayPro
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> EngineResult<(Vec<CommandEnvelope>, BodyHash)> {
-        if !self.is_atomic() {
-            return Err(EngineError::Unavailable);
-        }
         // The whole-body fingerprint `commit_transition` stamps on EVERY envelope of this commit, so a
         // post-reopen retry of the same body computes the identical fingerprint → Replay (not Conflict).
         let fingerprint = commit_body_hash(&entries)?;
@@ -6320,9 +6316,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                 entries,
             } = transition;
             let fingerprint = commit_body_hash(&entries)?;
-            // The commit boundary requires BOTH the atomic append+apply log AND a commit-class projection;
-            // otherwise refuse the whole operation rather than splitting/faking it (Snorri rejects the
-            // backend before activation via `commit_capabilities`).
+            // The commit boundary requires a commit-class projection. Durability comes from the log's one
+            // authoritative batch append; an EventualApply projection may materialize that batch after the
+            // durability boundary and is rebuilt from the same batch on reopen.
             let (max_attempts, retention, schema) = {
                 let def = self.control.queue_definition(shard)?;
                 let schema = def
@@ -6617,10 +6613,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                     created_at: now,
                 });
             }
-            // ONE atomic append+apply for the WHOLE commit (all committed entries' envelopes + the outcome
-            // marker). The epoch cannot change while we hold the lock, so either this fences (EpochFenced,
-            // before any mutation) or the whole commit's writes commit and apply together — no crash window
-            // between committed-entry durability and outcome durability.
+            // ONE atomic authoritative append for the WHOLE commit (all committed entries' envelopes + the
+            // outcome marker). The epoch cannot change while we hold the lock, so either this fences before
+            // mutation or the entire batch becomes durable. Projection materialization is synchronous for
+            // Atomic profiles and may be deferred for EventualApply profiles; either way recovery consumes
+            // this exact batch, so committed-entry durability cannot split from outcome durability.
             if !batch.is_empty() {
                 Self::commit_locked_batch(&mut g, shard, batch, expected_epoch)?;
             }

@@ -71,14 +71,14 @@
 //! push-idempotency map from it so a retry by request_id replays the one committed result (0 duplicate
 //! transitions). The classic ports (claim/renew/finalize/update_fields/purge/replace_if_pending) carry NO
 //! request_id (dedup is item/lease/version based) → capability-N/A, covered by AC-TXN-1 durability + AC-TXN-6
-//! parity. `‖` `memory`/`objectlog`/`object_log_sqlite` are `pass`: memory (non-durable) proves the in-proc
-//! PUSH + commit_transition replays with the restart cuts capability-N/A; the eventual-apply objectlog family
-//! covers PUSH at all four cuts and records commit_transition capability-N/A (`Unavailable` — no atomic
-//! transition boundary). `¶` `sqlite_log`/`postgres` are `pass`: they are durable AND atomic, so
-//! commit_transition IS a supported request_id-bearing op there, and recovery rebuilds the commit-transition
-//! idempotency record from the durable log (`rebuild_commit_idempotency_from_log`, the symmetric twin of the
-//! push rebuild). An ALL-COMMITTED commit's cross-restart request_id replay is proven at BOTH restart cut
-//! points from its `Finalize`-delimited envelopes. A MIXED committed+rejected commit is ALSO now replayed
+//! parity. Every profile is `pass`: memory proves in-process PUSH + commit_transition replay, with restart
+//! cuts capability-N/A because it has no durable reopen. Every durable log profile — sqlite-log, Postgres,
+//! object log, and object-log+SQLite — proves both request-id-bearing operations across restart. The
+//! object-log profiles use one atomic authoritative log batch while projection persistence remains eventual;
+//! recovery rebuilds commit-transition idempotency from that same batch
+//! (`rebuild_commit_idempotency_from_log`, the symmetric twin of the push rebuild). An ALL-COMMITTED commit's
+//! cross-restart request_id replay is proven at BOTH restart cut points from its `Finalize`-delimited
+//! envelopes. A MIXED committed+rejected commit is ALSO replayed
 //! BYTE-IDENTICALLY across restart at BOTH cut points (bead pqueue-db60657d, closed): a rejected entry mutates
 //! and appends nothing of its own, so `commit_transition` stamps the WHOLE per-entry vec (committed AND
 //! rejected, each rejection's structured error projected via `CommitRejection`) onto a terminal
@@ -1331,7 +1331,7 @@ async fn ac_txn_2_commit_timeout_path_has_no_durable_effect() {
 // AC-TXN-3 request_id unknown-outcome replay across every op + cut point (TP-003 §3.10 row 208), as
 // standalone tests (bead pqueue-48a4af85), independent of the aggregate `ac_txn_contract_matrix` evidence
 // run. Part 1 (mid-pipeline cut is now request_id-bearing) and Part 2 (per-op coverage: push all cuts;
-// commit_transition per reachable cut; classic ops capability-N/A).
+// commit_transition at every reachable cut; classic ops capability-N/A).
 // ---------------------------------------------------------------------------
 
 /// Part 1: the mid-pipeline `AfterAppendBeforeApply` cut is now `request_id`-BEARING (not item-level). On
@@ -1371,9 +1371,9 @@ async fn ac_txn_3_mid_pipeline_cut_is_request_id_bearing() {
 }
 
 /// Part 2: request_id replay across every op + cut point, per the honest engine capability map. PUSH is the
-/// only op fully covered at all four cuts; `commit_transition` is covered per its reachable cuts (in-process
-/// on atomic; capability-N/A on eventual-apply; cross-restart is a recorded engine limitation); the classic
-/// ports carry no request_id (capability-N/A).
+/// only op fully covered at all four cuts; `commit_transition` is covered in-process on every commit-capable
+/// projection and across both restart cuts on every durable log, including eventual-apply object-log
+/// compositions. The classic ports carry no request_id (capability-N/A).
 #[tokio::test]
 async fn ac_txn_3_request_id_replay_all_ops_all_cut_points() {
     // Durable composed-log profiles: PUSH covered at ALL FOUR cut points (incl. the request_id-bearing
@@ -1412,8 +1412,8 @@ async fn ac_txn_3_request_id_replay_all_ops_all_cut_points() {
         );
     }
 
-    // commit_transition per-backend: atomic backends prove in-process replay (and honestly record the
-    // cross-restart limitation as a GAP); eventual-apply backends record it capability-N/A (Unavailable).
+    // commit_transition per-backend: every durable log profile proves in-process replay and exact recovery at
+    // both restart cuts. Eventual projection persistence does not weaken the authoritative log-batch boundary.
     let sqlite_ct = ac_txn_3_commit_transition_request_id(sqlite_log_factory(), DURABLE).await;
     assert!(sqlite_ct.is_ok(), "sqlite_log ct: {:?}", sqlite_ct.err());
     let sqlite_ct = sqlite_ct.unwrap();
@@ -1464,15 +1464,36 @@ async fn ac_txn_3_request_id_replay_all_ops_all_cut_points() {
         "sqlite_log commit_transition must carry NO residual GAP once mixed + all-rejected replay is faithful: {sqlite_ct:?}"
     );
 
-    let ol_ct = ac_txn_3_commit_transition_request_id(objectlog_factory(), DURABLE).await;
-    assert!(ol_ct.is_ok(), "objectlog ct: {:?}", ol_ct.err());
-    assert!(
-        ol_ct
-            .unwrap()
-            .iter()
-            .any(|s| s.contains("capability-N/A") && s.contains("commit_transition")),
-        "objectlog (eventual-apply) must record commit_transition as capability-N/A (Unavailable)"
-    );
+    for (name, outcome) in [
+        (
+            "objectlog",
+            ac_txn_3_commit_transition_request_id(objectlog_factory(), DURABLE).await,
+        ),
+        (
+            "object_log_sqlite",
+            ac_txn_3_commit_transition_request_id(objectlog_sqlite_factory(), DURABLE).await,
+        ),
+    ] {
+        assert!(outcome.is_ok(), "{name} ct: {:?}", outcome.err());
+        let assertions = outcome.unwrap();
+        assert!(
+            assertions.iter().any(|s| s.contains(
+                "AfterAppendBeforeApply (request_id-bearing) across-restart request_id replay PROVEN"
+            )),
+            "{name} must replay the authoritative commit batch after an unapplied projection cut: {assertions:?}"
+        );
+        assert!(
+            assertions.iter().any(|s| s.contains(
+                "MIXED committed+rejected AfterAppendBeforeApply across-restart replay PROVEN"
+            )),
+            "{name} must replay the exact mixed outcome vector after an unapplied projection cut: {assertions:?}"
+        );
+        assert!(
+            assertions.iter().all(|s| !s.contains("GAP")
+                && !(s.contains("capability-N/A") && s.contains("commit_transition"))),
+            "{name} must not weaken commit_transition for eventual projection materialization: {assertions:?}"
+        );
+    }
 
     // memory (non-durable, atomic): in-process commit_transition replay covered; restart cuts capability-N/A.
     let mem_ct = ac_txn_3_commit_transition_request_id(
