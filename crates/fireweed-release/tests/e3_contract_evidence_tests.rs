@@ -562,10 +562,9 @@ fn rejects_symlink_authority_and_writer_target() {
         no_cas_stale_epoch_rejected: true,
         no_cas_current_epoch_committed: true,
         no_cas_pointer_and_epoch_atomic: true,
-        no_cas_mirror_failure_after_pointer_cas: true,
+        no_cas_object_store_manifest_head_write_attempts: 0,
         no_cas_restart_fresh_postgres_client: true,
-        no_cas_restart_read_pointer_authority: true,
-        no_cas_restart_repaired_mirror: true,
+        no_cas_restart_read_authoritative_pointer: true,
     })
     .unwrap();
     assert!(write_e3_fence_evidence(&output, &row).is_err());
@@ -630,6 +629,16 @@ fn rejects_unproven_manifest_fence_or_fallback() {
             .errors()
             .contains("Postgres transactional-pointer no-CAS")
     );
+
+    let fixture = Fixture::new();
+    fixture.mutate_json("fencing.json", |value| {
+        value["no_cas_object_store_manifest_head_write_attempts"] = serde_json::json!(1);
+    });
+    assert!(
+        fixture
+            .errors()
+            .contains("Postgres transactional-pointer no-CAS")
+    );
 }
 
 #[test]
@@ -641,15 +650,17 @@ fn fence_builder_fails_closed_and_emits_typed_release_profile() {
         no_cas_stale_epoch_rejected: true,
         no_cas_current_epoch_committed: true,
         no_cas_pointer_and_epoch_atomic: true,
-        no_cas_mirror_failure_after_pointer_cas: true,
+        no_cas_object_store_manifest_head_write_attempts: 0,
         no_cas_restart_fresh_postgres_client: true,
-        no_cas_restart_read_pointer_authority: true,
-        no_cas_restart_repaired_mirror: true,
+        no_cas_restart_read_authoritative_pointer: true,
     })
     .unwrap();
+    assert_eq!(row.schema_version, 4);
     assert_eq!(row.result, "pass");
     assert_eq!(row.store_profile, "minio_create_only_cas");
     assert!(row.no_cas_pointer_and_epoch_atomic);
+    assert_eq!(row.no_cas_object_store_manifest_head_write_attempts, 0);
+    assert!(row.no_cas_restart_read_authoritative_pointer);
 
     assert!(
         build_e3_fence_evidence(E3FenceObservation {
@@ -659,10 +670,9 @@ fn fence_builder_fails_closed_and_emits_typed_release_profile() {
             no_cas_stale_epoch_rejected: true,
             no_cas_current_epoch_committed: true,
             no_cas_pointer_and_epoch_atomic: true,
-            no_cas_mirror_failure_after_pointer_cas: true,
+            no_cas_object_store_manifest_head_write_attempts: 0,
             no_cas_restart_fresh_postgres_client: true,
-            no_cas_restart_read_pointer_authority: true,
-            no_cas_restart_repaired_mirror: true,
+            no_cas_restart_read_authoritative_pointer: true,
         })
         .is_err()
     );

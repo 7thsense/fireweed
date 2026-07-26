@@ -26,6 +26,7 @@ pub const REQUIRED_TXN_ACS: [&str; 6] = [
     "AC-TXN-1", "AC-TXN-2", "AC-TXN-3", "AC-TXN-4", "AC-TXN-6", "AC-TXN-7",
 ];
 pub const E3_CONTRACT_SCHEMA_VERSION: u32 = 3;
+pub const E3_FENCE_SCHEMA_VERSION: u32 = 4;
 pub const FENCE_SUITE: &str = "segmented_object_log_commits_through_minio";
 pub const FENCE_PROFILE: &str = "minio_create_only_cas";
 pub const FENCE_MODE: &str = "create_only_put_if_absent";
@@ -141,10 +142,9 @@ pub struct E3FenceEvidenceRow {
     pub no_cas_stale_epoch_rejected: bool,
     pub no_cas_current_epoch_committed: bool,
     pub no_cas_pointer_and_epoch_atomic: bool,
-    pub no_cas_mirror_failure_after_pointer_cas: bool,
+    pub no_cas_object_store_manifest_head_write_attempts: u64,
     pub no_cas_restart_fresh_postgres_client: bool,
-    pub no_cas_restart_read_pointer_authority: bool,
-    pub no_cas_restart_repaired_mirror: bool,
+    pub no_cas_restart_read_authoritative_pointer: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,10 +155,9 @@ pub struct E3FenceObservation {
     pub no_cas_stale_epoch_rejected: bool,
     pub no_cas_current_epoch_committed: bool,
     pub no_cas_pointer_and_epoch_atomic: bool,
-    pub no_cas_mirror_failure_after_pointer_cas: bool,
+    pub no_cas_object_store_manifest_head_write_attempts: u64,
     pub no_cas_restart_fresh_postgres_client: bool,
-    pub no_cas_restart_read_pointer_authority: bool,
-    pub no_cas_restart_repaired_mirror: bool,
+    pub no_cas_restart_read_authoritative_pointer: bool,
 }
 
 /// One executed TP-003 assertion at a concrete E3 profile and batching bound.
@@ -302,7 +301,7 @@ pub fn build_e3_fence_evidence(
         ));
     }
     Ok(E3FenceEvidenceRow {
-        schema_version: 3,
+        schema_version: E3_FENCE_SCHEMA_VERSION,
         suite: FENCE_SUITE.into(),
         source_revision: observation.source_revision,
         store_profile: FENCE_PROFILE.into(),
@@ -311,10 +310,9 @@ pub fn build_e3_fence_evidence(
             && observation.no_cas_stale_epoch_rejected
             && observation.no_cas_current_epoch_committed
             && observation.no_cas_pointer_and_epoch_atomic
-            && observation.no_cas_mirror_failure_after_pointer_cas
+            && observation.no_cas_object_store_manifest_head_write_attempts == 0
             && observation.no_cas_restart_fresh_postgres_client
-            && observation.no_cas_restart_read_pointer_authority
-            && observation.no_cas_restart_repaired_mirror
+            && observation.no_cas_restart_read_authoritative_pointer
         {
             "pass"
         } else {
@@ -333,11 +331,11 @@ pub fn build_e3_fence_evidence(
         no_cas_stale_epoch_rejected: observation.no_cas_stale_epoch_rejected,
         no_cas_current_epoch_committed: observation.no_cas_current_epoch_committed,
         no_cas_pointer_and_epoch_atomic: observation.no_cas_pointer_and_epoch_atomic,
-        no_cas_mirror_failure_after_pointer_cas: observation
-            .no_cas_mirror_failure_after_pointer_cas,
+        no_cas_object_store_manifest_head_write_attempts: observation
+            .no_cas_object_store_manifest_head_write_attempts,
         no_cas_restart_fresh_postgres_client: observation.no_cas_restart_fresh_postgres_client,
-        no_cas_restart_read_pointer_authority: observation.no_cas_restart_read_pointer_authority,
-        no_cas_restart_repaired_mirror: observation.no_cas_restart_repaired_mirror,
+        no_cas_restart_read_authoritative_pointer: observation
+            .no_cas_restart_read_authoritative_pointer,
     })
 }
 
@@ -1359,7 +1357,7 @@ fn verify_fence(
             return None;
         }
     };
-    if row.schema_version != 3
+    if row.schema_version != E3_FENCE_SCHEMA_VERSION
         || row.suite != FENCE_SUITE
         || row.source_revision != revision
         || row.store_profile != FENCE_PROFILE
@@ -1374,10 +1372,9 @@ fn verify_fence(
         || !row.no_cas_stale_epoch_rejected
         || !row.no_cas_current_epoch_committed
         || !row.no_cas_pointer_and_epoch_atomic
-        || !row.no_cas_mirror_failure_after_pointer_cas
+        || row.no_cas_object_store_manifest_head_write_attempts != 0
         || !row.no_cas_restart_fresh_postgres_client
-        || !row.no_cas_restart_read_pointer_authority
-        || !row.no_cas_restart_repaired_mirror
+        || !row.no_cas_restart_read_authoritative_pointer
     {
         errors.push(E3ContractError(format!(
             "fencing evidence {} does not prove stale rejection/current commit under both release CAS and Postgres transactional-pointer no-CAS profiles",
