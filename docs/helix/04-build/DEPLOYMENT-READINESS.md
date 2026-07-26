@@ -38,12 +38,14 @@ rendering, and CI evidence actually cover.
 ## Current Release Boundary
 
 > **Version source of truth:** the workspace `Cargo.toml` `[workspace.package] version`
-> (currently **0.19.6**) is canonical for the current release line. Release tags follow it
-> (`v0.19.6`, …). Version-specific docs under `docs/releases/` and `docs/perf/` are
+> (currently **0.21.0**) is canonical for the current release line. Release tags follow it
+> (`v0.21.0`, …). Version-specific docs under `docs/releases/` and `docs/perf/` are
 > historical snapshots of the version in their filename and are not statements about the current line.
 
-The v0.19.6 release packaging ships the `fireweed-service` RESP binary, container
-image, Helm chart, binary archive, checksums, and release evidence. The service
+The v0.21.0 release candidate validates the `fireweed-service` RESP binary and
+deployment packaging inputs. crates.io and GHCR publication are deferred by the
+public-preview checklist; no registry artifact is available until a later
+release explicitly publishes and verifies it. The service
 runtime (`crates/fireweed-server/src/env_config.rs`) currently wires these
 executable combinations:
 

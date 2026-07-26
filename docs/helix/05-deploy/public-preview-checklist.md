@@ -1,0 +1,113 @@
+---
+ddx:
+  id: public-preview-checklist
+  type: deployment-checklist
+  flow: helix
+  status: release-candidate
+  links:
+    - kind: informed_by
+      to: public-preview-boundary
+    - kind: informed_by
+      to: adr-021-open-source-license-and-contribution-policy
+    - kind: informed_by
+      to: production-deployment-readiness
+---
+
+# Fireweed v0.21.0 Public Preview Checklist
+
+## Release Scope
+
+- Component: Fireweed Queue source repository and Rust embedding facade
+- Version: `v0.21.0`
+- Release window: not scheduled; opens only after the go conditions below
+- Repository: <https://github.com/telepathdata/fireweed> (public; `main` is the
+  default branch; GitHub issues are enabled)
+- Publication: annotated Git tag and GitHub Release after a go decision
+- Contribution policy: issues accepted; pull requests, patches, and other code
+  contributions not accepted
+- Deferred publication: crates.io and GHCR
+- Release owner: project maintainer
+- Rollback owner: project maintainer
+- Approvers: technical lead and release owner
+- Supporting artifacts: [release notes](../../releases/v0.21.0.md),
+  [public preview boundary](../00-discover/public-preview-boundary.md),
+  [deployment readiness contract](../04-build/DEPLOYMENT-READINESS.md), and
+  [ADR-021](../02-design/adr/ADR-021-open-source-license-and-contribution-policy.md)
+
+## Pre-Deploy Checks
+
+Unchecked rows are required evidence placeholders. They are not passing
+evidence and must not be changed to pass without recording the exact command,
+revision, result, and environment where applicable.
+
+| Area | Check | Evidence or Command | Status |
+|------|-------|---------------------|--------|
+| Repository | Public repository is `telepathdata/fireweed`; issues enabled | `gh repo view telepathdata/fireweed --json nameWithOwner,visibility,hasIssuesEnabled,defaultBranchRef` | Confirmed 2026-07-25 |
+| Policy | README, `CONTRIBUTING.md`, support, security, and ADR-021 agree on issues-only contributions | `rg -n 'Issues are welcome|Pull requests.*not accepted|issues-only' README.md CONTRIBUTING.md SUPPORT.md SECURITY.md docs/helix/02-design/adr/ADR-021-open-source-license-and-contribution-policy.md` | [ ] Pending evidence |
+| Identity | Current Fireweed namespace gate passes | `bash scripts/verify-public-identity.sh` | [ ] Pending evidence |
+| Format | Formatting and whitespace gates pass | `cargo fmt --all -- --check && git diff --check` | [ ] Pending evidence |
+| Build | Workspace compiles with the release toolchain | `cargo check --locked --workspace --all-targets --all-features` | [ ] Pending evidence |
+| Lint | Workspace clippy gate passes | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | [ ] Pending evidence |
+| Function | Complete workspace functional suite passes | `cargo test --locked --workspace` | [ ] Pending evidence |
+| Facade | Public constructor, mutation, and durability matrices pass | `cargo test --locked -p fireweed --all-features` | [ ] Pending evidence |
+| PostgreSQL | PostgreSQL-backed matrix executes with no skips | `FIREWEED_PG_TEST_URL=<test-dsn> cargo test --locked --workspace` | [ ] Pending live-service evidence |
+| Object storage | S3-compatible object-log matrix executes against Garage on eldir with no skips | Use the release test procedure with the approved Garage endpoint and unique test namespace | [ ] Pending live-service evidence |
+| Downstream | Snorri passes its complete release matrix against the public Fireweed tag | Snorri release checklist and locked git dependency evidence | [ ] Pending tagged-source evidence |
+| Version | Cargo, docs, tag, and release-note versions agree | `bash scripts/release/list-public-version-sources.sh v0.21.0` | [ ] Pending evidence |
+
+## Rollout Plan
+
+| Stage | Action | Exit Condition |
+|-------|--------|----------------|
+| Local candidate | Finish all pre-deploy rows at one immutable commit | Every required row records pass evidence; zero skips in conditional backend rows |
+| Public source release | Push validated `main`, create annotated `v0.21.0`, and create the GitHub Release from `docs/releases/v0.21.0.md` | Remote branch, tag, and release resolve to the validated commit |
+| Downstream integration | Pin Snorri to the public tag and rerun its release matrix | Snorri lockfile records the tag revision and all required tests pass |
+
+crates.io publication, GHCR publication, and a production deployment are not
+rollout stages for v0.21.0.
+
+## Verification Checks
+
+| Signal or Check | Expected Result | Evidence or Command | Status |
+|-----------------|-----------------|---------------------|--------|
+| Git tag | Annotated `v0.21.0` resolves to the validated commit | `git cat-file -t v0.21.0` and `git rev-list -n 1 v0.21.0` | [ ] Pending publication |
+| GitHub release | Non-draft, non-prerelease source release exists for `v0.21.0` | `gh release view v0.21.0 --repo telepathdata/fireweed` | [ ] Pending publication |
+| Public clone | Clean clone resolves and builds the facade from the tag | Fresh-directory clone and locked facade check | [ ] Pending publication |
+| Snorri consumption | Snorri resolves only public `fireweed` at the tag revision | Snorri `Cargo.lock`, dependency guard, and release matrix | [ ] Pending publication |
+| Registry boundary | No crates.io or GHCR artifact is claimed or required | Release body and published assets contain no registry availability claim | [ ] Pending release inspection |
+
+## Rollback Triggers
+
+| Trigger | Threshold or Condition | Immediate Action | Owner |
+|---------|------------------------|------------------|-------|
+| Validation regression | Any required local or live-backend row fails or skips | Hold the release; fix on `main`; rerun the entire affected matrix | Project maintainer |
+| Tag mismatch | Tag, release, or Snorri lockfile resolves to a different commit | Do not move the tag; withdraw the GitHub Release if created and cut a new patch version after correction | Project maintainer |
+| Public API defect | The tagged facade cannot satisfy Snorri or exposes backend-specific construction details | Mark the release unsupported, document the defect, and cut a forward-fix patch; never retag | Project maintainer |
+| Durability defect | Committed mutation is lost, rejected mutation has durable effect, or request replay diverges | Mark affected profiles unsupported, publish an issue/advisory as appropriate, and cut a forward fix | Project maintainer |
+
+Rollback is forward-only. Published tags are immutable; rollback never means
+moving or deleting a tag to substitute different source.
+
+## Support and Deferred Claims
+
+- Support is best-effort through public issues and has no SLA or guaranteed fix
+  timeline. Security reports use the private channel in `SECURITY.md`.
+- v0.21.0 does not claim production readiness, hosted availability,
+  multi-region failover, capacity leadership, provider certification, or
+  universal performance bounds.
+- Memory is development-only. Experimental and deferred profiles retain the
+  classifications in `public-preview-boundary.md` even when their tests pass.
+- Performance results are host- and configuration-bound evidence. They do not
+  replace complete functionality and durability gates.
+- crates.io packaging, internal-crate publication, GHCR images, and associated
+  registry support remain deferred until separately authorized and verified.
+
+## Go or No-Go Decision
+
+- Decision: **Hold**
+- Decision time: not set
+- Reason: required local, live PostgreSQL, Garage, public-tag, and downstream
+  evidence rows are pending
+- Go condition: every required pre-deploy and verification row is backed by
+  evidence from the same release candidate revision
+- Follow-up owner: project maintainer

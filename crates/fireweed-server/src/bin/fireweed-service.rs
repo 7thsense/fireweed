@@ -37,11 +37,7 @@ fn main() {
         return;
     }
     if std::env::args().any(|arg| arg == "--help" || arg == "-h") {
-        let help = format!("{HELP}\n\n{OBJECT_LOG_HELP}\n\n{RUNTIME_RESOURCE_HELP}")
-            .replace("FIREWEED_", "FIREWEED_");
-        println!(
-            "{help}\n\nCompatibility: matching FIREWEED_* environment variables remain accepted as v0.20.0 aliases; FIREWEED_* wins when both are set. Persisted /var/lib/fireweed paths remain unchanged."
-        );
+        println!("{HELP}\n\n{OBJECT_LOG_HELP}\n\n{RUNTIME_RESOURCE_HELP}");
         return;
     }
 

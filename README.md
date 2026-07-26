@@ -18,7 +18,7 @@ Fireweed has two public entry points:
 
 ## Status
 
-Fireweed Queue `v0.20.0` is a public preview. Fireweed names are authoritative
+Fireweed Queue `v0.21.0` is a public preview. Fireweed names are authoritative
 across packages, binaries, configuration, storage identifiers, wire extensions,
 container images, and the Helm chart. The
 [namespace policy](docs/helix/02-design/adr/ADR-023-pre-release-fireweed-namespace-cutover.md)
@@ -29,6 +29,7 @@ backends, and documented object-log/Postgres deployment compositions. Public
 preview does not mean that every compiled storage pairing is production-ready.
 Before deploying, review the
 [deployment readiness contract](docs/helix/04-build/DEPLOYMENT-READINESS.md),
+the [v0.21.0 public-preview checklist](docs/helix/05-deploy/public-preview-checklist.md),
 run the applicable smoke and recovery checks, and plan capacity, credentials,
 monitoring, backups, and failure recovery for your environment. The memory
 configuration used below is disposable and development-only.
@@ -57,7 +58,7 @@ FIREWEED_BOOTSTRAP_QUEUES=t1:q1 \
 cargo run -p fireweed-server --bin fireweed-service
 ```
 
-The service prints `fireweed-service 0.20.0 listening on 127.0.0.1:8080` after
+The service prints `fireweed-service 0.21.0 listening on 127.0.0.1:8080` after
 the queue is ready. In a second terminal, push, claim, and complete one item:
 
 ```sh
@@ -118,7 +119,9 @@ fail at startup instead of silently selecting another backend.
   covers images, charts, archives, and checksums.
 - [Operator microsite](docs/operator/index.html) provides an openable deployment
   reference.
-- [v0.20.0 release notes](docs/releases/v0.20.0.md) describe the Fireweed rename.
+- [v0.21.0 release notes](docs/releases/v0.21.0.md) describe the complete
+  backend-opaque facade and durability matrix.
+- [v0.20.0 release notes](docs/releases/v0.20.0.md) record the Fireweed rename.
 
 For source development, the standard local gates are:
 

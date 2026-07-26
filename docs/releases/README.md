@@ -25,8 +25,10 @@ planning, but they do not decide the release verdict. The configured
 `progress_bound_ms` is different: it is the queue's logical liveness contract
 under load, not a host-performance bar, and remains release-significant.
 
-Versioned files in this directory describe already-cut releases. Fireweed Queue
-v0.20.0 is the first renamed public preview release; v0.19.6 and earlier retain
+Versioned files in this directory describe release candidates and already-cut
+releases. Once a release is cut, its note is immutable. Fireweed Queue v0.21.0
+is the current release candidate. v0.20.0 is the first renamed public
+preview release; v0.19.6 and earlier retain
 the retired identity as immutable release and audit history under ADR-023. This
 file defines the gate applied to future tags.
 
@@ -47,8 +49,8 @@ release-synchronized to that target. The chart file's development defaults are
 independently versioned, while `package-helm-chart.sh` overrides both chart
 versions with the release version when it builds the published package.
 
-Historical release-note files remain immutable. Add `docs/releases/v0.20.0.md`
-when that release is cut; do not rename earlier notes or artifacts. Any new
+Historical release-note files remain immutable. Add one new file matching each
+release tag; do not rename earlier notes or artifacts. Any new
 public version source must be added to the inventory command before release.
 
 ## Exact-revision composite staging
