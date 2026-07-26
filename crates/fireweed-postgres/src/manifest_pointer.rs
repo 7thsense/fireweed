@@ -26,6 +26,10 @@ ALTER TABLE fireweed_objectlog_immutable_claim
     ADD COLUMN IF NOT EXISTS present BOOLEAN NOT NULL DEFAULT TRUE
 ";
 
+// Stable across processes and releases. A transaction-scoped advisory lock prevents concurrent Fireweed
+// replicas from racing PostgreSQL's system-catalog uniqueness checks while bootstrapping the same tables.
+const SCHEMA_INITIALIZATION_LOCK: i64 = 0x4657_4D50_5343_4831;
+
 /// Postgres-held TD-004 manifest pointer and create-only object lifecycle authority for object stores
 /// without conditional writes.
 pub struct PostgresManifestPointer {
@@ -37,7 +41,7 @@ impl PostgresManifestPointer {
         let connection_string = connection_string.to_owned();
         let client = std::thread::spawn(move || {
             let mut client = connect(PostgresConnectConfig::new(connection_string))?;
-            client.batch_execute(SCHEMA).map_err(storage)?;
+            initialize_schema(&mut client)?;
             Ok::<Client, EngineError>(client)
         })
         .join()
@@ -72,6 +76,18 @@ impl PostgresManifestPointer {
                 })?
         })
     }
+}
+
+fn initialize_schema(client: &mut Client) -> EngineResult<()> {
+    let mut transaction = client.transaction().map_err(storage)?;
+    transaction
+        .query_one(
+            "SELECT pg_advisory_xact_lock($1)",
+            &[&SCHEMA_INITIALIZATION_LOCK],
+        )
+        .map_err(storage)?;
+    transaction.batch_execute(SCHEMA).map_err(storage)?;
+    transaction.commit().map_err(storage)
 }
 
 impl Drop for PostgresManifestPointer {
@@ -386,6 +402,60 @@ mod tests {
         fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
             self.inner.list(prefix)
         }
+    }
+
+    #[test]
+    fn concurrent_pointer_schema_initialization_is_catalog_race_free() {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
+            eprintln!(
+                "SKIP concurrent_pointer_schema_initialization_is_catalog_race_free: FIREWEED_PG_TEST_URL unset"
+            );
+            return;
+        };
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let schema = format!("fireweed_pointer_open_{nonce}");
+        let mut admin = connect(PostgresConnectConfig::new(url.clone())).unwrap();
+        admin
+            .batch_execute(&format!("CREATE SCHEMA {schema}"))
+            .unwrap();
+
+        const OPENERS: usize = 24;
+        let barrier = Arc::new(Barrier::new(OPENERS + 1));
+        let mut workers = Vec::new();
+        for _ in 0..OPENERS {
+            let barrier = barrier.clone();
+            let schema = schema.clone();
+            let url = url.clone();
+            workers.push(std::thread::spawn(move || {
+                let mut client = connect(PostgresConnectConfig::new(url))?;
+                client
+                    .batch_execute(&format!("SET search_path TO {schema}"))
+                    .map_err(storage)?;
+                barrier.wait();
+                initialize_schema(&mut client)
+            }));
+        }
+        barrier.wait();
+        for worker in workers {
+            worker.join().unwrap().unwrap();
+        }
+
+        let tables: i64 = admin
+            .query_one(
+                "SELECT count(*) FROM information_schema.tables \
+                 WHERE table_schema=$1 AND table_name IN \
+                 ('fireweed_objectlog_manifest_pointer','fireweed_objectlog_immutable_claim')",
+                &[&schema],
+            )
+            .unwrap()
+            .get(0);
+        assert_eq!(tables, 2);
+        admin
+            .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+            .unwrap();
     }
 
     #[test]
