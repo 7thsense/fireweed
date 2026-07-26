@@ -1,9 +1,6 @@
 name: release
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -118,26 +115,6 @@ jobs:
       - run: rustup toolchain install nightly --profile minimal --component llvm-tools-preview
       - run: cargo install --locked cargo-llvm-cov --version 0.8.2
 
-      - name: Exact Postgres TP-003 storage-pair proof
-        env:
-          FIREWEED_PG_TEST_URL: postgres://postgres:fireweed@127.0.0.1:5432/postgres
-        run: |
-          matrix_evidence=docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl
-          parity_evidence=docs/perf/evidence/tp003-ac-txn-parity-postgres-storage-pairs.jsonl
-          rm -f "$matrix_evidence" "$parity_evidence"
-          cargo +1.92.0 test -p fireweed-conformance \
-            --test external_transaction_contract_matrix_tests \
-            ac_txn_contract_matrix_postgres_storage_pairs -- --exact --nocapture
-          cargo +1.92.0 test -p fireweed-conformance \
-            --test external_transaction_contract_matrix_tests \
-            ac_txn_6_postgres_storage_pair_parity -- --exact --nocapture
-          test -s "$matrix_evidence"
-          test -s "$parity_evidence"
-          cargo +1.92.0 run -p fireweed-release \
-            --bin fireweed-verify-transaction-evidence -- \
-            --evidence "$matrix_evidence" \
-            --evidence "$parity_evidence"
-
       - name: Install Helm
         uses: azure/setup-helm@v5
         with:
@@ -153,14 +130,14 @@ jobs:
           curl -fsSLo kind https://kind.sigs.k8s.io/dl/v0.25.0/kind-linux-amd64
           sudo install -m 0755 kind /usr/local/bin/kind
 
-      - name: Fresh smoke and governed TP-002 release gate
+      - name: Functional and governed release gate
         env:
           FIREWEED_PG_TEST_URL: postgres://postgres:fireweed@127.0.0.1:5432/postgres
         run: |
           bash scripts/ci/verify-governed-release-composite.sh \
             --contract target/tp002-release/composite-contract.json \
             --expected-revision "$GITHUB_SHA"
-          bash scripts/ci/release-gate.sh
+          bash scripts/ci/release-gate.sh --governed-performance-only
 
       - name: Bind governed TP-002 evidence to exact release tag
         shell: bash

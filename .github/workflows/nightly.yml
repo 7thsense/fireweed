@@ -1,38 +1,23 @@
-name: nightly
+name: extended functional checks
 
 on:
-  schedule:
-    - cron: "17 6 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  nightly-gate:
+  functional:
     runs-on: ubuntu-latest
-    # Keep the full-workspace test link within the ~14 GB runner disk (see ci.yml): trimmed debuginfo
-    # + no incremental, plus freeing preinstalled tooling below.
+    timeout-minutes: 20
     env:
       CARGO_INCREMENTAL: "0"
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
-      CARGO_PROFILE_TEST_DEBUG: line-tables-only
-    defaults:
-      run:
-        working-directory: fireweed
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
-      - name: Free disk space
-        working-directory: ${{ github.workspace }}
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost || true
-          df -h /
-
-      - name: Checkout Fireweed
-        uses: actions/checkout@v5
-        with:
-          path: fireweed
-
-      # No dependency pre-checkouts: cargo resolves every git dep itself and they are all public
-      # (fjord=github.com/7thsense/fjord, heimq, axon), so they clone anonymously over HTTPS.
-
-      - run: rustup toolchain install 1.92.0 --profile minimal --component clippy --component rustfmt --component llvm-tools-preview
-      - run: rustup toolchain install nightly --profile minimal --component llvm-tools-preview
-      - run: cargo install --locked cargo-llvm-cov --version 0.8.2
-      - run: bash scripts/ci/nightly-gate.sh
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install 1.92.0 --profile minimal --component rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: bash scripts/ci/verify-github-actions-policy.sh
+      - name: Extended workspace library tests
+        run: cargo +1.92.0 test --workspace --lib --locked

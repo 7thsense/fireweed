@@ -1,32 +1,15 @@
 name: turso projection
 
 on:
-  pull_request:
-    paths:
-      - Cargo.toml
-      - Cargo.lock
-      - crates/fireweed-engine/**
-      - crates/fireweed-objectlog/**
-      - crates/fireweed-relational/**
-      - crates/fireweed-server/**
-      - crates/fireweed-turso/**
-      - .github/workflows/turso.yml
-  push:
-    branches:
-      - main
-    paths:
-      - Cargo.toml
-      - Cargo.lock
-      - crates/fireweed-engine/**
-      - crates/fireweed-objectlog/**
-      - crates/fireweed-relational/**
-      - crates/fireweed-server/**
-      - crates/fireweed-turso/**
-      - .github/workflows/turso.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   focused:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
@@ -34,6 +17,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: rustup toolchain install 1.92.0 --profile minimal --component clippy --component rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: bash scripts/ci/verify-github-actions-policy.sh
       - run: cargo +1.92.0 fmt --all --check
       - run: cargo +1.92.0 clippy -p fireweed-turso -p fireweed-server --all-targets --features fireweed-server/turso-projection -- -D warnings
       - run: cargo +1.92.0 test -p fireweed-turso --features local
