@@ -221,6 +221,11 @@ fn postgres_config(
     }
 }
 
+fn schema_url(url: &str, schema: &str) -> String {
+    let separator = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{separator}options=-c%20search_path%3D{schema}")
+}
+
 fn objectlog_config(
     object_log: ObjectLogStorage,
     projection: ProjectionConfig,
@@ -531,6 +536,160 @@ async fn run_postgres_runtime(cell: &str, mode: PostgresMode, coordinated: bool)
         .unwrap_or_else(|_| panic!("failed to clean PostgreSQL schema for {cell}"));
 }
 
+fn run_sync_constructor(cell: &str, open: impl Fn() -> Fireweed) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build sync-constructor test runtime");
+    let fireweed = open();
+    runtime.block_on(public_interface::run(cell, &fireweed, false));
+    let probe = runtime.block_on(seed_reopen_probe(cell, &fireweed));
+    drop(fireweed);
+    let reopened = open();
+    runtime.block_on(verify_reopen_probe(&reopened, probe));
+    drop(reopened);
+}
+
+#[test]
+fn postgres_convenience_sync_public_interface() {
+    let postgres_url = required_env("FIREWEED_PG_TEST_URL");
+    let schema_name = unique_name("postgres_convenience_sync");
+    let mut schema = PostgresSchema::new(postgres_url.clone(), schema_name.clone());
+    let isolated_url = schema_url(&postgres_url, &schema_name);
+    run_sync_constructor("postgres-convenience-sync", || {
+        fireweed::open_postgres(&isolated_url, Arc::new(SystemClock)).unwrap_or_else(|error| {
+            panic!(
+                "failed to open postgres-convenience-sync: {}",
+                redacted_error(error, &[&postgres_url])
+            )
+        })
+    });
+    schema
+        .cleanup()
+        .unwrap_or_else(|_| panic!("failed to clean postgres-convenience-sync schema"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn postgres_convenience_async_public_interface() {
+    let postgres_url = required_env("FIREWEED_PG_TEST_URL");
+    let schema_name = unique_name("postgres_convenience_async");
+    let mut schema = PostgresSchema::new(postgres_url.clone(), schema_name.clone());
+    let isolated_url = schema_url(&postgres_url, &schema_name);
+    let fireweed = fireweed::open_postgres_async(&isolated_url, Arc::new(SystemClock))
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to open postgres-convenience-async: {}",
+                redacted_error(error, &[&postgres_url])
+            )
+        });
+    public_interface::run("postgres-convenience-async", &fireweed, false).await;
+    let probe = seed_reopen_probe("postgres-convenience-async", &fireweed).await;
+    drop(fireweed);
+    let reopened = fireweed::open_postgres_async(&isolated_url, Arc::new(SystemClock))
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to reopen postgres-convenience-async: {}",
+                redacted_error(error, &[&postgres_url])
+            )
+        });
+    verify_reopen_probe(&reopened, probe).await;
+    drop(reopened);
+    schema
+        .cleanup()
+        .unwrap_or_else(|_| panic!("failed to clean postgres-convenience-async schema"));
+}
+
+#[test]
+fn postgres_coordinated_constructor_public_interface() {
+    let postgres_url = required_env("FIREWEED_PG_TEST_URL");
+    let schema_name = unique_name("postgres_coordinated_constructor");
+    let mut schema = PostgresSchema::new(postgres_url.clone(), schema_name.clone());
+    let isolated_url = schema_url(&postgres_url, &schema_name);
+    let owner_id = OwnerId::new(unique_name("coordinated_owner")).expect("valid unique owner id");
+    run_sync_constructor("postgres-coordinated-constructor", || {
+        fireweed::open_postgres_coordinated(
+            &isolated_url,
+            Arc::new(SystemClock),
+            owner_id.clone(),
+            ControlPlaneConfig::default(),
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to open postgres-coordinated-constructor: {}",
+                redacted_error(error, &[&postgres_url])
+            )
+        })
+    });
+    schema
+        .cleanup()
+        .unwrap_or_else(|_| panic!("failed to clean postgres-coordinated-constructor schema"));
+}
+
+#[test]
+fn postgres_runtime_sync_public_interface() {
+    let postgres_url = required_env("FIREWEED_PG_TEST_URL");
+    let schema_name = unique_name("postgres_runtime_sync");
+    let mut schema = PostgresSchema::new(postgres_url.clone(), schema_name.clone());
+    let runtime = postgres_config(&postgres_url, &schema_name, PostgresMode::LogReplay, None);
+    run_sync_constructor("postgres-runtime-sync", || {
+        fireweed::open_postgres_runtime(runtime.clone(), Arc::new(SystemClock)).unwrap_or_else(
+            |error| {
+                panic!(
+                    "failed to open postgres-runtime-sync: {}",
+                    redacted_error(error, &[&postgres_url])
+                )
+            },
+        )
+    });
+    schema
+        .cleanup()
+        .unwrap_or_else(|_| panic!("failed to clean postgres-runtime-sync schema"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn postgres_relational_coordinated_node_public_interface() {
+    let postgres_url = required_env("FIREWEED_PG_TEST_URL");
+    let schema_name = unique_name("postgres_relational_coordinated_node");
+    let mut schema = PostgresSchema::new(postgres_url.clone(), schema_name.clone());
+    let runtime = PostgresRuntimeConfig {
+        url: ConfigSecret::new(postgres_url.clone()),
+        schema: Some(schema_name),
+        mode: PostgresMode::Relational,
+        node_id: Some(7),
+        coordination: Some(PostgresCoordinationConfig {
+            instance_id: OwnerId::new(unique_name("relational_owner"))
+                .expect("valid unique owner id"),
+            control_plane: ControlPlaneConfig::default(),
+        }),
+    };
+    let fireweed = fireweed::open_postgres_runtime_async(runtime.clone(), Arc::new(SystemClock))
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to open postgres-relational-coordinated-node: {}",
+                redacted_error(error, &[&postgres_url])
+            )
+        });
+    public_interface::run("postgres-relational-coordinated-node", &fireweed, false).await;
+    let probe = seed_reopen_probe("postgres-relational-coordinated-node", &fireweed).await;
+    drop(fireweed);
+    let reopened = fireweed::open_postgres_runtime_async(runtime, Arc::new(SystemClock))
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to reopen postgres-relational-coordinated-node: {}",
+                redacted_error(error, &[&postgres_url])
+            )
+        });
+    verify_reopen_probe(&reopened, probe).await;
+    drop(reopened);
+    schema
+        .cleanup()
+        .unwrap_or_else(|_| panic!("failed to clean postgres-relational-coordinated-node schema"));
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn postgres_log_replay_public_interface() {
     run_postgres_runtime("postgres-log-replay", PostgresMode::LogReplay, false).await;
@@ -581,6 +740,99 @@ async fn objectlog_local_postgres_strict_public_interface() {
     schema.cleanup().unwrap_or_else(|_| {
         panic!("failed to clean PostgreSQL schema for objectlog-local-postgres-strict")
     });
+}
+
+#[test]
+fn objectlog_local_postgres_sync_constructor_public_interface() {
+    let postgres_url = required_env("FIREWEED_PG_TEST_URL");
+    let root = FixtureRoot::new("objectlog_local_postgres_sync");
+    let namespace = unique_name("objectlog_local_postgres_sync");
+    let mut schema = PostgresSchema::new(postgres_url.clone(), derived_postgres_schema(&namespace));
+    let runtime = objectlog_config(
+        ObjectLogStorage::Local {
+            root: root.path().join("object-log"),
+        },
+        ProjectionConfig::Postgres {
+            url: ConfigSecret::new(postgres_url.clone()),
+        },
+        ResponseBarrier::Strict,
+        namespace,
+    );
+    let open = || {
+        fireweed::open_objectlog_postgres(runtime.clone(), Arc::new(SystemClock)).unwrap_or_else(
+            |error| {
+                panic!(
+                    "failed to open objectlog-local-postgres-sync: {}",
+                    redacted_error(error, &[&postgres_url])
+                )
+            },
+        )
+    };
+    let fireweed = open();
+    let test_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build object-log sync-constructor test runtime");
+    test_runtime.block_on(public_interface::run(
+        "objectlog-local-postgres-sync",
+        &fireweed,
+        true,
+    ));
+    let probe = test_runtime.block_on(seed_reopen_probe(
+        "objectlog-local-postgres-sync",
+        &fireweed,
+    ));
+    drop(fireweed);
+    let reopened = open();
+    test_runtime.block_on(verify_reopen_probe(&reopened, probe));
+    drop(reopened);
+    schema
+        .cleanup()
+        .unwrap_or_else(|_| panic!("failed to clean objectlog-local-postgres-sync schema"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn garage_s3_postgres_strict_public_interface() {
+    let config = S3Config::load();
+    let postgres_url = required_env("FIREWEED_PG_TEST_URL");
+    let namespace = unique_name("garage_s3_postgres_strict");
+    let mut objects = S3Namespace::new(&config, &namespace);
+    let mut schema = PostgresSchema::new(postgres_url.clone(), derived_postgres_schema(&namespace));
+    let runtime = objectlog_config(
+        s3_storage(&config),
+        ProjectionConfig::Postgres {
+            url: ConfigSecret::new(postgres_url.clone()),
+        },
+        ResponseBarrier::Strict,
+        namespace,
+    );
+    let fireweed = fireweed::open_objectlog_postgres_async(runtime.clone(), Arc::new(SystemClock))
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to open garage-s3-postgres-strict: {}",
+                redacted_error(error, &[&postgres_url])
+            )
+        });
+    public_interface::run("garage-s3-postgres-strict", &fireweed, true).await;
+    let probe = seed_reopen_probe("garage-s3-postgres-strict", &fireweed).await;
+    drop(fireweed);
+    let reopened = fireweed::open_objectlog_postgres_async(runtime, Arc::new(SystemClock))
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to reopen garage-s3-postgres-strict: {}",
+                redacted_error(error, &[&postgres_url])
+            )
+        });
+    verify_reopen_probe(&reopened, probe).await;
+    drop(reopened);
+    schema
+        .cleanup()
+        .unwrap_or_else(|_| panic!("failed to clean garage-s3-postgres-strict schema"));
+    objects
+        .cleanup()
+        .unwrap_or_else(|_| panic!("failed to clean garage-s3-postgres-strict namespace"));
 }
 
 async fn run_s3_sqlite(cell: &str, barrier: ResponseBarrier) {
