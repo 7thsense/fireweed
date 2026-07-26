@@ -9,14 +9,13 @@
 # crates are NOT referenced anywhere below.
 #
 # WHAT THIS GATE PROVES:
-#   - fmt clean, clippy clean (-D warnings), `cargo test --workspace` green.
-#   - Every row emitted into a CLEAN ledger dir is well-formed + strict-valid. The fresh SMOKE-tier headline
-#     ids E2 (cross-queue scale-out + queue density) and E3 (object-log cost/ack + recovery) are required.
+#   - fmt clean, clippy clean (-D warnings), and the selected workspace correctness suite is green.
+#   - Local mode emits into a CLEAN ledger dir and requires well-formed E2/E3 evidence. GitHub release
+#     jobs skip those workloads and consume exact-revision governed evidence instead.
 #   - The exact files named by the governed TP-002 release manifest semantically satisfy E0-E3. The E3
 #     contract is additionally source-revision-bound and rejects quiet-host or absolute host-speed gates.
-#   - Repository-held TP-003 evidence snapshot contains passing required rows
-#     for AC-TXN-1/2/3/6 on both exact Postgres storage pairs. Fresh generation
-#     is enforced by CI/release workflows.
+#   - Repository-held TP-003 evidence contains passing required rows for AC-TXN-1/2/3/6 on both exact
+#     Postgres storage pairs. Evidence generation is local/manual; GitHub only verifies governed inputs.
 #   - Live coverage bars: fireweed-core >=90% line / >=85% branch,
 #     fireweed-engine >=80% line (enforced below; this comment is not the
 #     authority — the check-lcov-coverage.py calls are).
@@ -31,9 +30,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TP002_RELEASE_DIR="${FIREWEED_TP002_RELEASE_DIR:-${REPO_ROOT}/target/tp002-release}"
 TP002_COMPOSITE_CONTRACT="${TP002_RELEASE_DIR}/composite-contract.json"
-if (($# != 0)); then
+RUN_LOCAL_PERFORMANCE=true
+if (($# == 1)) && [[ "$1" == "--governed-performance-only" ]]; then
+    RUN_LOCAL_PERFORMANCE=false
+elif (($# != 0)); then
     printf 'release-gate.sh: unexpected argument(s): %s\n' "$*" >&2
-    echo "usage: bash scripts/ci/release-gate.sh" >&2
+    echo "usage: bash scripts/ci/release-gate.sh [--governed-performance-only]" >&2
     exit 64
 fi
 
@@ -49,7 +51,11 @@ for required in "${TP002_COMPOSITE_CONTRACT}"; do
     }
 done
 
-echo "=== Fireweed Queue release gate (fresh smoke + governed TP-002 release evidence) ==="
+if [[ "${RUN_LOCAL_PERFORMANCE}" == true ]]; then
+    echo "=== Fireweed release gate (local performance + governed release evidence) ==="
+else
+    echo "=== Fireweed release gate (functional checks + governed performance evidence) ==="
+fi
 
 echo "--- fmt ---"
 ${CARGO} fmt --all --check
@@ -73,24 +79,36 @@ ${CARGO} run -p fireweed-release --bin fireweed-verify-transaction-evidence -- \
 # target/fireweed-ledger evidence path can
 # never satisfy the gate. Every suite is pointed at this dir via the env var
 # that fireweed_release::ledger_path() honors.
-FIREWEED_LEDGER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fireweed-ledger.XXXXXX")"
-export FIREWEED_LEDGER_DIR
-trap 'rm -rf "${FIREWEED_LEDGER_DIR}"' EXIT
-echo "--- clean ledger dir: ${FIREWEED_LEDGER_DIR} ---"
+if [[ "${RUN_LOCAL_PERFORMANCE}" == true ]]; then
+    FIREWEED_LEDGER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fireweed-ledger.XXXXXX")"
+    export FIREWEED_LEDGER_DIR
+    trap 'rm -rf "${FIREWEED_LEDGER_DIR}"' EXIT
+    echo "--- clean ledger dir: ${FIREWEED_LEDGER_DIR} ---"
+fi
 
 echo "--- workspace correctness tests ---"
-${CARGO} test --workspace
+if [[ "${RUN_LOCAL_PERFORMANCE}" == true ]]; then
+    ${CARGO} test --workspace
+else
+    # GitHub release jobs validate exact-revision governed evidence but never compile or execute
+    # performance integration targets. Full integration and durability matrices are run locally/manual.
+    ${CARGO} test --workspace --lib --bins
+fi
 
-echo "--- bench evidence suites (separate workspace; emits E2 smoke rows) ---"
-${CARGO} test --manifest-path "${REPO_ROOT}/crates/fireweed-bench/Cargo.toml" \
-    --test performance_cross_queue_scale_out_tests \
-    --test queue_density_single_node_tests
+if [[ "${RUN_LOCAL_PERFORMANCE}" == true ]]; then
+    echo "--- local performance evidence suites ---"
+    ${CARGO} test --manifest-path "${REPO_ROOT}/crates/fireweed-bench/Cargo.toml" \
+        --test performance_cross_queue_scale_out_tests \
+        --test queue_density_single_node_tests
 
-echo "--- strict validation of any smoke rows emitted by correctness tests ---"
-${CARGO} run -p fireweed-release --bin fireweed-verify-ledger -- \
-    --ledger-dir "${FIREWEED_LEDGER_DIR}" \
-    --strict \
-    --require-smoke-evidence E2,E3
+    echo "--- strict validation of locally emitted evidence ---"
+    ${CARGO} run -p fireweed-release --bin fireweed-verify-ledger -- \
+        --ledger-dir "${FIREWEED_LEDGER_DIR}" \
+        --strict \
+        --require-smoke-evidence E2,E3
+else
+    echo "--- local performance execution skipped; exact-revision governed evidence is authoritative ---"
+fi
 
 echo "--- governed TP-002 composite semantic contract ---"
 bash "${SCRIPT_DIR}/verify-governed-release-composite.sh" \
@@ -128,5 +146,9 @@ echo "--- build-closure integrity ---"
 bash "${SCRIPT_DIR}/verify-build-closure.sh" --aggregate pqueue-131eadfa
 
 echo "=== release gate PASSED ==="
-echo "    Required smoke evidence E2,E3 present + well-formed; coverage bars met."
+if [[ "${RUN_LOCAL_PERFORMANCE}" == true ]]; then
+    echo "    Locally generated evidence E2,E3 present and well-formed; coverage bars met."
+else
+    echo "    No performance workload ran; exact-revision governed evidence was verified."
+fi
 echo "    Governed release evidence E0-E3 is semantically complete; E3 is source-bound and portable."
