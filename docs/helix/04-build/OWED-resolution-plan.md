@@ -48,7 +48,7 @@ generate it from their own counters → two servers/handles on one backend (or a
 **Do:** change `UpsertPort::replace_if_pending` to NOT take `new_item_id` — the backend assigns it from its
 own `cmd_seq` (restart-safe, like PushPort) and returns it in `UpsertOutcome::{Inserted,Replaced}` (which
 already carry the id — verified, so the call sites that destructure the reply are unaffected). Ripple: the 3
-backend impls, the conformance upsert scenarios (incl. `upsert_is_unavailable`'s id literal), RESP `xadd`,
+backend impls, the shared conformance upsert scenarios, RESP `xadd`,
 facade `upsert`. RESP `xadd`-without-key → route through `PushPort` (backend-assigned); `xadd`-with-key →
 the new `UpsertPort`. Confirm no e2e asserts a SPECIFIC returned-id shape (XADD replies are captured as
 opaque `String` — safe).

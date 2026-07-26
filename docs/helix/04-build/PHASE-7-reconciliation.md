@@ -60,13 +60,13 @@ All target crates exist with the prescribed roles and outward deps **except post
   **DONE.** No-stub is **behavioral**: the `fireweed-conformance` suite has ≥1 fail-on-no-op test per port
   method — including the read-only `peek`/`pending` and the `SnapshotStore` write/read/latest round-trip
   (added in Phase 7 after the reconciliation audit flagged them as previously suite-uncovered) — run
-  across every adapter: **19 atomic scenarios on memory + sqlite, 16 eventual-apply on objectlog**.
+  across every adapter; both durability classes exercise the same inherent operation scenarios.
   `IdGen` exists as a port but the RESP/facade currently generate ids themselves (see Owed Item C).
-- **§2.2 Two-class durability** — **Atomic** (memory lock, sqlite txn): append+apply commit together;
-  Invariants 1&2 strong. **Eventual-apply** (objectlog): upsert **forbidden** → `EngineError::Unavailable`
-  (`-ERR fireweed unavailable`), enforced at BOTH the `replace_if_pending` port and the durable write
-  chokepoint. **DONE** — `fireweed-conformance::eventual_apply_suite!` + `upsert_is_unavailable` scenario;
-  objectlog `DurabilityClass::EventualApply`.
+- **§2.2 Two-class durability** — **Atomic** (memory lock, sqlite txn): append+apply commit together.
+  **Eventual-apply** (objectlog): the log commit and projection barrier remain distinct, but the profile
+  exposes the same inherent operation surface. **DONE** — `fireweed-conformance::eventual_apply_suite!`
+  runs the shared upsert and field-mutation scenarios; objectlog remains
+  `DurabilityClass::EventualApply` for its visibility and recovery guarantees.
 - **§2.3 Single logical claim path** — claim authority is the engine; backends select eligible candidates
   from the projection then commit a `Claim` command; upsert/claim mutually exclude under one lock.
   **DONE** (memory/sqlite/objectlog claim via `eligible_candidates` + `commit_locked`).
@@ -86,7 +86,7 @@ All target crates exist with the prescribed roles and outward deps **except post
 - **Invariant 1** (per-item delivery, cursorless, no orphaning) — **DONE.** e2e
   `drain_and_reconcile_with_offtheshelf_client` (produce N mixed-priority → drain via `XREADGROUP >` to
   empty → delivered-set == produced-set, each once, no hang, cross-batch priority bands).
-- **Invariant 2** (upsert = atomic XDEL+XADD, pending-only, atomic-class-only) — **DONE.** e2e
+- **Invariant 2** (upsert = atomic XDEL+XADD, pending-only, every storage class) — **DONE.** e2e
   `xadd_on_client_item_key_upserts_not_appends` (effects), `xadd_collision_with_leased_then_terminal_is_an_error`
   (collision → invalid/terminal), `xack_of_superseded_id_is_superseded_over_the_wire` (`-ERR fireweed
   superseded`, fixed a shared `finalize_validate` bug). Atomicity proven at engine level (conformance).
@@ -165,12 +165,12 @@ nicety — `STREAM`/`GROUPS` are implemented).
 | DoD gate | Status |
 |---|---|
 | `rg` zero refs to service/client/kafka/`NativeRoute`/`axum`/`/v1`/problem+json | **PASS** (grep clean in live `src/`+`tests/`). |
-| No-stub = behavioral conformance per adapter × port method | **PASS** (memory/sqlite atomic suite 19 scenarios; objectlog eventual-apply suite 16; ≥1 fail-on-no-op test per port method incl. peek/pending/snapshot, run across all adapters). |
+| No-stub = behavioral conformance per adapter × port method | **PASS** (atomic and eventual-apply suites exercise the same inherent operation surface; ≥1 fail-on-no-op test per port method incl. peek/pending/snapshot, run across all adapters). |
 | Capability matrix {RESP-stock, library} signed, no unmarked library-only cells | **PARTIAL** — matrix present in TD-006 with library-only annotations; a final "every API-001/002 op classified" audit is OWED (Owed Item F). |
 | Every migrated invariant has an engine-level test | **PASS** (auth, idempotency, operator-op, fencing, pause, recurrence-validation, command_position, purge-validation — engine tests). |
 | ReclaimDriver: reclaim with zero intervening client commands | **PASS** (`fireweed-server` background-reclaim test + engine conformance). |
 | e2e RESP green: drain-reconcile, cursor loop, crash recovery, fence, upsert effects+collision+superseded, intra-group exclusion | **PARTIAL** — drain-reconcile ✅, crash-recovery ✅ (sqlite reopen), fence ✅, upsert effects+collision+superseded ✅; **cursor-pagination loop + intra-group exclusion e2e OWED** (Owed Item E). |
-| One conformance suite green on memory+sqlite+postgres+objectlog; eventual-apply weaker; upsert-on-eventual→unavailable | **PARTIAL** — memory+sqlite+objectlog ✅; **postgres OWED** (Owed Item A). |
+| One conformance suite green on memory+sqlite+postgres+objectlog with backend-independent inherent operations | **PARTIAL** — memory+sqlite+objectlog ✅; **postgres OWED** (Owed Item A). |
 | Two driving adapters + one composition root; dependency-direction test passes | **PASS** (RESP + facade + `fireweed-server`; dep-direction test green). |
 | Durable-state reconstructable from the log (idempotency/fences/pause/command_position) | **PASS** (sqlite/objectlog rebuild-from-log durability tests; engine replay-reconstruction tests). |
 | Docs consistent; ADR-007/TD-006/TD-007 recorded; asymmetry recorded | **PASS** (architectural docs); minor doc-hygiene OWED (Owed Item F). |

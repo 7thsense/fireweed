@@ -150,14 +150,12 @@ key→shard routing to keep it local, and no multi-shard uniqueness concern.
 - **Reclaim-no-traffic:** an item is reclaimed/expired with zero client commands on its queue (§3).
 - **Upsert↔claim exclusion:** concurrent `replace_if_pending` and claim on one item never both
   succeed; superseded-id `XACK` returns `-ERR fireweed superseded`.
-- **Class guarantees:** atomic and log-then-apply backends both satisfy API-001's external transaction
-  contract. Log-then-apply additionally proves its response barrier, crash-point matrix, and
-  `request_id` replay behavior; pure lagging-projection log-then-apply profiles keep colliding-key
-  `XADD` at `-ERR fireweed unavailable`, while `objectlog/hybrid-strict` and `objectlog/hybrid-async`
-  must prove the replacement/update/reschedule race-closure scenarios in TD-004 before they lift the
-  ban.
-- **Mutable-write race closure:** profiles that admit mutable writes
-  (`objectlog/hybrid-strict` and `objectlog/hybrid-async`) MUST prove that
+- **Class guarantees:** atomic and log-then-apply backends expose the same inherent API-001 operation
+  surface and satisfy its external transaction contract. Log-then-apply additionally proves its response
+  barrier, crash-point matrix, `request_id` replay behavior, and the replacement/update/reschedule
+  race-closure scenarios in TD-004. Storage selection never turns a supported operation into
+  `Unavailable`.
+- **Mutable-write race closure:** every log-then-apply profile MUST prove that
   `replace_if_pending`, `update_fields`, and `reschedule` against a pending item
   can race a concurrent claim under group commit without both succeeding; the
   closure mechanism is deterministic apply-time re-validation with

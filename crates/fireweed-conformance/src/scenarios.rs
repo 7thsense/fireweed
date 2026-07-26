@@ -1423,36 +1423,6 @@ pub async fn adr011_typed_schema_less_queue_unaffected<B: Adr011ConformanceBacke
     );
 }
 
-/// Eventual-apply backends MUST refuse upsert (Invariant 2 / TD-007 §2.3: the atomic XDEL+XADD
-/// `replace_if_pending` is offered only on the atomic durability class). The refusal is the structured
-/// `Unavailable` (RESP `-ERR fireweed unavailable`). Used by the eventual-apply conformance variant in
-/// place of the three atomic-class upsert scenarios.
-pub async fn upsert_is_unavailable<B: ConformanceCore>(make: impl Fn() -> B) {
-    let b = make();
-    b.create_queue(qdef()).await.unwrap();
-    let err = b
-        .replace_if_pending(
-            &shard(),
-            &ClientItemKey::new("dup").unwrap(),
-            Some(PriorityValue::Int64(5)),
-            None,
-            None,
-            None,
-            BTreeMap::new(),
-            Metadata::default(),
-            None,
-            ts(1),
-            None,
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(
-        err,
-        EngineError::Unavailable,
-        "eventual-apply backends must refuse upsert with Unavailable (Invariant 2)"
-    );
-}
-
 /// FAC-1 (atomic class): `update_fields` merges a LIVE item's hot-storage fields/payload in place
 /// (set + remove), bumps `item_version`, honors the `expected_item_version` CAS (`Conflict` on mismatch),
 /// and rejects unknown/terminal ids — the write half of the `live_items` read.
@@ -1600,37 +1570,6 @@ pub async fn update_fields_merges_and_cas<B: ConformanceCore>(make: impl Fn() ->
         )
         .await,
         Err(EngineError::Terminal)
-    );
-}
-
-/// FAC-1 (eventual-apply class): the read-your-write field mutation is refused with `Unavailable`
-/// (parity with `upsert_is_unavailable`).
-pub async fn update_fields_is_unavailable<B: ConformanceCore>(make: impl Fn() -> B) {
-    let b = make();
-    b.create_queue(qdef()).await.unwrap();
-    commit(
-        &b,
-        envelope(
-            QueueCommand::Push(PushCommand {
-                items: vec![item("1", "ka", 5)],
-            }),
-            vec![],
-        ),
-    )
-    .await;
-    assert_eq!(
-        b.update_fields(
-            &shard(),
-            ItemId::new("1").unwrap(),
-            BTreeMap::new(),
-            PayloadUpdate::Keep,
-            None,
-            None,
-            ts(20),
-            None
-        )
-        .await,
-        Err(EngineError::Unavailable)
     );
 }
 

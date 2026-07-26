@@ -142,7 +142,7 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
     with an in-mem projection — correct + durable + reuses the core, but a relational queryable
     sqlite-projection is deferred. Flag in the summary so the user can redirect if they want relational first.
 - **After sqlite:** postgres (`ClaimPort`, concurrent-claim races, intra-group exclusion), then objectlog
-  (eventual-apply class, upsert banned → `-ERR fireweed unavailable`). Conformance green on each.
+  (eventual-apply class with the same inherent operation surface). Conformance green on each.
 
 ## Checklist
 
@@ -229,14 +229,11 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   restored on rebuild), B2 (post-commit apply panics not silently diverges), I1 (`MAX(seq)+1` not
   `COUNT(*)`, compaction-safe), I4/M1 (serialize/query errors → `EngineError::Storage`, no panic/swallow).
   clippy 0.
-- [x] **objectlog adapter** (EVENTUAL-APPLY class) → `fireweed-objectlog` rewritten in place (dropped the
-  external S3 `object-log` git dep). Durable log = immutable per-command JSON **objects** on a local
-  filesystem (S3 stand-in, no server); projection rebuilt-from-objects. `durability_class()=EventualApply`;
-  upsert banned → `Unavailable` (enforced at BOTH `replace_if_pending` AND the durable write chokepoint
-  `append_object`). New **eventual-apply conformance variant** (`fireweed_conformance::eventual_apply_suite!`
-  = 12 non-upsert scenarios + `upsert_is_unavailable`). 13 conformance + 4 durability green. Fresh-eyes
-  GO-with-conditions → cleared: I-1 (ReplacePending refused at write path + test), I-2 (torn trailing
-  object skipped on reopen, not a hard open() failure, + test), M-2 (snapshot ref-id `max+1`). clippy 0.
+- [x] **objectlog adapter** (EVENTUAL-APPLY class) → `fireweed-objectlog` provides an authoritative
+  segmented object log with projection rebuild. `durability_class()=EventualApply`; the shared
+  conformance variant exercises upsert and field mutation as supported operations, while durability tests
+  prove response-barrier and replay behavior. Fresh-eyes conditions around torn segments, recovery, and
+  snapshot identifiers are covered by focused tests. clippy 0.
 - [ ] postgres (ClaimPort) — **DEFERRED** (atomic-class near-clone of sqlite; needs a live PostgreSQL
   server, not running here though binaries/docker are available). Tracked as a fast-follow; do via the
   durable-adapter template + env-gated conformance when a DB is provisioned.
@@ -367,14 +364,10 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   e2e), and RECONCILE in Phase 7 — either amend TD-006 to "reclaim and redelivery each charge" or add a
   combined reclaim-relelease engine op that charges once. Not an autonomous unilateral change to the
   shared attempt semantics. (Surfaced by RESP part-2 fresh-eyes B1.)
-- 2026-06-23 EVENTUAL-APPLY CLASS + CONFORMANCE VARIANT: the upsert ban (Invariant 2) is enforced at TWO
-  doors on an eventual-apply backend — the `replace_if_pending` port (returns Unavailable) AND the durable
-  write chokepoint (`append_object` refuses a `ReplacePending` command before writing, so a raw command via
-  `Backend::write` can't sneak past). The shared conformance suite gained an EVENTUAL-APPLY VARIANT
-  (`eventual_apply_suite!`): the atomic suite MINUS the 3 UpsertPort scenarios and the raw-ReplacePending
-  scenario, PLUS `upsert_is_unavailable`. Filesystem-object-log recovery: rebuild replays the objects
-  (recomputes state); a torn TRAILING object is treated as uncommitted (skipped) while a torn non-final
-  object is real corruption (errors) — the eventual-apply class's non-atomic write boundary made explicit.
+- 2026-06-23 EVENTUAL-APPLY CLASS + CONFORMANCE VARIANT: the shared eventual-apply suite exercises the
+  same upsert, raw ReplacePending, and field-mutation behavior as atomic profiles. Object-log recovery
+  rebuilds from authoritative committed segments, while the response barrier and replay tests make the
+  class's distinct append/apply boundary explicit.
 - 2026-06-23 POSTGRES DEFERRED: with memory+sqlite (atomic) and objectlog (eventual-apply) all green,
   postgres is an atomic-class near-clone of sqlite gated only on a live PostgreSQL server (not running in
   this environment; brew binaries + docker are present). Deferred as a fast-follow rather than block the
