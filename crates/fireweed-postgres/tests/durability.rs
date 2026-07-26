@@ -11,10 +11,10 @@ use std::time::{Duration, Instant};
 use axon_esf::IndexDef;
 use fireweed_conformance::{claim_req, commit, envelope, item, qdef, qkey};
 use fireweed_core::{
-    ClientItemKey, CohortOnIncomplete, CohortPolicy, EligibilityPolicy, EntitySchemaDocument,
-    GateKeyPolicy, IndexDeclaration, IndexSpec, IndexType, MetadataValue, OrderingMode,
-    PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, QueueDefinition,
-    QueueIndex, RecurrenceMode, RecurrencePolicy, RetryPolicy,
+    ClientItemKey, EligibilityPolicy, EntitySchemaDocument, GateKeyPolicy, IndexDeclaration,
+    IndexSpec, IndexType, MetadataValue, OrderingMode, PriorityDirection, PriorityModel,
+    PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueIndex, RecurrenceMode,
+    RecurrencePolicy, RetryPolicy,
 };
 use fireweed_engine::{
     ClaimPort, ControlPlaneStore, EngineError, ProjectionRead, PushCommand, PushPort, PushSpec,
@@ -398,12 +398,7 @@ fn rich_qdef() -> QueueDefinition {
             max_gate_keys_per_item: Some(3),
             max_gates_per_request: Some(5),
         },
-        cohort_policy: Some(CohortPolicy {
-            enabled: true,
-            completion_bound_ms: Some(9_000),
-            on_incomplete: Some(CohortOnIncomplete::ExpireCohort),
-            max_cohort_size: Some(8),
-        }),
+        cohort_policy: None,
         recurrence: RecurrencePolicy {
             mode: RecurrenceMode::Recurring,
             until: Some(fireweed_conformance::ts(4_242)),
@@ -415,7 +410,7 @@ fn rich_qdef() -> QueueDefinition {
         retry_policy: RetryPolicy { max_attempts: 9 },
         max_push_batch_size: 17,
         max_claim_batch_size: 19,
-        max_eligible_group_size: Some(23),
+        max_eligible_group_size: None,
         secondary_indexes: vec![IndexSpec {
             name: "by_customer".to_string(),
             fields: vec!["customer".to_string(), "region".to_string()],
