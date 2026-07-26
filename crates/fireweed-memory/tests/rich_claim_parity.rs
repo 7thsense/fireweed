@@ -13,9 +13,15 @@ fn ts(seconds: i64) -> UtcTimestamp {
     UtcTimestamp::new(seconds, 0).unwrap()
 }
 
-fn rich_definition() -> QueueDefinition {
+fn group_definition() -> QueueDefinition {
     QueueDefinition {
         max_eligible_group_size: Some(4),
+        ..qdef()
+    }
+}
+
+fn cohort_definition() -> QueueDefinition {
+    QueueDefinition {
         cohort_policy: Some(CohortPolicy {
             enabled: true,
             completion_bound_ms: Some(30_000),
@@ -58,7 +64,7 @@ fn claim(compatibility: ClaimCompatibility, max_items: usize) -> ClaimRequest {
 #[tokio::test]
 async fn composed_memory_whole_group_claim_keeps_groups_atomic_and_ordered() {
     let backend = composed_memory_backend();
-    backend.create_queue(rich_definition()).await.unwrap();
+    backend.create_queue(group_definition()).await.unwrap();
     let first = backend
         .push(
             &shard(),
@@ -103,7 +109,7 @@ async fn composed_memory_whole_group_claim_keeps_groups_atomic_and_ordered() {
 #[tokio::test]
 async fn composed_memory_same_group_key_claim_selects_one_group_and_allows_a_partial_group() {
     let backend = composed_memory_backend();
-    backend.create_queue(rich_definition()).await.unwrap();
+    backend.create_queue(group_definition()).await.unwrap();
     let oldest = backend
         .push(
             &shard(),
@@ -143,7 +149,7 @@ async fn composed_memory_same_group_key_claim_selects_one_group_and_allows_a_par
 #[tokio::test]
 async fn composed_memory_whole_cohort_claim_is_all_or_nothing_with_shared_lease() {
     let backend = composed_memory_backend();
-    backend.create_queue(rich_definition()).await.unwrap();
+    backend.create_queue(cohort_definition()).await.unwrap();
     backend
         .push(&shard(), vec![cohort(1, "incomplete", 2)], ts(0), None)
         .await
