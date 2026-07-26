@@ -1798,7 +1798,7 @@ fn cohort_qdef(
 /// (FR-32a..32c, FR-47a, FR-47c, FR-48.)
 ///
 /// COVERED via the lib facade (each assertion bites a DISTINCT cause):
-///   - item-level claim still works on a cohort-enabled queue (parity);
+///   - cohort-enabled queues reject ordinary items that omit cohort identity;
 ///   - whole_cohort on a NON-cohort queue -> Invalid("...enabled=true");
 ///   - whole_cohort on a cohort queue with completion_bound_ms = None -> Invalid("requires cohort completion...");
 ///   - whole_cohort with completion_bound_ms (90s) > progress_bound_ms (60s) -> Invalid("...<= progress_bound_ms");
@@ -1820,22 +1820,11 @@ async fn callback_cohort_e2e() {
         .await
         .unwrap();
 
-    // Item-level parity: ordinary delivery still works on a cohort-enabled queue.
-    let _ = fireweed.push(&cohort_q, NewItem::default()).await.unwrap();
-    let item_claim = fireweed.claim(&cohort_q, 10, 60_000).await.unwrap();
-    assert_eq!(
-        item_claim.len(),
-        1,
-        "item-level claim works on a cohort-enabled queue"
+    let ordinary = fireweed.push(&cohort_q, NewItem::default()).await;
+    assert!(
+        matches!(&ordinary, Err(EngineError::Invalid(message)) if message.contains("cohort items require")),
+        "a cohort-enabled queue rejects an item without group_key and cohort_size: {ordinary:?}"
     );
-    fireweed
-        .nack(
-            &cohort_q,
-            item_claim.iter().map(|c| c.item_id),
-            Nack::Release,
-        )
-        .await
-        .unwrap();
 
     let whole_cohort = || ClaimCompatibility {
         whole_cohort: true,
@@ -1868,10 +1857,6 @@ async fn callback_cohort_e2e() {
         .create_queue(cohort_qdef("cohort", "nobound", true, None))
         .await
         .unwrap();
-    let _ = fireweed
-        .push(&no_bound_q, NewItem::default())
-        .await
-        .unwrap();
     let no_bound = fireweed
         .claim_with(&no_bound_q, 10, 60_000, whole_cohort())
         .await;
@@ -1884,10 +1869,6 @@ async fn callback_cohort_e2e() {
     let bad_bound_q = qk("cohort", "badbound");
     fireweed
         .create_queue(cohort_qdef("cohort", "badbound", true, Some(90_000)))
-        .await
-        .unwrap();
-    let _ = fireweed
-        .push(&bad_bound_q, NewItem::default())
         .await
         .unwrap();
     let bad_bound = fireweed
@@ -1916,14 +1897,14 @@ async fn callback_cohort_e2e() {
         "whole_cohort cannot be combined with group_key: {combined:?}"
     );
 
-    // (e) A well-formed whole-cohort claim is accepted by the shared projection. The queue currently has
-    // only an ordinary item, so the rich claim returns empty instead of silently item-claiming it.
+    // (e) A well-formed whole-cohort claim is accepted by the shared projection. The empty queue returns
+    // empty rather than silently downgrading to item-level selection.
     let well_formed = fireweed
         .claim_with(&cohort_q, 10, 60_000, whole_cohort())
         .await;
     assert!(
         matches!(&well_formed, Ok(items) if items.is_empty()),
-        "a well-formed whole_cohort claim succeeds without leasing ordinary items: {well_formed:?}"
+        "a well-formed whole_cohort claim succeeds without silently downgrading: {well_formed:?}"
     );
 
     // --- ASSERTED atomic whole-cohort SELECTION on the relational backend (BQ-14c, all-or-nothing) ---
@@ -1994,11 +1975,11 @@ async fn callback_cohort_e2e() {
     emit_ac(
         "AC-E2E-3",
         &[],
-        "item-level claim parity on a cohort-enabled queue; whole_cohort compatibility errors remain distinct (non-cohort -> Invalid(enabled); no completion_bound -> Invalid(requires); completion>progress -> Invalid(<=progress); combined with group_key -> Invalid(combined)); a well-formed shared-projection request succeeds without leasing ordinary items; and a COMPLETE cohort leases all-or-nothing under a shared cohort lease token while an incomplete cohort is skipped (INV-7). [DEFERRED: incomplete-cohort expiry->failed-with-reason is in the relational suites]",
+        "a cohort-enabled queue rejects items without group_key+cohort_size; whole_cohort compatibility errors remain distinct (non-cohort -> Invalid(enabled); no completion_bound -> Invalid(requires); completion>progress -> Invalid(<=progress); combined with group_key -> Invalid(combined)); a well-formed shared-projection request returns empty without downgrading; and a COMPLETE cohort leases all-or-nothing under a shared cohort lease token while an incomplete cohort is skipped (INV-7). [DEFERRED: incomplete-cohort expiry->failed-with-reason is in the relational suites]",
         BTreeMap::from([
             (
-                "item_level_claim_len".into(),
-                serde_json::json!(item_claim.len()),
+                "ordinary_item_rejected".into(),
+                serde_json::json!(ordinary.is_err()),
             ),
             (
                 "non_cohort".into(),
