@@ -43,17 +43,16 @@ revision, result, and environment where applicable.
 | Area | Check | Evidence or Command | Status |
 |------|-------|---------------------|--------|
 | Repository | Public repository is `telepathdata/fireweed`; issues enabled | `gh repo view telepathdata/fireweed --json nameWithOwner,visibility,hasIssuesEnabled,defaultBranchRef` | Confirmed 2026-07-25 |
-| Policy | README, `CONTRIBUTING.md`, support, security, and ADR-021 agree on issues-only contributions | `rg -n 'Issues are welcome|Pull requests.*not accepted|issues-only' README.md CONTRIBUTING.md SUPPORT.md SECURITY.md docs/helix/02-design/adr/ADR-021-open-source-license-and-contribution-policy.md` | [ ] Pending evidence |
-| Identity | Current Fireweed namespace gate passes | `bash scripts/verify-public-identity.sh` | [ ] Pending evidence |
-| Format | Formatting and whitespace gates pass | `cargo fmt --all -- --check && git diff --check` | [ ] Pending evidence |
-| Build | Workspace compiles with the release toolchain | `cargo check --locked --workspace --all-targets --all-features` | [ ] Pending evidence |
-| Lint | Workspace clippy gate passes | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | [ ] Pending evidence |
-| Function | Complete workspace functional suite passes | `cargo test --locked --workspace` | [ ] Pending evidence |
-| Facade | Public constructor, mutation, and durability matrices pass | `cargo test --locked -p fireweed --all-features` | [ ] Pending evidence |
-| PostgreSQL | PostgreSQL-backed matrix executes with no skips | `FIREWEED_PG_TEST_URL=<test-dsn> bash scripts/ci/record-postgres-transaction-evidence.sh` plus the live workspace suite | [ ] Pending live-service evidence |
-| Object storage | S3-compatible object-log matrix executes against Garage on eldir with no skips | Use the release test procedure with the approved Garage endpoint and unique test namespace | [ ] Pending live-service evidence |
-| Downstream | Snorri passes its complete release matrix against the public Fireweed tag | Snorri release checklist and locked git dependency evidence | [ ] Pending tagged-source evidence |
-| Version | Cargo, docs, tag, and release-note versions agree | `bash scripts/release/list-public-version-sources.sh v0.21.0` | [ ] Pending evidence |
+| Policy | README, `CONTRIBUTING.md`, support, security, and ADR-021 agree on issues-only contributions | `rg -n 'Issues are welcome|Pull requests.*not accepted|issues-only' README.md CONTRIBUTING.md SUPPORT.md SECURITY.md docs/helix/02-design/adr/ADR-021-open-source-license-and-contribution-policy.md` | Passed at `51152e1d` (2026-07-25) |
+| Identity | Current Fireweed namespace gate passes | `bash scripts/verify-public-identity.sh` | Passed at `51152e1d` (2026-07-25) |
+| Format | Formatting and whitespace gates pass | `cargo fmt --all --check && git diff --check` | Passed at `51152e1d` (2026-07-25) |
+| Build | Workspace compiles with the release toolchain | `cargo check --locked --workspace --all-targets --all-features` | Passed at `51152e1d` (2026-07-25) |
+| Lint | Workspace clippy gate passes | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | Passed at `51152e1d` (2026-07-25) |
+| Function | Complete non-performance workspace functionality passes | Workspace sweep, then affected-package and explicitly enumerated non-performance server-target reruns | Passed at `51152e1d` (2026-07-25) |
+| Facade | Public constructor, mutation, and durability matrices pass | `cargo test --locked -p fireweed --all-features` plus the 13-cell external matrix | Passed at `51152e1d` (2026-07-25) |
+| PostgreSQL | PostgreSQL-backed matrix executes with no skips | `FIREWEED_PG_TEST_URL=<test-dsn> bash scripts/ci/record-postgres-transaction-evidence.sh` plus the live workspace suite | Passed against Niflheim PostgreSQL at `51152e1d` (2026-07-25) |
+| Object storage | S3-compatible object-log matrix executes against Garage on eldir with no skips | Public external matrix plus `objectlog_shared_ownership` using PostgreSQL publication authority | Passed against Garage: external 13/13 and ownership 9/9 at `51152e1d` (2026-07-25) |
+| Version | Cargo, docs, tag, and release-note versions agree | `bash scripts/release/list-public-version-sources.sh v0.21.0` | Passed at `51152e1d` (2026-07-25) |
 
 ## Rollout Plan
 
@@ -104,10 +103,10 @@ moving or deleting a tag to substitute different source.
 
 ## Go or No-Go Decision
 
-- Decision: **Hold**
-- Decision time: not set
-- Reason: required local, live PostgreSQL, Garage, public-tag, and downstream
-  evidence rows are pending
-- Go condition: every required pre-deploy and verification row is backed by
-  evidence from the same release candidate revision
+- Decision: **Go for the Fireweed source release**
+- Decision time: 2026-07-25
+- Reason: local functionality, facade, live PostgreSQL, and live Garage gates
+  passed; registry publication remains deliberately deferred
+- Post-publication condition: verify the immutable tag and clean public clone,
+  then pin and validate Snorri before cutting its release
 - Follow-up owner: project maintainer
