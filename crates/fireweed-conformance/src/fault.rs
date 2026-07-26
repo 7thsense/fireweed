@@ -54,7 +54,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use bytes::Bytes;
-use fireweed_core::{ClientItemKey, GroupKey, LeaseToken, PriorityValue, RequestId};
+use fireweed_core::{ClientItemKey, GateKeyPolicy, GroupKey, LeaseToken, PriorityValue, RequestId};
 use fireweed_engine::{
     Backend, ClaimCompatibility, ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition,
     CommitEntryOutcome, CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionEntry,
@@ -117,6 +117,15 @@ pub fn spec(key: &str, priority: i64) -> PushSpec {
         payload: Some(Bytes::copy_from_slice(key.as_bytes())),
         ..Default::default()
     }
+}
+
+/// The transaction fixture used only by scenarios that exercise gate-bearing items and gate mutation.
+/// The shared [`qdef`] intentionally keeps gates disabled so unrelated transaction scenarios do not gain
+/// capabilities they never use.
+fn gate_qdef() -> fireweed_core::QueueDefinition {
+    let mut definition = qdef();
+    definition.eligibility_policy.gate_keys = GateKeyPolicy::Dynamic;
+    definition
 }
 
 /// Drive one raw commit through the backend's typed [`Backend::commit_raw`] seam, injecting a crash at
@@ -446,7 +455,7 @@ pub async fn ac_txn_1_kill_after_set_gates<B: ConformanceCore + LogRead + SetGat
     }
     {
         let a = make("txn1-setgates");
-        a.create_queue(qdef())
+        a.create_queue(gate_qdef())
             .await
             .map_err(|e| format!("create_queue: {e:?}"))?;
         let mut gated = spec("setgates-a", 10);
@@ -1038,8 +1047,10 @@ pub async fn ac_txn_2_capacity_unavailable_path<B: ConformanceCore + LogRead>(
     a.create_queue(def)
         .await
         .map_err(|e| format!("create_queue: {e:?}"))?;
+    let mut accepted = spec("txn2cap-accepted", 5);
+    accepted.group_key = Some(GroupKey::new("txn2cap-group").unwrap());
     let ids = a
-        .push(&shard(), vec![spec("txn2cap-accepted", 5)], ts(0), None)
+        .push(&shard(), vec![accepted], ts(0), None)
         .await
         .map_err(|e| format!("accepted push: {e:?}"))?;
     ensure!(ids.len() == 1, "accepted push landed one item");
