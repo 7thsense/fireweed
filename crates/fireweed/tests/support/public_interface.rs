@@ -1536,7 +1536,7 @@ async fn exercise_mutation(cell: &str, fw: &Fireweed, failures: &mut Vec<String>
         after_preview.as_ref().is_some_and(|value| {
             value.as_ref().is_some_and(|item| {
                 Some(item.item_version) == item_version
-                    && item.fields.get("selector-mutated").is_none()
+                    && !item.fields.contains_key("selector-mutated")
             })
         }),
         "dry-run changed the item or its version",

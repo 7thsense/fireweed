@@ -720,7 +720,6 @@ impl Config {
     /// (the bin's `main` collects `std::env::vars()` and passes the map in). Available only with the
     /// `env-config` feature (default-on for the bin); a library embedder can drop it via `default-features = false`.
     pub fn from_env(env: &BTreeMap<String, String>) -> Result<Config, ConfigError> {
-        let env = env;
         let segments = segment_config(env)?;
         let replicas = replica_count(env)?;
         let node_id = resolve_node_id(&env_or(env, "FIREWEED_NODE_ID", "0"));
