@@ -6,15 +6,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fireweed::{
-    AddressedMutation, BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateRequest, BatchUpdateValue,
-    ClientItemKey, ConfigSecret, ControlPlaneConfig, DiscoveryGranularity, EligibilityPolicy,
-    EngineError, Fireweed, GateKeyPolicy, ItemMutationOperation, ItemMutationRequest,
-    ItemMutationResponse, ItemMutationReturning, ItemPatch, LeaseGuard, NewItem,
-    ObjectLogRuntimeConfig, ObjectLogStorage, OrderingMode, OwnerId, PostgresCoordinationConfig,
-    PostgresMode, PostgresRuntimeConfig, PriorityDirection, PriorityModel, PriorityModelKind,
-    PriorityTieBreaker, PriorityValue, ProjectionConfig, QueueDefinition, QueueId, QueueKey,
-    RecoveryAction, RecoveryPolicy, RecurrencePolicy, RequestId, ResponseBarrier, RetryPolicy,
-    SegmentConfig, SystemClock, TenantId, UtcTimestamp,
+    BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateRequest, BatchUpdateValue, ClientItemKey,
+    ConfigSecret, ControlPlaneConfig, DiscoveryGranularity, EligibilityPolicy, EngineError,
+    Fireweed, GateKeyPolicy, ItemMutationOperation, ItemMutationRequest, ItemMutationResponse,
+    ItemMutationReturning, ItemPatch, ItemPredicate, ItemSelector, ItemSelectorScope, LeaseGuard,
+    NewItem, ObjectLogRuntimeConfig, ObjectLogStorage, OrderingMode, OwnerId,
+    PostgresCoordinationConfig, PostgresMode, PostgresRuntimeConfig, PriorityDirection,
+    PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, ProjectionConfig,
+    QueueDefinition, QueueId, QueueKey, RecoveryAction, RecoveryPolicy, RecurrencePolicy,
+    RequestId, ResponseBarrier, RetryPolicy, SegmentConfig, SelectedMutation, SystemClock,
+    TenantId, UtcTimestamp,
 };
 use fireweed_objectlog::segmented::{BlobStore, S3BlobStore};
 use postgres::{Client, NoTls};
@@ -366,28 +367,81 @@ async fn seed_reopen_probe(cell: &str, fireweed: &Fireweed) -> ReopenProbe {
         dry_run: false,
         returning: ItemMutationReturning::BeforeSnapshot,
         gate_changes: vec![],
-        operation: ItemMutationOperation::Addressed {
-            entries: vec![AddressedMutation {
-                item_id,
-                expected_item_version: None,
-                predicates: vec![],
-                lease_guard: LeaseGuard::RejectActive,
-                patch: ItemPatch {
-                    priority: BatchUpdateValue::Replace(Some(PriorityValue::Int64(2))),
-                    field_edits: std::collections::BTreeMap::from([(
-                        "mutation-proof".into(),
-                        Some(bytes::Bytes::from_static(b"durable")),
-                    )]),
-                    ..ItemPatch::default()
+        operation: ItemMutationOperation::SelectFirst {
+            clauses: vec![
+                SelectedMutation {
+                    selector_id: "pre-mutation-state".into(),
+                    selector: ItemSelector {
+                        scope: ItemSelectorScope::Live,
+                        predicates: vec![
+                            ItemPredicate::ClientItemKeyEq(
+                                ClientItemKey::new("reopen-primary").unwrap(),
+                            ),
+                            ItemPredicate::FieldEq {
+                                name: "mutation-proof".into(),
+                                value: None,
+                            },
+                        ],
+                    },
+                    predicates: vec![],
+                    lease_guard: LeaseGuard::RejectActive,
+                    patch: ItemPatch {
+                        priority: BatchUpdateValue::Replace(Some(PriorityValue::Int64(2))),
+                        field_edits: std::collections::BTreeMap::from([(
+                            "mutation-proof".into(),
+                            Some(bytes::Bytes::from_static(b"durable")),
+                        )]),
+                        ..ItemPatch::default()
+                    },
                 },
-            }],
+                SelectedMutation {
+                    selector_id: "must-not-run-on-replay".into(),
+                    selector: ItemSelector {
+                        scope: ItemSelectorScope::Live,
+                        predicates: vec![ItemPredicate::ClientItemKeyEq(
+                            ClientItemKey::new("reopen-primary").unwrap(),
+                        )],
+                    },
+                    predicates: vec![],
+                    lease_guard: LeaseGuard::RejectActive,
+                    patch: ItemPatch {
+                        priority: BatchUpdateValue::Replace(Some(PriorityValue::Int64(99))),
+                        ..ItemPatch::default()
+                    },
+                },
+            ],
         },
     };
+    let before_preview = fireweed
+        .live_item(&queue, ClientItemKey::new("reopen-primary").unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut preview_request = mutation.clone();
+    preview_request.dry_run = true;
+    let preview = fireweed
+        .mutate_items(&queue, preview_request)
+        .await
+        .unwrap();
+    assert!(preview.position.is_none());
+    assert_eq!(preview.summary.changed, 1);
+    let after_preview = fireweed
+        .live_item(&queue, ClientItemKey::new("reopen-primary").unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_preview.item_version, before_preview.item_version);
+    assert_eq!(after_preview.priority, before_preview.priority);
+    assert!(!after_preview.fields.contains_key("mutation-proof"));
     let mutation_response = fireweed
         .mutate_items(&queue, mutation.clone())
         .await
         .unwrap();
     assert_eq!(mutation_response.summary.changed, 1);
+    assert_eq!(
+        mutation_response.results[0].selector_id.as_deref(),
+        Some("pre-mutation-state")
+    );
     fireweed
         .push(
             &queue,
@@ -446,10 +500,10 @@ async fn verify_reopen_probe(fireweed: &Fireweed, probe: ReopenProbe) {
         "item mutation response must replay exactly after close/reopen"
     );
     let mut conflicting_mutation = probe.mutation;
-    let ItemMutationOperation::Addressed { entries } = &mut conflicting_mutation.operation else {
-        unreachable!("reopen mutation is addressed")
+    let ItemMutationOperation::SelectFirst { clauses } = &mut conflicting_mutation.operation else {
+        unreachable!("reopen mutation uses selectors")
     };
-    entries[0].patch.priority = BatchUpdateValue::Replace(Some(PriorityValue::Int64(1)));
+    clauses[0].patch.priority = BatchUpdateValue::Replace(Some(PriorityValue::Int64(1)));
     assert_eq!(
         fireweed
             .mutate_items(&probe.queue, conflicting_mutation)
