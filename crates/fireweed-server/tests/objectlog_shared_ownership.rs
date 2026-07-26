@@ -18,8 +18,10 @@ use fireweed_engine::{
     ControlPlaneStore, EngineError, EngineResult, LeaseState, OwnerEndpointAdvertisement,
     OwnerResolution, ProjectionRead, PushPort, PushSpec, QueueControlPlane, QueueKey, QueueLease,
 };
-use fireweed_objectlog::segmented::{FaultCutPoint, FaultHook, S3BlobStore};
-use fireweed_postgres::PostgresControlPlane;
+use fireweed_objectlog::segmented::{
+    BlobStore, FaultCutPoint, FaultHook, NamespacedBlobStore, PointerFencedBlobStore, S3BlobStore,
+};
+use fireweed_postgres::{PostgresControlPlane, PostgresManifestPointer};
 use fireweed_resp::{RespHooks, RouteDecision};
 use fireweed_server::{OwnershipRuntime, SegmentConfig, SegmentedObjectLogSqliteBackend};
 
@@ -176,7 +178,20 @@ fn stale_handoff_supervision_classifies_expiry_and_names_every_semantic_stage() 
     );
 }
 
-fn live_env(label: &str) -> Option<(String, Arc<S3BlobStore>)> {
+fn identifier_component(label: &str) -> String {
+    label
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn live_env(label: &str) -> Option<(String, Arc<dyn BlobStore>, String)> {
     let Ok(pg) = std::env::var("FIREWEED_PG_TEST_URL") else {
         eprintln!("{label} SKIPPED — set FIREWEED_PG_TEST_URL and FIREWEED_S3_TEST_ENDPOINT");
         return None;
@@ -191,9 +206,16 @@ fn live_env(label: &str) -> Option<(String, Arc<S3BlobStore>)> {
         std::env::var("FIREWEED_S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into());
     let secret =
         std::env::var("FIREWEED_S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into());
-    let store = S3BlobStore::new(&endpoint, &bucket, &access, &secret, "us-east-1")
+    let region = std::env::var("FIREWEED_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
+    let store = S3BlobStore::new(&endpoint, &bucket, &access, &secret, &region)
         .expect("construct MinIO client");
-    Some((pg, Arc::new(store)))
+    let n = UNIQUE.fetch_add(1, Ordering::SeqCst);
+    let namespace = format!(
+        "fireweed/objectlog-shared-ownership/{}-{}-{n}",
+        identifier_component(label),
+        std::process::id()
+    );
+    Some((pg, Arc::new(store), namespace))
 }
 
 fn unique(label: &str) -> (String, QueueDefinition, QueueKey) {
@@ -229,7 +251,12 @@ fn unique(label: &str) -> (String, QueueDefinition, QueueKey) {
     };
     let key = QueueKey::new(tenant, queue_id);
     (
-        format!("fireweed_own_{label}_{}_{}", std::process::id(), n),
+        format!(
+            "fireweed_own_{}_{}_{}",
+            identifier_component(label),
+            std::process::id(),
+            n
+        ),
         definition,
         key,
     )
@@ -254,10 +281,23 @@ fn projection_path(label: &str) -> String {
         .into_owned()
 }
 
-fn backend(store: Arc<S3BlobStore>, label: &str) -> Arc<SegmentedObjectLogSqliteBackend> {
+fn backend(
+    store: Arc<dyn BlobStore>,
+    postgres_url: &str,
+    namespace: &str,
+    label: &str,
+) -> Arc<SegmentedObjectLogSqliteBackend> {
+    let pointers = Arc::new(
+        PostgresManifestPointer::open(postgres_url)
+            .expect("open PostgreSQL object-publication authority"),
+    );
+    let fenced: Arc<dyn BlobStore> = Arc::new(PointerFencedBlobStore::new(store, pointers));
+    let namespaced: Arc<dyn BlobStore> = Arc::new(
+        NamespacedBlobStore::new(fenced, namespace).expect("construct unique object namespace"),
+    );
     Arc::new(
         SegmentedObjectLogSqliteBackend::open_with_blob_store(
-            store,
+            namespaced,
             &projection_path(label),
             SegmentConfig::new(262_144, 5).unwrap(),
         )
@@ -514,7 +554,7 @@ impl QueueControlPlane for PauseAfterAcquireControlPlane {
 
 #[test]
 fn acquire_fences_manifest_before_serving() {
-    let Some((pg, store)) = live_env("OBJECTLOG SHARED OWNERSHIP ACQUIRE") else {
+    let Some((pg, store, namespace)) = live_env("OBJECTLOG SHARED OWNERSHIP ACQUIRE") else {
         return;
     };
     let (schema, definition, queue) = unique("acquire");
@@ -523,7 +563,7 @@ fn acquire_fences_manifest_before_serving() {
         lease_ttl_ms: 10_000,
     };
     let cp = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
-    let backend = backend(store, "acquire");
+    let backend = backend(store, &pg, &namespace, "acquire");
     let runtime = OwnershipRuntime::new(
         backend.clone(),
         cp.clone(),
@@ -557,7 +597,8 @@ fn acquire_fences_manifest_before_serving() {
 
 #[test]
 fn concurrent_acquires_publish_exactly_one_usable_owner() {
-    let Some((pg, store)) = live_env("OBJECTLOG SHARED OWNERSHIP CONCURRENT ACQUIRE") else {
+    let Some((pg, store, namespace)) = live_env("OBJECTLOG SHARED OWNERSHIP CONCURRENT ACQUIRE")
+    else {
         return;
     };
     let (schema, definition, queue) = unique("concurrent");
@@ -568,7 +609,7 @@ fn concurrent_acquires_publish_exactly_one_usable_owner() {
     let cp_a = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
     let cp_b = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
     let observer = PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap();
-    let backend = backend(store, "concurrent");
+    let backend = backend(store, &pg, &namespace, "concurrent");
     let a = Arc::new(OwnershipRuntime::new(
         backend.clone(),
         cp_a,
@@ -601,7 +642,7 @@ fn concurrent_acquires_publish_exactly_one_usable_owner() {
 
 #[test]
 fn pending_fence_gap_linearizes_old_commit_before_storage_fence_then_rejects_stale_retry() {
-    let Some((pg, store)) = live_env("OBJECTLOG PENDING FENCE LINEARIZATION") else {
+    let Some((pg, store, namespace)) = live_env("OBJECTLOG PENDING FENCE LINEARIZATION") else {
         return;
     };
     let (schema, definition, queue) = unique("pending-gap");
@@ -618,8 +659,8 @@ fn pending_fence_gap_linearizes_old_commit_before_storage_fence_then_rejects_sta
         resume: Mutex::new(resume_rx),
     });
     let observer = PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap();
-    let a_backend = backend(store.clone(), "pending-gap-a");
-    let b_backend = backend(store, "pending-gap-b");
+    let a_backend = backend(store.clone(), &pg, &namespace, "pending-gap-a");
+    let b_backend = backend(store, &pg, &namespace, "pending-gap-b");
     let a = Arc::new(OwnershipRuntime::new(
         a_backend.clone(),
         cp_a,
@@ -640,6 +681,7 @@ fn pending_fence_gap_linearizes_old_commit_before_storage_fence_then_rejects_sta
         b_backend.create_queue(definition).await.unwrap();
         a_backend.fence_epoch(&queue, 0).await.unwrap();
         a.acquire_queue(&queue, ts(0)).await.unwrap();
+        let flusher_a = a_backend.spawn_flusher();
 
         let acquiring = {
             let b = b.clone();
@@ -650,7 +692,7 @@ fn pending_fence_gap_linearizes_old_commit_before_storage_fence_then_rejects_sta
             .recv_timeout(std::time::Duration::from_secs(5))
             .unwrap();
         assert_eq!(
-            observer.lease(&queue).unwrap().state,
+            tokio::task::block_in_place(|| observer.lease(&queue).unwrap()).state,
             LeaseState::PendingFence
         );
         let routing_key = format!("{}:{}", queue.tenant_id.as_str(), queue.queue_id.as_str());
@@ -676,6 +718,7 @@ fn pending_fence_gap_linearizes_old_commit_before_storage_fence_then_rejects_sta
                 .await,
             Err(EngineError::EpochFenced)
         );
+        flusher_a.abort();
         assert_eq!(b_backend.metrics(&queue).await.unwrap().pending, 1);
         assert_eq!(b_backend.current_epoch(&queue).await.unwrap(), 2);
     });
@@ -683,7 +726,8 @@ fn pending_fence_gap_linearizes_old_commit_before_storage_fence_then_rejects_sta
 
 #[test]
 fn greater_epoch_owner_hydrates_snapshot_tail_before_serving() {
-    let Some((pg, store)) = live_env("OBJECTLOG SHARED OWNERSHIP TAKEOVER HYDRATION") else {
+    let Some((pg, store, namespace)) = live_env("OBJECTLOG SHARED OWNERSHIP TAKEOVER HYDRATION")
+    else {
         return;
     };
     let (schema, definition, queue) = unique("hydrate");
@@ -694,8 +738,8 @@ fn greater_epoch_owner_hydrates_snapshot_tail_before_serving() {
     let cp_a = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
     let cp_b = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
     let observer = PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap();
-    let a_backend = backend(store.clone(), "hydrate-a");
-    let b_backend = backend(store, "hydrate-b");
+    let a_backend = backend(store.clone(), &pg, &namespace, "hydrate-a");
+    let b_backend = backend(store, &pg, &namespace, "hydrate-b");
     let a = OwnershipRuntime::new(
         a_backend.clone(),
         cp_a,
@@ -803,7 +847,9 @@ fn greater_epoch_owner_hydrates_snapshot_tail_before_serving() {
 
 #[test]
 fn greater_epoch_owner_rebuilds_projection_initialized_before_writes() {
-    let Some((pg, store)) = live_env("OBJECTLOG SHARED OWNERSHIP EMPTY TAKEOVER REBUILD") else {
+    let Some((pg, store, namespace)) =
+        live_env("OBJECTLOG SHARED OWNERSHIP EMPTY TAKEOVER REBUILD")
+    else {
         return;
     };
     let (schema, definition, queue) = unique("empty_hydrate");
@@ -814,8 +860,8 @@ fn greater_epoch_owner_rebuilds_projection_initialized_before_writes() {
     let cp_a = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
     let cp_b = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
     let observer = PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap();
-    let a_backend = backend(store.clone(), "empty-hydrate-a");
-    let b_backend = backend(store, "empty-hydrate-b");
+    let a_backend = backend(store.clone(), &pg, &namespace, "empty-hydrate-a");
+    let b_backend = backend(store, &pg, &namespace, "empty-hydrate-b");
     let a = OwnershipRuntime::new(
         a_backend.clone(),
         cp_a,
@@ -871,7 +917,8 @@ fn stale_append_paused_before_authority_cannot_survive_handoff() {
     // Parse explicit watchdog configuration before the live-environment loud skip. Invalid operator
     // configuration must fail closed even when Postgres/MinIO are absent.
     let coordination_watchdog = coordination_watchdog_timeout();
-    let Some((pg, store)) = live_env("OBJECTLOG SHARED OWNERSHIP STALE APPEND RACE") else {
+    let Some((pg, store, namespace)) = live_env("OBJECTLOG SHARED OWNERSHIP STALE APPEND RACE")
+    else {
         return;
     };
     let (schema, definition, queue) = unique("race");
@@ -881,8 +928,8 @@ fn stale_append_paused_before_authority_cannot_survive_handoff() {
     };
     let cp_a = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
     let cp_b = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
-    let a_backend = backend(store.clone(), "race-a");
-    let b_backend = backend(store.clone(), "race-b");
+    let a_backend = backend(store.clone(), &pg, &namespace, "race-a");
+    let b_backend = backend(store.clone(), &pg, &namespace, "race-b");
     let a = Arc::new(OwnershipRuntime::new(
         a_backend.clone(),
         cp_a,
@@ -906,7 +953,7 @@ fn stale_append_paused_before_authority_cannot_survive_handoff() {
         resume: Mutex::new(resume_rx),
         fired: AtomicBool::new(false),
     })));
-    let reopened = backend(store, "race-reopen");
+    let reopened = backend(store, &pg, &namespace, "race-reopen");
     let seam_stage = Arc::new(Mutex::new(StaleHandoffStage::AwaitingFaultEntry));
     let supervised_stage = seam_stage.clone();
     test_runtime().block_on(async {
@@ -966,7 +1013,8 @@ fn stale_append_paused_before_authority_cannot_survive_handoff() {
 
 #[test]
 fn failed_fence_and_failed_compensation_remain_non_serving_across_restart() {
-    let Some((pg, store)) = live_env("OBJECTLOG SHARED OWNERSHIP FAILURE RECOVERY") else {
+    let Some((pg, store, namespace)) = live_env("OBJECTLOG SHARED OWNERSHIP FAILURE RECOVERY")
+    else {
         return;
     };
     let (schema, definition, queue) = unique("failure");
@@ -974,7 +1022,7 @@ fn failed_fence_and_failed_compensation_remain_non_serving_across_restart() {
         heartbeat_ttl_ms: 5_000,
         lease_ttl_ms: 10_000,
     };
-    let backend = backend(store, "failure");
+    let backend = backend(store, &pg, &namespace, "failure");
     let failing_cp = Arc::new(FailReleaseControlPlane {
         inner: PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap(),
         fail_release: AtomicBool::new(false),
