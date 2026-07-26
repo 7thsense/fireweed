@@ -40,24 +40,23 @@
 //! `‡` AC-TXN-1 (row 206) checkpoints kill-after-success for ALL eight named mutating ops — CreateQueue,
 //! BatchPush, BatchUpdate, SetGates, BatchClaim, BatchRenewLeases, BatchFinalize, PurgeItems. `sqlite_relational`
 //! (atomic AND gate-capable) exercises EVERY op for real, so it is an unqualified `pass`. The other durable
-//! profiles are also `pass`, with the ops they genuinely cannot perform recorded as capability-N/A (NOT a
-//! coverage gap): SetGates needs a gate-capable backend, so the non-gate log/hybrid profiles
-//! (`supports_gates()==false`, gate state being a relational-only feature) record it capability-N/A; and
-//! BatchUpdate is atomic-class only, so the eventual-apply objectlog / object_log_sqlite profiles (which
-//! return `Unavailable`) record it capability-N/A. `memory` is non-durable so kill/restart is `n/a` wholesale.
+//! profiles are also `pass`. Every current projection supports gate membership, gate state, and log-authoritative
+//! field mutation, so both `SetGates` and `BatchUpdate` are genuinely exercised across sqlite-log,
+//! sqlite-relational, objectlog, and objectlog+sqlite. `memory` is non-durable so kill/restart is `n/a`
+//! wholesale.
 //!
 //! `§` AC-TXN-2 (row 207) now drives the FULL rejection-class surface — per-item-invalid finalize,
 //! unknown-id renew, request-id-conflict, envelope-invalid batches (charset-invalid group_key +
 //! structurally-invalid group_batching), stale-lease/operator-fenced conflict, capacity/batch-limit
-//! (`BatchTooLarge`) + unavailable (upsert on eventual-apply) paths, and the commit-timeout/abort path. The
+//! (`BatchTooLarge`) plus an explicitly N/A Unavailable subclass, and the commit-timeout/abort path. The
 //! pure-reject classes each assert 0 durable commands + 0 visible effect (re-verified after restart+replay on
 //! the durable profiles) while an accepted sibling keeps normal success (a validly-leased sibling finalizes).
 //! The commit-timeout path is the DANGEROUS one and is modelled at the real append→apply window
 //! (`CutPoint::AfterAppendBeforeApply`): the command lands durably but its projection apply never runs
 //! (unknown outcome, 0 half-applied in-process), and on drop+reopen recovery replays the durable tail EXACTLY
 //! ONCE (item committed once, 0 duplicate/partial state transitions) — the same contract AC-TXN-3 proves.
-//! Two capability-N/A clauses (never a silent pass): upsert->Unavailable cannot occur on the ATOMIC profiles
-//! (upsert is available there — the `BatchTooLarge` capacity path covers capacity), and the append→apply
+//! Two capability-N/A clauses (never a silent pass): no inherent public operation is expected to become
+//! `Unavailable` on any current storage profile (the `BatchTooLarge` path covers capacity), and the append→apply
 //! commit-timeout window does not exist on the UNIFIED relational store (`sqlite_relational`: stage-only
 //! append, append+apply in one transaction — same N/A as AC-TXN-3); on `memory` the restart/recovery
 //! re-verifications are capability-N/A (non-durable). So every row is `pass` (no coverage-GAP). The standalone
@@ -392,11 +391,11 @@ const NON_DURABLE: TxnCaps = TxnCaps {
 /// * **coverage-GAP** — the backend SUPPORTS an op/cut-point but the suite does not exercise it. Any `GAP`
 ///   assertion forces the row to `partial`. This is the honesty gate: a `pass` never covers an untested
 ///   SUPPORTED requirement.
-/// * **capability-N/A** — the backend genuinely cannot perform the op (a class/capability property, e.g.
-///   BatchUpdate is atomic-class-only so eventual-apply profiles return `Unavailable`; SetGates needs a
-///   gate-capable backend; a non-durable profile cannot kill/restart). A `capability-N/A` assertion is a
-///   truthful declaration, NOT a coverage hole, so it does NOT force `partial`: a row is still `pass` when
-///   every op the backend actually supports is exercised.
+/// * **capability-N/A** — the requested rejection/cut cannot exist for the profile (e.g. the current
+///   full-capability profiles have no public-operation `Unavailable` subclass, a unified store has no
+///   durable-but-unapplied cut window, or a non-durable profile cannot kill/restart). A `capability-N/A`
+///   assertion is a truthful declaration, NOT a coverage hole, so it does NOT force `partial`: a row is
+///   still `pass` when every supported operation is exercised.
 ///
 /// So a row is `partial` iff it carries a coverage-`GAP`; capability-`N/A` clauses are recorded verbatim for
 /// audit but do not downgrade a row that otherwise fully exercises its supported surface.
@@ -1007,9 +1006,8 @@ async fn ac_txn_4_after_apply_before_response_crash() {
 // AC-TXN-1 per-op kill-after-success checkpoints (TP-003 §3.10 row 206), as standalone tests so each
 // named mutating op's kill-after-success step is independently satisfiable (bead pqueue-b943a44b),
 // independent of the aggregate `ac_txn_contract_matrix` evidence run. Each runs the durable in-process
-// profiles; the atomic profiles (sqlite_log) exercise the op for real, the eventual-apply profiles
-// (objectlog, object_log_sqlite) exercise the honest N/A path for BatchUpdate. SetGates is N/A on all of
-// these non-gate composed profiles (gate state is relational-only) and the test asserts that N/A holds.
+// profiles. Every current projection supports log-authoritative field mutation and gates, so BatchUpdate and
+// SetGates are exercised for real on every durable profile.
 
 #[tokio::test]
 async fn ac_txn_1_kill_after_create_queue() {
@@ -1031,8 +1029,8 @@ async fn ac_txn_1_kill_after_create_queue() {
 
 #[tokio::test]
 async fn ac_txn_1_kill_after_batch_update() {
-    // sqlite_relational + sqlite_log are atomic: BatchUpdate is GENUINELY exercised (durable + visible after
-    // reopen), never capability-N/A.
+    // Every current projection supports log-authoritative field mutation. Each profile must durably preserve
+    // the update across reopen; no profile may hide this supported operation behind capability-N/A.
     for (name, outcome) in [
         (
             "sqlite_relational",
@@ -1046,15 +1044,6 @@ async fn ac_txn_1_kill_after_batch_update() {
             fireweed_conformance::fault::ac_txn_1_kill_after_batch_update(sqlite_log_factory())
                 .await,
         ),
-    ] {
-        assert!(outcome.is_ok(), "{name}: {:?}", outcome.err());
-        assert!(
-            outcome.as_ref().unwrap().iter().all(|a| !a.contains("N/A")),
-            "BatchUpdate must be genuinely exercised on the atomic {name} profile, not N/A: {outcome:?}"
-        );
-    }
-    // objectlog / object_log_sqlite are eventual-apply: BatchUpdate is atomic-only → capability-N/A.
-    for (name, outcome) in [
         (
             "objectlog",
             fireweed_conformance::fault::ac_txn_1_kill_after_batch_update(objectlog_factory())
@@ -1069,32 +1058,30 @@ async fn ac_txn_1_kill_after_batch_update() {
         ),
     ] {
         assert!(outcome.is_ok(), "{name}: {:?}", outcome.err());
+        let assertions = outcome.as_ref().unwrap();
         assert!(
-            outcome
-                .as_ref()
-                .unwrap()
+            assertions.iter().all(|a| !a.contains("N/A")),
+            "BatchUpdate must be genuinely exercised on {name}, not capability-N/A: {outcome:?}"
+        );
+        assert!(
+            assertions
                 .iter()
-                .any(|a| a.contains("capability-N/A")),
-            "BatchUpdate must be capability-N/A on the eventual-apply {name} profile: {outcome:?}"
+                .any(|a| a.contains("effect durable + visible after kill/reopen")),
+            "{name} must prove the field update survives reopen: {outcome:?}"
         );
     }
 }
 
 #[tokio::test]
 async fn ac_txn_1_kill_after_set_gates() {
-    // sqlite_relational is gate-capable + atomic: SetGates is GENUINELY exercised (the blocked gate survives
-    // kill/reopen and keeps the gated item unclaimable), never capability-N/A.
-    let sr =
-        fireweed_conformance::fault::ac_txn_1_kill_after_set_gates(sqlite_relational_factory())
-            .await;
-    assert!(sr.is_ok(), "sqlite_relational: {:?}", sr.err());
-    assert!(
-        sr.as_ref().unwrap().iter().all(|a| !a.contains("N/A")),
-        "SetGates must be genuinely exercised on the gate-capable sqlite_relational profile, not N/A: {sr:?}"
-    );
-    // The remaining composed profiles are non-gate (gate state is relational-only), so SetGates is genuinely
-    // capability-N/A on each — assert the honest capability-N/A path (never a silent pass).
+    // Every current projection is gate-capable. Each profile must durably preserve the blocked state across
+    // reopen; no profile may hide this supported operation behind capability-N/A.
     for (name, outcome) in [
+        (
+            "sqlite_relational",
+            fireweed_conformance::fault::ac_txn_1_kill_after_set_gates(sqlite_relational_factory())
+                .await,
+        ),
         (
             "sqlite_log",
             fireweed_conformance::fault::ac_txn_1_kill_after_set_gates(sqlite_log_factory()).await,
@@ -1110,13 +1097,16 @@ async fn ac_txn_1_kill_after_set_gates() {
         ),
     ] {
         assert!(outcome.is_ok(), "{name}: {:?}", outcome.err());
+        let assertions = outcome.as_ref().unwrap();
         assert!(
-            outcome
-                .as_ref()
-                .unwrap()
+            assertions.iter().all(|a| !a.contains("N/A")),
+            "SetGates must be genuinely exercised on {name}, not capability-N/A: {outcome:?}"
+        );
+        assert!(
+            assertions
                 .iter()
-                .any(|a| a.contains("capability-N/A")),
-            "SetGates must be capability-N/A on the non-gate {name} profile: {outcome:?}"
+                .any(|a| a.contains("blocked-gate state durable after kill/reopen")),
+            "{name} must prove the blocked gate survives reopen: {outcome:?}"
         );
     }
 }
@@ -1208,8 +1198,8 @@ async fn ac_txn_2_stale_lease_conflict_has_no_durable_effect() {
 
 #[tokio::test]
 async fn ac_txn_2_capacity_unavailable_path_has_no_durable_effect() {
-    // Atomic backends: upsert is available -> the upsert->Unavailable class is capability-N/A; the
-    // BatchTooLarge capacity path is exercised for real.
+    // Every current profile exposes the same inherent operation surface. The Unavailable rejection subclass
+    // is therefore explicitly N/A, while the BatchTooLarge capacity path is exercised for real.
     for (name, outcome) in [
         (
             "sqlite_relational",
@@ -1227,20 +1217,6 @@ async fn ac_txn_2_capacity_unavailable_path_has_no_durable_effect() {
             )
             .await,
         ),
-    ] {
-        assert!(outcome.is_ok(), "{name}: {:?}", outcome.err());
-        let asserts = outcome.as_ref().unwrap();
-        assert!(
-            asserts.iter().all(|a| !a.contains("GAP")),
-            "{name} capacity/unavailable must not carry a coverage GAP: {outcome:?}"
-        );
-        assert!(
-            asserts.iter().any(|a| a.contains("capability-N/A")),
-            "{name} (atomic) must record upsert->Unavailable as capability-N/A: {outcome:?}"
-        );
-    }
-    // Eventual-apply backends: upsert genuinely refuses with Unavailable (exercised, not N/A).
-    for (name, outcome) in [
         (
             "objectlog",
             fireweed_conformance::fault::ac_txn_2_capacity_unavailable_path(
@@ -1265,10 +1241,12 @@ async fn ac_txn_2_capacity_unavailable_path_has_no_durable_effect() {
             "{name} capacity/unavailable must not carry a coverage GAP: {outcome:?}"
         );
         assert!(
-            asserts
-                .iter()
-                .any(|a| a.contains("unavailable path: upsert")),
-            "{name} (eventual-apply) must exercise the upsert->Unavailable path: {outcome:?}"
+            asserts.iter().any(|a| a.contains("capability-N/A")),
+            "{name} must explicitly record the Unavailable subclass as capability-N/A: {outcome:?}"
+        );
+        assert!(
+            asserts.iter().any(|a| a.contains("BatchTooLarge")),
+            "{name} must still exercise the actual capacity rejection: {outcome:?}"
         );
     }
 }

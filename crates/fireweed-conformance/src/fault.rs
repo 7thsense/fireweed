@@ -54,14 +54,14 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use bytes::Bytes;
-use fireweed_core::{ClientItemKey, GroupKey, LeaseToken, Metadata, PriorityValue, RequestId};
+use fireweed_core::{ClientItemKey, GroupKey, LeaseToken, PriorityValue, RequestId};
 use fireweed_engine::{
     Backend, ClaimCompatibility, ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition,
     CommitEntryOutcome, CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionEntry,
-    CommitTransitionPort, ControlPlaneStore, DurabilityClass, EngineError, EntryRecovery,
-    FenceLeaseCommand, FinalizeKind, FinalizeOutcome, GroupBatching, LogRead, PayloadUpdate,
-    PushCommand, PushSpec, QueueCommand, RawCommitFault, RawCommitRequest, RecoveryReadPort,
-    RequestIdReplayProbe, SetGatesCommand, SetGatesPort, UnfenceLeaseCommand,
+    CommitTransitionPort, ControlPlaneStore, EngineError, EntryRecovery, FenceLeaseCommand,
+    FinalizeKind, FinalizeOutcome, GroupBatching, LogRead, PayloadUpdate, PushCommand, PushSpec,
+    QueueCommand, RawCommitFault, RawCommitRequest, RecoveryReadPort, RequestIdReplayProbe,
+    SetGatesCommand, SetGatesPort, UnfenceLeaseCommand,
 };
 
 use crate::{ConformanceCore, claim_req, commit, envelope, item, qdef, qkey, shard, ts};
@@ -166,9 +166,8 @@ pub async fn durable_command_count<B: LogRead>(backend: &B) -> Result<usize, Str
 /// checkpointed inline; the remaining four (`CreateQueue`-alone, `BatchUpdate`, `SetGates`, `PurgeItems`)
 /// each get their own kill-after-success checkpoint on an isolated tag via the `ac_txn_1_kill_after_*`
 /// helpers below, so no later op can mask an earlier op's assertion. Two ops are capability-gated and record
-/// an honest N/A (never a silent pass) where genuinely unreachable: `BatchUpdate` is atomic-class only (the
-/// eventual-apply object-log family refuses it `Unavailable`), and `SetGates` needs a gate-capable backend
-/// (`supports_gates()`); a non-gate backend records N/A and skips.
+/// no capability N/A for the current profile matrix: every configured projection supports both
+/// `BatchUpdate` and `SetGates`, including durable replay after reopen.
 pub async fn ac_txn_1_success_durable_visible<B: ConformanceCore + LogRead + SetGatesPort>(
     make: impl Fn(&str) -> B,
 ) -> AcOutcome {
@@ -325,8 +324,7 @@ pub async fn ac_txn_1_success_durable_visible<B: ConformanceCore + LogRead + Set
     // TP-003 §3.10 row 206 requires kill-after-success for EVERY mutating op. The four core lifecycle ops
     // above are checkpointed inline; the remaining named ops each get their OWN kill-after-success checkpoint
     // here, on isolated tags so no op masks another. Each records a real durability assertion, or an honest
-    // N/A where the op is genuinely unavailable on this profile (BatchUpdate is atomic-class only; SetGates
-    // needs a gate-capable backend). No op is silently skipped.
+    // Every current profile exercises both BatchUpdate and SetGates. No op is silently skipped.
     asserts.extend(ac_txn_1_kill_after_create_queue(&make).await?);
     asserts.extend(ac_txn_1_kill_after_batch_update(&make).await?);
     asserts.extend(ac_txn_1_kill_after_set_gates(&make).await?);
@@ -373,17 +371,11 @@ pub async fn ac_txn_1_kill_after_create_queue<B: ConformanceCore + LogRead>(
 }
 
 /// **AC-TXN-1 / BatchUpdate** kill-after-success (TP-003 §3.10 row 206). `update_fields` a pending item, then
-/// kill+reopen and assert the merged field survives and is visible on the recovered live-item view.
-/// `UpdateFields` is an atomic-class in-place merge; the eventual-apply object-log family refuses it
-/// (`EngineError::Unavailable`), so on those profiles this op is genuinely unreachable — record N/A and skip.
+/// kill+reopen and assert the merged field survives and is visible on the recovered live-item view. The
+/// mutation is log-authoritative and supported by both current durability classes.
 pub async fn ac_txn_1_kill_after_batch_update<B: ConformanceCore + LogRead>(
     make: impl Fn(&str) -> B,
 ) -> AcOutcome {
-    if make("txn1-batchupd").durability_class() != DurabilityClass::Atomic {
-        return Ok(vec![
-            "capability-N/A: BatchUpdate (UpdateFields) is atomic-class only; this eventual-apply profile does not implement it (EngineError::Unavailable). This is a durability-class property, not a coverage gap — kill-after-BatchUpdate cannot exist on this backend".into(),
-        ]);
-    }
     let key = ClientItemKey::new("batchupd-a").unwrap();
     let item_id = {
         let a = make("txn1-batchupd");
@@ -440,15 +432,16 @@ pub async fn ac_txn_1_kill_after_batch_update<B: ConformanceCore + LogRead>(
 
 /// **AC-TXN-1 / SetGates** kill-after-success (TP-003 §3.10 row 206). On a gate-capable backend: block a gate
 /// key over a gate-bearing item, kill+reopen, and assert the durable gate state survives — the gated item
-/// stays hidden from claim (unclaimable) and pending on the recovered store. Gate state is a relational-only
-/// capability; the log-replay / hybrid composed family reports `supports_gates() == false` and refuses
-/// `SetGates` (`EngineError::Unavailable`), so on those profiles record N/A and skip.
+/// stays hidden from claim (unclaimable) and pending on the recovered store. The current in-memory/log-replay
+/// and relational projections all persist gate membership and state, so every configured profile exercises
+/// this checkpoint. A future projection that honestly advertises `supports_gates() == false` still records
+/// capability-N/A rather than silently passing.
 pub async fn ac_txn_1_kill_after_set_gates<B: ConformanceCore + LogRead + SetGatesPort>(
     make: impl Fn(&str) -> B,
 ) -> AcOutcome {
     if !make("txn1-setgates").supports_gates() {
         return Ok(vec![
-            "capability-N/A: SetGates requires a gate-capable backend; this profile reports supports_gates()=false (gate state is a relational-only feature) and does not implement SetGates (EngineError::Unavailable). This is a backend-capability property, not a coverage gap — kill-after-SetGates cannot exist on this backend".into(),
+            "capability-N/A: SetGates requires a gate-capable projection; this profile reports supports_gates()=false and refuses SetGates (EngineError::Unavailable). This is a backend-capability property, not a coverage gap — kill-after-SetGates cannot exist on this backend".into(),
         ]);
     }
     {
@@ -697,8 +690,9 @@ pub async fn ac_txn_2_rejection_no_effect<B: ConformanceCore + LogRead>(
     // normal success. The three classes above (per-item-invalid finalize, unknown-id renew,
     // request-id-conflict) are joined here by the remaining classes, each driven against the SAME profile via
     // its own isolated store tag so no scenario masks another. Capability-N/A is recorded (never a silent
-    // pass) where a class genuinely cannot occur on this backend (e.g. upsert->Unavailable on an atomic
-    // backend, where upsert is instead available).
+    // pass) where a class genuinely cannot occur on this backend. Current profiles expose the full inherent
+    // operation surface, so AC-TXN-2 records the Unavailable subclass as N/A rather than manufacturing it by
+    // disabling a supported operation.
     asserts.extend(ac_txn_2_envelope_invalid_batch(&make, caps).await?);
     asserts.extend(ac_txn_2_stale_lease_conflict(&make, caps).await?);
     asserts.extend(ac_txn_2_capacity_unavailable_path(&make, caps).await?);
@@ -1026,9 +1020,10 @@ pub async fn ac_txn_2_stale_lease_conflict<B: ConformanceCore + LogRead>(
 
 /// **AC-TXN-2 / capacity / unavailable path** (TP-003 §3.10 row 207): a capacity/batch-limit rejection
 /// (`group_batching` whose group ceiling exceeds the requested `max_items` -> `BatchTooLarge`) leaves 0
-/// durable effect on EVERY backend; additionally, on an eventual-apply backend an upsert (`ReplacePending`)
-/// is `Unavailable` (0 durable effect). On an ATOMIC backend upsert is available, so the upsert->Unavailable
-/// class genuinely cannot occur there and is recorded capability-N/A (never a silent pass).
+/// durable effect on EVERY backend. The Unavailable rejection subclass is capability-N/A for the current
+/// full-capability profiles: construction may select storage, but it must not remove an inherent Fireweed
+/// operation. The test records that N/A explicitly rather than manufacturing `Unavailable` from a supported
+/// operation such as upsert or field mutation.
 pub async fn ac_txn_2_capacity_unavailable_path<B: ConformanceCore + LogRead>(
     make: impl Fn(&str) -> B,
     caps: TxnCaps,
@@ -1062,38 +1057,9 @@ pub async fn ac_txn_2_capacity_unavailable_path<B: ConformanceCore + LogRead>(
         "a whole-group claim whose group ceiling exceeds max_items must be BatchTooLarge"
     );
 
-    // Unavailable path (backend-class dependent): upsert is atomic-only.
-    let is_atomic = a.durability_class() == DurabilityClass::Atomic;
-    if is_atomic {
-        asserts.push(
-            "capability-N/A: upsert (ReplacePending) is AVAILABLE on this atomic backend, so the upsert->Unavailable rejection class genuinely cannot occur here — a class/capability property, not a coverage gap; the BatchTooLarge capacity path above covers the capacity rejection".into(),
-        );
-    } else {
-        // Eventual-apply: upsert refuses with Unavailable before any append.
-        ensure!(
-            matches!(
-                a.replace_if_pending(
-                    &shard(),
-                    &ClientItemKey::new("txn2cap-upsert").unwrap(),
-                    Some(PriorityValue::Int64(1)),
-                    None,
-                    None,
-                    None,
-                    BTreeMap::new(),
-                    Metadata::default(),
-                    None,
-                    ts(11),
-                    None,
-                )
-                .await,
-                Err(EngineError::Unavailable)
-            ),
-            "upsert on an eventual-apply backend must be Unavailable"
-        );
-        asserts.push(
-            "unavailable path: upsert (ReplacePending) on this eventual-apply backend -> Unavailable, 0 durable effect".into(),
-        );
-    }
+    asserts.push(
+        "capability-N/A: no inherent Fireweed operation is specified to return Unavailable on any current storage profile; upsert and field mutation remain supported across durability classes, while the BatchTooLarge capacity rejection above is exercised for real".into(),
+    );
 
     let after = durable_command_count(&a).await?;
     ensure!(

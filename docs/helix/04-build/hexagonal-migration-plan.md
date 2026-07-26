@@ -49,15 +49,11 @@ method has a conformance test that fails if the impl returns a default/no-op** (
 
 **2.2 Two-class durability (TD-007):**
 - **Atomic** (memory lock / sqlite / postgres one txn): append+apply commit together; post-commit
-  projection globally consistent. **Invariant 1 & 2 strong guarantees hold only here.**
+  projection globally consistent.
 - **Eventual-apply** (objectlog): ack after log commit, apply within a bounded window; guarantee is
-  self-read-after-write only. Priority order is "over applied state, eventual"; pure
-  lagging-projection objectlog profiles keep **upsert forbidden** (re-`XADD` on an existing key returns
-  `-ERR fireweed unavailable`) because the upsert↔claim race is unclosable when the claim reads a
-  lagging projection (§3 flavor-difference 5).
-- `objectlog/hybrid-strict` and `objectlog/hybrid-async` are the profile-qualified exception: they may
-  lift the mutable-write ban only after TD-004 proves deterministic apply-time re-validation with
-  ack-after-apply.
+  self-read-after-write only. Priority order is "over applied state, eventual". It exposes the same
+  inherent mutation surface as the atomic class; deterministic re-validation and the response barrier
+  close upsert/update/reschedule races without making storage choice visible to callers.
 
 **2.3 Single *logical* claim path.** Engine is the single logical claim authority; a backend MAY
 implement claim atomically behind `ClaimPort` (postgres keeps `FOR UPDATE SKIP LOCKED`). Upsert and
@@ -86,13 +82,11 @@ command holds even where fireweed's flavor differs. Two implementation invariant
   returns highest-priority *undelivered* items, tracked per item; never orphans a low-priority small-id
   item; transactional advancement (claimed → PEL). **On the atomic class this is strict; on
   eventual-apply it is "priority over applied state, eventual."**
-- **Invariant 2 — upsert = atomic `XDEL old` + `XADD new`, pending-only, atomic-class-only.** Re-`XADD`
+- **Invariant 2 — upsert = atomic `XDEL old` + `XADD new`, pending-only, every storage class.** Re-`XADD`
   colliding with a **pending** item (via `UpsertPort`, same UoW as claim) returns a new monotonic id;
   old id reads deleted; `XLEN` nets unchanged. Collision with **claimed/terminal** → reject. Absent
-  `client_item_key` ⇒ always append. On pure lagging-projection eventual-apply profiles ⇒
-  `-ERR fireweed unavailable` (§2.2). On `objectlog/hybrid-strict` and `objectlog/hybrid-async`, the
-  same upsert path may be admitted only after TD-004's deterministic apply-time re-validation /
-  ack-after-apply proof. A later `XACK`/`XCLAIM` of a **superseded** old id returns
+  `client_item_key` ⇒ always append. Eventual-apply profiles use TD-004's deterministic re-validation
+  and response barrier. A later `XACK`/`XCLAIM` of a **superseded** old id returns
   **`-ERR fireweed superseded`** (never a silent `nil` — preserves at-least-once "no silent drop").
 
 **Stock surface (faithful per contract):**
@@ -114,8 +108,8 @@ command holds even where fireweed's flavor differs. Two implementation invariant
    sweep every entry is covered.
 3. Low-priority starvation is possible, **bounded by `progress_bound_ms`** (enforced by ReclaimDriver).
 4. At-least-once delivery (crash → reclaim); consumer-side idempotency is the app's job, as on Redis.
-5. On **eventual-apply** backends, priority order and no-double-claim are "over applied state, eventual,"
-   and upsert is unavailable (§2.2).
+5. On **eventual-apply** backends, priority order and no-double-claim are "over applied state, eventual";
+   the operation surface, including upsert, is unchanged.
 6. `XREADGROUP` replies carry fireweed reserved fields (`item_version`, `lease_expires_at`, …) as extra
    entry fields — benign; stock clients ignore unknown fields.
 7. Same-consumer `XCLAIM` is a no-charge **renew** (Redis would bump the delivery count); strictly more
@@ -171,7 +165,7 @@ image + health probe); none halted.
 
 - **Phase 0 — gating docs (own review gate).** ADR-007; validate TD-006 against the launch
   `{RESP-stock, library}` matrix; author TD-007 (durability classes, **ReclaimDriver**,
-  **UpsertPort**, eventual-apply upsert ban, superseded reply, cross-shard deferred). Converge all
+  **UpsertPort**, cross-class upsert race closure, superseded reply, cross-shard deferred). Converge all
   three before any code. Resolve whether an optional custom finalize command is needed.
 - **Phase 1 — ports + reference engine + early RESP smoke.** Define ports; extract `fireweed-memory`;
   implement priority claim/lease/ack + Invariants 1 & 2 + ReclaimDriver over memory; conformance green.
@@ -181,8 +175,8 @@ image + health probe); none halted.
   `default-members`. For each 4a unit: write the engine test, move the logic durable, **delete the
   service code path in the same step** (the service crate shrinks to nothing by phase end — no
   delegation, no shim).
-- **Phase 3 — driven adapters.** sqlite, postgres (`ClaimPort`), objectlog (eventual-apply, upsert
-  banned). Conformance green on each — incl. concurrent-claim races, intra-group exclusion, and each
+- **Phase 3 — driven adapters.** sqlite, postgres (`ClaimPort`), objectlog (eventual-apply with the same
+  inherent operations). Conformance green on each — incl. concurrent-claim races, intra-group exclusion, and each
   durability class's *declared* guarantee (strong on atomic; weaker on eventual-apply).
 - **Phase 4 — full RESP adapter + e2e.** `fireweed-resp`; the complete §3 e2e suite (all backends,
   cursor loop, crash recovery, fence, race) is the headline acceptance gate.
@@ -207,11 +201,9 @@ image + health probe); none halted.
 - **ReclaimDriver test:** item reclaimed/expired with zero intervening client commands on its queue.
 - e2e RESP suite green with pinned off-the-shelf client(s): drain-reconcile, cursor loop, crash
   recovery, fence=`-ERR fireweed stale_lease`, upsert effects+collision+superseded, intra-group exclusion.
-- One conformance suite green on memory+sqlite+postgres+objectlog; eventual-apply asserts the *weaker*
-  guarantee; pure lagging-projection eventual-apply profiles keep
-  `upsert-on-eventual-apply` at `-ERR fireweed unavailable`, while the hybrid
-  profiles may lift the ban only after TD-004 proves deterministic
-  apply-time re-validation with ack-after-apply.
+- One conformance suite green on memory+sqlite+postgres+objectlog; eventual-apply asserts its distinct
+  visibility/durability guarantee while retaining the same inherent operation surface. TD-004 proves
+  deterministic apply-time re-validation and the response barrier for mutable-write races.
 - Two driving adapters + one composition root; **dependency-direction test passes**.
 - Durable-state debt closed (idempotency/fences/pause/`command_position` reconstructable from the log).
 - Docs consistent; ADR-007/TD-006(refolded)/TD-007 recorded; capability asymmetry recorded.

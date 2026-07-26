@@ -930,13 +930,13 @@ The following cases define the required evidence surface:
   barrier for push, claim, renew, finalize, retry/release, update, purge, and
   operator-style mutations; same-body retry returns the original result without
   append, different-body retry returns `request-id-conflict`.
-- Mutable-write race closure: for profiles that admit mutable writes
-  (`objectlog/hybrid-strict` and `objectlog/hybrid-async`), race
+- Mutable-write race closure: for every object-log profile, race
   `replace_if_pending`/`update_fields`/`reschedule` against a concurrent claim
   for the same pending item under group commit; exactly one path succeeds, the
   winner is visible on the response path, and the loser fails closed. The
-  retired `eventual_apply_suite` keeps asserting `upsert_is_unavailable` for the
-  pure lagging-projection profiles, while this case covers the lifted profiles.
+  shared eventual-apply conformance class exercises the same upsert and field-
+  mutation behavior as atomic profiles; storage selection does not remove
+  inherent operations.
 - Hybrid segment retention: prove local SQLite high-water alone never authorizes
   object-log segment expiry; compute the retention frontier as the minimum of
   committed snapshot coverage, active manifest tail, request-id retention,
