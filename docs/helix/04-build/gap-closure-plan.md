@@ -17,10 +17,9 @@ named snake_case `#[test]` fns; NO `go test`, NO `lefthook`).
     exist ONLY on the monolith `SqliteRelationalBackend` (`relational.rs:6598`, `:6341`); ComposedBackend
     returns `Unavailable` (`compose.rs:1976`→`claim_validation.rs:140`; DiscoveryPort empty body
     `compose.rs:3336`).
-  - `claimed_item_shape_reflects_update_fields_after_reclaim` ×4: scenario (`scenarios.rs:1869`) pushes
-    an item with `gate_keys`; `ComposedBackend::supports_gates()==false` → `validate_gate_command`
-    returns `Unavailable` (`command.rs:147`, `compose.rs:1657`). Guard checks `is_atomic()` not
-    `supports_gates()` (`lib.rs:316`). Never passed on composed families (born in `3dce8dc8`).
+  - Gate and field-mutation conformance is now profile-independent: the shared in-memory/log-replay and
+    relational projections advertise gate support, and composed backends durably replay both `SetGates`
+    and field mutation.
   - `object_log_sqlite::recovery_tests` ×3 and `performance_object_log_hybrid_tests` ×3: deterministic
     (NOT flaky); currently build-blocked by rdkafka → unverified. No git evidence of regression.
   - `change_record_sink_rejected_without_durable_cursor_store` (`server.rs:1388`): hardcoded port 9092;
@@ -115,9 +114,10 @@ named snake_case `#[test]` fns; NO `go test`, NO `lefthook`).
   (`compose.rs:1196-1215`, `:1514-1527`, `:1656-1667`) so gate-bearing pushes/`SetGates` are accepted
   when the store advertises gates; **implement `SetGatesPort` on composed** (`compose.rs:3332-3335`
   empty default → delegate to the relational apply arm `relational.rs:3238-3260`). Keep the conformance
-  scenario guarded on `supports_gates()` (skip, not fail, on non-gate backends).
-- AC: `claimed_item_shape_reflects_update_fields_after_reclaim` passes on gate-capable composed backends
-  and is cleanly skipped on non-gate backends; no `is_atomic()`-only guard remains for gate scenarios.
+  scenario guarded on `supports_gates()` only for genuinely custom projections outside the current
+  profile matrix.
+- AC: `claimed_item_shape_reflects_update_fields_after_reclaim` and the SetGates reopen checkpoint pass
+  on every current composed backend; no durability-class guard hides a supported operation.
 
 **B0.5 — Reconcile the product-validation test fixtures to composed backends.**
 - Point `callback_cohort_e2e` (call site `product_validation_tests.rs:1870-1872`) and

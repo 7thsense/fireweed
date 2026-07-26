@@ -34,8 +34,8 @@
 //! ## Conformance matrix (BQ-13 / ADR-008 §2 / TD-001 capability classes)
 //!
 //! Every backend runs the classes its durability + recovery model supports. The CORE class is the SAME
-//! scenario set for ALL backends (`core_suite!(@atomic)` or its `@eventual` upsert variant), which is what
-//! holds the two projection families behaviorally identical on core.
+//! scenario set for ALL backends (`core_suite!(@atomic)` or `core_suite!(@eventual)`), including upsert on
+//! both durability classes; only operations that still require an atomic projection boundary differ.
 //!
 //! | Backend | Projection family | Durability | Class wiring | Where |
 //! |---|---|---|---|---|
@@ -383,9 +383,9 @@ macro_rules! claimed_item_shape_conformance_tests {
 
 /// **Core** scenario class — substrate-independent behavior every projection family must satisfy
 /// (ordering, eligibility, claim atomicity, idempotency, lease/epoch fencing, the per-queue progress
-/// bound). Two durability variants on the one upsert axis (TD-007 §2.3): `@atomic` includes the three
-/// `UpsertPort` scenarios + the raw `ReplacePending` command; `@eventual` substitutes
-/// `upsert_is_unavailable`. Bounded by [`ConformanceCore`] — no `LogRead`/`SnapshotStore` required.
+/// bound). Both durability variants exercise the three `UpsertPort` scenarios and the raw
+/// `ReplacePending` command and field-mutation scenarios. Bounded by [`ConformanceCore`] — no
+/// `LogRead`/`SnapshotStore` required.
 #[macro_export]
 macro_rules! core_suite {
     (@atomic $make:expr) => {
@@ -446,8 +446,11 @@ macro_rules! core_suite {
             reassign_swaps_token_and_charges_attempt,
             purge_removes_present_items_and_gates_leased,
             finalize_of_nonleased_item_is_rejected_without_appending,
-            upsert_is_unavailable,
-            update_fields_is_unavailable,
+            replace_pending_supersedes_old,
+            upsert_inserts_then_replaces_pending,
+            upsert_rejects_claimed_and_terminal,
+            upsert_preserves_group_delay_and_payload_in_claim_shape,
+            update_fields_merges_and_cas,
             reclaim_expired_sweeps_per_queue,
             claim_compatibility_is_resolved_and_gated,
             successful_push_is_visible_before_response_returns,
@@ -560,7 +563,8 @@ macro_rules! conformance_suite {
 }
 
 /// The conformance suite for an **eventual-apply** log-bearing backend (e.g. objectlog):
-/// `core_suite!(@eventual)` (upsert refused) + `log_replay_suite!`. Invoke at module scope:
+/// `core_suite!(@eventual)` (the same inherent operation surface, including upsert and field mutation) +
+/// `log_replay_suite!`. Invoke at module scope:
 /// `fireweed_conformance::eventual_apply_suite!(MyBackend::new);`.
 #[macro_export]
 macro_rules! eventual_apply_suite {
