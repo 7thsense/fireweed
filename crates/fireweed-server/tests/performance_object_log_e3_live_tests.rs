@@ -53,7 +53,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -93,23 +93,30 @@ const RELEASE_LOAD_SIZE_SEAL_COMMANDS: usize = 4;
 const RELEASE_QUEUE_WAITING_BYTES: usize = 16 * 1024 * 1024;
 const STORE_OBJECT_PAGE_LIMIT: u64 = S3_LIST_PAGE_MAX_KEYS as u64;
 
-struct FailNextManifestMirrorStore {
+struct RejectManifestHeadObjectWritesStore {
     inner: Arc<dyn BlobStore>,
-    fail_next_manifest_mirror: AtomicBool,
+    manifest_head_object_write_attempts: AtomicU64,
 }
 
-impl BlobStore for FailNextManifestMirrorStore {
+impl BlobStore for RejectManifestHeadObjectWritesStore {
     fn put(&self, key: &str, body: &[u8]) -> fireweed_engine::EngineResult<()> {
-        if key.contains("/authority_head/")
-            && self.fail_next_manifest_mirror.swap(false, Ordering::SeqCst)
-        {
+        if key.contains("/authority_head/") {
+            self.manifest_head_object_write_attempts
+                .fetch_add(1, Ordering::SeqCst);
             return Err(EngineError::Storage(
-                "injected post-CAS mirror failure".into(),
+                "manifest-head authority must not be written to object storage".into(),
             ));
         }
         self.inner.put(key, body)
     }
     fn put_if_absent(&self, key: &str, body: &[u8]) -> fireweed_engine::EngineResult<bool> {
+        if key.contains("/authority_head/") {
+            self.manifest_head_object_write_attempts
+                .fetch_add(1, Ordering::SeqCst);
+            return Err(EngineError::Storage(
+                "manifest-head authority must not be written to object storage".into(),
+            ));
+        }
         self.inner.put_if_absent(key, body)
     }
     fn get(&self, key: &str) -> fireweed_engine::EngineResult<Option<Vec<u8>>> {
@@ -135,17 +142,22 @@ impl BlobStore for FailNextManifestMirrorStore {
 }
 
 #[test]
-fn fence_failure_injector_targets_the_post_cas_authority_mirror() {
-    let store = FailNextManifestMirrorStore {
+fn pointer_authority_guard_rejects_manifest_head_object_writes() {
+    let store = RejectManifestHeadObjectWritesStore {
         inner: Arc::new(fireweed_objectlog::segmented::InMemoryBlobStore::new()),
-        fail_next_manifest_mirror: AtomicBool::new(true),
+        manifest_head_object_write_attempts: AtomicU64::new(0),
     };
     let result = store.put(
         "t/tenant/q/queue/authority_head/00000000000000000001.json",
-        b"mirror",
+        b"head",
     );
     assert!(matches!(result, Err(EngineError::Storage(_))));
-    assert!(!store.fail_next_manifest_mirror.load(Ordering::SeqCst));
+    assert_eq!(
+        store
+            .manifest_head_object_write_attempts
+            .load(Ordering::SeqCst),
+        1
+    );
 }
 
 fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std::path::Path) {
@@ -201,9 +213,9 @@ fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std:
     assert!(native_current_epoch_committed);
     assert!(native_stale_epoch_rejected);
 
-    let objects = Arc::new(FailNextManifestMirrorStore {
+    let objects = Arc::new(RejectManifestHeadObjectWritesStore {
         inner: raw_objects,
-        fail_next_manifest_mirror: AtomicBool::new(false),
+        manifest_head_object_write_attempts: AtomicU64::new(0),
     });
     // Independent clients are essential: a process-local mutex is not the fence under test.
     let pointer_a = Arc::new(
@@ -224,27 +236,28 @@ fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std:
     owner_a.seal(&shard, 0, 3).unwrap();
 
     let adapter_b = Arc::new(PointerFencedBlobStore::new(objects.clone(), pointer_b));
-    let owner_b = SegmentedObjectLog::open(adapter_b.clone(), cfg);
+    let owner_b = SegmentedObjectLog::open(adapter_b, cfg);
     owner_b.create_queue(&no_cas_def).unwrap();
     assert_eq!(owner_b.acquire_epoch(&shard, 4).unwrap(), 1);
     owner_b.enqueue(&shard, &push("2", "b"), 1, 5).unwrap();
-    objects
-        .fail_next_manifest_mirror
-        .store(true, Ordering::SeqCst);
     owner_b.seal(&shard, 1, 6).unwrap();
-    assert!(!objects.fail_next_manifest_mirror.load(Ordering::SeqCst));
-    assert_eq!(adapter_b.pending_manifest_mirrors(), 1);
+    assert_eq!(
+        objects
+            .manifest_head_object_write_attempts
+            .load(Ordering::SeqCst),
+        0
+    );
     owner_a.enqueue(&shard, &push("3", "stale"), 0, 7).unwrap();
     assert_eq!(owner_a.seal(&shard, 0, 8), Err(EngineError::EpochFenced));
     assert_eq!(owner_b.read_all(&shard).unwrap().len(), 2);
 
-    // Model a process restart with a new Postgres client and no volatile mirror-debt map. Authority must be
-    // readable directly from Postgres and the missing optional numeric mirror must be reconstructed from it.
+    // Model a process restart with a fresh Postgres client. The authoritative head must be readable
+    // directly from Postgres; there is no object-store manifest-head copy to reconstruct or repair.
     let pointer_restart = Arc::new(
         fireweed_postgres::PostgresManifestPointer::open(&postgres_url)
             .expect("open fresh restart Postgres pointer"),
     );
-    let restarted = PointerFencedBlobStore::new(objects, pointer_restart);
+    let restarted = PointerFencedBlobStore::new(objects.clone(), pointer_restart);
     let pointer_prefix =
         SegmentedObjectLog::<Arc<PointerFencedBlobStore>>::authoritative_manifest_pointer_prefix(
             &shard,
@@ -254,11 +267,10 @@ fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std:
         .expect("read restart pointer authority")
         .expect("restart pointer head exists");
     assert_eq!(restarted_head.value.current_epoch, 1);
-    assert!(
-        restarted
-            .repair_current_manifest_mirror(&pointer_prefix)
-            .expect("repair mirror from Postgres authority")
-    );
+    let manifest_head_object_write_attempts = objects
+        .manifest_head_object_write_attempts
+        .load(Ordering::SeqCst);
+    assert_eq!(manifest_head_object_write_attempts, 0);
 
     let row = fireweed_release::e3_contract::build_e3_fence_evidence(
         fireweed_release::e3_contract::E3FenceObservation {
@@ -268,10 +280,9 @@ fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std:
             no_cas_stale_epoch_rejected: true,
             no_cas_current_epoch_committed: true,
             no_cas_pointer_and_epoch_atomic: true,
-            no_cas_mirror_failure_after_pointer_cas: true,
+            no_cas_object_store_manifest_head_write_attempts: manifest_head_object_write_attempts,
             no_cas_restart_fresh_postgres_client: true,
-            no_cas_restart_read_pointer_authority: true,
-            no_cas_restart_repaired_mirror: true,
+            no_cas_restart_read_authoritative_pointer: true,
         },
     )
     .expect("build executed Postgres-pointer fence evidence");

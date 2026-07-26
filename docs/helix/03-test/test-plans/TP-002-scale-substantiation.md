@@ -280,7 +280,7 @@ E3 request-cost rows MUST come from a test-scoped production `BlobMetricsRecorde
 measured interval, not a separate counting `BlobStore`. PUT/create, GET, DELETE, and physical LIST page totals
 come from primitive attempts; logical head/acquire/fence/branch spans are excluded from billable totals.
 Tests assert LIST pages are attempts rather than retries, protocol retries equal loop iterations minus one,
-legacy manifest mirrors are not retries, and hostile key/error inputs cannot create new series.
+and hostile key/error inputs cannot create new series.
 
 Disabled-recorder transparency and deterministic accounting are normal CI gates. Recorder overhead is
 judged against an interleaved, same-run disabled-recorder control with identical seeded work; no pass/fail
@@ -306,7 +306,7 @@ Backend: `object_log_inmemory_projection` and `object_log_sqlite_projection`
 | Pass: progress and resources | exact logical operation counts, monotonic progress, and bounded memory/work queues hold for every bound/profile; throughput is reported but is not an absolute release threshold |
 | Pass: cost | $/billion-commands and object/log requests per billion commands reported for each latency bound; the cost-optimized point beats `postgres_native` at high sustained volume (ADR-001 cost table) |
 | Pass: recovery | rebuild an exact 10M-item projection from snapshot + log tail with checksum/count/order equality, monotonic replay progress, and bounded memory/work queues; wall time is capacity evidence only |
-| Pass: manifest fencing | a stale-epoch writer's manifest CAS commit is rejected; on a no-CAS object store the Postgres-held manifest pointer enforces the same fence (TD-004) |
+| Pass: manifest fencing | a stale-epoch writer's manifest CAS commit is rejected; on a no-CAS object store the Postgres-held authoritative pointer atomically commits the head and assignment epoch, performs zero object-store manifest-head writes, fences stale writers, and remains directly readable through a fresh Postgres client after restart (TD-004) |
 | Pass: transaction contract | success-visible, rejection-no-effect, and unknown-outcome replay invariants hold under the same bound sweep; no latency setting may weaken TP-003 transaction invariants |
 | Pass: byte admission | Compare request-count-only evidence with global+tenant byte admission for small, target-sized, and oversize payloads under stalled-store and hot/cold-tenant contention. Global/tenant charges never exceed caps; a cold tenant progresses; median throughput regression is <=5% and p99 regression <=10%, including serialization paid before oversize rejection. |
 
@@ -333,7 +333,7 @@ P0 items are referenced by name (not number) to stay robust to PRD renumbering.
 | PRD P0 performance-at-scale item | PRD / TD-001 / TD-002 / TD-004 | E1 and E2 preserve exact outcomes, queue-global progress, and bounded resources while distributing queues across owners. Throughput and latency remain declared-topology capacity evidence. |
 | PRD P0 queue-density item | PRD / TD-001 / TD-002 / TD-003 / TD-004 | E2 queue density: the release command `scripts/perf/tp002-e2-density-kind.sh` proves exactly 1,000 cold queues plus one hot queue on one live objectlog/SQLite node using canonical 300,000-item hot windows, 8 hot connections, 8 cold workers, 4 server workers, and seed 42. Every cold queue retains an eligible item and completes a non-empty claim/finalize operation during loaded hot work; additional exact hot sustain windows keep load active until all 1,000 queues progress. Hot baseline/load/baseline counts reconcile, shared workers/tasks/connections stay within declared bounds, and quiet-host or fixed-speed gates are forbidden. Absolute rates, latency, and retention remain declared-topology capacity evidence. |
 | TD-003 queue ownership | TD-003 | Deterministic queue-to-owner assignment, epoch fencing of a stale owner, graceful drain without loss/duplication, recovery, and stalled-queue visibility. |
-| TD-004 object-log backend | TD-004 / ADR-001 | E3 latency/cost/recovery; commit-latency-bound sweep; manifest-CAS (or Postgres-pointer fallback) current-epoch fencing; passes the shared TD-001 backend conformance suite. |
+| TD-004 object-log backend | TD-004 / ADR-001 | E3 latency/cost/recovery; commit-latency-bound sweep; manifest-CAS or authoritative Postgres-pointer current-epoch fencing; passes the shared TD-001 backend conformance suite. |
 | Per-queue local progress (D1) | TD-001 / TD-003 | Each queue's oldest-eligible age is computed locally on its owner (gate-aware); the oldest item is claimed before the bound; no cross-shard aggregation. |
 | TD-006 client routing | TD-006 / TD-003 | A wrong-node command is `-MOVED`-redirected to the queue's owner and converges in one hop; a stale/misrouted write is fenced, never corrupting state. |
 | Recurrence under scale (D4) | TD-001 / TD-002 / TD-004 | Recurrence scale row passes under both backend profiles: high-frequency rearm, idle inventory bound, queue-local purge under load. |
@@ -381,8 +381,9 @@ Scale benchmarking must include:
   $/command and object/log requests per billion commands at high volume, and
   10M-item projection rebuild time for each committed object-log projection
   variant (E3);
-- manifest-CAS fencing, including the Postgres-held manifest-pointer fallback on
-  no-CAS object stores (E3);
+- manifest-CAS fencing or, on no-CAS object stores, fencing through the
+  Postgres-held authoritative manifest pointer with zero object-store
+  manifest-head writes and direct fresh-client restart reads (E3);
 - external transaction-contract invariants under the E3 latency-bound sweep, so
   lower latency or lower cost configurations cannot publish weaker semantics;
 - recurrence under scale on both backend profiles.

@@ -2320,7 +2320,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     }
 
     /// Exact transactional manifest-pointer key used by the no-CAS Postgres authority. Exposed for live
-    /// recovery/repair tooling, not as a queue data-plane API.
+    /// restart verification, not as a queue data-plane API.
     pub fn authoritative_manifest_pointer_prefix(shard: &QueueKey) -> String {
         Self::authoritative_head_prefix(shard)
     }
