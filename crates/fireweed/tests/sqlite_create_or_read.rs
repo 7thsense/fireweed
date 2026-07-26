@@ -2,11 +2,11 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Barrier};
 
 use fireweed::{
-    CohortOnIncomplete, CohortPolicy, DiscoveryGranularity, EligibilityPolicy, EngineError,
-    EntitySchemaDocument, GateKeyPolicy, GroupKey, IndexDeclaration, IndexDef, IndexSpec,
-    IndexType, MetadataValue, NewItem, OrderingMode, PriorityDirection, PriorityModel,
-    PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, QueueIndex, QueueKey,
-    RecurrenceMode, RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp,
+    DiscoveryGranularity, EligibilityPolicy, EngineError, EntitySchemaDocument, GateKeyPolicy,
+    GroupKey, IndexDeclaration, IndexDef, IndexSpec, IndexType, MetadataValue, NewItem,
+    OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker,
+    QueueDefinition, QueueId, QueueIndex, QueueKey, RecurrenceMode, RecurrencePolicy, RetryPolicy,
+    TenantId, UtcTimestamp,
 };
 use fireweed_memory::ManualClock;
 
@@ -73,12 +73,9 @@ fn rich_definition() -> QueueDefinition {
         max_gate_keys_per_item: Some(3),
         max_gates_per_request: Some(5),
     };
-    definition.cohort_policy = Some(CohortPolicy {
-        enabled: true,
-        completion_bound_ms: Some(9_000),
-        on_incomplete: Some(CohortOnIncomplete::ExpireCohort),
-        max_cohort_size: Some(8),
-    });
+    // Group batching and cohort mode are mutually exclusive queue policies. This reopen fixture exercises
+    // the group-batching lane; cohort-definition persistence is covered by the dedicated cohort suites.
+    definition.cohort_policy = None;
     definition.recurrence = RecurrencePolicy {
         mode: RecurrenceMode::Recurring,
         until: Some(UtcTimestamp::new(4_242, 0).unwrap()),
