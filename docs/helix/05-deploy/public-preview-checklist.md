@@ -43,7 +43,7 @@ revision, result, and environment where applicable.
 | Area | Check | Evidence or Command | Status |
 |------|-------|---------------------|--------|
 | Repository | Public repository is `telepathdata/fireweed`; issues enabled | `gh repo view telepathdata/fireweed --json nameWithOwner,visibility,hasIssuesEnabled,defaultBranchRef` | Confirmed 2026-07-25 |
-| Repository redirect | The pre-rename GitHub coordinate resolves to the immutable released source | `git ls-remote https://github.com/telepathdata/7thsense-pqueue.git HEAD` returned `5b2cf59b29c0652af9e8513ea2e6de5e93201474` | Confirmed 2026-07-26 |
+| Repository redirect | The immediately previous GitHub coordinate resolves to the immutable released source | Anonymous `git ls-remote` returned `5b2cf59b29c0652af9e8513ea2e6de5e93201474`; the exact historical coordinate is retained in the cutover bead | Confirmed 2026-07-26 |
 | Hosting controls | Record repository automation and branch policy rather than assuming protection | Repository Actions API reports `enabled=false`; `main` has no GitHub branch-protection rule; release validation and publication were therefore performed locally/manual | Recorded 2026-07-26 |
 | Policy | README, `CONTRIBUTING.md`, support, security, and ADR-021 agree on issues-only contributions | `rg -n 'Issues are welcome|Pull requests.*not accepted|issues-only' README.md CONTRIBUTING.md SUPPORT.md SECURITY.md docs/helix/02-design/adr/ADR-021-open-source-license-and-contribution-policy.md` | Passed at `51152e1d` (2026-07-25) |
 | Identity | Current Fireweed namespace gate passes | `bash scripts/verify-public-identity.sh` | Passed at `51152e1d` (2026-07-25) |
