@@ -90,7 +90,40 @@ pub trait ManifestPointerStore: Send + Sync {
         expected_version: Option<u64>,
         value: &ManifestHeadBlob,
     ) -> EngineResult<bool>;
-    fn claim_immutable(&self, key: &str, content_sha256: &str) -> EngineResult<bool>;
+
+    /// Serialize one create-only object publication against every cooperating writer. The authority holds
+    /// its per-key transaction lock while inspecting and, when necessary, repairing the object mirror.
+    fn publish_if_absent(
+        &self,
+        key: &str,
+        content_sha256: &str,
+        body: &[u8],
+        mirror: &dyn BlobStore,
+    ) -> EngineResult<TransactionalPublishOutcome>;
+
+    /// Serialize deletion against publication of the same key. The durable lifecycle record remains as an
+    /// absent tombstone so a later create can safely reuse the transient key with different content.
+    fn delete_object(
+        &self,
+        key: &str,
+        mirror: &dyn BlobStore,
+    ) -> EngineResult<TransactionalDeleteOutcome>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionalPublishOutcome {
+    Created,
+    Repaired,
+    Existing,
+    Conflict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionalDeleteOutcome {
+    Deleted,
+    Repaired,
+    Missing,
+    Conflict,
 }
 
 /// Blob-store adapter for the TD-004 no-CAS mode. Immutable bodies remain in object storage while
@@ -104,12 +137,6 @@ impl PointerFencedBlobStore {
     pub fn new(objects: Arc<dyn BlobStore>, pointers: Arc<dyn ManifestPointerStore>) -> Self {
         Self { objects, pointers }
     }
-
-    fn needs_transactional_create(key: &str) -> bool {
-        key.contains("/manifest_head/")
-            || key.ends_with("authority_protocol_v1")
-            || key.ends_with("authority_initialized_v1")
-    }
 }
 
 impl BlobStore for PointerFencedBlobStore {
@@ -122,23 +149,17 @@ impl BlobStore for PointerFencedBlobStore {
     }
 
     fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
-        if !Self::needs_transactional_create(key) {
-            return self.objects.put_if_absent(key, body);
-        }
         let digest = hex_lower(&Sha256::digest(body));
-        if !self.pointers.claim_immutable(key, &digest)? {
-            return Ok(false);
-        }
-        match self.objects.get(key)? {
-            Some(existing) if existing == body => Ok(true),
-            Some(_) => Err(EngineError::Storage(
-                "immutable object content disagrees with transactional claim".into(),
-            )),
-            None => self.objects.put(key, body).map(|()| true).map_err(|error| {
-                EngineError::Storage(format!(
-                    "immutable claim committed but object mirror incomplete; retry repairs it: {error}"
-                ))
-            }),
+        match self
+            .pointers
+            .publish_if_absent(key, &digest, body, self.objects.as_ref())?
+        {
+            TransactionalPublishOutcome::Created | TransactionalPublishOutcome::Repaired => {
+                Ok(true)
+            }
+            TransactionalPublishOutcome::Existing | TransactionalPublishOutcome::Conflict => {
+                Ok(false)
+            }
         }
     }
 
@@ -147,7 +168,13 @@ impl BlobStore for PointerFencedBlobStore {
     }
 
     fn delete(&self, key: &str) -> EngineResult<bool> {
-        self.objects.delete(key)
+        match self.pointers.delete_object(key, self.objects.as_ref())? {
+            TransactionalDeleteOutcome::Deleted | TransactionalDeleteOutcome::Repaired => Ok(true),
+            TransactionalDeleteOutcome::Missing => Ok(false),
+            TransactionalDeleteOutcome::Conflict => Err(EngineError::Storage(
+                "object mirror content disagrees with transactional publication authority".into(),
+            )),
+        }
     }
 
     fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
@@ -572,6 +599,38 @@ pub(crate) fn update_manifest_head_via<S: BlobStore + ?Sized>(
         CreateOnlyResolution::PreconditionLost => Ok(false),
         CreateOnlyResolution::Ambiguous(source) => Err(source),
         _ => unreachable!("all applied resolutions handled by the guard"),
+    }
+}
+
+/// Verify that a raw blob store implements the create-only primitive Fireweed requires. The probe uses a
+/// cryptographically unique temporary key, proves that a conflicting second body loses and cannot replace
+/// the winner, and removes the probe object before returning. Pointer-fenced stores do not need this probe.
+pub fn probe_create_only_semantics(store: &dyn BlobStore) -> EngineResult<()> {
+    let key = format!(
+        "_fireweed_capability_probe/{}.tmp",
+        publication_attempt_id()?
+    );
+    let first = b"fireweed-create-only-winner-v1";
+    let second = b"fireweed-create-only-loser-v1";
+    let result = (|| {
+        if !store.put_if_absent(&key, first)? {
+            return Err(EngineError::Storage(
+                "create-only capability probe could not publish its unique key".into(),
+            ));
+        }
+        if store.put_if_absent(&key, second)? {
+            return Err(EngineError::Unavailable);
+        }
+        if store.get(&key)?.as_deref() != Some(first) {
+            return Err(EngineError::Unavailable);
+        }
+        Ok(())
+    })();
+    let cleanup = store.delete(&key).map(|_| ());
+    match (result, cleanup) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
     }
 }
 
@@ -9156,7 +9215,7 @@ mod manifest_deletion_watermark_tests {
     #[derive(Default)]
     struct TransactionalPointer {
         heads: Mutex<BTreeMap<String, VersionedHead<ManifestHeadBlob>>>,
-        immutable: Mutex<BTreeMap<String, String>>,
+        immutable: Mutex<BTreeMap<String, (String, bool)>>,
     }
 
     impl ManifestPointerStore for TransactionalPointer {
@@ -9185,13 +9244,103 @@ mod manifest_deletion_watermark_tests {
             Ok(true)
         }
 
-        fn claim_immutable(&self, key: &str, content_sha256: &str) -> EngineResult<bool> {
+        fn publish_if_absent(
+            &self,
+            key: &str,
+            content_sha256: &str,
+            body: &[u8],
+            mirror: &dyn BlobStore,
+        ) -> EngineResult<TransactionalPublishOutcome> {
             let mut claims = self.immutable.lock().unwrap();
-            match claims.get(key) {
-                Some(existing) => Ok(existing == content_sha256),
+            let mirrored = mirror.get(key)?;
+            match claims.get(key).cloned() {
+                Some((claimed, true)) => match mirrored {
+                    None if claimed == content_sha256 => {
+                        mirror.put(key, body)?;
+                        Ok(TransactionalPublishOutcome::Repaired)
+                    }
+                    None => Ok(TransactionalPublishOutcome::Conflict),
+                    Some(existing) if hex_lower(&Sha256::digest(&existing)) != claimed => {
+                        Err(EngineError::Storage(
+                            "object mirror content disagrees with transactional publication authority"
+                                .into(),
+                        ))
+                    }
+                    Some(_) if claimed != content_sha256 => {
+                        Ok(TransactionalPublishOutcome::Conflict)
+                    }
+                    Some(existing) if existing == body => Ok(TransactionalPublishOutcome::Existing),
+                    Some(_) => Err(EngineError::Storage(
+                        "object mirror bytes disagree with their claimed content hash".into(),
+                    )),
+                },
+                Some((_, false)) => {
+                    let repaired = mirrored.as_deref() == Some(body);
+                    if !repaired {
+                        mirror.put(key, body)?;
+                    }
+                    claims.insert(key.to_owned(), (content_sha256.to_owned(), true));
+                    Ok(if repaired {
+                        TransactionalPublishOutcome::Repaired
+                    } else {
+                        TransactionalPublishOutcome::Created
+                    })
+                }
                 None => {
-                    claims.insert(key.to_owned(), content_sha256.to_owned());
-                    Ok(true)
+                    if mirrored.as_ref().is_some_and(|existing| existing != body) {
+                        return Ok(TransactionalPublishOutcome::Conflict);
+                    }
+                    let repaired = mirrored.is_some();
+                    if !repaired {
+                        mirror.put(key, body)?;
+                    }
+                    claims.insert(key.to_owned(), (content_sha256.to_owned(), true));
+                    Ok(if repaired {
+                        TransactionalPublishOutcome::Repaired
+                    } else {
+                        TransactionalPublishOutcome::Created
+                    })
+                }
+            }
+        }
+
+        fn delete_object(
+            &self,
+            key: &str,
+            mirror: &dyn BlobStore,
+        ) -> EngineResult<TransactionalDeleteOutcome> {
+            let mut claims = self.immutable.lock().unwrap();
+            let mirrored = mirror.get(key)?;
+            match (claims.get(key).cloned(), mirrored) {
+                (None, None) | (Some((_, false)), None) => Ok(TransactionalDeleteOutcome::Missing),
+                (None, Some(existing)) => {
+                    mirror.delete(key)?;
+                    claims.insert(
+                        key.to_owned(),
+                        (hex_lower(&Sha256::digest(&existing)), false),
+                    );
+                    Ok(TransactionalDeleteOutcome::Repaired)
+                }
+                (Some((claimed, false)), Some(existing))
+                    if hex_lower(&Sha256::digest(&existing)) == claimed =>
+                {
+                    mirror.delete(key)?;
+                    Ok(TransactionalDeleteOutcome::Repaired)
+                }
+                (Some((_, false)), Some(_)) => Ok(TransactionalDeleteOutcome::Conflict),
+                (Some((claimed, true)), Some(existing))
+                    if hex_lower(&Sha256::digest(&existing)) != claimed =>
+                {
+                    Ok(TransactionalDeleteOutcome::Conflict)
+                }
+                (Some((claimed, true)), Some(_)) => {
+                    mirror.delete(key)?;
+                    claims.insert(key.to_owned(), (claimed, false));
+                    Ok(TransactionalDeleteOutcome::Deleted)
+                }
+                (Some((claimed, true)), None) => {
+                    claims.insert(key.to_owned(), (claimed, false));
+                    Ok(TransactionalDeleteOutcome::Repaired)
                 }
             }
         }
@@ -9230,6 +9379,162 @@ mod manifest_deletion_watermark_tests {
         fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
             self.inner.list(prefix)
         }
+    }
+
+    /// Models Garage's broken conditional PUT: every `put_if_absent` overwrites and reports success.
+    struct ClobberingStore {
+        inner: InMemoryBlobStore,
+        conditional_calls: AtomicU64,
+        fail_after_put: AtomicBool,
+        fail_after_delete: AtomicBool,
+    }
+
+    impl ClobberingStore {
+        fn new() -> Self {
+            Self {
+                inner: InMemoryBlobStore::new(),
+                conditional_calls: AtomicU64::new(0),
+                fail_after_put: AtomicBool::new(false),
+                fail_after_delete: AtomicBool::new(false),
+            }
+        }
+
+        fn remove_mirror(&self, key: &str) {
+            self.inner.delete(key).unwrap();
+        }
+    }
+
+    impl BlobStore for ClobberingStore {
+        fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
+            self.inner.put(key, body)?;
+            if self.fail_after_put.swap(false, AtomicOrdering::SeqCst) {
+                return Err(EngineError::Storage("effect-then-error put".into()));
+            }
+            Ok(())
+        }
+
+        fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
+            self.conditional_calls.fetch_add(1, AtomicOrdering::SeqCst);
+            self.inner.put(key, body)?;
+            Ok(true)
+        }
+
+        fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
+            self.inner.get(key)
+        }
+
+        fn delete(&self, key: &str) -> EngineResult<bool> {
+            let deleted = self.inner.delete(key)?;
+            if self.fail_after_delete.swap(false, AtomicOrdering::SeqCst) {
+                return Err(EngineError::Storage("effect-then-error delete".into()));
+            }
+            Ok(deleted)
+        }
+
+        fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
+            self.inner.list(prefix)
+        }
+    }
+
+    #[test]
+    fn native_create_only_probe_rejects_a_clobbering_store_and_cleans_up() {
+        let store = ClobberingStore::new();
+        assert_eq!(
+            probe_create_only_semantics(&store),
+            Err(EngineError::Unavailable)
+        );
+        assert!(
+            store
+                .list("_fireweed_capability_probe/")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn transactional_publication_never_calls_a_clobbering_conditional_primitive() {
+        let objects = Arc::new(ClobberingStore::new());
+        let pointers = Arc::new(TransactionalPointer::default());
+        let adapter = PointerFencedBlobStore::new(objects.clone(), pointers);
+        assert!(adapter.put_if_absent("queue.json", b"winner").unwrap());
+        assert!(!adapter.put_if_absent("queue.json", b"loser").unwrap());
+        assert_eq!(adapter.get("queue.json").unwrap().unwrap(), b"winner");
+        assert_eq!(objects.conditional_calls.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[test]
+    fn transactional_publication_fails_closed_on_mirror_authority_disagreement() {
+        let objects = Arc::new(ClobberingStore::new());
+        let pointers = Arc::new(TransactionalPointer::default());
+        let adapter = PointerFencedBlobStore::new(objects.clone(), pointers);
+        assert!(adapter.put_if_absent("queue.json", b"authority").unwrap());
+        objects.put("queue.json", b"corrupt-mirror").unwrap();
+        assert!(matches!(
+            adapter.put_if_absent("queue.json", b"authority"),
+            Err(EngineError::Storage(_))
+        ));
+    }
+
+    #[test]
+    fn transactional_publication_repairs_crash_gaps_and_allows_transient_reuse() {
+        let objects = Arc::new(ClobberingStore::new());
+        let pointers = Arc::new(TransactionalPointer::default());
+        let adapter = PointerFencedBlobStore::new(objects.clone(), pointers);
+        let key = "recovery/page-guard";
+
+        objects.fail_after_put.store(true, AtomicOrdering::SeqCst);
+        assert!(adapter.put_if_absent(key, b"first").is_err());
+        assert_eq!(objects.get(key).unwrap().unwrap(), b"first");
+        assert!(adapter.put_if_absent(key, b"first").unwrap());
+        assert!(!adapter.put_if_absent(key, b"other").unwrap());
+
+        objects
+            .fail_after_delete
+            .store(true, AtomicOrdering::SeqCst);
+        assert!(adapter.delete(key).is_err());
+        assert!(objects.get(key).unwrap().is_none());
+        assert!(
+            !adapter.put_if_absent(key, b"after-delete-crash").unwrap(),
+            "missing immutable content cannot be reinterpreted as a completed delete"
+        );
+        assert!(adapter.delete(key).unwrap(), "retry completes the delete");
+        assert!(adapter.put_if_absent(key, b"after-delete-crash").unwrap());
+        assert_eq!(objects.get(key).unwrap().unwrap(), b"after-delete-crash");
+
+        assert!(adapter.delete(key).unwrap());
+        assert!(adapter.put_if_absent(key, b"reused").unwrap());
+        assert_eq!(objects.get(key).unwrap().unwrap(), b"reused");
+
+        objects.remove_mirror(key);
+        assert!(!adapter.put_if_absent(key, b"different").unwrap());
+        assert!(adapter.put_if_absent(key, b"reused").unwrap());
+        assert_eq!(objects.get(key).unwrap().unwrap(), b"reused");
+    }
+
+    #[test]
+    fn transactional_publication_serializes_concurrent_conflicting_bodies() {
+        let objects = Arc::new(ClobberingStore::new());
+        let pointers = Arc::new(TransactionalPointer::default());
+        let adapter = Arc::new(PointerFencedBlobStore::new(objects.clone(), pointers));
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut workers = Vec::new();
+        for body in [b"alpha".as_slice(), b"bravo".as_slice()] {
+            let adapter = adapter.clone();
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                adapter.put_if_absent("shared/key", body).unwrap()
+            }));
+        }
+        barrier.wait();
+        let results: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|created| **created).count(), 1);
+        let stored = objects.get("shared/key").unwrap().unwrap();
+        assert!(stored == b"alpha" || stored == b"bravo");
+        assert_eq!(objects.conditional_calls.load(AtomicOrdering::SeqCst), 0);
     }
 
     #[test]
