@@ -2909,10 +2909,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         Ok(out)
     }
 
-    fn store_delete(&self, key: &str) -> EngineResult<bool> {
-        let deleted = self.store.delete(key)?;
+    fn record_delete_outcome(&self, key: &str, deleted: bool, attempts: u64) {
         let mut g = self.inner.lock().expect("segmented log poisoned");
-        g.counters.delete_count += 1;
+        g.counters.delete_count = g.counters.delete_count.saturating_add(attempts.max(1));
         if deleted {
             g.counters.object_count = g.counters.object_count.saturating_sub(1);
             if let Some(len) = g.object_sizes.remove(key) {
@@ -2925,6 +2924,33 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 }
             }
         }
+    }
+
+    /// Issue one classified delete and keep the process-local counter/inventory surface aligned with the
+    /// physical outcome. Bounded maintenance needs the classified result for retry policy, while ordinary
+    /// call sites use [`Self::store_delete`]; both must account through this single seam.
+    fn store_observed_delete(
+        &self,
+        key: &str,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<bool>> {
+        match self.store.observed_delete(key) {
+            Ok(call) => {
+                self.record_delete_outcome(key, call.value, call.attempts);
+                Ok(call)
+            }
+            Err(error) => {
+                // `delete_count` is a physical-attempt counter, so failed provider attempts are observable too.
+                self.record_delete_outcome(key, false, error.attempts);
+                Err(error)
+            }
+        }
+    }
+
+    fn store_delete(&self, key: &str) -> EngineResult<bool> {
+        let call = self
+            .store_observed_delete(key)
+            .map_err(|error| error.outward)?;
+        let deleted = call.value;
         Ok(deleted)
     }
 
@@ -5807,7 +5833,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 return Ok((effect, false));
             }
             effect.requests += 1;
-            if effect_blob_try!(self.store.observed_delete(&key)) {
+            if effect_blob_try!(self.store_observed_delete(&key)) {
                 effect.objects += 1;
                 effect.bytes = effect.bytes.saturating_add(bytes);
                 effect_try!(self.fault(FaultCutPoint::GcAfterOrphanObjectDeleted));
@@ -5860,7 +5886,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             });
         }
         effect.requests += 1;
-        if effect_blob_try!(self.store.observed_delete(&pending)) {
+        if effect_blob_try!(self.store_observed_delete(&pending)) {
             effect.objects += 1;
             effect.bytes = effect.bytes.saturating_add(sentinel_bytes);
         }
@@ -5872,7 +5898,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             });
         }
         effect.requests += 1;
-        if effect_blob_try!(self.store.observed_delete(&pin_key)) {
+        if effect_blob_try!(self.store_observed_delete(&pin_key)) {
             effect.objects += 1;
             effect.bytes = effect.bytes.saturating_add(pin_bytes);
         }
@@ -6792,7 +6818,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             }
             report.requests += 1;
             partial_try!(self.fault(FaultCutPoint::DuringSegmentExpiry));
-            if partial_blob_try!(self.store.observed_delete(seg_key)) {
+            if partial_blob_try!(self.store_observed_delete(seg_key)) {
                 report.deleted += 1;
                 report.bytes_deleted = report.bytes_deleted.saturating_add(bytes);
             }
@@ -9816,6 +9842,98 @@ mod manifest_deletion_watermark_tests {
             CommandPosition::new(shard.clone(), epoch, through),
             epoch,
         )
+    }
+
+    #[test]
+    fn classified_delete_accounting_tracks_success_and_idempotent_absence() {
+        let store = Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let log = SegmentedObjectLog::open(store.clone(), cfg);
+        let key = "accounting/delete-me.bin";
+        let body = b"retained bytes";
+
+        log.store_put(key, body, false).unwrap();
+        let before = log.counters();
+        assert!(store.get(key).unwrap().is_some());
+
+        let first = log.store_observed_delete(key).unwrap();
+        assert!(first.value, "the first delete removes the physical object");
+        let after_first = log.counters();
+        assert_eq!(
+            after_first.delete_count,
+            before.delete_count + first.attempts.max(1)
+        );
+        assert_eq!(after_first.object_count, before.object_count - 1);
+        assert_eq!(
+            after_first.total_bytes,
+            before.total_bytes - body.len() as u64
+        );
+        assert!(store.get(key).unwrap().is_none());
+        assert!(
+            !log.inner
+                .lock()
+                .expect("segmented log poisoned")
+                .object_sizes
+                .contains_key(key),
+            "successful deletion removes the retained-size inventory entry"
+        );
+
+        let second = log.store_observed_delete(key).unwrap();
+        assert!(!second.value, "repeated deletion is an idempotent absence");
+        let after_second = log.counters();
+        assert_eq!(
+            after_second.delete_count,
+            after_first.delete_count + second.attempts.max(1),
+            "physical delete attempts remain observable"
+        );
+        assert_eq!(after_second.object_count, after_first.object_count);
+        assert_eq!(after_second.total_bytes, after_first.total_bytes);
+    }
+
+    #[test]
+    fn bounded_segment_expiry_uses_accounted_delete_path() {
+        let store = Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+        let log = SegmentedObjectLog::open(store.clone(), cfg);
+        log.create_queue(&conformance_qdef()).unwrap();
+        let epoch = log.acquire_epoch(&shard, 0).unwrap();
+        for i in 0..2u64 {
+            log.enqueue(&shard, &pushes(1), epoch, 10 + i as i64 * 10)
+                .unwrap();
+            log.seal(&shard, epoch, 11 + i as i64 * 10).unwrap();
+        }
+        advance_floor_as_owner(&log, &shard, 0, 100).unwrap();
+        let segment_key = log
+            .read_manifest(&shard)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.first_seq == 0 && entry.segment_key.is_some())
+            .and_then(|entry| entry.segment_key)
+            .expect("first data segment key");
+        assert!(store.get(&segment_key).unwrap().is_some());
+        let before = log.counters();
+
+        let report = log
+            .expire_segments_through_bounded_default(&shard, 0, 1_000)
+            .unwrap();
+        assert_eq!(report.deleted, 1);
+        assert!(report.cursor.is_none(), "the focused pass must complete");
+        assert!(report.stopped_by.is_none());
+        let after = log.counters();
+        assert!(
+            after.delete_count > before.delete_count,
+            "bounded deletion must update the same public counter surface"
+        );
+        assert!(store.get(&segment_key).unwrap().is_none());
+        assert!(
+            !log.inner
+                .lock()
+                .expect("segmented log poisoned")
+                .object_sizes
+                .contains_key(&segment_key),
+            "bounded deletion must remove the segment from retained-size inventory"
+        );
     }
 
     fn strip_manifest_head_namespace(store: &std::sync::Arc<InMemoryBlobStore>, shard: &QueueKey) {
