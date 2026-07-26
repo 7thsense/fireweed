@@ -77,27 +77,27 @@ fn transaction_evidence_rejects_bogus_structured_na() {
 }
 
 #[test]
-fn exact_pair_workflow_steps_require_fresh_nonempty_evidence() {
+fn exact_pair_local_gate_requires_fresh_nonempty_evidence() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for workflow in [".github/workflows/ci.yml", ".github/workflows/release.yml"] {
-        let source = std::fs::read_to_string(repo.join(workflow)).unwrap();
-        let fresh = source
-            .find("rm -f \"$matrix_evidence\" \"$parity_evidence\"")
+    let source =
+        std::fs::read_to_string(repo.join("scripts/ci/record-postgres-transaction-evidence.sh"))
             .unwrap();
-        let matrix_test = source
-            .find("ac_txn_contract_matrix_postgres_storage_pairs -- --exact --nocapture")
-            .unwrap();
-        let parity_test = source
-            .find("ac_txn_6_postgres_storage_pair_parity -- --exact --nocapture")
-            .unwrap();
-        let matrix_nonempty = source.find("test -s \"$matrix_evidence\"").unwrap();
-        let parity_nonempty = source.find("test -s \"$parity_evidence\"").unwrap();
-        let verify = source
-            .find("--bin fireweed-verify-transaction-evidence")
-            .unwrap();
-        assert!(fresh < matrix_test);
-        assert!(fresh < parity_test);
-        assert!(matrix_test < matrix_nonempty && parity_test < parity_nonempty);
-        assert!(matrix_nonempty < verify && parity_nonempty < verify);
-    }
+    let fresh = source
+        .find("rm -f \"$matrix_evidence\" \"$parity_evidence\"")
+        .unwrap();
+    let matrix_test = source
+        .find("ac_txn_contract_matrix_postgres_storage_pairs -- --exact --nocapture")
+        .unwrap();
+    let parity_test = source
+        .find("ac_txn_6_postgres_storage_pair_parity -- --exact --nocapture")
+        .unwrap();
+    let matrix_nonempty = source.find("test -s \"$matrix_evidence\"").unwrap();
+    let parity_nonempty = source.find("test -s \"$parity_evidence\"").unwrap();
+    let verify = source
+        .find("--bin fireweed-verify-transaction-evidence")
+        .unwrap();
+    assert!(fresh < matrix_test);
+    assert!(fresh < parity_test);
+    assert!(matrix_test < matrix_nonempty && parity_test < parity_nonempty);
+    assert!(matrix_nonempty < verify && parity_nonempty < verify);
 }

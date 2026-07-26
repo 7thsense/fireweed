@@ -1115,11 +1115,13 @@ mod tests {
                 ),
             }
         }
-        // With the feature, the built sink is the rskafka-backed external sink (construction may fail to
-        // connect since no broker is running here — we only assert it selects the rskafka type/path).
+        // With the feature, the selected implementation is the rskafka-backed external sink. Do not
+        // construct it in this unit test: construction performs a real broker handshake and belongs in
+        // an explicitly configured live integration test, not the bounded default suite.
         #[cfg(feature = "external-kafka")]
         {
-            let _ = ExternalKafkaChangeRecordSink::new(&config);
+            fn assert_send_sync<T: Send + Sync>() {}
+            assert_send_sync::<ExternalKafkaChangeRecordSink>();
         }
     }
 

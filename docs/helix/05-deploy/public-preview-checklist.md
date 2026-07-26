@@ -50,7 +50,7 @@ revision, result, and environment where applicable.
 | Lint | Workspace clippy gate passes | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | [ ] Pending evidence |
 | Function | Complete workspace functional suite passes | `cargo test --locked --workspace` | [ ] Pending evidence |
 | Facade | Public constructor, mutation, and durability matrices pass | `cargo test --locked -p fireweed --all-features` | [ ] Pending evidence |
-| PostgreSQL | PostgreSQL-backed matrix executes with no skips | `FIREWEED_PG_TEST_URL=<test-dsn> cargo test --locked --workspace` | [ ] Pending live-service evidence |
+| PostgreSQL | PostgreSQL-backed matrix executes with no skips | `FIREWEED_PG_TEST_URL=<test-dsn> bash scripts/ci/record-postgres-transaction-evidence.sh` plus the live workspace suite | [ ] Pending live-service evidence |
 | Object storage | S3-compatible object-log matrix executes against Garage on eldir with no skips | Use the release test procedure with the approved Garage endpoint and unique test namespace | [ ] Pending live-service evidence |
 | Downstream | Snorri passes its complete release matrix against the public Fireweed tag | Snorri release checklist and locked git dependency evidence | [ ] Pending tagged-source evidence |
 | Version | Cargo, docs, tag, and release-note versions agree | `bash scripts/release/list-public-version-sources.sh v0.21.0` | [ ] Pending evidence |
