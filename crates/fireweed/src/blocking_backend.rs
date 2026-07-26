@@ -41,6 +41,11 @@ pub(crate) struct OwnedBlockingExecutor {
 }
 
 impl OwnedBlockingExecutor {
+    #[cfg(any(
+        all(feature = "objectlog", feature = "postgres"),
+        all(feature = "objectlog", feature = "sqlite"),
+        test
+    ))]
     pub(crate) fn run<T, F>(
         &self,
         operation: F,
