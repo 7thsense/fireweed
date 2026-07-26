@@ -48,6 +48,14 @@ ddx:
 
 # Test Plan: TP-003 Verification and Acceptance Criteria
 
+## Current object-log durable-format gate
+
+Fireweed has one object-log frame and manifest shape. The verification suite MUST prove current-format
+goldens, CRC32C/SHA-256 integrity, exact manifest/key identity, recovery-index replay, restart, branch,
+retention, and deletion-watermark behavior. Retired frame versions, missing or unknown manifest fields, and
+retired namespaces appear only as negative fixtures and MUST fail closed. No environment variable or public
+API may select a durable format.
+
 ## Scope
 
 TP-001 (governing traceability) says **what** to test and which suite covers it.
@@ -116,17 +124,14 @@ expect confirmed success—not unknown outcome—when the exact authoritative re
 `pending_fence_gap_has_one_safe_old_prefix_then_fences_stale_retry` is the non-skipping CP/storage-gap test;
 the live Postgres/S3 equivalent is
 `pending_fence_gap_linearizes_old_commit_before_storage_fence_then_rejects_stale_retry`. The maintenance
-budget test `deletion_watermark_proof_request_budget_is_linear_and_bounded` bounds the legacy maintenance
-path's GET, PUT, LIST, and DELETE growth linearly in reclaimed entries.
+budget test `deletion_watermark_proof_request_budget_is_linear_and_bounded` bounds current maintenance
+GET, PUT, LIST, and DELETE growth linearly in reclaimed entries.
 `authority_mode_deletion_proof_cost_ignores_total_head_history` uses underlying-store counters to prove the
 incremental completed-prefix proof adds no LIST and costs only per reclaimed entry at 8 versus 128 retained
 head versions. This does not claim total authority-mode maintenance is O(reclaimed): the default
 `read_manifest_head` recovery step still scans retained head versions and remains a release-scale benchmark/
 optimization condition. `successful_create_performs_zero_rereads` protects the successful create-only hot
-path. `stale_high_read_horizon_cache_cannot_fence_reopened_writer_or_suppress_seal` proves the compatibility
-cache cannot become authority after reopen, while
-`forged_high_cache_cannot_suppress_standalone_authoritative_marker` proves it cannot suppress standalone
-marker progress after physical deletion.
+path. Retired watermark-cache objects are negative fixtures and must make open fail closed.
 
 ## 3. Acceptance Criteria by Area
 
@@ -427,17 +432,10 @@ One seed controls operation choice, logical time, retry, crash, and scripted sto
 `fireweed-sim-support` crate has no engine/object-log/runtime dependency. The production adapter drives the real
 synchronous `SegmentedObjectLog`, advances the real durable retention floor, performs real expiry, and
 compares recovery visibility plus executable storage projections of INV-1, INV-2, INV-10, INV-12, and INV-14
-after every executed durable cut. Corpus records are schema v2 and require harness v2. Failure output includes
-the seed, failing index, and compact trace; delta debugging preserves violated-invariant identity and retains
+after every executed durable cut. Failure output includes the seed, failing index, and compact trace; delta
+debugging preserves violated-invariant identity and retains
 the failure in at most 32 operations.
 
-Local v2 evidence dated 2026-07-18: seed `0x5eed`; 100 byte-identical in-process replays; 5/5 model tests and
-8/8 production-adapter tests passed. The adapter test includes 128 independently seeded 48-operation traces
-with generated crashes. The repeat-suite command above passed 100/100 process runs with zero
-failures in 82.38 seconds at 101,068 KiB maximum RSS. Phase-addressed outcomes covered pre-effect failure,
-durable-effect-then-error/ambiguous create, CAS loss, stale LIST, incomplete page, and partial deletion.
-After final oracle/adapter reconciliation, the complete eight-test integration target also passed another
-100/100 process invocations with zero failures.
 SP-08 adds two enumerated composed-path cases and one honestly scoped log-level retry case to the same
 integration target. They drive the real `InMemoryControlPlane`, engine `acquire_and_fence`, and
 `SegmentedObjectLog` with logical time through `PendingFence`, failure-before-effect, effect-then-error,
@@ -449,9 +447,8 @@ before retry, log-level ambiguous manifest retry, and exact fresh reopen. The fo
 cargo test -p fireweed-objectlog --test deterministic_storage_simulation
 ```
 
-The typed corpus detects the two historical and five synthetic mutants with expected invariant identity.
-Untargeted discovery of both historical bugs, cross-host repeats, clean target-dir growth, and process-kill
-replay remain release evidence and were not claimed or run here. The suite has a precise repeat-suite entry
+The generated suite exercises current-format crash and store-fault behavior. Cross-host repeats, clean
+target-dir growth, and process-kill replay remain release evidence. The suite has a precise repeat-suite entry
 but is not wired into broad GitHub Actions; no host-capacity benchmark is part of this suite.
 
 ## 5. CI Quality Gates (the green set)
@@ -463,13 +460,13 @@ orphan proof; bounded orphan-GC tests for dry-run/live parity, partial replay, p
 fencing, `page_size = 1` segment/sentinel convergence, and request-cap enforcement; and a scheduler
 regression proving terminal projection rows are reaped by the single reclaim driver only after emission
 advances its cursor. Partial-effect reports cover retryable delete failure and epoch loss after deletion.
-Restart tests prove completion from persisted object-size inventory; the bounded legacy fallback reports and
-budgets each size GET. Providers without an exact one-attempt primitive-call guarantee fail closed.
+Restart tests prove completion from persisted object-size inventory. Providers without an exact one-attempt
+primitive-call guarantee fail closed.
 
 Bounded segment-expiry acceptance additionally requires a large manifest prefix to converge across multiple
 passes without exceeding per-pass object, byte, request, elapsed-time, or page-size limits. A restart between
 passes must discard only the soft cursor, rescan durable reclaimed markers, delete every remaining eligible
-segment exactly once, and publish the read horizon only after the complete unblocked traversal. A call-site
+segment exactly once, and publish the deletion watermark only after the complete unblocked traversal. A call-site
 gate verifies that the composed production scheduler invokes the bounded expiry seam and merges its summary;
 the unbounded compatibility helper is not a scheduler dependency.
 Regression cases increase `through_seq` between passes, expire a live pin between passes, and scan a branch
@@ -499,7 +496,7 @@ but not sufficient.
 | Coverage — `fireweed-service` | ≥ 80% line | per-PR |
 | Property tests | ≥ `props` (PR tier); 0 falsifications | per-PR |
 | Fuzz targets (command decode, selector, priority decode) | ≥ `fuzz` (PR tier); 0 new crashes | per-PR |
-| Segment format v2/v3 (golden, bounds, corruption, mixed history) | Literal v2/v3 bytes; CRC32C/SHA-256 standards; all single-bit v3 mutations; truncated/oversized/malicious lengths; manifest/key/header mismatch; deterministic arbitrary v2/v3/control-entry interleavings; legacy branch exemption | per-PR |
+| Current segment format (golden, bounds, corruption, recovery) | Literal current bytes; CRC32C/SHA-256 standards; all single-bit mutations; truncated/oversized/malicious lengths; manifest/key/header mismatch; deterministic data/control replay; retired shapes rejected | per-PR |
 | Product E2E smoke (`FIREWEED_E2E_SCALE=smoke`) | P0/core AC-E2E-1..6 and AC-E2E-8..9 pass at smoke shape for each implemented suite and required backend profile; include AC-E2E-7 once the P1/operator surface is implemented | per-PR once the suite exists |
 | **Every `AC-*` in §3 executes and passes at its stated bar** | 100% of claimed `AC-*` green | per-PR for unit/integration ACs and product smoke; release for soak, scale, and release-shape product E2E ACs |
 | Portable capacity/degradation gates `AC-LAT-1..4` | exact work, same-run ratios, structural complexity, and declared resource bounds pass; absolute p50/p95/p99 are reported only | release |

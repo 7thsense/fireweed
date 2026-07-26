@@ -33,7 +33,7 @@ use fireweed_objectlog::segmented::{
     SegmentConfig, SegmentCounters, SegmentedObjectLog,
 };
 use fireweed_objectlog::{
-    LocalObjectLog, ObjectLogByteAdmissionSnapshot, prepare_serialized_commands_for_format,
+    LocalObjectLog, ObjectLogByteAdmissionSnapshot, prepare_serialized_commands,
 };
 use fireweed_projection::ProjectionData;
 use fireweed_sqlite::SqliteProjectionStore;
@@ -1214,7 +1214,6 @@ pub struct SegmentedObjectLogSqliteBackend {
     idempotency: Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>>,
     byte_budget: BufferedByteBudget,
     queue_byte_limit: usize,
-    writer_format: fireweed_objectlog::SegmentWriterFormat,
 }
 
 fn ts_to_ms(now: UtcTimestamp) -> i64 {
@@ -1304,7 +1303,6 @@ impl SegmentedObjectLogSqliteBackend {
             idempotency: Mutex::new(HashMap::new()),
             byte_budget: default_objectlog_byte_budget(),
             queue_byte_limit: crate::DEFAULT_OBJECTLOG_QUEUE_WAITING_BYTES,
-            writer_format: config.writer_format(),
         })
     }
 
@@ -1543,10 +1541,9 @@ impl SegmentedObjectLogSqliteBackend {
             // Same-queue callers waiting for this lock own only their request envelope, never a global byte
             // permit or an extra serialized copy. Canonical encoding, queue reservation, and non-waiting
             // global admission linearize together under the coordinator lock.
-            let (serialized, charged_bytes) = prepare_serialized_commands_for_format(
+            let (serialized, charged_bytes) = prepare_serialized_commands(
                 vec![envelope],
                 self.byte_budget.config().global_limit(),
-                self.writer_format,
             )?;
             let queue_bytes: usize = state.permits.iter().map(OwnedBytePermit::bytes).sum();
             if !state.pending.is_empty()
@@ -1607,10 +1604,9 @@ impl SegmentedObjectLogSqliteBackend {
         {
             let mut state = coord.state.lock().await;
             for (index, envelope) in envelopes.into_iter().enumerate() {
-                let (serialized, charged_bytes) = match prepare_serialized_commands_for_format(
+                let (serialized, charged_bytes) = match prepare_serialized_commands(
                     vec![envelope],
                     self.byte_budget.config().global_limit(),
-                    self.writer_format,
                 ) {
                     Ok(prepared) => prepared,
                     Err(error) => {
@@ -2510,7 +2506,6 @@ pub struct SegmentedObjectLogInMemoryBackend {
     byte_budget: BufferedByteBudget,
     queue_byte_limit: usize,
     debug_segments: bool,
-    writer_format: fireweed_objectlog::SegmentWriterFormat,
 }
 
 impl SegmentedObjectLogInMemoryBackend {
@@ -2569,7 +2564,6 @@ impl SegmentedObjectLogInMemoryBackend {
             byte_budget: default_objectlog_byte_budget(),
             queue_byte_limit: crate::DEFAULT_OBJECTLOG_QUEUE_WAITING_BYTES,
             debug_segments: false,
-            writer_format: config.writer_format(),
         })
     }
 
@@ -2805,10 +2799,9 @@ impl SegmentedObjectLogInMemoryBackend {
         let (tx, rx) = oneshot::channel();
         {
             let mut state = coord.state.lock().await;
-            let (serialized, charged_bytes) = prepare_serialized_commands_for_format(
+            let (serialized, charged_bytes) = prepare_serialized_commands(
                 vec![envelope],
                 self.byte_budget.config().global_limit(),
-                self.writer_format,
             )?;
             let queue_bytes: usize = state.permits.iter().map(OwnedBytePermit::bytes).sum();
             if !state.pending.is_empty()
@@ -2864,10 +2857,9 @@ impl SegmentedObjectLogInMemoryBackend {
         {
             let mut state = coord.state.lock().await;
             for (index, envelope) in envelopes.into_iter().enumerate() {
-                let (serialized, charged_bytes) = match prepare_serialized_commands_for_format(
+                let (serialized, charged_bytes) = match prepare_serialized_commands(
                     vec![envelope],
                     self.byte_budget.config().global_limit(),
-                    self.writer_format,
                 ) {
                     Ok(prepared) => prepared,
                     Err(error) => {
@@ -4591,11 +4583,9 @@ mod recovery_tests {
     async fn production_tick_fences_crash_pins_and_converges_recovery_index_gc() {
         let store = Arc::new(InMemoryBlobStore::new());
         let blob_store: Arc<dyn BlobStore> = store.clone();
-        let backend = SegmentedObjectLogInMemoryBackend::open_with_blob_store(
-            blob_store,
-            seal_each_config().with_writer_format(fireweed_objectlog::SegmentWriterFormat::V3),
-        )
-        .unwrap();
+        let backend =
+            SegmentedObjectLogInMemoryBackend::open_with_blob_store(blob_store, seal_each_config())
+                .unwrap();
         let definition = queue_def("maintenance", "recovery-index");
         let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
         backend.create_queue(definition).await.unwrap();
@@ -4995,15 +4985,17 @@ mod recovery_tests {
 
     #[tokio::test]
     async fn segmented_inmemory_restart_reports_observed_full_replay() {
-        let tmp = TmpDir::new("seg-inmemory-replay");
         let def = queue_def("t", "inmemory-q");
         let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
-        const N: usize = 300;
+        const N: usize = 257;
+        let store: Arc<dyn BlobStore> = Arc::new(InMemoryBlobStore::new());
 
         {
-            let backend =
-                SegmentedObjectLogInMemoryBackend::open(tmp.object_root(), seal_each_config())
-                    .unwrap();
+            let backend = SegmentedObjectLogInMemoryBackend::open_with_blob_store(
+                store.clone(),
+                seal_each_config(),
+            )
+            .unwrap();
             backend.create_queue(def.clone()).await.unwrap();
             for i in 0..N {
                 backend
@@ -5014,7 +5006,8 @@ mod recovery_tests {
         }
 
         let reopened =
-            SegmentedObjectLogInMemoryBackend::open(tmp.object_root(), seal_each_config()).unwrap();
+            SegmentedObjectLogInMemoryBackend::open_with_blob_store(store, seal_each_config())
+                .unwrap();
         reopened.create_queue(def).await.unwrap();
         assert_eq!(reopened.metrics(&shard).await.unwrap().pending, N as u64);
         let stats = reopened.recovery_stats(&shard).unwrap();
@@ -5048,7 +5041,7 @@ mod recovery_tests {
         }
         assert_eq!(ordered.len(), N);
         assert_eq!(ordered.first().unwrap().as_str(), "0");
-        assert_eq!(ordered.last().unwrap().as_str(), "299");
+        assert_eq!(ordered.last().unwrap().as_str(), "256");
     }
 
     /// AC (crash-consistency): a reopen where the projection high-water LAGS the durable object-log head
@@ -5148,12 +5141,12 @@ mod recovery_tests {
     }
 
     #[tokio::test]
-    async fn sqlite_snapshot_tail_recovers_interleaved_v3_then_v2_once() {
-        let tmp = TmpDir::new("seg-mixed-tail");
+    async fn sqlite_snapshot_tail_recovers_multiple_current_segments_once() {
+        let tmp = TmpDir::new("seg-current-tail");
         let def = queue_def("t", "q");
         let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
         const APPLIED: usize = 3;
-        let (v3_envelope, v2_envelope) = {
+        let (first_envelope, second_envelope) = {
             let backend = SegmentedObjectLogSqliteBackend::open(
                 tmp.object_root(),
                 &tmp.projection(),
@@ -5178,25 +5171,20 @@ mod recovery_tests {
                 );
                 backend.next_envelope(QueueCommand::Push(PushCommand { items }), ids, ts())
             };
-            (envelope("tail-v3", 10_001), envelope("tail-v2", 10_002))
+            (envelope("tail-a", 10_001), envelope("tail-b", 10_002))
         };
 
-        let append_only = |format, envelope: &CommandEnvelope| {
+        let append_only = |envelope: &CommandEnvelope| {
             let store: Arc<dyn BlobStore> =
                 Arc::new(LocalFsBlobStore::open(tmp.object_root()).unwrap());
-            let log = SegmentedObjectLog::open(
-                store,
-                SegmentConfig::new(1, 1_000)
-                    .unwrap()
-                    .with_writer_format(format),
-            );
+            let log = SegmentedObjectLog::open(store, SegmentConfig::new(1, 1_000).unwrap());
             log.create_queue(&def).unwrap();
             log.enqueue(&shard, std::slice::from_ref(envelope), 0, system_now_ms())
                 .unwrap();
             log.seal(&shard, 0, system_now_ms()).unwrap();
         };
-        append_only(fireweed_objectlog::SegmentWriterFormat::V3, &v3_envelope);
-        append_only(fireweed_objectlog::SegmentWriterFormat::V2, &v2_envelope);
+        append_only(&first_envelope);
+        append_only(&second_envelope);
 
         let recovered = SegmentedObjectLogSqliteBackend::open(
             tmp.object_root(),

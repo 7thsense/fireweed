@@ -51,7 +51,7 @@ pub use change_record_sink::{
     ChangeRecordSinkConfig, ChangeRecordSinkMode, FjordChangeRecordSink, NiflheimChangeRecordSink,
     emit_change_record_tick, spawn_change_record_emitter,
 };
-pub use fireweed_objectlog::segmented::{SegmentConfig, SegmentWriterFormat};
+pub use fireweed_objectlog::segmented::SegmentConfig;
 pub use object_log_sqlite::{
     DEFAULT_RECOVERY_MAX_TAIL, ObjectLogSqliteBackend, RecoveryStats,
     SegmentedObjectLogInMemoryBackend, SegmentedObjectLogSqliteBackend,

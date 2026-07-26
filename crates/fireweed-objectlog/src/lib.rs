@@ -19,8 +19,7 @@ pub mod simulation_support;
 pub use async_commit::{
     ByteAdmissionWaitPolicy, GroupCommitObjectLogProjectionCommitter, MAX_RECOVERY_PAGE_SIZE,
     ObjectLogByteAdmissionConfig, ObjectLogByteAdmissionSnapshot, ObjectLogProjectionCommitter,
-    PreparedObjectLogCommit, prepare_serialized_commands, prepare_serialized_commands_for_format,
-    serialized_peak_charge,
+    PreparedObjectLogCommit, prepare_serialized_commands, serialized_peak_charge,
 };
 pub use async_log::{
     AsyncObjectLog, DEFAULT_ASYNC_OBJECT_LOG_CAPACITY, DEFAULT_ASYNC_OBJECT_LOG_WORKERS,
@@ -29,9 +28,7 @@ pub use compose_log::{
     ComposedObjectLogBackend, ObjectLog, composed_objectlog_backend,
     composed_objectlog_backend_group_commit,
 };
-pub use segmented::{
-    FaultCutPoint, FaultHook, SegmentConfig, SegmentWriterFormat, SerializedCommandEnvelope,
-};
+pub use segmented::{FaultCutPoint, FaultHook, SegmentConfig, SerializedCommandEnvelope};
 
 use std::collections::HashMap;
 use std::fs;

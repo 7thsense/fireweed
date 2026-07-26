@@ -1,4 +1,4 @@
-//! Versioned, manifest-authoritative segment framing and integrity checks.
+//! Manifest-authoritative segment framing and integrity checks.
 //!
 //! This module deliberately knows nothing about object-store keys, manifests,
 //! or replay. Callers translate a manifest entry into [`ManifestIntegrity`]
@@ -8,8 +8,7 @@ use fireweed_engine::{CommandEnvelope, DurableIntegrityStage, EngineError, Engin
 use sha2::{Digest, Sha256};
 
 pub(crate) const MAGIC: [u8; 4] = *b"FWSG";
-pub(crate) const V2: u8 = 2;
-pub(crate) const V3: u8 = 3;
+pub(crate) const VERSION: u8 = 3;
 pub(crate) const HEADER_LEN: usize = 4 + 1 + 8 + 8;
 const TRAILER_LEN: usize = 4;
 
@@ -23,39 +22,10 @@ pub(crate) const MAX_RECORDS: usize = 1_000_000;
 pub(crate) const CRC32C_ALGORITHM: &str = "crc32c-castagnoli";
 pub(crate) const SHA256_ALGORITHM: &str = "sha256";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WriterFormat {
-    V2,
-    V3,
-}
-
-impl WriterFormat {
-    pub(crate) const fn version(self) -> u8 {
-        match self {
-            Self::V2 => V2,
-            Self::V3 => V3,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ManifestIntegrity {
-    V2 {
-        checksum_fnv1a: u64,
-    },
-    V3 {
-        frame_crc32c: u32,
-        content_sha256: String,
-    },
-}
-
-impl ManifestIntegrity {
-    const fn version(&self) -> u8 {
-        match self {
-            Self::V2 { .. } => V2,
-            Self::V3 { .. } => V3,
-        }
-    }
+pub(crate) struct ManifestIntegrity {
+    pub(crate) frame_crc32c: u32,
+    pub(crate) content_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,9 +75,8 @@ impl From<SegmentIntegrityError> for EngineError {
 #[derive(Debug, Clone)]
 pub(crate) struct EncodedSegment {
     pub(crate) bytes: Vec<u8>,
-    pub(crate) legacy_checksum: u64,
-    pub(crate) frame_crc32c: Option<u32>,
-    pub(crate) content_sha256: Option<String>,
+    pub(crate) frame_crc32c: u32,
+    pub(crate) content_sha256: String,
 }
 
 pub(crate) fn object_locator(object_key: &str) -> String {
@@ -115,15 +84,9 @@ pub(crate) fn object_locator(object_key: &str) -> String {
     digest[..16].to_owned()
 }
 
-pub(crate) fn encoded_len(
-    format: WriterFormat,
-    lengths: impl IntoIterator<Item = usize>,
-) -> Option<usize> {
-    let record_overhead = match format {
-        WriterFormat::V2 => 4,
-        WriterFormat::V3 => 8,
-    };
-    let base = HEADER_LEN + 4 + usize::from(format == WriterFormat::V3) * TRAILER_LEN;
+pub(crate) fn encoded_len(lengths: impl IntoIterator<Item = usize>) -> Option<usize> {
+    let record_overhead = 8;
+    let base = HEADER_LEN + 4 + TRAILER_LEN;
     lengths.into_iter().try_fold(base, |size, len| {
         size.checked_add(record_overhead)?.checked_add(len)
     })
@@ -133,13 +96,12 @@ pub(crate) fn encoded_len(
 /// Empty command batches are permitted here as no-op requests; `encode`
 /// separately rejects an empty physical segment.
 pub(crate) fn validate_write_lengths(
-    format: WriterFormat,
     lengths: impl IntoIterator<Item = usize>,
 ) -> EngineResult<usize> {
     let lengths = lengths.into_iter();
     let mut count = 0_usize;
-    let mut object_len = HEADER_LEN + 4 + usize::from(format == WriterFormat::V3) * TRAILER_LEN;
-    let record_overhead = if format == WriterFormat::V3 { 8 } else { 4 };
+    let mut object_len = HEADER_LEN + 4 + TRAILER_LEN;
+    let record_overhead = 8;
     for len in lengths {
         count = count.saturating_add(1);
         if count > MAX_RECORDS || len > MAX_RECORD_BYTES || len > u32::MAX as usize {
@@ -166,7 +128,6 @@ pub(crate) fn validate_write_lengths(
 }
 
 pub(crate) fn encode(
-    format: WriterFormat,
     epoch: u64,
     first_seq: u64,
     records: &[Vec<u8>],
@@ -177,38 +138,24 @@ pub(crate) fn encode(
             limit: MAX_SEGMENT_BYTES,
         });
     }
-    let object_len = validate_write_lengths(format, records.iter().map(Vec::len))?;
+    let object_len = validate_write_lengths(records.iter().map(Vec::len))?;
     let mut object = Vec::with_capacity(object_len);
     object.extend_from_slice(&MAGIC);
-    object.push(format.version());
+    object.push(VERSION);
     object.extend_from_slice(&epoch.to_le_bytes());
     object.extend_from_slice(&first_seq.to_le_bytes());
-    let records_start = object.len();
     object.extend_from_slice(&(records.len() as u32).to_le_bytes());
     for record in records {
         object.extend_from_slice(&(record.len() as u32).to_le_bytes());
-        if format == WriterFormat::V3 {
-            object.extend_from_slice(&crc32c::crc32c(record).to_le_bytes());
-        }
+        object.extend_from_slice(&crc32c::crc32c(record).to_le_bytes());
         object.extend_from_slice(record);
     }
-    let legacy_checksum = if format == WriterFormat::V2 {
-        fnv1a(&object[records_start..])
-    } else {
-        0
-    };
-    let frame_crc32c = if format == WriterFormat::V3 {
-        let checksum = crc32c::crc32c(&object);
-        object.extend_from_slice(&checksum.to_le_bytes());
-        Some(checksum)
-    } else {
-        None
-    };
+    let frame_crc32c = crc32c::crc32c(&object);
+    object.extend_from_slice(&frame_crc32c.to_le_bytes());
     debug_assert_eq!(object.len(), object_len);
-    let content_sha256 = (format == WriterFormat::V3).then(|| hex_lower(&Sha256::digest(&object)));
+    let content_sha256 = hex_lower(&Sha256::digest(&object));
     Ok(EncodedSegment {
         bytes: object,
-        legacy_checksum,
         frame_crc32c,
         content_sha256,
     })
@@ -252,7 +199,6 @@ pub(crate) struct ValidatedSegmentCursor {
     bytes: Vec<u8>,
     manifest_index: u64,
     locator: String,
-    v3: bool,
     epoch: u64,
     first_seq: u64,
     count: usize,
@@ -276,45 +222,26 @@ impl ValidatedSegmentCursor {
         if bytes.len() < HEADER_LEN || bytes[..4] != MAGIC {
             return Err(fail(DurableIntegrityStage::Header, "bad_magic_or_short_header").into());
         }
-        if bytes[4] != expected.version() {
+        if bytes[4] != VERSION {
             return Err(fail(DurableIntegrityStage::Manifest, "format_version_mismatch").into());
         }
         let epoch = u64::from_le_bytes(bytes[5..13].try_into().expect("fixed header"));
         let first_seq = u64::from_le_bytes(bytes[13..21].try_into().expect("fixed header"));
-        let records_end = match expected {
-            ManifestIntegrity::V2 { checksum_fnv1a } => {
-                let blob = &bytes[HEADER_LEN..];
-                if fnv1a(blob) != *checksum_fnv1a {
-                    return Err(fail(DurableIntegrityStage::LegacyFnv1a, "fnv1a_mismatch").into());
-                }
-                bytes.len()
-            }
-            ManifestIntegrity::V3 {
-                frame_crc32c,
-                content_sha256,
-            } => {
-                if bytes.len() < HEADER_LEN + 4 + TRAILER_LEN {
-                    return Err(fail(DurableIntegrityStage::Bounds, "truncated_v3_frame").into());
-                }
-                let trailer_at = bytes.len() - TRAILER_LEN;
-                let trailer = u32::from_le_bytes(bytes[trailer_at..].try_into().expect("trailer"));
-                if trailer != *frame_crc32c || crc32c::crc32c(&bytes[..trailer_at]) != trailer {
-                    return Err(fail(DurableIntegrityStage::FrameCrc32c, "crc32c_mismatch").into());
-                }
-                if hex_lower(&Sha256::digest(&bytes)) != *content_sha256 {
-                    return Err(fail(DurableIntegrityStage::Sha256, "sha256_mismatch").into());
-                }
-                trailer_at
-            }
-        };
+        if bytes.len() < HEADER_LEN + 4 + TRAILER_LEN {
+            return Err(fail(DurableIntegrityStage::Bounds, "truncated_frame").into());
+        }
+        let records_end = bytes.len() - TRAILER_LEN;
+        let trailer = u32::from_le_bytes(bytes[records_end..].try_into().expect("trailer"));
+        if trailer != expected.frame_crc32c || crc32c::crc32c(&bytes[..records_end]) != trailer {
+            return Err(fail(DurableIntegrityStage::FrameCrc32c, "crc32c_mismatch").into());
+        }
+        if hex_lower(&Sha256::digest(&bytes)) != expected.content_sha256 {
+            return Err(fail(DurableIntegrityStage::Sha256, "sha256_mismatch").into());
+        }
 
         let mut cursor = HEADER_LEN;
         let count = read_u32(&bytes, &mut cursor, records_end, &fail)? as usize;
-        let min_record_bytes = if matches!(expected, ManifestIntegrity::V3 { .. }) {
-            8
-        } else {
-            4
-        };
+        let min_record_bytes = 8;
         if count > MAX_RECORDS || count > (records_end.saturating_sub(cursor) / min_record_bytes) {
             return Err(fail(DurableIntegrityStage::Bounds, "record_count_out_of_bounds").into());
         }
@@ -326,11 +253,7 @@ impl ValidatedSegmentCursor {
             if len > MAX_RECORD_BYTES {
                 return Err(fail(DurableIntegrityStage::Bounds, "record_too_large").into());
             }
-            let expected_record_crc = if matches!(expected, ManifestIntegrity::V3 { .. }) {
-                Some(read_u32(&bytes, &mut cursor, records_end, &fail)?)
-            } else {
-                None
-            };
+            let expected_record_crc = read_u32(&bytes, &mut cursor, records_end, &fail)?;
             let end = cursor
                 .checked_add(len)
                 .filter(|end| *end <= records_end)
@@ -338,7 +261,7 @@ impl ValidatedSegmentCursor {
                     EngineError::from(fail(DurableIntegrityStage::Bounds, "truncated_record"))
                 })?;
             let record = &bytes[cursor..end];
-            if expected_record_crc.is_some_and(|crc| crc32c::crc32c(record) != crc) {
+            if crc32c::crc32c(record) != expected_record_crc {
                 return Err(fail(DurableIntegrityStage::RecordCrc32c, "crc32c_mismatch").into());
             }
             cursor = end;
@@ -351,7 +274,6 @@ impl ValidatedSegmentCursor {
             bytes,
             manifest_index,
             locator: locator.to_owned(),
-            v3: matches!(expected, ManifestIntegrity::V3 { .. }),
             epoch,
             first_seq,
             count,
@@ -410,9 +332,7 @@ impl ValidatedSegmentCursor {
             SegmentIntegrityError::new(stage, self.manifest_index, &self.locator, detail)
         };
         let len = read_u32(&self.bytes, &mut self.cursor, self.records_end, &fail)? as usize;
-        if self.v3 {
-            let _ = read_u32(&self.bytes, &mut self.cursor, self.records_end, &fail)?;
-        }
+        let _ = read_u32(&self.bytes, &mut self.cursor, self.records_end, &fail)?;
         let end = self
             .cursor
             .checked_add(len)
@@ -452,15 +372,6 @@ fn read_u32(
     Ok(value)
 }
 
-pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
 pub(crate) fn hex_lower(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     let mut encoded = String::with_capacity(bytes.len() * 2);
@@ -484,22 +395,16 @@ mod tests {
     }
 
     #[test]
-    fn v2_and_v3_frame_goldens_are_literal() {
+    fn current_frame_golden_is_literal() {
         let records = vec![b"{}".to_vec(), b"[]".to_vec()];
-        let v2 = encode(WriterFormat::V2, 7, 11, &records).unwrap();
-        let v3 = encode(WriterFormat::V3, 7, 11, &records).unwrap();
+        let encoded = encode(7, 11, &records).unwrap();
         assert_eq!(
-            hex_lower(&v2.bytes),
-            "465753470207000000000000000b0000000000000002000000020000007b7d020000005b5d"
-        );
-        assert_eq!(
-            hex_lower(&v3.bytes),
+            hex_lower(&encoded.bytes),
             "465753470307000000000000000b000000000000000200000002000000aad07b297b7d0200000076bd4d765b5de85b0807"
         );
-        assert_eq!(v2.legacy_checksum, 0xb828_4cc9_e212_925b);
-        assert_eq!(v3.frame_crc32c, Some(0x0708_5be8));
+        assert_eq!(encoded.frame_crc32c, 0x0708_5be8);
         assert_eq!(
-            v3.content_sha256.unwrap(),
+            encoded.content_sha256,
             "fcd9404e276f954a7d00eda7dfebea2bccacdb6fcd36d55fb71607151b9d0051"
         );
     }
@@ -512,31 +417,28 @@ mod tests {
         // proves that durable frames decode byte-for-byte.
         command.command_id = fireweed_engine::CommandId::new("c");
         let record = serde_json::to_vec(&command).unwrap();
-        let v2 = encode(WriterFormat::V2, 7, 11, std::slice::from_ref(&record)).unwrap();
-        let v3 = encode(WriterFormat::V3, 7, 11, std::slice::from_ref(&record)).unwrap();
-        let v2_expected = ManifestIntegrity::V2 {
-            checksum_fnv1a: v2.legacy_checksum,
+        let encoded = encode(7, 11, std::slice::from_ref(&record)).unwrap();
+        let expected = ManifestIntegrity {
+            frame_crc32c: encoded.frame_crc32c,
+            content_sha256: encoded.content_sha256.clone(),
         };
-        let v3_expected = ManifestIntegrity::V3 {
-            frame_crc32c: v3.frame_crc32c.unwrap(),
-            content_sha256: v3.content_sha256.clone().unwrap(),
-        };
-        let decoded_v2 = decode(&v2.bytes, 3, "fixture", &v2_expected).unwrap().2;
-        let decoded_v3 = decode(&v3.bytes, 3, "fixture", &v3_expected).unwrap().2;
-        assert_eq!(serde_json::to_vec(&decoded_v2[0]).unwrap(), record);
-        assert_eq!(serde_json::to_vec(&decoded_v3[0]).unwrap(), record);
+        let decoded = decode(&encoded.bytes, 3, "fixture", &expected).unwrap().2;
+        assert_eq!(serde_json::to_vec(&decoded[0]).unwrap(), record);
     }
 
     #[test]
     fn malformed_counts_fail_before_command_allocation() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&MAGIC);
-        bytes.push(V2);
+        bytes.push(VERSION);
         bytes.extend_from_slice(&0_u64.to_le_bytes());
         bytes.extend_from_slice(&0_u64.to_le_bytes());
         bytes.extend_from_slice(&u32::MAX.to_le_bytes());
-        let expected = ManifestIntegrity::V2 {
-            checksum_fnv1a: fnv1a(&bytes[HEADER_LEN..]),
+        let trailer = crc32c::crc32c(&bytes);
+        bytes.extend_from_slice(&trailer.to_le_bytes());
+        let expected = ManifestIntegrity {
+            frame_crc32c: trailer,
+            content_sha256: hex_lower(&Sha256::digest(&bytes)),
         };
         let error = decode(&bytes, 9, "opaque", &expected).unwrap_err();
         assert!(matches!(
@@ -549,20 +451,20 @@ mod tests {
         ));
     }
 
-    fn rewrite_v3_integrity(bytes: &mut [u8]) -> ManifestIntegrity {
+    fn rewrite_integrity(bytes: &mut [u8]) -> ManifestIntegrity {
         let trailer_at = bytes.len() - TRAILER_LEN;
         let frame_crc32c = crc32c::crc32c(&bytes[..trailer_at]);
         bytes[trailer_at..].copy_from_slice(&frame_crc32c.to_le_bytes());
-        ManifestIntegrity::V3 {
+        ManifestIntegrity {
             frame_crc32c,
             content_sha256: hex_lower(&Sha256::digest(bytes)),
         }
     }
 
     #[test]
-    fn valid_outer_integrity_still_rejects_malicious_v3_lengths_and_counts() {
+    fn valid_outer_integrity_still_rejects_malicious_lengths_and_counts() {
         let records = vec![b"{}".to_vec()];
-        let original = encode(WriterFormat::V3, 1, 2, &records).unwrap().bytes;
+        let original = encode(1, 2, &records).unwrap().bytes;
         for (offset, replacement) in [
             (HEADER_LEN, u32::MAX),
             (HEADER_LEN + 4, (MAX_RECORD_BYTES as u32).saturating_add(1)),
@@ -570,7 +472,7 @@ mod tests {
         ] {
             let mut bytes = original.clone();
             bytes[offset..offset + 4].copy_from_slice(&replacement.to_le_bytes());
-            let expected = rewrite_v3_integrity(&mut bytes);
+            let expected = rewrite_integrity(&mut bytes);
             assert!(matches!(
                 decode(&bytes, 4, "opaque", &expected),
                 Err(EngineError::DurableDataCorrupt {
@@ -590,14 +492,11 @@ mod tests {
             MAX_RECORD_BYTES,
             MAX_SEGMENT_BYTES - (HEADER_LEN + 4 + TRAILER_LEN) - 4 * 8 - 3 * MAX_RECORD_BYTES,
         ];
-        assert_eq!(
-            validate_write_lengths(WriterFormat::V3, exact).unwrap(),
-            MAX_SEGMENT_BYTES
-        );
+        assert_eq!(validate_write_lengths(exact).unwrap(), MAX_SEGMENT_BYTES);
         let mut over = exact;
         over[3] += 1;
         assert!(matches!(
-            validate_write_lengths(WriterFormat::V3, over),
+            validate_write_lengths(over),
             Err(EngineError::RequestTooLarge {
                 limit: MAX_SEGMENT_BYTES,
                 ..
@@ -606,75 +505,22 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "manual SP-07 v2/v3 encode/decode overhead benchmark; compare interleaved same-run profiles"]
-    fn segment_v2_v3_integrity_overhead_manual_benchmark() {
-        use std::hint::black_box;
-        use std::time::Instant;
-
-        let command =
-            fireweed_conformance::envelope(fireweed_engine::QueueCommand::ResumeQueue, vec![]);
-        let record = serde_json::to_vec(&command).unwrap();
-        let records = vec![record; 256];
-        let v2_len = encoded_len(WriterFormat::V2, records.iter().map(Vec::len)).unwrap();
-        let v3_len = encoded_len(WriterFormat::V3, records.iter().map(Vec::len)).unwrap();
-        assert_eq!(v3_len - v2_len, records.len() * 4 + TRAILER_LEN);
-
-        let iterations = 1_000;
-        for format in [WriterFormat::V2, WriterFormat::V3] {
-            let started = Instant::now();
-            for _ in 0..iterations {
-                black_box(encode(format, 7, 11, black_box(&records)).unwrap());
-            }
-            eprintln!(
-                "SP-07 segment integrity manual benchmark format={format:?} records={} iterations={iterations} elapsed={:?}",
-                records.len(),
-                started.elapsed()
-            );
-        }
-
-        let mixed = [
-            WriterFormat::V2,
-            WriterFormat::V3,
-            WriterFormat::V2,
-            WriterFormat::V3,
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(index, format)| {
-            let encoded = encode(
-                format,
-                7,
-                11 + index as u64 * records.len() as u64,
-                &records,
-            )
-            .unwrap();
-            let expected = match format {
-                WriterFormat::V2 => ManifestIntegrity::V2 {
-                    checksum_fnv1a: encoded.legacy_checksum,
-                },
-                WriterFormat::V3 => ManifestIntegrity::V3 {
-                    frame_crc32c: encoded.frame_crc32c.unwrap(),
-                    content_sha256: encoded.content_sha256.clone().unwrap(),
-                },
-            };
-            (encoded.bytes, expected)
-        })
-        .collect::<Vec<_>>();
-        let started = Instant::now();
-        for _ in 0..iterations {
-            for (index, (bytes, expected)) in mixed.iter().enumerate() {
-                let (_, first_seq, decoded) =
-                    decode(black_box(bytes), index as u64, "benchmark", expected).unwrap();
-                assert_eq!(first_seq, 11 + index as u64 * records.len() as u64);
-                assert_eq!(decoded.len(), records.len());
-                black_box(decoded);
-            }
-        }
-        eprintln!(
-            "SP-07 segment integrity manual mixed-replay benchmark segments={} records_per_segment={} iterations={iterations} elapsed={:?}",
-            mixed.len(),
-            records.len(),
-            started.elapsed()
-        );
+    fn retired_frame_version_is_rejected() {
+        let mut bytes = encode(7, 11, &[b"{}".to_vec()]).unwrap().bytes;
+        bytes[4] = 2;
+        let trailer_at = bytes.len() - TRAILER_LEN;
+        let frame_crc32c = crc32c::crc32c(&bytes[..trailer_at]);
+        bytes[trailer_at..].copy_from_slice(&frame_crc32c.to_le_bytes());
+        let expected = ManifestIntegrity {
+            frame_crc32c,
+            content_sha256: hex_lower(&Sha256::digest(&bytes)),
+        };
+        assert!(matches!(
+            decode(&bytes, 3, "retired-frame", &expected),
+            Err(EngineError::DurableDataCorrupt {
+                stage: DurableIntegrityStage::Manifest,
+                ..
+            })
+        ));
     }
 }

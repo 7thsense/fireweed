@@ -285,10 +285,6 @@ impl ObjectLog {
         self.config.target_bytes
     }
 
-    pub(crate) fn shared_segment_writer_format(&self) -> crate::SegmentWriterFormat {
-        self.config.writer_format()
-    }
-
     pub(crate) fn shared_pending(&self, shard: &QueueKey) -> usize {
         self.log.pending(shard)
     }

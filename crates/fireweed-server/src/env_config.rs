@@ -22,8 +22,7 @@ use fireweed_sqlite::{DEFAULT_DEFERRED_FLUSH_CHUNK, HybridAsyncThresholds};
 use crate::{
     BackendSpec, ChangeRecordSinkConfig, Config, ControlPlaneSpec, DEFAULT_RECOVERY_MAX_TAIL,
     EmbeddedFjordConfig, LogSpec, ObjectLogByteLimits, ObjectLogSpec, ProjectionSpec,
-    S3CredentialSource, SegmentConfig, SegmentWriterFormat, resolve_node_id,
-    validated_owner_endpoint,
+    S3CredentialSource, SegmentConfig, resolve_node_id, validated_owner_endpoint,
 };
 
 /// A rejected runtime configuration: the populator could not build a valid [`Config`] from the supplied env
@@ -216,23 +215,11 @@ fn parse_control_plane(
     }
 }
 
-/// The group-commit segment configuration for the segmented object-log families (byte-size + latency seal
-/// triggers), plus the rollout-safe writer format. Readers always accept both
-/// durable formats; release N defaults new writes to v2.
+/// The group-commit segment configuration for the segmented object-log families.
 fn segment_config(env: &BTreeMap<String, String>) -> Result<SegmentConfig, ConfigError> {
     let target_bytes = parse_usize(env, "FIREWEED_SEGMENT_TARGET_BYTES", 262_144);
     let max_latency_ms = parse_u64(env, "FIREWEED_SEGMENT_MAX_LATENCY_MS", 20);
-    let writer_format = match env_or(env, "FIREWEED_SEGMENT_WRITER_FORMAT", "v2").as_str() {
-        "v2" => SegmentWriterFormat::V2,
-        "v3" => SegmentWriterFormat::V3,
-        other => {
-            return Err(ConfigError::new(format!(
-                "unknown FIREWEED_SEGMENT_WRITER_FORMAT={other:?}; expected v2|v3"
-            )));
-        }
-    };
     SegmentConfig::new(target_bytes, max_latency_ms)
-        .map(|config| config.with_writer_format(writer_format))
         .map_err(|e| ConfigError::new(format!("invalid segment configuration: {e}")))
 }
 
@@ -1067,46 +1054,11 @@ mod tests {
     }
 
     #[test]
-    fn segment_writer_format_is_strict_and_rollout_defaults_to_v2() {
-        assert_eq!(
-            segment_config(&map(&[])).unwrap().writer_format(),
-            SegmentWriterFormat::V2
-        );
-        assert_eq!(
-            segment_config(&map(&[("FIREWEED_SEGMENT_WRITER_FORMAT", "v2")]))
-                .unwrap()
-                .writer_format(),
-            SegmentWriterFormat::V2
-        );
-        assert_eq!(
-            segment_config(&map(&[("FIREWEED_SEGMENT_WRITER_FORMAT", "v3")]))
-                .unwrap()
-                .writer_format(),
-            SegmentWriterFormat::V3
-        );
-        for value in ["", "V2", "V3", "3", "future"] {
-            assert!(
-                segment_config(&map(&[("FIREWEED_SEGMENT_WRITER_FORMAT", value)])).is_err(),
-                "accepted non-canonical writer format {value:?}"
-            );
-        }
-
-        let s3 = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "objectlog"),
-            ("FIREWEED_OBJECT_LOG_STORE", "s3"),
-            ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "https://object.example"),
-            ("FIREWEED_OBJECT_LOG_S3_BUCKET", "bucket"),
-            ("FIREWEED_OBJECT_LOG_S3_REGION", "us-east-1"),
-            ("FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE", "static"),
-            ("FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID", "test"),
-            ("FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY", "test"),
-            ("FIREWEED_SEGMENT_WRITER_FORMAT", "v3"),
-        ]))
-        .unwrap();
-        let LogSpec::ObjectLog(ObjectLogSpec::S3 { segment_config, .. }) = s3.backend.log else {
-            panic!("expected S3 object-log profile");
-        };
-        assert_eq!(segment_config.writer_format(), SegmentWriterFormat::V3);
+    fn segment_format_is_fixed_and_has_no_runtime_selector() {
+        let baseline = segment_config(&map(&[])).unwrap();
+        let with_retired_selector =
+            segment_config(&map(&[("FIREWEED_SEGMENT_WRITER_FORMAT", "retired")])).unwrap();
+        assert_eq!(baseline, with_retired_selector);
     }
 
     #[test]
@@ -1134,7 +1086,6 @@ mod tests {
                 assert_eq!(path, PathBuf::from("/data/proj.db"));
                 assert_eq!(segment_config.target_bytes, 131_072);
                 assert_eq!(segment_config.max_latency_ms, 5);
-                assert_eq!(segment_config.writer_format(), SegmentWriterFormat::V2);
             }
             _ => panic!("expected objectlog log × sqlite projection"),
         }

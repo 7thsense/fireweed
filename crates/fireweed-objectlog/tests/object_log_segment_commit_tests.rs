@@ -113,32 +113,32 @@ fn collect_files(root: &std::path::Path) -> Vec<String> {
     out
 }
 
-fn attempt_segment_files(root: &std::path::Path) -> Vec<String> {
+fn candidate_segment_files(root: &std::path::Path) -> Vec<String> {
     collect_files(root)
         .into_iter()
-        .filter(|p| p.contains("/seg_attempt/") && p.ends_with(".seg"))
+        .filter(|p| p.contains("/seg_candidates/") && p.ends_with(".seg"))
         .collect()
 }
 
-fn manifest_head_files(root: &std::path::Path) -> Vec<String> {
+fn manifest_candidate_files(root: &std::path::Path) -> Vec<String> {
     collect_files(root)
         .into_iter()
-        .filter(|p| p.contains("/manifest_head/") && p.ends_with(".json"))
+        .filter(|p| p.contains("/manifest_candidates/") && p.ends_with(".json"))
         .collect()
 }
 
-fn legacy_manifest_files(root: &std::path::Path) -> Vec<String> {
+fn retired_manifest_mirror_files(root: &std::path::Path) -> Vec<String> {
     collect_files(root)
         .into_iter()
         .filter(|p| {
-            p.contains("/manifest/") && !p.contains("/manifest_head/") && p.ends_with(".json")
+            p.contains("/manifest/") && !p.contains("/manifest_candidates/") && p.ends_with(".json")
         })
         .collect()
 }
 
-fn delete_legacy_manifest_files(root: &std::path::Path) {
-    for rel in legacy_manifest_files(root) {
-        std::fs::remove_file(root.join(rel)).expect("delete legacy manifest");
+fn delete_retired_manifest_mirror_files(root: &std::path::Path) {
+    for rel in retired_manifest_mirror_files(root) {
+        std::fs::remove_file(root.join(rel)).expect("delete retired manifest");
     }
 }
 
@@ -283,8 +283,8 @@ fn seal_head_cas_ack_boundary_preserves_replay_semantics() {
 
     log.set_fault_hook(Some(Arc::new(CrashAt(FaultCutPoint::BeforeSegmentWrite))));
     assert!(log.append(&shard, &[push_env("10")], 0).is_err());
-    assert!(attempt_segment_files(&root).is_empty());
-    assert!(manifest_head_files(&root).is_empty());
+    assert!(candidate_segment_files(&root).is_empty());
+    assert!(manifest_candidate_files(&root).is_empty());
     assert!(log.read_from(&shard, None, 10).unwrap().entries.is_empty());
 
     log.set_fault_hook(Some(Arc::new(CrashAt(
@@ -292,11 +292,15 @@ fn seal_head_cas_ack_boundary_preserves_replay_semantics() {
     ))));
     assert!(log.append(&shard, &[push_env("11")], 0).is_err());
     assert_eq!(
-        attempt_segment_files(&root).len(),
+        candidate_segment_files(&root).len(),
         1,
-        "segment write before head CAS leaves only an unreachable attempt object"
+        "segment write before head CAS leaves only an unreachable candidate object"
     );
-    assert!(manifest_head_files(&root).is_empty());
+    assert_eq!(
+        manifest_candidate_files(&root).len(),
+        1,
+        "the prepared manifest candidate remains unreachable until the authority-head CAS"
+    );
     assert!(log.read_from(&shard, None, 10).unwrap().entries.is_empty());
 
     log.set_fault_hook(None);
@@ -307,7 +311,7 @@ fn seal_head_cas_ack_boundary_preserves_replay_semantics() {
         acked.iter().map(|p| p.sequence).collect::<Vec<_>>(),
         vec![0]
     );
-    assert_eq!(manifest_head_files(&root).len(), 1);
+    assert_eq!(manifest_candidate_files(&root).len(), 2);
     assert_eq!(log.read_from(&shard, None, 10).unwrap().entries.len(), 1);
 
     log.set_fault_hook(Some(Arc::new(CrashAt(
@@ -532,7 +536,7 @@ fn replay_across_restart_with_head_and_deletion() {
             vec![4],
             "restart must replay the committed tail exactly once after interrupted deletion"
         );
-        let deletes_before = reopened.counters().delete_count;
+        let segments_before = candidate_segment_files(&root).len();
         reopened
             .acquire_epoch(&shard)
             .expect("reacquire trim owner after restart");
@@ -540,8 +544,8 @@ fn replay_across_restart_with_head_and_deletion() {
             .expire_segments_through_bounded(&shard, 3, 1_000)
             .expect("retry trim after restart");
         assert!(
-            reopened.counters().delete_count > deletes_before,
-            "the retry must finish the interrupted deletion"
+            candidate_segment_files(&root).len() < segments_before,
+            "the retry must finish the interrupted segment deletion"
         );
         assert_eq!(
             reopened
@@ -568,7 +572,7 @@ fn unique_attempt_segment_keys_do_not_clobber_live_branch_or_later_segments() {
         FaultCutPoint::AfterSegmentWriteBeforeManifest,
     ))));
     assert!(stale.append(&shard, &[push_env("20")], 0).is_err());
-    let orphan_key = attempt_segment_files(&root)
+    let orphan_key = candidate_segment_files(&root)
         .into_iter()
         .next()
         .expect("failed attempt segment");
@@ -581,7 +585,7 @@ fn unique_attempt_segment_keys_do_not_clobber_live_branch_or_later_segments() {
         .append(&shard, &[push_env("21")], 0)
         .expect("live retry");
     assert_eq!(live[0].sequence, 0);
-    let after_live = attempt_segment_files(&root);
+    let after_live = candidate_segment_files(&root);
     assert_eq!(after_live.len(), 2);
     assert!(
         after_live.iter().any(|k| k == &orphan_key),
@@ -616,7 +620,7 @@ fn unique_attempt_segment_keys_do_not_clobber_live_branch_or_later_segments() {
         .expect("later commit");
     assert_eq!(later[0].sequence, 1);
 
-    delete_legacy_manifest_files(&root);
+    delete_retired_manifest_mirror_files(&root);
     let stale_race = stale.append(&shard, &[push_env("23")], 0);
     assert!(
         matches!(
@@ -626,7 +630,7 @@ fn unique_attempt_segment_keys_do_not_clobber_live_branch_or_later_segments() {
         "dormant stale owner must not ack after losing the manifest-head CAS: {stale_race:?}"
     );
 
-    let keys = attempt_segment_files(&root);
+    let keys = candidate_segment_files(&root);
     let seq0_keys = keys
         .iter()
         .filter(|k| k.contains("/s00000000000000000000-"))
@@ -685,7 +689,7 @@ fn stale_writer_cannot_false_ack_after_deleted_index() {
         1,
         "owner B advances the permanent head"
     );
-    delete_legacy_manifest_files(&root);
+    delete_retired_manifest_mirror_files(&root);
 
     resume.wait();
     let frozen_res = frozen_handle.join().expect("frozen owner thread");
@@ -708,7 +712,7 @@ fn stale_writer_cannot_false_ack_after_deleted_index() {
     );
     assert_eq!(owner_b.current_epoch(&shard).unwrap(), 1);
     assert!(
-        legacy_manifest_files(&root).is_empty(),
+        retired_manifest_mirror_files(&root).is_empty(),
         "the old manifest index objects were deleted"
     );
 
@@ -729,7 +733,7 @@ fn stale_writer_attempt_garbage_unpublished() {
         stale.append(&shard, &[push_env("40")], 0).is_err(),
         "the initial stale attempt should crash after the segment write"
     );
-    let orphan_key = attempt_segment_files(&root)
+    let orphan_key = candidate_segment_files(&root)
         .into_iter()
         .find(|k| k.contains("/s00000000000000000000-"))
         .expect("orphan segment object");
@@ -738,7 +742,7 @@ fn stale_writer_attempt_garbage_unpublished() {
     current.ensure_shard(&shard).unwrap();
     let live = current.append(&shard, &[push_env("41")], 0).unwrap();
     assert_eq!(live[0].sequence, 0);
-    let live_key = attempt_segment_files(&root)
+    let live_key = candidate_segment_files(&root)
         .into_iter()
         .find(|k| k != &orphan_key)
         .expect("live segment object");
@@ -760,7 +764,7 @@ fn stale_writer_attempt_garbage_unpublished() {
     let later = current.append(&shard, &[push_env("42")], 0).unwrap();
     assert_eq!(later[0].sequence, 1);
 
-    delete_legacy_manifest_files(&root);
+    delete_retired_manifest_mirror_files(&root);
     stale.set_fault_hook(None);
     let stale_race = stale.append(&shard, &[push_env("43")], 0);
     assert!(
@@ -771,7 +775,7 @@ fn stale_writer_attempt_garbage_unpublished() {
         "a stale owner must not ack after the head advances: {stale_race:?}"
     );
 
-    let keys = attempt_segment_files(&root);
+    let keys = candidate_segment_files(&root);
     let seq0_keys = keys
         .iter()
         .filter(|k| k.contains("/s00000000000000000000-"))
