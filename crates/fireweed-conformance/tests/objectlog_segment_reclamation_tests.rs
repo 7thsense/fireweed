@@ -26,10 +26,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fireweed_conformance::fault::spec;
 use fireweed_core::{QueueDefinition, RequestId};
 use fireweed_engine::{
-    ClaimPort, CommandPosition, CommitTransition, CommitTransitionPort, ComposedBackend,
-    ControlPlaneStore, EngineError, InProcessControlPlane, LogRead, LogStore,
-    MaintenanceStopReason, ProjectionRead, ProjectionStore, PushPort, QueueKey, ReclaimDriver,
-    RecoveryStart, resolve_recovery_start,
+    ClaimPort, ClaimRef, CommandPosition, CommitEntryOutcome, CommitTransition,
+    CommitTransitionEntry, CommitTransitionPort, ComposedBackend, ControlPlaneStore, EngineError,
+    FinalizeKind, InProcessControlPlane, LogRead, LogStore, MaintenanceStopReason, ProjectionRead,
+    ProjectionStore, PushPort, QueueKey, ReclaimDriver, RecoveryStart, resolve_recovery_start,
 };
 use fireweed_objectlog::{FaultCutPoint, FaultHook, ObjectLog, SegmentConfig};
 use fireweed_sqlite::{BackpressureLevel, HybridAsyncThresholds, HybridProjectionStore};
@@ -290,8 +290,8 @@ async fn test1_segment_reclamation_trims_expired_checkpointed_segments() {
         Some(2),
         "the durable retention floor advanced through the trimmed prefix"
     );
-    // The old segment deletes may be offset by newly-written floor/read-horizon/head metadata, but the trim
-    // must only grow the counted durable footprint by the single retained watermark object.
+    // The old segment deletes may be offset by newly-written floor/deletion-watermark/head metadata, but the
+    // trim must only grow the counted durable footprint by the single retained watermark object.
     let objects_after = object_count(&backend);
     assert!(
         objects_after <= objects_before + 1,
@@ -440,8 +440,8 @@ async fn test2_trim_withheld_under_hard_debt() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3 — AC-TXN-3 ACROSS TRIM + RESTART (push_with_request_id). Retained-within-retention REPLAYS; trimmed-
-//          after-retention is FRESH. commit_transition is capability-N/A on this eventual-apply backend.
+// Test 3 — AC-TXN-3 ACROSS TRIM + RESTART. Retained request outcomes replay from object-log authority;
+//          outcomes below the retention floor are treated as fresh after their idempotency window closes.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -527,32 +527,111 @@ async fn test3b_request_id_after_retention_is_reclaimed_and_treated_fresh_across
 }
 
 #[tokio::test]
-async fn test3c_commit_transition_is_capability_na_on_eventual_apply_objectlog() {
-    // commit_transition (the OTHER request_id-bearing op) requires the atomic append+apply boundary; the
-    // eventual-apply object-log/hybrid-async backend refuses it (EngineError::Unavailable). It therefore
-    // cannot be exercised across a trim on THIS substrate — a durability-class property, not a coverage gap
-    // (same finding as the existing AC-TXN-3 objectlog row). Its recovery fold (rebuild_commit_idempotency_from_log)
-    // IS floor-threaded + back-compat by construction (it starts the fold at `floor`, symmetric with the push
-    // fold), but that fold is NOT exercised end-to-end here because no commit_transition envelope can exist on
-    // this backend; the push fold is the one proven across trim+restart (test3a/test3b/test4).
-    let root = base_dir("actxn3-commit-na");
-    let backend = open_hybrid(&root, clear_thresholds());
+async fn test3c_commit_transition_within_retention_replays_across_trim_restart() {
+    let root = base_dir("actxn3-commit-replay");
+    let backend = open_hybrid_strict(&root);
     create_owned_queue(&backend).await;
-    let outcome = backend
+
+    let mut filler = spec("commit-filler", 5);
+    filler.not_before = Some(fireweed_conformance::ts(10_000));
+    backend
+        .push(&shard(), vec![filler], fireweed_conformance::ts(1), None)
+        .await
+        .expect("push old ineligible filler");
+    drain(&backend);
+    push(&backend, "commit-input", 1_000).await;
+    let claimed = backend
+        .claim(fireweed_conformance::claim_req(1, 1_500, 1_001))
+        .await
+        .expect("claim commit input");
+    assert_eq!(claimed.items.len(), 1, "one eligible input claimed");
+    let item = &claimed.items[0];
+    let claim_ref = ClaimRef {
+        item_id: item.item_id,
+        lease_token: item.lease_token.clone().expect("claim carries lease token"),
+        lease_expires_at: item.lease_expires_at,
+        item_version: item.item_version,
+    };
+    let request_id = RequestId::new("C".to_owned()).unwrap();
+    let transition = |finalize| CommitTransition {
+        request_id: Some(request_id.clone()),
+        entries: vec![CommitTransitionEntry {
+            claim_ref: claim_ref.clone(),
+            additional_claim_refs: Vec::new(),
+            finalize,
+            side_records: Vec::new(),
+            lifecycle_items: Vec::new(),
+            instance_fence: None,
+        }],
+    };
+    let committed = backend
         .commit_transition(
             &shard(),
-            CommitTransition {
-                request_id: Some(RequestId::new("C".to_string()).unwrap()),
-                entries: vec![],
-            },
-            fireweed_conformance::ts(1),
+            transition(FinalizeKind::Complete),
+            fireweed_conformance::ts(1_002),
             None,
         )
-        .await;
-    assert!(
-        matches!(outcome, Err(EngineError::Unavailable)),
-        "commit_transition is Unavailable on the eventual-apply object-log backend; got {outcome:?}"
+        .await
+        .expect("commit claimed input");
+    assert_eq!(
+        committed,
+        vec![CommitEntryOutcome::Committed {
+            lifecycle_item_ids: Vec::new()
+        }]
     );
+    drain(&backend);
+
+    backend.tick(fireweed_conformance::ts(4_000)).await.unwrap();
+    assert_eq!(
+        floor_seq(&backend),
+        Some(0),
+        "only the old filler segment is below the retention floor"
+    );
+    drop(backend);
+
+    let reopened = open_hybrid_strict(&root);
+    let segments_before = reopened.with_log(|log| log.counters().segments_sealed);
+    let replay = reopened
+        .commit_transition(
+            &shard(),
+            transition(FinalizeKind::Complete),
+            fireweed_conformance::ts(4_001),
+            None,
+        )
+        .await
+        .expect("replay retained commit outcome");
+    assert_eq!(
+        replay, committed,
+        "restart replay returns the exact committed outcome"
+    );
+    assert_eq!(
+        reopened.with_log(|log| log.counters().segments_sealed),
+        segments_before,
+        "replay appends no new segment"
+    );
+    assert!(
+        matches!(
+            reopened
+                .commit_transition(
+                    &shard(),
+                    transition(FinalizeKind::Fail),
+                    fireweed_conformance::ts(4_002),
+                    None,
+                )
+                .await,
+            Err(EngineError::RequestIdConflict)
+        ),
+        "a different body under the retained request ID conflicts"
+    );
+    let metrics = reopened
+        .metrics(&shard())
+        .await
+        .expect("metrics after replay");
+    assert_eq!(
+        metrics.complete, 1,
+        "the claimed input completed exactly once"
+    );
+    assert_eq!(metrics.leased, 0, "the completed input is no longer leased");
 }
 
 // ---------------------------------------------------------------------------
