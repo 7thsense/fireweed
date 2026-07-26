@@ -32,13 +32,14 @@ use std::task::{Context, Poll, Waker};
 use bytes::Bytes;
 use fireweed_core::{
     BodyHash, BoundedMutationRequest, BoundedMutationResponse, ClaimByQueryRequest, ClientItemKey,
-    CohortId, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, GroupKey,
+    CohortId, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, GateKeyPolicy, GroupKey,
     GroupedAggregateRequest, GroupedAggregateResponse, ItemId, ItemState, LeaseToken, Metadata,
     MetricsByQueryRequest, OrderingMode, PriorityValue, QueryCapabilityFlags, QueueDefinition,
     QueueId, RangeScanRequest, RangeScanResponse, RequestId, TenantId, UtcTimestamp,
 };
 
 use crate::active_scope::{ActiveScope, DiscoveryGranularity};
+use crate::async_composed::validate_push_shape;
 use crate::claim_validation::{ClaimCompatibility, ClaimUnit, validate_claim_compatibility};
 use crate::command::{
     AdvanceInstanceFenceCommand, ClaimCommand, CohortClaimCommand, CommandChecksum,
@@ -3938,6 +3939,67 @@ fn recovery_from_outcome_entry(e: CommitOutcomeEntry) -> EntryRecovery {
     }
 }
 
+fn valid_gate_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 256
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+}
+
+fn validate_gate_key_sets<'a>(
+    definition: &QueueDefinition,
+    key_sets: impl IntoIterator<Item = &'a [String]>,
+) -> EngineResult<()> {
+    let key_sets = key_sets.into_iter().collect::<Vec<_>>();
+    let has_keys = key_sets.iter().any(|keys| !keys.is_empty());
+    if has_keys && definition.eligibility_policy.gate_keys != GateKeyPolicy::Dynamic {
+        return Err(EngineError::Invalid("gates-not-enabled"));
+    }
+    let mut request_keys = BTreeSet::new();
+    for keys in key_sets {
+        if keys.iter().any(|key| !valid_gate_key(key)) {
+            return Err(EngineError::Invalid("invalid gate key"));
+        }
+        if definition
+            .eligibility_policy
+            .max_gate_keys_per_item
+            .is_some_and(|max| keys.len() as u64 > max)
+        {
+            return Err(EngineError::Invalid("item gate-key cap exceeded"));
+        }
+        request_keys.extend(keys.iter());
+    }
+    if definition
+        .eligibility_policy
+        .max_gates_per_request
+        .is_some_and(|max| request_keys.len() as u64 > max)
+    {
+        return Err(EngineError::Invalid("request gate-key cap exceeded"));
+    }
+    Ok(())
+}
+
+fn validate_gate_command_definition(
+    definition: &QueueDefinition,
+    command: &QueueCommand,
+) -> EngineResult<()> {
+    match command {
+        QueueCommand::SetGates(command) => {
+            validate_gate_key_sets(definition, std::iter::once(command.gate_keys.as_slice()))
+        }
+        QueueCommand::Push(command) => validate_gate_key_sets(
+            definition,
+            command.items.iter().map(|item| item.gate_keys.as_slice()),
+        ),
+        QueueCommand::ReplacePending(command) => validate_gate_key_sets(
+            definition,
+            std::iter::once(command.replacement.gate_keys.as_slice()),
+        ),
+        _ => Ok(()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Backend
 // ---------------------------------------------------------------------------
@@ -3993,6 +4055,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> Backend for ComposedBacke
             if fault == crate::RawCommitFault::BeforeAppend {
                 return Err(EngineError::Invalid("fault-injection: kill before append"));
             }
+            let definition = self.control.queue_definition(&shard)?;
             let fault_hook = self
                 .fault_hook
                 .lock()
@@ -4009,6 +4072,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> Backend for ComposedBacke
             let supports_gates = projection.supports_gates();
             for env in &commands {
                 validate_gate_command(supports_gates, &env.command)?;
+                validate_gate_command_definition(&definition, &env.command)?;
             }
             let positions = log.append(&shard, &commands, expected_epoch)?;
             if fault == crate::RawCommitFault::AfterAppendBeforeApply {
@@ -4194,6 +4258,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
             let pending = (|| {
                 validate_gate_push(self.supports_gates(), &items)?;
                 let def = self.control.queue_definition(shard)?;
+                validate_push_shape(&def, &items)?;
                 let schema = def
                     .entity_schema
                     .as_ref()
@@ -4256,6 +4321,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
             validate_gate_push(self.supports_gates(), &items)?;
             let fingerprint = push_body_hash(&items)?;
             let def = self.control.queue_definition(shard)?;
+            validate_push_shape(&def, &items)?;
             let schema = def
                 .entity_schema
                 .as_ref()
@@ -4359,6 +4425,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::RequestIdReplayPro
         validate_gate_push(self.supports_gates(), &items)?;
         let fingerprint = push_body_hash(&items)?;
         let def = self.control.queue_definition(shard)?;
+        validate_push_shape(&def, &items)?;
         let schema = def
             .entity_schema
             .as_ref()
@@ -6319,8 +6386,12 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
             // The commit boundary requires a commit-class projection. Durability comes from the log's one
             // authoritative batch append; an EventualApply projection may materialize that batch after the
             // durability boundary and is rebuilt from the same batch on reopen.
+            let definition = self.control.queue_definition(shard)?;
+            for entry in &entries {
+                validate_push_shape(&definition, &entry.lifecycle_items)?;
+            }
             let (max_attempts, retention, schema) = {
-                let def = self.control.queue_definition(shard)?;
+                let def = &definition;
                 let schema = def
                     .entity_schema
                     .as_ref()
@@ -6714,6 +6785,8 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::SetGatesPort
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         queue_serialized(&self.mutation_gate, shard.clone(), move || {
+            let definition = self.control.queue_definition(shard)?;
+            validate_gate_key_sets(&definition, std::iter::once(command.gate_keys.as_slice()))?;
             let mut g = self.inner.lock().expect("poisoned");
             Self::require_known_shard(&g, shard)?;
             let env = Self::make_envelope(

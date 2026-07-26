@@ -432,50 +432,96 @@ mod composed_capability_parity {
             item_version: c.item_version,
         };
         let rid = RequestId::new("txn-c10").unwrap();
-        b.commit_transition(
-            &shard(),
-            CommitTransition {
-                request_id: Some(rid.clone()),
-                entries: vec![CommitTransitionEntry {
-                    claim_ref,
-                    additional_claim_refs: Vec::new(),
-                    finalize: FinalizeKind::Complete,
-                    side_records: vec![SideRecord {
-                        key: b"state/run".to_vec(),
-                        payload: Bytes::from_static(b"opaque"),
+        let input_id = claim_ref.item_id;
+        let outcomes = b
+            .commit_transition(
+                &shard(),
+                CommitTransition {
+                    request_id: Some(rid.clone()),
+                    entries: vec![CommitTransitionEntry {
+                        claim_ref,
+                        additional_claim_refs: Vec::new(),
+                        finalize: FinalizeKind::Complete,
+                        side_records: vec![SideRecord {
+                            key: b"state/run".to_vec(),
+                            payload: Bytes::from_static(b"opaque"),
+                        }],
+                        lifecycle_items: vec![PushSpec::default()],
+                        instance_fence: Some(InstanceFence {
+                            instance_key: b"wf-1".to_vec(),
+                            expected: 0,
+                            next: 1,
+                        }),
                     }],
-                    lifecycle_items: vec![PushSpec::default()],
-                    instance_fence: Some(InstanceFence {
-                        instance_key: b"wf-1".to_vec(),
-                        expected: 0,
-                        next: 1,
-                    }),
-                }],
-            },
-            ts(1),
-            None,
-        )
-        .await
-        .unwrap();
+                },
+                ts(1),
+                None,
+            )
+            .await
+            .unwrap();
+        let lifecycle_id = match &outcomes[0] {
+            fireweed_engine::CommitEntryOutcome::Committed { lifecycle_item_ids } => {
+                lifecycle_item_ids[0]
+            }
+            other => panic!("expected committed transition, got {other:?}"),
+        };
 
         let page = b.read_from(&shard(), None, 1000).await.unwrap();
-        let mut commit_path_envs = 0;
+        let mut effect_envs = 0;
+        let mut outcome_markers = 0;
         for (_pos, env) in &page.entries {
             match &env.command {
+                QueueCommand::WriteSideRecords(command)
+                    if command.records.is_empty() && env.request_outcome.is_some() =>
+                {
+                    assert_eq!(env.request_id.as_ref(), Some(&rid));
+                    outcome_markers += 1;
+                }
                 QueueCommand::WriteSideRecords(_)
                 | QueueCommand::AdvanceInstanceFence(_)
                 | QueueCommand::Finalize(_) => {
                     assert_eq!(env.request_id.as_ref(), Some(&rid));
-                    commit_path_envs += 1;
+                    effect_envs += 1;
                 }
                 QueueCommand::Push(_) if env.request_id.is_some() => {
                     assert_eq!(env.request_id.as_ref(), Some(&rid));
-                    commit_path_envs += 1;
+                    effect_envs += 1;
                 }
                 _ => {}
             }
         }
-        assert_eq!(commit_path_envs, 4);
+        assert_eq!(effect_envs, 4);
+        assert_eq!(outcome_markers, 1);
+        let rid_envs = page
+            .entries
+            .iter()
+            .filter(|(_, env)| env.request_id.as_ref() == Some(&rid))
+            .map(|(_, env)| env)
+            .collect::<Vec<_>>();
+        assert_eq!(rid_envs.len(), 5, "four effects plus one outcome marker");
+        let fingerprint = rid_envs[0]
+            .request_fingerprint
+            .expect("commit envelope carries a fingerprint");
+        assert!(
+            rid_envs
+                .iter()
+                .all(|env| env.request_fingerprint == Some(fingerprint)),
+            "all commit envelopes share the whole-body fingerprint"
+        );
+        let marker = rid_envs.last().expect("terminal outcome marker");
+        let fireweed_engine::RequestOutcome::CommitTransition { entries } = marker
+            .request_outcome
+            .as_ref()
+            .expect("terminal marker carries the durable outcome")
+        else {
+            panic!("terminal marker has the wrong request outcome")
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].consumed_input_id, input_id);
+        assert_eq!(entries[0].side_record_keys, vec![b"state/run".to_vec()]);
+        assert_eq!(entries[0].instance, Some((b"wf-1".to_vec(), 1)));
+        assert_eq!(entries[0].lifecycle_item_ids, vec![lifecycle_id]);
+        assert!(entries[0].rejection.is_none());
     }
 }
 
@@ -523,17 +569,23 @@ async fn distinct_node_ids_never_collide_on_concurrent_push() {
 }
 
 #[tokio::test]
-async fn gate_bearing_push_and_raw_setgates_are_rejected_before_commit() {
-    use fireweed_conformance::{envelope, qdef, qkey, shard, ts};
+async fn gate_bearing_push_and_raw_setgates_control_claim_eligibility() {
+    use fireweed_conformance::{claim_req, envelope, qdef, qkey, shard, ts};
+    use fireweed_core::GateKeyPolicy;
     use fireweed_engine::{
-        Backend, ControlPlaneStore, EngineError, ProjectionRead, PushPort, PushSpec, QueueCommand,
+        Backend, ClaimPort, ControlPlaneStore, ProjectionRead, PushPort, PushSpec, QueueCommand,
         RawCommitRequest, SetGatesCommand,
     };
 
     let b = composed_memory_backend();
-    b.create_queue(qdef()).await.unwrap();
+    let mut definition = qdef();
+    definition.eligibility_policy.gate_keys = GateKeyPolicy::Dynamic;
+    definition.eligibility_policy.max_gate_keys_per_item = Some(4);
+    definition.eligibility_policy.max_gates_per_request = Some(4);
+    b.create_queue(definition).await.unwrap();
+    assert!(b.supports_gates());
 
-    let err = b
+    let ids = b
         .push(
             &shard(),
             vec![PushSpec {
@@ -544,11 +596,11 @@ async fn gate_bearing_push_and_raw_setgates_are_rejected_before_commit() {
             None,
         )
         .await
-        .unwrap_err();
-    assert_eq!(err, EngineError::Unavailable);
-    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 0);
+        .expect("gate-bearing push is supported");
+    assert_eq!(ids.len(), 1);
+    assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1);
 
-    let env = envelope(
+    let block = envelope(
         QueueCommand::SetGates(SetGatesCommand {
             gate_keys: vec!["hold".to_string()],
             blocked: true,
@@ -556,11 +608,90 @@ async fn gate_bearing_push_and_raw_setgates_are_rejected_before_commit() {
         vec![],
     );
     let epoch = b.current_epoch(&shard()).await.unwrap();
-    let err = b
-        .commit_raw(RawCommitRequest::new(shard(), vec![env], epoch))
+    let blocked = b
+        .commit_raw(RawCommitRequest::new(shard(), vec![block], epoch))
         .await
-        .unwrap_err();
-    assert_eq!(err, EngineError::Unavailable);
+        .expect("raw SetGates blocks the gate");
+    assert!(blocked.projection_applied());
+    assert_eq!(blocked.positions().len(), 1);
+    assert!(
+        b.claim(claim_req(1, 60, 0)).await.unwrap().items.is_empty(),
+        "a blocked gate makes the item ineligible"
+    );
+
+    let unblock = envelope(
+        QueueCommand::SetGates(SetGatesCommand {
+            gate_keys: vec!["hold".to_string()],
+            blocked: false,
+        }),
+        vec![],
+    );
+    let unblocked = b
+        .commit_raw(RawCommitRequest::new(shard(), vec![unblock], epoch))
+        .await
+        .expect("raw SetGates unblocks the gate");
+    assert!(unblocked.projection_applied());
+    assert_eq!(unblocked.positions().len(), 1);
+    let claimed = b.claim(claim_req(1, 60, 0)).await.unwrap();
+    assert_eq!(claimed.items.len(), 1, "unblocking restores eligibility");
+    assert_eq!(claimed.items[0].item_id, ids[0]);
+}
+
+#[tokio::test]
+async fn gate_disabled_queue_rejects_push_and_raw_setgates_before_append() {
+    use fireweed_conformance::{envelope, qdef, shard, ts};
+    use fireweed_engine::{
+        Backend, ControlPlaneStore, EngineError, LogRead, PushPort, PushSpec, QueueCommand,
+        RawCommitRequest, SetGatesCommand,
+    };
+
+    let backend = composed_memory_backend();
+    backend.create_queue(qdef()).await.unwrap();
+    let before = backend
+        .read_from(&shard(), None, 16)
+        .await
+        .unwrap()
+        .entries
+        .len();
+    assert!(matches!(
+        backend
+            .push(
+                &shard(),
+                vec![PushSpec {
+                    gate_keys: vec!["hold".to_owned()],
+                    ..Default::default()
+                }],
+                ts(0),
+                None,
+            )
+            .await,
+        Err(EngineError::Invalid(_))
+    ));
+
+    let command = envelope(
+        QueueCommand::SetGates(SetGatesCommand {
+            gate_keys: vec!["hold".to_owned()],
+            blocked: true,
+        }),
+        Vec::new(),
+    );
+    let epoch = backend.current_epoch(&shard()).await.unwrap();
+    assert!(matches!(
+        backend
+            .commit_raw(RawCommitRequest::new(shard(), vec![command], epoch))
+            .await,
+        Err(EngineError::Invalid("gates-not-enabled"))
+    ));
+    assert_eq!(
+        backend
+            .read_from(&shard(), None, 16)
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        before,
+        "policy rejection appends no command"
+    );
 }
 
 /// B1a (ADR-009 / TD-003 In-Process Library Owner-Runtime): a claim stamped with the owner's *cached*
@@ -800,11 +931,11 @@ async fn finalize_fences_superseded_owner_epoch() {
 }
 
 /// Acceptance #4 (epic pqueue-2201fd37): the vectorized claimed-work commit path PROPAGATES the caller's
-/// request id into EVERY backend command envelope it appends — `WriteSideRecords`, `AdvanceInstanceFence`,
-/// the lifecycle `Push`, and `Finalize` — and does NOT construct any of them with `request_id: None`.
+/// request id into EVERY backend command envelope it appends — the four effect commands plus the terminal
+/// durable outcome marker — and does NOT construct any of them with `request_id: None`.
 ///
-/// This is a RUNTIME assertion, not a source grep: it commits one entry that forces all four commit-path
-/// command kinds, then reads the durable log back through [`LogRead`] and asserts each commit-path envelope
+/// This is a RUNTIME assertion, not a source grep: it commits one entry that forces all four effect command
+/// kinds and the outcome marker, then reads the durable log back through [`LogRead`] and asserts each envelope
 /// carries `request_id == Some(rid)`. The request-id-less input `Push` and the `Claim` are kept in the same
 /// log as negative controls, proving the assertion actually discriminates `Some` from `None`.
 #[tokio::test]
@@ -813,9 +944,9 @@ async fn commit_path_propagates_request_id_into_every_command_envelope() {
     use fireweed_conformance::{claim_req, qdef, shard, ts};
     use fireweed_core::RequestId;
     use fireweed_engine::{
-        ClaimPort, ClaimRef, CommitTransition, CommitTransitionEntry, CommitTransitionPort,
-        ControlPlaneStore, FinalizeKind, InstanceFence, LogRead, PushPort, PushSpec, QueueCommand,
-        SideRecord,
+        ClaimPort, ClaimRef, CommitEntryOutcome, CommitTransition, CommitTransitionEntry,
+        CommitTransitionPort, ControlPlaneStore, FinalizeKind, InstanceFence, LogRead, PushPort,
+        PushSpec, QueueCommand, RequestOutcome, SideRecord,
     };
 
     let b = composed_memory_backend();
@@ -843,6 +974,7 @@ async fn commit_path_propagates_request_id_into_every_command_envelope() {
     // (WriteSideRecords), an instance fence (AdvanceInstanceFence), a lifecycle item (Push), and a finalize
     // (Finalize). The caller request id must thread into every one of them.
     let rid = RequestId::new("txn-c10").unwrap();
+    let input_id = claim_ref.item_id;
     let outcomes = b
         .commit_transition(
             &shard(),
@@ -870,15 +1002,26 @@ async fn commit_path_propagates_request_id_into_every_command_envelope() {
         .await
         .unwrap();
     assert_eq!(outcomes.len(), 1, "one entry committed");
+    let lifecycle_id = match &outcomes[0] {
+        CommitEntryOutcome::Committed { lifecycle_item_ids } => lifecycle_item_ids[0],
+        other => panic!("expected committed transition, got {other:?}"),
+    };
 
     // Read the durable log back and inspect every appended envelope's `request_id`.
     let page = b.read_from(&shard(), None, 1000).await.unwrap();
-    let mut commit_path_envs = 0;
+    let mut effect_envs = 0;
+    let mut outcome_markers = 0;
     let mut saw_input_push_without_rid = false;
     let mut saw_claim_without_rid = false;
     for (_pos, env) in &page.entries {
         match &env.command {
             // The three commit-path command kinds that are unambiguous (no non-commit producer in this test).
+            QueueCommand::WriteSideRecords(command)
+                if command.records.is_empty() && env.request_outcome.is_some() =>
+            {
+                assert_eq!(env.request_id.as_ref(), Some(&rid));
+                outcome_markers += 1;
+            }
             QueueCommand::WriteSideRecords(_)
             | QueueCommand::AdvanceInstanceFence(_)
             | QueueCommand::Finalize(_) => {
@@ -887,14 +1030,14 @@ async fn commit_path_propagates_request_id_into_every_command_envelope() {
                     Some(&rid),
                     "commit-path envelope must carry the caller request id, not None"
                 );
-                commit_path_envs += 1;
+                effect_envs += 1;
             }
             // Two pushes reach the log: the request-id-less input push (None) and the commit's lifecycle push
             // (Some(rid)). Discriminate by request_id — the commit one MUST be Some(rid).
             QueueCommand::Push(_) => {
                 if env.request_id.is_some() {
                     assert_eq!(env.request_id.as_ref(), Some(&rid));
-                    commit_path_envs += 1;
+                    effect_envs += 1;
                 } else {
                     saw_input_push_without_rid = true;
                 }
@@ -911,9 +1054,43 @@ async fn commit_path_propagates_request_id_into_every_command_envelope() {
         }
     }
     assert_eq!(
-        commit_path_envs, 4,
+        effect_envs, 4,
         "WriteSideRecords + AdvanceInstanceFence + lifecycle Push + Finalize all propagated Some(rid)"
     );
+    assert_eq!(
+        outcome_markers, 1,
+        "one durable commit-outcome marker propagated Some(rid)"
+    );
+    let rid_envs = page
+        .entries
+        .iter()
+        .filter(|(_, env)| env.request_id.as_ref() == Some(&rid))
+        .map(|(_, env)| env)
+        .collect::<Vec<_>>();
+    assert_eq!(rid_envs.len(), 5, "four effects plus one outcome marker");
+    let fingerprint = rid_envs[0]
+        .request_fingerprint
+        .expect("commit envelope carries a fingerprint");
+    assert!(
+        rid_envs
+            .iter()
+            .all(|env| env.request_fingerprint == Some(fingerprint)),
+        "all commit envelopes share the whole-body fingerprint"
+    );
+    let marker = rid_envs.last().expect("terminal outcome marker");
+    let RequestOutcome::CommitTransition { entries } = marker
+        .request_outcome
+        .as_ref()
+        .expect("terminal marker carries the durable outcome")
+    else {
+        panic!("terminal marker has the wrong request outcome")
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].consumed_input_id, input_id);
+    assert_eq!(entries[0].side_record_keys, vec![b"state/run".to_vec()]);
+    assert_eq!(entries[0].instance, Some((b"wf-1".to_vec(), 1)));
+    assert_eq!(entries[0].lifecycle_item_ids, vec![lifecycle_id]);
+    assert!(entries[0].rejection.is_none());
     assert!(
         saw_input_push_without_rid,
         "the request-id-less input push is the negative control proving None is observable"

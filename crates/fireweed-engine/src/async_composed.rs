@@ -857,7 +857,10 @@ fn validate_push_definition(
     Ok(())
 }
 
-fn validate_push_shape(definition: &QueueDefinition, items: &[PushSpec]) -> EngineResult<()> {
+pub(crate) fn validate_push_shape(
+    definition: &QueueDefinition,
+    items: &[PushSpec],
+) -> EngineResult<()> {
     let mut request_gates = HashSet::new();
     let mut grouped_counts = std::collections::HashMap::new();
     for item in items {
