@@ -7,10 +7,10 @@ use fireweed::{
     ClaimCompatibility, ClaimRef, ClientItemKey, CohortOnIncomplete, CohortPolicy, CommitEntry,
     CommitEntryStatus, CommitRequest, CompoundIndexDef, CompoundIndexField, CreateQueue,
     DeclaredBucketSegmentRequest, DiscoveryGranularity, EligibilityPolicy, EngineError,
-    FinalizeKind, Fireweed, GroupBatching, GroupByField, GroupKey, GroupedAggregateRequest,
-    IndexDeclaration, IndexDef, IndexType, ItemMutationOperation, ItemMutationOutcome,
-    ItemMutationRequest, ItemMutationReturning, ItemPatch, ItemPredicate, ItemSelector,
-    ItemSelectorScope, LeaseGuard, MetricsByQueryRequest, MultiClaimCommitEntry,
+    FinalizeKind, Fireweed, GateKeyPolicy, GroupBatching, GroupByField, GroupKey,
+    GroupedAggregateRequest, IndexDeclaration, IndexDef, IndexType, ItemMutationOperation,
+    ItemMutationOutcome, ItemMutationRequest, ItemMutationReturning, ItemPatch, ItemPredicate,
+    ItemSelector, ItemSelectorScope, LeaseGuard, MetricsByQueryRequest, MultiClaimCommitEntry,
     MultiClaimCommitRequest, MultiQueueClaimLimits, MultiQueueClaimTarget, MutationOutcome, Nack,
     NewItem, OrderField, OrderingMode, PayloadUpdate, PriorityDirection, PriorityModel,
     PriorityModelKind, PriorityTieBreaker, PriorityValue, QueryFilter, QueueCreationPolicy,
@@ -97,12 +97,30 @@ fn definition(name: &str) -> QueueDefinition {
 fn rich_definition(name: &str) -> QueueDefinition {
     QueueDefinition {
         max_eligible_group_size: Some(4),
+        ..definition(name)
+    }
+}
+
+fn cohort_definition(name: &str) -> QueueDefinition {
+    QueueDefinition {
         cohort_policy: Some(CohortPolicy {
             enabled: true,
             completion_bound_ms: Some(30_000),
             on_incomplete: Some(CohortOnIncomplete::ExpireCohort),
             max_cohort_size: Some(10),
         }),
+        ..definition(name)
+    }
+}
+
+fn gated_definition(name: &str) -> QueueDefinition {
+    QueueDefinition {
+        eligibility_policy: EligibilityPolicy {
+            gate_keys: GateKeyPolicy::Dynamic,
+            max_gate_keys_per_item: Some(4),
+            max_gates_per_request: Some(8),
+            ..EligibilityPolicy::default()
+        },
         ..definition(name)
     }
 }
@@ -250,6 +268,58 @@ async fn create_rich(
             .as_ref()
             .is_some_and(|value| value.created && value.definition.queue_id == queue.queue_id),
         "did not create the rich-claim queue",
+    );
+    queue
+}
+
+async fn create_cohort(
+    cell: &str,
+    fireweed: &Fireweed,
+    failures: &mut Vec<String>,
+    name: &str,
+) -> QueueKey {
+    let queue = key(name);
+    let outcome = call(
+        cell,
+        &format!("create_queue[{name}]"),
+        failures,
+        fireweed.create_queue(cohort_definition(name)),
+    )
+    .await;
+    check(
+        cell,
+        &format!("create_queue[{name}]"),
+        failures,
+        outcome
+            .as_ref()
+            .is_some_and(|value| value.created && value.definition.queue_id == queue.queue_id),
+        "did not create the cohort queue",
+    );
+    queue
+}
+
+async fn create_gated(
+    cell: &str,
+    fireweed: &Fireweed,
+    failures: &mut Vec<String>,
+    name: &str,
+) -> QueueKey {
+    let queue = key(name);
+    let outcome = call(
+        cell,
+        &format!("create_queue[{name}]"),
+        failures,
+        fireweed.create_queue(gated_definition(name)),
+    )
+    .await;
+    check(
+        cell,
+        &format!("create_queue[{name}]"),
+        failures,
+        outcome
+            .as_ref()
+            .is_some_and(|value| value.created && value.definition.queue_id == queue.queue_id),
+        "did not create the gated queue",
     );
     queue
 }
@@ -1205,7 +1275,7 @@ async fn exercise_rich_claims(cell: &str, fw: &Fireweed, failures: &mut Vec<Stri
         "did not select two members from exactly the oldest group",
     );
 
-    let cohort = create_rich(cell, fw, failures, "rich-whole-cohort").await;
+    let cohort = create_cohort(cell, fw, failures, "rich-whole-cohort").await;
     let _ = call(
         cell,
         "push[incomplete_cohort]",
@@ -1344,7 +1414,7 @@ async fn exercise_mutation(cell: &str, fw: &Fireweed, failures: &mut Vec<String>
         "priority/field mutations were not observable",
     );
 
-    let gated_queue = create(cell, fw, failures, "gates").await;
+    let gated_queue = create_gated(cell, fw, failures, "gates").await;
     let mut gated = item("gated-item", 1);
     gated.gate_keys = vec!["gate-a".into()];
     let _ = call(cell, "push[gates]", failures, fw.push(&gated_queue, gated)).await;
