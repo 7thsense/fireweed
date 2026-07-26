@@ -1261,9 +1261,10 @@ pub async fn ac_txn_2_commit_timeout_path<B: ConformanceCore + LogRead>(
 ///   in-process, AfterAppendBeforeApply via the now-`request_id`-bearing mid-pipeline probe
 ///   ([`ac_txn_3_mid_pipeline_request_id_bearing`] — recovery rebuilds the push-idempotency map from the
 ///   durable-but-unapplied `request_id` envelope), and AfterApplyBeforeResponse across a full restart.
-/// * `commit_transition` is covered per its reachable cut points
-///   ([`ac_txn_3_commit_transition_request_id`]): in-process replay on atomic backends; capability-N/A on
-///   eventual-apply (`Unavailable`); its cross-restart replay is an honestly-recorded engine limitation.
+/// * `commit_transition` is covered at every reachable cut point
+///   ([`ac_txn_3_commit_transition_request_id`]): in-process replay on every commit-capable projection, and
+///   both restart cuts on every durable log. Eventual projection materialization does not weaken the
+///   request-id contract because the whole commit and its outcome marker share one authoritative log batch.
 /// * The classic ports (claim/renew/finalize/update_fields/purge/replace_if_pending) carry NO `request_id`
 ///   and are recorded capability-N/A (covered by AC-TXN-1 durability + AC-TXN-6 parity).
 pub async fn ac_txn_3_unknown_outcome_replay<
@@ -1327,7 +1328,7 @@ pub async fn ac_txn_3_unknown_outcome_replay<
         "capability-N/A: claim / renew / finalize (classic FinalizePort) / update_fields / purge / replace_if_pending carry NO request_id or idempotent key in this engine — their ports take no request_id and dedup is item-id / lease-token / item-version based, not request_id based. So request_id unknown-outcome replay is not an applicable contract for these ops; their kill/restart durability is covered by AC-TXN-1 (row 206 per-op kill-after-success) and their cross-backend parity by AC-TXN-6 (row 212).".into(),
     );
 
-    // --- commit_transition request_id replay (reachable cut points; capability-N/A on eventual-apply). ---
+    // --- commit_transition request_id replay at every reachable cut point. ---
     asserts.extend(ac_txn_3_commit_transition_request_id(&make, caps).await?);
 
     if !caps.durable_reopen {
@@ -1543,13 +1544,12 @@ async fn seed_mixed_commit<B: ConformanceCore, F: Fn(&str) -> B>(
 
 /// **AC-TXN-3 commit_transition** (TP-003 §3.10 row 208, the OTHER request_id-bearing mutating op). The
 /// authoritative claimed-work commit (`commit_transition`) carries a `request_id` idempotent over the whole
-/// commit body (`commit_idempotency` cache). Coverage, capability-gated honestly:
-/// * Eventual-apply backends cannot offer one atomic transition boundary → `commit_transition` is
-///   `Unavailable` → capability-N/A (the op does not exist there).
-/// * Atomic backends: the IN-PROCESS request_id replay (BeforeAppend-fresh + AfterResponse) is proven —
+/// commit body (`commit_idempotency` cache). The atomic boundary is the authoritative log batch, not
+/// synchronous projection persistence: eventual-apply projections recover from that exact batch.
+/// * Every commit-capable backend proves IN-PROCESS request_id replay (BeforeAppend-fresh + AfterResponse) —
 ///   a same-body retry replays the ONE committed per-entry outcome, a different body conflicts, and the input
 ///   is finalized exactly once.
-/// * Durable atomic backends ALSO prove the cross-restart cut points for an ALL-COMMITTED commit now that
+/// * Every durable log backend ALSO proves the cross-restart cut points for an ALL-COMMITTED commit now that
 ///   recovery rebuilds `commit_idempotency` from the durable log (`rebuild_commit_idempotency_from_log`, the
 ///   symmetric twin of the push rebuild): `AfterApplyBeforeResponse` (commit fully, kill, reopen) and
 ///   `AfterAppendBeforeApply` (append the request_id-bearing commit envelope, kill before apply, reopen) both
@@ -1613,19 +1613,12 @@ pub async fn ac_txn_3_commit_transition_request_id<
         }],
     };
 
-    // First commit under the request_id. Eventual-apply backends refuse the whole op (no atomic boundary).
-    let committed = match a
+    // First commit under the request_id. The whole command/outcome batch commits on the authoritative log;
+    // projection persistence may be synchronous or eventual without changing this request-id boundary.
+    let committed = a
         .commit_transition(&shard(), transition(FinalizeKind::Complete), ts(2), None)
         .await
-    {
-        Err(EngineError::Unavailable) => {
-            return Ok(vec![
-                "capability-N/A: commit_transition (the authoritative request_id-bearing claimed-work commit) requires an atomic append+apply boundary; this eventual-apply backend returns EngineError::Unavailable, so the request_id-bearing finalize/transition op does not exist here (a durability-class property, not a coverage gap). Its lifecycle durability is covered by AC-TXN-1 and its parity by AC-TXN-6.".into(),
-            ]);
-        }
-        Ok(o) => o,
-        Err(e) => return Err(format!("commit_transition first call: {e:?}")),
-    };
+        .map_err(|e| format!("commit_transition first call: {e:?}"))?;
     ensure!(
         matches!(committed.as_slice(), [CommitEntryOutcome::Committed { .. }]),
         "commit_transition must commit the entry; got {committed:?}"
