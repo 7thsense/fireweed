@@ -1,5 +1,7 @@
 use fireweed_conformance::{envelope, item, qdef, ts};
-use fireweed_core::{CohortId, CohortPolicy, GroupKey, ItemId, ItemState, LeaseToken};
+use fireweed_core::{
+    CohortId, CohortOnIncomplete, CohortPolicy, GroupKey, ItemId, ItemState, LeaseToken, QueueId,
+};
 use fireweed_engine::{
     AsyncProjectionStore, ClaimCommand, CohortClaimCommand, CohortFinalizeCommand,
     CohortLeaseTarget, CohortRenewLeaseCommand, CommandPosition, EngineError, FenceLeaseCommand,
@@ -10,20 +12,32 @@ use fireweed_turso::TursoRelational;
 
 #[tokio::test]
 async fn expired_lease_selection_and_transition_match_sqlite() {
-    let mut definition = qdef();
-    definition.cohort_policy = Some(CohortPolicy {
+    let definition = qdef();
+    let mut cohort_definition = qdef();
+    cohort_definition.queue_id = QueueId::new("cohort-queue").unwrap();
+    cohort_definition.cohort_policy = Some(CohortPolicy {
         enabled: true,
         completion_bound_ms: Some(60_000),
-        on_incomplete: None,
+        on_incomplete: Some(CohortOnIncomplete::ExpireCohort),
         max_cohort_size: Some(10),
     });
     let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let cohort_shard = QueueKey::new(
+        cohort_definition.tenant_id.clone(),
+        cohort_definition.queue_id.clone(),
+    );
     let sqlite = AsyncSqliteProjectionStore::open(":memory:").await.unwrap();
     let turso = TursoRelational::in_memory().await.unwrap();
     AsyncProjectionStore::ensure_shard(&sqlite, definition.clone())
         .await
         .unwrap();
     AsyncProjectionStore::ensure_shard(&turso, definition)
+        .await
+        .unwrap();
+    AsyncProjectionStore::ensure_shard(&sqlite, cohort_definition.clone())
+        .await
+        .unwrap();
+    AsyncProjectionStore::ensure_shard(&turso, cohort_definition)
         .await
         .unwrap();
     let ids = [
@@ -33,33 +47,31 @@ async fn expired_lease_selection_and_transition_match_sqlite() {
     ];
     let cohort_ids = [ItemId::new("20").unwrap(), ItemId::new("21").unwrap()];
     let cohort_group = GroupKey::new("cohort").unwrap();
-    let mut pushed = ids
+    let pushed = ids
         .iter()
         .map(|id| item(&id.to_string(), &format!("key-{id}"), 3))
         .collect::<Vec<_>>();
-    pushed.extend(cohort_ids.iter().map(|id| {
-        let mut member = item(&id.to_string(), &format!("key-{id}"), 3);
-        member.group_key = Some(cohort_group.clone());
-        member.cohort_size = Some(2);
-        member
-    }));
-    let all_ids = ids
+    let cohort_items = cohort_ids
         .iter()
-        .chain(cohort_ids.iter())
-        .copied()
+        .map(|id| {
+            let mut member = item(&id.to_string(), &format!("key-{id}"), 3);
+            member.group_key = Some(cohort_group.clone());
+            member.cohort_size = Some(2);
+            member
+        })
         .collect::<Vec<_>>();
     let push = envelope(
         QueueCommand::Push(PushCommand { items: pushed }),
-        all_ids.clone(),
+        ids.to_vec(),
     );
     let claim = envelope(
         QueueCommand::Claim(ClaimCommand {
-            item_ids: all_ids.clone(),
+            item_ids: ids.to_vec(),
             lease_token: LeaseToken::new("lease").unwrap(),
             lease_expires_at: ts(10),
             worker_id: None,
         }),
-        all_ids,
+        ids.to_vec(),
     );
     let fence = envelope(
         QueueCommand::FenceLease(FenceLeaseCommand {
@@ -80,6 +92,37 @@ async fn expired_lease_selection_and_transition_match_sqlite() {
     .await
     .unwrap();
     AsyncProjectionStore::apply_live(&turso, positions, vec![push, claim, fence])
+        .await
+        .unwrap();
+
+    let cohort_id = CohortId::new(format!("coh:{}:0", cohort_group.as_str())).unwrap();
+    let cohort_push = envelope(
+        QueueCommand::Push(PushCommand {
+            items: cohort_items,
+        }),
+        cohort_ids.to_vec(),
+    );
+    let cohort_claim = envelope(
+        QueueCommand::CohortClaim(CohortClaimCommand {
+            cohort_id,
+            item_ids: cohort_ids.to_vec(),
+            lease_token: LeaseToken::new("cohort-lease").unwrap(),
+            lease_expires_at: ts(10),
+        }),
+        cohort_ids.to_vec(),
+    );
+    let cohort_positions = vec![
+        CommandPosition::new(cohort_shard.clone(), 0, 0),
+        CommandPosition::new(cohort_shard.clone(), 0, 1),
+    ];
+    AsyncProjectionStore::apply_live(
+        &sqlite,
+        cohort_positions.clone(),
+        vec![cohort_push.clone(), cohort_claim.clone()],
+    )
+    .await
+    .unwrap();
+    AsyncProjectionStore::apply_live(&turso, cohort_positions, vec![cohort_push, cohort_claim])
         .await
         .unwrap();
 
@@ -138,7 +181,14 @@ async fn expired_lease_selection_and_transition_match_sqlite() {
             .await
             .unwrap(),
         Vec::<ItemId>::new(),
-        "fenced and cohort leases stay excluded after the ordinary leases are reclaimed"
+        "the fenced lease stays excluded after the ordinary leases are reclaimed"
+    );
+    assert_eq!(
+        AsyncProjectionStore::expired_leases(&turso, cohort_shard, ts(11), 10)
+            .await
+            .unwrap(),
+        Vec::<ItemId>::new(),
+        "cohort leases are excluded from ordinary lease reclamation"
     );
     sqlite.close_and_drain().await.unwrap();
 }
@@ -149,7 +199,7 @@ async fn cohort_lease_validation_renew_and_retry_match_sqlite() {
     definition.cohort_policy = Some(CohortPolicy {
         enabled: true,
         completion_bound_ms: Some(60_000),
-        on_incomplete: None,
+        on_incomplete: Some(CohortOnIncomplete::ExpireCohort),
         max_cohort_size: Some(10),
     });
     let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());

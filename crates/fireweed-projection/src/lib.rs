@@ -4754,9 +4754,9 @@ mod tests {
     use super::*;
     use axon_esf::IndexDef;
     use fireweed_core::{
-        CohortId, CohortPolicy, EligibilityPolicy, IndexSpec, MetadataValue, PriorityDirection,
-        PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, RetryPolicy, TenantId,
-        WorkerId,
+        CohortId, CohortPolicy, EligibilityPolicy, GateKeyPolicy, IndexSpec, MetadataValue,
+        PriorityDirection, PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId,
+        RetryPolicy, TenantId, WorkerId,
     };
     use fireweed_engine::{
         AdvanceInstanceFenceCommand, ChangeRecordSink, ClaimCommand, ClaimCompatibility, ClaimPort,
@@ -6074,14 +6074,18 @@ mod tests {
 
     #[test]
     fn projection_image_roundtrips_full_projection_state() {
-        let definition = qdef();
+        let mut definition = qdef();
+        definition.eligibility_policy.gate_keys = GateKeyPolicy::Dynamic;
+        definition.eligibility_policy.max_gate_keys_per_item = Some(4);
+        definition.eligibility_policy.max_gates_per_request = Some(4);
         let mut projection = ProjectionData::new(
             definition.priority_model,
             definition.ordering_mode,
             definition.max_rank_error,
             definition.recurrence,
             &definition.secondary_indexes,
-        );
+        )
+        .with_eligibility_policy(&definition.eligibility_policy);
         let item_id = iid("1");
         let lease_token = LeaseToken::new("lease-1").unwrap();
 

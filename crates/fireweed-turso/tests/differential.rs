@@ -3,8 +3,8 @@ mod support;
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
-use fireweed_conformance::{envelope, item};
-use fireweed_core::{ClientItemKey, ItemId, ItemState, LeaseToken};
+use fireweed_conformance::{envelope, item, qdef};
+use fireweed_core::{ClientItemKey, GateKeyPolicy, ItemId, ItemState, LeaseToken};
 use fireweed_engine::{
     AdvanceInstanceFenceCommand, AsyncProjectionStore, ClaimCommand, CommandPosition,
     FenceLeaseCommand, LeaseExpiredCommand, PauseQueueCommand, PayloadUpdate, PushCommand,
@@ -13,6 +13,30 @@ use fireweed_engine::{
 };
 
 use support::{Pair, lifecycle};
+
+async fn gated_pair() -> Pair {
+    let mut definition = qdef();
+    definition.eligibility_policy.gate_keys = GateKeyPolicy::Dynamic;
+    definition.eligibility_policy.max_gate_keys_per_item = Some(4);
+    definition.eligibility_policy.max_gates_per_request = Some(4);
+    let shard =
+        fireweed_engine::QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let sqlite = fireweed_sqlite::AsyncSqliteProjectionStore::open(":memory:")
+        .await
+        .unwrap();
+    let turso = fireweed_turso::TursoRelational::in_memory().await.unwrap();
+    AsyncProjectionStore::ensure_shard(&sqlite, definition.clone())
+        .await
+        .unwrap();
+    AsyncProjectionStore::ensure_shard(&turso, definition)
+        .await
+        .unwrap();
+    Pair {
+        sqlite,
+        turso,
+        shard,
+    }
+}
 
 #[tokio::test]
 async fn sqlite_and_turso_lifecycle_have_zero_observable_mismatch() {
@@ -39,7 +63,7 @@ async fn sqlite_and_turso_lifecycle_have_zero_observable_mismatch() {
 
 #[tokio::test]
 async fn generated_rich_history_has_exact_projection_image_and_read_parity() {
-    let pair = Pair::memory().await;
+    let pair = gated_pair().await;
     let original = ItemId::new("121").unwrap();
     let leased = ItemId::new("122").unwrap();
     let replacement = ItemId::new("123").unwrap();

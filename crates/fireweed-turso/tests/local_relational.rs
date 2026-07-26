@@ -2,11 +2,11 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use fireweed_core::{
-    BodyHash, ClientItemKey, CohortId, CohortPolicy, EligibilityPolicy, GroupKey, IndexDeclaration,
-    IndexDef, IndexType, ItemId, LeaseToken, Metadata, MetadataValue, OrderingMode,
-    PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
-    QueueDefinition, QueueId, QueueIndex, RecurrencePolicy, RequestId, RetryPolicy, TenantId,
-    UtcTimestamp, WorkerId,
+    BodyHash, ClientItemKey, CohortId, CohortOnIncomplete, CohortPolicy, EligibilityPolicy,
+    GateKeyPolicy, GroupKey, IndexDeclaration, IndexDef, IndexType, ItemId, LeaseToken, Metadata,
+    MetadataValue, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
+    PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, QueueIndex, RecurrencePolicy,
+    RequestId, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
 };
 use fireweed_engine::{
     AsyncProjectionStore, ClaimCommand, ClaimCompatibility, ClaimUnit, CohortClaimCommand,
@@ -269,7 +269,7 @@ async fn push_preappend_and_durable_idempotency_are_native_async() {
 
 #[tokio::test]
 async fn accepted_push_full_chunk_materializes_items_gates_and_indexes() {
-    let mut definition = definition();
+    let mut definition = gated_definition();
     definition.max_push_batch_size = 100;
     definition.typed_indexes = vec![QueueIndex {
         name: "by_email".to_string(),
@@ -340,14 +340,8 @@ async fn accepted_push_full_chunk_materializes_items_gates_and_indexes() {
 
 #[tokio::test]
 async fn group_cap_counts_existing_and_incoming_cohort_members() {
-    let mut def = definition();
+    let mut def = cohort_definition(3);
     def.max_eligible_group_size = Some(2);
-    def.cohort_policy = Some(CohortPolicy {
-        enabled: true,
-        completion_bound_ms: Some(60_000),
-        on_incomplete: None,
-        max_cohort_size: Some(3),
-    });
     let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
     let turso = TursoRelational::in_memory().await.unwrap();
     AsyncProjectionStore::ensure_shard(&turso, def)
@@ -418,7 +412,7 @@ fn cohort_item(item_id: ItemId, key: &str, group: &GroupKey, email: &str) -> Pus
 
 #[tokio::test]
 async fn grouped_typed_cohort_lifecycle_is_atomic_and_refreshes_summary() {
-    let mut definition = definition();
+    let mut definition = cohort_definition(10);
     definition.typed_indexes = vec![QueueIndex {
         name: "by_email".to_string(),
         declaration: IndexDeclaration::Single(IndexDef {
@@ -606,8 +600,8 @@ async fn grouped_typed_cohort_lifecycle_is_atomic_and_refreshes_summary() {
 
 #[tokio::test]
 async fn grouped_push_unique_conflict_and_cohort_expiry_roll_back_or_converge() {
-    let mut definition = definition();
-    definition.typed_indexes = vec![QueueIndex {
+    let mut cohort_definition = cohort_definition(10);
+    cohort_definition.typed_indexes = vec![QueueIndex {
         name: "by_email".to_string(),
         declaration: IndexDeclaration::Single(IndexDef {
             field: "email".to_string(),
@@ -615,9 +609,21 @@ async fn grouped_push_unique_conflict_and_cohort_expiry_roll_back_or_converge() 
             unique: true,
         }),
     }];
-    let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let shard = QueueKey::new(
+        cohort_definition.tenant_id.clone(),
+        cohort_definition.queue_id.clone(),
+    );
+    let mut ordinary_definition = definition();
+    ordinary_definition.queue_id = QueueId::new("ordinary-cohort-neighbor").unwrap();
+    let ordinary_shard = QueueKey::new(
+        ordinary_definition.tenant_id.clone(),
+        ordinary_definition.queue_id.clone(),
+    );
     let turso = TursoRelational::in_memory().await.unwrap();
-    AsyncProjectionStore::ensure_shard(&turso, definition)
+    AsyncProjectionStore::ensure_shard(&turso, cohort_definition)
+        .await
+        .unwrap();
+    AsyncProjectionStore::ensure_shard(&turso, ordinary_definition)
         .await
         .unwrap();
     let group = GroupKey::new("cohort-b").unwrap();
@@ -658,20 +664,33 @@ async fn grouped_push_unique_conflict_and_cohort_expiry_roll_back_or_converge() 
             items: vec![
                 cohort_item(first, "first", &group, "a@example.com"),
                 cohort_item(second, "second", &group, "b@example.com"),
-                PushItem {
-                    group_key: Some(group.clone()),
-                    entity_document: Some(serde_json::json!({ "email": "other@example.com" })),
-                    ..push_item(unrelated, "unrelated", 3)
-                },
             ],
         }),
-        vec![first, second, unrelated],
+        vec![first, second],
         20,
     );
     AsyncProjectionStore::apply_recovery(
         &turso,
         vec![CommandPosition::new(shard.clone(), 3, 0)],
         vec![valid],
+    )
+    .await
+    .unwrap();
+    AsyncProjectionStore::apply_recovery(
+        &turso,
+        vec![CommandPosition::new(ordinary_shard.clone(), 3, 0)],
+        vec![envelope(
+            "unrelated-grouped-push",
+            QueueCommand::Push(PushCommand {
+                items: vec![PushItem {
+                    group_key: Some(group.clone()),
+                    entity_document: Some(serde_json::json!({ "email": "other@example.com" })),
+                    ..push_item(unrelated, "unrelated", 3)
+                }],
+            }),
+            vec![unrelated],
+            20,
+        )],
     )
     .await
     .unwrap();
@@ -702,8 +721,13 @@ async fn grouped_push_unique_conflict_and_cohort_expiry_roll_back_or_converge() 
     assert_eq!(
         turso
             .query(
-                "SELECT eligible_item_count FROM fireweed_group_summary WHERE group_key=?1",
-                vec![Value::Text(group.as_str().to_string())],
+                "SELECT eligible_item_count FROM fireweed_group_summary \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3",
+                vec![
+                    Value::Text(ordinary_shard.tenant_id.as_str().to_string()),
+                    Value::Text(ordinary_shard.queue_id.as_str().to_string()),
+                    Value::Text(group.as_str().to_string()),
+                ],
             )
             .await
             .unwrap()[0]
@@ -1476,6 +1500,25 @@ fn definition() -> QueueDefinition {
         typed_indexes: Vec::new(),
         emit_change_records: false,
     }
+}
+
+fn gated_definition() -> QueueDefinition {
+    let mut definition = definition();
+    definition.eligibility_policy.gate_keys = GateKeyPolicy::Dynamic;
+    definition.eligibility_policy.max_gate_keys_per_item = Some(64);
+    definition.eligibility_policy.max_gates_per_request = Some(64);
+    definition
+}
+
+fn cohort_definition(max_cohort_size: u64) -> QueueDefinition {
+    let mut definition = gated_definition();
+    definition.cohort_policy = Some(CohortPolicy {
+        enabled: true,
+        completion_bound_ms: Some(30_000),
+        on_incomplete: Some(CohortOnIncomplete::ExpireCohort),
+        max_cohort_size: Some(max_cohort_size),
+    });
+    definition
 }
 
 fn rich_create_definition() -> QueueDefinition {
@@ -3176,7 +3219,7 @@ async fn purge_retains_pending_leased_and_terminal_keys_like_async_sqlite() {
 
 #[tokio::test]
 async fn control_gate_update_replace_and_purge_match_sqlite() {
-    let definition = definition();
+    let definition = gated_definition();
     let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
     let mut sqlite = SqliteProjectionStore::in_memory().expect("sqlite");
     ProjectionStore::ensure_shard(&mut sqlite, &definition).expect("sqlite ensure");
@@ -3496,14 +3539,8 @@ async fn control_gate_update_replace_and_purge_match_sqlite() {
 
 #[tokio::test]
 async fn async_rich_claim_selection_matches_sqlite_without_durable_mutation() {
-    let mut rich_definition = definition();
+    let mut rich_definition = gated_definition();
     rich_definition.max_eligible_group_size = Some(3);
-    rich_definition.cohort_policy = Some(CohortPolicy {
-        enabled: true,
-        completion_bound_ms: Some(30_000),
-        on_incomplete: None,
-        max_cohort_size: Some(4),
-    });
     let shard = QueueKey::new(
         rich_definition.tenant_id.clone(),
         rich_definition.queue_id.clone(),
@@ -3786,7 +3823,7 @@ async fn async_rich_claim_selection_matches_sqlite_without_durable_mutation() {
         TenantId::new("cohort-tenant").unwrap(),
         QueueId::new("cohort-queue").unwrap(),
     );
-    let mut cohort_definition = rich_definition;
+    let mut cohort_definition = cohort_definition(4);
     cohort_definition.tenant_id = cohort_shard.tenant_id.clone();
     cohort_definition.queue_id = cohort_shard.queue_id.clone();
     let mut cohort_sqlite = SqliteRelational::in_memory().unwrap();
