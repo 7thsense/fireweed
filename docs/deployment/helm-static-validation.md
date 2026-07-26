@@ -44,6 +44,9 @@ renders `FIREWEED_OBJECT_LOG_S3_*`,
 `FIREWEED_POSTGRES_CONTROL_PLANE_DATABASE_URL`, and `FIREWEED_ADVERTISE_ADDR` from the pod
 IP, uses `replicaCount=3`, and keeps
 SQLite projections pod-local via `emptyDir` rather than a shared RWO PVC.
+The PostgreSQL DSN is both the shared queue control plane and the atomic
+create-only publication authority for S3 implementations without native
+conditional PutObject support.
 The chart fails closed if a local object-log profile is scaled beyond one
 replica.
 

@@ -140,6 +140,95 @@ async fn production_s3_object_log_config_builds_segmented_backend() {
     server.shutdown_and_drain(Duration::from_secs(5)).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn postgres_authority_starts_on_s3_without_native_create_only() {
+    let required = [
+        "FIREWEED_S3_TEST_ENDPOINT",
+        "FIREWEED_S3_TEST_BUCKET",
+        "FIREWEED_S3_TEST_REGION",
+        "FIREWEED_S3_TEST_ACCESS_KEY",
+        "FIREWEED_S3_TEST_SECRET_KEY",
+        "FIREWEED_PG_TEST_URL",
+    ];
+    let values: Option<Vec<_>> = required
+        .iter()
+        .map(|name| std::env::var(name).ok().map(|value| (*name, value)))
+        .collect();
+    let Some(values) = values else {
+        eprintln!(
+            "S3 + PostgreSQL authority integration skipped; set {}",
+            required.join(", ")
+        );
+        return;
+    };
+    let lookup = |name: &str| {
+        values
+            .iter()
+            .find_map(|(key, value)| (*key == name).then_some(value.as_str()))
+            .expect("required live-test variable")
+    };
+
+    let endpoint = lookup("FIREWEED_S3_TEST_ENDPOINT");
+    let bucket = lookup("FIREWEED_S3_TEST_BUCKET");
+    let region = lookup("FIREWEED_S3_TEST_REGION");
+    let access = lookup("FIREWEED_S3_TEST_ACCESS_KEY");
+    let secret = lookup("FIREWEED_S3_TEST_SECRET_KEY");
+    S3BlobStore::new(endpoint, bucket, access, secret, region)
+        .expect("valid live S3 client")
+        .create_bucket()
+        .expect("create/ensure live S3 bucket");
+
+    let postgres_url = lookup("FIREWEED_PG_TEST_URL").to_owned();
+    let schema = format!("fireweed_s3_authority_{}", std::process::id());
+    let setup_url = postgres_url.clone();
+    let setup_schema = schema.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut client = postgres::Client::connect(&setup_url, postgres::NoTls)
+            .expect("connect live Postgres for schema setup");
+        client
+            .batch_execute(&format!("CREATE SCHEMA {setup_schema}"))
+            .expect("create isolated authority schema");
+    })
+    .await
+    .expect("authority schema setup task");
+    let separator = if postgres_url.contains('?') { '&' } else { '?' };
+    let isolated_postgres_url =
+        format!("{postgres_url}{separator}options=-c%20search_path%3D{schema}");
+
+    let mut environment = production_s3_env(endpoint, bucket);
+    environment.insert("FIREWEED_OBJECT_LOG_S3_REGION".into(), region.into());
+    environment.insert("FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID".into(), access.into());
+    environment.insert(
+        "FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY".into(),
+        secret.into(),
+    );
+    environment.insert("FIREWEED_CONTROL_PLANE".into(), "postgres".into());
+    environment.insert(
+        "FIREWEED_POSTGRES_CONTROL_PLANE_DATABASE_URL".into(),
+        isolated_postgres_url,
+    );
+    environment.insert(
+        "FIREWEED_BOOTSTRAP_QUEUES".into(),
+        format!("t1:garage-authority-{}", std::process::id()),
+    );
+
+    let config = Config::from_env(&environment).expect("live authority profile config");
+    let server = start(config)
+        .await
+        .expect("PostgreSQL authority must allow startup on no-CAS S3");
+    server.shutdown_and_drain(Duration::from_secs(5)).await;
+
+    tokio::task::spawn_blocking(move || {
+        let mut client = postgres::Client::connect(&postgres_url, postgres::NoTls)
+            .expect("connect live Postgres for schema cleanup");
+        client
+            .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+            .expect("drop isolated authority schema");
+    })
+    .await
+    .expect("authority schema cleanup task");
+}
+
 #[test]
 fn production_s3_object_log_config_rejects_incomplete_credentials_and_local_fallback() {
     let complete = production_s3_env("http://127.0.0.1:9000", "fireweed");

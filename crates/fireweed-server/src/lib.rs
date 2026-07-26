@@ -23,7 +23,9 @@ use fireweed_engine::{
 };
 use fireweed_memory::composed_memory_backend;
 use fireweed_objectlog::ObjectLog;
-use fireweed_objectlog::segmented::{BlobStore, LocalFsBlobStore, S3BlobStore};
+use fireweed_objectlog::segmented::{
+    BlobStore, LocalFsBlobStore, PointerFencedBlobStore, S3BlobStore, probe_create_only_semantics,
+};
 use fireweed_resp::{
     RespBackend, RespHooks, RouteDecision, SystemClock, route, serve_with_shutdown,
     serve_with_shutdown_and_hooks,
@@ -314,6 +316,31 @@ impl ObjectLogSpec {
                     secret_access_key,
                     region,
                 )?))
+            }
+        }
+    }
+
+    /// Open the production blob-store composition for this object-log profile. Local filesystems retain
+    /// their native create-only implementation. S3 either uses the configured PostgreSQL authority for
+    /// every create-only publication or proves the endpoint's native primitive before startup proceeds.
+    fn open_blob_store_with_authority(
+        &self,
+        postgres_pointer_url: Option<&str>,
+    ) -> EngineResult<Arc<dyn BlobStore>> {
+        let store = self.open_blob_store()?;
+        match (self, postgres_pointer_url) {
+            (Self::LocalFilesystem { .. }, _) => Ok(store),
+            (Self::S3 { .. }, Some(url)) => {
+                let pointers = Arc::new(fireweed_postgres::PostgresManifestPointer::open(url)?);
+                Ok(Arc::new(PointerFencedBlobStore::new(store, pointers)))
+            }
+            (Self::S3 { .. }, None) => {
+                probe_create_only_semantics(store.as_ref()).map_err(|error| {
+                    EngineError::Storage(format!(
+                        "S3 object-log endpoint does not provide Fireweed's required native create-only semantics; configure FIREWEED_CONTROL_PLANE=postgres and FIREWEED_POSTGRES_CONTROL_PLANE_DATABASE_URL to use PostgreSQL publication authority: {error}"
+                    ))
+                })?;
+                Ok(store)
             }
         }
     }
@@ -2147,6 +2174,12 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         projection,
         control_plane,
     } = config.backend;
+    // The PostgreSQL control-plane DSN is also the production publication authority for S3 stores that do
+    // not implement an atomic create-only PutObject. Capture it before erasing the control-plane type.
+    let postgres_pointer_url = match &control_plane {
+        ControlPlaneSpec::InProcess => None,
+        ControlPlaneSpec::Postgres { url, .. } => Some(url.clone()),
+    };
     // The sync Postgres client owns an internal runtime, so connect off the Tokio reactor. Erase the
     // concrete implementation only after construction; every backend arm receives this same selected
     // queue-ownership authority instead of manufacturing a private per-process control plane.
@@ -2227,7 +2260,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             // projection rebuilt by `read_all` replay on open.
             let backends = tokio::task::spawn_blocking(move || {
                 let segment_config = spec.segment_config();
-                let store = spec.open_blob_store()?;
+                let store = spec.open_blob_store_with_authority(postgres_pointer_url.as_deref())?;
                 (0..8)
                     .map(|index| {
                         SegmentedObjectLogInMemoryBackend::open_with_blob_store(
@@ -2281,7 +2314,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 .map_err(|_| EngineError::Storage("non-utf8 path".into()))?;
             let backends = tokio::task::spawn_blocking(move || {
                 let segment_config = spec.segment_config();
-                let store = spec.open_blob_store()?;
+                let store = spec.open_blob_store_with_authority(postgres_pointer_url.as_deref())?;
                 let projection = Arc::new(fireweed_sqlite::SqliteProjectionStore::open(&p)?);
                 (0..8)
                     .map(|index| {
@@ -2332,7 +2365,11 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         #[cfg(feature = "turso-projection")]
         (LogSpec::ObjectLog(spec), ProjectionSpec::Turso { path }) => {
             let segment_config = spec.segment_config();
-            let store = spec.open_blob_store()?;
+            let store = tokio::task::spawn_blocking(move || {
+                spec.open_blob_store_with_authority(postgres_pointer_url.as_deref())
+            })
+            .await
+            .map_err(|e| EngineError::Storage(format!("object-log open task failed: {e}")))??;
             let backend = Arc::new(
                 ObjectLogTursoBackend::open_with_blob_store(store, &path, segment_config).await?,
             );
@@ -2355,7 +2392,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         (LogSpec::ObjectLog(spec), ProjectionSpec::Hybrid { path }) => {
             let backends = tokio::task::spawn_blocking(move || {
                 let segment_config = spec.segment_config();
-                let store = spec.open_blob_store()?;
+                let store = spec.open_blob_store_with_authority(postgres_pointer_url.as_deref())?;
                 (0..8)
                     .map(|index| {
                         open_objectlog_hybrid_backend(
@@ -2424,7 +2461,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             // the durable SQLite `ProjectionImage`.
             let backends = tokio::task::spawn_blocking(move || {
                 let segment_config = spec.segment_config();
-                let store = spec.open_blob_store()?;
+                let store = spec.open_blob_store_with_authority(postgres_pointer_url.as_deref())?;
                 (0..8)
                     .map(|index| {
                         open_objectlog_hybrid_backend(
@@ -2503,7 +2540,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             );
             let backends = tokio::task::spawn_blocking(move || {
                 let segment_config = spec.segment_config();
-                let store = spec.open_blob_store()?;
+                let store = spec.open_blob_store_with_authority(postgres_pointer_url.as_deref())?;
                 (0..8)
                     .map(|index| {
                         open_objectlog_hybrid_backend(
@@ -3182,6 +3219,30 @@ mod byte_admission_wiring_tests {
     };
     use fireweed_objectlog::segmented::InMemoryBlobStore;
     use std::sync::mpsc;
+
+    #[test]
+    fn every_objectlog_projection_arm_uses_the_publication_authority_composition() {
+        let source = include_str!("lib.rs");
+        let production_start = source
+            .split("pub async fn start(config: Config)")
+            .nth(1)
+            .expect("server composition root")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production composition boundary");
+
+        assert_eq!(
+            production_start
+                .matches("open_blob_store_with_authority")
+                .count(),
+            6,
+            "inmemory, sqlite, turso, hybrid, hybrid-strict, and hybrid-async must share the authority-aware S3 opener"
+        );
+        assert!(
+            !production_start.contains("spec.open_blob_store()?"),
+            "no object-log projection arm may bypass the S3 authority boundary"
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn control_plane_executor_bounds_admission_and_owns_cancelled_calls() {

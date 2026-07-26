@@ -49,7 +49,7 @@ SQLite high-water, and fails closed on memory-apply poisoning. Non-objectlog
 hybrid pairings are unsupported unless a future release explicitly documents and
 tests them.
 
-`storage.log.objectLog.store=local` is the legacy filesystem-backed profile.
+`storage.log.objectLog.store=local` is the filesystem-backed profile.
 It stays single-replica only. The chart fails closed if you scale it beyond one
 pod because its log and projection persistence are not shared.
 
@@ -59,6 +59,11 @@ it with `storage.controlPlane.backend=postgres`,
 `persistence.enabled=false`. The chart renders pod-reachable `FIREWEED_ADVERTISE_ADDR`
 from the pod IP, uses `emptyDir` for the rebuildable SQLite projection, and does
 not render the local object-log path or a shared RWO projection PVC.
+
+The PostgreSQL control-plane DSN also provides the atomic create-only publication
+authority for S3 implementations that do not provide that primitive themselves.
+With an in-process control plane, startup probes the S3 endpoint's native
+create-only behavior and fails closed when it cannot prove the required contract.
 
 `objectlog/hybrid-async` (`storage.projection.backend: hybrid-async`) runs the
 same object-log + hybrid substrate under its canonical profile name: manifest
@@ -115,8 +120,8 @@ configured `databaseUrlKey` (default `database-url`) contains the control-plane
 Postgres DSN. Keep credentials out of values files and rendered manifests; the
 chart only renders Secret references.
 
-The profile spans three failure domains: S3 is the durable log authority,
-Postgres owns shared leases and fencing, and each pod holds only a rebuildable
+The profile spans three failure domains: S3 holds durable log objects, Postgres
+owns atomic object publication plus shared leases and fencing, and each pod holds only a rebuildable
 SQLite projection in `emptyDir`. Losing a pod or its local volume triggers a
 projection rebuild. Losing access to S3 or Postgres is an availability event
 and must fail closed; neither another pod nor its local SQLite file substitutes

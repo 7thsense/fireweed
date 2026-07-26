@@ -297,12 +297,32 @@ fn bind_storage_epoch_if_present(
 /// its own transaction and takes a `FOR UPDATE` row lock for linearization.
 pub struct PostgresControlPlane {
     config: ControlPlaneConfig,
-    inner: Mutex<Client>,
+    inner: Mutex<RuntimeIsolatedClient>,
     batch_renewal_calls: AtomicU64,
     batch_renewal_transactions: AtomicU64,
     batch_renewal_statements: AtomicU64,
     batch_resolution_calls: AtomicU64,
     batch_resolution_statements: AtomicU64,
+}
+
+struct RuntimeIsolatedClient(Option<Client>);
+
+impl std::ops::Deref for RuntimeIsolatedClient {
+    type Target = Client;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+            .as_ref()
+            .expect("Postgres control-plane client closed")
+    }
+}
+
+impl std::ops::DerefMut for RuntimeIsolatedClient {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0
+            .as_mut()
+            .expect("Postgres control-plane client closed")
+    }
 }
 
 /// Structural amplification counters for node-level ownership work. These count protocol operations,
@@ -347,7 +367,7 @@ impl PostgresControlPlane {
         st(client.batch_execute(CONTROL_PLANE_SCHEMA))?;
         Ok(PostgresControlPlane {
             config,
-            inner: Mutex::new(client),
+            inner: Mutex::new(RuntimeIsolatedClient(Some(client))),
             batch_renewal_calls: AtomicU64::new(0),
             batch_renewal_transactions: AtomicU64::new(0),
             batch_renewal_statements: AtomicU64::new(0),
@@ -418,6 +438,20 @@ impl PostgresControlPlane {
             }
             None => false,
         })
+    }
+}
+
+impl Drop for PostgresControlPlane {
+    fn drop(&mut self) {
+        let client = self
+            .inner
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .0
+            .take();
+        if let Some(client) = client {
+            let _ = std::thread::spawn(move || drop(client)).join();
+        }
     }
 }
 

@@ -29,48 +29,92 @@ ALTER TABLE fireweed_objectlog_immutable_claim
 /// Postgres-held TD-004 manifest pointer and create-only object lifecycle authority for object stores
 /// without conditional writes.
 pub struct PostgresManifestPointer {
-    client: Mutex<Client>,
+    client: Mutex<Option<Client>>,
 }
 
 impl PostgresManifestPointer {
     pub fn open(connection_string: &str) -> EngineResult<Self> {
-        let mut client = connect(PostgresConnectConfig::new(connection_string))?;
-        client.batch_execute(SCHEMA).map_err(storage)?;
-        Ok(Self {
-            client: Mutex::new(client),
+        let connection_string = connection_string.to_owned();
+        let client = std::thread::spawn(move || {
+            let mut client = connect(PostgresConnectConfig::new(connection_string))?;
+            client.batch_execute(SCHEMA).map_err(storage)?;
+            Ok::<Client, EngineError>(client)
         })
+        .join()
+        .map_err(|_| {
+            EngineError::Storage("Postgres manifest pointer open thread panicked".into())
+        })??;
+        Ok(Self {
+            client: Mutex::new(Some(client)),
+        })
+    }
+
+    fn with_client<T: Send>(
+        &self,
+        operation: impl FnOnce(&mut Client) -> EngineResult<T> + Send,
+    ) -> EngineResult<T> {
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut guard = self.client.lock().map_err(|_| {
+                        EngineError::Storage("manifest pointer client poisoned".into())
+                    })?;
+                    let client = guard.as_mut().ok_or_else(|| {
+                        EngineError::Storage("manifest pointer client is closed".into())
+                    })?;
+                    operation(client)
+                })
+                .join()
+                .map_err(|_| {
+                    EngineError::Storage(
+                        "Postgres manifest pointer operation thread panicked".into(),
+                    )
+                })?
+        })
+    }
+}
+
+impl Drop for PostgresManifestPointer {
+    fn drop(&mut self) {
+        let client = self
+            .client
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(client) = client {
+            let _ = std::thread::spawn(move || drop(client)).join();
+        }
     }
 }
 
 impl ManifestPointerStore for PostgresManifestPointer {
     fn read(&self, pointer_key: &str) -> EngineResult<Option<VersionedHead<ManifestHeadBlob>>> {
-        let mut client = self
-            .client
-            .lock()
-            .expect("manifest pointer client poisoned");
-        let row = client
-            .query_opt(
-                "SELECT version, assignment_epoch, head_json \
-                 FROM fireweed_objectlog_manifest_pointer WHERE pointer_key=$1",
-                &[&pointer_key],
-            )
-            .map_err(storage)?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        let version: i64 = row.get(0);
-        let assignment_epoch: i64 = row.get(1);
-        let value: ManifestHeadBlob = serde_json::from_str(row.get::<_, &str>(2))
-            .map_err(|error| EngineError::Storage(error.to_string()))?;
-        if version < 0 || assignment_epoch < 0 || value.current_epoch != assignment_epoch as u64 {
-            return Err(EngineError::Storage(
-                "Postgres manifest pointer epoch/head mismatch".into(),
-            ));
-        }
-        Ok(Some(VersionedHead {
-            version: version as u64,
-            value,
-        }))
+        self.with_client(|client| {
+            let row = client
+                .query_opt(
+                    "SELECT version, assignment_epoch, head_json \
+                     FROM fireweed_objectlog_manifest_pointer WHERE pointer_key=$1",
+                    &[&pointer_key],
+                )
+                .map_err(storage)?;
+            let Some(row) = row else {
+                return Ok(None);
+            };
+            let version: i64 = row.get(0);
+            let assignment_epoch: i64 = row.get(1);
+            let value: ManifestHeadBlob = serde_json::from_str(row.get::<_, &str>(2))
+                .map_err(|error| EngineError::Storage(error.to_string()))?;
+            if version < 0 || assignment_epoch < 0 || value.current_epoch != assignment_epoch as u64
+            {
+                return Err(EngineError::Storage(
+                    "Postgres manifest pointer epoch/head mismatch".into(),
+                ));
+            }
+            Ok(Some(VersionedHead {
+                version: version as u64,
+                value,
+            }))
+        })
     }
 
     fn compare_and_swap(
@@ -87,31 +131,29 @@ impl ManifestPointerStore for PostgresManifestPointer {
             .map_err(|_| EngineError::Storage("assignment epoch overflow".into()))?;
         let head_json = serde_json::to_string(value)
             .map_err(|error| EngineError::Storage(error.to_string()))?;
-        let mut client = self
-            .client
-            .lock()
-            .expect("manifest pointer client poisoned");
-        let mut transaction = client.transaction().map_err(storage)?;
-        let changed = match expected {
-            None => transaction
-                .execute(
-                    "INSERT INTO fireweed_objectlog_manifest_pointer \
-                     (pointer_key,version,assignment_epoch,head_json) VALUES($1,0,$2,$3) \
-                     ON CONFLICT(pointer_key) DO NOTHING",
-                    &[&pointer_key, &epoch, &head_json],
-                )
-                .map_err(storage)?,
-            Some(expected) => transaction
-                .execute(
-                    "UPDATE fireweed_objectlog_manifest_pointer \
-                     SET version=$2+1, assignment_epoch=$3, head_json=$4 \
-                     WHERE pointer_key=$1 AND version=$2",
-                    &[&pointer_key, &expected, &epoch, &head_json],
-                )
-                .map_err(storage)?,
-        };
-        transaction.commit().map_err(storage)?;
-        Ok(changed == 1)
+        self.with_client(move |client| {
+            let mut transaction = client.transaction().map_err(storage)?;
+            let changed = match expected {
+                None => transaction
+                    .execute(
+                        "INSERT INTO fireweed_objectlog_manifest_pointer \
+                         (pointer_key,version,assignment_epoch,head_json) VALUES($1,0,$2,$3) \
+                         ON CONFLICT(pointer_key) DO NOTHING",
+                        &[&pointer_key, &epoch, &head_json],
+                    )
+                    .map_err(storage)?,
+                Some(expected) => transaction
+                    .execute(
+                        "UPDATE fireweed_objectlog_manifest_pointer \
+                         SET version=$2+1, assignment_epoch=$3, head_json=$4 \
+                         WHERE pointer_key=$1 AND version=$2",
+                        &[&pointer_key, &expected, &epoch, &head_json],
+                    )
+                    .map_err(storage)?,
+            };
+            transaction.commit().map_err(storage)?;
+            Ok(changed == 1)
+        })
     }
 
     fn publish_if_absent(
@@ -126,75 +168,73 @@ impl ManifestPointerStore for PostgresManifestPointer {
                 "transactional publication body hash mismatch",
             ));
         }
-        let mut client = self
-            .client
-            .lock()
-            .expect("manifest pointer client poisoned");
-        let mut transaction = client.transaction().map_err(storage)?;
-        lock_object_key(&mut transaction, key)?;
-        let lifecycle = read_lifecycle(&mut transaction, key)?;
-        let mirrored = mirror.get(key)?;
+        self.with_client(|client| {
+            let mut transaction = client.transaction().map_err(storage)?;
+            lock_object_key(&mut transaction, key)?;
+            let lifecycle = read_lifecycle(&mut transaction, key)?;
+            let mirrored = mirror.get(key)?;
 
-        let outcome = match lifecycle {
-            Some((claimed, true)) => match mirrored {
-                None if claimed == content_sha256 => {
-                    mirror.put(key, body)?;
-                    TransactionalPublishOutcome::Repaired
-                }
-                None => TransactionalPublishOutcome::Conflict,
-                Some(existing) if sha256_hex(&existing) != claimed => {
-                    return Err(EngineError::Storage(
-                        "object mirror content disagrees with transactional publication authority"
-                            .into(),
-                    ));
-                }
-                Some(_) if claimed != content_sha256 => TransactionalPublishOutcome::Conflict,
-                Some(existing) if existing == body => TransactionalPublishOutcome::Existing,
-                Some(_) => {
-                    return Err(EngineError::Storage(
-                        "object mirror bytes disagree with their claimed content hash".into(),
-                    ));
-                }
-            },
-            Some((_, false)) => {
-                let repaired = mirrored.as_deref() == Some(body);
-                if !repaired {
-                    mirror.put(key, body)?;
-                }
-                transaction
-                    .execute(
-                        "UPDATE fireweed_objectlog_immutable_claim \
-                         SET content_sha256=$2,present=TRUE WHERE object_key=$1",
-                        &[&key, &content_sha256],
-                    )
-                    .map_err(storage)?;
-                if repaired {
-                    TransactionalPublishOutcome::Repaired
-                } else {
-                    TransactionalPublishOutcome::Created
-                }
-            }
-            None => match mirrored {
-                Some(existing) if existing != body => TransactionalPublishOutcome::Conflict,
-                existing => {
+            let outcome = match lifecycle {
+                Some((claimed, true)) => match mirrored {
+                    None if claimed == content_sha256 => {
+                        mirror.put(key, body)?;
+                        TransactionalPublishOutcome::Repaired
+                    }
+                    None => TransactionalPublishOutcome::Conflict,
+                    Some(existing) if sha256_hex(&existing) != claimed => {
+                        return Err(EngineError::Storage(
+                            "object mirror content disagrees with transactional publication authority"
+                                .into(),
+                        ));
+                    }
+                    Some(_) if claimed != content_sha256 => TransactionalPublishOutcome::Conflict,
+                    Some(existing) if existing == body => TransactionalPublishOutcome::Existing,
+                    Some(_) => {
+                        return Err(EngineError::Storage(
+                            "object mirror bytes disagree with their claimed content hash".into(),
+                        ));
+                    }
+                },
+                Some((_, false)) => {
+                    let repaired = mirrored.as_deref() == Some(body);
+                    if !repaired {
+                        mirror.put(key, body)?;
+                    }
                     transaction
                         .execute(
-                            "INSERT INTO fireweed_objectlog_immutable_claim \
-                             (object_key,content_sha256,present) VALUES($1,$2,TRUE)",
+                            "UPDATE fireweed_objectlog_immutable_claim \
+                             SET content_sha256=$2,present=TRUE WHERE object_key=$1",
                             &[&key, &content_sha256],
                         )
                         .map_err(storage)?;
-                    if existing.is_some() {
+                    if repaired {
                         TransactionalPublishOutcome::Repaired
                     } else {
-                        mirror.put(key, body)?;
                         TransactionalPublishOutcome::Created
                     }
                 }
-            },
-        };
-        transaction.commit().map_err(storage)?;
-        Ok(outcome)
+                None => match mirrored {
+                    Some(existing) if existing != body => TransactionalPublishOutcome::Conflict,
+                    existing => {
+                        transaction
+                            .execute(
+                                "INSERT INTO fireweed_objectlog_immutable_claim \
+                                 (object_key,content_sha256,present) VALUES($1,$2,TRUE)",
+                                &[&key, &content_sha256],
+                            )
+                            .map_err(storage)?;
+                        if existing.is_some() {
+                            TransactionalPublishOutcome::Repaired
+                        } else {
+                            mirror.put(key, body)?;
+                            TransactionalPublishOutcome::Created
+                        }
+                    }
+                },
+            };
+            transaction.commit().map_err(storage)?;
+            Ok(outcome)
+        })
     }
 
     fn delete_object(
@@ -202,59 +242,57 @@ impl ManifestPointerStore for PostgresManifestPointer {
         key: &str,
         mirror: &dyn BlobStore,
     ) -> EngineResult<TransactionalDeleteOutcome> {
-        let mut client = self
-            .client
-            .lock()
-            .expect("manifest pointer client poisoned");
-        let mut transaction = client.transaction().map_err(storage)?;
-        lock_object_key(&mut transaction, key)?;
-        let lifecycle = read_lifecycle(&mut transaction, key)?;
-        let mirrored = mirror.get(key)?;
+        self.with_client(|client| {
+            let mut transaction = client.transaction().map_err(storage)?;
+            lock_object_key(&mut transaction, key)?;
+            let lifecycle = read_lifecycle(&mut transaction, key)?;
+            let mirrored = mirror.get(key)?;
 
-        let outcome = match (lifecycle, mirrored) {
-            (None, None) | (Some((_, false)), None) => TransactionalDeleteOutcome::Missing,
-            (None, Some(existing)) => {
-                let digest = sha256_hex(&existing);
-                mirror.delete(key)?;
-                transaction
-                    .execute(
-                        "INSERT INTO fireweed_objectlog_immutable_claim \
-                         (object_key,content_sha256,present) VALUES($1,$2,FALSE)",
-                        &[&key, &digest],
-                    )
-                    .map_err(storage)?;
-                TransactionalDeleteOutcome::Repaired
-            }
-            (Some((claimed, false)), Some(existing)) if sha256_hex(&existing) == claimed => {
-                mirror.delete(key)?;
-                TransactionalDeleteOutcome::Repaired
-            }
-            (Some((_, false)), Some(_)) => TransactionalDeleteOutcome::Conflict,
-            (Some((claimed, true)), Some(existing)) if sha256_hex(&existing) != claimed => {
-                TransactionalDeleteOutcome::Conflict
-            }
-            (Some((_, true)), Some(_)) => {
-                mirror.delete(key)?;
-                transaction
-                    .execute(
-                        "UPDATE fireweed_objectlog_immutable_claim SET present=FALSE WHERE object_key=$1",
-                        &[&key],
-                    )
-                    .map_err(storage)?;
-                TransactionalDeleteOutcome::Deleted
-            }
-            (Some((_, true)), None) => {
-                transaction
-                    .execute(
-                        "UPDATE fireweed_objectlog_immutable_claim SET present=FALSE WHERE object_key=$1",
-                        &[&key],
-                    )
-                    .map_err(storage)?;
-                TransactionalDeleteOutcome::Repaired
-            }
-        };
-        transaction.commit().map_err(storage)?;
-        Ok(outcome)
+            let outcome = match (lifecycle, mirrored) {
+                (None, None) | (Some((_, false)), None) => TransactionalDeleteOutcome::Missing,
+                (None, Some(existing)) => {
+                    let digest = sha256_hex(&existing);
+                    mirror.delete(key)?;
+                    transaction
+                        .execute(
+                            "INSERT INTO fireweed_objectlog_immutable_claim \
+                             (object_key,content_sha256,present) VALUES($1,$2,FALSE)",
+                            &[&key, &digest],
+                        )
+                        .map_err(storage)?;
+                    TransactionalDeleteOutcome::Repaired
+                }
+                (Some((claimed, false)), Some(existing)) if sha256_hex(&existing) == claimed => {
+                    mirror.delete(key)?;
+                    TransactionalDeleteOutcome::Repaired
+                }
+                (Some((_, false)), Some(_)) => TransactionalDeleteOutcome::Conflict,
+                (Some((claimed, true)), Some(existing)) if sha256_hex(&existing) != claimed => {
+                    TransactionalDeleteOutcome::Conflict
+                }
+                (Some((_, true)), Some(_)) => {
+                    mirror.delete(key)?;
+                    transaction
+                        .execute(
+                            "UPDATE fireweed_objectlog_immutable_claim SET present=FALSE WHERE object_key=$1",
+                            &[&key],
+                        )
+                        .map_err(storage)?;
+                    TransactionalDeleteOutcome::Deleted
+                }
+                (Some((_, true)), None) => {
+                    transaction
+                        .execute(
+                            "UPDATE fireweed_objectlog_immutable_claim SET present=FALSE WHERE object_key=$1",
+                            &[&key],
+                        )
+                        .map_err(storage)?;
+                    TransactionalDeleteOutcome::Repaired
+                }
+            };
+            transaction.commit().map_err(storage)?;
+            Ok(outcome)
+        })
     }
 }
 

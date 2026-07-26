@@ -1,7 +1,8 @@
 //! TD-004 **production** object-log substrate: configurable group-commit segments on an S3-compatible
 //! store, ack withheld until segment+manifest commit, manifest-CAS epoch fencing, and release-measurable
 //! segment/object counters. The in-memory store exercises the whole pipeline with NO network; the MinIO
-//! integration test (env-gated on `FIREWEED_S3_TEST_ENDPOINT`) runs the SAME flow against a real S3 endpoint.
+//! integration test (env-gated on `FIREWEED_S3_TEST_ENDPOINT`) runs the SAME flow against a real S3 endpoint
+//! only after proving that endpoint's native create-only primitive.
 //!
 //! ## Running the MinIO integration test (orbstack networking)
 //!
@@ -16,7 +17,8 @@
 //!
 //! This host CANNOT reach docker *published* ports (`localhost:9000` fails in the orbstack namespace), so the
 //! container IP must be used directly. Optional overrides: `FIREWEED_S3_TEST_BUCKET` (default `fireweed-test`),
-//! `FIREWEED_S3_TEST_ACCESS_KEY` / `FIREWEED_S3_TEST_SECRET_KEY` (default `minioadmin`). Absent the endpoint env,
+//! `FIREWEED_S3_TEST_ACCESS_KEY` / `FIREWEED_S3_TEST_SECRET_KEY` (default `minioadmin`) and
+//! `FIREWEED_S3_TEST_REGION` (default `us-east-1`). Absent the endpoint env,
 //! the test prints a LOUD skip and returns green (mirroring the postgres `FIREWEED_PG_TEST_URL` gate).
 
 use std::fs;
@@ -38,7 +40,7 @@ use fireweed_objectlog::object_store_observability::{
 };
 use fireweed_objectlog::segmented::{
     BlobStore, FaultCutPoint, FaultHook, InMemoryBlobStore, ManifestHeadBlob, ObjectStoreStats,
-    S3BlobStore, SegmentConfig, SegmentedObjectLog,
+    S3BlobStore, SegmentConfig, SegmentedObjectLog, probe_create_only_semantics,
 };
 
 // `n` distinct push commands (one item each), so a segment can batch several commands.
@@ -1266,7 +1268,7 @@ fn segmented_object_log_commits_through_minio() {
     let Ok(endpoint) = std::env::var("FIREWEED_S3_TEST_ENDPOINT") else {
         eprintln!(
             "\n================================================================\n\
-             MINIO INTEGRATION SKIPPED (segmented_object_log_commits_through_minio)\n\
+             S3 INTEGRATION SKIPPED (segmented_object_log_commits_through_minio)\n\
              set FIREWEED_S3_TEST_ENDPOINT=http://<container-ip>:9000 to run it.\n\
              (this host cannot reach docker PUBLISHED ports; use the container IP)\n\
              ================================================================\n"
@@ -1279,17 +1281,36 @@ fn segmented_object_log_commits_through_minio() {
         std::env::var("FIREWEED_S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into());
     let secret =
         std::env::var("FIREWEED_S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into());
+    let region = std::env::var("FIREWEED_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
 
-    let s3 = S3BlobStore::new(&endpoint, &bucket, &access, &secret, "us-east-1").unwrap();
+    let s3 = S3BlobStore::new(&endpoint, &bucket, &access, &secret, &region).unwrap();
     s3.create_bucket().expect("create/ensure bucket");
 
     // Round-trip the raw object surface first (PUT / GET / create-only CAS) so a signing failure is obvious.
     let probe = format!("probe/{}.txt", std::process::id());
     s3.put(&probe, b"hello").unwrap();
     assert_eq!(s3.get(&probe).unwrap().as_deref(), Some(&b"hello"[..]));
-    assert!(
-        !s3.put_if_absent(&probe, b"again").unwrap(),
-        "create-only CAS fails on an existing key"
+    let native_create_only = !s3.put_if_absent(&probe, b"again").unwrap();
+    if !native_create_only {
+        assert_eq!(
+            s3.get(&probe).unwrap().as_deref(),
+            Some(&b"again"[..]),
+            "an endpoint claiming success must expose the conflicting overwrite"
+        );
+        assert!(
+            probe_create_only_semantics(&s3).is_err(),
+            "the production capability probe must reject an endpoint that overwrites create-only PUTs"
+        );
+        s3.delete(&probe).unwrap();
+        eprintln!(
+            "S3 endpoint lacks native create-only PutObject; raw SegmentedObjectLog is correctly not exercised (use PointerFencedBlobStore with PostgreSQL authority)"
+        );
+        return;
+    }
+    assert_eq!(
+        s3.get(&probe).unwrap().as_deref(),
+        Some(&b"hello"[..]),
+        "a rejected conflicting create must preserve the winner"
     );
 
     // Use a per-process queue id so reruns against a persistent MinIO do not collide.
