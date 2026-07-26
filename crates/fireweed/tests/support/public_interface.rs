@@ -8,13 +8,15 @@ use fireweed::{
     CommitEntryStatus, CommitRequest, CompoundIndexDef, CompoundIndexField, CreateQueue,
     DeclaredBucketSegmentRequest, DiscoveryGranularity, EligibilityPolicy, EngineError,
     FinalizeKind, Fireweed, GroupBatching, GroupByField, GroupKey, GroupedAggregateRequest,
-    IndexDeclaration, IndexDef, IndexType, MetricsByQueryRequest, MultiClaimCommitEntry,
+    IndexDeclaration, IndexDef, IndexType, ItemMutationOperation, ItemMutationOutcome,
+    ItemMutationRequest, ItemMutationReturning, ItemPatch, ItemPredicate, ItemSelector,
+    ItemSelectorScope, LeaseGuard, MetricsByQueryRequest, MultiClaimCommitEntry,
     MultiClaimCommitRequest, MultiQueueClaimLimits, MultiQueueClaimTarget, MutationOutcome, Nack,
     NewItem, OrderField, OrderingMode, PayloadUpdate, PriorityDirection, PriorityModel,
     PriorityModelKind, PriorityTieBreaker, PriorityValue, QueryFilter, QueueCreationPolicy,
     QueueDefinition, QueueId, QueueIndex, QueueKey, QueueTemplate, RangeScanRequest,
-    RecurrencePolicy, RequestId, RetryPolicy, ScheduleUpdate, SideRecord, SortDirection, TenantId,
-    TypedValue, UtcTimestamp, WorkerId,
+    RecurrencePolicy, RequestId, RetryPolicy, ScheduleUpdate, SelectedMutation, SideRecord,
+    SortDirection, TenantId, TypedValue, UtcTimestamp, WorkerId,
 };
 use serde_json::json;
 
@@ -1445,6 +1447,168 @@ async fn exercise_mutation(cell: &str, fw: &Fireweed, failures: &mut Vec<String>
                 .is_some_and(|item| item.payload.as_deref() == Some(b"batch-updated".as_slice()))
         }),
         "payload replacement was not observable",
+    );
+
+    let item_version = batch_live
+        .as_ref()
+        .and_then(|value| value.as_ref())
+        .map(|item| item.item_version);
+    let mutation_request = ItemMutationRequest {
+        request_id: RequestId::new("selector-mutation-request").unwrap(),
+        evaluated_at: UtcTimestamp::new(1_800_000_000, 0).unwrap(),
+        dry_run: false,
+        returning: ItemMutationReturning::BeforeSnapshot,
+        gate_changes: vec![],
+        operation: ItemMutationOperation::SelectFirst {
+            clauses: vec![
+                SelectedMutation {
+                    selector_id: "matching-clause".into(),
+                    selector: ItemSelector {
+                        scope: ItemSelectorScope::Live,
+                        predicates: vec![ItemPredicate::ClientItemKeyEq(
+                            ClientItemKey::new("mutation-item").unwrap(),
+                        )],
+                    },
+                    predicates: vec![],
+                    lease_guard: LeaseGuard::RejectActive,
+                    patch: ItemPatch {
+                        priority: BatchUpdateValue::Replace(Some(PriorityValue::Int64(4))),
+                        field_edits: BTreeMap::from([(
+                            "selector-mutated".into(),
+                            Some(bytes::Bytes::from_static(b"yes")),
+                        )]),
+                        ..ItemPatch::default()
+                    },
+                },
+                SelectedMutation {
+                    selector_id: "must-not-run".into(),
+                    selector: ItemSelector {
+                        scope: ItemSelectorScope::Live,
+                        predicates: vec![],
+                    },
+                    predicates: vec![],
+                    lease_guard: LeaseGuard::RejectActive,
+                    patch: ItemPatch {
+                        priority: BatchUpdateValue::Replace(Some(PriorityValue::Int64(99))),
+                        ..ItemPatch::default()
+                    },
+                },
+            ],
+        },
+    };
+    let mut dry_run = mutation_request.clone();
+    dry_run.request_id = RequestId::new("selector-mutation-dry-run").unwrap();
+    dry_run.dry_run = true;
+    let preview = call(
+        cell,
+        "mutate_items[dry_run]",
+        failures,
+        fw.mutate_items(&queue, dry_run),
+    )
+    .await;
+    check(
+        cell,
+        "mutate_items[dry_run]",
+        failures,
+        preview.as_ref().is_some_and(|response| {
+            response.position.is_none()
+                && response.summary.changed == 1
+                && response.results.len() == 1
+                && response.results[0].selector_id.as_deref() == Some("matching-clause")
+                && matches!(
+                    response.results[0].outcome,
+                    ItemMutationOutcome::WouldUpdate { .. }
+                )
+        }),
+        "dry-run did not resolve the first selector without committing",
+    );
+    let after_preview = call(
+        cell,
+        "mutate_items[dry_run].post_state",
+        failures,
+        fw.live_item(&queue, ClientItemKey::new("mutation-item").unwrap()),
+    )
+    .await;
+    check(
+        cell,
+        "mutate_items[dry_run]",
+        failures,
+        after_preview.as_ref().is_some_and(|value| {
+            value.as_ref().is_some_and(|item| {
+                Some(item.item_version) == item_version
+                    && item.fields.get("selector-mutated").is_none()
+            })
+        }),
+        "dry-run changed the item or its version",
+    );
+
+    let mutation = call(
+        cell,
+        "mutate_items",
+        failures,
+        fw.mutate_items(&queue, mutation_request.clone()),
+    )
+    .await;
+    let mutation_replay = call(
+        cell,
+        "mutate_items[idempotent]",
+        failures,
+        fw.mutate_items(&queue, mutation_request.clone()),
+    )
+    .await;
+    check(
+        cell,
+        "mutate_items",
+        failures,
+        mutation.as_ref().is_some_and(|response| {
+            response.position.is_some()
+                && response.summary.changed == 1
+                && response.results.len() == 1
+                && response.results[0].selector_id.as_deref() == Some("matching-clause")
+                && matches!(
+                    response.results[0].outcome,
+                    ItemMutationOutcome::Updated { .. }
+                )
+        }) && mutation == mutation_replay,
+        "selector mutation did not commit once and replay exactly",
+    );
+    let mut changed_body = mutation_request;
+    let ItemMutationOperation::SelectFirst { clauses } = &mut changed_body.operation else {
+        unreachable!("shared mutation request uses SelectFirst")
+    };
+    clauses[0].patch.priority = BatchUpdateValue::Replace(Some(PriorityValue::Int64(5)));
+    check(
+        cell,
+        "mutate_items[request_id_conflict]",
+        failures,
+        matches!(
+            fw.mutate_items(&queue, changed_body).await,
+            Err(EngineError::RequestIdConflict)
+        ),
+        "changed mutation body did not conflict with the retained request id",
+    );
+    let mutated_live = call(
+        cell,
+        "mutate_items.post_state",
+        failures,
+        fw.live_item(&queue, ClientItemKey::new("mutation-item").unwrap()),
+    )
+    .await;
+    check(
+        cell,
+        "mutate_items",
+        failures,
+        mutated_live.as_ref().is_some_and(|value| {
+            value.as_ref().is_some_and(|item| {
+                item.priority == Some(PriorityValue::Int64(4))
+                    && item
+                        .fields
+                        .get("selector-mutated")
+                        .is_some_and(|value| value.as_ref() == b"yes")
+                    && item_version.is_some_and(|before| item.item_version == before + 1)
+            })
+        }),
+        "selector mutation state, first-match ownership, or version increment was incorrect",
     );
 }
 
