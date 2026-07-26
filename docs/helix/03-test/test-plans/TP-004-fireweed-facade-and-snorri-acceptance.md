@@ -113,7 +113,7 @@ git diff --check
     outside timed phases. No row may skip an operation or report
     `Unavailable`.
 
-Crates.io package closure is a separate follow-up. The v0.20 GitHub release
+Crates.io package closure is a separate follow-up. The v0.21 GitHub release
 MUST NOT publish repository-only internal crates merely to make the facade's
 current path dependencies registry-resolvable.
 
@@ -135,7 +135,7 @@ handle enum.
 Before running any Snorri command, the acceptance record MUST prove dependency
 identity. Pre-release testing uses a path dependency on
 `../fireweed/crates/fireweed` or an exact Fireweed commit revision. Release
-testing uses the exact v0.20 tag from the public `telepathdata/fireweed`
+testing uses the exact v0.21 tag from the public `telepathdata/fireweed`
 repository. `cargo tree` and `Cargo.lock` evidence MUST show package `fireweed`
 at the intended path, revision, or tagged git source; any other repository
 source is a hard failure even if compilation succeeds from cache.
@@ -236,9 +236,10 @@ environment-gated row may be skipped there.
 | Garage credentials leak into evidence | High | Source host-managed secrets and reject credential values in logs |
 
 The concrete facade, sibling Snorri migration, supported-surface fixture, and
-compile-fail fixtures are implemented. Release acceptance still requires the
-exact-revision `eldir` Garage run and post-publication tagged-source repeat;
-local or path-based success does not substitute for either row.
+compile-fail fixtures are implemented. Release acceptance completed against
+Fireweed `v0.21.0` at `5b2cf59b29c0652af9e8513ea2e6de5e93201474`:
+the exact-revision Garage/PostgreSQL matrices ran without skips, and Snorri
+`v0.11.0` repeated its full integration against the published tag.
 
 ## Build handoff
 

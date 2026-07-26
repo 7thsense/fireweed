@@ -11,7 +11,7 @@ ddx:
 # API-005: Fireweed Rust facade
 
 **Type**: Rust binding contract
-**Version**: v0.20
+**Version**: v0.21
 **Status**: accepted
 **Related**: API-001, API-004, ADR-009, ADR-022, ADR-023, TP-004
 
@@ -45,14 +45,14 @@ impl Fireweed {
 
 `Fireweed` has no public type parameter. Its fields, backend dispatch, and
 lifecycle ownership are private. It is `Send + Sync`; callers may place it in
-an `Arc`. Clone semantics are not required for v0.20.
+an `Arc`. Clone semantics are not required for v0.21.
 
 The crate root requires downstream users to name only `Fireweed` and public
 Fireweed DTOs. It must not require `LibBackend`, `EmbeddedHandle`, a concrete
 backend, a profile-specific wrapper, or an internal workspace crate. Generic
 facade forms, retired root/configuration types, raw backend constructors, and
 the generic raw constructor MUST be unavailable to an ordinary external crate
-when v0.20 ships. First-party tests use a crate-private construction seam.
+when v0.21 ships. First-party tests use a crate-private construction seam.
 
 Storage authority, projection implementation, response-barrier choice, and
 coordination topology are construction inputs only. `Fireweed` exposes no
@@ -133,11 +133,17 @@ The composed object-log configuration is:
 ```rust
 pub struct ObjectLogRuntimeConfig {
     pub object_log: ObjectLogStorage,
+    pub authority: ObjectLogAuthority,
     pub projection: ProjectionConfig,
     pub response_barrier: ResponseBarrier,
     pub segments: SegmentConfig,
     pub namespace: String,
     pub recovery: RecoveryPolicy,
+}
+
+pub enum ObjectLogAuthority {
+    NativeConditionalWrite,
+    Postgres { url: ConfigSecret },
 }
 
 pub enum ObjectLogStorage {
@@ -169,6 +175,14 @@ pub struct RecoveryPolicy {
 }
 ```
 
+Object storage, publication authority, and projection storage are independent
+construction axes. Local filesystem object logs require
+`NativeConditionalWrite`. S3-compatible stores may use native conditional
+creation only when that operation is atomic for the configured store; otherwise
+callers must select PostgreSQL authority. Garage compositions use PostgreSQL
+authority regardless of whether their disposable projection is SQLite or
+PostgreSQL. The selected authority remains private after construction.
+
 `ConfigSecret::new`, `SegmentConfig::new`, `RecoveryPolicy::default`, and
 `ObjectLogRuntimeConfig::validate` preserve the corresponding current
 validation behavior. `ConfigSecret` exposes no plaintext accessor and its
@@ -185,7 +199,7 @@ constructors additionally require `ResponseBarrier::Strict`; they return
 `EmbeddedRecoveryAction`, `EmbeddedRecoveryPolicy`,
 `EmbeddedDurabilityConfig`, and the `open_embedded*` functions are not supported
 facade names. ADR-023 requires a hard pre-release cutover with no deprecated
-alias layer. These Rust names MUST be replaced for v0.20. Every constructor
+alias layer. These Rust names MUST be replaced for v0.21. Every constructor
 returns `Fireweed`; no profile-specific wrapper type is returned.
 
 ### Queue operations
@@ -233,7 +247,7 @@ The free active-scope selector and its value types remain supported:
 `select_active_scope_from_prefix`, `ActiveScopeDiscovery`,
 `OldestFirstScopePrefix`, and `ActiveScopeSelection`.
 
-`read_as_of<T, F>` is excluded from v0.20's supported facade because its
+`read_as_of<T, F>` is excluded from v0.21's supported facade because its
 callback exposes a backend-associated projection type. Its replacement must be
 an owned, backend-neutral request/response contract under a separately reviewed
 history component. Removing this generic escape hatch does not remove
@@ -293,8 +307,8 @@ an `.await` is supported.
 
 The `fireweed` crate re-exports every named public input and output type used by
 the methods and constructors above. This includes `ConfigSecret`,
-`ControlPlaneConfig`, `ObjectLogRuntimeConfig`, `ObjectLogStorage`, `OwnerId`,
-`ProjectionConfig`, `ProjectionControl`, `ProjectionControlCapabilities`,
+`ControlPlaneConfig`, `ObjectLogAuthority`, `ObjectLogRuntimeConfig`,
+`ObjectLogStorage`, `OwnerId`, `ProjectionConfig`, `ProjectionControl`, `ProjectionControlCapabilities`,
 `ProjectionRebuild`, `ProjectionVerification`, `RecoveryAction`,
 `RecoveryPolicy`, `ResponseBarrier`, and `SegmentConfig`. For the Snorri
 migration it also includes all current facade DTOs plus

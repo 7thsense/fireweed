@@ -3,7 +3,7 @@ ddx:
   id: public-preview-checklist
   type: deployment-checklist
   flow: helix
-  status: release-candidate
+  status: released
   links:
     - kind: informed_by
       to: public-preview-boundary
@@ -19,10 +19,10 @@ ddx:
 
 - Component: Fireweed Queue source repository and Rust embedding facade
 - Version: `v0.21.0`
-- Release window: not scheduled; opens only after the go conditions below
+- Release time: 2026-07-26 06:04:35 UTC
 - Repository: <https://github.com/telepathdata/fireweed> (public; `main` is the
   default branch; GitHub issues are enabled)
-- Publication: annotated Git tag and GitHub Release after a go decision
+- Publication: annotated Git tag and GitHub source release, both complete
 - Contribution policy: issues accepted; pull requests, patches, and other code
   contributions not accepted
 - Deferred publication: crates.io and GHCR
@@ -69,11 +69,11 @@ rollout stages for v0.21.0.
 
 | Signal or Check | Expected Result | Evidence or Command | Status |
 |-----------------|-----------------|---------------------|--------|
-| Git tag | Annotated `v0.21.0` resolves to the validated commit | `git cat-file -t v0.21.0` and `git rev-list -n 1 v0.21.0` | [ ] Pending publication |
-| GitHub release | Non-draft, non-prerelease source release exists for `v0.21.0` | `gh release view v0.21.0 --repo telepathdata/fireweed` | [ ] Pending publication |
-| Public clone | Clean clone resolves and builds the facade from the tag | Fresh-directory clone and locked facade check | [ ] Pending publication |
-| Snorri consumption | Snorri resolves only public `fireweed` at the tag revision | Snorri `Cargo.lock`, dependency guard, and release matrix | [ ] Pending publication |
-| Registry boundary | No crates.io or GHCR artifact is claimed or required | Release body and published assets contain no registry availability claim | [ ] Pending release inspection |
+| Git tag | Annotated `v0.21.0` resolves to the validated commit | Tag object `cc07218`; peeled commit `5b2cf59b29c0652af9e8513ea2e6de5e93201474` | Passed 2026-07-26 |
+| GitHub release | Non-draft, non-prerelease source release exists for `v0.21.0` | <https://github.com/telepathdata/fireweed/releases/tag/v0.21.0> | Passed 2026-07-26 |
+| Public clone | Clean clone resolves and builds the facade from the tag | Anonymous depth-one tag clone; `cargo check --locked -p fireweed` | Passed 2026-07-26 |
+| Snorri consumption | Snorri resolves only public `fireweed` at the tag revision | Snorri `Cargo.lock`; clean-checkout all-feature workspace check; live PostgreSQL/Garage matrix; Snorri `v0.11.0` at `b37e46410287b563ca692666bca2032a81cb9e3b` | Passed 2026-07-26 |
+| Registry boundary | No crates.io or GHCR artifact is claimed or required | Fireweed and Snorri GitHub releases have zero uploaded assets and their release notes defer registry publication | Passed 2026-07-26 |
 
 ## Rollback Triggers
 
