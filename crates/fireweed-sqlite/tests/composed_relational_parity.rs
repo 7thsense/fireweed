@@ -5,8 +5,8 @@
 
 use fireweed_conformance::{claim_req, qdef, qkey, shard};
 use fireweed_core::{
-    CohortOnIncomplete, CohortPolicy, GroupKey, ItemId, LeaseToken, PriorityValue, QueueDefinition,
-    UtcTimestamp, WorkerId,
+    CohortOnIncomplete, CohortPolicy, EligibilityPolicy, GateKeyPolicy, GroupKey, ItemId,
+    LeaseToken, PriorityValue, QueueDefinition, UtcTimestamp, WorkerId,
 };
 use fireweed_engine::{
     Backend, ClaimCompatibility, ClaimPort, ClaimRequest, ControlPlaneStore, DiscoveryGranularity,
@@ -22,17 +22,36 @@ fn ts(s: i64) -> UtcTimestamp {
     UtcTimestamp::new(s, 0).unwrap()
 }
 
-/// A queue def with a group-size bound (so `group_batching` / `same_group_key` validate) and cohorts
-/// enabled (so `whole_cohort` validates) — one def usable by every rich-claim unit.
-fn qdef_rich() -> QueueDefinition {
+/// A queue definition with a group-size bound, used only for grouped claim units.
+fn qdef_grouped() -> QueueDefinition {
     QueueDefinition {
         max_eligible_group_size: Some(5),
+        ..qdef()
+    }
+}
+
+/// A queue definition used only for whole-cohort claim units.
+fn qdef_cohort() -> QueueDefinition {
+    QueueDefinition {
         cohort_policy: Some(CohortPolicy {
             enabled: true,
             completion_bound_ms: Some(30_000),
             on_incomplete: Some(CohortOnIncomplete::ExpireCohort),
             max_cohort_size: Some(10),
         }),
+        ..qdef()
+    }
+}
+
+/// A queue definition that explicitly permits dynamic gate keys.
+fn qdef_gated() -> QueueDefinition {
+    QueueDefinition {
+        eligibility_policy: EligibilityPolicy {
+            gate_keys: GateKeyPolicy::Dynamic,
+            max_gate_keys_per_item: Some(4),
+            max_gates_per_request: Some(4),
+            ..EligibilityPolicy::default()
+        },
         ..qdef()
     }
 }
@@ -94,7 +113,7 @@ fn claim_req_compat(
 #[tokio::test]
 async fn composed_relational_whole_cohort_claim_selects_and_leases() {
     let b = composed_sqlite_relational_in_memory().unwrap();
-    b.create_queue(qdef_rich()).await.unwrap();
+    b.create_queue(qdef_cohort()).await.unwrap();
     let ids = b
         .push(
             &shard(),
@@ -141,7 +160,7 @@ async fn composed_relational_whole_cohort_claim_selects_and_leases() {
 #[tokio::test]
 async fn composed_relational_whole_group_claim_selects() {
     let b = composed_sqlite_relational_in_memory().unwrap();
-    b.create_queue(qdef_rich()).await.unwrap();
+    b.create_queue(qdef_grouped()).await.unwrap();
     let ids = b
         .push(
             &shard(),
@@ -186,7 +205,7 @@ async fn composed_relational_whole_group_claim_selects() {
 #[tokio::test]
 async fn composed_relational_same_group_key_claim_selects() {
     let b = composed_sqlite_relational_in_memory().unwrap();
-    b.create_queue(qdef_rich()).await.unwrap();
+    b.create_queue(qdef_grouped()).await.unwrap();
     let ids = b
         .push(
             &shard(),
@@ -221,18 +240,19 @@ async fn composed_relational_same_group_key_claim_selects() {
 /// The composed log-replay backend uses the shared projection for every valid non-item claim unit.
 #[tokio::test]
 async fn composed_log_replay_accepts_non_item_claim_units() {
-    let b = composed_sqlite_backend_in_memory().unwrap();
-    b.create_queue(qdef_rich()).await.unwrap();
-    b.push(
-        &shard(),
-        vec![cspec(10, "c1", 2), cspec(11, "c1", 2)],
-        ts(0),
-        None,
-    )
-    .await
-    .unwrap();
+    let cohort_backend = composed_sqlite_backend_in_memory().unwrap();
+    cohort_backend.create_queue(qdef_cohort()).await.unwrap();
+    cohort_backend
+        .push(
+            &shard(),
+            vec![cspec(10, "c1", 2), cspec(11, "c1", 2)],
+            ts(0),
+            None,
+        )
+        .await
+        .unwrap();
 
-    let cohort = b
+    let cohort = cohort_backend
         .claim(claim_req_compat(
             10,
             500,
@@ -247,6 +267,8 @@ async fn composed_log_replay_accepts_non_item_claim_units() {
     assert_eq!(cohort.items.len(), 2);
     assert!(cohort.cohort_id.is_some());
 
+    let grouped_backend = composed_sqlite_backend_in_memory().unwrap();
+    grouped_backend.create_queue(qdef_grouped()).await.unwrap();
     for compat in [
         ClaimCompatibility {
             same_group_key: true,
@@ -258,7 +280,8 @@ async fn composed_log_replay_accepts_non_item_claim_units() {
         },
     ] {
         assert!(
-            b.claim(claim_req_compat(10, 500, 100, compat))
+            grouped_backend
+                .claim(claim_req_compat(10, 500, 100, compat))
                 .await
                 .unwrap()
                 .items
@@ -283,7 +306,7 @@ async fn composed_relational_fenced_rich_claim_leaves_group_summary_unchanged() 
             .as_nanos()
     ));
     let b = composed_sqlite_relational(path.to_str().unwrap()).unwrap();
-    b.create_queue(qdef_rich()).await.unwrap();
+    b.create_queue(qdef_grouped()).await.unwrap();
     // A grouped item that is NOT due until ts(200): at push time (ts 0) the group summary's
     // oldest_eligible_at stays NULL (no eligible member yet) and no later mutation refreshes it.
     let delayed = PushSpec {
@@ -354,7 +377,7 @@ async fn composed_relational_fenced_rich_claim_leaves_group_summary_unchanged() 
 #[tokio::test]
 async fn composed_relational_discover_active_scopes_rolls_up() {
     let b = composed_sqlite_relational_in_memory().unwrap();
-    b.create_queue(qdef_rich()).await.unwrap();
+    b.create_queue(qdef_grouped()).await.unwrap();
     b.push(
         &shard(),
         vec![gspec(10, "g1"), gspec(11, "g1")],
@@ -382,7 +405,7 @@ async fn composed_relational_discover_active_scopes_rolls_up() {
 #[tokio::test]
 async fn composed_log_replay_discovers_active_scopes() {
     let b = composed_sqlite_backend_in_memory().unwrap();
-    b.create_queue(qdef_rich()).await.unwrap();
+    b.create_queue(qdef_grouped()).await.unwrap();
     b.push(&shard(), vec![gspec(10, "g1")], ts(10), None)
         .await
         .unwrap();
@@ -409,7 +432,7 @@ async fn composed_relational_set_gates_and_gate_bearing_push_accepted() {
         b.supports_gates(),
         "the composed relational backend supports gates"
     );
-    b.create_queue(qdef()).await.unwrap();
+    b.create_queue(qdef_gated()).await.unwrap();
 
     // A gate-bearing push is ACCEPTED (rejected on a non-gate backend).
     let ids = b

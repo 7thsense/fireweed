@@ -13,10 +13,17 @@ fn ts(seconds: i64) -> UtcTimestamp {
     UtcTimestamp::new(seconds, 0).unwrap()
 }
 
-fn definition(queue_id: &str) -> QueueDefinition {
+fn grouped_definition(queue_id: &str) -> QueueDefinition {
     QueueDefinition {
         queue_id: QueueId::new(queue_id).unwrap(),
         max_eligible_group_size: Some(4),
+        ..qdef()
+    }
+}
+
+fn cohort_definition(queue_id: &str) -> QueueDefinition {
+    QueueDefinition {
+        queue_id: QueueId::new(queue_id).unwrap(),
         cohort_policy: Some(CohortPolicy {
             enabled: true,
             completion_bound_ms: Some(30_000),
@@ -72,9 +79,9 @@ async fn durable_log_replay_restores_every_rich_claim_unit() {
             .as_nanos()
     ));
     let path_text = path.to_str().unwrap();
-    let whole_group = definition("whole-group");
-    let same_group = definition("same-group");
-    let whole_cohort = definition("whole-cohort");
+    let whole_group = grouped_definition("whole-group");
+    let same_group = grouped_definition("same-group");
+    let whole_cohort = cohort_definition("whole-cohort");
     let whole_group_key =
         QueueKey::new(whole_group.tenant_id.clone(), whole_group.queue_id.clone());
     let same_group_key = QueueKey::new(same_group.tenant_id.clone(), same_group.queue_id.clone());
