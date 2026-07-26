@@ -778,11 +778,18 @@ fn derived_postgres_schema_name(namespace: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ComposedStorageConfig {
     pub object_log: ObjectLogConfig,
+    pub object_log_authority: ObjectLogAuthorityConfig,
     pub projection: ProjectionStoreConfig,
     pub response_barrier: CommitResponseBarrier,
     pub segments: SegmentSettings,
     pub namespace: String,
     pub recovery: ProjectionRecoveryPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ObjectLogAuthorityConfig {
+    NativeConditionalWrite,
+    Postgres { url: SecretValue },
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -813,6 +820,16 @@ pub enum ObjectLogStorage {
         secret_access_key: ConfigSecret,
         allow_insecure_http: bool,
     },
+}
+
+/// Linearization authority for object-log manifest publication.
+///
+/// S3-compatible stores that do not provide atomic conditional object creation must use the PostgreSQL
+/// authority. Local filesystem storage uses its native conditional-create implementation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObjectLogAuthority {
+    NativeConditionalWrite,
+    Postgres { url: ConfigSecret },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -870,6 +887,7 @@ impl Default for RecoveryPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectLogRuntimeConfig {
     pub object_log: ObjectLogStorage,
+    pub authority: ObjectLogAuthority,
     pub projection: ProjectionConfig,
     pub response_barrier: ResponseBarrier,
     pub segments: SegmentConfig,
@@ -921,6 +939,14 @@ impl ObjectLogRuntimeConfig {
                     secret_access_key: secret_access_key.0,
                     allow_insecure_http,
                 },
+            },
+            object_log_authority: match self.authority {
+                ObjectLogAuthority::NativeConditionalWrite => {
+                    ObjectLogAuthorityConfig::NativeConditionalWrite
+                }
+                ObjectLogAuthority::Postgres { url } => {
+                    ObjectLogAuthorityConfig::Postgres { url: url.0 }
+                }
             },
             projection: match self.projection {
                 ProjectionConfig::Sqlite { path } => ProjectionStoreConfig::Sqlite { path },
@@ -986,6 +1012,26 @@ impl ComposedStorageConfig {
                 ));
             }
             _ => {}
+        }
+        match (&self.object_log, &self.object_log_authority) {
+            (ObjectLogConfig::Local { .. }, ObjectLogAuthorityConfig::NativeConditionalWrite) => {}
+            (ObjectLogConfig::Local { .. }, ObjectLogAuthorityConfig::Postgres { .. }) => {
+                return Err(EngineError::Invalid(
+                    "local object-log storage requires native conditional-write authority",
+                ));
+            }
+            (
+                ObjectLogConfig::S3Compatible { .. },
+                ObjectLogAuthorityConfig::NativeConditionalWrite,
+            ) => {}
+            (ObjectLogConfig::S3Compatible { .. }, ObjectLogAuthorityConfig::Postgres { url })
+                if url.is_empty() =>
+            {
+                return Err(EngineError::Invalid(
+                    "PostgreSQL object-log authority URL must not be empty",
+                ));
+            }
+            (ObjectLogConfig::S3Compatible { .. }, ObjectLogAuthorityConfig::Postgres { .. }) => {}
         }
         match &self.projection {
             ProjectionStoreConfig::Sqlite { path } if path.as_os_str().is_empty() => {
@@ -1673,6 +1719,11 @@ fn open_composed_object_log(
         config.segments.target_bytes,
         config.segments.max_latency_ms,
     )?;
+    let probe_native_s3 = matches!(&config.object_log, ObjectLogConfig::S3Compatible { .. })
+        && matches!(
+            &config.object_log_authority,
+            ObjectLogAuthorityConfig::NativeConditionalWrite
+        );
     let raw: Arc<dyn BlobStore> = match &config.object_log {
         ObjectLogConfig::Local { root } => Arc::new(LocalFsBlobStore::open(root)?),
         ObjectLogConfig::S3Compatible {
@@ -1697,8 +1748,27 @@ fn open_composed_object_log(
             )?)
         }
     };
+    let raw: Arc<dyn BlobStore> = match &config.object_log_authority {
+        ObjectLogAuthorityConfig::NativeConditionalWrite => raw,
+        ObjectLogAuthorityConfig::Postgres { url } => {
+            #[cfg(feature = "postgres")]
+            {
+                use fireweed_objectlog::segmented::PointerFencedBlobStore;
+                let pointers = Arc::new(fireweed_postgres::PostgresManifestPointer::open(&url.0)?);
+                Arc::new(PointerFencedBlobStore::new(raw, pointers))
+            }
+            #[cfg(not(feature = "postgres"))]
+            {
+                let _ = url;
+                return Err(EngineError::Unavailable);
+            }
+        }
+    };
     let namespace = object_log_namespace(&config.namespace);
     let store: Arc<dyn BlobStore> = Arc::new(NamespacedBlobStore::new(raw, &namespace)?);
+    if probe_native_s3 {
+        fireweed_objectlog::segmented::probe_create_only_semantics(store.as_ref())?;
+    }
     if authoritative {
         fireweed_objectlog::ObjectLog::open_group_commit_authoritative_with_blob_store(
             store,

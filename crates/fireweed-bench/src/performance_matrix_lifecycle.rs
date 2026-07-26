@@ -539,8 +539,8 @@ mod tests {
     };
 
     use fireweed::{
-        ObjectLogRuntimeConfig, ObjectLogStorage, ProjectionConfig, RecoveryPolicy,
-        ResponseBarrier, SegmentConfig, open_memory, open_objectlog_sqlite,
+        ObjectLogAuthority, ObjectLogRuntimeConfig, ObjectLogStorage, ProjectionConfig,
+        RecoveryPolicy, ResponseBarrier, SegmentConfig, open_memory, open_objectlog_sqlite,
     };
 
     use super::*;
@@ -579,6 +579,7 @@ mod tests {
             object_log: ObjectLogStorage::Local {
                 root: base.join("log"),
             },
+            authority: ObjectLogAuthority::NativeConditionalWrite,
             projection: ProjectionConfig::Sqlite {
                 path: base.join("projection.sqlite"),
             },

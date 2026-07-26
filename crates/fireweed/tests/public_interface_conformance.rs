@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fireweed::{
-    Fireweed, ObjectLogRuntimeConfig, ObjectLogStorage, ProjectionConfig, RecoveryAction,
-    RecoveryPolicy, ResponseBarrier, SegmentConfig, SystemClock,
+    ConfigSecret, Fireweed, ObjectLogAuthority, ObjectLogRuntimeConfig, ObjectLogStorage,
+    ProjectionConfig, RecoveryAction, RecoveryPolicy, ResponseBarrier, SegmentConfig, SystemClock,
 };
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -48,27 +48,69 @@ async fn assert_cell(
     drop(fireweed);
 }
 
+fn objectlog_sqlite_config(
+    root: &Path,
+    barrier: ResponseBarrier,
+    namespace: &str,
+) -> ObjectLogRuntimeConfig {
+    ObjectLogRuntimeConfig {
+        object_log: ObjectLogStorage::Local {
+            root: root.join("object-log"),
+        },
+        authority: ObjectLogAuthority::NativeConditionalWrite,
+        projection: ProjectionConfig::Sqlite {
+            path: root.join("projection.sqlite"),
+        },
+        response_barrier: barrier,
+        segments: SegmentConfig::new(262_144, 20).unwrap(),
+        namespace: namespace.into(),
+        recovery: RecoveryPolicy {
+            incompatible_projection: RecoveryAction::RebuildProjection,
+            verify_checksums: true,
+            max_tail_commands: 1_000_000,
+        },
+    }
+}
+
 fn objectlog_sqlite(root: &Path, barrier: ResponseBarrier, namespace: &str) -> Fireweed {
     fireweed::open_objectlog_sqlite(
-        ObjectLogRuntimeConfig {
-            object_log: ObjectLogStorage::Local {
-                root: root.join("object-log"),
-            },
-            projection: ProjectionConfig::Sqlite {
-                path: root.join("projection.sqlite"),
-            },
-            response_barrier: barrier,
-            segments: SegmentConfig::new(262_144, 20).unwrap(),
-            namespace: namespace.into(),
-            recovery: RecoveryPolicy {
-                incompatible_projection: RecoveryAction::RebuildProjection,
-                verify_checksums: true,
-                max_tail_commands: 1_000_000,
-            },
-        },
+        objectlog_sqlite_config(root, barrier, namespace),
         Arc::new(SystemClock),
     )
     .unwrap()
+}
+
+#[test]
+fn objectlog_authority_validation_rejects_invalid_combinations() {
+    let root = FixtureRoot::new("authority-validation");
+    let mut local =
+        objectlog_sqlite_config(root.path(), ResponseBarrier::Strict, "authority-validation");
+    local.authority = ObjectLogAuthority::Postgres {
+        url: ConfigSecret::new("postgres://authority"),
+    };
+    assert!(local.validate().is_err());
+
+    let mut s3 = local;
+    s3.object_log = ObjectLogStorage::S3Compatible {
+        endpoint: "https://objects.example.test".into(),
+        bucket: "fireweed".into(),
+        region: "us-east-1".into(),
+        access_key_id: ConfigSecret::new("access"),
+        secret_access_key: ConfigSecret::new("secret"),
+        allow_insecure_http: false,
+    };
+    s3.authority = ObjectLogAuthority::Postgres {
+        url: ConfigSecret::new(""),
+    };
+    assert!(s3.validate().is_err());
+
+    s3.authority = ObjectLogAuthority::NativeConditionalWrite;
+    s3.validate().unwrap();
+
+    s3.authority = ObjectLogAuthority::Postgres {
+        url: ConfigSecret::new("postgres://authority"),
+    };
+    s3.validate().unwrap();
 }
 
 #[tokio::test]

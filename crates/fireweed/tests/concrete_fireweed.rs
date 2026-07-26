@@ -2,11 +2,11 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fireweed::{
-    ClientItemKey, EligibilityPolicy, Fireweed, NewItem, ObjectLogRuntimeConfig, ObjectLogStorage,
-    OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker,
-    PriorityValue, ProjectionConfig, QueueDefinition, QueueId, QueueKey, RecoveryPolicy,
-    RecurrencePolicy, ResponseBarrier, RetryPolicy, ScheduleUpdate, SegmentConfig, SystemClock,
-    TenantId, WorkerId, open_memory, open_sqlite,
+    ClientItemKey, EligibilityPolicy, Fireweed, NewItem, ObjectLogAuthority,
+    ObjectLogRuntimeConfig, ObjectLogStorage, OrderingMode, PriorityDirection, PriorityModel,
+    PriorityModelKind, PriorityTieBreaker, PriorityValue, ProjectionConfig, QueueDefinition,
+    QueueId, QueueKey, RecoveryPolicy, RecurrencePolicy, ResponseBarrier, RetryPolicy,
+    ScheduleUpdate, SegmentConfig, SystemClock, TenantId, WorkerId, open_memory, open_sqlite,
 };
 
 fn queue_definition() -> QueueDefinition {
@@ -96,6 +96,7 @@ fn role_named_object_log_configuration_validates() {
         object_log: ObjectLogStorage::Local {
             root: "object-log".into(),
         },
+        authority: ObjectLogAuthority::NativeConditionalWrite,
         projection: ProjectionConfig::Sqlite {
             path: "projection.sqlite".into(),
         },

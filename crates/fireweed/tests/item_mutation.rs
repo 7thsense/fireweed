@@ -12,8 +12,8 @@ use fireweed::{
 };
 #[cfg(feature = "objectlog")]
 use fireweed::{
-    ObjectLogRuntimeConfig, ObjectLogStorage, ProjectionConfig, RecoveryAction, RecoveryPolicy,
-    ResponseBarrier, SegmentConfig,
+    ObjectLogAuthority, ObjectLogRuntimeConfig, ObjectLogStorage, ProjectionConfig, RecoveryAction,
+    RecoveryPolicy, ResponseBarrier, SegmentConfig,
 };
 
 fn ts(seconds: i64) -> UtcTimestamp {
@@ -576,6 +576,7 @@ async fn objectlog_sqlite_reopen_replays_without_selector_evaluation() {
         object_log: ObjectLogStorage::Local {
             root: root.join("object-log"),
         },
+        authority: ObjectLogAuthority::NativeConditionalWrite,
         projection: ProjectionConfig::Sqlite {
             path: root.join("projection.sqlite"),
         },

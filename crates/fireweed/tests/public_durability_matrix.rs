@@ -10,9 +10,9 @@ use fireweed::{
     Fireweed, GateKeyPolicy, IndexDeclaration, IndexSpec, IndexType, ItemMutationOperation,
     ItemMutationOutcome, ItemMutationRequest, ItemMutationResponse, ItemMutationReturning,
     ItemPatch, ItemPredicate, ItemSelector, ItemSelectorScope, LeaseGuard, LifecyclePatch, NewItem,
-    ObjectLogRuntimeConfig, ObjectLogStorage, OrderingMode, PriorityDirection, PriorityModel,
-    PriorityModelKind, PriorityTieBreaker, PriorityValue, ProjectionConfig, QueryFilter,
-    QueueDefinition, QueueId, QueueIndex, QueueKey, RecoveryAction, RecoveryPolicy,
+    ObjectLogAuthority, ObjectLogRuntimeConfig, ObjectLogStorage, OrderingMode, PriorityDirection,
+    PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, ProjectionConfig,
+    QueryFilter, QueueDefinition, QueueId, QueueIndex, QueueKey, RecoveryAction, RecoveryPolicy,
     RecurrencePolicy, RequestId, ResponseBarrier, RetryPolicy, ScheduleUpdate, SegmentConfig,
     SelectedMutation, SideRecord, SystemClock, TenantId, TypedValue, UtcTimestamp,
 };
@@ -256,6 +256,7 @@ fn objectlog_sqlite(root: &Path, barrier: ResponseBarrier, cell: &str) -> Firewe
             object_log: ObjectLogStorage::Local {
                 root: root.join("object-log"),
             },
+            authority: ObjectLogAuthority::NativeConditionalWrite,
             projection: ProjectionConfig::Sqlite {
                 path: root.join("projection.sqlite"),
             },

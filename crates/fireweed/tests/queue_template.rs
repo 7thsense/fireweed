@@ -384,6 +384,7 @@ fn composed_config(root: &Path, sqlite: &Path) -> ComposedStorageConfig {
         object_log: ObjectLogConfig::Local {
             root: root.to_path_buf(),
         },
+        object_log_authority: fireweed::ObjectLogAuthorityConfig::NativeConditionalWrite,
         projection: ProjectionStoreConfig::Sqlite {
             path: sqlite.to_path_buf(),
         },
@@ -431,6 +432,7 @@ fn postgres_public_constructors_and_composed_reopen_idempotently() {
         object_log: ObjectLogConfig::Local {
             root: composed_root.clone(),
         },
+        object_log_authority: fireweed::ObjectLogAuthorityConfig::NativeConditionalWrite,
         projection: ProjectionStoreConfig::Postgres {
             url: fireweed::SecretValue::new(url),
         },

@@ -10,10 +10,10 @@ use std::sync::Arc;
 
 use fireweed::{
     CohortPolicy, CommitResponseBarrier, ComposedStorageConfig, CreateQueue, EligibilityPolicy,
-    ObjectLogConfig, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-    PriorityTieBreaker, PriorityValue, ProjectionRecoveryAction, ProjectionRecoveryPolicy,
-    ProjectionStoreConfig, QueueCreationPolicy, QueueDefinition, QueueId, QueueKey,
-    RecurrencePolicy, RetryPolicy, SecretValue, SegmentSettings, TenantId,
+    ObjectLogAuthorityConfig, ObjectLogConfig, OrderingMode, PriorityDirection, PriorityModel,
+    PriorityModelKind, PriorityTieBreaker, PriorityValue, ProjectionRecoveryAction,
+    ProjectionRecoveryPolicy, ProjectionStoreConfig, QueueCreationPolicy, QueueDefinition, QueueId,
+    QueueKey, RecurrencePolicy, RetryPolicy, SecretValue, SegmentSettings, TenantId,
 };
 use fireweed_memory::ManualClock;
 
@@ -79,6 +79,7 @@ fn composed_storage_config(inputs: &mut [String]) -> ComposedStorageConfig {
             secret_access_key: SecretValue::new(std::mem::take(&mut inputs[4])),
             allow_insecure_http: true,
         },
+        object_log_authority: ObjectLogAuthorityConfig::NativeConditionalWrite,
         projection: ProjectionStoreConfig::Postgres {
             url: SecretValue::new(std::mem::take(&mut inputs[5])),
         },
@@ -118,6 +119,7 @@ fn composed_storage_config_is_owned_and_secret_safe() {
         object_log: ObjectLogConfig::Local {
             root: "local-log".into(),
         },
+        object_log_authority: ObjectLogAuthorityConfig::NativeConditionalWrite,
         projection: ProjectionStoreConfig::Sqlite {
             path: "projection.sqlite".into(),
         },

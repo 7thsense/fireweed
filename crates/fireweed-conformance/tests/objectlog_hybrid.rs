@@ -29,6 +29,7 @@ fn public_config(
         object_log: fireweed::ObjectLogStorage::Local {
             root: root.join("objects"),
         },
+        authority: fireweed::ObjectLogAuthority::NativeConditionalWrite,
         projection: fireweed::ProjectionConfig::Sqlite {
             path: root.join("projection.sqlite"),
         },

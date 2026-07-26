@@ -107,6 +107,7 @@ fn local_config(root: &Path, sqlite: &Path) -> ComposedStorageConfig {
         object_log: ObjectLogConfig::Local {
             root: root.to_path_buf(),
         },
+        object_log_authority: fireweed::ObjectLogAuthorityConfig::NativeConditionalWrite,
         projection: ProjectionStoreConfig::Sqlite {
             path: sqlite.to_path_buf(),
         },
@@ -1245,6 +1246,7 @@ fn public_s3_sqlite_delete_and_rebuild() {
             secret_access_key: SecretValue::new(secret),
             allow_insecure_http: true,
         },
+        object_log_authority: fireweed::ObjectLogAuthorityConfig::NativeConditionalWrite,
         projection: ProjectionStoreConfig::Sqlite {
             path: fixture.join("projection.sqlite"),
         },

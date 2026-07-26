@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fireweed::{
-    ConfigSecret, Fireweed, ObjectLogRuntimeConfig, ObjectLogStorage, PostgresMode,
-    PostgresRuntimeConfig, ProjectionConfig, RecoveryAction, RecoveryPolicy, ResponseBarrier,
-    SegmentConfig, open_memory, open_objectlog, open_objectlog_postgres, open_objectlog_sqlite,
-    open_postgres_runtime, open_sqlite, open_sqlite_relational,
+    ConfigSecret, Fireweed, ObjectLogAuthority, ObjectLogRuntimeConfig, ObjectLogStorage,
+    PostgresMode, PostgresRuntimeConfig, ProjectionConfig, RecoveryAction, RecoveryPolicy,
+    ResponseBarrier, SegmentConfig, open_memory, open_objectlog, open_objectlog_postgres,
+    open_objectlog_sqlite, open_postgres_runtime, open_sqlite, open_sqlite_relational,
 };
 use fireweed_bench::performance_matrix::{
     ProjectionCatchupEvidence, RepetitionSpec, run_preflight, run_repetition,
@@ -311,6 +311,19 @@ fn object_config(
             path: root.join("projection.sqlite"),
         }
     };
+    let authority = if s3_cell {
+        ObjectLogAuthority::Postgres {
+            url: ConfigSecret::new(
+                cfg.postgres
+                    .as_ref()
+                    .ok_or("PostgreSQL configuration missing for S3 object-log authority")?
+                    .url
+                    .as_str(),
+            ),
+        }
+    } else {
+        ObjectLogAuthority::NativeConditionalWrite
+    };
     let cleanup = match (s3_cell, postgres_projection) {
         (true, true) => CleanupRecipe::S3AndPostgres(SchemaKind::ObjectLog),
         (true, false) => CleanupRecipe::S3,
@@ -320,6 +333,7 @@ fn object_config(
     Ok((
         ObjectLogRuntimeConfig {
             object_log,
+            authority,
             projection,
             response_barrier: if cell.ends_with("sqlite-async") {
                 ResponseBarrier::AsyncProjection

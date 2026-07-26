@@ -11,13 +11,13 @@ use fireweed::{
     EntityEditOperation, EntityPredicateValue, EntryOutcome, FilterOp, FinalizeKind, GateChange,
     IndexDeclaration, IndexType, InstanceFence, ItemMutationOperation, ItemMutationRequest,
     ItemMutationReturning, ItemPatch, ItemPredicate, ItemSelector, ItemSelectorScope, LeaseGuard,
-    NewItem, ObjectLogConfig, ObjectLogRuntimeConfig, ObjectLogStorage, OrderField, OrderingMode,
-    PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
-    ProjectionConfig, ProjectionRecoveryPolicy, ProjectionStoreConfig, QueryFilter,
-    QueueDefinition, QueueId, QueueIndex, QueueKey, RangeScanRequest, RecoveryPolicy,
-    RecurrencePolicy, RequestId, ResponseBarrier, RetryPolicy, SecretValue, SegmentConfig,
-    SegmentSettings, SelectedMutation, SideRecord, SortDirection, TenantId, TypedValue,
-    UtcTimestamp,
+    NewItem, ObjectLogAuthority, ObjectLogAuthorityConfig, ObjectLogConfig, ObjectLogRuntimeConfig,
+    ObjectLogStorage, OrderField, OrderingMode, PriorityDirection, PriorityModel,
+    PriorityModelKind, PriorityTieBreaker, PriorityValue, ProjectionConfig,
+    ProjectionRecoveryPolicy, ProjectionStoreConfig, QueryFilter, QueueDefinition, QueueId,
+    QueueIndex, QueueKey, RangeScanRequest, RecoveryPolicy, RecurrencePolicy, RequestId,
+    ResponseBarrier, RetryPolicy, SecretValue, SegmentConfig, SegmentSettings, SelectedMutation,
+    SideRecord, SortDirection, TenantId, TypedValue, UtcTimestamp,
 };
 use fireweed_engine::DurabilityClass;
 use fireweed_memory::ManualClock;
@@ -53,6 +53,7 @@ fn config(root: &Path, schema: &str, url: &str) -> ComposedStorageConfig {
         object_log: ObjectLogConfig::Local {
             root: root.to_path_buf(),
         },
+        object_log_authority: ObjectLogAuthorityConfig::NativeConditionalWrite,
         projection: ProjectionStoreConfig::Postgres {
             url: SecretValue::new(url),
         },
@@ -68,6 +69,7 @@ fn public_config(root: &Path, schema: &str, url: &str) -> ObjectLogRuntimeConfig
         object_log: ObjectLogStorage::Local {
             root: root.to_path_buf(),
         },
+        authority: ObjectLogAuthority::NativeConditionalWrite,
         projection: ProjectionConfig::Postgres {
             url: ConfigSecret::new(url),
         },
@@ -579,6 +581,9 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
             access_key_id: ConfigSecret::new(access),
             secret_access_key: ConfigSecret::new(secret),
             allow_insecure_http,
+        },
+        authority: ObjectLogAuthority::Postgres {
+            url: ConfigSecret::new(pg_url.clone()),
         },
         projection: ProjectionConfig::Postgres {
             url: ConfigSecret::new(pg_url.clone()),
