@@ -1,0 +1,82 @@
+format: fireweed-public-namespace-cutover-v2
+governed_by: ADR-023
+generated_from: repository-state
+mode: hard-pre-release-cutover
+
+identity:
+  display_name: Fireweed
+  repository_stem: fireweed
+  cli_stem: fireweed
+  rust_stem: fireweed
+  environment_prefix: FIREWEED_
+  abbreviation: FW
+
+policy:
+  compatibility_aliases: forbidden
+  fallback_reads: forbidden
+  dual_writes: forbidden
+  migration_shims: forbidden
+  compatibility_binaries: forbidden
+  clean_start_required: true
+  history_rewriting: forbidden
+
+canonical_surfaces:
+  cargo_packages:
+    - fireweed
+    - fireweed-core
+    - fireweed-engine
+    - fireweed-projection
+    - fireweed-relational
+    - fireweed-memory
+    - fireweed-sqlite
+    - fireweed-postgres
+    - fireweed-objectlog
+    - fireweed-resp
+    - fireweed-server
+    - fireweed-release
+    - fireweed-loadgen
+    - fireweed-conformance
+    - fireweed-sim-support
+    - fireweed-turso
+    - fireweed-bench
+  binaries:
+    - fireweed-service
+    - fireweed-postgres-migrate
+    - fireweed-loadgen
+    - fireweed-bench
+    - fireweed-verify-ledger
+    - fireweed-verify-evidence-attestation
+    - fireweed-verify-transaction-evidence
+    - fireweed-verify-e2-failover
+    - fireweed-verify-e3-contract
+    - fireweed-build-e3-contract
+    - fireweed-cost-model
+  repository:
+    url: https://github.com/7thsense/fireweed.git
+  container:
+    image: ghcr.io/7thsense/fireweed-service
+  helm:
+    chart: fireweed-queue
+    path: charts/fireweed-queue
+  runtime:
+    state_root: /var/lib/fireweed
+    object_log_root: /var/lib/fireweed/object-log
+    log_database: /var/lib/fireweed/fireweed-log.db
+    projection_database: /var/lib/fireweed/fireweed-projection.db
+  persistence:
+    sql_prefix: fireweed_
+    object_prefix: fireweed/
+  protocol:
+    resp_extension_prefix: FW.
+    http_header_prefix: X-Fireweed-
+
+exceptions:
+  - immutable DDx bead IDs and execution paths with their original audit identifiers
+  - verbatim historical evidence whose rewriting would falsify the record
+  - negative tests that prove a retired namespace is rejected
+
+verification:
+  - no executable alias or fallback accepts a retired identifier
+  - no current example, operator instruction, schema, path, prefix, or wire identifier emits a retired identifier
+  - fresh SQLite, PostgreSQL, Turso, and object-log configurations pass functional and close/reopen durability suites
+  - identity residue verification uses exact path-and-pattern exceptions only
