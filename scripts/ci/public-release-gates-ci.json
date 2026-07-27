@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "version": "v0.21-source-preview-ci",
+  "gates": [
+    {"id": "functional-format-identity", "command": ["bash", "scripts/ci/fast-functional-gate.sh"]},
+    {"id": "artifact-topology", "command": ["bash", "scripts/verify-public-artifact-topology.sh"]},
+    {"id": "crate-boundary", "command": ["bash", "scripts/verify-public-crate-boundary.sh"]},
+    {"id": "source-package-sbom-provenance", "command": ["bash", "scripts/release/source-preview-artifacts-test.sh"]},
+    {"id": "whitespace", "command": ["git", "diff", "--check"]}
+  ]
+}

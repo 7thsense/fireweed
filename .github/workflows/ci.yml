@@ -35,5 +35,8 @@ jobs:
       - name: Verify workflow policy
         run: bash scripts/ci/verify-github-actions-policy.sh
 
-      - name: Fast functional gate
-        run: bash scripts/ci/fast-functional-gate.sh
+      - name: Public release validation gate
+        run: |
+          python3 scripts/ci/public-release-gate.py \
+            --manifest scripts/ci/public-release-gates-ci.json \
+            --evidence target/public-release-gate.json
