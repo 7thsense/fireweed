@@ -32,6 +32,32 @@ preview release; v0.19.6 and earlier retain
 the retired identity as immutable release and audit history under ADR-023. This
 file defines the gate applied to future tags.
 
+## Source-preview dry run
+
+The v0.21 public-preview boundary ships an immutable Git tag and
+GitHub-generated source archives. crates.io, GHCR, binary, and Helm publication
+remain deferred. Prepare the exact local verification bundle without publishing:
+
+```bash
+revision="$(git rev-parse HEAD)"
+bash scripts/release/build-source-preview-artifacts.sh \
+  --out target/source-preview-dist \
+  --version 0.21.0 \
+  --revision "$revision" \
+  --builder "local:$(id -un)"
+bash scripts/release/verify-source-preview-artifacts.sh \
+  --dist target/source-preview-dist \
+  --version 0.21.0 \
+  --revision "$revision"
+```
+
+The exact set is a deterministic source archive, SPDX 2.3 package SBOM,
+revision-and-builder provenance statement, and `SHA256SUMS`. The verifier checks
+the archive path boundary, every checksum, SBOM revision binding, provenance
+subjects, source revision, builder, and dry-run invocation. No artifact is
+signed and no SLSA level is claimed; checksum and provenance verification are
+the documented preview mechanism until signing is separately authorized.
+
 ## Public version sources
 
 Before changing version values for a release, inventory every public version
