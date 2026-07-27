@@ -20,7 +20,7 @@ ddx:
   status: proposed
 ---
 
-# Technical Design: TD-011 Relational Batch Row-and-Byte Admission
+# Technical Design: TD-012 Relational Batch Row-and-Byte Admission
 
 **Status**: Proposed; operator review required before contract or implementation work.
 **Contract**: API-001 | **ADR**: ADR-013, ADR-015 | **Scope**: relational mutation admission only
