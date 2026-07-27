@@ -92,6 +92,10 @@ const RELEASE_LOAD_SEGMENT_TARGET_BYTES: usize = 917_504;
 const RELEASE_LOAD_SIZE_SEAL_COMMANDS: usize = 4;
 const RELEASE_QUEUE_WAITING_BYTES: usize = 16 * 1024 * 1024;
 const STORE_OBJECT_PAGE_LIMIT: u64 = S3_LIST_PAGE_MAX_KEYS as u64;
+const EXPECTED_RECORDER_CONTROL_SCHEDULE: &str =
+    "independent-bounded-blocks-seeded-alternating-order-v1";
+const EXPECTED_RECORDER_CONTROL_FINGERPRINT_ALGORITHM: &str =
+    "fnv1a128+disk-unique-id-index+canonical-live-state-v1";
 
 struct RejectManifestHeadObjectWritesStore {
     inner: Arc<dyn BlobStore>,
@@ -1036,8 +1040,8 @@ where
         recorder_overhead_ratio: round3(recorder_overhead_ratio),
         recorder_overhead_ratio_samples: overhead_samples.into_iter().map(round3).collect(),
         recorder_control_order_seed: order_seed,
-        recorder_control_schedule: "independent-bounded-blocks-seeded-alternating-order-v1",
-        recorder_control_fingerprint_algorithm: "fnv1a128+disk-unique-id-index+canonical-live-state-v1",
+        recorder_control_schedule: EXPECTED_RECORDER_CONTROL_SCHEDULE,
+        recorder_control_fingerprint_algorithm: EXPECTED_RECORDER_CONTROL_FINGERPRINT_ALGORITHM,
         recorder_enabled_state_fingerprint: enabled.state_fingerprint.digest,
         recorder_disabled_state_fingerprint: disabled.state_fingerprint.digest,
         recorder_control_verified_items: enabled.state_fingerprint.verified,
@@ -2125,8 +2129,9 @@ fn validate_e3_profile_matrix(runs: &[ProfileRun], require_bars: bool) -> Result
             } else {
                 f64::NAN
             };
-            if result.recorder_control_schedule
-                != "independent-bounded-blocks-seeded-alternating-order-v1"
+            if result.recorder_control_schedule != EXPECTED_RECORDER_CONTROL_SCHEDULE
+                || result.recorder_control_fingerprint_algorithm
+                    != EXPECTED_RECORDER_CONTROL_FINGERPRINT_ALGORITHM
                 || result.recorder_control_order_seed == 0
                 || !sample_distribution_valid
                 || (measured_median - result.recorder_overhead_ratio).abs() > 0.001
@@ -3117,8 +3122,8 @@ fn synthetic_ack(
         recorder_overhead_ratio: 1.0,
         recorder_overhead_ratio_samples: vec![1.0; RECORDER_CONTROL_BLOCKS],
         recorder_control_order_seed: 7,
-        recorder_control_schedule: "independent-bounded-blocks-seeded-alternating-order-v1",
-        recorder_control_fingerprint_algorithm: "fnv1a128+disk-unique-id-index+canonical-live-state-v1",
+        recorder_control_schedule: EXPECTED_RECORDER_CONTROL_SCHEDULE,
+        recorder_control_fingerprint_algorithm: EXPECTED_RECORDER_CONTROL_FINGERPRINT_ALGORITHM,
         recorder_enabled_state_fingerprint: "fnv1a128:0123456789abcdef0123456789abcdef".into(),
         recorder_disabled_state_fingerprint: "fnv1a128:0123456789abcdef0123456789abcdef".into(),
         recorder_control_verified_items: 2,
@@ -3335,6 +3340,50 @@ fn e3_matrix_rejects_forged_or_lockstepped_recorder_distribution() {
             .any(|error| error.contains("independent bounded-block recorder-control distribution")),
         "{errors:?}"
     );
+}
+
+#[allow(non_snake_case)]
+#[test]
+fn TestE3RecorderControlsUseFiveInterleavedSameRunBlocks() {
+    let run = synthetic_profile_run("object_log_sqlite_projection", "sqlite", true);
+    let ack = &run.ack_results[0];
+    assert_eq!(
+        ack.recorder_overhead_ratio_samples.len(),
+        RECORDER_CONTROL_BLOCKS
+    );
+    assert_eq!(
+        ack.recorder_control_schedule,
+        EXPECTED_RECORDER_CONTROL_SCHEDULE
+    );
+    assert_eq!(
+        ack.recorder_control_fingerprint_algorithm,
+        EXPECTED_RECORDER_CONTROL_FINGERPRINT_ALGORITHM
+    );
+    assert!(ack.recorder_control_order_seed != 0);
+    assert!(ack.recorder_control_logical_match);
+}
+
+#[allow(non_snake_case)]
+#[test]
+fn TestE3RecorderControlsRejectLocksteppedDistribution() {
+    let mut run = synthetic_profile_run("object_log_sqlite_projection", "sqlite", true);
+    run.ack_results[0].recorder_control_schedule =
+        "paired-operation-barriers-concurrent-worker-partitions-v1";
+    let errors = validate_e3_profile_matrix(&[run], true).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("independent bounded-block recorder-control distribution")),
+        "{errors:?}"
+    );
+}
+
+#[allow(non_snake_case)]
+#[test]
+fn TestE3RecorderControlsBoundedOverheadRatio() {
+    let run = synthetic_profile_run("object_log_sqlite_projection", "sqlite", true);
+    let ack = &run.ack_results[0];
+    assert!(ack.recorder_overhead_ratio <= MAX_RECORDER_OVERHEAD_RATIO);
 }
 
 #[test]
