@@ -93,6 +93,19 @@ jobs:
             test "${GITHUB_SHA}" = "$(git rev-list -n 1 "v${workspace_version}")"
           fi
 
+      - name: Dry-run source archive, SBOM, checksums, and provenance
+        shell: bash
+        run: |
+          bash scripts/release/build-source-preview-artifacts.sh \
+            --out target/source-preview-dist \
+            --version "${{ steps.release.outputs.version }}" \
+            --revision "${GITHUB_SHA}" \
+            --builder "github-actions:${GITHUB_WORKFLOW_REF}"
+          bash scripts/release/verify-source-preview-artifacts.sh \
+            --dist target/source-preview-dist \
+            --version "${{ steps.release.outputs.version }}" \
+            --revision "${GITHUB_SHA}"
+
       - name: Acquire and preflight exact-revision governed evidence
         env:
           FIREWEED_GOVERNED_EVIDENCE_BASE_URL: ${{ vars.FIREWEED_GOVERNED_EVIDENCE_BASE_URL }}
