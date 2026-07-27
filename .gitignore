@@ -8,6 +8,8 @@ target/
 .ddx/exec-runs.d/
 .ddx/.execute-bead-wt-*/
 .ddx/executions/
+.ddx/coordination/
+.ddx/runs/
 .ddx/metrics/locks.jsonl
 .ddx/metrics/locks.jsonl.lock
 .ddx/*.lock
