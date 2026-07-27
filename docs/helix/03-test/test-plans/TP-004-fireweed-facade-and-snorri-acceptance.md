@@ -32,7 +32,7 @@ release artifacts, and runtime-hardening work not exposed by API-005
 | Million-cycle parity | Insert 1,000,000, batch-update 500,000, and read/verify 1,000,000 through every supported constructor | P0 |
 | Downstream integration | All five Snorri feature combinations compile against one concrete type | P0 |
 | Garage integration | SQLite and PostgreSQL projection lifecycle plus retry/idempotency run against Garage on `eldir` without skips | P0 |
-| Published-source consumption | Snorri resolves the tagged public `telepathdata/fireweed` repository rather than a workspace-internal crate | P0 |
+| Published-source consumption | Snorri resolves the tagged public `7thsense/fireweed` repository rather than a workspace-internal crate | P0 |
 | Existing backend suites | No regression in the selected profile's current semantic tests | P0 |
 
 ## Test data
@@ -135,7 +135,7 @@ handle enum.
 Before running any Snorri command, the acceptance record MUST prove dependency
 identity. Pre-release testing uses a path dependency on
 `../fireweed/crates/fireweed` or an exact Fireweed commit revision. Release
-testing uses the exact v0.21 tag from the public `telepathdata/fireweed`
+testing uses the exact v0.21 tag from the public `7thsense/fireweed`
 repository. `cargo tree` and `Cargo.lock` evidence MUST show package `fireweed`
 at the intended path, revision, or tagged git source; any other repository
 source is a hard failure even if compilation succeeds from cache.
@@ -203,7 +203,7 @@ passing evidence.
 | API-005 projection control | Fireweed + Snorri object-log integration | Borrowed control verify/delete/rebuild and reassignment tests |
 | API-005 opaque composition | Contract compile | Construction selects composition; the live facade cannot disclose it |
 | Garage durability acceptance | Snorri on `eldir` | All three named Garage tests execute without skips and pass |
-| Published facade consumption | GitHub release + downstream integration | Public tag/release exists; post-publication lockfile resolves the exact `telepathdata/fireweed` tag |
+| Published facade consumption | GitHub release + downstream integration | Public tag/release exists; post-publication lockfile resolves the exact `7thsense/fireweed` tag |
 
 ## Infrastructure and implementation order
 

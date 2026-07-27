@@ -63,7 +63,7 @@ On push to `main` (site-related paths) or `workflow_dispatch`:
 4. Playwright post-deploy: screenshots at common viewports + link crawl  
 
 Published URL (project Pages):  
-**https://telepathdata.github.io/fireweed/** → redirects to `/site/`.
+**https://7thsense.github.io/fireweed/** → redirects to `/site/`.
 
 If organization policy blocks repository Actions, publish with the fallback:
 

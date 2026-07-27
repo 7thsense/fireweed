@@ -4,7 +4,7 @@
   "version": "0.21.0",
   "status": "public preview",
   "descriptor": "A durable work-state engine for ordered, recoverable execution.",
-  "repository": "https://github.com/telepathdata/fireweed",
+  "repository": "https://github.com/7thsense/fireweed",
   "license": "MIT OR Apache-2.0",
   "contribution": "issues-only",
   "deferred": ["crates.io", "GHCR"]

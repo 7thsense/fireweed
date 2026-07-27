@@ -11,7 +11,7 @@ summary_path="${tmp_dir}/summary.md"
 stdout_path="${tmp_dir}/stdout.txt"
 
 GITHUB_SERVER_URL="https://github.com" \
-GITHUB_REPOSITORY="telepathdata/fireweed" \
+GITHUB_REPOSITORY="7thsense/fireweed" \
 GITHUB_RUN_ID="28641569553" \
 GITHUB_RUN_ATTEMPT="2" \
 GITHUB_WORKFLOW="release" \

@@ -52,9 +52,9 @@ canonical_surfaces:
     - fireweed-build-e3-contract
     - fireweed-cost-model
   repository:
-    url: https://github.com/telepathdata/fireweed.git
+    url: https://github.com/7thsense/fireweed.git
   container:
-    image: ghcr.io/telepathdata/fireweed-service
+    image: ghcr.io/7thsense/fireweed-service
   helm:
     chart: fireweed-queue
     path: charts/fireweed-queue

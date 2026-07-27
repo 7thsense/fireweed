@@ -20,7 +20,7 @@ ddx:
 - Component: Fireweed Queue source repository and Rust embedding facade
 - Version: `v0.21.0`
 - Release time: 2026-07-26 06:04:35 UTC
-- Repository: <https://github.com/telepathdata/fireweed> (public; `main` is the
+- Repository: <https://github.com/7thsense/fireweed> (public; `main` is the
   default branch; GitHub issues are enabled)
 - Publication: annotated Git tag and GitHub source release, both complete
 - Contribution policy: issues accepted; pull requests, patches, and other code
@@ -42,7 +42,7 @@ revision, result, and environment where applicable.
 
 | Area | Check | Evidence or Command | Status |
 |------|-------|---------------------|--------|
-| Repository | Public repository is `telepathdata/fireweed`; issues enabled | `gh repo view telepathdata/fireweed --json nameWithOwner,visibility,hasIssuesEnabled,defaultBranchRef` | Confirmed 2026-07-25 |
+| Repository | Public repository is `7thsense/fireweed`; issues enabled | `gh repo view 7thsense/fireweed --json nameWithOwner,visibility,hasIssuesEnabled,defaultBranchRef` | Confirmed 2026-07-25 |
 | Repository redirect | The immediately previous GitHub coordinate resolves to the immutable released source | Anonymous `git ls-remote` returned `5b2cf59b29c0652af9e8513ea2e6de5e93201474`; the exact historical coordinate is retained in the cutover bead | Confirmed 2026-07-26 |
 | Hosting controls | Record repository automation and branch policy rather than assuming protection | Repository Actions API reports `enabled=false`; `main` has no GitHub branch-protection rule; release validation and publication were therefore performed locally/manual | Recorded 2026-07-26 |
 | Policy | README, `CONTRIBUTING.md`, support, security, and ADR-021 agree on issues-only contributions | `rg -n 'Issues are welcome|Pull requests.*not accepted|issues-only' README.md CONTRIBUTING.md SUPPORT.md SECURITY.md docs/helix/02-design/adr/ADR-021-open-source-license-and-contribution-policy.md` | Passed at `51152e1d` (2026-07-25) |
@@ -72,7 +72,7 @@ rollout stages for v0.21.0.
 | Signal or Check | Expected Result | Evidence or Command | Status |
 |-----------------|-----------------|---------------------|--------|
 | Git tag | Annotated `v0.21.0` resolves to the validated commit | Tag object `cc07218`; peeled commit `5b2cf59b29c0652af9e8513ea2e6de5e93201474` | Passed 2026-07-26 |
-| GitHub release | Non-draft, non-prerelease source release exists for `v0.21.0` | <https://github.com/telepathdata/fireweed/releases/tag/v0.21.0> | Passed 2026-07-26 |
+| GitHub release | Non-draft, non-prerelease source release exists for `v0.21.0` | <https://github.com/7thsense/fireweed/releases/tag/v0.21.0> | Passed 2026-07-26 |
 | Public clone | Clean clone resolves and builds the facade from the tag | Anonymous depth-one tag clone; `cargo check --locked -p fireweed` | Passed 2026-07-26 |
 | Snorri consumption | Snorri resolves only public `fireweed` at the tag revision | Snorri `Cargo.lock`; clean-checkout all-feature workspace check; live PostgreSQL/Garage matrix; Snorri `v0.11.0` at `b37e46410287b563ca692666bca2032a81cb9e3b`; Fast CI run `30191358058` passed in 56 seconds | Passed 2026-07-26 |
 | Registry boundary | No crates.io or GHCR artifact is claimed or required | Fireweed and Snorri GitHub releases have zero uploaded assets and their release notes defer registry publication | Passed 2026-07-26 |

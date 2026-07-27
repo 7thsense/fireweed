@@ -48,7 +48,7 @@ Clone the repository. In the first terminal, start a single-process,
 in-memory service with the default example queue made explicit:
 
 ```sh
-git clone https://github.com/telepathdata/fireweed.git
+git clone https://github.com/7thsense/fireweed.git
 cd fireweed
 
 FIREWEED_LISTEN_ADDR=127.0.0.1:8080 \
@@ -107,7 +107,7 @@ fail at startup instead of silently selecting another backend.
 - [Product microsite](docs/site/index.html) — openable marketing, concepts,
   examples from real tests, API guides, and the operator deploy console.
   Brand voice and visual system: [docs/site/DESIGN.md](docs/site/DESIGN.md).
-  Deployed site: <https://telepathdata.github.io/fireweed/> (GitHub Pages).
+  Deployed site: <https://7thsense.github.io/fireweed/> (GitHub Pages).
 - [Choosing a priority queue instead of a stream](docs/helix/01-frame/guides/choosing-fireweed.md)
   explains the workload boundary.
 - [Rust facade source and crate documentation](crates/fireweed/src/lib.rs)

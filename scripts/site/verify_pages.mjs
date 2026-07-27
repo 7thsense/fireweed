@@ -8,7 +8,7 @@
  *
  * Usage:
  *   BASE_URL=http://127.0.0.1:4173 node scripts/site/verify_pages.mjs
- *   BASE_URL=https://telepathdata.github.io/fireweed node scripts/site/verify_pages.mjs
+ *   BASE_URL=https://7thsense.github.io/fireweed node scripts/site/verify_pages.mjs
  *
  * Env:
  *   BASE_URL       required — origin (no trailing slash required)

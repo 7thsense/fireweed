@@ -27,4 +27,4 @@ git add -A
 git commit -m "Deploy Fireweed microsite to GitHub Pages" >/dev/null
 git remote add origin "$(git -C "${ROOT}" remote get-url "${REMOTE}")"
 git push -u origin "HEAD:${BRANCH}" --force
-echo "Published ${BRANCH} → GitHub Pages (https://telepathdata.github.io/fireweed/)"
+echo "Published ${BRANCH} → GitHub Pages (https://7thsense.github.io/fireweed/)"

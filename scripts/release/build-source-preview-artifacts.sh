@@ -37,7 +37,7 @@ for index, package in enumerate(sorted(metadata["packages"], key=lambda p: p["na
     spdx_id = f"SPDXRef-Package-{index}"
     packages.append({"SPDXID": spdx_id, "name": package["name"], "versionInfo": package["version"], "downloadLocation": "NOASSERTION", "filesAnalyzed": False, "licenseConcluded": "NOASSERTION", "licenseDeclared": package.get("license") or "NOASSERTION", "copyrightText": "NOASSERTION"})
     relationships.append({"spdxElementId": "SPDXRef-DOCUMENT", "relationshipType": "DESCRIBES", "relatedSpdxElement": spdx_id})
-document = {"spdxVersion": "SPDX-2.3", "dataLicense": "CC0-1.0", "SPDXID": "SPDXRef-DOCUMENT", "name": f"fireweed-{version}-source", "documentNamespace": f"https://github.com/telepathdata/fireweed/releases/{revision}/sbom", "creationInfo": {"created": created, "creators": ["Tool: fireweed-source-preview-builder"]}, "packages": packages, "relationships": relationships}
+document = {"spdxVersion": "SPDX-2.3", "dataLicense": "CC0-1.0", "SPDXID": "SPDXRef-DOCUMENT", "name": f"fireweed-{version}-source", "documentNamespace": f"https://github.com/7thsense/fireweed/releases/{revision}/sbom", "creationInfo": {"created": created, "creators": ["Tool: fireweed-source-preview-builder"]}, "packages": packages, "relationships": relationships}
 with open(output, "w", encoding="utf-8") as handle: json.dump(document, handle, indent=2, sort_keys=True); handle.write("\n")
 PY
 archive_sha="$(sha256sum "$out/$archive" | awk '{print $1}')"
@@ -47,7 +47,7 @@ python3 - "$out/$provenance" "$revision" "$builder" "$version" "$commit_epoch" "
 import datetime, json, sys
 output, revision, builder, version, epoch, archive, archive_sha, sbom, sbom_sha = sys.argv[1:]
 generated = datetime.datetime.fromtimestamp(int(epoch), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-document = {"schema": "fireweed.source_preview_provenance.v1", "source": {"repository": "https://github.com/telepathdata/fireweed", "commit": revision}, "builder": {"id": builder}, "invocation": {"mode": "dry-run", "version": version}, "generated_at": generated, "subjects": [{"name": archive, "digest": {"sha256": archive_sha}}, {"name": sbom, "digest": {"sha256": sbom_sha}}], "claims": {"slsa_level": None, "signed": False}}
+document = {"schema": "fireweed.source_preview_provenance.v1", "source": {"repository": "https://github.com/7thsense/fireweed", "commit": revision}, "builder": {"id": builder}, "invocation": {"mode": "dry-run", "version": version}, "generated_at": generated, "subjects": [{"name": archive, "digest": {"sha256": archive_sha}}, {"name": sbom, "digest": {"sha256": sbom_sha}}], "claims": {"slsa_level": None, "signed": False}}
 with open(output, "w", encoding="utf-8") as handle: json.dump(document, handle, indent=2, sort_keys=True); handle.write("\n")
 PY
 bash "$SCRIPT_DIR/write-checksums.sh" "$out"
