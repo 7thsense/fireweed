@@ -34,6 +34,23 @@ file defines the gate applied to future tags.
 
 ## Source-preview dry run
 
+Run the complete local public-release validation manifest and retain its
+revision/tool evidence before preparing source artifacts:
+
+```bash
+python3 scripts/ci/public-release-gate.py \
+  --manifest scripts/ci/public-release-gates.json \
+  --evidence target/public-release-gate.json
+```
+
+The versioned manifest preserves each constituent's native output and stops at
+the first failure. CI invokes the same entrypoint with the bounded CI manifest;
+both evidence files record the exact Git revision, manifest version, command
+status, and available Git, Rust, Cargo, Python, cargo-deny, and gitleaks
+versions. Registry package publication and deployment lint remain outside the
+v0.21 source-only boundary; the manifest verifies the declared source package,
+SBOM, checksums, and provenance without publishing them.
+
 The v0.21 public-preview boundary ships an immutable Git tag and
 GitHub-generated source archives. crates.io, GHCR, binary, and Helm publication
 remain deferred. Prepare the exact local verification bundle without publishing:
