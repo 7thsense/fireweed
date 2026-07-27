@@ -20,7 +20,7 @@ ddx:
 - Component: Fireweed Queue source repository and Rust embedding facade
 - Version: `v0.21.0`
 - Release time: 2026-07-26 06:04:35 UTC
-- Repository: <https://github.com/7thsense/fireweed> (public; `main` is the
+- Repository: <https://github.com/7thsense/fireweed> (transferred from `telepathdata/fireweed`; GitHub keeps a redirect) (public; `main` is the
   default branch; GitHub issues are enabled)
 - Publication: annotated Git tag and GitHub source release, both complete
 - Contribution policy: issues accepted; pull requests, patches, and other code

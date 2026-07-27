@@ -79,7 +79,7 @@ history rewrite.
 |---|---|---|---|
 | Display name | `pqueue` / `pqueue-service` era branding | Rename-now | `Fireweed Queue` |
 | Short name | `pqueue` | Rename-now | `Fireweed` |
-| Repository | `telepathdata/7thsense-pqueue` | Rename-now | `fireweed` |
+| Repository | `telepathdata/7thsense-pqueue` (historical) | Rename-now | `7thsense/fireweed` |
 | Rust / CLI stem | `pqueue` | Rename-now | `fireweed` |
 | Environment prefix | `PQUEUE_` | Temporary compatibility alias | `FIREWEED_` |
 | Cargo packages | `pqueue*` | Temporary compatibility alias | `fireweed*` package names |
