@@ -44,8 +44,9 @@ The historical run took 3,332.60 seconds (55m32.60s); that duration is not a gat
 
 Throughput and p50/p95/p99 latency are topology-bound capacity observations,
 not release thresholds. Release judgment uses exact committed work, valid
-distribution ordering, logically identical interleaved recorder controls, and
-fixed resource bounds; it does not require a quiet or specially selected host.
+distribution ordering, five alternating same-run recorder-control blocks with a
+stable schedule/fingerprint check, and fixed resource bounds; it does not
+require a quiet or specially selected host.
 
 Historical observations only (invalid as current evidence):
 
@@ -108,7 +109,8 @@ The release path is fail-closed before a new ledger is accepted:
    monotonic production replay progress, bounded queues/pages, and successful production segment/record/frame
    checksum validation for both snapshot-tail and genesis replay.
 4. Each bound requires five seeded, alternating, same-run recorder-control blocks with matching complete-state
-   fingerprints and median degradation no greater than 1.02.
+   fingerprints, a stable recorder-control schedule/fingerprint check, and median degradation no greater than
+   1.02.
 5. Semantic validators reject smoke rows, incomplete matrices, missing or altered counters, stale provenance,
    non-exact/checksum-unverified recovery, quiet-host deferral, and host-speed gates.
 6. Focused tests, formatting, and warning-denied clippy are the code gates. The only remaining evidence gate is
