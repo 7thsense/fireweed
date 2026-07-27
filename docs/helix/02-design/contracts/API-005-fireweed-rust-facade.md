@@ -28,7 +28,7 @@ queue semantics.
   inherent queue methods, runtime construction facts, projection maintenance,
   export closure, compatibility, and structured errors.
 - Out of scope: storage-port object safety, backend algorithms, RESP bindings,
-  new queue semantics, and the backend-neutral replacement for `read_as_of`.
+  new queue semantics, and the backend-neutral historical query component.
 - Owning crate: `fireweed`.
 
 ## Normative surface
@@ -247,11 +247,30 @@ The free active-scope selector and its value types remain supported:
 `select_active_scope_from_prefix`, `ActiveScopeDiscovery`,
 `OldestFirstScopePrefix`, and `ActiveScopeSelection`.
 
-`read_as_of<T, F>` is excluded from v0.21's supported facade because its
-callback exposes a backend-associated projection type. Its replacement must be
-an owned, backend-neutral request/response contract under a separately reviewed
-history component. Removing this generic escape hatch does not remove
-`current_position` or ordinary recovery reads.
+### Historical query component
+
+The backend-neutral historical query component is a separately reviewed owned
+contract. It is intentionally outside the v0.21 supported facade closure until
+its request, response, capability, and retention semantics are governed.
+
+Its availability is runtime- and queue-scoped. A runtime may answer historical
+queries for some queues and decline others, and queue-scoped capability values
+remain authoritative for that decision. The caller must consult those
+capabilities for the target queue before issuing a historical request.
+
+Ownership stays with the runtime that already owns the queue state and any
+retained snapshots or segments needed to answer the query. Callers do not take
+detached ownership of backend objects, and the component does not expose a
+backend-associated callback surface.
+
+If the runtime cannot satisfy the requested queue/position, or the retained
+state needed to reconstruct the answer has expired or been discarded, the
+component fails closed with a structured unavailable result and returns no
+partial data.
+
+`read_as_of<T, F>` is retired from the supported facade. Its replacement is
+the historical query component above, and no implementation or conformance
+bead may be derived from it until the dedicated history contract is reviewed.
 
 ### Projection control
 

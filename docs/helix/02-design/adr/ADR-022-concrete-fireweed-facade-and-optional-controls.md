@@ -137,9 +137,11 @@ governing interface specification.
 - The `fireweed` crate must re-export every domain type appearing in its public
   signatures, including `WorkerId`; consumers do not depend on `fireweed-core`.
 - Existing queue verbs and semantics remain stable during the rename.
-- `read_as_of<T, F>` cannot cross the erased boundary because its callback
-  names a backend-associated projection type. A backend-neutral history/query
-  contract must replace it before it becomes part of the supported facade.
+- `read_as_of<T, F>` is not part of the supported facade. Its replacement is
+  the backend-neutral historical query component, which is separately reviewed
+  and uses owned request/response DTOs plus queue-scoped capability checks. No
+  implementation or conformance bead should be derived from that component
+  until the dedicated history contract review is accepted.
 - `batch_update` remains an API-001 operation. Its facade method returns the
   structured unsupported result on profiles without the capability; internal
   conditional dispatch must not leak a backend bound.
