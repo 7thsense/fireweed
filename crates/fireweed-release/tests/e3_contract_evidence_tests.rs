@@ -11,6 +11,10 @@ use fireweed_release::e3_contract::{
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
 const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
 struct Fixture {
     root: PathBuf,
 }
@@ -82,6 +86,116 @@ fn accepts_all_profiles_bounds_transaction_authorities_and_fence() {
     assert_eq!(summary.entries, 8);
     assert_eq!(summary.transaction_rows, 48);
     assert_eq!(summary.cost_rows, 8);
+}
+
+#[allow(non_snake_case)]
+#[test]
+fn TestE3ValidatorRejectsSmokeRowsAndIncompleteMatrix() {
+    let smoke = Fixture::new();
+    smoke.mutate_e3_row(0, |row| {
+        row["evidence_tier"] = serde_json::json!("smoke");
+    });
+    let smoke_errors = smoke.errors();
+    assert!(
+        smoke_errors.contains("must be release tier and scale"),
+        "{smoke_errors}"
+    );
+
+    let incomplete = Fixture::new();
+    incomplete.mutate_json("contract.json", |value| {
+        value["entries"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|entry| entry["profile"] != "object_log_sqlite_projection");
+    });
+    let incomplete_errors = incomplete.errors();
+    assert!(
+        incomplete_errors
+            .contains("missing E3 contract entry: profile=object_log_sqlite_projection"),
+        "{incomplete_errors}"
+    );
+}
+
+#[allow(non_snake_case)]
+#[test]
+fn TestE3ValidatorRejectsMissingOrAlteredCounters() {
+    let missing = Fixture::new();
+    missing.mutate_e3_row(0, |row| {
+        row["measurements"]
+            .as_object_mut()
+            .unwrap()
+            .remove("recovery_load_mean_commands_per_segment");
+    });
+    let missing_errors = missing.errors();
+    assert!(
+        missing_errors.contains("recovery_load_mean_commands_per_segment"),
+        "{missing_errors}"
+    );
+
+    let altered = Fixture::new();
+    altered.mutate_e3_row(0, |row| {
+        row["measurements"]["bound_1ms_recorder_control_verified_items"] =
+            serde_json::json!(999_999);
+    });
+    let altered_errors = altered.errors();
+    assert!(
+        altered_errors.contains("matching complete recorder-control state fingerprints"),
+        "{altered_errors}"
+    );
+}
+
+#[allow(non_snake_case)]
+#[test]
+fn TestE3ValidatorRejectsQuietHostAndHostSpeedGates() {
+    let quiet_host = Fixture::new();
+    let path = quiet_host.root.join("e3.jsonl");
+    let body = fs::read_to_string(&path).unwrap().replacen(
+        "synthetic-fixture",
+        "synthetic-fixture on a quiet host",
+        1,
+    );
+    fs::write(path, body).unwrap();
+    let quiet_errors = quiet_host.errors();
+    assert!(
+        quiet_errors.contains("contains a non-portable quiet-host gate"),
+        "{quiet_errors}"
+    );
+
+    let host_speed = Fixture::new();
+    let path = host_speed.root.join("e3.jsonl");
+    let body = fs::read_to_string(&path).unwrap().replacen(
+        "E3: 1/5/20/100ms bounds; sustained batched commits with valid latency distributions and logically identical interleaved recorder controls; 10M ephemeral in-memory projection rebuilt by exact bounded durable-log genesis replay; streaming complete-state digests match with zero missing, duplicate, or invalid items; replay progress and bounded-resource samples are monotonic; absolute capacity is reported for the declared topology, not used as a portable gate",
+        "finish within 30 seconds on this host",
+        1,
+    );
+    fs::write(path, body).unwrap();
+    let host_speed_errors = host_speed.errors();
+    assert!(
+        host_speed_errors.contains("must use the governed host-independent pass bar"),
+        "{host_speed_errors}"
+    );
+}
+
+#[allow(non_snake_case)]
+#[test]
+fn TestE3ReleaseGatesPassFmtClippyAndOperatorChecks() {
+    let root = repo_root();
+    assert!(
+        !root.join("go.mod").exists(),
+        "go test ./... is operator-required non-applicability because the repo has no Go module"
+    );
+    assert!(
+        !root.join(".lefthook.yml").exists() && !root.join(".pre-commit-config.yaml").exists(),
+        "lefthook run pre-commit is operator-required non-applicability because the repo has no lefthook config"
+    );
+
+    let release_note =
+        fs::read_to_string(root.join("docs/perf/tp002-e3-objectlog-minio-release.md")).unwrap();
+    assert!(
+        release_note
+            .contains("Focused tests, formatting, and warning-denied clippy are the code gates"),
+        "release note does not record the governed code gates"
+    );
 }
 
 #[test]
