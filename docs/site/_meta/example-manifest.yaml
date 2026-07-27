@@ -1,0 +1,126 @@
+# Curated microsite examples extracted from real tests/examples.
+# Regenerate with: python3 scripts/site/extract-examples.py
+# Verify with:     python3 scripts/site/check-example-provenance.py
+
+examples:
+  - slug: basic-lifecycle
+    title: Open, push, claim, complete
+    summary: >
+      Concrete Fireweed handle over memory: create a queue, push with a client
+      key, update schedule, claim under a lease, and complete.
+    tags: [embed, lifecycle, beginner]
+    category: embed
+    sources:
+      - path: crates/fireweed/tests/concrete_fireweed.rs
+        symbol: exercise_operation_families
+      - path: crates/fireweed/tests/concrete_fireweed.rs
+        symbol: queue_definition
+
+  - slug: priority-retry
+    title: Priority order and nack retry
+    summary: >
+      Items are claimed in priority order, completed with ack, and returned for
+      retry with attempt count via nack.
+    tags: [embed, priority, retry]
+    category: lifecycle
+    sources:
+      - path: crates/fireweed/tests/facade.rs
+        symbol: push_claim_ack_nack_lifecycle_over_memory
+
+  - slug: scheduled-delivery
+    title: Scheduled delivery with not_before
+    summary: >
+      Work stays ineligible until not_before; advancing the clock unlocks
+      delivery. Finalization maps complete, fail, retry, release, and rearm.
+    tags: [eligibility, scheduling, product-ac]
+    category: eligibility
+    sources:
+      - path: crates/fireweed/tests/product_validation_tests.rs
+        symbol: scheduled_batch_delivery_profile
+
+  - slug: retry-delays
+    title: Absolute and relative retry delays
+    summary: >
+      retry and retry_after aliases, absolute vs relative delay, empty claim
+      before due, and max_attempts exhaustion to failed.
+    tags: [retry, leases]
+    category: lifecycle
+    sources:
+      - path: crates/fireweed/tests/facade.rs
+        symbol: retry_aliases_match_absolute_relative_and_exhaustion_behavior
+
+  - slug: lease-ops
+    title: Renew, reclaim, fail, release
+    summary: >
+      Lease renew without a new delivery charge, reclaim after expiry, fail to
+      terminal dead-letter, and related finalize verbs.
+    tags: [leases, finalize]
+    category: lifecycle
+    sources:
+      - path: crates/fireweed/tests/facade.rs
+        symbol: renew_extends_lease_without_charging_a_delivery
+      - path: crates/fireweed/tests/facade.rs
+        symbol: fail_dead_letters_a_claimed_item
+      - path: crates/fireweed/tests/facade.rs
+        symbol: reclaim_expired_convenience_uses_handle_clock
+
+  - slug: scheduler-boundary
+    title: Discover, select, claim across queues
+    summary: >
+      Public workflow example: queue template ensure, grouped discovery,
+      dispersion selection, bounded claim_across_queues, and finalize.
+    tags: [orchestration, discovery, multi-queue]
+    category: orchestration
+    sources:
+      - path: crates/fireweed/examples/scheduler_boundary.rs
+        symbol: run_workflow
+
+  - slug: multi-queue-claim
+    title: Claim across queues in caller order
+    summary: >
+      claim_across_queues preserves input target order and shares claim time
+      from the handle clock.
+    tags: [multi-queue, claim]
+    category: orchestration
+    sources:
+      - path: crates/fireweed/tests/multi_queue_claim.rs
+        symbol: memory_claims_share_time_and_preserve_input_order
+
+  - slug: dispersion
+    title: Disperse workers across active scopes
+    summary: >
+      Stateless active-scope selection is stable, disperses workers across a
+      leading window, and preserves source order.
+    tags: [routing, dispersion]
+    category: orchestration
+    sources:
+      - path: crates/fireweed/tests/active_scope_routing.rs
+        symbol: bounded_selection_is_stable_dispersed_and_preserves_source_order
+
+  - slug: durable-open
+    title: Open SQLite and object-log backends
+    summary: >
+      Public constructors for durable profiles and a role-named object-log
+      runtime configuration that validates construction axes.
+    tags: [durable, construction]
+    category: construction
+    sources:
+      - path: crates/fireweed/tests/concrete_fireweed.rs
+        symbol: role_named_object_log_configuration_validates
+      - path: crates/fireweed-bench/tests/e2e_shapes_tests.rs
+        symbol: lifecycle_over_shapes_sqlite_log
+      - path: crates/fireweed-bench/tests/e2e_shapes_tests.rs
+        symbol: lifecycle_over_shapes_sqlite_relational
+      - path: crates/fireweed-bench/tests/e2e_shapes_tests.rs
+        symbol: lifecycle_over_shapes_objectlog
+
+  - slug: resp-drain
+    title: Redis client drain over RESP
+    summary: >
+      Off-the-shelf redis crate against fireweed-resp: XADD, XREADGROUP, XACK
+      with priority-ordered drain semantics.
+    tags: [resp, redis, wire]
+    category: resp
+    sources:
+      - path: crates/fireweed-resp/tests/e2e.rs
+        symbol: drain_and_reconcile_with_offtheshelf_client

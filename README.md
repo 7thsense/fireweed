@@ -104,6 +104,10 @@ fail at startup instead of silently selecting another backend.
 
 ## Documentation
 
+- [Product microsite](docs/site/index.html) — openable marketing, concepts,
+  examples from real tests, API guides, and the operator deploy console.
+  Brand voice and visual system: [docs/site/DESIGN.md](docs/site/DESIGN.md).
+  Deployed site: <https://telepathdata.github.io/fireweed/> (GitHub Pages).
 - [Choosing a priority queue instead of a stream](docs/helix/01-frame/guides/choosing-fireweed.md)
   explains the workload boundary.
 - [Rust facade source and crate documentation](crates/fireweed/src/lib.rs)
@@ -117,8 +121,8 @@ fail at startup instead of silently selecting another backend.
   storage axes, upgrades, and verification.
 - [Release artifact verification](docs/deployment/operator-release-artifacts.md)
   covers images, charts, archives, and checksums.
-- [Operator microsite](docs/operator/index.html) provides an openable deployment
-  reference.
+- [Operator deploy console](docs/site/deploy/index.html) (also linked from the
+  legacy [docs/operator](docs/operator/index.html) shim).
 - [v0.21.0 release notes](docs/releases/v0.21.0.md) describe the complete
   backend-opaque facade and durability matrix.
 - [v0.20.0 release notes](docs/releases/v0.20.0.md) record the Fireweed rename.

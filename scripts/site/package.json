@@ -1,0 +1,13 @@
+{
+  "name": "fireweed-site-verify",
+  "private": true,
+  "type": "module",
+  "description": "Playwright verification for the Fireweed product microsite",
+  "scripts": {
+    "verify": "node verify_pages.mjs",
+    "install-browsers": "playwright install chromium --with-deps"
+  },
+  "devDependencies": {
+    "playwright": "^1.54.2"
+  }
+}

@@ -28,3 +28,5 @@ target/
 .ddx/agent-logs/
 .workflow-scratch/
 .ddx/metrics/
+node_modules/
+__pycache__/

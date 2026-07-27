@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="claim_across_queues preserves input target order and shares claim time from the handle clock." />
+    <title>Claim across queues in caller order — Fireweed Queue</title>
+    <link rel="stylesheet" href="../assets/site.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="site-header">
+        <a class="brand" href="../index.html">
+          <h1>Fireweed Queue</h1>
+          <span>public preview · v0.21.0</span>
+        </a>
+        <nav class="site-nav" aria-label="Primary">
+        <a href="../index.html">Home</a>
+        <a href="../why.html">Why</a>
+        <a href="../concepts.html">Concepts</a>
+        <a href="../get-started.html">Get started</a>
+        <a href="index.html" aria-current="page">Examples</a>
+        <a href="../api/index.html">API</a>
+        <a href="../deploy/index.html">Deploy</a>
+        <a href="../preview.html">Preview</a>
+        </nav>
+      </header>
+      <main>
+
+        <div class="page-intro">
+          <h2>Claim across queues in caller order</h2>
+          <p>claim_across_queues preserves input target order and shares claim time from the handle clock.</p>
+        </div>
+        <div class="example-meta">
+          <span class="badge neutral">orchestration</span>
+          <span>Provenance: <code>crates/fireweed/tests/multi_queue_claim.rs::memory_claims_share_time_and_preserve_input_order</code></span>
+        </div>
+        <div class="tag-list" style="margin-bottom:16px"><span class="tag">multi-queue</span><span class="tag">claim</span></div>
+        <div class="code-block">
+  <div class="label"><span>docs/site/examples/src/multi-queue-claim.rs</span><span>rust</span></div>
+  <pre><code>// Provenance: crates/fireweed/tests/multi_queue_claim.rs::memory_claims_share_time_and_preserve_input_order
+// Do not edit by hand — regenerate with scripts/site/extract_examples.py
+async fn memory_claims_share_time_and_preserve_input_order() {
+    let clock = Arc::new(ManualClock::at(17));
+    let fireweed = fireweed::open_memory(clock);
+    let a = queue(&quot;a&quot;);
+    let b = queue(&quot;b&quot;);
+    for (key, id) in [(&amp;a, &quot;a&quot;), (&amp;b, &quot;b&quot;)] {
+        fireweed.create_queue(definition(id)).await.unwrap();
+        fireweed.push(key, NewItem::default()).await.unwrap();
+    }
+
+    let results = fireweed
+        .claim_across_queues(
+            vec![target(b.clone(), 1), target(a.clone(), 1)],
+            MultiQueueClaimLimits::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        results.iter().map(|entry| &amp;entry.queue).collect::&lt;Vec&lt;_&gt;&gt;(),
+        vec![&amp;b, &amp;a]
+    );
+    for entry in results {
+        let claimed = entry.result.unwrap();
+        assert_eq!(claimed.items.len(), 1);
+        assert_eq!(claimed.items[0].lease_expires_at.seconds, 47);
+    }
+}</code></pre>
+</div>
+        <div class="prose">
+          <p>
+            Full sources live in the repository paths above. Regenerate excerpts with
+            <code>python3 scripts/site/extract_examples.py</code>.
+          </p>
+          <p>
+            <a href="index.html">All examples</a> ·
+            Next: <a href="dispersion.html">Disperse workers across active scopes</a>
+          </p>
+        </div>
+
+      </main>
+      <footer class="site-footer">
+        <p>
+          Fireweed Queue v0.21.0 · public preview ·
+          source release · crates.io and GHCR deferred ·
+          issues welcome · code contributions not accepted ·
+          MIT OR Apache-2.0.
+        </p>
+        <p>
+          Static docs in the repository.
+          Open <code>docs/site/index.html</code> from a clone, or browse
+          <a href="https://github.com/telepathdata/fireweed">github.com/telepathdata/fireweed</a>.
+          Brand voice and style:
+          <a href="../DESIGN.md">DESIGN.md</a>.
+          See <a href="../contribute.html">contribute</a> and
+          <a href="../preview.html">preview boundary</a>.
+        </p>
+      </footer>
+    </div>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

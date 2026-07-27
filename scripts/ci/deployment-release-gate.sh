@@ -350,76 +350,48 @@ PY
 }
 
 validate_docs_microsite() {
-    python3 - <<'PY'
-from html.parser import HTMLParser
-from pathlib import Path
-from urllib.parse import unquote, urlparse
-import sys
+    required_docs=(
+        docs/helix/04-build/DEPLOYMENT-READINESS.md
+        docs/deployment/helm-static-validation.md
+        docs/deployment/kind-helm-integration.md
+        docs/deployment/operator-guide.md
+        docs/operator/index.html
+        docs/site/index.html
+        docs/site/deploy/index.html
+        docs/site/_meta/example-manifest.yaml
+        docs/site/_meta/site-meta.json
+    )
+    local path
+    for path in "${required_docs[@]}"; do
+        if [[ ! -f "$path" ]]; then
+            echo "missing docs/microsite file: $path" >&2
+            return 1
+        fi
+    done
 
-root = Path.cwd()
-required_docs = [
-    Path("docs/helix/04-build/DEPLOYMENT-READINESS.md"),
-    Path("docs/deployment/helm-static-validation.md"),
-    Path("docs/deployment/kind-helm-integration.md"),
-    Path("docs/deployment/operator-guide.md"),
-]
-index = Path("docs/operator/index.html")
+    if ! grep -q 'bash scripts/ci/helm-gate.sh' docs/deployment/helm-static-validation.md; then
+        echo "docs/deployment/helm-static-validation.md missing helm-gate command" >&2
+        return 1
+    fi
+    if ! grep -q 'storage.log.backend' docs/deployment/helm-static-validation.md; then
+        echo "docs/deployment/helm-static-validation.md missing storage.log.backend" >&2
+        return 1
+    fi
+    local kind_cmd
+    for kind_cmd in \
+        'bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend inmemory' \
+        'bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend sqlite' \
+        'bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend hybrid' \
+        'bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend hybrid-async'
+    do
+        if ! grep -Fq "$kind_cmd" docs/deployment/kind-helm-integration.md; then
+            echo "docs/deployment/kind-helm-integration.md missing: $kind_cmd" >&2
+            return 1
+        fi
+    done
 
-for path in required_docs + [index]:
-    if not (root / path).is_file():
-        print(f"missing docs/microsite file: {path}", file=sys.stderr)
-        sys.exit(1)
-
-required_phrases = {
-    Path("docs/deployment/helm-static-validation.md"): [
-        "bash scripts/ci/helm-gate.sh",
-        "storage.log.backend",
-    ],
-    Path("docs/deployment/kind-helm-integration.md"): [
-        "bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend inmemory",
-        "bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend sqlite",
-        "bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend hybrid",
-        "bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend hybrid-async",
-    ],
-}
-for path, phrases in required_phrases.items():
-    text = (root / path).read_text(encoding="utf-8")
-    for phrase in phrases:
-        if phrase not in text:
-            print(f"{path} missing documented command or storage axis: {phrase}", file=sys.stderr)
-            sys.exit(1)
-
-class LinkParser(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.hrefs = []
-
-    def handle_starttag(self, tag, attrs):
-        if tag != "a":
-            return
-        for name, value in attrs:
-            if name == "href" and value:
-                self.hrefs.append(value)
-
-parser = LinkParser()
-parser.feed((root / index).read_text(encoding="utf-8"))
-
-checked_links = 0
-for href in parser.hrefs:
-    parsed = urlparse(href)
-    if parsed.scheme or parsed.netloc or href.startswith(("#", "mailto:")):
-        continue
-    local = unquote(parsed.path)
-    if not local:
-        continue
-    target = (root / index).parent / local
-    if not target.is_file():
-        print(f"{index} has broken local link: {href}", file=sys.stderr)
-        sys.exit(1)
-    checked_links += 1
-
-print(f"validated {len(required_docs)} deployment docs and {checked_links} microsite local link(s)")
-PY
+    python3 scripts/site/check_links.py
+    python3 scripts/site/check_example_provenance.py
 }
 
 kind_unavailable_reasons() {

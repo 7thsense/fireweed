@@ -1,0 +1,141 @@
+# Deploy the Fireweed product microsite to GitHub Pages and run Playwright
+# layout + link verification against the live URL.
+#
+# Requires repository Actions enabled (currently may be blocked at the org).
+# Fallback publish without Actions: bash scripts/site/publish_gh_pages.sh
+name: pages
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "docs/site/**"
+      - "docs/helix/**"
+      - "docs/deployment/**"
+      - "docs/operator/**"
+      - "scripts/site/**"
+      - ".github/workflows/pages.yml"
+      - "SECURITY.md"
+      - "CONTRIBUTING.md"
+      - "SUPPORT.md"
+      - "LICENSE-MIT"
+      - "LICENSE-APACHE"
+      - "CODE_OF_CONDUCT.md"
+      - "NOTICE"
+      - "README.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate source microsite links and example provenance
+        run: |
+          python3 scripts/site/check_links.py
+          python3 scripts/site/check_example_provenance.py
+
+      - name: Stage GitHub Pages artifact
+        run: python3 scripts/site/stage_pages.py target/site-pages
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/site-pages
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+  verify:
+    needs: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: scripts/site
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: scripts/site/package-lock.json
+
+      - name: Install Playwright
+        run: |
+          npm ci
+          npx playwright install chromium --with-deps
+
+      - name: Resolve Pages URL
+        id: url
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Prefer the official Pages API URL when configured.
+          pages_url="$(gh api "repos/${GITHUB_REPOSITORY}/pages" --jq .html_url 2>/dev/null || true)"
+          if [[ -z "${pages_url}" || "${pages_url}" == "null" ]]; then
+            owner="${GITHUB_REPOSITORY%/*}"
+            repo="${GITHUB_REPOSITORY#*/}"
+            pages_url="https://${owner}.github.io/${repo}"
+          fi
+          pages_url="${pages_url%/}"
+          echo "base_url=${pages_url}" >> "$GITHUB_OUTPUT"
+          echo "Using BASE_URL=${pages_url}"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Wait for Pages to serve the site
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="${{ steps.url.outputs.base_url }}"
+          for i in $(seq 1 30); do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' "${base}/site/" || true)"
+            if [[ "${code}" == "200" ]]; then
+              echo "Pages ready (HTTP ${code})"
+              exit 0
+            fi
+            echo "attempt ${i}: HTTP ${code}; sleeping..."
+            sleep 10
+          done
+          echo "Pages did not become ready in time" >&2
+          exit 1
+
+      - name: Playwright layout + link verification
+        run: |
+          BASE_URL="${{ steps.url.outputs.base_url }}" \
+          SITE_PREFIX="/site" \
+          SCREENSHOT_DIR="${{ github.workspace }}/target/site-verify/screenshots" \
+          REPORT_PATH="${{ github.workspace }}/target/site-verify/report.json" \
+          npm run verify
+
+      - name: Upload verification artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: site-verify
+          path: |
+            target/site-verify/screenshots
+            target/site-verify/report.json
+          if-no-files-found: warn
