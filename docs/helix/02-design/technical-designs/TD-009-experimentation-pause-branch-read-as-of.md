@@ -42,7 +42,7 @@ currently unspecified:
   (`crates/fireweed-engine/src/port.rs:818-819`). Documented so paused-queue metrics are not misread.
 - Pause/resume are log commands, so they emit change records (TD-008) and survive failover.
 
-## 2. Read-as-of-position
+## 2. Historical query component
 
 Primitives exist: `LogStore::high_water` (`crates/fireweed-engine/src/compose.rs:113`) and
 snapshot-at-position storage (`compose.rs:116-123`). (`shard` below is a `QueueKey` — the whole queue,
@@ -50,16 +50,32 @@ per ADR-008; the name survives from the engine's internal vocabulary.) New read 
 
 - `current_position(shard) -> CommandPosition` — thin wrapper over `high_water`; the cheap "grab the
   LSN" call.
-- `read_as_of(shard, position, query)` — hydrate from the nearest snapshot ≤ P
-  (`latest_snapshot`/`read_snapshot`), replay `read_from` up to P into an ephemeral projection, answer
-  the bounded query, discard. This is the log-as-truth "materialize up to P" read.
-- **Relational family**: returns a structured `capability-unavailable` (`EngineError::Unavailable`).
-  The ADR-013 rebuild-from-log migration is now complete (the relational stores persist the log,
-  implement `recovery_high_water`, and replay the tail on recovery), but as-of reads additionally
-  require reconstructing an ephemeral historical projection from snapshot + replay, which the
-  relational projection stores decline (`supports_as_of() = false`,
-  `crates/fireweed-engine/src/port.rs:1220-1231`) — so the relational family still serves only "now"
-  until that reconstruct path is built.
+- The backend-neutral historical query component is a separately reviewed owned
+  contract. It answers bounded queries at a historical position using owned
+  request/response DTOs, not a callback over backend-owned types.
+- Availability is runtime- and queue-scoped. A runtime may support historical
+  queries for one queue and decline them for another, and the queue-scoped
+  capability result is authoritative for the target queue/position.
+- The runtime that owns the queue state also owns the retained snapshots and
+  segments needed to answer the query. If the requested position cannot be
+  reconstructed, or the retained state needed for the answer has expired or
+  been discarded, the request fails closed with a structured
+  `capability-unavailable` (`EngineError::Unavailable`) and no partial payload.
+- `current_position` remains the cheap "grab the LSN" call, and ordinary
+  recovery reads are unchanged.
+- **Relational family**: returns a structured `capability-unavailable`
+  (`EngineError::Unavailable`) for the historical query component. The ADR-013
+  rebuild-from-log migration is now complete (the relational stores persist the
+  log, implement `recovery_high_water`, and replay the tail on recovery), but
+  the historical query component still requires reconstructing an ephemeral
+  answer from retained state, which the relational projection stores decline
+  (`supports_as_of() = false`, `crates/fireweed-engine/src/port.rs:1220-1231`)
+  — so the relational family still serves only "now" until that reconstruct
+  path is built.
+
+This component stays outside the v0.20 Snorri acceptance slice until its
+request, response, capability, and retention semantics are reviewed and
+accepted.
 
 ## 3. Branch-at-position
 
@@ -104,5 +120,6 @@ expect a burst of lease expiries at branch start.
 2. `branch(Q, at: P) -> Q′` (emission-suppressed, own lease, TTL set).
 3. Point the variant workflow at Q′; resume Q with the incumbent workflow (a live-traffic shadow
    comparison) or keep Q paused (offline what-if).
-4. Compare via `read_as_of(Q, P, …)` vs live reads of Q′ (and Q).
+4. Compare via the historical query component at `(Q, P, …)` vs live reads of
+   Q′ (and Q).
 5. Discard Q′ (TTL or explicit delete) — segment pins release; production history untouched.
