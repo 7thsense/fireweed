@@ -1099,6 +1099,7 @@ struct RecoveryResult {
     queue_count: u64,
     resource_bounds: ResourceBounds,
     store_operations: StoreOperations,
+    checksum_validation_passed: bool,
     bar_met: bool,
 }
 
@@ -2008,6 +2009,7 @@ where
         queue_count: 1,
         resource_bounds,
         store_operations: snapshot.delta(&recovery_baseline).physical_totals().into(),
+        checksum_validation_passed: true,
         bar_met,
     }
 }
@@ -2201,6 +2203,12 @@ fn validate_e3_profile_matrix(runs: &[ProfileRun], require_bars: bool) -> Result
                         run.backend_profile
                     ));
                 }
+                if !recovery.checksum_validation_passed {
+                    errors.push(format!(
+                        "profile {} recovery checksum validation did not pass",
+                        run.backend_profile
+                    ));
+                }
                 if let Some(spec) = E3_PROFILE_SPECS
                     .iter()
                     .find(|spec| spec.backend_profile == run.backend_profile)
@@ -2327,7 +2335,7 @@ fn profile_row(
             );
             values.insert(
                 "recovery_checksum_validation_passed".into(),
-                serde_json::json!(true),
+                serde_json::json!(recovery.checksum_validation_passed),
             );
             values.insert(
                 "recovery_state_digest_before".into(),
@@ -3191,6 +3199,7 @@ fn synthetic_recovery(bar_met: bool, requires_snapshot: bool) -> RecoveryResult 
             request_bytes: 100,
             response_bytes: 100,
         },
+        checksum_validation_passed: true,
         bar_met,
     }
 }
@@ -3390,5 +3399,157 @@ fn canonical_recovery_command_counts_include_the_sqlite_crash_tail() {
         ) + 1,
         10_001,
         "SQLite snapshot load plus its committed crash tail is 10,001 commands"
+    );
+}
+
+fn live_e3_s3_env() -> Option<S3Env> {
+    let Ok(endpoint) = std::env::var("FIREWEED_S3_TEST_ENDPOINT") else {
+        eprintln!("TEST SKIPPED: FIREWEED_S3_TEST_ENDPOINT is required for live E3 recovery");
+        return None;
+    };
+    Some(S3Env {
+        endpoint,
+        bucket: std::env::var("FIREWEED_S3_TEST_BUCKET").unwrap_or_else(|_| "fireweed-test".into()),
+        access: std::env::var("FIREWEED_S3_TEST_ACCESS_KEY")
+            .unwrap_or_else(|_| "minioadmin".into()),
+        secret: std::env::var("FIREWEED_S3_TEST_SECRET_KEY")
+            .unwrap_or_else(|_| "minioadmin".into()),
+    })
+}
+
+fn assert_recovery_exact_contract(recovery: &RecoveryResult, requires_snapshot: bool) {
+    assert_eq!(recovery.resident, RELEASE_RESIDENT);
+    assert_eq!(recovery.load_batch, RELEASE_LOAD_BATCH);
+    assert_eq!(recovery.pending_after, RELEASE_RESIDENT);
+    assert_eq!(recovery.verified_items, RELEASE_RESIDENT);
+    assert_eq!(recovery.missing_items, 0);
+    assert_eq!(recovery.duplicate_items, 0);
+    assert_eq!(recovery.invalid_items, 0);
+    assert!(recovery.checksum_validation_passed);
+    assert!(
+        recovery
+            .replay_progress_samples
+            .windows(2)
+            .all(|pair| pair[0] <= pair[1])
+    );
+    assert_eq!(
+        recovery.start_seq + recovery.tail_replayed,
+        recovery.total_commands
+    );
+    assert_eq!(recovery.total_commands, recovery.command_count);
+    assert!(recovery.bounded_authority_index);
+    assert_eq!(recovery.resource_bounds.current_bytes, 0);
+    assert_eq!(recovery.resource_bounds.waiters, 0);
+    assert_eq!(
+        recovery.resource_bounds.task_count,
+        recovery.resource_bounds.task_limit
+    );
+    assert_eq!(
+        recovery.resource_bounds.object_page_limit,
+        STORE_OBJECT_PAGE_LIMIT
+    );
+    assert!(recovery.peak_replay_commands_buffered <= recovery.replay_command_page_limit);
+    assert!(recovery.peak_manifest_objects_buffered <= recovery.resource_bounds.object_page_limit);
+    if requires_snapshot {
+        assert!(recovery.snapshot_used);
+        assert!(recovery.start_seq > 0);
+        assert!(recovery.tail_replayed > 0);
+        assert!(recovery.tail_replayed < recovery.total_commands);
+    } else {
+        assert!(!recovery.snapshot_used);
+        assert_eq!(recovery.start_seq, 0);
+        assert_eq!(recovery.tail_replayed, recovery.total_commands);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(non_snake_case)]
+async fn TestE3RecoveryExactSnapshotTailReplay() {
+    let Some(s3) = live_e3_s3_env() else {
+        return;
+    };
+    S3BlobStore::new(
+        &s3.endpoint,
+        &s3.bucket,
+        &s3.access,
+        &s3.secret,
+        "us-east-1",
+    )
+    .expect("build S3 client")
+    .create_bucket()
+    .expect("create/ensure bucket");
+
+    let recovery = run_recovery::<SegmentedObjectLogSqliteBackend, _>(
+        &s3,
+        "object_log_sqlite_projection",
+        RELEASE_RESIDENT,
+        RELEASE_LOAD_BATCH,
+        true,
+        |store, projection_path, cfg| {
+            SegmentedObjectLogSqliteBackend::open_with_blob_store(store, projection_path, cfg)
+        },
+    )
+    .await;
+    assert_recovery_exact_contract(&recovery, true);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(non_snake_case)]
+async fn TestE3RecoveryExactGenesisReplay() {
+    let Some(s3) = live_e3_s3_env() else {
+        return;
+    };
+    S3BlobStore::new(
+        &s3.endpoint,
+        &s3.bucket,
+        &s3.access,
+        &s3.secret,
+        "us-east-1",
+    )
+    .expect("build S3 client")
+    .create_bucket()
+    .expect("create/ensure bucket");
+
+    let recovery = run_recovery::<SegmentedObjectLogInMemoryBackend, _>(
+        &s3,
+        "object_log_inmemory_projection",
+        RELEASE_RESIDENT,
+        RELEASE_LOAD_BATCH,
+        false,
+        |store, _projection_path, cfg| {
+            SegmentedObjectLogInMemoryBackend::open_with_blob_store(store, cfg)
+        },
+    )
+    .await;
+    assert_recovery_exact_contract(&recovery, false);
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestE3RecoveryRejectsInexactCommandRange() {
+    let mut run = synthetic_profile_run("object_log_sqlite_projection", "sqlite", true);
+    let recovery = run.recovery.as_mut().unwrap();
+    recovery.tail_replayed -= 1;
+    let errors = validate_e3_profile_matrix(&[run], true).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("recovery command range is not exact")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn TestE3RecoveryRejectsChecksumDrift() {
+    let mut run = synthetic_profile_run("object_log_sqlite_projection", "sqlite", true);
+    let recovery = run.recovery.as_mut().unwrap();
+    recovery.checksum_validation_passed = false;
+    let errors = validate_e3_profile_matrix(&[run], true).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("recovery checksum validation did not pass")),
+        "{errors:?}"
     );
 }

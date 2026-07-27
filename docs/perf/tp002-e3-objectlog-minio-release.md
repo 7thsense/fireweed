@@ -1,6 +1,6 @@
 # TP-002 E3 — live object-log projection matrix over MinIO
 
-**Status:** PREPARED; a new release run is required. There is no current E3 PASS artifact.
+**Status:** PREPARED; the exact 10M recovery proof is now encoded in the E3 test harness, but a new release run is still required to stamp a PASS artifact.
 
 The 2026-07-16 run is retained only as
 `docs/perf/evidence/tp002-e3-objectlog-minio-historical-invalid.jsonl`. It is invalid under the current
@@ -80,6 +80,12 @@ command, so its governed recovery command count is 10,001. Concurrent loader
 scheduling does not define queue order: the proof validates that the complete
 authoritative order is a duplicate-free permutation of the verified live state
 and that its page-for-page digest is identical before and after recovery.
+The exact snapshot-tail, genesis, inexact-command-range, and checksum-drift
+checks are enforced by `TestE3RecoveryExactSnapshotTailReplay`,
+`TestE3RecoveryExactGenesisReplay`,
+`TestE3RecoveryRejectsInexactCommandRange`, and
+`TestE3RecoveryRejectsChecksumDrift` in
+`crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs`.
 
 ## Exclusions and claim boundary
 
