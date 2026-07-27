@@ -63,7 +63,17 @@ On push to `main` (site-related paths) or `workflow_dispatch`:
 4. Playwright post-deploy: screenshots at common viewports + link crawl  
 
 Published URL (project Pages):  
-`https://telepathdata.github.io/fireweed/` → redirects to `/site/`.
+**https://telepathdata.github.io/fireweed/** → redirects to `/site/`.
+
+If organization policy blocks repository Actions, publish with the fallback:
+
+```sh
+bash scripts/site/publish_gh_pages.sh
+```
+
+That force-updates the `gh-pages` branch (legacy Pages source). When Actions is
+enabled, switch the Pages build type to **GitHub Actions** so `pages.yml` owns
+deploy + Playwright verification.
 
 ### Local stage + Playwright
 
