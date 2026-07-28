@@ -758,10 +758,12 @@ fn object_log_namespace(namespace: &str) -> String {
         .collect()
 }
 
-#[cfg(all(feature = "objectlog", feature = "postgres"))]
+#[cfg(feature = "postgres")]
 use sha2::{Digest, Sha256};
 
-#[cfg(all(feature = "objectlog", feature = "postgres"))]
+/// Deterministic, legal Postgres schema name derived from an isolation key.
+/// Used for object-log×postgres and other matrix cells that share a DSN.
+#[cfg(feature = "postgres")]
 fn derived_postgres_schema_name(namespace: &str) -> String {
     const PREFIX: &str = "fireweed_";
     const HASH_BYTES: usize = 27;
@@ -4540,7 +4542,9 @@ fn storage_open_needs_blocking_offload(config: &StorageConfig) -> bool {
 fn open_validated(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
     match (config.log, config.projection) {
         // --- memory log (Class B) ---
-        (LogConfig::Memory, projection) => open_memory_log_cell(projection, clock),
+        (LogConfig::Memory, projection) => {
+            open_memory_log_cell(projection, clock, &config.namespace)
+        }
 
         // --- sqlite log (Class A) ---
         (LogConfig::Sqlite { path }, projection) => open_sqlite_log_cell(path, projection, clock),
@@ -4622,11 +4626,13 @@ where
 fn open_memory_log_cell(
     projection: ProjectionStoreConfig,
     clock: Arc<dyn Clock>,
+    namespace: &str,
 ) -> EngineResult<Fireweed> {
     match projection {
         ProjectionStoreConfig::Memory => {
             #[cfg(feature = "memory")]
             {
+                let _ = namespace;
                 Ok(Fireweed::from_runtime(RuntimeCore::new(
                     Arc::new(fireweed_memory::composed_memory_backend()),
                     clock,
@@ -4634,7 +4640,7 @@ fn open_memory_log_cell(
             }
             #[cfg(not(feature = "memory"))]
             {
-                let _ = clock;
+                let _ = (clock, namespace);
                 Err(EngineError::Invalid(
                     "memory×memory requires the `memory` cargo feature",
                 ))
@@ -4643,6 +4649,7 @@ fn open_memory_log_cell(
         ProjectionStoreConfig::Sqlite { path } => {
             #[cfg(all(feature = "memory", feature = "sqlite"))]
             {
+                let _ = namespace;
                 use fireweed_engine::{ComposedBackend, InProcessControlPlane};
                 let path = path_utf8(&path)?;
                 let log = fireweed_projection::MemoryLog::new();
@@ -4655,7 +4662,7 @@ fn open_memory_log_cell(
             }
             #[cfg(not(all(feature = "memory", feature = "sqlite")))]
             {
-                let _ = (path, clock);
+                let _ = (path, clock, namespace);
                 Err(EngineError::Invalid(
                     "memory×sqlite requires the `memory` and `sqlite` cargo features",
                 ))
@@ -4666,7 +4673,11 @@ fn open_memory_log_cell(
             {
                 use fireweed_engine::{ComposedBackend, InProcessControlPlane};
                 let log = fireweed_projection::MemoryLog::new();
-                let projection = fireweed_postgres::PostgresRelational::connect(&url.0.0)?;
+                // Schema is derived from StorageConfig.namespace so reopen reuses the same
+                // projection while distinct configs stay isolated on a shared DSN.
+                let schema = derived_postgres_schema_name(&format!("memory_pg_{namespace}"));
+                let projection =
+                    fireweed_postgres::PostgresRelational::connect_in_schema(&url.0.0, &schema)?;
                 let backend = Arc::new(
                     ComposedBackend::new(log, projection, InProcessControlPlane::new())
                         .recover()?,
@@ -4675,7 +4686,7 @@ fn open_memory_log_cell(
             }
             #[cfg(not(all(feature = "memory", feature = "postgres")))]
             {
-                let _ = (url, clock);
+                let _ = (url, clock, namespace);
                 Err(EngineError::Invalid(
                     "memory×postgres requires the `memory` and `postgres` cargo features",
                 ))
@@ -4878,9 +4889,12 @@ fn open_object_log_cell(
                 }
             }
             ProjectionStoreConfig::Postgres { url } => {
-                #[cfg(feature = "postgres")]
+                #[cfg(all(feature = "objectlog", feature = "postgres"))]
                 {
-                    open_objectlog_postgres(
+                    // Call the blocking constructor directly. `open_objectlog_postgres` refuses
+                    // when a Tokio Handle is present; `open_async` already offloads this path to
+                    // `spawn_blocking`, where try_current() can still succeed.
+                    open_objectlog_postgres_blocking(
                         ObjectLogRuntimeConfig {
                             object_log,
                             authority,
@@ -4889,11 +4903,13 @@ fn open_object_log_cell(
                             segments,
                             namespace,
                             recovery,
-                        },
+                        }
+                        .into_storage_config(),
                         clock,
                     )
+                    .map(ComposedRuntime::into_fireweed)
                 }
-                #[cfg(not(feature = "postgres"))]
+                #[cfg(not(all(feature = "objectlog", feature = "postgres")))]
                 {
                     let _ = (
                         object_log,
@@ -4906,7 +4922,7 @@ fn open_object_log_cell(
                         clock,
                     );
                     Err(EngineError::Invalid(
-                        "object-log×postgres requires the `postgres` cargo feature",
+                        "object-log×postgres requires the `objectlog` and `postgres` cargo features",
                     ))
                 }
             }
@@ -5014,7 +5030,10 @@ pub fn open_sqlite_postgres_projection(
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed> {
     let log = fireweed_sqlite::SqliteLog::open(log_path)?;
-    let projection = fireweed_postgres::PostgresRelational::connect(projection_url)?;
+    // Unique schema per log path so matrix runs and reopens do not collide on a shared DSN.
+    let schema = derived_postgres_schema_name(&format!("sqlite_pg_{log_path}"));
+    let projection =
+        fireweed_postgres::PostgresRelational::connect_in_schema(projection_url, &schema)?;
     let backend = Arc::new(
         fireweed_engine::ComposedBackend::new(
             log,

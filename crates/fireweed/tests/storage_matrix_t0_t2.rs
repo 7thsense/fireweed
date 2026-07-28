@@ -370,11 +370,13 @@ fn build_config(cell: MatrixCell, root: &Path) -> StorageConfig {
         },
         LogAxis::Postgres => {
             let url = std::env::var("FIREWEED_PG_TEST_URL").expect("checked by skip_reason");
+            // Unique schema per open so sequential matrix cells do not share durable residue.
             let schema = format!(
-                "fw_t0t2_{}_{}_{}",
+                "fw_t0t2_{}_{}_{}_{}",
                 cell.log.name(),
                 cell.projection.name(),
-                std::process::id()
+                std::process::id(),
+                FIXTURE_ORDINAL.fetch_add(1, Ordering::Relaxed)
             );
             LogConfig::Postgres {
                 url: ConfigSecret::new(url),
@@ -437,10 +439,11 @@ fn build_config(cell: MatrixCell, root: &Path) -> StorageConfig {
         response_barrier: ResponseBarrier::Strict,
         segments: segments(),
         namespace: format!(
-            "t0t2-{}-{}-{}",
+            "t0t2-{}-{}-{}-{}",
             cell.log.name(),
             cell.projection.name(),
-            std::process::id()
+            std::process::id(),
+            FIXTURE_ORDINAL.fetch_add(1, Ordering::Relaxed)
         ),
         recovery: RecoveryPolicy::default(),
     };
