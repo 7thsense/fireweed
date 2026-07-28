@@ -13,7 +13,8 @@ ddx:
 **Type**: Rust binding contract
 **Version**: v0.21
 **Status**: accepted
-**Related**: API-001, API-004, ADR-009, ADR-022, ADR-023, TP-004
+**Related**: API-001, API-004, ADR-009, ADR-012, ADR-022, ADR-023, TP-004,
+orthogonal-storage-matrix-brief
 
 ## Purpose
 
@@ -24,9 +25,10 @@ queue semantics.
 
 ## Scope and boundaries
 
-- In scope: the supported Rust root type, constructors, configuration names,
-  inherent queue methods, runtime construction facts, projection maintenance,
-  export closure, compatibility, and structured errors.
+- In scope: the supported Rust root type, constructors, configuration names
+  (including full-matrix `StorageConfig`), inherent queue methods, runtime
+  construction facts, projection maintenance, export closure, compatibility,
+  and structured errors.
 - Out of scope: storage-port object safety, backend algorithms, RESP bindings,
   new queue semantics, and the backend-neutral historical query component.
 - Owning crate: `fireweed`.
@@ -49,10 +51,11 @@ an `Arc`. Clone semantics are not required for v0.21.
 
 The crate root requires downstream users to name only `Fireweed` and public
 Fireweed DTOs. It must not require `LibBackend`, `EmbeddedHandle`, a concrete
-backend, a profile-specific wrapper, or an internal workspace crate. Generic
-facade forms, retired root/configuration types, raw backend constructors, and
-the generic raw constructor MUST be unavailable to an ordinary external crate
-when v0.21 ships. First-party tests use a crate-private construction seam.
+backend, a composition-specific wrapper, or an internal workspace crate.
+Generic facade forms, retired root/configuration types, raw backend
+constructors, and the generic raw constructor MUST be unavailable to an
+ordinary external crate when v0.21 ships. First-party tests use a crate-private
+construction seam.
 
 Storage authority, projection implementation, response-barrier choice, and
 coordination topology are construction inputs only. `Fireweed` exposes no
@@ -64,15 +67,150 @@ authority exists.
 
 ### Construction
 
-The release-critical constructors preserve clock injection and return the same
-concrete type:
+#### Normative full-matrix surface: `StorageConfig`
+
+The product storage model is the orthogonal product of log and projection
+stores (see `orthogonal-storage-matrix-brief`). **Typed `StorageConfig` is the
+normative facade construction surface** for the full 5×3 matrix. Embedders
+assemble log × projection (+ optional control-plane, segment, recovery, and
+authority fields) and open one concrete `Fireweed`.
 
 ```rust
+/// Normative composition root for log × projection (+ related axes).
+pub struct StorageConfig {
+    pub log: LogConfig,
+    pub projection: ProjectionStoreConfig,
+    pub control_plane: Option<ControlPlaneConfig>,
+    /// Object-log peers only (`Filesystem`, `S3`); ignored for other logs.
+    pub authority: Option<ObjectLogAuthority>,
+    pub response_barrier: ResponseBarrier,
+    pub segments: SegmentConfig,
+    pub namespace: String,
+    pub recovery: RecoveryPolicy,
+}
+
+/// Public log axis (five first-class values).
+pub enum LogConfig {
+    Memory,
+    Sqlite { path: PathBuf },
+    Postgres {
+        url: ConfigSecret,
+        schema: Option<String>,
+        mode: PostgresMode,
+        node_id: Option<u8>,
+        coordination: Option<PostgresCoordinationConfig>,
+    },
+    /// Local directory tree / NAS path object log (same protocol as S3).
+    Filesystem { root: PathBuf },
+    /// S3-compatible object log.
+    S3 {
+        endpoint: String,
+        bucket: String,
+        region: String,
+        access_key_id: ConfigSecret,
+        secret_access_key: ConfigSecret,
+        allow_insecure_http: bool,
+    },
+}
+
+/// Public projection axis (three first-class values).
+pub enum ProjectionStoreConfig {
+    Memory,
+    Sqlite { path: PathBuf },
+    Postgres { url: ConfigSecret },
+}
+
+pub fn open(
+    config: StorageConfig,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Fireweed>;
+
+pub async fn open_async(
+    config: StorageConfig,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Fireweed>;
+```
+
+Every cell of the matrix is a valid selection:
+
+| Log \ Projection | `memory` | `sqlite` | `postgres` |
+| --- | --- | --- | --- |
+| `memory` | yes | yes | yes |
+| `sqlite` | yes | yes | yes |
+| `postgres` | yes | yes | yes |
+| `filesystem` | yes | yes | yes |
+| `s3` | yes | yes | yes |
+
+`Filesystem` and `S3` are first-class log backends that share the object-log
+protocol (segments, manifest, conditional write / authority, retention). They
+are not test-only substitutes for each other. There is **no** public profile
+SKU product type; pair strings may appear only in test IDs and historical
+evidence filenames.
+
+##### Durability classes
+
+Semantics across matrix cells differ by **durability class**, not by a second
+architecture:
+
+| Class | Logs | Client contract (summary) |
+| --- | --- | --- |
+| **A — Durable log** | `sqlite`, `postgres`, `filesystem`, `s3` | Success ⇒ durable on the log and visible in the serving projection; recovery via high-water + tail replay when the log remains |
+| **B — Memory log** | `memory` | Success ⇒ visible in the projection; durable **iff** the projection is durable (`sqlite` / `postgres`); after process death only the projection remains—no log rebuild, branch, or read-as-of from the log |
+
+Class B is a weaker persistence envelope, not “no LogStore.” Callers that need
+Class A guarantees MUST NOT select `LogConfig::Memory`.
+
+##### Environment variables
+
+Environment variables are **not** the facade construction surface. The library
+API accepts typed `StorageConfig` (or the convenience constructors below that
+map onto it). Container / process env injection, if used by a server or Helm
+chart, is an **adapter** that must deserialize into `StorageConfig` before
+composition. This contract does not define `FIREWEED_*` names as the embedder
+API.
+
+`StorageConfig` fields are construction inputs only. The resulting `Fireweed`
+does not expose the selected log, projection, authority, barrier, or backend
+objects.
+
+Validation (normative intent; names may share helpers with object-log
+config):
+
+- `LogConfig::Filesystem` requires `ObjectLogAuthority::NativeConditionalWrite`
+  (or equivalent native conditional write) when authority is required for the
+  composition.
+- `LogConfig::S3` may use native conditional creation only when that operation
+  is atomic for the configured store; otherwise callers must select PostgreSQL
+  authority. Garage compositions use PostgreSQL authority regardless of
+  whether their disposable projection is SQLite or PostgreSQL.
+- Object-log compositions with a Postgres projection require
+  `ResponseBarrier::Strict` unless a later contract explicitly widens this.
+- Unsupported or mismatched field combinations return
+  `EngineError::Unavailable` (or `EngineError::Invalid` for clearly malformed
+  input) before opening either store; no partially opened `Fireweed` escapes.
+
+`ConfigSecret::new`, `SegmentConfig::new`, and `RecoveryPolicy::default`
+preserve the corresponding current validation behavior. `ConfigSecret` exposes
+no plaintext accessor and its `Debug` implementation always redacts the
+contained value.
+
+#### Convenience constructors (map onto `StorageConfig`)
+
+The release-critical convenience constructors preserve clock injection and
+return the same concrete type. Each is a **subset constructor** over
+`StorageConfig` for a common cell or object-log pairing; they are not a
+separate product model.
+
+```rust
+/// Class B: memory log × memory projection.
 pub fn open_memory(clock: Arc<dyn Clock>) -> Fireweed;
+/// Class A: sqlite log × sqlite projection (shared path).
 pub fn open_sqlite(path: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed>;
 pub fn open_sqlite_relational(path: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed>;
+/// Class A: filesystem object log with a default local composition.
 pub fn open_objectlog(root: impl Into<PathBuf>, clock: Arc<dyn Clock>)
     -> EngineResult<Fireweed>;
+/// Class A: postgres log × postgres projection (common defaults).
 pub fn open_postgres(url: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed>;
 pub async fn open_postgres_async(url: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed>;
 pub fn open_postgres_coordinated(
@@ -89,6 +227,8 @@ pub async fn open_postgres_runtime_async(
     config: PostgresRuntimeConfig,
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed>;
+/// Object-log conveniences: map `ObjectLogRuntimeConfig` → `StorageConfig`
+/// (`Local` → `LogConfig::Filesystem`, `S3Compatible` → `LogConfig::S3`).
 pub fn open_objectlog_postgres(
     config: ObjectLogRuntimeConfig,
     clock: Arc<dyn Clock>,
@@ -104,7 +244,9 @@ pub fn open_objectlog_sqlite(
 ```
 
 Advanced PostgreSQL deployments may select their storage shape, schema, node
-identity, and coordination topology at the composition root:
+identity, and coordination topology at the composition root. Prefer
+`LogConfig::Postgres { … }` on `StorageConfig` for new code; the types below
+remain the convenience shape used by `open_postgres_runtime*`:
 
 ```rust
 pub enum PostgresMode { LogReplay, Relational }
@@ -128,7 +270,11 @@ expose the selected mode, schema, node identity, coordination topology, or
 backend objects. `open_postgres` and `open_postgres_coordinated` remain the
 convenience constructors for their common configurations.
 
-The composed object-log configuration is:
+`ObjectLogRuntimeConfig` remains the structured convenience for object-log
+compositions that already name storage, authority, projection, barrier,
+segments, namespace, and recovery together. It MUST be describable as a
+mapping into `StorageConfig` (filesystem/S3 log + projection store + shared
+fields). New full-matrix work SHOULD use `StorageConfig` directly.
 
 ```rust
 pub struct ObjectLogRuntimeConfig {
@@ -146,6 +292,7 @@ pub enum ObjectLogAuthority {
     Postgres { url: ConfigSecret },
 }
 
+/// Convenience object-log storage; maps to `LogConfig::Filesystem` / `S3`.
 pub enum ObjectLogStorage {
     Local { root: PathBuf },
     S3Compatible {
@@ -158,6 +305,9 @@ pub enum ObjectLogStorage {
     },
 }
 
+/// Convenience projection subset used by object-log constructors.
+/// Full matrix projection selection is `ProjectionStoreConfig` (includes
+/// `Memory`).
 pub enum ProjectionConfig {
     Sqlite { path: PathBuf },
     Postgres { url: ConfigSecret },
@@ -183,11 +333,8 @@ callers must select PostgreSQL authority. Garage compositions use PostgreSQL
 authority regardless of whether their disposable projection is SQLite or
 PostgreSQL. The selected authority remains private after construction.
 
-`ConfigSecret::new`, `SegmentConfig::new`, `RecoveryPolicy::default`, and
-`ObjectLogRuntimeConfig::validate` preserve the corresponding current
-validation behavior. `ConfigSecret` exposes no plaintext accessor and its
-`Debug` implementation always redacts the contained value.
-`open_objectlog_sqlite` requires
+`ObjectLogRuntimeConfig::validate` preserves the corresponding current
+validation behavior. `open_objectlog_sqlite` requires
 `ProjectionConfig::Sqlite`; the Postgres constructors require
 `ProjectionConfig::Postgres`; a mismatched variant returns
 `EngineError::Unavailable` before opening either store. The Postgres projection
@@ -200,7 +347,7 @@ constructors additionally require `ResponseBarrier::Strict`; they return
 `EmbeddedDurabilityConfig`, and the `open_embedded*` functions are not supported
 facade names. ADR-023 requires a hard pre-release cutover with no deprecated
 alias layer. These Rust names MUST be replaced for v0.21. Every constructor
-returns `Fireweed`; no profile-specific wrapper type is returned.
+returns `Fireweed`; no composition-specific wrapper type is returned.
 
 ### Queue operations
 
@@ -211,8 +358,9 @@ composition MUST NOT turn an inherent method into
 `EngineError::Unavailable`; a composition that cannot implement the complete
 surface is unsupported and MUST NOT be exposed by API-005. The only optional
 handle is `projection_control()`, because it represents a concern absent from
-profiles without a disposable projection. Capability inspection may describe
-execution characteristics, but MUST NOT excuse missing core functionality.
+compositions without a disposable projection. Capability inspection may
+describe execution characteristics, but MUST NOT excuse missing core
+functionality.
 
 | Family | Methods |
 | --- | --- |
@@ -326,11 +474,12 @@ an `.await` is supported.
 
 The `fireweed` crate re-exports every named public input and output type used by
 the methods and constructors above. This includes `ConfigSecret`,
-`ControlPlaneConfig`, `ObjectLogAuthority`, `ObjectLogRuntimeConfig`,
-`ObjectLogStorage`, `OwnerId`, `ProjectionConfig`, `ProjectionControl`, `ProjectionControlCapabilities`,
+`ControlPlaneConfig`, `LogConfig`, `ObjectLogAuthority`,
+`ObjectLogRuntimeConfig`, `ObjectLogStorage`, `OwnerId`, `ProjectionConfig`,
+`ProjectionStoreConfig`, `ProjectionControl`, `ProjectionControlCapabilities`,
 `ProjectionRebuild`, `ProjectionVerification`, `RecoveryAction`,
-`RecoveryPolicy`, `ResponseBarrier`, and `SegmentConfig`. For the Snorri
-migration it also includes all current facade DTOs plus
+`RecoveryPolicy`, `ResponseBarrier`, `SegmentConfig`, and `StorageConfig`. For
+the Snorri migration it also includes all current facade DTOs plus
 `CompoundIndexDef`, `CompoundIndexField`, `IndexDeclaration`, `IndexType`,
 `QueueIndex`, and `WorkerId`. A compile fixture depending only on `fireweed` is
 the enforcement mechanism.
@@ -376,8 +525,9 @@ non-generic `Fireweed` using these operations:
 `hot_projection_capabilities`, `range_scan`, `grouped_aggregate`, and
 `declared_bucket_segment`.
 
-Object-log profiles additionally consume `projection_control` and its four
-operations. No Snorri public or private type may retain a `LibBackend` bound.
+Object-log compositions (filesystem / s3 log with a disposable projection)
+additionally consume `projection_control` and its four operations. No Snorri
+public or private type may retain a `LibBackend` bound.
 
 The Snorri-critical method signatures MUST remain type-equivalent in parameter
 ownership and result shape to the current public facade contract. Through v0.21.0
@@ -419,6 +569,9 @@ pub async fn declared_bucket_segment(&self, queue: &QueueKey, request: DeclaredB
 
 - API-001 and API-004 govern queue semantics. API-005 governs Rust ownership,
   names, signatures, construction, and export closure.
+- `orthogonal-storage-matrix-brief` governs the public log × projection matrix
+  and durability classes; API-005 is the Rust binding of that construction
+  model via `StorageConfig`.
 - Returning `Fireweed` is a deliberate source break from inferred
   `Fireweed<impl LibBackend>` return types. Migration guidance MUST show removal
   of downstream backend parameters.
@@ -427,6 +580,9 @@ pub async fn declared_bucket_segment(&self, queue: &QueueKey, request: DeclaredB
 - Adding a `Fireweed` method or capability bit is compatible. Removing or
   changing a supported method or DTO requires a breaking pre-1.0 minor and
   migration guidance.
+- Convenience constructors and `ObjectLogRuntimeConfig` remain compatible
+  subset surfaces; full-matrix cells that those conveniences do not cover are
+  opened through `StorageConfig` / `open` / `open_async`.
 
 ## Error semantics
 
@@ -464,6 +620,12 @@ implementation strategy. It is not part of this contract.
 ## Validation checklist
 
 - [ ] `Fireweed` is concrete, `Send + Sync`, and sufficient behind `Arc`.
+- [ ] `StorageConfig` / `LogConfig` / `ProjectionStoreConfig` document the full
+      5×3 matrix; filesystem and s3 are first-class logs; no profile SKU model.
+- [ ] Durability Class A vs Class B is documented (memory log = Class B).
+- [ ] Environment variables are not the facade construction surface.
+- [ ] `ObjectLogRuntimeConfig` and `open_*` conveniences map to / are described
+      as conveniences over `StorageConfig`.
 - [ ] Every existing supported facade family is forwarded or explicitly
       excluded by this contract.
 - [ ] Snorri's exact method and named-type closure compiles from `fireweed`
