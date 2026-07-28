@@ -112,6 +112,11 @@ impl ProductDurabilityClass {
 /// Conformance capability claims a matrix cell may make in evidence.
 ///
 /// See `docs/helix/04-build/storage-matrix-conformance-classes.md` §2.
+///
+/// Fields are public for inspection and under-claiming, but **declaring** claims
+/// for a cell (CI evidence, suite registration) MUST go through
+/// [`validate_claims_for_cell`] or [`register_suite_claims`]. Those APIs enforce
+/// the Class B hard rule: memory log never claims [`Self::durable_log_replay`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CellConformanceClaims {
     /// Substrate-independent core suite — every cell.
@@ -130,6 +135,161 @@ pub struct CellConformanceClaims {
     ///
     /// On Class B this is **not** durable log-replay and must not be reported as such.
     pub in_process_log_read: bool,
+}
+
+impl CellConformanceClaims {
+    /// Empty claim set (no suites asserted). Always legal for any cell.
+    pub const fn none() -> Self {
+        Self {
+            core: false,
+            durable_log_replay: false,
+            projection_reopen: false,
+            relational_reconnect: false,
+            eventual_apply: false,
+            in_process_log_read: false,
+        }
+    }
+
+    /// True when every flag set in `self` is also set in `allowed` (under-claiming OK).
+    pub const fn is_subset_of(self, allowed: Self) -> bool {
+        (!self.core || allowed.core)
+            && (!self.durable_log_replay || allowed.durable_log_replay)
+            && (!self.projection_reopen || allowed.projection_reopen)
+            && (!self.relational_reconnect || allowed.relational_reconnect)
+            && (!self.eventual_apply || allowed.eventual_apply)
+            && (!self.in_process_log_read || allowed.in_process_log_read)
+    }
+}
+
+/// Why a claimed suite set is illegal for a matrix cell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IllegalConformanceClaim {
+    /// Cell id (`"memory×sqlite"`).
+    pub cell_id: String,
+    /// Product class of that cell.
+    pub product_class: ProductDurabilityClass,
+    /// Capability flag that was illegally asserted.
+    pub flag: &'static str,
+    /// Human-readable reason (stable for tests / CI messages).
+    pub reason: &'static str,
+}
+
+impl std::fmt::Display for IllegalConformanceClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "illegal conformance claim on {} ({}): {} — {}",
+            self.cell_id,
+            self.product_class.as_str(),
+            self.flag,
+            self.reason
+        )
+    }
+}
+
+impl std::error::Error for IllegalConformanceClaim {}
+
+/// Validated suite-registration record for one matrix cell.
+///
+/// Only constructible via [`register_suite_claims`], so Class B cannot carry
+/// `durable_log_replay` through any registration path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegisteredSuiteClaims {
+    cell: MatrixCell,
+    claims: CellConformanceClaims,
+}
+
+impl RegisteredSuiteClaims {
+    pub const fn cell(self) -> MatrixCell {
+        self.cell
+    }
+
+    pub const fn claims(self) -> CellConformanceClaims {
+        self.claims
+    }
+
+    pub const fn product_durability_class(self) -> ProductDurabilityClass {
+        self.cell.product_durability_class()
+    }
+}
+
+/// Validate that `claims` does not assert any capability the cell may not claim.
+///
+/// **Hard rule (storage-matrix-completion-brief §1.2 / conformance-classes §2.2):**
+/// Class B (`log=memory`) must never claim `durable_log_replay`.
+///
+/// Under-claiming is allowed (register a subset of the cell's max allowed set).
+pub fn validate_claims_for_cell(
+    cell: MatrixCell,
+    claims: &CellConformanceClaims,
+) -> Result<(), IllegalConformanceClaim> {
+    // Explicit Class B hard rule first — clearest diagnostic for the product ban.
+    if cell.product_durability_class().is_class_b() && claims.durable_log_replay {
+        return Err(IllegalConformanceClaim {
+            cell_id: cell.id(),
+            product_class: ProductDurabilityClass::ClassB,
+            flag: "durable_log_replay",
+            reason: "Class B (memory log) must not claim durable_log_replay; after process death only the projection remains",
+        });
+    }
+
+    let allowed = cell.claims();
+    if claims.is_subset_of(allowed) {
+        return Ok(());
+    }
+
+    // Name the first over-claimed flag for a precise error (order matches struct fields).
+    let (flag, reason) = if claims.core && !allowed.core {
+        ("core", "cell does not allow core claim")
+    } else if claims.durable_log_replay && !allowed.durable_log_replay {
+        (
+            "durable_log_replay",
+            "cell does not allow durable_log_replay",
+        )
+    } else if claims.projection_reopen && !allowed.projection_reopen {
+        (
+            "projection_reopen",
+            "cell does not allow projection_reopen (projection is not durable)",
+        )
+    } else if claims.relational_reconnect && !allowed.relational_reconnect {
+        (
+            "relational_reconnect",
+            "cell does not allow relational_reconnect",
+        )
+    } else if claims.eventual_apply && !allowed.eventual_apply {
+        (
+            "eventual_apply",
+            "cell does not allow eventual_apply (not a Class A object-log peer)",
+        )
+    } else if claims.in_process_log_read && !allowed.in_process_log_read {
+        (
+            "in_process_log_read",
+            "cell does not allow in_process_log_read",
+        )
+    } else {
+        ("unknown", "claims are not a subset of the cell allow-list")
+    };
+
+    Err(IllegalConformanceClaim {
+        cell_id: cell.id(),
+        product_class: cell.product_durability_class(),
+        flag,
+        reason,
+    })
+}
+
+/// Register suite capability claims for a public matrix cell.
+///
+/// This is the only supported registration entry point: it refuses any set that
+/// [`validate_claims_for_cell`] rejects, including the Class B
+/// `durable_log_replay` ban. Adapters and CI evidence builders should call this
+/// (or the validator) rather than treating raw [`CellConformanceClaims`] as trusted.
+pub fn register_suite_claims(
+    cell: MatrixCell,
+    claims: CellConformanceClaims,
+) -> Result<RegisteredSuiteClaims, IllegalConformanceClaim> {
+    validate_claims_for_cell(cell, &claims)?;
+    Ok(RegisteredSuiteClaims { cell, claims })
 }
 
 /// One public 5×3 matrix cell.
@@ -153,7 +313,9 @@ impl MatrixCell {
         }
     }
 
-    /// Capability claims this cell is allowed to make.
+    /// Maximum capability claims this cell is allowed to make.
+    ///
+    /// **Hard rule:** Class B never includes `durable_log_replay`.
     pub const fn claims(self) -> CellConformanceClaims {
         let class_a = self.product_durability_class().is_class_a();
         let durable_proj = self.projection.is_durable();
@@ -341,5 +503,113 @@ mod tests {
         assert_eq!(ProductDurabilityClass::ClassA.as_str(), "Class A");
         assert_eq!(ProductDurabilityClass::ClassB.as_str(), "Class B");
         assert_eq!(MatrixLog::Filesystem.as_str(), "filesystem");
+    }
+
+    /// Abusive construction: raw claims with durable_log_replay must not register on Class B.
+    #[test]
+    fn register_suite_claims_rejects_class_b_durable_log_replay() {
+        for projection in MatrixProjection::ALL {
+            let cell = MatrixCell::new(MatrixLog::Memory, projection);
+            let mut abused = CellConformanceClaims::none();
+            abused.core = true;
+            abused.durable_log_replay = true; // illegal for memory log
+
+            let err = register_suite_claims(cell, abused).expect_err(
+                "memory log must not register durable_log_replay",
+            );
+            assert_eq!(err.flag, "durable_log_replay");
+            assert_eq!(err.product_class, ProductDurabilityClass::ClassB);
+            assert!(
+                err.reason.contains("Class B") || err.reason.contains("memory log"),
+                "reason should name Class B / memory log: {}",
+                err.reason
+            );
+
+            let validate_err = validate_claims_for_cell(cell, &abused)
+                .expect_err("validator must agree with registration");
+            assert_eq!(validate_err.flag, "durable_log_replay");
+        }
+    }
+
+    /// Even when other Class B flags are correctly set, durable_log_replay remains banned.
+    #[test]
+    fn register_suite_claims_rejects_class_b_mixed_with_projection_reopen() {
+        let cell = MatrixCell::new(MatrixLog::Memory, MatrixProjection::Sqlite);
+        let mut claims = cell.claims();
+        assert!(!claims.durable_log_replay);
+        claims.durable_log_replay = true; // flip the hard-rule bit
+
+        let err = register_suite_claims(cell, claims).unwrap_err();
+        assert_eq!(err.flag, "durable_log_replay");
+        assert_eq!(err.cell_id, "memory×sqlite");
+    }
+
+    #[test]
+    fn register_suite_claims_accepts_canonical_allow_list_for_every_cell() {
+        for cell in all_matrix_cells() {
+            let registered = register_suite_claims(cell, cell.claims())
+                .unwrap_or_else(|e| panic!("canonical claims must register for {}: {e}", cell.id()));
+            assert_eq!(registered.cell(), cell);
+            assert_eq!(registered.claims(), cell.claims());
+            if cell.product_durability_class().is_class_b() {
+                assert!(!registered.claims().durable_log_replay);
+            }
+        }
+    }
+
+    #[test]
+    fn register_suite_claims_allows_under_claiming() {
+        let cell = MatrixCell::new(MatrixLog::Sqlite, MatrixProjection::Sqlite);
+        let core_only = CellConformanceClaims {
+            core: true,
+            durable_log_replay: false,
+            projection_reopen: false,
+            relational_reconnect: false,
+            eventual_apply: false,
+            in_process_log_read: false,
+        };
+        let registered = register_suite_claims(cell, core_only).expect("under-claim ok");
+        assert!(registered.claims().core);
+        assert!(!registered.claims().durable_log_replay);
+    }
+
+    #[test]
+    fn register_suite_claims_accepts_class_a_durable_log_replay() {
+        let cell = MatrixCell::new(MatrixLog::Filesystem, MatrixProjection::Memory);
+        let claims = CellConformanceClaims {
+            core: true,
+            durable_log_replay: true,
+            projection_reopen: false,
+            relational_reconnect: false,
+            eventual_apply: false,
+            in_process_log_read: true,
+        };
+        let registered = register_suite_claims(cell, claims).expect("Class A may claim log replay");
+        assert!(registered.claims().durable_log_replay);
+        assert_eq!(
+            registered.product_durability_class(),
+            ProductDurabilityClass::ClassA
+        );
+    }
+
+    #[test]
+    fn register_suite_claims_rejects_eventual_apply_on_memory_log() {
+        let cell = MatrixCell::new(MatrixLog::Memory, MatrixProjection::Memory);
+        let mut claims = CellConformanceClaims::none();
+        claims.eventual_apply = true;
+        let err = register_suite_claims(cell, claims).unwrap_err();
+        assert_eq!(err.flag, "eventual_apply");
+    }
+
+    #[test]
+    fn every_class_b_cell_canonical_claims_pass_validator() {
+        for cell in all_matrix_cells() {
+            if cell.product_durability_class().is_class_b() {
+                validate_claims_for_cell(cell, &cell.claims()).unwrap_or_else(|e| {
+                    panic!("Class B allow-list must be self-consistent for {}: {e}", cell.id())
+                });
+                assert!(!cell.claims().durable_log_replay);
+            }
+        }
     }
 }
