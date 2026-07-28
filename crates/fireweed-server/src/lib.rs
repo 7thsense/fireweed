@@ -4614,7 +4614,7 @@ mod class_b_memory_log_tests {
         PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
         ProjectionStoreConfig, QueueDefinition, QueueId, QueueKey, RecoveryPolicy,
         RecurrencePolicy, ResponseBarrier, RetryPolicy, SegmentConfig, StorageConfig, SystemClock,
-        TenantId, open_async,
+        TenantId, open, open_async,
     };
     use fireweed_conformance::matrix_classes::{
         CellConformanceClaims, MatrixCell, MatrixLog, MatrixProjection, ProductDurabilityClass,
@@ -4796,7 +4796,7 @@ mod class_b_memory_log_tests {
         );
     }
 
-    /// Full T0–T3 body for one Class B cell via `fireweed::open_async(StorageConfig)`.
+    /// Full T0–T3 body for one Class B cell via [`fireweed::open`] / [`fireweed::open_async`].
     async fn run_class_b_cell_t0_t3(proj: ClassBProjection) {
         let cell_id = format!("memory×{}", proj.name());
 
@@ -4825,9 +4825,16 @@ mod class_b_memory_log_tests {
         );
         cfg.validate()
             .unwrap_or_else(|e| panic!("{cell_id} T0 validate: {e:?}"));
-        let fireweed = open_async(cfg.clone(), Arc::clone(&clock) as _)
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T0 open(StorageConfig): {e:?}"));
+        // Normative construct path: `fireweed::open(StorageConfig)` (sync). Postgres projection
+        // may touch the sync client under an active Tokio runtime — use open_async there.
+        let fireweed = if matches!(proj, ClassBProjection::Postgres) {
+            open_async(cfg.clone(), Arc::clone(&clock) as _)
+                .await
+                .unwrap_or_else(|e| panic!("{cell_id} T0 open_async(StorageConfig): {e:?}"))
+        } else {
+            open(cfg.clone(), Arc::clone(&clock) as _)
+                .unwrap_or_else(|e| panic!("{cell_id} T0 open(StorageConfig): {e:?}"))
+        };
 
         // --- T1 Lifecycle: create_queue → push → claim → complete; push → claim → fail ---
         fireweed
