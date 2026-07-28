@@ -1,0 +1,25 @@
+# Fireweed Queue CI values: first-class s3 log × postgres projection (public StorageConfig axes).
+# Class A cell; S3 and projection DSNs are injected via Secret (never fixture credentials).
+storage:
+  log:
+    backend: s3
+    objectLog:
+      s3:
+        endpoint: https://s3.example.com
+        bucket: fireweed-matrix
+        region: us-east-1
+        allowInsecureHttp: false
+        credentials:
+          existingSecret: fireweed-objectlog-s3
+          accessKeyIdKey: access-key-id
+          secretAccessKeyKey: secret-access-key
+  projection:
+    backend: postgres
+    postgres:
+      existingSecret: fireweed-postgres-projection
+      databaseUrlKey: database-url
+persistence:
+  enabled: false
+image:
+  tag: ci
+replicaCount: 1

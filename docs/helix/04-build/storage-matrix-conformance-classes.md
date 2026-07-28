@@ -138,7 +138,7 @@ for `postgres` axis cells.
 | Shape | What it proves | Where today | Env / fixtures |
 |-------|----------------|-------------|----------------|
 | **Filesystem default** | Class A object-log protocol + local durability without cloud deps; sqlite/memory cells | PR `ci.yml` functional / fast gates; adapter `cargo test` with temp dirs / `FIREWEED_OBJECT_LOG_ROOT` | No external services; local disk only |
-| **S3-compatible sample** | Same protocol over real S3 API (MinIO / Garage / cloud); multi-node / shared-store shapes | Helm gate S3 value fixtures; kind/deploy sample paths; release/nightly when configured | Endpoint, bucket, static keys (or IAM); never claim S3 without a live sample |
+| **S3-compatible sample** | Same protocol over real S3 API (MinIO / Garage / cloud); multi-node / shared-store shapes; **required** product jobs must not skip `s3×{memory,sqlite,postgres}` | Helm gate s3 cell values; kind/deploy sample paths; see `scripts/ci/s3-matrix-job-requirements.md` | `FIREWEED_S3_TEST_ENDPOINT` (+ bucket/region/keys); native create-only; never claim S3 without a live sample |
 | **Postgres feature jobs** | All cells with `postgres` log and/or `postgres` projection | `release.yml` (Postgres 16 service); adapter tests env-gated | `FIREWEED_PG_TEST_URL`; build with `--features postgres` (and `objectlog` where needed) |
 
 ### 3.2 Suggested cargo commands (local / CI)

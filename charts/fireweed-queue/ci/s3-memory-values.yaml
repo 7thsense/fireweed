@@ -1,0 +1,23 @@
+# Fireweed Queue CI values: first-class s3 log × memory projection (public StorageConfig axes).
+# Class A cell; S3 credentials are injected via Secret (never fixture credentials).
+# Process-local projection rebuilds from the durable S3 log on open.
+storage:
+  log:
+    backend: s3
+    objectLog:
+      s3:
+        endpoint: https://s3.example.com
+        bucket: fireweed-matrix
+        region: us-east-1
+        allowInsecureHttp: false
+        credentials:
+          existingSecret: fireweed-objectlog-s3
+          accessKeyIdKey: access-key-id
+          secretAccessKeyKey: secret-access-key
+  projection:
+    backend: memory
+persistence:
+  enabled: false
+image:
+  tag: ci
+replicaCount: 1
