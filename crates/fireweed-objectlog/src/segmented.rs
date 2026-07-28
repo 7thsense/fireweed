@@ -8954,9 +8954,89 @@ mod manifest_deletion_watermark_tests {
     use fireweed_conformance::{
         envelope, item, qdef as conformance_qdef, shard as conformance_shard,
     };
-    use fireweed_engine::{PushCommand, QueueCommand};
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering, Ordering};
+    use fireweed_engine::{CommandEnvelope, PushCommand, QueueCommand};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
+
+    /// Test double: optionally stalls the next recovery-index node GET so concurrent
+    /// reclaim/seal races can be observed under a live recovery cursor.
+    #[derive(Default)]
+    struct StalledRecoveryNodeStore {
+        inner: InMemoryBlobStore,
+        block_next_node_get: AtomicBool,
+        stall: (Mutex<(bool, bool)>, Condvar),
+    }
+
+    impl StalledRecoveryNodeStore {
+        fn block_next_recovery_node_get(&self) {
+            self.block_next_node_get.store(true, Ordering::SeqCst);
+        }
+
+        fn wait_until_stalled(&self) {
+            let (state, changed) = &self.stall;
+            let mut state = state.lock().unwrap();
+            while !state.0 {
+                state = changed.wait(state).unwrap();
+            }
+        }
+
+        fn release_stalled_get(&self) {
+            let (state, changed) = &self.stall;
+            let mut state = state.lock().unwrap();
+            state.1 = true;
+            changed.notify_all();
+        }
+    }
+
+    impl BlobStore for StalledRecoveryNodeStore {
+        fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
+            self.inner.put(key, body)
+        }
+
+        fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
+            self.inner.put_if_absent(key, body)
+        }
+
+        fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
+            if key.contains("/recovery_index/v1/")
+                && self.block_next_node_get.swap(false, Ordering::SeqCst)
+            {
+                let (state, changed) = &self.stall;
+                let mut state = state.lock().unwrap();
+                state.0 = true;
+                changed.notify_all();
+                while !state.1 {
+                    state = changed.wait(state).unwrap();
+                }
+            }
+            self.inner.get(key)
+        }
+
+        fn delete(&self, key: &str) -> EngineResult<bool> {
+            self.inner.delete(key)
+        }
+
+        fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
+            self.inner.list(prefix)
+        }
+
+        fn stats(&self, prefix: &str) -> EngineResult<ObjectStoreStats> {
+            self.inner.stats(prefix)
+        }
+    }
+
+    fn pushes(n: u64) -> Vec<CommandEnvelope> {
+        (0..n)
+            .map(|i| {
+                envelope(
+                    QueueCommand::Push(PushCommand {
+                        items: vec![item(&format!("{i}"), &format!("k{i}"), i as i64)],
+                    }),
+                    vec![],
+                )
+            })
+            .collect()
+    }
 
     fn indexed_recovery_work(command_count: u64) -> (usize, usize) {
         let store = Arc::new(InMemoryBlobStore::new());

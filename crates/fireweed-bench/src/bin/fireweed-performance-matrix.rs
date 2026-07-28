@@ -311,19 +311,7 @@ fn object_config(
             path: root.join("projection.sqlite"),
         }
     };
-    let authority = if s3_cell {
-        ObjectLogAuthority::Postgres {
-            url: ConfigSecret::new(
-                cfg.postgres
-                    .as_ref()
-                    .ok_or("PostgreSQL configuration missing for S3 object-log authority")?
-                    .url
-                    .as_str(),
-            ),
-        }
-    } else {
-        ObjectLogAuthority::NativeConditionalWrite
-    };
+    let authority = ObjectLogAuthority::NativeConditionalWrite;
     let cleanup = match (s3_cell, postgres_projection) {
         (true, true) => CleanupRecipe::S3AndPostgres(SchemaKind::ObjectLog),
         (true, false) => CleanupRecipe::S3,

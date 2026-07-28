@@ -6442,7 +6442,6 @@ mod s3_object_log_matrix_tests {
 /// | **T4 Deploy** | Helm CI values under `charts/fireweed-queue/ci/sqlite-*-values.yaml` (+ helm-gate) |
 #[cfg(test)]
 mod sqlite_log_matrix_tests {
-    use super::*;
     use fireweed_conformance::fault::{
         AcEvidence, TxnCaps, ac_txn_1_success_durable_visible, ac_txn_2_rejection_no_effect,
         ac_txn_3_unknown_outcome_replay, write_evidence,
@@ -6737,7 +6736,6 @@ mod sqlite_log_matrix_tests {
 
         cleanup_root(&root);
     }
-
 
     fn record_outcome(
         records: &mut Vec<AcEvidence>,
@@ -7214,7 +7212,11 @@ mod sqlite_log_matrix_tests {
 /// evidence rows (n/a only when no prior pass evidence exists).
 #[cfg(test)]
 mod postgres_log_matrix_tests {
-    use super::*;
+    // Helpers and AC-TXN imports are only exercised under `--features postgres`.
+    // Default clippy/test builds still compile the module (composition-root source
+    // asserts + not-postgres stubs) and must not trip unused/dead-code lint.
+    #![allow(dead_code, unused_imports)]
+
     use fireweed_conformance::fault::{
         AcEvidence, TxnCaps, ac_txn_1_success_durable_visible, ac_txn_2_rejection_no_effect,
         ac_txn_3_unknown_outcome_replay, write_evidence,

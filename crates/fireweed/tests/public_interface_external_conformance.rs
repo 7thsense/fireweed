@@ -857,9 +857,7 @@ async fn garage_s3_postgres_strict_public_interface() {
     let mut schema = PostgresSchema::new(postgres_url.clone(), derived_postgres_schema(&namespace));
     let runtime = objectlog_config(
         s3_storage(&config),
-        ObjectLogAuthority::Postgres {
-            url: ConfigSecret::new(postgres_url.clone()),
-        },
+        ObjectLogAuthority::NativeConditionalWrite,
         ProjectionConfig::Postgres {
             url: ConfigSecret::new(postgres_url.clone()),
         },
@@ -897,15 +895,12 @@ async fn garage_s3_postgres_strict_public_interface() {
 
 async fn run_s3_sqlite(cell: &str, barrier: ResponseBarrier) {
     let config = S3Config::load();
-    let postgres_url = required_env("FIREWEED_PG_TEST_URL");
     let root = FixtureRoot::new(cell);
     let namespace = unique_name(cell);
     let mut objects = S3Namespace::new(&config, &namespace);
     let runtime = objectlog_config(
         s3_storage(&config),
-        ObjectLogAuthority::Postgres {
-            url: ConfigSecret::new(postgres_url),
-        },
+        ObjectLogAuthority::NativeConditionalWrite,
         ProjectionConfig::Sqlite {
             path: root.path().join("projection.sqlite"),
         },

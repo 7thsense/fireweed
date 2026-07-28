@@ -583,9 +583,7 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
             secret_access_key: ConfigSecret::new(secret),
             allow_insecure_http,
         },
-        authority: ObjectLogAuthority::Postgres {
-            url: ConfigSecret::new(pg_url.clone()),
-        },
+        authority: ObjectLogAuthority::NativeConditionalWrite,
         projection: ProjectionConfig::Postgres {
             url: ConfigSecret::new(pg_url.clone()),
         },

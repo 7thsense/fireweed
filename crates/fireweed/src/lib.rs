@@ -827,8 +827,9 @@ pub enum ObjectLogStorage {
 
 /// Linearization authority for object-log manifest publication.
 ///
-/// S3-compatible stores that do not provide atomic conditional object creation must use the PostgreSQL
-/// authority. Local filesystem storage uses its native conditional-create implementation.
+/// Public matrix cells use native conditional object creation on filesystem and
+/// S3-compatible stores. PostgreSQL is a projection/log store axis, not a
+/// manifest-authority variant on this enum.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectLogAuthority {
     NativeConditionalWrite,

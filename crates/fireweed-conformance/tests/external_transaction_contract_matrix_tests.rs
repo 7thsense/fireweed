@@ -4852,6 +4852,14 @@ async fn e3_governed_transaction_evidence_matrix() {
         .expect("E3 transaction evidence requires source revision");
     let recorded_at = std::env::var("FIREWEED_E3_RECORDED_AT")
         .expect("E3 transaction evidence requires an externally recorded RFC3339 timestamp");
+    let evidence_link = fireweed_release::e3_contract::E3EvidenceLink {
+        schema_version: fireweed_release::e3_contract::E3_EVIDENCE_LINK_SCHEMA_VERSION,
+        run_id: std::env::var("FIREWEED_E3_RUN_ID")
+            .expect("E3 transaction evidence requires FIREWEED_E3_RUN_ID"),
+        composition_fingerprint: std::env::var("FIREWEED_E3_COMPOSITION_FINGERPRINT")
+            .expect("E3 transaction evidence requires FIREWEED_E3_COMPOSITION_FINGERPRINT"),
+        authority_mode: fireweed_release::e3_contract::E3AuthorityMode::NativeCreateOnly,
+    };
     let mut rows = Vec::new();
     let mut failures = Vec::new();
 
@@ -4929,6 +4937,7 @@ async fn e3_governed_transaction_evidence_matrix() {
                         match fireweed_release::e3_contract::build_e3_transaction_evidence_row(
                             fireweed_release::e3_contract::E3TransactionObservation {
                                 source_revision: revision.clone(),
+                                evidence_link: evidence_link.clone(),
                                 profile: profile.into(),
                                 bound_ms,
                                 ac: ac.into(),

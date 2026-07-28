@@ -81,14 +81,12 @@ fn objectlog_sqlite(root: &Path, barrier: ResponseBarrier, namespace: &str) -> F
 }
 
 #[test]
-fn objectlog_authority_validation_rejects_invalid_combinations() {
+fn objectlog_authority_validation_accepts_native_conditional_write() {
     let root = FixtureRoot::new("authority-validation");
     let mut local =
         objectlog_sqlite_config(root.path(), ResponseBarrier::Strict, "authority-validation");
-    local.authority = ObjectLogAuthority::Postgres {
-        url: ConfigSecret::new("postgres://authority"),
-    };
-    assert!(local.validate().is_err());
+    local.authority = ObjectLogAuthority::NativeConditionalWrite;
+    local.validate().unwrap();
 
     let mut s3 = local;
     s3.object_log = ObjectLogStorage::S3Compatible {
@@ -99,17 +97,7 @@ fn objectlog_authority_validation_rejects_invalid_combinations() {
         secret_access_key: ConfigSecret::new("secret"),
         allow_insecure_http: false,
     };
-    s3.authority = ObjectLogAuthority::Postgres {
-        url: ConfigSecret::new(""),
-    };
-    assert!(s3.validate().is_err());
-
     s3.authority = ObjectLogAuthority::NativeConditionalWrite;
-    s3.validate().unwrap();
-
-    s3.authority = ObjectLogAuthority::Postgres {
-        url: ConfigSecret::new("postgres://authority"),
-    };
     s3.validate().unwrap();
 }
 
