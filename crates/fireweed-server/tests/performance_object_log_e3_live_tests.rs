@@ -2,7 +2,7 @@
 //!
 //! This is the live counterpart to the in-process segment-counter smoke row in
 //! `fireweed-objectlog/tests/segmented_s3_substrate_tests.rs::counters_surface_emits_a_release_ledger_row`.
-//! It drives the REAL production segmented object-log backends over a real S3-compatible endpoint (MinIO)
+//! It drives the REAL production segmented object-log backends over a configured S3-compatible endpoint
 //! by injecting an `S3BlobStore` through `open_with_blob_store`, and measures the E3 bars:
 //!
 //!   1. **>=4 commit-latency bounds** — each profile runs at `1ms`, `5ms`, `20ms`, and `100ms`
@@ -22,32 +22,26 @@
 //!   4. **Measured request-cost linkage** — every bound and recovery records the actual PUT, GET, LIST, and
 //!      DELETE requests issued through the live `BlobStore` seam; release cost rows consume these counters.
 //!
-//! ## ENV-GATING (mirrors the postgres E0/E1 baseline + the MinIO substrate test)
+//! ## ENV-GATING (mirrors the postgres E0/E1 baseline + the S3 substrate test)
 //!
 //! Gated on `FIREWEED_S3_TEST_ENDPOINT`; absent it, a LOUD skip prints and the test returns green (the E3
 //! evidence is DEFERRED, never a hidden/fabricated pass). The two perf lanes:
-//!   - SMOKE (default, any reachable MinIO): MEASURES + reports + emits SMOKE-tier rows. Bars are NOT
+//!   - SMOKE (default, any reachable S3-compatible endpoint): MEASURES + reports + emits SMOKE-tier rows. Bars are NOT
 //!     hard-failed (a small resident over a casual endpoint is not a valid release perf environment).
 //!   - PERF (`FIREWEED_PERF_ENV=1` AND the release resident shape `FIREWEED_E3_RESIDENT=10000000`): hard-asserts
 //!     the bars and emits RELEASE-tier rows only when they are met.
 //!
-//! ## Running it (orbstack networking — this host cannot reach docker PUBLISHED ports; use the container IP)
+//! ## Running it
 //!
 //! ```text
-//! docker run -d --name fireweed-e3-minio -e MINIO_ROOT_USER=minioadmin \
-//!     -e MINIO_ROOT_PASSWORD=minioadmin minio/minio server /data
-//! IP=$(docker inspect fireweed-e3-minio --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
-//! # routine live smoke (small resident, fast):
-//! FIREWEED_S3_TEST_ENDPOINT="http://$IP:9000" \
-//!     cargo test -p fireweed-server --release --test performance_object_log_e3_live_tests -- --nocapture
-//! # the full TP-002 E3 RELEASE shape (10M-item snapshot-tail recovery; hard-fails the bars):
-//! FIREWEED_PERF_ENV=1 FIREWEED_E3_RESIDENT=10000000 FIREWEED_S3_TEST_ENDPOINT="http://$IP:9000" \
-//!     cargo test -p fireweed-server --release --test performance_object_log_e3_live_tests -- --nocapture
+//! FIREWEED_S3_TEST_ENDPOINT=<endpoint> FIREWEED_S3_TEST_REGION=<region> \
+//! FIREWEED_S3_TEST_BUCKET=<isolated-bucket> FIREWEED_S3_TEST_ACCESS_KEY=<access-key> \
+//! FIREWEED_S3_TEST_SECRET_KEY=<secret-key> cargo test -p fireweed-server --release \
+//!     --test performance_object_log_e3_live_tests -- --nocapture
+//! # Governed 10M release runs use scripts/perf/tp002-e3-s3.sh and its declared topology/authority profile.
 //! ```
 //!
-//! Optional overrides: `FIREWEED_S3_TEST_BUCKET` (default `fireweed-test`), `FIREWEED_S3_TEST_REGION`
-//! (default `us-east-1`), `FIREWEED_S3_TEST_ACCESS_KEY` / `FIREWEED_S3_TEST_SECRET_KEY` (default
-//! `minioadmin`), `FIREWEED_E3_LOAD_BATCH` (items per push command during
+//! `FIREWEED_E3_LOAD_BATCH` (items per push command during
 //! the recovery-load phase, default 1000), `FIREWEED_E3_ACK_PUSHES` (pushes per ack-latency config, default
 //! 100000), `FIREWEED_E3_ACK_CONCURRENCY` (concurrent push tasks, default 384), `FIREWEED_E3_LOAD_CONCURRENCY`
 //! (concurrent recovery-load tasks, default 8).
@@ -182,7 +176,7 @@ fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std:
         )]
     };
 
-    // Execute the release store's native create-only-CAS fence path over MinIO. These observations are
+    // Execute the configured provider's native create-only-CAS fence path. These observations are
     // independent of the Postgres pointer fallback below; neither path may lend booleans to the other.
     let native_def = qdef("e3", &format!("e3-native-fence-{}", std::process::id()));
     let native_shard = QueueKey::new(native_def.tenant_id.clone(), native_def.queue_id.clone());
@@ -422,6 +416,7 @@ struct S3Env {
 }
 
 const DEFAULT_E3_S3_REGION: &str = "us-east-1";
+const SUPPORTED_E3_AUTHORITY_MODE: &str = "native-create-only";
 
 fn e3_s3_region(configured: Option<String>) -> String {
     configured.unwrap_or_else(|| DEFAULT_E3_S3_REGION.into())
@@ -431,10 +426,73 @@ fn live_e3_s3_region() -> String {
     e3_s3_region(std::env::var("FIREWEED_S3_TEST_REGION").ok())
 }
 
+fn validate_release_s3_profile(
+    topology_id: &str,
+    topology_description: &str,
+    durability_claim: &str,
+    authority_mode: &str,
+) -> Result<(), &'static str> {
+    let mut topology_bytes = topology_id.bytes();
+    if !(3..=128).contains(&topology_id.len())
+        || !topology_bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        || !topology_bytes
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err("release E3 topology id must be a stable 3-128 character token");
+    }
+    if topology_description.trim().is_empty() {
+        return Err("release E3 requires a non-empty storage topology description");
+    }
+    if durability_claim != "excluded" {
+        return Err("release E3 currently excludes storage host durability and restart claims");
+    }
+    if authority_mode != SUPPORTED_E3_AUTHORITY_MODE {
+        return Err(
+            "release E3 measurement currently requires native-create-only authority; postgres-pointer measurement is not yet implemented",
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn e3_s3_region_defaults_and_accepts_override() {
     assert_eq!(e3_s3_region(None), DEFAULT_E3_S3_REGION);
     assert_eq!(e3_s3_region(Some("garage".into())), "garage");
+}
+
+#[test]
+fn release_s3_profile_is_provider_neutral_and_authority_aware() {
+    validate_release_s3_profile(
+        "garage-local-1",
+        "operator-verified S3-compatible topology",
+        "excluded",
+        "native-create-only",
+    )
+    .unwrap();
+    assert!(
+        validate_release_s3_profile(
+            "garage-local-1",
+            "operator-verified S3-compatible topology",
+            "excluded",
+            "postgres-pointer",
+        )
+        .unwrap_err()
+        .contains("not yet implemented")
+    );
+    assert!(
+        validate_release_s3_profile("undeclared", "", "excluded", "native-create-only").is_err()
+    );
+    assert!(
+        validate_release_s3_profile(
+            "provider-a",
+            "remote provider",
+            "provider-durable",
+            "native-create-only",
+        )
+        .is_err()
+    );
 }
 
 impl S3Env {
@@ -752,7 +810,7 @@ impl E3OrderProbe for SegmentedObjectLogInMemoryBackend {
     }
 }
 
-/// Drive `pushes` single-item pushes through one backend/profile over MinIO at `concurrency`, with the
+/// Drive `pushes` single-item pushes through one backend/profile over S3 at `concurrency`, with the
 /// flusher running, recording each push's ack latency and end-to-end throughput.
 struct AckArmConfig {
     profile: &'static str,
@@ -1952,16 +2010,13 @@ async fn run_release_load_shape_calibration(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires live MinIO release-shape batching calibration"]
+#[ignore = "requires live S3 release-shape batching calibration"]
 async fn e3_release_load_shape_calibration() {
     let s3 = S3Env {
-        endpoint: std::env::var("FIREWEED_S3_TEST_ENDPOINT").expect("live MinIO endpoint"),
-        bucket: std::env::var("FIREWEED_S3_TEST_BUCKET")
-            .unwrap_or_else(|_| "fireweed-e3-load-calibration".into()),
-        access: std::env::var("FIREWEED_S3_TEST_ACCESS_KEY")
-            .unwrap_or_else(|_| "minioadmin".into()),
-        secret: std::env::var("FIREWEED_S3_TEST_SECRET_KEY")
-            .unwrap_or_else(|_| "minioadmin".into()),
+        endpoint: std::env::var("FIREWEED_S3_TEST_ENDPOINT").expect("live S3 endpoint"),
+        bucket: std::env::var("FIREWEED_S3_TEST_BUCKET").expect("live S3 calibration bucket"),
+        access: std::env::var("FIREWEED_S3_TEST_ACCESS_KEY").expect("live S3 access key"),
+        secret: std::env::var("FIREWEED_S3_TEST_SECRET_KEY").expect("live S3 secret key"),
         region: live_e3_s3_region(),
     };
     S3BlobStore::new(&s3.endpoint, &s3.bucket, &s3.access, &s3.secret, &s3.region)
@@ -2032,7 +2087,7 @@ async fn e3_release_load_shape_calibration() {
     );
 }
 
-/// Load `resident` items over MinIO, then reopen and measure the projection-specific rebuild contract.
+/// Load `resident` items over S3, then reopen and measure the projection-specific rebuild contract.
 async fn run_recovery<B, F>(
     s3: &S3Env,
     profile: &'static str,
@@ -3092,19 +3147,29 @@ fn profile_row(
         std::env::var("FIREWEED_E3_SOURCE_REVISION").unwrap_or_else(|_| "undeclared".into());
     values.insert("storage_topology_id".into(), serde_json::json!(topology_id));
     values.insert(
+        "storage_topology_description".into(),
+        serde_json::json!(storage_topology),
+    );
+    values.insert(
         "storage_durability_claim".into(),
         serde_json::json!(durability_claim),
+    );
+    values.insert(
+        "storage_authority_mode".into(),
+        serde_json::json!(
+            std::env::var("FIREWEED_E3_AUTHORITY_MODE").unwrap_or_else(|_| "undeclared".into())
+        ),
     );
     values.insert("source_revision".into(), serde_json::json!(source_revision));
 
     fireweed_release::LedgerRow {
         suite: "performance_object_log_e3_live_tests".into(),
-        command: "FIREWEED_E3_MINIO_CONTAINER=<fresh-minio-container> FIREWEED_S3_TEST_ENDPOINT=http://<minio-ip>:9000 scripts/perf/tp002-e3-minio.sh".into(),
+        command: "FIREWEED_S3_TEST_ENDPOINT=<s3-endpoint> FIREWEED_E3_STORAGE_TOPOLOGY_ID=<topology-id> FIREWEED_E3_AUTHORITY_MODE=native-create-only scripts/perf/tp002-e3-s3.sh".into(),
         backend_profile: profile_run.backend_profile.into(),
         scale,
         seed: 0,
         environment: format!(
-            "live {} over S3-compatible MinIO at {}, single deployment, resident={resident}, load_batch={load_batch}, perf_env={perf_env}; {storage_topology}; both committed object-log projection variants are exercised at 1/5/20/100ms bounds",
+            "live {} over the configured S3-compatible endpoint at {}, single deployment, resident={resident}, load_batch={load_batch}, perf_env={perf_env}; {storage_topology}; both committed object-log projection variants are exercised at 1/5/20/100ms bounds",
             profile_run.projection_label, s3_endpoint
         ),
         exit_status: 0,
@@ -3129,8 +3194,7 @@ async fn performance_object_log_e3_live_tests() {
         eprintln!(
             "\n================================================================\n\
              TP-002 E3 LIVE OBJECT-LOG HARNESS SKIPPED (performance_object_log_e3_live_tests)\n\
-             set FIREWEED_S3_TEST_ENDPOINT=http://<container-ip>:9000 to run it.\n\
-             (this host cannot reach docker PUBLISHED ports; use the MinIO container IP)\n\
+             set FIREWEED_S3_TEST_ENDPOINT=<s3-compatible-endpoint> and its bucket/region/credentials to run it.\n\
              The E3 matrix evidence is DEFERRED, not a hidden pass.\n\
              ================================================================\n"
         );
@@ -3138,11 +3202,12 @@ async fn performance_object_log_e3_live_tests() {
     };
     let s3 = S3Env {
         endpoint,
-        bucket: std::env::var("FIREWEED_S3_TEST_BUCKET").unwrap_or_else(|_| "fireweed-test".into()),
+        bucket: std::env::var("FIREWEED_S3_TEST_BUCKET")
+            .expect("live E3 requires FIREWEED_S3_TEST_BUCKET"),
         access: std::env::var("FIREWEED_S3_TEST_ACCESS_KEY")
-            .unwrap_or_else(|_| "minioadmin".into()),
+            .expect("live E3 requires FIREWEED_S3_TEST_ACCESS_KEY"),
         secret: std::env::var("FIREWEED_S3_TEST_SECRET_KEY")
-            .unwrap_or_else(|_| "minioadmin".into()),
+            .expect("live E3 requires FIREWEED_S3_TEST_SECRET_KEY"),
         region: live_e3_s3_region(),
     };
     S3BlobStore::new(&s3.endpoint, &s3.bucket, &s3.access, &s3.secret, &s3.region)
@@ -3166,16 +3231,21 @@ async fn performance_object_log_e3_live_tests() {
                 && source_revision.bytes().all(|byte| byte.is_ascii_hexdigit()),
             "release E3 source revision must be a full 40-character Git SHA"
         );
-        assert_eq!(
-            std::env::var("FIREWEED_E3_STORAGE_TOPOLOGY_ID").as_deref(),
-            Ok("minio-tmpfs-16g"),
-            "release E3 evidence requires wrapper-verified MinIO /data tmpfs topology"
-        );
-        assert_eq!(
-            std::env::var("FIREWEED_E3_STORAGE_DURABILITY_CLAIM").as_deref(),
-            Ok("excluded"),
-            "tmpfs evidence must exclude object-store host durability/restart claims"
-        );
+        let topology_id = std::env::var("FIREWEED_E3_STORAGE_TOPOLOGY_ID")
+            .expect("release E3 requires FIREWEED_E3_STORAGE_TOPOLOGY_ID");
+        let topology_description = std::env::var("FIREWEED_E3_STORAGE_TOPOLOGY")
+            .expect("release E3 requires FIREWEED_E3_STORAGE_TOPOLOGY");
+        let durability_claim = std::env::var("FIREWEED_E3_STORAGE_DURABILITY_CLAIM")
+            .expect("release E3 requires FIREWEED_E3_STORAGE_DURABILITY_CLAIM");
+        let authority_mode = std::env::var("FIREWEED_E3_AUTHORITY_MODE")
+            .expect("release E3 requires FIREWEED_E3_AUTHORITY_MODE");
+        validate_release_s3_profile(
+            &topology_id,
+            &topology_description,
+            &durability_claim,
+            &authority_mode,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(resident, RELEASE_RESIDENT);
         assert_eq!(load_batch, RELEASE_LOAD_BATCH);
         assert_eq!(ack_pushes, RELEASE_ACK_PUSHES);
@@ -3236,7 +3306,7 @@ async fn performance_object_log_e3_live_tests() {
     validate_e3_profile_matrix(&runs, require_bars).expect("E3 profile matrix shape and bars");
 
     println!(
-        "\nTP-002 E3 live object-log projection matrix over MinIO ({}) — perf_env={perf_env}, resident={resident}:",
+        "\nTP-002 E3 live object-log projection matrix over S3 ({}) — perf_env={perf_env}, resident={resident}:",
         s3.endpoint
     );
     for run in &runs {
@@ -3369,15 +3439,13 @@ async fn performance_object_log_e3_live_tests() {
 }
 
 #[test]
-#[ignore = "requires live MinIO and Postgres release-fence endpoints"]
+#[ignore = "requires live S3 and Postgres release-fence endpoints"]
 fn e3_release_fence_proofs_only() {
     let s3 = S3Env {
-        endpoint: std::env::var("FIREWEED_S3_TEST_ENDPOINT").expect("live MinIO endpoint"),
-        bucket: std::env::var("FIREWEED_S3_TEST_BUCKET").unwrap_or_else(|_| "fireweed-test".into()),
-        access: std::env::var("FIREWEED_S3_TEST_ACCESS_KEY")
-            .unwrap_or_else(|_| "minioadmin".into()),
-        secret: std::env::var("FIREWEED_S3_TEST_SECRET_KEY")
-            .unwrap_or_else(|_| "minioadmin".into()),
+        endpoint: std::env::var("FIREWEED_S3_TEST_ENDPOINT").expect("live S3 endpoint"),
+        bucket: std::env::var("FIREWEED_S3_TEST_BUCKET").expect("live S3 fence bucket"),
+        access: std::env::var("FIREWEED_S3_TEST_ACCESS_KEY").expect("live S3 access key"),
+        secret: std::env::var("FIREWEED_S3_TEST_SECRET_KEY").expect("live S3 secret key"),
         region: live_e3_s3_region(),
     };
     S3BlobStore::new(&s3.endpoint, &s3.bucket, &s3.access, &s3.secret, &s3.region)
@@ -3797,11 +3865,9 @@ fn live_e3_s3_env() -> Option<S3Env> {
     };
     Some(S3Env {
         endpoint,
-        bucket: std::env::var("FIREWEED_S3_TEST_BUCKET").unwrap_or_else(|_| "fireweed-test".into()),
-        access: std::env::var("FIREWEED_S3_TEST_ACCESS_KEY")
-            .unwrap_or_else(|_| "minioadmin".into()),
-        secret: std::env::var("FIREWEED_S3_TEST_SECRET_KEY")
-            .unwrap_or_else(|_| "minioadmin".into()),
+        bucket: std::env::var("FIREWEED_S3_TEST_BUCKET").expect("live E3 S3 bucket"),
+        access: std::env::var("FIREWEED_S3_TEST_ACCESS_KEY").expect("live E3 S3 access key"),
+        secret: std::env::var("FIREWEED_S3_TEST_SECRET_KEY").expect("live E3 S3 secret key"),
         region: live_e3_s3_region(),
     })
 }

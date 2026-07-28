@@ -1,4 +1,4 @@
-# TP-002 E3 — live object-log projection matrix over MinIO
+# TP-002 E3 — live object-log projection matrix over S3-compatible storage
 
 **Status:** PREPARED; the exact 10M recovery proof is now encoded in the E3 test harness, but a new release run is still required to stamp a PASS artifact.
 
@@ -8,7 +8,34 @@ contract because it used host-speed thresholds, excluded in-memory recovery, all
 and lacks production replay/resource and measured-byte provenance. It must not be consumed as release
 evidence. This preparation change deliberately does not fabricate replacement measurements.
 
-## Command
+## Provider-neutral command
+
+The governed producer is `scripts/perf/tp002-e3-s3.sh`. It accepts an endpoint, signing region, isolated
+bucket, credentials, a stable topology ID and description, an explicit durability claim, and an authority
+mode. Credentials are supplied by the operator and are never stored in evidence.
+
+```bash
+FIREWEED_S3_TEST_ENDPOINT=https://s3.example.invalid \
+FIREWEED_S3_TEST_REGION=us-east-1 \
+FIREWEED_S3_TEST_BUCKET=isolated-fireweed-e3 \
+FIREWEED_S3_TEST_ACCESS_KEY=... \
+FIREWEED_S3_TEST_SECRET_KEY=... \
+FIREWEED_E3_STORAGE_TOPOLOGY_ID=provider-topology-1 \
+FIREWEED_E3_STORAGE_TOPOLOGY='operator-verified isolated S3 topology; host durability excluded' \
+FIREWEED_E3_STORAGE_DURABILITY_CLAIM=excluded \
+FIREWEED_E3_AUTHORITY_MODE=native-create-only \
+FIREWEED_E3_POSTGRES_POINTER_DATABASE_URL=... \
+FIREWEED_E3_FENCE_EVIDENCE_OUT=... \
+FIREWEED_E3_TRANSACTION_EVIDENCE_OUT=... \
+scripts/perf/tp002-e3-s3.sh
+```
+
+`native-create-only` is the only measured authority mode currently supported. The wrapper recognizes
+`postgres-pointer` but rejects it before execution because the E3 measurement backend is not yet wrapped in
+the Postgres manifest-pointer adapter. The existing Postgres-pointer fence remains an independent executed
+proof and must not be mistaken for a pointer-backed E3 measurement.
+
+## Local MinIO convenience profile
 
 Start a fresh MinIO instance with a tmpfs data volume:
 
@@ -22,18 +49,21 @@ IP=$(docker inspect fireweed-e3-minio --format '{{range .NetworkSettings.Network
 FIREWEED_S3_TEST_ENDPOINT="http://$IP:9000" scripts/perf/tp002-e3-minio.sh
 ```
 
-The wrapper fixes the release workload at 10,000,000 resident items, 100,000 single-item acknowledgement
+The MinIO script only verifies its container/tmpfs topology and supplies a local profile to the generic S3
+wrapper. It is not the governed release producer. The generic wrapper fixes the release workload at
+10,000,000 resident items, 100,000 single-item acknowledgement
 pushes per bound, acknowledgement concurrency 384, load batch 1,000, load concurrency 8, an 896 KiB
 recovery-load segment target, and seed 0. Before the load starts, the harness canonically serializes the
 first eight commands and fails closed unless the smallest four exceed the segment target by at least 10%,
 the smallest three remain below it, each command remains below the target, and the full wave's conservative
 byte-admission charge is at most
 half the 16 MiB per-queue cap. These are byte-shape checks, not elapsed-time or host-performance gates.
-The fresh run requires a 16 GiB MinIO `/data` tmpfs: the exact 10M workload exhausted the prior 8 GiB
-topology with MinIO HTTP 507 (`XMinioStorageFull`) before evidence could be accepted. This capacity correction
-does not add a host-speed gate or a durability claim.
+The local convenience profile requires a 16 GiB MinIO `/data` tmpfs: the exact 10M workload exhausted the
+prior 8 GiB topology with MinIO HTTP 507 (`XMinioStorageFull`) before evidence could be accepted. This local
+capacity correction does not constrain another S3-compatible provider topology, add a host-speed gate, or
+make a durability claim.
 
-## Topology and hardware
+## Historical local topology and hardware
 
 - One local Rust test process drove one MinIO container over live HTTP/S3 at its bridge IP.
 - The invalid historical run used MinIO `RELEASE.2025-09-07T16-13-09Z` on an 8 GiB `/data` tmpfs; the fresh
@@ -119,9 +149,9 @@ The release path is fail-closed before a new ledger is accepted:
    monotonic production replay progress, bounded queues/pages, and successful production segment/record/frame
    checksum validation for both snapshot-tail and genesis replay.
 4. Each bound requires five seeded, alternating, same-run recorder-control blocks with matching complete-state
-   fingerprints, a stable recorder-control schedule/fingerprint check, and median degradation no greater than
-   1.02.
+   fingerprints and a stable recorder-control schedule/fingerprint check.
 5. Semantic validators reject smoke rows, incomplete matrices, missing or altered counters, stale provenance,
    non-exact/checksum-unverified recovery, quiet-host deferral, and host-speed gates.
 6. Focused tests, formatting, and warning-denied clippy are the code gates. The only remaining evidence gate is
-   the coordinated live 10M MinIO run and validation of its generated release ledger; PREPARED is not PASS.
+   a coordinated live 10M run through the generic S3 wrapper and validation of its generated release ledger;
+   PREPARED is not PASS.

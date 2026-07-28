@@ -190,7 +190,7 @@ fn TestE3ReleaseGatesPassFmtClippyAndOperatorChecks() {
     );
 
     let release_note =
-        fs::read_to_string(root.join("docs/perf/tp002-e3-objectlog-minio-release.md")).unwrap();
+        fs::read_to_string(root.join("docs/perf/tp002-e3-objectlog-s3-release.md")).unwrap();
     assert!(
         release_note
             .contains("Focused tests, formatting, and warning-denied clippy are the code gates"),
@@ -331,13 +331,7 @@ fn accepts_large_consistent_interleaved_recorder_ratio_as_diagnostic() {
             1,
         );
     fs::write(path, body).unwrap();
-    // The checked-in fixture may independently fail newer topology-exclusion requirements. This assertion
-    // stays focused on the recorder contract: a large, internally consistent ratio is not an E3 error.
-    let errors = fixture.errors();
-    assert!(
-        !errors.contains("finite positive recorder ratio"),
-        "{errors}"
-    );
+    verify_e3_contract(&fixture.manifest(), REVISION).unwrap();
 }
 
 #[test]
@@ -639,6 +633,30 @@ fn rejects_non_governed_e3_producer() {
             .errors()
             .contains("must come from governed producer suite")
     );
+}
+
+#[test]
+fn rejects_undeclared_topology_or_unsupported_s3_authority_mode() {
+    let fixture = Fixture::new();
+    fixture.mutate_e3_row(0, |row| {
+        row["measurements"]
+            .as_object_mut()
+            .unwrap()
+            .remove("storage_topology_description");
+    });
+    let errors = fixture.errors();
+    assert!(
+        errors.contains("requires declared storage_topology_description"),
+        "{errors}"
+    );
+
+    let fixture = Fixture::new();
+    fixture.mutate_e3_row(0, |row| {
+        row["measurements"]["storage_authority_mode"] = serde_json::json!("postgres-pointer");
+    });
+    let errors = fixture.errors();
+    assert!(errors.contains("storage_authority_mode"), "{errors}");
+    assert!(errors.contains("native-create-only"), "{errors}");
 }
 
 #[test]

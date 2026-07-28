@@ -34,7 +34,7 @@ pub const NO_CAS_STORE_PROFILE: &str = "object_store_without_conditional_write";
 pub const NO_CAS_MODE: &str = "postgres_transactional_manifest_pointer";
 pub const TRANSACTION_SUITE: &str = "external_transaction_contract_matrix_tests";
 pub const E3_PRODUCER_SUITE: &str = "performance_object_log_e3_live_tests";
-pub const E3_PRODUCER_COMMAND: &str = "scripts/perf/tp002-e3-minio.sh";
+pub const E3_PRODUCER_COMMAND: &str = "scripts/perf/tp002-e3-s3.sh";
 pub const E3_INMEMORY_PASS_BAR: &str = "E3: 1/5/20/100ms bounds; sustained batched commits with valid latency distributions and logically identical interleaved recorder controls; 10M ephemeral in-memory projection rebuilt by exact bounded durable-log genesis replay; streaming complete-state digests match with zero missing, duplicate, or invalid items; replay progress and bounded-resource samples are monotonic; absolute capacity is reported for the declared topology, not used as a portable gate";
 pub const E3_SQLITE_PASS_BAR: &str = "E3: 1/5/20/100ms bounds; sustained batched commits with valid latency distributions and logically identical interleaved recorder controls; 10M SQLite projection rebuilt from durable snapshot high-water plus bounded tail; streaming complete-state digests match with zero missing, duplicate, or invalid items; replay progress and bounded-resource samples are monotonic; absolute capacity is reported for the declared topology, not used as a portable gate";
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
@@ -652,6 +652,31 @@ fn verify_e3_ledger(
             serde_json::json!(true),
             errors,
         );
+        require_value(
+            &row,
+            "storage_durability_claim",
+            serde_json::json!("excluded"),
+            errors,
+        );
+        require_value(
+            &row,
+            "storage_authority_mode",
+            serde_json::json!("native-create-only"),
+            errors,
+        );
+        for key in ["storage_topology_id", "storage_topology_description"] {
+            if row
+                .measurements
+                .values
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|value| value.trim().is_empty() || value == "undeclared")
+            {
+                errors.push(E3ContractError(format!(
+                    "E3 ledger profile {profile} requires declared {key}"
+                )));
+            }
+        }
         if contains_quiet_host_gate(&row.environment) || contains_quiet_host_gate(&row.pass_bar) {
             errors.push(E3ContractError(format!(
                 "E3 ledger profile {profile} contains a non-portable quiet-host gate"
