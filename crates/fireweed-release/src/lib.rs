@@ -2994,21 +2994,43 @@ pub mod cost {
                     "profile {profile} uses a quiet-host or absolute host-speed gate"
                 ));
             }
-            if row
+            let topology_id = row
                 .measurements
                 .values
                 .get("storage_topology_id")
-                .and_then(serde_json::Value::as_str)
-                != Some("minio-tmpfs-16g")
+                .and_then(serde_json::Value::as_str);
+            let topology_description = row
+                .measurements
+                .values
+                .get("storage_topology_description")
+                .and_then(serde_json::Value::as_str);
+            let stable_topology_id = topology_id.is_some_and(|value| {
+                let mut bytes = value.bytes();
+                (3..=128).contains(&value.len())
+                    && bytes
+                        .next()
+                        .is_some_and(|byte| byte.is_ascii_alphanumeric())
+                    && bytes.all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+                    })
+            });
+            if !stable_topology_id
+                || topology_description.is_none_or(|value| value.trim().is_empty())
                 || row
                     .measurements
                     .values
                     .get("storage_durability_claim")
                     .and_then(serde_json::Value::as_str)
                     != Some("excluded")
+                || row
+                    .measurements
+                    .values
+                    .get("storage_authority_mode")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("native-create-only")
             {
                 errors.push(format!(
-                    "profile {profile} lacks wrapper-verified tmpfs topology/exclusion"
+                    "profile {profile} lacks a declared provider-neutral S3 topology, supported authority mode, or durability exclusion"
                 ));
             }
             let source_revision = row
@@ -3508,7 +3530,7 @@ pub mod cost {
     /// Build the TP-002 E3 **cost-model** ledger row from a computed comparison. The row is **smoke-tier**: it
     /// is a derived CALCULATION over the measured E3/E0 counts (cited prices, stated assumptions), NOT a fresh
     /// live measurement — so it is recorded and strict-validated for visibility but never counts as headline
-    /// release evidence on its own (the live MinIO E3 run carries the release-tier `E3`). It is traceable
+    /// release evidence on its own (the live S3 E3 run carries the release-tier `E3`). It is traceable
     /// (`tp002_evidence_ids=["E3"]`) and carries the computed numbers + the inputs that produced them.
     pub fn build_cost_row(
         comparison: &CostComparison,
@@ -4382,11 +4404,19 @@ pub mod cost {
                 ("host_speed_gate".into(), serde_json::json!(false)),
                 (
                     "storage_topology_id".into(),
-                    serde_json::json!("minio-tmpfs-16g"),
+                    serde_json::json!("synthetic-s3-topology"),
+                ),
+                (
+                    "storage_topology_description".into(),
+                    serde_json::json!("synthetic provider-neutral S3 topology"),
                 ),
                 (
                     "storage_durability_claim".into(),
                     serde_json::json!("excluded"),
+                ),
+                (
+                    "storage_authority_mode".into(),
+                    serde_json::json!("native-create-only"),
                 ),
                 (
                     "source_revision".into(),
@@ -4499,7 +4529,7 @@ pub mod cost {
                 backend_profile: profile.into(),
                 scale: "release".into(),
                 seed: 0,
-                environment: "live MinIO test fixture".into(),
+                environment: "live provider-neutral S3 test fixture".into(),
                 exit_status: 0,
                 ac_ids: vec![],
                 inv_ids: vec![],
@@ -4899,14 +4929,14 @@ pub mod cost {
         }
 
         #[test]
-        fn release_cost_inputs_reject_unverified_or_overclaimed_storage_topology() {
+        fn release_cost_inputs_reject_undeclared_or_overclaimed_storage_topology() {
             let mut sources = E3_PROFILES
                 .iter()
                 .map(|profile| synthetic_release_source(profile))
                 .collect::<Vec<_>>();
             sources[0].measurements.values.insert(
                 "storage_topology_id".into(),
-                serde_json::json!("operator-described"),
+                serde_json::json!("invalid topology id"),
             );
             sources[1].measurements.values.insert(
                 "storage_durability_claim".into(),
@@ -4916,7 +4946,7 @@ pub mod cost {
             assert_eq!(
                 errors
                     .iter()
-                    .filter(|e| e.contains("lacks wrapper-verified tmpfs topology/exclusion"))
+                    .filter(|e| e.contains("lacks a declared provider-neutral S3 topology"))
                     .count(),
                 2
             );

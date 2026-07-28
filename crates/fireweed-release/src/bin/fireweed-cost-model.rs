@@ -28,13 +28,13 @@ use fireweed_release::cost::{
 };
 
 const REPRO_COMMAND: &str = "cargo run -p fireweed-release --bin fireweed-cost-model -- \
-    --e3-ledger docs/perf/evidence/tp002-e3-objectlog-minio-release.jsonl \
+    --e3-ledger docs/perf/evidence/tp002-e3-objectlog-s3-release.jsonl \
     --out docs/perf/tp002-e3-cost-model.md --ledger docs/perf/evidence/tp002-e3-cost-model.jsonl";
 
 fn main() -> ExitCode {
     let mut out = PathBuf::from("docs/perf/tp002-e3-cost-model.md");
     let mut ledger: Option<PathBuf> = None;
-    let mut e3_ledger = PathBuf::from("docs/perf/evidence/tp002-e3-objectlog-minio-release.jsonl");
+    let mut e3_ledger = PathBuf::from("docs/perf/evidence/tp002-e3-objectlog-s3-release.jsonl");
     let mut print = false;
     let mut granularity_only = false;
 
