@@ -1447,6 +1447,11 @@ pub struct LogData {
     /// Persisted command_position high-water — a stored field, NOT recomputed from `entries.len()`,
     /// so it survives log retention/compaction and `item_version` never regresses (TD-007 §4).
     high_water: Option<CommandPosition>,
+    /// Sequence number of `entries[0]` when the in-process log was seeded past a durable projection
+    /// high-water (ADR-013 Class B reopen). Normal process-local logs keep this at `0` so
+    /// `sequence == entries` index. After Class B seed, new appends continue at `entry_base_seq +
+    /// entries.len()` so the projection's `next_seq` cursor is not regressed or gapped.
+    entry_base_seq: u64,
     snapshots: Vec<(SnapshotRef, ProjectionSnapshot)>,
 }
 
@@ -1466,7 +1471,9 @@ impl LogData {
         }
         let mut positions = Vec::with_capacity(commands.len());
         for cmd in commands {
-            let seq = self.entries.len() as u64;
+            let seq = self
+                .entry_base_seq
+                .saturating_add(self.entries.len() as u64);
             self.entries.push((self.epoch, cmd.clone()));
             let pos = CommandPosition::new(shard.clone(), self.epoch, seq);
             self.high_water = Some(pos.clone());
@@ -1495,20 +1502,31 @@ impl LogData {
         from: Option<CommandPosition>,
         limit: usize,
     ) -> fireweed_engine::CommandPage {
+        // Map absolute sequence → index into the in-process entry buffer (Class B may have
+        // `entry_base_seq > 0` with an empty or short buffer after projection-only reopen).
         let start = match &from {
-            Some(p) => p.sequence as usize + 1,
+            Some(p) => p
+                .sequence
+                .saturating_add(1)
+                .saturating_sub(self.entry_base_seq) as usize,
             None => 0,
         };
         let mut entries = Vec::new();
         for (i, (entry_epoch, cmd)) in self.entries.iter().enumerate().skip(start).take(limit) {
+            let seq = self.entry_base_seq.saturating_add(i as u64);
             entries.push((
-                CommandPosition::new(shard.clone(), *entry_epoch, i as u64),
+                CommandPosition::new(shard.clone(), *entry_epoch, seq),
                 cmd.clone(),
             ));
         }
         let next = (start + entries.len() < self.entries.len()).then(|| {
-            let (next_epoch, _) = &self.entries[start + entries.len()];
-            CommandPosition::new(shard.clone(), *next_epoch, (start + entries.len()) as u64)
+            let idx = start + entries.len();
+            let (next_epoch, _) = &self.entries[idx];
+            CommandPosition::new(
+                shard.clone(),
+                *next_epoch,
+                self.entry_base_seq.saturating_add(idx as u64),
+            )
         });
         fireweed_engine::CommandPage { entries, next }
     }
@@ -1518,12 +1536,24 @@ impl LogData {
     }
 
     /// Set the persisted high-water, rejecting a regression (TD-007 §4 monotonicity).
+    ///
+    /// When the in-process entry buffer is empty (Class B reopen over a durable projection), also
+    /// advances [`Self::entry_base_seq`] so the next append continues past the projection's absorbed
+    /// prefix instead of restarting at sequence 0 (which would be skipped/gapped by the projection).
     pub fn set_high_water(&mut self, position: CommandPosition) -> EngineResult<()> {
         if let Some(cur) = &self.high_water
             && !cur.precedes(&position)
             && cur != &position
         {
             return Err(EngineError::Invalid("high-water regression"));
+        }
+        if self.entries.is_empty() {
+            self.entry_base_seq = position.sequence.saturating_add(1);
+            // Keep the live process's epoch at least the projection's recorded epoch so a later
+            // append is not fenced by a higher assignment_epoch already stored on the projection.
+            if position.backend_epoch > self.epoch {
+                self.epoch = position.backend_epoch;
+            }
         }
         self.high_water = Some(position);
         Ok(())

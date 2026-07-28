@@ -54,6 +54,12 @@ impl MemoryLog {
 }
 
 impl LogStore for MemoryLog {
+    fn is_durable_log(&self) -> bool {
+        // ADR-013 Class B: the in-process log is ordering/fence authority only while the process is
+        // alive. After process death the log is gone; recovery is projection-only.
+        false
+    }
+
     fn ensure_shard(&mut self, shard: &QueueKey) -> EngineResult<()> {
         self.logs.entry(shard.clone()).or_default();
         Ok(())

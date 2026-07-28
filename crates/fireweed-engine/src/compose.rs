@@ -357,6 +357,15 @@ pub trait LogStore: Send {
         DurabilityClass::Atomic
     }
 
+    /// Whether this log substrate retains commands across process death (ADR-013 Class A).
+    ///
+    /// Default `true`. In-process logs (`fireweed_projection::MemoryLog`) return `false` (Class B):
+    /// after process death only the projection remains, so recovery must not require a durable log
+    /// tail or claim Class A rebuild-from-log semantics.
+    fn is_durable_log(&self) -> bool {
+        true
+    }
+
     /// Register a shard's log (called from `create_queue`). Idempotent.
     fn ensure_shard(&mut self, shard: &QueueKey) -> EngineResult<()>;
 
@@ -2849,16 +2858,28 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                     projection.ensure_shard(&def)?;
                     // Seed counters from the durable projection snapshot (no-op for the in-memory projection).
                     projection.restore_counters(&key, &self.counters)?;
-                    // Cross-validate the (now hydrated) durable projection's recorded object-log lineage against the
-                    // log's actual identity (TD-004 async lineage validation), BEFORE trusting its high-water as a
-                    // replay-skip point. A hybrid projection whose recorded lineage does not descend from this log
-                    // fails closed here (the in-memory / relational projections record no lineage → no-op default).
-                    let identity = LogLineageIdentity {
-                        shard: key.clone(),
-                        current_epoch: log.current_epoch(&key)?,
-                        high_water: log.high_water(&key)?,
-                    };
-                    projection.validate_recovery_lineage(&identity)?;
+                    // Class B (non-durable / memory log): after process death the log is empty while a
+                    // durable projection may still hold applied state (ADR-013). Seed the in-process
+                    // log high-water (and sequence base) from the projection so subsequent appends
+                    // continue the sequence space the projection already absorbed — without claiming
+                    // Class A rebuild-from-log. Skip Class A lineage cross-check against the empty log.
+                    let durable_log = log.is_durable_log();
+                    if !durable_log {
+                        if let Some(hw) = projection.recovery_high_water(&key)? {
+                            log.set_high_water(&key, hw)?;
+                        }
+                    } else {
+                        // Cross-validate the (now hydrated) durable projection's recorded object-log lineage against the
+                        // log's actual identity (TD-004 async lineage validation), BEFORE trusting its high-water as a
+                        // replay-skip point. A hybrid projection whose recorded lineage does not descend from this log
+                        // fails closed here (the in-memory / relational projections record no lineage → no-op default).
+                        let identity = LogLineageIdentity {
+                            shard: key.clone(),
+                            current_epoch: log.current_epoch(&key)?,
+                            high_water: log.high_water(&key)?,
+                        };
+                        projection.validate_recovery_lineage(&identity)?;
+                    }
                     // Fold async-apply poison / hard-backpressure health into the replay-start decision (TD-004
                     // §backpressure/poison): a poisoned projection fails closed here (unresolved replay poison must
                     // stop serving; high-water must not advance past poison), and a hard-backpressured one replays
