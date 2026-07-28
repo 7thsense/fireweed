@@ -1,7 +1,8 @@
 # Fireweed Queue Helm Chart
 
 This chart deploys the `fireweed-service` RESP runtime. Storage is configured with
-separate log and projection axes.
+separate **log** and **projection** axes (plus control plane) isomorphic to the
+product `StorageConfig` model. There is no public combined-profile product type.
 
 ## Fireweed Queue preview version policy
 
@@ -17,56 +18,59 @@ environment, and persisted identifiers all use the Fireweed namespace.
 
 ## Storage Axes
 
-Log backend:
+Public product values:
 
-- `objectlog`
-- `postgres`
+| Axis | Helm key | Values |
+|------|----------|--------|
+| **Log** | `storage.log.backend` | `memory`, `sqlite`, `postgres`, `filesystem`, `s3` |
+| **Projection** | `storage.projection.backend` | `memory`, `sqlite`, `postgres` |
+| **Control plane** | `storage.controlPlane.backend` | `inprocess`, `postgres` |
 
-Projection backend:
+`filesystem` and `s3` are first-class object-log peers (same segment/manifest
+protocol). Configure them with structured fields:
 
-- `inmemory`
-- `sqlite`
-- `turso`
-- `hybrid`
-- `hybrid-async`
-- `postgres`
+- **Filesystem log** — `storage.log.backend=filesystem` and
+  `storage.log.objectLog.root` (local disk or NAS path, e.g. `/tank/fireweed/object-log`)
+- **S3 log** — `storage.log.backend=s3` and `storage.log.objectLog.s3.*`
+  (endpoint, bucket, region, credentials Secret)
+- **SQLite log** — `storage.log.backend=sqlite` and `storage.log.sqlite.path`
+- **Postgres log / projection** — Secret-ref DSN blocks under
+  `storage.log.postgres` / `storage.projection.postgres`
+- **SQLite projection** — `storage.projection.backend=sqlite` and
+  `storage.projection.sqlite.path`
 
-`hybrid-strict` is intentionally not a chart value. The server retains an
-experimental `FIREWEED_PROJECTION_BACKEND=hybrid-strict` env/direct-config path,
-but it is not chart-selectable or production-supported. Helm schema validation
-must reject attempts to set `storage.projection.backend=hybrid-strict`.
+### Durability (summary)
 
-The current `fireweed-server` binary wires `memory/inmemory`, `sqlite/inmemory`,
-`objectlog/inmemory`, `objectlog/sqlite`, `objectlog/hybrid`, and
-`objectlog/hybrid-async` unconditionally. `objectlog/turso` is available in
-builds with the `turso-projection` feature. `postgres/inmemory` is also wired — the sync postgres client runs only on Tokio's blocking-thread pool
-via the `PostgresNativeBackend` wrapper, never on a reactor worker — but only when
-the binary is built with the `postgres` cargo feature (`--features postgres`, or
-`--features postgres,tls` for native-tls). The default release image does **not**
-build that feature, so selecting `postgres` against the stock image fails loudly at
-startup with a message naming the required feature build. Other unsupported
-combinations also fail loudly at startup instead of being hidden behind a synthetic
-combined backend name.
+- **Class A** (`sqlite` / `postgres` / `filesystem` / `s3` log): success means
+  durable on the log and visible in the projection; recovery uses high-water +
+  tail when the log remains.
+- **Class B** (`memory` log): success means visible in the projection; durable
+  only if the projection is durable. After process death only the projection
+  remains — no Class A log-rebuild claims for a memory log.
 
-`FIREWEED_PROJECTION_BACKEND=hybrid` selects the normative `objectlog/hybrid`
-profile. It uses the same `FIREWEED_SQLITE_PROJECTION_PATH` as
-`sqlite`, applies committed object-log batches to SQLite first, hydrates the hot
-in-memory projection from a SQLite `ProjectionImage` before returning SQLite
-high-water on recovery, and fails closed if memory apply fails after a SQLite
-commit. Until other pairings are explicitly implemented and tested,
-`memory/hybrid`, `sqlite/hybrid`, and `postgres/hybrid` must fail at startup.
+### Compat aliases
 
-`FIREWEED_PROJECTION_BACKEND=hybrid-async` selects the `objectlog/hybrid-async`
-profile (TD-004): the same hot-in-memory serving over a durable SQLite checkpoint
-image as `hybrid` and the same `FIREWEED_SQLITE_PROJECTION_PATH`, but manifest commit
-plus synchronous in-memory apply/render is the success barrier and the durable
-SQLite image is an asynchronous checkpoint that MAY lag (caught up by object-log
-tail replay on recovery). The deployment carries the async-apply
-debt/backpressure/poison thresholds, rendered as `FIREWEED_HYBRID_ASYNC_*` from
-`storage.projection.hybridAsync`; each bound MUST be `> 0` (a zero bound is
-instantly backpressured) and the server fails closed at startup otherwise. Only
-the object-log log axis pairs with `hybrid-async`; `memory/hybrid-async`,
-`sqlite/hybrid-async`, and `postgres/hybrid-async` fail at startup.
+Legacy spellings still parse for one minor and map onto the public axes:
+
+- `storage.log.backend=objectlog` + `objectLog.store=local` → `filesystem`
+- `storage.log.backend=objectlog` + `objectLog.store=s3` → `s3`
+- `storage.projection.backend=inmemory` → `memory`
+
+Prefer public axis names in new values. Temporary non-public projection values
+(`hybrid`, `hybrid-async`, `turso`) may still be schema-accepted for
+transitional wiring; they are not public matrix rows. Helm schema validation
+rejects `storage.projection.backend=hybrid-strict`.
+
+### Wiring honesty
+
+The current `fireweed-server` binary still selects many combinations through
+legacy env spellings while composition converges on full `StorageConfig`.
+Unsupported or not-yet-verified log×projection cells fail loudly at startup
+instead of silent downgrade. Postgres log/projection paths require a binary
+built with the `postgres` cargo feature (`--features postgres`, or
+`--features postgres,tls` for native-tls). The default release image does
+**not** build that feature, so selecting `postgres` against the stock image
+fails at startup with a message naming the required feature build.
 
 ### Databricks Lakebase (postgres over TLS)
 
@@ -84,45 +88,66 @@ Lakebase provider-certification run remains tracked separately (`pqueue-ea625701
 ```yaml
 storage:
   log:
-    backend: objectlog
+    backend: filesystem
+    objectLog:
+      root: /var/lib/fireweed/projection/object-log
   projection:
-    backend: inmemory
+    backend: memory
 ```
 
 The chart renders:
 
-- `FIREWEED_LOG_BACKEND`
-- `FIREWEED_PROJECTION_BACKEND`
-- `FIREWEED_OBJECT_LOG_ROOT` when `storage.log.backend=objectlog`
-- `FIREWEED_SQLITE_PROJECTION_PATH` when `storage.projection.backend=sqlite`,
-  `hybrid`, or `hybrid-async`
-- `FIREWEED_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS`,
-  `FIREWEED_HYBRID_ASYNC_APPLY_DEBT_MAX_BYTES`,
-  `FIREWEED_HYBRID_ASYNC_APPLY_QUEUE_DEPTH_MAX`,
-  `FIREWEED_HYBRID_ASYNC_OLDEST_UNAPPLIED_MAX_MS`, and
-  `FIREWEED_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD` (from
-  `storage.projection.hybridAsync`) when `storage.projection.backend=hybrid-async`
-- Postgres log/projection database URL Secret refs when the corresponding axis
-  uses `postgres`
+- `FIREWEED_LOG_BACKEND` from `storage.log.backend`
+- `FIREWEED_PROJECTION_BACKEND` from `storage.projection.backend`
+- `FIREWEED_OBJECT_LOG_ROOT` when the log is `filesystem` (or compat
+  `objectlog` + local store)
+- `FIREWEED_OBJECT_LOG_S3_*` when the log is `s3` (or compat `objectlog` + s3 store)
+- `FIREWEED_SQLITE_LOG_PATH` when the log is `sqlite`
+- `FIREWEED_SQLITE_PROJECTION_PATH` when the projection is `sqlite` (and for
+  transitional hybrid paths that still use a SQLite image path)
+- Postgres log/projection/control-plane database URL Secret refs when those
+  axes use `postgres`
 
 The service exposes the RESP port and uses TCP liveness/readiness probes.
 
-## Shared S3 Multi-Replica Profile
+## Shared S3 multi-replica values
 
-`values-shared-s3.yaml` selects the replica-safe shared S3 object log, Postgres
-ownership control plane, and pod-local rebuildable SQLite projection. Each pod
-publishes its Kubernetes `metadata.uid` as the full-width `FIREWEED_OWNER_ID` and
-its pod IP as `FIREWEED_ADVERTISE_ADDR`; `FIREWEED_NODE_ID` remains the independent
-compact item-ID field. Create the referenced S3 and Postgres Secrets before
-installing this profile.
+`values-shared-s3.yaml` selects a replica-safe shared S3 object log, Postgres
+ownership control plane, and pod-local rebuildable SQLite projection. Prefer
+public spellings in operator-owned values:
 
-## Lakebase Postgres Native Profile
+```yaml
+replicaCount: 3
+storage:
+  log:
+    backend: s3
+    objectLog:
+      s3:
+        endpoint: https://s3.example.com
+        bucket: fireweed-shared
+        region: us-east-1
+        credentials:
+          existingSecret: fireweed-objectlog-s3
+  controlPlane:
+    backend: postgres
+  projection:
+    backend: sqlite
+persistence:
+  enabled: false
+```
 
-`charts/fireweed-queue/ci/lakebase-postgres-values.yaml` is the static render profile for
-Databricks Lakebase with the postgres log axis selected (`projection.backend:
-inmemory` — the only wired postgres combination: durable via the DSN log with a
-fast in-memory projection apply). It renders Secret references, but it does not
-embed credentials in chart values or manifests.
+Each pod publishes its Kubernetes `metadata.uid` as the full-width
+`FIREWEED_OWNER_ID` and its pod IP as `FIREWEED_ADVERTISE_ADDR`;
+`FIREWEED_NODE_ID` remains the independent compact item-ID field. Create the
+referenced S3 and Postgres Secrets before installing.
+
+## Lakebase Postgres native values
+
+`charts/fireweed-queue/ci/lakebase-postgres-values.yaml` is the static render
+fixture for Databricks Lakebase with the postgres **log** axis selected and a
+memory projection (durable via the DSN log with a fast in-memory projection
+apply). It renders Secret references, but it does not embed credentials in
+chart values or manifests.
 
 The binary connects to Lakebase from the log DSN alone. The DSN Secret key
 referenced by `storage.log.postgres.databaseUrlKey` must contain a
