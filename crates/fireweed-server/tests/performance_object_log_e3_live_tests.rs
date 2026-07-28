@@ -66,8 +66,8 @@ use fireweed_objectlog::object_store_observability::{
 };
 use fireweed_objectlog::prepare_serialized_commands;
 use fireweed_objectlog::segmented::{
-    BlobStore, FaultCutPoint, PointerFencedBlobStore, S3_LIST_PAGE_MAX_KEYS, S3BlobStore,
-    SegmentConfig, SegmentCounters, SegmentedObjectLog,
+    BlobStore, FaultCutPoint, ManifestPointerStore, PointerFencedBlobStore, S3_LIST_PAGE_MAX_KEYS,
+    S3BlobStore, SegmentConfig, SegmentCounters, SegmentedObjectLog,
 };
 use fireweed_server::{
     RecoveryStats, SegmentedObjectLogInMemoryBackend, SegmentedObjectLogSqliteBackend,
@@ -416,7 +416,47 @@ struct S3Env {
 }
 
 const DEFAULT_E3_S3_REGION: &str = "us-east-1";
-const SUPPORTED_E3_AUTHORITY_MODE: &str = "native-create-only";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum E3AuthorityMode {
+    NativeCreateOnly,
+    PostgresPointer { database_url: String },
+}
+
+impl E3AuthorityMode {
+    fn parse(mode: &str, postgres_url: Option<String>) -> Result<Self, &'static str> {
+        match mode {
+            "native-create-only" => Ok(Self::NativeCreateOnly),
+            "postgres-pointer" => {
+                let database_url = postgres_url.filter(|url| !url.trim().is_empty()).ok_or(
+                    "postgres-pointer authority requires FIREWEED_E3_POSTGRES_POINTER_DATABASE_URL",
+                )?;
+                Ok(Self::PostgresPointer { database_url })
+            }
+            _ => Err("release E3 authority mode must be native-create-only or postgres-pointer"),
+        }
+    }
+
+    /// Apply authority outside the measured object-store wrapper. In pointer mode this constructs a fresh
+    /// Postgres client on every backend open, including recovery/control reopen paths.
+    fn wrap_measured_objects(
+        &self,
+        measured_objects: Arc<dyn BlobStore>,
+    ) -> fireweed_engine::EngineResult<Arc<dyn BlobStore>> {
+        match self {
+            Self::NativeCreateOnly => Ok(measured_objects),
+            Self::PostgresPointer { database_url } => {
+                let pointers = Arc::new(fireweed_postgres::PostgresManifestPointer::open(
+                    database_url,
+                )?);
+                Ok(Arc::new(PointerFencedBlobStore::new(
+                    measured_objects,
+                    pointers,
+                )))
+            }
+        }
+    }
+}
 
 fn e3_s3_region(configured: Option<String>) -> String {
     configured.unwrap_or_else(|| DEFAULT_E3_S3_REGION.into())
@@ -430,7 +470,7 @@ fn validate_release_s3_profile(
     topology_id: &str,
     topology_description: &str,
     durability_claim: &str,
-    authority_mode: &str,
+    authority_mode: &E3AuthorityMode,
 ) -> Result<(), &'static str> {
     let mut topology_bytes = topology_id.bytes();
     if !(3..=128).contains(&topology_id.len())
@@ -448,10 +488,8 @@ fn validate_release_s3_profile(
     if durability_claim != "excluded" {
         return Err("release E3 currently excludes storage host durability and restart claims");
     }
-    if authority_mode != SUPPORTED_E3_AUTHORITY_MODE {
-        return Err(
-            "release E3 measurement currently requires native-create-only authority; postgres-pointer measurement is not yet implemented",
-        );
+    match authority_mode {
+        E3AuthorityMode::NativeCreateOnly | E3AuthorityMode::PostgresPointer { .. } => {}
     }
     Ok(())
 }
@@ -464,39 +502,35 @@ fn e3_s3_region_defaults_and_accepts_override() {
 
 #[test]
 fn release_s3_profile_is_provider_neutral_and_authority_aware() {
+    let native = E3AuthorityMode::NativeCreateOnly;
+    let postgres = E3AuthorityMode::PostgresPointer {
+        database_url: "postgres://pointer.invalid/e3".into(),
+    };
     validate_release_s3_profile(
         "garage-local-1",
         "operator-verified S3-compatible topology",
         "excluded",
-        "native-create-only",
+        &native,
     )
     .unwrap();
+    validate_release_s3_profile(
+        "garage-local-1",
+        "operator-verified S3-compatible topology",
+        "excluded",
+        &postgres,
+    )
+    .unwrap();
+    assert!(validate_release_s3_profile("undeclared", "", "excluded", &native).is_err());
     assert!(
-        validate_release_s3_profile(
-            "garage-local-1",
-            "operator-verified S3-compatible topology",
-            "excluded",
-            "postgres-pointer",
-        )
-        .unwrap_err()
-        .contains("not yet implemented")
+        validate_release_s3_profile("provider-a", "remote provider", "provider-durable", &native,)
+            .is_err()
     );
-    assert!(
-        validate_release_s3_profile("undeclared", "", "excluded", "native-create-only").is_err()
-    );
-    assert!(
-        validate_release_s3_profile(
-            "provider-a",
-            "remote provider",
-            "provider-durable",
-            "native-create-only",
-        )
-        .is_err()
-    );
+    assert!(E3AuthorityMode::parse("postgres-pointer", None).is_err());
+    assert!(E3AuthorityMode::parse("unknown", None).is_err());
 }
 
 impl S3Env {
-    fn instrumented_store(
+    fn instrumented_objects(
         &self,
         recorder_enabled: bool,
     ) -> (Arc<dyn BlobStore>, Arc<BlobMetricsRecorder>) {
@@ -521,6 +555,204 @@ impl S3Env {
             )),
             recorder,
         )
+    }
+}
+
+fn open_measured_store(
+    authority: &E3AuthorityMode,
+    measured_objects: Arc<dyn BlobStore>,
+) -> fireweed_engine::EngineResult<Arc<dyn BlobStore>> {
+    authority.wrap_measured_objects(measured_objects)
+}
+
+#[cfg(test)]
+mod measured_authority_tests {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use fireweed_objectlog::segmented::{
+        InMemoryBlobStore, ManifestHeadBlob, TransactionalDeleteOutcome,
+        TransactionalPublishOutcome, VersionedHead,
+    };
+
+    use super::*;
+
+    struct RawConditionalGuard {
+        inner: InMemoryBlobStore,
+        conditional_puts: AtomicU64,
+        reject_conditional_puts: bool,
+    }
+
+    impl RawConditionalGuard {
+        fn new(reject_conditional_puts: bool) -> Self {
+            Self {
+                inner: InMemoryBlobStore::new(),
+                conditional_puts: AtomicU64::new(0),
+                reject_conditional_puts,
+            }
+        }
+    }
+
+    impl BlobStore for RawConditionalGuard {
+        fn put(&self, key: &str, body: &[u8]) -> fireweed_engine::EngineResult<()> {
+            self.inner.put(key, body)
+        }
+
+        fn put_if_absent(&self, key: &str, body: &[u8]) -> fireweed_engine::EngineResult<bool> {
+            self.conditional_puts.fetch_add(1, Ordering::SeqCst);
+            if self.reject_conditional_puts {
+                return Err(EngineError::Storage(
+                    "raw conditional PUT escaped pointer authority".into(),
+                ));
+            }
+            self.inner.put_if_absent(key, body)
+        }
+
+        fn get(&self, key: &str) -> fireweed_engine::EngineResult<Option<Vec<u8>>> {
+            self.inner.get(key)
+        }
+
+        fn delete(&self, key: &str) -> fireweed_engine::EngineResult<bool> {
+            self.inner.delete(key)
+        }
+
+        fn list(&self, prefix: &str) -> fireweed_engine::EngineResult<Vec<String>> {
+            self.inner.list(prefix)
+        }
+
+        fn backend_kind(&self) -> BlobBackendKind {
+            BlobBackendKind::Memory
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingPointer {
+        heads: Mutex<HashMap<String, VersionedHead<ManifestHeadBlob>>>,
+        pointer_publications: AtomicU64,
+        immutable_publications: AtomicU64,
+    }
+
+    impl ManifestPointerStore for CountingPointer {
+        fn read(
+            &self,
+            pointer_key: &str,
+        ) -> fireweed_engine::EngineResult<Option<VersionedHead<ManifestHeadBlob>>> {
+            Ok(self.heads.lock().unwrap().get(pointer_key).cloned())
+        }
+
+        fn compare_and_swap(
+            &self,
+            pointer_key: &str,
+            expected_version: Option<u64>,
+            value: &ManifestHeadBlob,
+        ) -> fireweed_engine::EngineResult<bool> {
+            let mut heads = self.heads.lock().unwrap();
+            let matches = heads.get(pointer_key).map(|head| head.version) == expected_version;
+            if !matches {
+                return Ok(false);
+            }
+            heads.insert(
+                pointer_key.to_owned(),
+                VersionedHead {
+                    version: expected_version.map_or(0, |version| version + 1),
+                    value: value.clone(),
+                },
+            );
+            self.pointer_publications.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
+        }
+
+        fn publish_if_absent(
+            &self,
+            key: &str,
+            _content_sha256: &str,
+            body: &[u8],
+            mirror: &dyn BlobStore,
+        ) -> fireweed_engine::EngineResult<TransactionalPublishOutcome> {
+            self.immutable_publications.fetch_add(1, Ordering::SeqCst);
+            match mirror.get(key)? {
+                None => {
+                    mirror.put(key, body)?;
+                    Ok(TransactionalPublishOutcome::Created)
+                }
+                Some(existing) if existing == body => Ok(TransactionalPublishOutcome::Existing),
+                Some(_) => Ok(TransactionalPublishOutcome::Conflict),
+            }
+        }
+
+        fn delete_object(
+            &self,
+            key: &str,
+            mirror: &dyn BlobStore,
+        ) -> fireweed_engine::EngineResult<TransactionalDeleteOutcome> {
+            Ok(if mirror.delete(key)? {
+                TransactionalDeleteOutcome::Deleted
+            } else {
+                TransactionalDeleteOutcome::Missing
+            })
+        }
+    }
+
+    fn commit_one(store: Arc<dyn BlobStore>, queue: &str) {
+        use fireweed_conformance::{envelope, item};
+
+        let cfg = SegmentConfig::new(1_048_576, 100).unwrap();
+        let def = qdef("e3-measured-authority", queue);
+        let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        let log = SegmentedObjectLog::open(store, cfg);
+        log.create_queue(&def).unwrap();
+        assert_eq!(log.fence_epoch(&shard, 0, 1).unwrap(), 0);
+        log.enqueue(
+            &shard,
+            &[envelope(
+                QueueCommand::Push(PushCommand {
+                    items: vec![item("1", "measured-authority", 0)],
+                }),
+                vec![],
+            )],
+            0,
+            2,
+        )
+        .unwrap();
+        log.seal(&shard, 0, 3).unwrap();
+        assert_eq!(log.read_all(&shard).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn postgres_pointer_wrap_avoids_raw_conditional_put_and_publishes_pointer() {
+        let raw = Arc::new(RawConditionalGuard::new(true));
+        let recorder = Arc::new(BlobMetricsRecorder::new());
+        let measured_objects: Arc<dyn BlobStore> = Arc::new(InstrumentedBlobStore::new(
+            raw.clone(),
+            recorder,
+            BlobBackendKind::Memory,
+        ));
+        let pointers = Arc::new(CountingPointer::default());
+        let measured_store: Arc<dyn BlobStore> = Arc::new(PointerFencedBlobStore::new(
+            measured_objects,
+            pointers.clone(),
+        ));
+
+        commit_one(measured_store, "postgres-pointer");
+
+        assert_eq!(raw.conditional_puts.load(Ordering::SeqCst), 0);
+        assert!(pointers.pointer_publications.load(Ordering::SeqCst) > 0);
+        assert!(pointers.immutable_publications.load(Ordering::SeqCst) > 0);
+    }
+
+    #[test]
+    fn native_create_only_still_uses_raw_conditional_put() {
+        let raw = Arc::new(RawConditionalGuard::new(false));
+        let recorder = Arc::new(BlobMetricsRecorder::new());
+        let measured_store: Arc<dyn BlobStore> = Arc::new(InstrumentedBlobStore::new(
+            raw.clone(),
+            recorder,
+            BlobBackendKind::Memory,
+        ));
+
+        commit_one(measured_store, "native-create-only");
+
+        assert!(raw.conditional_puts.load(Ordering::SeqCst) > 0);
     }
 }
 
@@ -846,7 +1078,7 @@ where
     ));
     let cfg = SegmentConfig::new(config.bound.target_bytes, config.bound.max_latency_ms).unwrap();
 
-    let (store, recorder) = s3.instrumented_store(config.recorder_enabled);
+    let (store, recorder) = s3.instrumented_objects(config.recorder_enabled);
     let backend = Arc::new(open(store, &proj, cfg).expect("open segmented backend over S3"));
     backend.create_queue(def).await.expect("create queue");
     let flusher = backend.spawn_background_flusher();
@@ -1938,8 +2170,10 @@ fn release_load_batch_shape_met(counters: &SegmentCounters) -> bool {
         && counters.group_commit_batches.iter().sum::<usize>() as u64 == counters.commands_committed
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_release_load_shape_calibration(
     s3: &S3Env,
+    authority: &E3AuthorityMode,
     label: &str,
     resident: u64,
     load_batch: u64,
@@ -1955,7 +2189,8 @@ async fn run_release_load_shape_calibration(
     // arm uses the governed 10 s cap; the one-wave negative control uses a shorter cap only to expose the
     // otherwise unreachable 8 MiB target without repeating the same blocked wave.
     let cfg = SegmentConfig::new(target_bytes, max_latency_ms).unwrap();
-    let (store, _) = s3.instrumented_store(true);
+    let (store, _) = s3.instrumented_objects(true);
+    let store = open_measured_store(authority, store).expect("apply calibration authority");
     let backend = Arc::new(
         SegmentedObjectLogInMemoryBackend::open_with_blob_store(store, cfg)
             .expect("open calibration backend"),
@@ -2025,6 +2260,12 @@ async fn e3_release_load_shape_calibration() {
         .expect("create bucket");
 
     let preflight = assert_release_load_preflight();
+    let authority = E3AuthorityMode::parse(
+        &std::env::var("FIREWEED_E3_AUTHORITY_MODE")
+            .unwrap_or_else(|_| "native-create-only".into()),
+        std::env::var("FIREWEED_E3_POSTGRES_POINTER_DATABASE_URL").ok(),
+    )
+    .expect("valid E3 authority mode");
     let smallest_size_seal_raw =
         preflight.smallest_subset_raw_bytes(RELEASE_LOAD_SIZE_SEAL_COMMANDS);
     eprintln!(
@@ -2041,6 +2282,7 @@ async fn e3_release_load_shape_calibration() {
 
     let old = run_release_load_shape_calibration(
         &s3,
+        &authority,
         "old",
         8_000,
         RELEASE_LOAD_BATCH,
@@ -2051,6 +2293,7 @@ async fn e3_release_load_shape_calibration() {
     .await;
     let tuned = run_release_load_shape_calibration(
         &s3,
+        &authority,
         "tuned",
         64_000,
         RELEASE_LOAD_BATCH,
@@ -2109,7 +2352,7 @@ where
     // can therefore drive a size seal without depending on host timing or the latency flusher.
     let cfg = SegmentConfig::new(RELEASE_LOAD_SEGMENT_TARGET_BYTES, 10_000).unwrap();
     let load_concurrency = env_u64("FIREWEED_E3_LOAD_CONCURRENCY", 8).max(1);
-    let (store, recorder) = s3.instrumented_store(true);
+    let (store, recorder) = s3.instrumented_objects(true);
     let verification_chunk_items = env_u64("FIREWEED_E3_VERIFY_CHUNK_ITEMS", 512).clamp(1, 512);
 
     let load_resident = if requires_snapshot {
@@ -3223,6 +3466,14 @@ async fn performance_object_log_e3_live_tests() {
     let load_concurrency = env_u64("FIREWEED_E3_LOAD_CONCURRENCY", 8).max(1);
     let release_shape = resident >= RELEASE_RESIDENT;
     let require_bars = perf_env && release_shape;
+    let configured_authority_mode = std::env::var("FIREWEED_E3_AUTHORITY_MODE").ok();
+    let authority = E3AuthorityMode::parse(
+        configured_authority_mode
+            .as_deref()
+            .unwrap_or("native-create-only"),
+        std::env::var("FIREWEED_E3_POSTGRES_POINTER_DATABASE_URL").ok(),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
     if require_bars {
         let source_revision = std::env::var("FIREWEED_E3_SOURCE_REVISION")
             .expect("release E3 evidence requires an exact committed source revision");
@@ -3237,13 +3488,14 @@ async fn performance_object_log_e3_live_tests() {
             .expect("release E3 requires FIREWEED_E3_STORAGE_TOPOLOGY");
         let durability_claim = std::env::var("FIREWEED_E3_STORAGE_DURABILITY_CLAIM")
             .expect("release E3 requires FIREWEED_E3_STORAGE_DURABILITY_CLAIM");
-        let authority_mode = std::env::var("FIREWEED_E3_AUTHORITY_MODE")
+        configured_authority_mode
+            .as_ref()
             .expect("release E3 requires FIREWEED_E3_AUTHORITY_MODE");
         validate_release_s3_profile(
             &topology_id,
             &topology_description,
             &durability_claim,
-            &authority_mode,
+            &authority,
         )
         .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(resident, RELEASE_RESIDENT);
@@ -3283,7 +3535,10 @@ async fn performance_object_log_e3_live_tests() {
             ack_concurrency,
             false,
             |store, _projection_path, cfg| {
-                SegmentedObjectLogInMemoryBackend::open_with_blob_store(store, cfg)
+                SegmentedObjectLogInMemoryBackend::open_with_blob_store(
+                    open_measured_store(&authority, store)?,
+                    cfg,
+                )
             },
         )
         .await,
@@ -3297,7 +3552,11 @@ async fn performance_object_log_e3_live_tests() {
             ack_concurrency,
             true,
             |store, projection_path, cfg| {
-                SegmentedObjectLogSqliteBackend::open_with_blob_store(store, projection_path, cfg)
+                SegmentedObjectLogSqliteBackend::open_with_blob_store(
+                    open_measured_store(&authority, store)?,
+                    projection_path,
+                    cfg,
+                )
             },
         )
         .await,
