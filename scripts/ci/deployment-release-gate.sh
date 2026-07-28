@@ -21,7 +21,7 @@ KIND_IMAGE_CONTEXT="${PROOF_DIR}/kind-image"
 KIND_IMAGE_DOCKERFILE="${KIND_IMAGE_CONTEXT}/Dockerfile"
 
 # Public projection axis only (hybrid*/turso demoted from chart schema and public env select).
-STORAGE_COMBINATIONS=("objectlog:inmemory" "objectlog:sqlite")
+STORAGE_COMBINATIONS=("filesystem:memory" "filesystem:sqlite")
 KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.31.0}"
 export KIND_NODE_IMAGE
 
@@ -380,10 +380,11 @@ validate_docs_microsite() {
     fi
     local kind_cmd
     for kind_cmd in \
-        'bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend inmemory' \
-        'bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend sqlite' \
-        'bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend hybrid' \
-        'bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend hybrid-async'
+        'bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend memory' \
+        'bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend sqlite' \
+        'bash scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend memory' \
+        'bash scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend sqlite' \
+        'bash scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend postgres'
     do
         if ! grep -Fq "$kind_cmd" docs/deployment/kind-helm-integration.md; then
             echo "docs/deployment/kind-helm-integration.md missing: $kind_cmd" >&2

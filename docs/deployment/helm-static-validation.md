@@ -5,18 +5,18 @@ cluster.
 
 The chart storage contract is expressed as axes isomorphic to `StorageConfig`:
 
-- `storage.log.backend`: public `memory` | `sqlite` | `postgres` | `filesystem` | `s3`; compat alias `objectlog` (+ `objectLog.store` local|s3 → filesystem|s3)
+- `storage.log.backend`: public `memory` | `sqlite` | `postgres` | `filesystem` | `s3`
 - `storage.log.objectLog.root` / `objectLog.s3.*`: filesystem root and S3 credential blocks (structured fields)
-- `storage.projection.backend`: public `memory` | `sqlite` | `postgres`; compat `inmemory` only
+- `storage.projection.backend`: public `memory` | `sqlite` | `postgres`
 - `storage.controlPlane.backend`: `inprocess` or `postgres`
 
-Demoted projection values (`hybrid`, `hybrid-async`, `hybrid-strict`, `turso`) are
-**not** part of the chart contract or public support surface. The gate contains a
-named negative assertion that requires Helm to reject each demoted value at
-`/storage/projection/backend` with the exact public allowed enum; an unrelated
-render failure cannot satisfy the assertion. Server-side hybrid runtime code may
-still exist for direct `Config` construction / internal tests, but the public
-env adapter rejects hybrid selection and Turso remains feature-gated non-public.
+Only those public product values are chart-selectable. The gate contains named
+negative assertions that require Helm to reject demoted or legacy backend names
+at `/storage/log/backend` and `/storage/projection/backend` with the exact public
+allowed enums; an unrelated render failure cannot satisfy the assertion.
+Server-side implementation code may still exist for direct `Config` construction
+/ internal tests, but the public env adapter and chart schema hard-reject those
+names.
 
 `shared-s3-postgres-control-plane` is the replica-safe shared profile. It
 renders `FIREWEED_OBJECT_LOG_S3_*`,
@@ -29,7 +29,7 @@ conditional PutObject support.
 The chart fails closed if a local object-log profile is scaled beyond one
 replica.
 
-The gate first proves demoted-projection schema exclusion, then runs
+The gate first proves demoted/legacy backend schema exclusion, then runs
 `helm lint --strict`, renders checked-in CI values for selected axis
 combinations, asserts the rendered environment variables, and validates the
 manifests with `kubeconform`.
@@ -41,6 +41,6 @@ bash scripts/ci/helm-gate.sh
 Runtime smoke testing is separate:
 
 ```sh
-bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend inmemory
-bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend sqlite
+bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend memory
+bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend sqlite
 ```

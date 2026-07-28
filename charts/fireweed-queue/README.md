@@ -48,14 +48,12 @@ protocol). Configure them with structured fields:
   only if the projection is durable. After process death only the projection
   remains — no Class A log-rebuild claims for a memory log.
 
-### Non-public names (rejected)
+### Public names only
 
-The following names are **not** public product values. The Helm schema and the
-server env adapter hard-reject them (no long-lived aliases):
-
-- log: `objectlog` (use `filesystem` or `s3`)
-- projection: `inmemory` (use `memory`), `hybrid`, `hybrid-async`,
-  `hybrid-strict`, `turso`
+The chart schema and the server env adapter accept **only** the public product
+values above. Older spellings and demoted projection paths are hard-rejected
+(no long-lived aliases). Prefer `filesystem` or `s3` for the object-log protocol
+family, and `memory` for an in-process projection.
 
 ### Wiring honesty
 

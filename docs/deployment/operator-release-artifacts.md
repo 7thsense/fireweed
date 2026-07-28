@@ -134,19 +134,16 @@ kind storage matrix only and is not CI matrix proof.
 
 ## Storage Boundary
 
-The chart exposes separate storage axes:
+The chart exposes separate storage axes isomorphic to `StorageConfig`:
 
-- log backend: `objectlog` or `postgres`
-- projection backend: `inmemory`, `sqlite`, `turso`, `hybrid`, `hybrid-async`, or
-  `postgres`
+- log backend: `memory` | `sqlite` | `postgres` | `filesystem` | `s3`
+- projection backend: `memory` | `sqlite` | `postgres`
 
-`objectlog/hybrid-strict` is deliberately absent from that chart enum. It is an
-experimental runtime path selectable only through environment or direct
-configuration, not a chart-selectable or production-supported profile. The
-static Helm gate names and verifies the exact schema rejection, so runtime
-wiring cannot be mistaken for public deployment support.
+Only those public product values are chart-selectable. The static Helm gate
+names and verifies schema rejection of demoted and legacy backend names, so
+non-public implementation paths cannot be mistaken for public deployment support.
 
-The current live-kind matrix covers `objectlog` plus `inmemory`, `sqlite`,
-`hybrid`, or `hybrid-async`, and `postgres` plus `inmemory`, `sqlite`, or
-`postgres`. Other rendered combinations remain outside the live deployment
-claim until their matrix entries and evidence land.
+The current live-kind matrix covers `filesystem` plus `memory` or `sqlite`, and
+`postgres` plus `memory`, `sqlite`, or `postgres`. Other rendered combinations
+remain outside the live deployment claim until their matrix entries and evidence
+land.

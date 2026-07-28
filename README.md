@@ -53,7 +53,7 @@ cd fireweed
 
 FIREWEED_LISTEN_ADDR=127.0.0.1:8080 \
 FIREWEED_LOG_BACKEND=memory \
-FIREWEED_PROJECTION_BACKEND=inmemory \
+FIREWEED_PROJECTION_BACKEND=memory \
 FIREWEED_BOOTSTRAP_QUEUES=t1:q1 \
 cargo run -p fireweed-server --bin fireweed-service
 ```

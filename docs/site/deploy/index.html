@@ -69,7 +69,7 @@ gh release download "$TAG" --repo "${OWNER}/${REPO}" \
 (cd "$DIST_DIR" &amp;&amp; shasum -a 256 -c SHA256SUMS)</code></pre>
               </div>
               <div class="command-block">
-                <div class="label"><span>helm install</span><span>objectlog path</span></div>
+                <div class="label"><span>helm install</span><span>filesystem log</span></div>
                 <pre><code>NAMESPACE=fireweed
 RELEASE=fireweed
 IMAGE="ghcr.io/${OWNER}/fireweed-service"
@@ -80,13 +80,13 @@ helm install "$RELEASE" "$DIST_DIR/fireweed-queue-${VERSION}.tgz" \
   --namespace "$NAMESPACE" \
   --set image.repository="$IMAGE" \
   --set image.tag="$VERSION" \
-  --set storage.log.backend=objectlog \
-  --set storage.projection.backend=inmemory</code></pre>
+  --set storage.log.backend=filesystem \
+  --set storage.projection.backend=memory</code></pre>
               </div>
               <div class="command-block">
                 <div class="label"><span>kind smoke</span><span>local proof</span></div>
                 <pre><code>bash scripts/ci/helm-gate.sh
-bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend inmemory</code></pre>
+bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend memory</code></pre>
               </div>
             </div>
           </section>
@@ -99,11 +99,11 @@ bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend i
               <div class="storage-axis-list">
                 <article class="storage-axis">
                   <h3>log backend</h3>
-                  <p>Chart values may expose <code>objectlog</code> and <code>postgres</code>. Prefer preview-supported object-log compositions unless you knowingly operate outside the preview contract.</p>
+                  <p>Public product values: <code>memory</code>, <code>sqlite</code>, <code>postgres</code>, <code>filesystem</code>, and <code>s3</code>. Chart schema and the container env adapter accept only these names.</p>
                 </article>
                 <article class="storage-axis">
                   <h3>projection backend</h3>
-                  <p>Chart values may expose <code>inmemory</code>, <code>sqlite</code>, <code>hybrid</code>, <code>hybrid-async</code>, and <code>postgres</code>. Unsupported pairings fail at startup.</p>
+                  <p>Public product values: <code>memory</code>, <code>sqlite</code>, and <code>postgres</code>. Unsupported pairings fail closed at startup.</p>
                 </article>
               </div>
             </section>
@@ -114,12 +114,12 @@ bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend i
               </div>
               <div class="status-list">
                 <article class="status-row">
-                  <h3><span class="badge ok">supported</span> objectlog + inmemory/sqlite/hybrid</h3>
-                  <p>Within the public preview boundary when release evidence and readiness gates pass for your topology.</p>
+                  <h3><span class="badge ok">supported</span> filesystem/s3 log × memory/sqlite projection</h3>
+                  <p>Within the public preview boundary when release evidence and readiness gates pass for your topology. Use public axis names only.</p>
                 </article>
                 <article class="status-row">
-                  <h3><span class="badge blocked">deferred</span> postgres chart paths</h3>
-                  <p>May render and even test, but remain outside the preview support contract until promoted.</p>
+                  <h3><span class="badge warn">verify</span> postgres chart paths</h3>
+                  <p>First-class axes; require a binary built with the <code>postgres</code> feature. Stock release images fail closed if selected without that build.</p>
                 </article>
                 <article class="status-row">
                   <h3><span class="badge warn">verify</span> release artifacts</h3>
@@ -184,7 +184,7 @@ bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend i
               </article>
               <article class="doc-row">
                 <h3><a href="../../deployment/kind-helm-integration.md">kind smoke</a></h3>
-                <p>kind RESP smoke for objectlog projections.</p>
+                <p>kind RESP smoke for public log × projection axes.</p>
               </article>
             </div>
           </section>

@@ -89,19 +89,12 @@ rebuilds from the shared log.
 - Projection SQLite path: `storage.projection.sqlite.path` (when projection is `sqlite`)
 - Postgres DSN Secret refs: `storage.log.postgres.*` / `storage.projection.postgres.*`
 
-### Compat aliases (not product identity)
+### Public product names only
 
-Legacy chart spellings still parse for one minor:
-
-- `storage.log.backend=objectlog` + `objectLog.store=local` → product log `filesystem`
-- `storage.log.backend=objectlog` + `objectLog.store=s3` → product log `s3`
-- `storage.projection.backend=inmemory` → product projection `memory`
-
-Prefer the five public log names and three public projection names in new
-values files and operator runbooks. Non-public projection values (`hybrid`,
-`hybrid-async`, `turso`) may still render for transitional wiring; they are not
-public matrix rows and must not be treated as product SKUs. Setting
-`storage.projection.backend=hybrid-strict` fails Helm schema validation.
+Use only the five public log names and three public projection names in values
+files and operator runbooks. The Helm schema and the server env adapter
+hard-reject older spellings and demoted projection paths (no long-lived
+aliases).
 
 Postgres is a first-class log and projection backend. Feature flags or image
 builds that omit the adapter are packaging choices and fail closed with a clear
@@ -167,8 +160,7 @@ helm install "$RELEASE" "$DIST_DIR/fireweed-queue-${VERSION}.tgz" \
 
 Or install with the checked-in shared values file
 (`charts/fireweed-queue/values-shared-s3.yaml`), which selects the same
-replica-safe combination (compat `objectlog`+`store=s3` spelling is equivalent
-to public `s3`).
+replica-safe combination (`storage.log.backend=s3`).
 
 ### Shared S3 operating boundary
 
@@ -259,9 +251,6 @@ default. The corresponding direct environment variables are
 bash scripts/ci/helm-gate.sh
 bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend memory
 ```
-
-Legacy harness spellings (`objectlog` / `inmemory`) remain accepted as compat
-aliases for the same axes.
 
 ## Reference Documents
 

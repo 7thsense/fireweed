@@ -1,4 +1,4 @@
-# Fireweed Queue replica-safe shared profile using first-class log.backend=s3 (not objectlog+store).
+# Fireweed Queue replica-safe shared profile using first-class log.backend=s3.
 replicaCount: 3
 
 storage:

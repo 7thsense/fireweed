@@ -42,23 +42,18 @@ REQUIRED TOOLS FOR REAL RUNS:
   kubectl   apply helper manifests, wait for rollout, and run the smoke check
   helm      install/upgrade the charts/fireweed-queue release
 
-STORAGE BACKENDS (runnable live smokes):
-  objectlog + inmemory   ephemeral projection over the durable object log
-  objectlog + sqlite     durable SQLite relational projection over the object log,
-                         persisted on the chart's storage volume
-  objectlog + hybrid     durable SQLite projection plus the hot in-memory serving
-                         image over the object log, persisted on the chart's volume
-  objectlog + hybrid-async
-                         hot in-memory serving over an asynchronous durable SQLite
-                         checkpoint, with fail-closed debt/backpressure thresholds
-  postgres  + inmemory   durable postgres command log + in-memory projection
+STORAGE BACKENDS (runnable live smokes; public product names only):
+  filesystem + memory    ephemeral projection over a durable filesystem object log
+  filesystem + sqlite    durable SQLite relational projection over the filesystem
+                         object log, persisted on the chart's storage volume
+  postgres   + memory    durable postgres command log + in-memory projection
                          (the wired managed-postgres profile). The harness stands
                          up a throwaway in-cluster postgres and injects its DSN as
                          the fireweed-postgres-log Secret before installing the chart.
-  postgres  + sqlite     durable postgres command log + a derived SQLite relational
+  postgres   + sqlite    durable postgres command log + a derived SQLite relational
                          projection on the chart's storage volume. Same in-cluster
                          postgres as above for the log axis; no projection Secret.
-  postgres  + postgres   durable postgres command log + a SEPARATE postgres-backed
+  postgres   + postgres  durable postgres command log + a SEPARATE postgres-backed
                          relational projection (distinct table sets, no collision).
                          The harness reuses the one throwaway in-cluster postgres for
                          both axes and injects its DSN as both the fireweed-postgres-log
@@ -128,13 +123,10 @@ values_file_for() {
     case "$1:$2" in
         filesystem:memory) echo "${CHART_DIR}/ci/filesystem-memory-values.yaml" ;;
         filesystem:sqlite) echo "${CHART_DIR}/ci/filesystem-sqlite-values.yaml" ;;
-        # Historical kind matrix keys still accepted; fixtures use public product names.
-        objectlog:inmemory|objectlog:memory) echo "${CHART_DIR}/ci/filesystem-memory-values.yaml" ;;
-        objectlog:sqlite) echo "${CHART_DIR}/ci/filesystem-sqlite-values.yaml" ;;
-        postgres:memory|postgres:inmemory) echo "${CHART_DIR}/ci/postgres-memory-values.yaml" ;;
+        postgres:memory) echo "${CHART_DIR}/ci/postgres-memory-values.yaml" ;;
         postgres:sqlite) echo "${CHART_DIR}/ci/postgres-sqlite-values.yaml" ;;
         postgres:postgres) echo "${CHART_DIR}/ci/postgres-postgres-values.yaml" ;;
-        *) die "no runtime CI values file for log=$1 projection=$2" ;;
+        *) die "no runtime CI values file for log=$1 projection=$2 (public: filesystem|postgres × memory|sqlite|postgres)" ;;
     esac
 }
 
@@ -275,12 +267,12 @@ validate_config() {
     [[ -n "${LOG_BACKEND}" ]] || die "--log-backend is required"
     [[ -n "${PROJECTION_BACKEND}" ]] || die "--projection-backend is required"
     case "${LOG_BACKEND}:${PROJECTION_BACKEND}" in
-        objectlog:inmemory) ;;
-        objectlog:sqlite) ;;
-        postgres:inmemory) ;;
+        filesystem:memory) ;;
+        filesystem:sqlite) ;;
+        postgres:memory) ;;
         postgres:sqlite) ;;
         postgres:postgres) ;;
-        *) die "runtime smoke supports log=objectlog projection={inmemory,sqlite}, and log=postgres projection={inmemory,sqlite,postgres}; hybrid/turso are demoted from the public projection axis (requested log=${LOG_BACKEND} projection=${PROJECTION_BACKEND})" ;;
+        *) die "runtime smoke supports public axes only: log=filesystem projection={memory,sqlite}, and log=postgres projection={memory,sqlite,postgres} (requested log=${LOG_BACKEND} projection=${PROJECTION_BACKEND})" ;;
     esac
     [[ "${IMAGE}" == *:* ]] || die "--image must include an explicit tag, for example fireweed-service:ci"
     [[ -d "${IMAGE_CONTEXT}" ]] || die "--image-context must be an existing directory: ${IMAGE_CONTEXT}"
@@ -354,7 +346,7 @@ dry_run_plan() {
     echo "+ RESP PING 127.0.0.1:${SMOKE_PORT}"
     echo "+ RESP XADD/XREADGROUP 127.0.0.1:${SMOKE_PORT}"
     case "${LOG_BACKEND}" in
-        objectlog | postgres)
+        filesystem | postgres)
             echo "+ RESP XADD before restart"
             print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout restart "deployment/${RELEASE_NAME}"
             print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
@@ -553,11 +545,11 @@ smoke_resp() {
 }
 
 # Durable-backend restart recovery: push an item, restart the fireweed Deployment, and prove the item is
-# recovered after restart. Runs for the durable log axes (objectlog and postgres); the in-memory-only
+# recovered after restart. Runs for the durable log axes (filesystem and postgres); memory-log
 # combos have nothing durable to recover, so it is a no-op there.
 smoke_durable_restart_runtime() {
     case "${LOG_BACKEND}" in
-        objectlog | postgres) ;;
+        filesystem | postgres) ;;
         *) return 0 ;;
     esac
 
@@ -597,7 +589,7 @@ create_namespace() {
 }
 
 # Stand up a throwaway in-cluster postgres (Deployment + ClusterIP Service) and publish its DSN as the
-# Secret the postgres-inmemory values file references (${PG_SECRET_NAME}/${PG_SECRET_KEY}). Ephemeral
+# Secret the postgres-memory values file references (${PG_SECRET_NAME}/${PG_SECRET_KEY}). Ephemeral
 # (emptyDir) — the smoke only needs a live database for the RESP round-trip, not cross-pod durability.
 deploy_in_cluster_postgres() {
     needs_in_cluster_postgres || return 0
