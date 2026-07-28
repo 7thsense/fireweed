@@ -1,0 +1,13 @@
+# Fireweed Queue CI values: memory log × postgres projection (Class B, public StorageConfig axes).
+# Durability limited to the projection; DSN via Secret (never fixture credentials).
+storage:
+  log:
+    backend: memory
+  projection:
+    backend: postgres
+    postgres:
+      existingSecret: fireweed-postgres-projection
+      databaseUrlKey: database-url
+image:
+  tag: ci
+replicaCount: 1

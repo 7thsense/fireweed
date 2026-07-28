@@ -51,10 +51,16 @@ cargo run -p fireweed --example scheduler_boundary</code></pre>
 </div>
         <div class="prose">
           <p>
-            The public root type is concrete <code>Fireweed</code>. Start with
-            <code>open_memory</code> for local experiments, then
-            <code>open_sqlite</code> / <code>open_sqlite_relational</code> /
-            <code>open_objectlog</code> for durable compositions. Walk
+            The public root type is concrete <code>Fireweed</code>. The normative
+            full-matrix entry is typed <code>StorageConfig</code> with
+            <code>open</code> / <code>open_async</code>—any of the five log
+            backends (<code>memory</code>, <code>sqlite</code>,
+            <code>postgres</code>, <code>filesystem</code>, <code>s3</code>)
+            paired with any of the three projections
+            (<code>memory</code>, <code>sqlite</code>, <code>postgres</code>).
+            Convenience helpers (<code>open_memory</code>,
+            <code>open_sqlite</code>, <code>open_objectlog</code>, …) map onto
+            the same surface for common cells. Walk
             <a href="examples/basic-lifecycle.html">basic lifecycle</a> then
             <a href="examples/scheduler-boundary.html">scheduler boundary</a>.
           </p>

@@ -69,26 +69,27 @@
 
         <div class="prose">
           <p>
-            Target product surface: full 5×3 matrix. All 15 cells are <strong>wired</strong> in the
-            server composition root (postgres log/projection cells need the <code>postgres</code>
-            feature). Wired is not the same as preview-supported: only cells below marked
-            supported carry the public correctness contract. Full TP-003 (or equivalent) evidence
-            for every Class A cell may still be evolving—see deployment readiness and the matrix
-            inventory.
+            Product surface: full 5×3 matrix. All <strong>15 cells are preview-supported</strong>.
+            Open via typed <code>StorageConfig</code> (<code>Fireweed::open</code>); server and Helm
+            select the same log × projection pair. Postgres is a first-class log and projection
+            backend (not a deferred product family). There are no public profile SKUs.
+          </p>
+          <p>
+            <strong>Class B semantic disclaimer only:</strong> when the log is <code>memory</code>,
+            durability is limited to the projection after process death—no Class A log rebuild,
+            branch, read-as-of, or change-record-from-log claims. That is a weaker persistence
+            envelope, not incompleteness.
           </p>
         </div>
 
         <div class="table-wrap"><table class="data">
           <thead><tr><th>Log</th><th>Projection</th><th>Status</th><th>Notes</th></tr></thead>
           <tbody>
-            <tr><td><code>sqlite</code></td><td><code>memory</code></td><td><span class="badge ok">supported</span></td><td>Class A. Single-process, locally durable embed.</td></tr>
-            <tr><td><code>filesystem</code> / <code>s3</code></td><td><code>memory</code></td><td><span class="badge ok">supported</span></td><td>Class A. Durable object log, rebuildable memory projection.</td></tr>
-            <tr><td><code>filesystem</code> / <code>s3</code></td><td><code>sqlite</code></td><td><span class="badge ok">supported baseline</span></td><td>Class A. Reference persistent local projection.</td></tr>
-            <tr><td><code>memory</code></td><td><code>memory</code></td><td><span class="badge neutral">development only</span></td><td>Class B; wired; does not survive process loss.</td></tr>
-            <tr><td><code>memory</code></td><td><code>sqlite</code> / <code>postgres</code></td><td><span class="badge neutral">wired · Class B</span></td><td>Durability limited to projection; no Class A log-rebuild claims.</td></tr>
-            <tr><td><code>sqlite</code></td><td><code>sqlite</code> / <code>postgres</code></td><td><span class="badge warn">wired · evidence evolving</span></td><td>Compositions open; preview promotion tracks TP-003 / readiness gates.</td></tr>
-            <tr><td><code>postgres</code></td><td><code>memory</code> / <code>sqlite</code> / <code>postgres</code></td><td><span class="badge warn">first-class · wired · evidence evolving</span></td><td>First-class axes—not a deferred product family. Support tracks readiness evidence.</td></tr>
-            <tr><td><code>filesystem</code> / <code>s3</code></td><td><code>postgres</code></td><td><span class="badge warn">wired · evidence evolving</span></td><td>Object-log × postgres assembled; full cell TP-003 promotion may still be incomplete.</td></tr>
+            <tr><td><code>memory</code></td><td><code>memory</code></td><td><span class="badge ok">supported</span></td><td>Class B. Process-local; neither log nor projection survives process loss.</td></tr>
+            <tr><td><code>memory</code></td><td><code>sqlite</code> / <code>postgres</code></td><td><span class="badge ok">supported</span></td><td>Class B. Durability limited to the projection; no Class A log-rebuild claims.</td></tr>
+            <tr><td><code>sqlite</code></td><td><code>memory</code> / <code>sqlite</code> / <code>postgres</code></td><td><span class="badge ok">supported</span></td><td>Class A. Durable sqlite log; projection as selected.</td></tr>
+            <tr><td><code>postgres</code></td><td><code>memory</code> / <code>sqlite</code> / <code>postgres</code></td><td><span class="badge ok">supported</span></td><td>Class A. First-class durable postgres log; projection as selected.</td></tr>
+            <tr><td><code>filesystem</code> / <code>s3</code></td><td><code>memory</code> / <code>sqlite</code> / <code>postgres</code></td><td><span class="badge ok">supported</span></td><td>Class A. Durable object-log peers; projection as selected.</td></tr>
           </tbody>
         </table></div>
 

@@ -1,0 +1,10 @@
+# Fireweed Queue CI values: memory log × memory projection (Class B, public StorageConfig axes).
+# Process-local; after process death neither log nor projection remains.
+storage:
+  log:
+    backend: memory
+  projection:
+    backend: memory
+image:
+  tag: ci
+replicaCount: 1

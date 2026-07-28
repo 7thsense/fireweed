@@ -43,8 +43,8 @@ declare -A KUBECONFORM_SHA256=(
 
 # Storage combinations to validate. Each maps to a CI values file under charts/fireweed-queue/ci/.
 # Public axes only: logs memory|sqlite|postgres|filesystem|s3; projections memory|sqlite|postgres.
-# s3-memory / s3-sqlite / s3-postgres are the three chart-installable s3 log cells (T4).
-COMBINATIONS=(filesystem-memory filesystem-sqlite filesystem-postgres sqlite-memory sqlite-sqlite sqlite-postgres s3-memory s3-sqlite s3-postgres shared-s3-postgres-control-plane s3-sqlite-postgres-control-plane postgres-memory postgres-sqlite postgres-postgres lakebase-postgres)
+# Full 15-cell matrix fixtures (plus shared multi-replica S3/control-plane and lakebase variants).
+COMBINATIONS=(memory-memory memory-sqlite memory-postgres filesystem-memory filesystem-sqlite filesystem-postgres sqlite-memory sqlite-sqlite sqlite-postgres s3-memory s3-sqlite s3-postgres shared-s3-postgres-control-plane s3-sqlite-postgres-control-plane postgres-memory postgres-sqlite postgres-postgres lakebase-postgres)
 
 err() { echo "helm-gate: $*" >&2; }
 
@@ -130,6 +130,9 @@ ensure_kubeconform() {
 values_file_for() {
     local combination="$1"
     case "$combination" in
+        memory-memory) echo "${CHART_DIR}/ci/memory-memory-values.yaml" ;;
+        memory-sqlite) echo "${CHART_DIR}/ci/memory-sqlite-values.yaml" ;;
+        memory-postgres) echo "${CHART_DIR}/ci/memory-postgres-values.yaml" ;;
         filesystem-memory) echo "${CHART_DIR}/ci/filesystem-memory-values.yaml" ;;
         filesystem-sqlite) echo "${CHART_DIR}/ci/filesystem-sqlite-values.yaml" ;;
         filesystem-postgres) echo "${CHART_DIR}/ci/filesystem-postgres-values.yaml" ;;
@@ -180,6 +183,29 @@ assert_no_fixture_credentials() {
     do
         assert_not_contains "$file" "$forbidden" "${description} fixture credential"
     done
+}
+
+# Class B memory log cells (memory×memory / memory×sqlite / memory×postgres).
+assert_memory_log_contract() {
+    local rendered="$1"
+    local projection="$2"
+
+    assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "memory"' "memory log axis"
+    assert_contains "$rendered" "FIREWEED_PROJECTION_BACKEND: \"${projection}\"" "${projection} projection axis"
+    assert_not_contains "$rendered" 'FIREWEED_OBJECT_LOG_ROOT' "filesystem root on memory log"
+    assert_not_contains "$rendered" 'FIREWEED_OBJECT_LOG_S3_' "S3 object-log env on memory log"
+    assert_not_contains "$rendered" 'FIREWEED_SQLITE_LOG_PATH' "sqlite log path on memory log"
+    assert_not_contains "$rendered" 'FIREWEED_BACKEND_PROFILE' "legacy profile env"
+    if [[ "$projection" == "sqlite" ]]; then
+        assert_contains "$rendered" 'FIREWEED_SQLITE_PROJECTION_PATH: "/var/lib/fireweed/projection/projection.db"' "sqlite projection path"
+    fi
+    if [[ "$projection" == "postgres" ]]; then
+        assert_contains "$rendered" 'name: FIREWEED_POSTGRES_PROJECTION_DATABASE_URL' "postgres projection DSN env"
+    fi
+    if [[ "$projection" == "memory" ]]; then
+        assert_not_contains "$rendered" 'FIREWEED_SQLITE_PROJECTION_PATH' "sqlite projection path on memory×memory"
+    fi
+    assert_no_fixture_credentials "$rendered" "memory/${projection} rendered manifest"
 }
 
 assert_filesystem_memory_contract() {
@@ -422,6 +448,9 @@ assert_combination_contract() {
 
     echo "--- rendered contract assertions [${combination}] ---"
     case "$combination" in
+        memory-memory) assert_memory_log_contract "$rendered" "memory" ;;
+        memory-sqlite) assert_memory_log_contract "$rendered" "sqlite" ;;
+        memory-postgres) assert_memory_log_contract "$rendered" "postgres" ;;
         filesystem-memory) assert_filesystem_memory_contract "$rendered" ;;
         filesystem-sqlite) assert_filesystem_sqlite_contract "$rendered" ;;
         filesystem-postgres) assert_filesystem_postgres_contract "$rendered" ;;

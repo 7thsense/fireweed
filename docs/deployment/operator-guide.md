@@ -45,9 +45,10 @@ Do not claim Class A recovery or durability for any memory-log combination.
 
 ### Full matrix (15 cells)
 
-Every cell is a valid selection. Semantics differ only by durability class.
-Runtime wiring and release evidence may still be sparse; unsupported or
-not-yet-verified cells fail closed at startup.
+Every cell is a valid, preview-supported selection. Semantics differ only by
+durability class. Open the same pair via library `StorageConfig`, server env
+adapter, or Helm `storage.log` / `storage.projection`. Invalid or demoted names
+fail closed at schema validation / startup.
 
 | Log \ Projection | `memory` | `sqlite` | `postgres` |
 |------------------|----------|----------|------------|
@@ -56,6 +57,116 @@ not-yet-verified cells fail closed at startup.
 | `postgres` | Class A | Class A | Class A |
 | `filesystem` | Class A | Class A | Class A |
 | `s3` | Class A | Class A | Class A |
+
+### Axis examples (`StorageConfig` ↔ Helm)
+
+Helm values below are isomorphic to product `StorageConfig`. Each snippet is a
+minimal axis selection; combine any log row with any projection column. Chart
+CI fixtures under `charts/fireweed-queue/ci/` cover the full matrix (plus
+shared multi-replica S3/control-plane variants).
+
+#### Log axis (five public values)
+
+**`memory` (Class B).** In-process log; after process death only the projection
+remains. Pair with a durable projection when you need process-restart
+durability without a durable log.
+
+```yaml
+storage:
+  log:
+    backend: memory
+  projection:
+    backend: sqlite   # or memory | postgres
+    sqlite:
+      path: /var/lib/fireweed/projection/projection.db
+```
+
+**`sqlite` (Class A).** Durable local log path.
+
+```yaml
+storage:
+  log:
+    backend: sqlite
+    sqlite:
+      path: /var/lib/fireweed/projection/fireweed-log.db
+  projection:
+    backend: memory   # or sqlite | postgres
+```
+
+**`postgres` (Class A).** First-class durable log; DSN via Secret only.
+
+```yaml
+storage:
+  log:
+    backend: postgres
+    postgres:
+      existingSecret: fireweed-postgres-log
+      databaseUrlKey: database-url
+  projection:
+    backend: memory   # or sqlite | postgres
+```
+
+**`filesystem` (Class A).** Local disk or NAS object-log root (peer of `s3`).
+
+```yaml
+storage:
+  log:
+    backend: filesystem
+    objectLog:
+      root: /var/lib/fireweed/projection/object-log
+  projection:
+    backend: memory   # or sqlite | postgres
+```
+
+**`s3` (Class A).** S3-compatible object log; credentials via Secret.
+
+```yaml
+storage:
+  log:
+    backend: s3
+    objectLog:
+      s3:
+        endpoint: https://s3.example.com
+        bucket: fireweed-matrix
+        region: us-east-1
+        credentials:
+          existingSecret: fireweed-objectlog-s3
+  projection:
+    backend: sqlite   # or memory | postgres
+```
+
+#### Projection axis (three public values)
+
+| Projection | When to use | Structured fields |
+|------------|-------------|-------------------|
+| `memory` | Rebuildable / process-local serving | none |
+| `sqlite` | Local durable serving projection | `storage.projection.sqlite.path` |
+| `postgres` | Shared durable serving projection | `storage.projection.postgres.existingSecret` + `databaseUrlKey` |
+
+```yaml
+# memory projection (no extra fields)
+storage:
+  projection:
+    backend: memory
+
+# sqlite projection
+storage:
+  projection:
+    backend: sqlite
+    sqlite:
+      path: /var/lib/fireweed/projection/projection.db
+
+# postgres projection (DSN Secret)
+storage:
+  projection:
+    backend: postgres
+    postgres:
+      existingSecret: fireweed-postgres-projection
+      databaseUrlKey: database-url
+```
+
+Embedders construct the same pairs with typed `StorageConfig` and
+`Fireweed::open` / `open_async` (see API-005). There is no public profile SKU.
 
 ### Object-log peers: `filesystem` and `s3`
 

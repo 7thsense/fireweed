@@ -1,0 +1,12 @@
+# Fireweed Queue CI values: memory log × sqlite projection (Class B, public StorageConfig axes).
+# Durability limited to the projection; no Class A log rebuild claims.
+storage:
+  log:
+    backend: memory
+  projection:
+    backend: sqlite
+    sqlite:
+      path: /var/lib/fireweed/projection/projection.db
+image:
+  tag: ci
+replicaCount: 1
