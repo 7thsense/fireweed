@@ -12,7 +12,9 @@ evidence. This preparation change deliberately does not fabricate replacement me
 
 The governed producer is `scripts/perf/tp002-e3-s3.sh`. It accepts an endpoint, signing region, isolated
 bucket, credentials, a stable topology ID and description, an explicit durability claim, and an authority
-mode. Credentials are supplied by the operator and are never stored in evidence.
+mode. Credentials are supplied by the operator and are never stored in evidence. The operator must also
+provide a provider-safety adapter: this is the only provider-specific component, and is the authority that
+authenticates with the supplied credentials and performs the remote preflight/cleanup operations.
 
 ```bash
 FIREWEED_S3_TEST_ENDPOINT=https://s3.example.invalid \
@@ -25,10 +27,47 @@ FIREWEED_E3_STORAGE_TOPOLOGY='operator-verified isolated S3 topology; host durab
 FIREWEED_E3_STORAGE_DURABILITY_CLAIM=excluded \
 FIREWEED_E3_AUTHORITY_MODE=native-create-only \
 FIREWEED_E3_POSTGRES_POINTER_DATABASE_URL=... \
-FIREWEED_E3_FENCE_EVIDENCE_OUT=... \
-FIREWEED_E3_TRANSACTION_EVIDENCE_OUT=... \
+FIREWEED_E3_S3_BUCKET_MODE=create \
+FIREWEED_E3_S3_BUCKET_ACK=isolated-fireweed-e3 \
+FIREWEED_E3_RUN_ID=20260728-release-001 \
+FIREWEED_E3_EVIDENCE_DIR=/absolute/path/to/new-empty-e3-evidence-dir \
+FIREWEED_E3_S3_PROVIDER_IDENTITY=example-s3-control-plane \
+FIREWEED_E3_S3_PROVIDER_ADAPTER=/absolute/path/to/example-s3-safety-adapter \
 scripts/perf/tp002-e3-s3.sh
 ```
+
+`FIREWEED_E3_S3_BUCKET_MODE` is exactly `create` or `preexisting`. `create` asks the adapter to create or
+verify the named isolated bucket; `preexisting` requires an already provisioned, exclusive bucket. In both
+cases `FIREWEED_E3_S3_BUCKET_ACK` must exactly equal `FIREWEED_S3_TEST_BUCKET`, so a cleanup invocation
+cannot silently retarget another bucket. The current Rust E3 harness has no object-key-prefix setting, so a
+`preexisting` bucket must be dedicated to this run; the generic runner never performs bucket-root cleanup or
+bucket deletion.
+
+`FIREWEED_E3_RUN_ID` is a unique 8--64-character token. The runner derives its own control prefix as
+`fireweed-e3-control/v1/<commit12>/<run-id>/`; it is deliberately distinct from E3 test keys. The evidence
+directory must already exist and be empty. The runner derives the fencing, transaction, ledger, contract,
+and composition-fingerprint paths under it, preventing stale or caller-selected artifact paths from being
+accepted. The recorded SHA-256 composition fingerprint covers non-secret run composition only; credentials,
+the Postgres DSN, and adapter output are excluded.
+
+The adapter is an executable invoked as:
+
+```text
+adapter capabilities|create-bucket|prefix-empty|nonce-write-read|nonce-validate|cleanup-prefix \
+  --provider-identity <declared-token> --endpoint <endpoint> --region <region> \
+  --bucket <acknowledged-bucket> --bucket-mode <mode> --bucket-ack <same-bucket> \
+  --run-id <run-id> --run-prefix <derived-prefix> --nonce <fresh-nonce>
+```
+
+The runner calls `create-bucket` only in `create` mode. `capabilities` must verify the declared control-plane
+identity and that the adapter can safely list, write/read, and delete exactly the supplied prefix.
+`prefix-empty` must reject a nonempty supplied prefix; `nonce-write-read` and `nonce-validate` prove that a
+fresh nonce belongs to this run. `cleanup-prefix` is called only after the generated E3 contract has
+semantically recomputed the ledger, TP-003 transaction matrix, and executed fencing proof. It must list and
+delete only the exact nonempty `--run-prefix`, then relist it empty; it must not delete a bucket, bucket root,
+or sibling prefix. On every failed preflight, test, freshness, provenance, or semantic-verification path the
+runner deliberately skips cleanup, retaining the provider namespace for investigation. Adapter stdout/stderr
+is suppressed by the wrapper; adapters must not emit credentials.
 
 `native-create-only` is the only measured authority mode currently supported. The wrapper recognizes
 `postgres-pointer` but rejects it before execution because the E3 measurement backend is not yet wrapped in
@@ -50,7 +89,8 @@ FIREWEED_S3_TEST_ENDPOINT="http://$IP:9000" scripts/perf/tp002-e3-minio.sh
 ```
 
 The MinIO script only verifies its container/tmpfs topology and supplies a local profile to the generic S3
-wrapper. It is not the governed release producer. The generic wrapper fixes the release workload at
+wrapper. It is not the governed release producer. Supply the same run directory, bucket lifecycle
+declaration, identity, and MinIO-capable safety adapter shown above when using it. The generic wrapper fixes the release workload at
 10,000,000 resident items, 100,000 single-item acknowledgement
 pushes per bound, acknowledgement concurrency 384, load batch 1,000, load concurrency 8, an 896 KiB
 recovery-load segment target, and seed 0. Before the load starts, the harness canonically serializes the
