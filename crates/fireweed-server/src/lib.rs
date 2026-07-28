@@ -4359,7 +4359,6 @@ mod byte_admission_wiring_tests {
         let backend = open_objectlog_postgres_backend(
             &log_spec,
             &scoped,
-            None,
             DEFAULT_RECOVERY_MAX_TAIL,
             0,
             budget,
@@ -4555,8 +4554,7 @@ mod byte_admission_wiring_tests {
             format!("{url}?options=-csearch_path%3D{schema}")
         };
 
-        // Postgres publication authority is required for S3 stores without native create-only.
-        let pointer_url = scoped.clone();
+        // S3 requires native create-only (If-None-Match / equivalent); open probes the endpoint.
         let segment_config = SegmentConfig::new(262_144, 20).unwrap();
         let log_spec = ObjectLogSpec::S3 {
             endpoint: lookup("FIREWEED_S3_TEST_ENDPOINT").to_owned(),
@@ -4573,7 +4571,6 @@ mod byte_admission_wiring_tests {
         let backend = open_objectlog_postgres_backend(
             &log_spec,
             &scoped,
-            Some(pointer_url.as_str()),
             DEFAULT_RECOVERY_MAX_TAIL,
             0,
             budget,
