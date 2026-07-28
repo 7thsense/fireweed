@@ -24,17 +24,17 @@ pub const RECORDER_CONTROL_BLOCKS: usize = 5;
 pub const REQUIRED_TXN_ACS: [&str; 6] = [
     "AC-TXN-1", "AC-TXN-2", "AC-TXN-3", "AC-TXN-4", "AC-TXN-6", "AC-TXN-7",
 ];
-pub const E3_CONTRACT_SCHEMA_VERSION: u32 = 3;
-pub const E3_FENCE_SCHEMA_VERSION: u32 = 4;
-pub const FENCE_SUITE: &str = "segmented_object_log_commits_through_minio";
-pub const FENCE_PROFILE: &str = "minio_create_only_cas";
+pub const E3_CONTRACT_SCHEMA_VERSION: u32 = 4;
+pub const E3_FENCE_SCHEMA_VERSION: u32 = 5;
+pub const E3_EVIDENCE_LINK_SCHEMA_VERSION: u32 = 1;
+pub const FENCE_SUITE: &str = "e3_s3_publication_authority_fence";
+pub const NATIVE_FENCE_PROFILE: &str = "s3_native_create_only";
+pub const POSTGRES_POINTER_FENCE_PROFILE: &str = "s3_postgres_pointer";
 pub const FENCE_MODE: &str = "create_only_put_if_absent";
-pub const NO_CAS_REASON: &str = "postgres_pointer_transactional_epoch_cas_proven";
-pub const NO_CAS_STORE_PROFILE: &str = "object_store_without_conditional_write";
-pub const NO_CAS_MODE: &str = "postgres_transactional_manifest_pointer";
 pub const TRANSACTION_SUITE: &str = "external_transaction_contract_matrix_tests";
 pub const E3_PRODUCER_SUITE: &str = "performance_object_log_e3_live_tests";
 pub const E3_PRODUCER_COMMAND: &str = "scripts/perf/tp002-e3-s3.sh";
+pub const POSTGRES_POINTER_COST_SCOPE_EXCLUDED_DISCLOSED: &str = "excluded-disclosed";
 pub const E3_INMEMORY_PASS_BAR: &str = "E3: 1/5/20/100ms bounds; sustained batched commits with valid latency distributions and logically identical interleaved recorder controls; 10M ephemeral in-memory projection rebuilt by exact bounded durable-log genesis replay; streaming complete-state digests match with zero missing, duplicate, or invalid items; replay progress and bounded-resource samples are monotonic; absolute capacity is reported for the declared topology, not used as a portable gate";
 pub const E3_SQLITE_PASS_BAR: &str = "E3: 1/5/20/100ms bounds; sustained batched commits with valid latency distributions and logically identical interleaved recorder controls; 10M SQLite projection rebuilt from durable snapshot high-water plus bounded tail; streaming complete-state digests match with zero missing, duplicate, or invalid items; replay progress and bounded-resource samples are monotonic; absolute capacity is reported for the declared topology, not used as a portable gate";
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
@@ -52,6 +52,7 @@ pub fn expected_e3_pass_bar(profile: &str) -> Option<&'static str> {
 pub struct E3ContractManifest {
     pub schema_version: u32,
     pub source_revision: String,
+    pub evidence_link: E3EvidenceLink,
     pub e3_ledger: String,
     pub transaction_evidence: String,
     pub fencing_evidence: String,
@@ -84,8 +85,40 @@ pub struct E3ContractEntry {
 pub struct E3FenceAuthority {
     pub suite: String,
     pub store_profile: String,
+    pub authority_mode: E3AuthorityMode,
     pub applicability: Applicability,
-    pub no_cas: NoCasDisposition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum E3AuthorityMode {
+    NativeCreateOnly,
+    PostgresPointer,
+}
+
+impl E3AuthorityMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeCreateOnly => "native-create-only",
+            Self::PostgresPointer => "postgres-pointer",
+        }
+    }
+
+    const fn fence_profile(self) -> &'static str {
+        match self {
+            Self::NativeCreateOnly => NATIVE_FENCE_PROFILE,
+            Self::PostgresPointer => POSTGRES_POINTER_FENCE_PROFILE,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct E3EvidenceLink {
+    pub schema_version: u32,
+    pub run_id: String,
+    pub composition_fingerprint: String,
+    pub authority_mode: E3AuthorityMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,52 +144,78 @@ pub enum Applicability {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NoCasStatus {
-    Proven,
-    Excluded,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NoCasDisposition {
-    pub status: NoCasStatus,
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct E3FenceEvidenceRow {
     pub schema_version: u32,
     pub suite: String,
     pub source_revision: String,
+    pub evidence_link: E3EvidenceLink,
     pub store_profile: String,
     pub result: String,
-    pub stale_epoch_rejected: bool,
-    pub current_epoch_committed: bool,
-    pub cas_mode: String,
-    pub no_cas: NoCasDisposition,
-    pub no_cas_store_profile: String,
-    pub no_cas_mode: String,
-    pub no_cas_stale_epoch_rejected: bool,
-    pub no_cas_current_epoch_committed: bool,
-    pub no_cas_pointer_and_epoch_atomic: bool,
-    pub no_cas_object_store_manifest_head_write_attempts: u64,
-    pub no_cas_restart_fresh_postgres_client: bool,
-    pub no_cas_restart_read_authoritative_pointer: bool,
+    pub authority: E3FenceAuthorityEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum E3FenceAuthorityEvidence {
+    NativeCreateOnly {
+        cas_mode: String,
+        stale_epoch_rejected: bool,
+        current_epoch_committed: bool,
+    },
+    PostgresPointer {
+        stale_epoch_rejected: bool,
+        current_epoch_committed: bool,
+        pointer_and_epoch_atomic: bool,
+        object_store_manifest_head_write_attempts: u64,
+        restart_fresh_postgres_client: bool,
+        restart_read_authoritative_pointer: bool,
+        object_namespace_count: u64,
+        pointer_namespace_count: u64,
+        postgres_pointer_operation_count: u64,
+        postgres_pointer_cost_scope: String,
+        postgres_pointer_cost_disclosure: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum E3ObservedOutcome {
+    Passed { observation: String },
+    Failed { observation: String },
+}
+
+impl E3ObservedOutcome {
+    fn passed(&self) -> bool {
+        matches!(self, Self::Passed { observation } if !observation.trim().is_empty())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum E3FenceAuthorityObservation {
+    NativeCreateOnly {
+        stale_epoch: E3ObservedOutcome,
+        current_epoch: E3ObservedOutcome,
+    },
+    PostgresPointer {
+        stale_epoch: E3ObservedOutcome,
+        current_epoch: E3ObservedOutcome,
+        pointer_and_epoch_atomic: E3ObservedOutcome,
+        object_store_manifest_head_write_attempts: u64,
+        restart_fresh_postgres_client: E3ObservedOutcome,
+        restart_read_authoritative_pointer: E3ObservedOutcome,
+        object_namespace_count: u64,
+        pointer_namespace_count: u64,
+        postgres_pointer_operation_count: u64,
+        postgres_pointer_cost_scope: String,
+        postgres_pointer_cost_disclosure: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct E3FenceObservation {
     pub source_revision: String,
-    pub stale_epoch_rejected: bool,
-    pub current_epoch_committed: bool,
-    pub no_cas_stale_epoch_rejected: bool,
-    pub no_cas_current_epoch_committed: bool,
-    pub no_cas_pointer_and_epoch_atomic: bool,
-    pub no_cas_object_store_manifest_head_write_attempts: u64,
-    pub no_cas_restart_fresh_postgres_client: bool,
-    pub no_cas_restart_read_authoritative_pointer: bool,
+    pub evidence_link: E3EvidenceLink,
+    pub authority: E3FenceAuthorityObservation,
 }
 
 /// One executed TP-003 assertion at a concrete E3 profile and batching bound.
@@ -165,6 +224,7 @@ pub struct E3FenceObservation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct E3TransactionObservation {
     pub source_revision: String,
+    pub evidence_link: E3EvidenceLink,
     pub profile: String,
     pub bound_ms: u64,
     pub ac: String,
@@ -178,6 +238,7 @@ pub fn build_e3_transaction_evidence_row(
     observation: E3TransactionObservation,
 ) -> Result<TransactionEvidenceRow, E3ContractError> {
     if !valid_revision(&observation.source_revision)
+        || validate_evidence_link(&observation.evidence_link).is_err()
         || !REQUIRED_E3_PROFILES.contains(&observation.profile.as_str())
         || !REQUIRED_BOUNDS_MS.contains(&observation.bound_ms)
         || !REQUIRED_TXN_ACS.contains(&observation.ac.as_str())
@@ -205,6 +266,10 @@ pub fn build_e3_transaction_evidence_row(
         bound_ms: Some(observation.bound_ms),
         latency_window_timing: Some("latency_window".into()),
         request_id_timing: Some("force_sealed_config_independent".into()),
+        e3_evidence_schema_version: Some(observation.evidence_link.schema_version),
+        e3_run_id: Some(observation.evidence_link.run_id),
+        e3_composition_fingerprint: Some(observation.evidence_link.composition_fingerprint),
+        e3_authority_mode: Some(observation.evidence_link.authority_mode.as_str().into()),
     })
 }
 
@@ -226,6 +291,7 @@ pub struct E3ContractSummary {
 
 pub fn build_e3_contract_manifest(
     source_revision: String,
+    evidence_link: E3EvidenceLink,
     e3_ledger: String,
     transaction_evidence: String,
     fencing_evidence: String,
@@ -235,14 +301,11 @@ pub fn build_e3_contract_manifest(
             "contract source_revision must be a 40-character lowercase hex revision".into(),
         ));
     }
-    let no_cas = NoCasDisposition {
-        status: NoCasStatus::Proven,
-        reason: NO_CAS_REASON.into(),
-    };
+    validate_evidence_link(&evidence_link)?;
+    let authority_mode = evidence_link.authority_mode;
     let entries = REQUIRED_E3_PROFILES
         .into_iter()
         .flat_map(|profile| {
-            let no_cas = no_cas.clone();
             REQUIRED_BOUNDS_MS.into_iter().map(move |bound_ms| {
                 let transaction_authorities = REQUIRED_TXN_ACS
                     .into_iter()
@@ -260,9 +323,9 @@ pub fn build_e3_contract_manifest(
                     request_id_timing: RequestIdTiming::ForceSealedConfigIndependent,
                     manifest_fence: E3FenceAuthority {
                         suite: FENCE_SUITE.into(),
-                        store_profile: FENCE_PROFILE.into(),
+                        store_profile: authority_mode.fence_profile().into(),
+                        authority_mode,
                         applicability: Applicability::Pass,
-                        no_cas: no_cas.clone(),
                     },
                     transaction_authorities,
                 }
@@ -272,6 +335,7 @@ pub fn build_e3_contract_manifest(
     Ok(E3ContractManifest {
         schema_version: E3_CONTRACT_SCHEMA_VERSION,
         source_revision,
+        evidence_link,
         e3_ledger,
         transaction_evidence,
         fencing_evidence,
@@ -299,43 +363,114 @@ pub fn build_e3_fence_evidence(
             "fence source_revision must be a 40-character lowercase hex revision".into(),
         ));
     }
+    validate_evidence_link(&observation.evidence_link)?;
+    let (authority_mode, authority, passed) = match observation.authority {
+        E3FenceAuthorityObservation::NativeCreateOnly {
+            stale_epoch,
+            current_epoch,
+        } => {
+            let stale_epoch_rejected = stale_epoch.passed();
+            let current_epoch_committed = current_epoch.passed();
+            (
+                E3AuthorityMode::NativeCreateOnly,
+                E3FenceAuthorityEvidence::NativeCreateOnly {
+                    cas_mode: FENCE_MODE.into(),
+                    stale_epoch_rejected,
+                    current_epoch_committed,
+                },
+                stale_epoch_rejected && current_epoch_committed,
+            )
+        }
+        E3FenceAuthorityObservation::PostgresPointer {
+            stale_epoch,
+            current_epoch,
+            pointer_and_epoch_atomic,
+            object_store_manifest_head_write_attempts,
+            restart_fresh_postgres_client,
+            restart_read_authoritative_pointer,
+            object_namespace_count,
+            pointer_namespace_count,
+            postgres_pointer_operation_count,
+            postgres_pointer_cost_scope,
+            postgres_pointer_cost_disclosure,
+        } => {
+            let stale_epoch_rejected = stale_epoch.passed();
+            let current_epoch_committed = current_epoch.passed();
+            let pointer_and_epoch_atomic = pointer_and_epoch_atomic.passed();
+            let restart_fresh_postgres_client = restart_fresh_postgres_client.passed();
+            let restart_read_authoritative_pointer = restart_read_authoritative_pointer.passed();
+            let counts_and_costs_disclosed = object_namespace_count > 0
+                && pointer_namespace_count > 0
+                && postgres_pointer_operation_count > 0
+                && valid_postgres_pointer_cost_disclosure(
+                    &postgres_pointer_cost_scope,
+                    &postgres_pointer_cost_disclosure,
+                );
+            let passed = stale_epoch_rejected
+                && current_epoch_committed
+                && pointer_and_epoch_atomic
+                && object_store_manifest_head_write_attempts == 0
+                && restart_fresh_postgres_client
+                && restart_read_authoritative_pointer
+                && counts_and_costs_disclosed;
+            (
+                E3AuthorityMode::PostgresPointer,
+                E3FenceAuthorityEvidence::PostgresPointer {
+                    stale_epoch_rejected,
+                    current_epoch_committed,
+                    pointer_and_epoch_atomic,
+                    object_store_manifest_head_write_attempts,
+                    restart_fresh_postgres_client,
+                    restart_read_authoritative_pointer,
+                    object_namespace_count,
+                    pointer_namespace_count,
+                    postgres_pointer_operation_count,
+                    postgres_pointer_cost_scope,
+                    postgres_pointer_cost_disclosure,
+                },
+                passed,
+            )
+        }
+    };
+    if observation.evidence_link.authority_mode != authority_mode {
+        return Err(E3ContractError(
+            "fence observation authority does not match its evidence link".into(),
+        ));
+    }
     Ok(E3FenceEvidenceRow {
         schema_version: E3_FENCE_SCHEMA_VERSION,
         suite: FENCE_SUITE.into(),
         source_revision: observation.source_revision,
-        store_profile: FENCE_PROFILE.into(),
-        result: if observation.stale_epoch_rejected
-            && observation.current_epoch_committed
-            && observation.no_cas_stale_epoch_rejected
-            && observation.no_cas_current_epoch_committed
-            && observation.no_cas_pointer_and_epoch_atomic
-            && observation.no_cas_object_store_manifest_head_write_attempts == 0
-            && observation.no_cas_restart_fresh_postgres_client
-            && observation.no_cas_restart_read_authoritative_pointer
-        {
-            "pass"
-        } else {
-            "fail"
-        }
-        .into(),
-        stale_epoch_rejected: observation.stale_epoch_rejected,
-        current_epoch_committed: observation.current_epoch_committed,
-        cas_mode: FENCE_MODE.into(),
-        no_cas: NoCasDisposition {
-            status: NoCasStatus::Proven,
-            reason: NO_CAS_REASON.into(),
-        },
-        no_cas_store_profile: NO_CAS_STORE_PROFILE.into(),
-        no_cas_mode: NO_CAS_MODE.into(),
-        no_cas_stale_epoch_rejected: observation.no_cas_stale_epoch_rejected,
-        no_cas_current_epoch_committed: observation.no_cas_current_epoch_committed,
-        no_cas_pointer_and_epoch_atomic: observation.no_cas_pointer_and_epoch_atomic,
-        no_cas_object_store_manifest_head_write_attempts: observation
-            .no_cas_object_store_manifest_head_write_attempts,
-        no_cas_restart_fresh_postgres_client: observation.no_cas_restart_fresh_postgres_client,
-        no_cas_restart_read_authoritative_pointer: observation
-            .no_cas_restart_read_authoritative_pointer,
+        evidence_link: observation.evidence_link,
+        store_profile: authority_mode.fence_profile().into(),
+        result: if passed { "pass" } else { "fail" }.into(),
+        authority,
     })
+}
+
+fn validate_evidence_link(link: &E3EvidenceLink) -> Result<(), E3ContractError> {
+    let valid_run_id = (8..=128).contains(&link.run_id.len())
+        && link
+            .run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+    let valid_fingerprint = link.composition_fingerprint.len() == 64
+        && link
+            .composition_fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    if link.schema_version != E3_EVIDENCE_LINK_SCHEMA_VERSION || !valid_run_id || !valid_fingerprint
+    {
+        Err(E3ContractError(
+            "E3 evidence link requires schema version 1, a safe 8-128 character run_id, and a 64-character lowercase-hex composition fingerprint".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn valid_postgres_pointer_cost_disclosure(scope: &str, disclosure: &str) -> bool {
+    scope == POSTGRES_POINTER_COST_SCOPE_EXCLUDED_DISCLOSED && !disclosure.trim().is_empty()
 }
 
 pub fn write_e3_fence_evidence(path: &Path, row: &E3FenceEvidenceRow) -> std::io::Result<()> {
@@ -435,6 +570,9 @@ pub fn verify_e3_contract(
             manifest.source_revision
         )));
     }
+    if let Err(error) = validate_evidence_link(&manifest.evidence_link) {
+        errors.push(error);
+    }
     let Some(base) = manifest_path.parent() else {
         return Err(vec![E3ContractError(
             "manifest has no parent directory".into(),
@@ -473,21 +611,34 @@ pub fn verify_e3_contract(
 
     let e3_rows = ledger_path
         .as_ref()
-        .map(|path| verify_e3_ledger(path, &manifest.source_revision, &mut errors))
+        .map(|path| {
+            verify_e3_ledger(
+                path,
+                &manifest.source_revision,
+                &manifest.evidence_link,
+                &mut errors,
+            )
+        })
         .unwrap_or_default();
     let cost_rows = verify_cost_contract(&e3_rows, &mut errors);
     let txn_rows = txn_path
         .as_ref()
         .map(|path| read_transaction_rows(path, &mut errors))
         .unwrap_or_default();
-    let fence = fence_path
-        .as_ref()
-        .and_then(|path| verify_fence(path, &manifest.source_revision, &mut errors));
+    let fence = fence_path.as_ref().and_then(|path| {
+        verify_fence(
+            path,
+            &manifest.source_revision,
+            &manifest.evidence_link,
+            &mut errors,
+        )
+    });
     verify_entries(
         &manifest.entries,
         &manifest.ac7_binding,
         &txn_rows,
         &manifest.source_revision,
+        &manifest.evidence_link,
         fence.as_ref(),
         &mut errors,
     );
@@ -572,6 +723,7 @@ fn resolve_authority(
 fn verify_e3_ledger(
     path: &Path,
     revision: &str,
+    evidence_link: &E3EvidenceLink,
     errors: &mut Vec<E3ContractError>,
 ) -> Vec<LedgerRow> {
     if let Err(findings) = verify_ledger(path, true) {
@@ -636,6 +788,24 @@ fn verify_e3_ledger(
             )));
         }
         require_value(&row, "source_revision", serde_json::json!(revision), errors);
+        require_value(
+            &row,
+            "e3_evidence_schema_version",
+            serde_json::json!(evidence_link.schema_version),
+            errors,
+        );
+        require_value(
+            &row,
+            "e3_run_id",
+            serde_json::json!(evidence_link.run_id),
+            errors,
+        );
+        require_value(
+            &row,
+            "e3_composition_fingerprint",
+            serde_json::json!(evidence_link.composition_fingerprint),
+            errors,
+        );
         require_value(&row, "bound_count", serde_json::json!(4), errors);
         require_value(&row, "bars_met", serde_json::json!(true), errors);
         require_value(&row, "portable_gate", serde_json::json!(true), errors);
@@ -661,9 +831,31 @@ fn verify_e3_ledger(
         require_value(
             &row,
             "storage_authority_mode",
-            serde_json::json!("native-create-only"),
+            serde_json::json!(evidence_link.authority_mode.as_str()),
             errors,
         );
+        if evidence_link.authority_mode == E3AuthorityMode::PostgresPointer {
+            require_positive_u64(&row, "object_namespace_count", errors);
+            require_positive_u64(&row, "pointer_namespace_count", errors);
+            require_positive_u64(&row, "postgres_pointer_operation_count", errors);
+            let scope = row
+                .measurements
+                .values
+                .get("postgres_pointer_cost_scope")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let disclosure = row
+                .measurements
+                .values
+                .get("postgres_pointer_cost_disclosure")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if !valid_postgres_pointer_cost_disclosure(scope, disclosure) {
+                errors.push(E3ContractError(format!(
+                    "E3 ledger profile {profile} requires an explicit Postgres-pointer cost scope and disclosure"
+                )));
+            }
+        }
         for key in ["storage_topology_id", "storage_topology_description"] {
             if row
                 .measurements
@@ -1151,6 +1343,25 @@ fn require_value(
     }
 }
 
+fn require_positive_u64(
+    row: &LedgerRow,
+    key: &str,
+    errors: &mut Vec<E3ContractError>,
+) -> Option<u64> {
+    let value = row
+        .measurements
+        .values
+        .get(key)
+        .and_then(serde_json::Value::as_u64);
+    if value.is_none_or(|value| value == 0) {
+        errors.push(E3ContractError(format!(
+            "E3 ledger profile {} requires positive {key}",
+            row.backend_profile
+        )));
+    }
+    value
+}
+
 fn read_transaction_rows(
     path: &Path,
     errors: &mut Vec<E3ContractError>,
@@ -1193,6 +1404,7 @@ fn verify_entries(
     ac7_binding: &Ac7Binding,
     rows: &[TransactionEvidenceRow],
     revision: &str,
+    evidence_link: &E3EvidenceLink,
     fence: Option<&E3FenceEvidenceRow>,
     errors: &mut Vec<E3ContractError>,
 ) {
@@ -1264,6 +1476,12 @@ fn verify_entries(
                         && row.latency_window_timing.as_deref() == Some("latency_window")
                         && row.request_id_timing.as_deref()
                             == Some("force_sealed_config_independent")
+                        && row.e3_evidence_schema_version == Some(evidence_link.schema_version)
+                        && row.e3_run_id.as_deref() == Some(evidence_link.run_id.as_str())
+                        && row.e3_composition_fingerprint.as_deref()
+                            == Some(evidence_link.composition_fingerprint.as_str())
+                        && row.e3_authority_mode.as_deref()
+                            == Some(evidence_link.authority_mode.as_str())
                 })
                 .collect();
             if candidates.len() != 1 {
@@ -1332,7 +1550,7 @@ fn verify_entry_fence(
     };
     if authority.suite != fence.suite
         || authority.store_profile != fence.store_profile
-        || authority.no_cas != fence.no_cas
+        || authority.authority_mode != fence.evidence_link.authority_mode
         || !matches!(authority.applicability, Applicability::Pass)
     {
         errors.push(E3ContractError(format!(
@@ -1360,6 +1578,7 @@ fn governed_backend<'a>(profile: &str, ac: &str) -> Option<&'a str> {
 fn verify_fence(
     path: &Path,
     revision: &str,
+    evidence_link: &E3EvidenceLink,
     errors: &mut Vec<E3ContractError>,
 ) -> Option<E3FenceEvidenceRow> {
     let body = match fs::read_to_string(path) {
@@ -1382,27 +1601,56 @@ fn verify_fence(
             return None;
         }
     };
+    let authority_valid = match &row.authority {
+        E3FenceAuthorityEvidence::NativeCreateOnly {
+            cas_mode,
+            stale_epoch_rejected,
+            current_epoch_committed,
+        } => {
+            row.evidence_link.authority_mode == E3AuthorityMode::NativeCreateOnly
+                && cas_mode == FENCE_MODE
+                && *stale_epoch_rejected
+                && *current_epoch_committed
+        }
+        E3FenceAuthorityEvidence::PostgresPointer {
+            stale_epoch_rejected,
+            current_epoch_committed,
+            pointer_and_epoch_atomic,
+            object_store_manifest_head_write_attempts,
+            restart_fresh_postgres_client,
+            restart_read_authoritative_pointer,
+            object_namespace_count,
+            pointer_namespace_count,
+            postgres_pointer_operation_count,
+            postgres_pointer_cost_scope,
+            postgres_pointer_cost_disclosure,
+        } => {
+            row.evidence_link.authority_mode == E3AuthorityMode::PostgresPointer
+                && *stale_epoch_rejected
+                && *current_epoch_committed
+                && *pointer_and_epoch_atomic
+                && *object_store_manifest_head_write_attempts == 0
+                && *restart_fresh_postgres_client
+                && *restart_read_authoritative_pointer
+                && *object_namespace_count > 0
+                && *pointer_namespace_count > 0
+                && *postgres_pointer_operation_count > 0
+                && valid_postgres_pointer_cost_disclosure(
+                    postgres_pointer_cost_scope,
+                    postgres_pointer_cost_disclosure,
+                )
+        }
+    };
     if row.schema_version != E3_FENCE_SCHEMA_VERSION
         || row.suite != FENCE_SUITE
         || row.source_revision != revision
-        || row.store_profile != FENCE_PROFILE
+        || row.evidence_link != *evidence_link
+        || row.store_profile != evidence_link.authority_mode.fence_profile()
         || row.result != "pass"
-        || !row.stale_epoch_rejected
-        || !row.current_epoch_committed
-        || row.cas_mode != FENCE_MODE
-        || row.no_cas.status != NoCasStatus::Proven
-        || row.no_cas.reason != NO_CAS_REASON
-        || row.no_cas_store_profile != NO_CAS_STORE_PROFILE
-        || row.no_cas_mode != NO_CAS_MODE
-        || !row.no_cas_stale_epoch_rejected
-        || !row.no_cas_current_epoch_committed
-        || !row.no_cas_pointer_and_epoch_atomic
-        || row.no_cas_object_store_manifest_head_write_attempts != 0
-        || !row.no_cas_restart_fresh_postgres_client
-        || !row.no_cas_restart_read_authoritative_pointer
+        || !authority_valid
     {
         errors.push(E3ContractError(format!(
-            "fencing evidence {} does not prove stale rejection/current commit under both release CAS and Postgres transactional-pointer no-CAS profiles",
+            "fencing evidence {} does not prove the selected, run-bound S3 publication authority",
             path.display()
         )));
         None

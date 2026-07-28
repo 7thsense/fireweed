@@ -32,6 +32,16 @@ pub struct TransactionEvidenceRow {
     pub latency_window_timing: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id_timing: Option<String>,
+    /// E3 release schema/link fields. Standalone TP-003 evidence remains backward-compatible, but the E3
+    /// contract verifier requires all four fields and rejects rows from another run or composition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub e3_evidence_schema_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub e3_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub e3_composition_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub e3_authority_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

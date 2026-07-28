@@ -3014,6 +3014,38 @@ pub mod cost {
                         byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
                     })
             });
+            let authority_mode = row
+                .measurements
+                .values
+                .get("storage_authority_mode")
+                .and_then(serde_json::Value::as_str);
+            let postgres_pointer_disclosed = authority_mode == Some("postgres-pointer")
+                && [
+                    "object_namespace_count",
+                    "pointer_namespace_count",
+                    "postgres_pointer_operation_count",
+                ]
+                .into_iter()
+                .all(|key| {
+                    row.measurements
+                        .values
+                        .get(key)
+                        .and_then(serde_json::Value::as_u64)
+                        .is_some_and(|value| value > 0)
+                })
+                && matches!(
+                    row.measurements
+                        .values
+                        .get("postgres_pointer_cost_scope")
+                        .and_then(serde_json::Value::as_str),
+                    Some("excluded-disclosed")
+                )
+                && row
+                    .measurements
+                    .values
+                    .get("postgres_pointer_cost_disclosure")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty());
             if !stable_topology_id
                 || topology_description.is_none_or(|value| value.trim().is_empty())
                 || row
@@ -3022,12 +3054,7 @@ pub mod cost {
                     .get("storage_durability_claim")
                     .and_then(serde_json::Value::as_str)
                     != Some("excluded")
-                || row
-                    .measurements
-                    .values
-                    .get("storage_authority_mode")
-                    .and_then(serde_json::Value::as_str)
-                    != Some("native-create-only")
+                || !(authority_mode == Some("native-create-only") || postgres_pointer_disclosed)
             {
                 errors.push(format!(
                     "profile {profile} lacks a declared provider-neutral S3 topology, supported authority mode, or durability exclusion"

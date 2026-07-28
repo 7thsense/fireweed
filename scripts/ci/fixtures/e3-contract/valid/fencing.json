@@ -1,22 +1,19 @@
 {
-  "schema_version": 4,
-  "suite": "segmented_object_log_commits_through_minio",
+  "schema_version": 5,
+  "suite": "e3_s3_publication_authority_fence",
   "source_revision": "0123456789abcdef0123456789abcdef01234567",
-  "store_profile": "minio_create_only_cas",
-  "result": "pass",
-  "stale_epoch_rejected": true,
-  "current_epoch_committed": true,
-  "cas_mode": "create_only_put_if_absent",
-  "no_cas": {
-    "status": "proven",
-    "reason": "postgres_pointer_transactional_epoch_cas_proven"
+  "evidence_link": {
+    "schema_version": 1,
+    "run_id": "e3-run-20260728",
+    "composition_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "authority_mode": "native-create-only"
   },
-  "no_cas_store_profile": "object_store_without_conditional_write",
-  "no_cas_mode": "postgres_transactional_manifest_pointer",
-  "no_cas_stale_epoch_rejected": true,
-  "no_cas_current_epoch_committed": true,
-  "no_cas_pointer_and_epoch_atomic": true,
-  "no_cas_object_store_manifest_head_write_attempts": 0,
-  "no_cas_restart_fresh_postgres_client": true,
-  "no_cas_restart_read_authoritative_pointer": true
+  "store_profile": "s3_native_create_only",
+  "result": "pass",
+  "authority": {
+    "mode": "native-create-only",
+    "cas_mode": "create_only_put_if_absent",
+    "stale_epoch_rejected": true,
+    "current_epoch_committed": true
+  }
 }
