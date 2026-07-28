@@ -418,8 +418,11 @@ kind_unavailable_reasons() {
 
 run_non_cluster_gates() {
     echo "=== deployment release gate: non-cluster checks ==="
+    # release-gate.sh already runs storage-matrix-gate.sh --skip-helm (cargo matrix + legacy
+    # product-name ban). Re-run the gate here for helm only so the deployment path still owns
+    # chart fixtures without double-compiling the matrix cargo suites.
     run_cmd bash scripts/ci/release-gate.sh
-    run_cmd bash scripts/ci/helm-gate.sh
+    run_cmd bash scripts/ci/storage-matrix-gate.sh --skip-cargo
 
     local version
     version="$(chart_version)"

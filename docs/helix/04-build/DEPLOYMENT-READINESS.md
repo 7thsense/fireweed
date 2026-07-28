@@ -256,10 +256,16 @@ The release CI surface must include:
 - **15-cell storage matrix gate** (`scripts/ci/storage-matrix-gate.sh`): binds
   the full public `StorageConfig` matrix (T0–T2 library harness, server Class B /
   sqlite / filesystem / s3 matrix suites, legacy product-name assert, Helm
-  15-cell fixtures). Required full-matrix jobs set
-  `FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1` with live S3 + Postgres fixtures;
-  the gate fails non-zero when a required step fails or when full-matrix mode
-  is set without fixtures;
+  15-cell fixtures). **Invoked from** `scripts/ci/release-gate.sh`
+  (`--skip-helm`, cargo + legacy ban on every release/tag path that runs the
+  release gate, including `.github/workflows/release.yml` and
+  `scripts/ci/nightly-gate.sh`) and from
+  `scripts/ci/deployment-release-gate.sh` (`--skip-cargo`, Helm fixtures on the
+  deployment/tag path). Default PR `ci.yml` stays thin (policy:
+  `verify-github-actions-policy.sh`) and does **not** run this gate. Required
+  full-matrix jobs set `FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1` with live S3 +
+  Postgres fixtures; the gate fails non-zero when a required step fails or when
+  full-matrix mode is set without fixtures;
 - Rust quality gates: formatting, clippy, workspace tests, release-gate scripts,
   and strict verification-ledger validation;
 - Helm chart lint/render checks for every storage combination listed in the

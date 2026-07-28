@@ -10,6 +10,9 @@
 #
 # WHAT THIS GATE PROVES:
 #   - fmt clean, clippy clean (-D warnings), and the selected workspace correctness suite is green.
+#   - Public 15-cell storage matrix (T0–T2 library harness + server matrix suites + legacy product-name
+#     ban) via scripts/ci/storage-matrix-gate.sh --skip-helm. Helm fixtures stay in deployment-release-gate
+#     / helm-gate.sh. Full-matrix fixture hard-fail is opt-in via FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1.
 #   - Local mode emits into a CLEAN ledger dir and requires well-formed E2/E3 evidence. GitHub release
 #     jobs skip those workloads and consume exact-revision governed evidence instead.
 #   - The exact files named by the governed TP-002 release manifest semantically satisfy E0-E3. The E3
@@ -94,6 +97,12 @@ else
     # performance integration targets. Full integration and durability matrices are run locally/manual.
     ${CARGO} test --workspace --lib --bins
 fi
+
+# Public 15-cell StorageConfig matrix (Phase 6). Helm is owned by deployment-release-gate /
+# helm-gate.sh so this call skips helm. S3/PG cells skip when fixtures are unset unless
+# FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1 is set (then missing fixtures fail the gate).
+echo "--- storage matrix gate (15-cell public surface; helm deferred to deployment gate) ---"
+bash "${SCRIPT_DIR}/storage-matrix-gate.sh" --skip-helm
 
 if [[ "${RUN_LOCAL_PERFORMANCE}" == true ]]; then
     echo "--- local performance evidence suites ---"

@@ -6137,6 +6137,8 @@ mod s3_object_log_matrix_tests {
 
     /// s3×postgres — Class A: durable S3 object-log + Postgres relational projection.
     /// Skips when S3 or Postgres fixtures are missing.
+    /// Covered by `fireweed --test storage_matrix_t0_t2` s3×postgres (open_async).
+    /// Raw ComposedBackend+sync postgres Drop panics under #[tokio::test].
     #[cfg(feature = "postgres")]
     #[tokio::test]
     #[ignore = "use storage_matrix_t0_t2 for s3×postgres live lifecycle"]
