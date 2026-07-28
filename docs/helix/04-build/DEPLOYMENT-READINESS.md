@@ -59,6 +59,26 @@ architecture:
 | `filesystem` | Class A | Class A | Class A |
 | `s3` | Class A | Class A | Class A |
 
+### Release storage surface (normative)
+
+The **release storage surface is this full 15-cell matrix** (typed
+`StorageConfig`, API-005 / `orthogonal-storage-matrix-brief`). A release/tag
+must not ship with a failed **required** matrix cell. The binding gate is
+`scripts/ci/storage-matrix-gate.sh` (Phase 6 of
+[`storage-matrix-completion-brief.md`](./storage-matrix-completion-brief.md)):
+
+| Step | Command / artifact |
+|------|--------------------|
+| 15-cell T0–T2 harness | `cargo test -p fireweed --features memory,sqlite,objectlog,postgres --test storage_matrix_t0_t2` |
+| Server Class B + Class A suites | `cargo test -p fireweed-server --features postgres --lib class_b` / `sqlite_log_matrix` / `filesystem_matrix` / `s3_object_log` |
+| Legacy product-name ban | `bash scripts/ci/assert-no-legacy-storage-product-names.sh` |
+| Helm matrix fixtures | `bash scripts/ci/helm-gate.sh` (all 15 public cells under `charts/fireweed-queue/ci/*-values.yaml`) |
+
+Required product CI that claims the full surface sets
+`FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1` and provisions S3 + Postgres fixtures
+so skip is not treated as pass (see **Storage matrix fixture requirements**
+below and [`scripts/ci/s3-matrix-job-requirements.md`](../../../scripts/ci/s3-matrix-job-requirements.md)).
+
 **Configuration layering:** structured `StorageConfig` fields and Helm
 `storage.log.*` / `storage.projection.*` define storage. Environment variables
 are a container injection adapter into that model, not the product vocabulary
@@ -233,15 +253,24 @@ service names.
 
 The release CI surface must include:
 
+- **15-cell storage matrix gate** (`scripts/ci/storage-matrix-gate.sh`): binds
+  the full public `StorageConfig` matrix (T0–T2 library harness, server Class B /
+  sqlite / filesystem / s3 matrix suites, legacy product-name assert, Helm
+  15-cell fixtures). Required full-matrix jobs set
+  `FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1` with live S3 + Postgres fixtures;
+  the gate fails non-zero when a required step fails or when full-matrix mode
+  is set without fixtures;
 - Rust quality gates: formatting, clippy, workspace tests, release-gate scripts,
   and strict verification-ledger validation;
 - Helm chart lint/render checks for every storage combination listed in the
-  chart CI values;
+  chart CI values (the 15 public cells plus shared multi-replica / lakebase
+  variants under `charts/fireweed-queue/ci/`);
 - a negative check that `FIREWEED_BACKEND_PROFILE` is absent from rendered Helm
   output;
-- live `kind` Helm smokes for `objectlog` + `inmemory`, `objectlog` + `sqlite`,
-  `objectlog` + `hybrid`, and `objectlog` + `hybrid-async`, including RESP
-  `PING`, `XADD`, `XREADGROUP`, rollout restart, and post-restart readback;
+- live `kind` Helm smokes for deploy-facing cells on the public axes (log ∈
+  {memory, sqlite, postgres, filesystem, s3} × projection ∈ {memory, sqlite,
+  postgres} as claimed), including RESP `PING`, `XADD`, `XREADGROUP`, rollout
+  restart, and post-restart readback;
 - the TP-003 `AC-TXN-*` transaction-contract matrix for every production-claimed
   storage combination, including object-log crash points around segment write,
   manifest commit, projection apply, response delivery, snapshot, and owner
@@ -451,16 +480,63 @@ provider or provider-compatible endpoint, credentials, conditional-write
 semantics, the same transaction-contract matrix, and release evidence separate
 from the local filesystem object-log fixture.
 
+## Storage matrix fixture requirements
+
+Full 15-cell matrix evidence needs external services for axes that cannot be
+satisfied with temp dirs alone. Local developer runs may skip those cells
+(documented `eprintln!`); **required** release/product jobs must provision
+fixtures and set `FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1` so missing fixtures
+fail the gate rather than silently reducing coverage.
+
+| Axis / cells | Fixture | Environment |
+|--------------|---------|-------------|
+| Local Class A/B (`memory`/`sqlite`/`filesystem` log × `memory`/`sqlite` projection) | Temp dirs only | none |
+| Any `postgres` log or projection cell | Live Postgres | `FIREWEED_PG_TEST_URL`; build with `--features postgres` |
+| `s3` × {`memory`,`sqlite`} | S3-compatible endpoint with native create-only | `FIREWEED_S3_TEST_ENDPOINT` (+ bucket/keys; see below) |
+| `s3` × `postgres` | S3 **and** Postgres | both of the above |
+
+S3-compatible job contract (endpoint, bucket, keys, create-only, MinIO/Garage
+notes) is normative in
+[`scripts/ci/s3-matrix-job-requirements.md`](../../../scripts/ci/s3-matrix-job-requirements.md).
+Suggested exports for a disposable MinIO:
+
+```sh
+export FIREWEED_S3_TEST_ENDPOINT="http://127.0.0.1:9000"
+export FIREWEED_S3_TEST_BUCKET=fireweed-test
+export FIREWEED_S3_TEST_ACCESS_KEY=minioadmin
+export FIREWEED_S3_TEST_SECRET_KEY=minioadmin
+export FIREWEED_PG_TEST_URL=postgres://fireweed:fireweed@127.0.0.1:5432/fireweed
+export FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1
+```
+
 ## Verification Commands
 
 Release-readiness verification for the current boundary is:
 
 ```sh
+# Full public 15-cell StorageConfig matrix (library T0–T2, server suites,
+# legacy name ban, Helm fixtures). Fails non-zero on any step failure.
+# For required release CI, export FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1
+# and the S3/PG fixtures above first.
+bash scripts/ci/storage-matrix-gate.sh
+
 bash scripts/ci/release-gate.sh
 cargo run -p fireweed-release --bin fireweed-verify-transaction-evidence -- \
   --evidence docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl \
   --evidence docs/perf/evidence/tp003-ac-txn-parity-postgres-storage-pairs.jsonl
 bash scripts/ci/helm-gate.sh
-bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend inmemory
+bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend memory
 bash scripts/ci/deployment-release-gate.sh
+```
+
+Focused matrix commands (also invoked by the gate):
+
+```sh
+cargo test -p fireweed --features memory,sqlite,objectlog,postgres --test storage_matrix_t0_t2
+cargo test -p fireweed-server --features postgres --lib class_b
+cargo test -p fireweed-server --features postgres --lib sqlite_log_matrix
+cargo test -p fireweed-server --features postgres --lib filesystem_matrix
+cargo test -p fireweed-server --features postgres --lib s3_object_log
+bash scripts/ci/assert-no-legacy-storage-product-names.sh
+bash scripts/ci/helm-gate.sh
 ```
