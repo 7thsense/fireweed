@@ -89,3 +89,7 @@ required-features = ["postgres", "objectlog", "sqlite"]
 [[test]]
 name = "public_durability_matrix"
 path = "tests/public_durability_matrix.rs"
+
+[[test]]
+name = "storage_matrix_t0_t2"
+path = "tests/storage_matrix_t0_t2.rs"
