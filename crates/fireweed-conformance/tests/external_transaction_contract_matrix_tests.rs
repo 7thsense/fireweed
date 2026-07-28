@@ -20,11 +20,13 @@
 //! | AC-TXN-6 cross-combination parity | — | ✓ (sqlite-log vs objectlog+sqlite) | | | | — |
 //! | AC-TXN-7 latency-bound invariance | — | — | — | pass (AC-TXN-1/2/3 + AC-TXN-6 across regimes AND the numeric 1/5/20/100 ms flusher sweep, incl. the AC-TXN-5/5A hybrid object-log-touching invariants swept across the numeric bounds)^ | | — |
 //!
-//! The final `postgres (env)` column above is the legacy Postgres-log/in-memory-projection row.  The shipped
-//! exact `postgres/sqlite` and `postgres/postgres` pairs have dedicated live-DB tests and evidence files:
+//! The final `postgres (env)` column above is the legacy Postgres-log/in-memory-projection row
+//! (axis name `postgres×memory`).  The shipped exact `postgres×sqlite` and `postgres×postgres`
+//! pairs (slash aliases `postgres/sqlite`, `postgres/postgres` still accepted by the release
+//! verifier) have dedicated live-DB tests and evidence files:
 //! `ac_txn_contract_matrix_postgres_storage_pairs` proves AC-TXN-1/2/3 while reopening both durable axes,
 //! and `ac_txn_6_postgres_storage_pair_parity` proves the same-history observable-state parity.  Their
-//! profile-keyed rows live in `tp003-ac-txn-matrix-postgres-storage-pairs.jsonl` and
+//! axis-named rows live in `tp003-ac-txn-matrix-postgres-storage-pairs.jsonl` and
 //! `tp003-ac-txn-parity-postgres-storage-pairs.jsonl`.
 //!
 //! AC-TXN-3's request_id-replay-across-restart is a REAL assertion on EVERY durable profile (atomic AND
