@@ -1,10 +1,10 @@
 # Operator Release Artifacts
 
 This is the operator-facing location for obtaining and verifying Fireweed release
-artifacts. Replace `OWNER`, `REPO`, and `v0.21.0` with the release repository and
+artifacts. Replace `OWNER`, `REPO`, and `v0.22.0` with the release repository and
 tag you are installing from.
 
-The v0.21.0 public preview defers GHCR publication. The table below defines the
+The v0.22.0 public preview defers GHCR publication. The table below defines the
 optional deployment artifact shape when a release explicitly publishes those
 assets; the GitHub Release asset list is authoritative.
 
@@ -18,9 +18,9 @@ assets; the GitHub Release asset list is authoritative.
 | Deployment proof | GitHub Release assets `deployment-proof.json` and `deployment-proof.md` |
 | Checksums | GitHub Release asset `SHA256SUMS` |
 
-For example, release tag `v0.21.0` uses version `0.21.0`, so the chart package is
-`fireweed-queue-0.21.0.tgz` and binary archives are named like
-`fireweed-0.21.0-x86_64-linux.tar.gz`. When enabled, the `v0.21.0` workflow publishes the Helm
+For example, release tag `v0.22.0` uses version `0.22.0`, so the chart package is
+`fireweed-queue-0.22.0.tgz` and binary archives are named like
+`fireweed-0.22.0-x86_64-linux.tar.gz`. When enabled, the `v0.22.0` workflow publishes the Helm
 chart as a GitHub Release package asset; it does not publish an OCI chart.
 
 ## Download
@@ -30,7 +30,7 @@ With the GitHub CLI:
 ```sh
 OWNER=<github-owner>
 REPO=fireweed
-TAG=v0.21.0
+TAG=v0.22.0
 VERSION="${TAG#v}"
 DIST_DIR="release-${TAG}"
 
@@ -50,7 +50,7 @@ gh release download "$TAG" \
 Without `gh`, download the same assets from:
 
 ```text
-https://github.com/OWNER/REPO/releases/tag/v0.21.0
+https://github.com/OWNER/REPO/releases/tag/v0.22.0
 ```
 
 ## Verify Checksums

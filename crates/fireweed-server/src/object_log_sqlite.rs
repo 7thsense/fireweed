@@ -801,7 +801,8 @@ impl PushPort for ObjectLogSqliteBackend {
         items: Vec<PushSpec>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
-    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::PushBatchOutcome>> + Send
+    {
         async move {
             validate_gate_push(self.supports_gates(), &items)?;
             let _guard = self.op_lock.lock().await;
@@ -822,7 +823,9 @@ impl PushPort for ObjectLogSqliteBackend {
                     fingerprint,
                     now,
                 ) {
-                    IdempotencyDecision::Replay(ids) => return Ok(ids),
+                    IdempotencyDecision::Replay(ids) => {
+                        return Ok(fireweed_engine::PushBatchOutcome::replayed(ids));
+                    }
                     IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
                     IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}
                 }
@@ -849,7 +852,7 @@ impl PushPort for ObjectLogSqliteBackend {
                 .entry(shard.clone())
                 .or_default()
                 .record(request_id, fingerprint, ids.clone(), expires_at);
-            Ok(ids)
+            Ok(fireweed_engine::PushBatchOutcome::fresh(ids))
         }
     }
 }
@@ -2127,7 +2130,8 @@ impl PushPort for SegmentedObjectLogSqliteBackend {
         items: Vec<PushSpec>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
-    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::PushBatchOutcome>> + Send
+    {
         async move {
             validate_gate_push(self.supports_gates(), &items)?;
             // Serialize the request-id'd push with claims/commits on this queue so the cache
@@ -2158,7 +2162,9 @@ impl PushPort for SegmentedObjectLogSqliteBackend {
                     .or_default()
                     .check(&request_id, fingerprint, now)
                 {
-                    IdempotencyDecision::Replay(ids) => return Ok(ids),
+                    IdempotencyDecision::Replay(ids) => {
+                        return Ok(fireweed_engine::PushBatchOutcome::replayed(ids));
+                    }
                     IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
                     IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}
                 }
@@ -2181,7 +2187,7 @@ impl PushPort for SegmentedObjectLogSqliteBackend {
                 .entry(shard.clone())
                 .or_default()
                 .record(request_id, fingerprint, ids.clone(), expires_at);
-            Ok(ids)
+            Ok(fireweed_engine::PushBatchOutcome::fresh(ids))
         }
     }
 }
@@ -3374,7 +3380,8 @@ impl PushPort for SegmentedObjectLogInMemoryBackend {
         items: Vec<PushSpec>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
-    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::PushBatchOutcome>> + Send
+    {
         async move {
             validate_gate_push(self.supports_gates(), &items)?;
             let fingerprint = push_body_hash(&items)?;
@@ -3407,7 +3414,9 @@ impl PushPort for SegmentedObjectLogInMemoryBackend {
                     .or_default()
                     .check(&request_id, fingerprint, now)
                 {
-                    IdempotencyDecision::Replay(ids) => return Ok(ids),
+                    IdempotencyDecision::Replay(ids) => {
+                        return Ok(fireweed_engine::PushBatchOutcome::replayed(ids));
+                    }
                     IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
                     IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}
                 }
@@ -3430,7 +3439,7 @@ impl PushPort for SegmentedObjectLogInMemoryBackend {
                 .entry(shard.clone())
                 .or_default()
                 .record(request_id, fingerprint, ids.clone(), expires_at);
-            Ok(ids)
+            Ok(fireweed_engine::PushBatchOutcome::fresh(ids))
         }
     }
 }

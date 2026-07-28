@@ -286,17 +286,17 @@ async fn seed(cell: &str, fireweed: &Fireweed) -> SeededState {
     );
 
     let push_request = RequestId::new("push-primary-v1").unwrap();
-    let primary_id = fireweed
+    let (primary_id, primary_disp) = fireweed
         .push_with_request_id(&queue, push_request.clone(), primary_item())
         .await
         .unwrap();
-    assert_eq!(
-        fireweed
-            .push_with_request_id(&queue, push_request, primary_item())
-            .await
-            .unwrap(),
-        primary_id
-    );
+    assert_eq!(primary_disp, fireweed::PushDisposition::Fresh);
+    let (replayed_id, replay_disp) = fireweed
+        .push_with_request_id(&queue, push_request, primary_item())
+        .await
+        .unwrap();
+    assert_eq!(replay_disp, fireweed::PushDisposition::Replayed);
+    assert_eq!(replayed_id, primary_id);
     fireweed
         .update(
             &queue,
@@ -649,17 +649,16 @@ async fn verify_reopen(cell: &str, fireweed: &Fireweed, state: SeededState) {
         fireweed.queue_definition(&queue).await.unwrap(),
         state.definition
     );
-    assert_eq!(
-        fireweed
-            .push_with_request_id(
-                &queue,
-                RequestId::new("push-primary-v1").unwrap(),
-                primary_item(),
-            )
-            .await
-            .unwrap(),
-        state.primary_id
-    );
+    let (replayed_id, replay_disp) = fireweed
+        .push_with_request_id(
+            &queue,
+            RequestId::new("push-primary-v1").unwrap(),
+            primary_item(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay_disp, fireweed::PushDisposition::Replayed);
+    assert_eq!(replayed_id, state.primary_id);
     let mut conflicting_push = primary_item();
     conflicting_push.payload = Some(Bytes::from_static(b"different-body"));
     assert_eq!(

@@ -4313,7 +4313,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
         items: Vec<PushSpec>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
-    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+    ) -> impl std::future::Future<Output = EngineResult<crate::PushBatchOutcome>> + Send {
         // The request-id'd push is NOT the co-buffering hot path: in group-commit mode it force-seals the
         // prior buffer + commits synchronously (`gc_commit_sync`) so the retained idempotency record is only
         // written AFTER a successful durable commit (a deferred-seal failure must leave NO replay entry).
@@ -4344,7 +4344,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
                 fingerprint,
                 now,
             ) {
-                IdempotencyDecision::Replay(ids) => return Ok(ids),
+                IdempotencyDecision::Replay(ids) => {
+                    return Ok(crate::PushBatchOutcome::replayed(ids));
+                }
                 IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
                 IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}
             }
@@ -4358,7 +4360,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
                     ids.clone(),
                     expires_at,
                 );
-                return Ok(ids);
+                return Ok(crate::PushBatchOutcome::replayed(ids));
             }
             // TD-004 hard-debt admission gate — placed AFTER the idempotency Replay/Conflict resolution so it
             // gates only the PROCEED path (genuinely new work that adds async-apply debt). An idempotent
@@ -4398,7 +4400,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
                 ids.clone(),
                 expires_at,
             );
-            Ok(ids)
+            Ok(crate::PushBatchOutcome::fresh(ids))
         })
     }
 }

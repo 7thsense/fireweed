@@ -1665,7 +1665,7 @@ async fn ac_txn_5_hybrid_strict_poison_replay_scenario() -> AcOutcome {
             .await
             .map_err(|e| format!("same-body retry: {e:?}"))?;
         ensure!(
-            replay == first,
+            first.is_fresh() && replay.is_replayed() && replay.item_ids == first.item_ids,
             "same-body retry under the same request_id must replay the original result"
         );
         let conflict = backend
@@ -1810,6 +1810,7 @@ async fn strict_push(
             None,
         )
         .await
+        .map(|outcome| outcome.into_item_ids())
 }
 
 /// **AC-TXN-5 on the real server write path** (bead pqueue-da1965d7, TP-003 §3.10 row 210,
@@ -2061,7 +2062,7 @@ async fn ac_txn_5_hybrid_strict_poison_on_real_server_path_scenario() -> AcOutco
                 .await
                 .map_err(|e| format!("unknown-outcome same-body retry: {e:?}"))?;
             ensure!(
-                replay == vec![original_id],
+                replay.is_replayed() && replay.item_ids == vec![original_id],
                 "the same-body retry must replay the ONE original item id (not re-mint); got {replay:?} vs original {original_id:?}"
             );
             let m2 = backend
@@ -2182,6 +2183,7 @@ async fn async_push_rid(
             None,
         )
         .await
+        .map(|outcome| outcome.into_item_ids())
 }
 
 /// **AC-TXN-5A idempotent replay under debt** on the REAL server-wired hybrid-async composition (TD-004:361,
@@ -3107,7 +3109,11 @@ async fn ac_txn_5a_segment_object_reclamation_scenario() -> AcOutcome {
         )
         .await
         .map_err(|e| format!("replay R: {e:?}"))?;
-    if replay != r_ids || reopened.with_log(|l| l.counters().segments_sealed) != segments_before {
+    if !r_ids.is_fresh()
+        || !replay.is_replayed()
+        || replay.item_ids != r_ids.item_ids
+        || reopened.with_log(|l| l.counters().segments_sealed) != segments_before
+    {
         return Err(format!(
             "within-retention R must REPLAY across trim+restart with 0 new segments: {replay:?} vs {r_ids:?}"
         ));
@@ -3411,7 +3417,7 @@ async fn ac_txn_7_numeric_latency_sweep() -> AcOutcome {
             .await;
         let durable_after_conflict = durable_command_count(backend.as_ref()).await?;
         ensure!(
-            replay == orig,
+            orig.is_fresh() && replay.is_replayed() && replay.item_ids == orig.item_ids,
             "@ {bound_ms}ms: same request_id + same body must replay the ONE committed result"
         );
         ensure!(
@@ -3461,7 +3467,7 @@ async fn ac_txn_7_numeric_latency_sweep() -> AcOutcome {
             .await
             .map_err(|e| format!("@ {bound_ms}ms replay after restart: {e:?}"))?;
         ensure!(
-            replay2 == committed,
+            committed.is_fresh() && replay2.is_replayed() && replay2.item_ids == committed.item_ids,
             "@ {bound_ms}ms: lost-response replay across restart must return the ONE committed result ({replay2:?} vs {committed:?})"
         );
 
@@ -3737,7 +3743,7 @@ async fn ac_txn_5_5a_numeric_latency_sweep() -> AcOutcome {
                         format!("@ {bound_ms}ms unknown-outcome same-body retry: {e:?}")
                     })?;
                 ensure!(
-                    replay == vec![original_id],
+                    replay.is_replayed() && replay.item_ids == vec![original_id],
                     "@ {bound_ms}ms: the same-body retry must replay the ONE original id; got {replay:?} vs {original_id:?}"
                 );
                 let m2 = backend
@@ -4447,7 +4453,9 @@ where
         .await
         .map_err(|e| format!("{profile} @ {bound_ms}ms request replay: {e:?}"))?;
     ensure!(
-        latency_replay == latency_first,
+        latency_first.is_fresh()
+            && latency_replay.is_replayed()
+            && latency_replay.item_ids == latency_first.item_ids,
         "{profile} @ {bound_ms}ms same request-id must replay the original result"
     );
     let latency_metrics = latency
@@ -4500,7 +4508,9 @@ where
         .await
         .map_err(|e| format!("{profile} force-seal request replay: {e:?}"))?;
     ensure!(
-        force_replay == force_first,
+        force_first.is_fresh()
+            && force_replay.is_replayed()
+            && force_replay.item_ids == force_first.item_ids,
         "{profile} force-seal same request-id must replay the original result"
     );
     let force_metrics = force

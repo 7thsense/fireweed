@@ -254,7 +254,9 @@ where
         )
         .await
         .unwrap();
-    assert_eq!(first, replay);
+    assert!(first.is_fresh());
+    assert!(replay.is_replayed());
+    assert_eq!(first.item_ids, replay.item_ids);
     assert_eq!(backend.metrics(&shard).await.unwrap().pending, 1);
 }
 

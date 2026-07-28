@@ -338,7 +338,7 @@ fn public_objectlog_postgres_delete_and_rebuild() {
         .is_empty()
     );
     let first_request = RequestId::new("composed-request-1").unwrap();
-    let first =
+    let (first, _) =
         block_on(fireweed.push_with_request_id(&key, first_request.clone(), item(10))).unwrap();
     let second = block_on(fireweed.push(&key, item(20))).unwrap();
 
@@ -509,8 +509,9 @@ fn public_objectlog_postgres_delete_and_rebuild() {
         vec![second, lifecycle_id]
     );
 
-    let replayed =
+    let (replayed, replay_disp) =
         block_on(fireweed.push_with_request_id(&key, first_request.clone(), item(10))).unwrap();
+    assert_eq!(replay_disp, fireweed::PushDisposition::Replayed);
     assert_eq!(replayed, first);
     assert_eq!(object_count(&root), objects_before_delete);
 
@@ -526,10 +527,10 @@ fn public_objectlog_postgres_delete_and_rebuild() {
             .collect::<Vec<_>>(),
         vec![second, lifecycle_id]
     );
-    assert_eq!(
-        block_on(reopened.push_with_request_id(&key, first_request, item(10))).unwrap(),
-        first
-    );
+    let (reopened_replay, reopened_disp) =
+        block_on(reopened.push_with_request_id(&key, first_request, item(10))).unwrap();
+    assert_eq!(reopened_disp, fireweed::PushDisposition::Replayed);
+    assert_eq!(reopened_replay, first);
     assert_eq!(object_count(&root), objects_before_delete);
     drop(reopened);
 

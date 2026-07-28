@@ -29,8 +29,8 @@ path = "src/lib.rs"
 # (engine + core) only; a concrete backend + clock are injected (hexagonal).
 [dependencies]
 axon-esf.workspace = true
-fireweed-core = { version = "0.21.0", path = "../fireweed-core" }
-fireweed-engine = { version = "0.21.0", path = "../fireweed-engine" }
+fireweed-core = { version = "0.22.0", path = "../fireweed-core" }
+fireweed-engine = { version = "0.22.0", path = "../fireweed-engine" }
 bytes = "1"
 serde_json = "1"
 futures = "0.3"
@@ -38,10 +38,10 @@ sha2 = "0.11"
 # Adapters are OPTIONAL deps, activated per feature. The published library is a thin composition root
 # that builds the chosen backend internally (ADR-009 §4a / B3) so a client never names a concrete backend
 # — the `open_*` functions are the construction path. This is the deliberate composition-root dependency inversion.
-fireweed-memory = { version = "0.21.0", path = "../fireweed-memory", optional = true }
-fireweed-sqlite = { version = "0.21.0", path = "../fireweed-sqlite", optional = true }
-fireweed-objectlog = { version = "0.21.0", path = "../fireweed-objectlog", optional = true }
-fireweed-postgres = { version = "0.21.0", path = "../fireweed-postgres", optional = true }
+fireweed-memory = { version = "0.22.0", path = "../fireweed-memory", optional = true }
+fireweed-sqlite = { version = "0.22.0", path = "../fireweed-sqlite", optional = true }
+fireweed-objectlog = { version = "0.22.0", path = "../fireweed-objectlog", optional = true }
+fireweed-postgres = { version = "0.22.0", path = "../fireweed-postgres", optional = true }
 tokio = { version = "1", features = ["rt"], optional = true }
 
 [features]
@@ -57,7 +57,7 @@ postgres = ["dep:fireweed-postgres", "dep:tokio"]
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time"] }
 # product_validation_tests (AC-E2E-* product workflows) emit verification-ledger rows.
-fireweed-release = { version = "0.21.0", path = "../fireweed-release" }
+fireweed-release = { version = "0.22.0", path = "../fireweed-release" }
 serde_json = "1"
 # The postgres-constructor smoke test drives the sync postgres client via a non-tokio executor.
 postgres = "0.19"

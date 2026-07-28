@@ -1180,7 +1180,8 @@ impl PushPort for SqliteRelationalBackend {
         items: Vec<PushSpec>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
-    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::PushBatchOutcome>> + Send
+    {
         let result = (|| {
             validate_gate_push(self.supports_gates(), &items)?;
             let mut g = self.inner.lock().expect("poisoned");
@@ -1229,7 +1230,7 @@ impl PushPort for SqliteRelationalBackend {
                 &fingerprint,
                 ts_nanos(now),
             )? {
-                return Ok(ids);
+                return Ok(fireweed_engine::PushBatchOutcome::replayed(ids));
             }
 
             let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
@@ -1271,7 +1272,7 @@ impl PushPort for SqliteRelationalBackend {
             )?;
             st(tx.commit())?;
             apply_token_ops(live_tokens, live_tokens_by_consumer, token_ops);
-            Ok(ids)
+            Ok(fireweed_engine::PushBatchOutcome::fresh(ids))
         })();
         std::future::ready(result)
     }

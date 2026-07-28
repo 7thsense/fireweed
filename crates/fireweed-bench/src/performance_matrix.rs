@@ -80,7 +80,11 @@ pub async fn run_preflight(
         .push_batch_with_request_id(&queue, request_id.clone(), body)
         .await
         .map_err(|error| format!("preflight replay: {error}"))?;
-    if first != replay || first.len() != 1 {
+    if !first.is_fresh()
+        || !replay.is_replayed()
+        || first.item_ids != replay.item_ids
+        || first.len() != 1
+    {
         return Err("preflight request replay changed item identity".into());
     }
     match fireweed
@@ -193,7 +197,8 @@ pub async fn run_repetition(
         let ids = fireweed
             .push_batch_with_request_id(&queue, request_id, batch_items)
             .await
-            .map_err(|error| format!("append: {error}"))?;
+            .map_err(|error| format!("append: {error}"))?
+            .into_item_ids();
         append_lat.push(nanos(started));
         if ids.len() != batch {
             return Err(format!(

@@ -418,8 +418,13 @@ async fn exercise_push_read_and_index(cell: &str, fw: &Fireweed, failures: &mut 
         cell,
         "push_with_request_id",
         failures,
-        requested.is_some() && requested == requested_again,
-        "same request id did not converge on the same item id",
+        requested.as_ref().is_some_and(|(id, disp)| {
+            *disp == fireweed::PushDisposition::Fresh
+                && requested_again.as_ref().is_some_and(|(rid, rdisp)| {
+                    *rdisp == fireweed::PushDisposition::Replayed && rid == id
+                })
+        }),
+        "same request id did not converge on the same item id with Fresh then Replayed",
     );
     let batch = call(
         cell,
@@ -461,9 +466,14 @@ async fn exercise_push_read_and_index(cell: &str, fw: &Fireweed, failures: &mut 
         cell,
         "push_batch_with_request_id",
         failures,
-        requested_batch.as_ref().is_some_and(|ids| ids.len() == 2)
-            && requested_batch == requested_batch_again,
-        "same request id did not return the same two item ids",
+        requested_batch.as_ref().is_some_and(|first| {
+            first.is_fresh()
+                && first.len() == 2
+                && requested_batch_again
+                    .as_ref()
+                    .is_some_and(|again| again.is_replayed() && again.item_ids == first.item_ids)
+        }),
+        "same request id did not return the same two item ids with Fresh then Replayed",
     );
     let upsert = call(
         cell,

@@ -105,8 +105,9 @@ async fn objectlog_hybrid_recovery_hydrates_replays_tail_and_rebuilds_request_id
             .push_with_request_id(&queue, request.clone(), body.clone(), ts(1), None)
             .await
             .unwrap();
+        assert!(ids.is_fresh());
         assert_eq!(backend.metrics(&queue).await.unwrap().pending, 1);
-        ids
+        ids.into_item_ids()
     };
 
     // Reopen: recovery validates lineage, hydrates memory from the SQLite image, and replays the retained
@@ -124,8 +125,9 @@ async fn objectlog_hybrid_recovery_hydrates_replays_tail_and_rebuilds_request_id
         .push_with_request_id(&queue, request, body, ts(2), None)
         .await
         .unwrap();
+    assert!(replayed.is_replayed());
     assert_eq!(
-        replayed, first_ids,
+        replayed.item_ids, first_ids,
         "committed request-id converges after restart"
     );
     assert_eq!(
@@ -148,10 +150,11 @@ async fn objectlog_hybrid_public_strict_failure_replay_and_request_id_conflict()
     fireweed.create_queue(qdef()).await.unwrap();
     let request = RequestId::new("public-strict-request").unwrap();
 
-    let first = fireweed
+    let (first, first_disp) = fireweed
         .push_with_request_id(&queue, request.clone(), public_item(10))
         .await
         .unwrap();
+    assert_eq!(first_disp, fireweed::PushDisposition::Fresh);
     let verification = fireweed
         .projection_control()
         .unwrap()
@@ -162,12 +165,13 @@ async fn objectlog_hybrid_public_strict_failure_replay_and_request_id_conflict()
         verification.projection_sequence, verification.authoritative_sequence,
         "strict returned success is manifest-committed and SQLite-visible"
     );
+    let (replayed, replay_disp) = fireweed
+        .push_with_request_id(&queue, request.clone(), public_item(10))
+        .await
+        .unwrap();
+    assert_eq!(replay_disp, fireweed::PushDisposition::Replayed);
     assert_eq!(
-        fireweed
-            .push_with_request_id(&queue, request.clone(), public_item(10))
-            .await
-            .unwrap(),
-        first,
+        replayed, first,
         "same request and body replay the original result"
     );
     assert!(matches!(

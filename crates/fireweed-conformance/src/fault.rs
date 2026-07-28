@@ -1311,6 +1311,10 @@ pub async fn ac_txn_3_unknown_outcome_replay<
             .push_with_request_id(&shard(), rid.clone(), body.clone(), ts(1), None)
             .await
             .map_err(|e| format!("fresh push after BeforeAppend: {e:?}"))?;
+        ensure!(
+            ids.is_fresh(),
+            "fresh execution must report Fresh disposition"
+        );
         ensure!(ids.len() == 1, "fresh execution created exactly one item");
         // AfterResponse: a duplicate retry replays the one committed result (0 duplicate transitions).
         let replay = a
@@ -1318,7 +1322,7 @@ pub async fn ac_txn_3_unknown_outcome_replay<
             .await
             .map_err(|e| format!("after-response replay: {e:?}"))?;
         ensure!(
-            replay == ids,
+            replay.is_replayed() && replay.item_ids == ids.item_ids,
             "after-response retry must replay the same result"
         );
         ensure!(
@@ -1367,6 +1371,7 @@ pub async fn ac_txn_3_unknown_outcome_replay<
             a.push_with_request_id(&shard(), rid.clone(), body.clone(), ts(1), None)
                 .await
                 .map_err(|e| format!("push before lost response: {e:?}"))?
+                .into_item_ids()
             // The client never observes this success (the response is "lost"); we drop the handle.
         };
         // Kill + restart, then retry the same request_id (the client re-sends after the timeout).
@@ -1376,7 +1381,7 @@ pub async fn ac_txn_3_unknown_outcome_replay<
             .await
             .map_err(|e| format!("replay after lost response: {e:?}"))?;
         ensure!(
-            replay == committed_ids,
+            replay.is_replayed() && replay.item_ids == committed_ids,
             "same request_id after a lost response must replay the ONE committed result (got {replay:?} vs {committed_ids:?})"
         );
         let m = b
@@ -1474,7 +1479,7 @@ pub async fn ac_txn_3_mid_pipeline_request_id_bearing<
         .await
         .map_err(|e| format!("mid-pipeline request_id replay after reopen: {e:?}"))?;
     ensure!(
-        replay == committed_ids,
+        replay.item_ids == committed_ids,
         "the append->apply kill-window retry by request_id must replay the ONE committed result (got {replay:?} vs {committed_ids:?})"
     );
     let m = b
@@ -2400,7 +2405,7 @@ pub async fn ac_txn_6_parity<A: ConformanceCore + LogRead, B: ConformanceCore + 
             .await;
         let durable_after = durable_command_count(&x).await?;
         let rid_idempotency = (
-            replay == original,
+            original.is_fresh() && replay.is_replayed() && replay.item_ids == original.item_ids,
             original.len(),
             matches!(conflict, Err(EngineError::RequestIdConflict)),
             // Two same-request_id same-body pushes + one conflicting push commit exactly ONE new command.

@@ -803,7 +803,9 @@ pub async fn adr011_schema_validation_rejects_before_visible_state<B: Conformanc
         .push_with_request_id(&shard(), rid, vec![valid()], ts(3), None)
         .await
         .unwrap();
-    assert_eq!(first, replay);
+    assert!(first.is_fresh());
+    assert!(replay.is_replayed());
+    assert_eq!(first.item_ids, replay.item_ids);
     assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1);
 }
 
@@ -3736,7 +3738,12 @@ pub async fn request_id_push_replays_once_and_conflicts_on_body_change<B: Confor
         .push_with_request_id(&shard(), request_id.clone(), body, ts(1), None)
         .await
         .unwrap();
-    assert_eq!(second, first, "same request_id/body replays ids");
+    assert!(first.is_fresh());
+    assert!(second.is_replayed());
+    assert_eq!(
+        second.item_ids, first.item_ids,
+        "same request_id/body replays ids"
+    );
     assert_eq!(
         b.metrics(&qkey()).await.unwrap().pending,
         1,

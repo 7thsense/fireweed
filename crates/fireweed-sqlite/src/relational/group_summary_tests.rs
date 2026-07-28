@@ -164,6 +164,7 @@ async fn request_id_push_replays_prior_ids_without_second_append() {
         .push_with_request_id(&shard(), request_id.clone(), body.clone(), ts(0), None)
         .await
         .unwrap();
+    assert!(first.is_fresh());
     assert_eq!(first.len(), 2);
     assert_eq!(next_seq(&b), 1);
 
@@ -171,7 +172,11 @@ async fn request_id_push_replays_prior_ids_without_second_append() {
         .push_with_request_id(&shard(), request_id, body, ts(1), None)
         .await
         .unwrap();
-    assert_eq!(replay, first, "same request body replays the prior ids");
+    assert!(replay.is_replayed());
+    assert_eq!(
+        replay.item_ids, first.item_ids,
+        "same request body replays the prior ids"
+    );
     assert_eq!(next_seq(&b), 1, "replay did not append a second command");
 }
 

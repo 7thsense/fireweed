@@ -295,7 +295,8 @@ impl PushPort for ObjectLogTursoBackend {
         items: Vec<PushSpec>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
-    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::PushBatchOutcome>> + Send
+    {
         async move {
             self.engine
                 .push(AsyncPushRequest {

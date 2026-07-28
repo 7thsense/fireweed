@@ -190,6 +190,7 @@ pub async fn push_rid(
             None,
         )
         .await
+        .map(|outcome| outcome.into_item_ids())
 }
 
 // ---------------------------------------------------------------------------

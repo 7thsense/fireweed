@@ -3,13 +3,13 @@
 //! on (ddx-pqueue-2201fd37): the caller's `request_id` propagates into the durable command envelope and
 //! drives replay / conflict / expired outcomes.
 //!
-//! - same request id + same body  -> REPLAY the original ids, append nothing (no new item)
+//! - same request id + same body  -> REPLAY the original ids, append nothing (no new item), disposition Replayed
 //! - same request id + diff body   -> `RequestIdConflict`
 //! - retry after the retention win -> treated as a fresh push (push semantics; the prior ids are gone)
 
 use std::sync::Arc;
 
-use fireweed::{EngineError, NewItem, PriorityValue, RequestId, RuntimeCore};
+use fireweed::{EngineError, NewItem, PriorityValue, PushDisposition, RequestId, RuntimeCore};
 use fireweed_core::{
     EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
@@ -68,15 +68,17 @@ async fn same_request_id_same_body_replays_without_a_second_append() {
     fireweed.create_queue(qdef(60_000)).await.unwrap();
     let rid = RequestId::new("snorri-txn-1").unwrap();
 
-    let first = fireweed
+    let (first, first_disp) = fireweed
         .push_with_request_id(&q, rid.clone(), item(10))
         .await
         .unwrap();
+    assert_eq!(first_disp, PushDisposition::Fresh);
     // Replay: identical body under the same request id returns the SAME id and appends nothing.
-    let replay = fireweed
+    let (replay, replay_disp) = fireweed
         .push_with_request_id(&q, rid.clone(), item(10))
         .await
         .unwrap();
+    assert_eq!(replay_disp, PushDisposition::Replayed);
     assert_eq!(first, replay, "replay must return the original id");
 
     // Exactly one item exists (the replay did not enqueue a second one).
@@ -94,10 +96,11 @@ async fn same_request_id_different_body_conflicts() {
     fireweed.create_queue(qdef(60_000)).await.unwrap();
     let rid = RequestId::new("snorri-txn-2").unwrap();
 
-    fireweed
+    let (_, disp) = fireweed
         .push_with_request_id(&q, rid.clone(), item(10))
         .await
         .unwrap();
+    assert_eq!(disp, PushDisposition::Fresh);
     // A different body under the same request id is a structural conflict — nothing appended.
     let err = fireweed
         .push_with_request_id(&q, rid.clone(), item(99))
@@ -121,17 +124,19 @@ async fn retry_after_retention_window_is_a_fresh_push() {
     fireweed.create_queue(qdef(1_000)).await.unwrap();
     let rid = RequestId::new("snorri-txn-3").unwrap();
 
-    let first = fireweed
+    let (first, first_disp) = fireweed
         .push_with_request_id(&q, rid.clone(), item(10))
         .await
         .unwrap();
+    assert_eq!(first_disp, PushDisposition::Fresh);
 
     // Advance past the retention window (1_000ms): the retained entry is now expired.
     clock.set(5);
-    let after_expiry = fireweed
+    let (after_expiry, after_disp) = fireweed
         .push_with_request_id(&q, rid.clone(), item(10))
         .await
         .unwrap();
+    assert_eq!(after_disp, PushDisposition::Fresh);
 
     // Push semantics: an expired entry is a genuinely new request, so a fresh item is appended
     // (different id) rather than replaying the old one.
@@ -152,14 +157,43 @@ async fn distinct_request_ids_each_append() {
     let q = qkey();
     fireweed.create_queue(qdef(60_000)).await.unwrap();
 
-    let a = fireweed
+    let (a, a_disp) = fireweed
         .push_with_request_id(&q, RequestId::new("a").unwrap(), item(10))
         .await
         .unwrap();
-    let b = fireweed
+    let (b, b_disp) = fireweed
         .push_with_request_id(&q, RequestId::new("b").unwrap(), item(10))
         .await
         .unwrap();
+    assert_eq!(a_disp, PushDisposition::Fresh);
+    assert_eq!(b_disp, PushDisposition::Fresh);
     assert_ne!(a, b, "distinct request ids are distinct logical requests");
+    assert_eq!(fireweed.metrics(&q).await.unwrap().pending, 2);
+}
+
+#[tokio::test]
+async fn batch_push_reports_fresh_then_replayed_disposition() {
+    let fireweed = RuntimeCore::new(
+        Arc::new(composed_memory_backend()),
+        Arc::new(ManualClock::at(0)),
+    );
+    let q = qkey();
+    fireweed.create_queue(qdef(60_000)).await.unwrap();
+    let rid = RequestId::new("snorri-batch-1").unwrap();
+    let body = vec![item(10), item(20)];
+
+    let first = fireweed
+        .push_batch_with_request_id(&q, rid.clone(), body.clone())
+        .await
+        .unwrap();
+    assert!(first.is_fresh());
+    assert_eq!(first.len(), 2);
+
+    let replay = fireweed
+        .push_batch_with_request_id(&q, rid, body)
+        .await
+        .unwrap();
+    assert!(replay.is_replayed());
+    assert_eq!(replay.item_ids, first.item_ids);
     assert_eq!(fireweed.metrics(&q).await.unwrap().pending, 2);
 }

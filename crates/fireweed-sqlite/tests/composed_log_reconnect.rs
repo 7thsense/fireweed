@@ -187,7 +187,9 @@ async fn request_id_replay_and_conflict_survive_composed_sqlite_log_reopen() {
         .push_with_request_id(&shard(), request_id.clone(), body, ts(0), None)
         .await
         .unwrap();
-    assert_eq!(replay, first);
+    assert!(first.is_fresh());
+    assert!(replay.is_replayed());
+    assert_eq!(replay.item_ids, first.item_ids);
     assert_eq!(reopened.metrics(&shard()).await.unwrap().pending, 1);
 
     let conflict = reopened

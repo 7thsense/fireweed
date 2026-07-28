@@ -144,10 +144,11 @@ async fn hybrid_request_id_push_replays_after_restart_and_conflicts_on_body_chan
         assert_eq!(
             env.request_outcome,
             Some(RequestOutcome::Push {
-                item_ids: ids.clone()
+                item_ids: ids.item_ids.clone()
             })
         );
-        ids
+        assert!(ids.is_fresh());
+        ids.into_item_ids()
     };
 
     let reopened = open_hybrid(&root, &sqlite_path);
@@ -156,7 +157,11 @@ async fn hybrid_request_id_push_replays_after_restart_and_conflicts_on_body_chan
         .push_with_request_id(&queue, request_id.clone(), body, ts(2), None)
         .await
         .unwrap();
-    assert_eq!(replayed, first_ids, "same request/body replays ids");
+    assert!(replayed.is_replayed());
+    assert_eq!(
+        replayed.item_ids, first_ids,
+        "same request/body replays ids"
+    );
     assert_eq!(
         reopened.metrics(&queue).await.unwrap().pending,
         1,
@@ -183,7 +188,7 @@ async fn hybrid_request_id_push_replays_after_restart_and_conflicts_on_body_chan
         "conflict does not append"
     );
 
-    let fresh_ids = reopened
+    let fresh = reopened
         .push_with_request_id(
             &queue,
             RequestId::new("push-request-fresh").unwrap(),
@@ -193,8 +198,9 @@ async fn hybrid_request_id_push_replays_after_restart_and_conflicts_on_body_chan
         )
         .await
         .unwrap();
+    assert!(fresh.is_fresh());
     assert_ne!(
-        fresh_ids, first_ids,
+        fresh.item_ids, first_ids,
         "a request id never committed before restart is fresh"
     );
     assert_eq!(reopened.metrics(&queue).await.unwrap().pending, 2);

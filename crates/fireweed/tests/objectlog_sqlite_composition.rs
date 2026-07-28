@@ -127,7 +127,9 @@ fn assert_delete_rebuild(
     let key = queue(queue_id);
     block_on(fireweed.create_queue(definition(queue_id))).unwrap();
     let request = RequestId::new(format!("request-{queue_id}")).unwrap();
-    let first = block_on(fireweed.push_with_request_id(&key, request.clone(), item(10))).unwrap();
+    let (first, first_disp) =
+        block_on(fireweed.push_with_request_id(&key, request.clone(), item(10))).unwrap();
+    assert_eq!(first_disp, fireweed::PushDisposition::Fresh);
     let second = block_on(fireweed.push(&key, item(20))).unwrap();
 
     let expected = block_on(fireweed.metrics(&key)).unwrap();
@@ -174,9 +176,11 @@ fn assert_delete_rebuild(
         vec![first, second],
         "rebuild reconstructs the exact normalized resident set"
     );
+    let (replayed, replay_disp) =
+        block_on(fireweed.push_with_request_id(&key, request, item(10))).unwrap();
+    assert_eq!(replay_disp, fireweed::PushDisposition::Replayed);
     assert_eq!(
-        block_on(fireweed.push_with_request_id(&key, request, item(10))).unwrap(),
-        first,
+        replayed, first,
         "same-body replay returns the original item without a duplicate transition"
     );
     assert_eq!(block_on(fireweed.metrics(&key)).unwrap(), expected);
@@ -198,7 +202,8 @@ fn assert_strict_commit_transition_round_trip(config: ComposedStorageConfig, que
     assert_eq!(caps.durability_class, DurabilityClass::Atomic);
 
     let request = RequestId::new(format!("request-{queue_id}")).unwrap();
-    let first = block_on(fireweed.push_with_request_id(&key, request.clone(), item(10))).unwrap();
+    let (first, _) =
+        block_on(fireweed.push_with_request_id(&key, request.clone(), item(10))).unwrap();
     let second = block_on(fireweed.push(&key, item(20))).unwrap();
     let claimed = block_on(fireweed.claim(&key, 1, 30_000)).unwrap();
     let claim = &claimed[0];
@@ -346,10 +351,10 @@ fn assert_strict_commit_transition_round_trip(config: ComposedStorageConfig, que
     );
     assert_eq!(recovery.entries[0].lifecycle_item_ids, vec![lifecycle_id]);
     assert_eq!(recovery.entries[0].instance, Some((b"wf-1".to_vec(), 1)));
-    assert_eq!(
-        block_on(fireweed.push_with_request_id(&key, request, item(10))).unwrap(),
-        first
-    );
+    let (replayed, replay_disp) =
+        block_on(fireweed.push_with_request_id(&key, request, item(10))).unwrap();
+    assert_eq!(replay_disp, fireweed::PushDisposition::Replayed);
+    assert_eq!(replayed, first);
 }
 
 #[test]

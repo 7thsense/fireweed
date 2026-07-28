@@ -776,6 +776,75 @@ pub enum UpsertOutcome {
     },
 }
 
+/// Whether a request-id push applied new work or returned a retained idempotent result.
+///
+/// Distinct from [`UpsertOutcome`]: that is `client_item_key` collision semantics, not
+/// API-001 request-id batch idempotency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PushDisposition {
+    /// The request body was applied for the first time (or after retention expiry).
+    Fresh,
+    /// Same request id + same body: retained outcome was returned without re-applying.
+    Replayed,
+}
+
+/// Outcome of [`PushPort::push_with_request_id`]: item ids plus replay-vs-fresh disposition.
+///
+/// The disposition is per **request** (the whole batch shares one request id), not per item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushBatchOutcome {
+    pub disposition: PushDisposition,
+    pub item_ids: Vec<ItemId>,
+}
+
+impl PushBatchOutcome {
+    pub fn fresh(item_ids: Vec<ItemId>) -> Self {
+        Self {
+            disposition: PushDisposition::Fresh,
+            item_ids,
+        }
+    }
+
+    pub fn replayed(item_ids: Vec<ItemId>) -> Self {
+        Self {
+            disposition: PushDisposition::Replayed,
+            item_ids,
+        }
+    }
+
+    pub fn is_replayed(&self) -> bool {
+        matches!(self.disposition, PushDisposition::Replayed)
+    }
+
+    pub fn is_fresh(&self) -> bool {
+        matches!(self.disposition, PushDisposition::Fresh)
+    }
+
+    pub fn into_item_ids(self) -> Vec<ItemId> {
+        self.item_ids
+    }
+}
+
+impl std::ops::Deref for PushBatchOutcome {
+    type Target = [ItemId];
+
+    fn deref(&self) -> &Self::Target {
+        &self.item_ids
+    }
+}
+
+impl AsRef<[ItemId]> for PushBatchOutcome {
+    fn as_ref(&self) -> &[ItemId] {
+        &self.item_ids
+    }
+}
+
+impl From<PushBatchOutcome> for Vec<ItemId> {
+    fn from(value: PushBatchOutcome) -> Self {
+        value.item_ids
+    }
+}
+
 /// Pending-item replacement, executed in the **same unit of work as claim** so upsert and claim on
 /// one item mutually exclude (TD-007 §2.3). Atomic class only; on eventual-apply the engine returns
 /// `EngineError::Unavailable` without calling this port.
@@ -897,7 +966,7 @@ pub trait PushPort: Send + Sync {
         items: Vec<PushSpec>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
-    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send;
+    ) -> impl std::future::Future<Output = EngineResult<PushBatchOutcome>> + Send;
 }
 
 /// AC-TXN-3 fault-injection seam (TP-003 §3.10 row 208, `request_id` unknown-outcome replay). Build the

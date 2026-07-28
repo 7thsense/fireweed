@@ -2,10 +2,10 @@
 
 <!-- markdownlint-disable MD013 -->
 
-This guide covers the v0.21.0 Fireweed release packaging. The Helm chart configures
+This guide covers the v0.22.0 Fireweed release packaging. The Helm chart configures
 storage as separate log, projection, and control-plane axes.
 
-The v0.21.0 public preview defers GHCR publication. Container coordinates below
+The v0.22.0 public preview defers GHCR publication. Container coordinates below
 describe the deployment artifact contract; they are available only when a
 release explicitly publishes and verifies those assets.
 

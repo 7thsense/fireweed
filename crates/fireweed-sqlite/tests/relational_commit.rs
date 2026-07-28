@@ -680,7 +680,9 @@ where
         .push_with_request_id(&q, rid, vec![typed_item(1, true)], ts(3), None)
         .await
         .unwrap();
-    assert_eq!(first, replay);
+    assert!(first.is_fresh());
+    assert!(replay.is_replayed());
+    assert_eq!(first.item_ids, replay.item_ids);
     assert_eq!(backend.metrics(&q).await.unwrap().pending, 1);
 
     backend.push(&q, vec![item(5)], ts(4), None).await.unwrap();

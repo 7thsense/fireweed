@@ -1832,7 +1832,9 @@ async fn objectlog_hybrid_request_id_replays_after_reopen() {
         .push_with_request_id(&shard(), request_id.clone(), body, ts(1), None)
         .await
         .unwrap();
-    assert_eq!(replayed, first);
+    assert!(first.is_fresh());
+    assert!(replayed.is_replayed());
+    assert_eq!(replayed.item_ids, first.item_ids);
     assert_eq!(reopened.metrics(&shard()).await.unwrap().pending, 1);
     let err = reopened
         .push_with_request_id(

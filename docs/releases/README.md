@@ -26,7 +26,7 @@ planning, but they do not decide the release verdict. The configured
 under load, not a host-performance bar, and remains release-significant.
 
 Versioned files in this directory describe release candidates and already-cut
-releases. Once a release is cut, its note is immutable. Fireweed Queue v0.21.0
+releases. Once a release is cut, its note is immutable. Fireweed Queue v0.22.0
 is the current release candidate. v0.20.0 is the first renamed public
 preview release; v0.19.6 and earlier retain
 the retired identity as immutable release and audit history under ADR-023. This
@@ -59,12 +59,12 @@ remain deferred. Prepare the exact local verification bundle without publishing:
 revision="$(git rev-parse HEAD)"
 bash scripts/release/build-source-preview-artifacts.sh \
   --out target/source-preview-dist \
-  --version 0.21.0 \
+  --version 0.22.0 \
   --revision "$revision" \
   --builder "local:$(id -un)"
 bash scripts/release/verify-source-preview-artifacts.sh \
   --dist target/source-preview-dist \
-  --version 0.21.0 \
+  --version 0.22.0 \
   --revision "$revision"
 ```
 

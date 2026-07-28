@@ -377,7 +377,7 @@ impl Inner {
         expires_at: i64,
         env: CommandEnvelope,
         expected_epoch: Option<u64>,
-    ) -> EngineResult<Vec<ItemId>> {
+    ) -> EngineResult<fireweed_engine::PushBatchOutcome> {
         validate_gate_command(false, &env.command)?;
         let (t, q) = parts(shard);
         let now_n = ts_nanos(env.created_at);
@@ -402,7 +402,9 @@ impl Inner {
             let prior_expires_at: i64 = row.get(2);
             if prior_expires_at > now_n {
                 if prior_fingerprint == fingerprint {
-                    return item_ids_from_json(response_payload);
+                    return Ok(fireweed_engine::PushBatchOutcome::replayed(
+                        item_ids_from_json(response_payload)?,
+                    ));
                 }
                 return Err(EngineError::RequestIdConflict);
             }
@@ -454,7 +456,7 @@ impl Inner {
                 "post-commit apply must be infallible after a durable append (caller pre-validates); \
                  a failure here means the durable log advanced past the in-memory projection",
             );
-        Ok(env.item_ids)
+        Ok(fireweed_engine::PushBatchOutcome::fresh(env.item_ids))
     }
 
     /// Reconstruct every queue's projection from durable state (queues + their replayed logs). Proves the
@@ -978,7 +980,8 @@ impl PushPort for PostgresBackend {
         items: Vec<PushSpec>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
-    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::PushBatchOutcome>> + Send
+    {
         let result = (|| {
             validate_gate_push(self.supports_gates(), &items)?;
             let mut g = self.inner.lock().expect("poisoned");

@@ -383,7 +383,9 @@ async fn request_id_push_replays_over_sqlite_relational_facade() {
         .await
         .unwrap();
 
-    assert_eq!(replay, first);
+    assert!(first.is_fresh());
+    assert!(replay.is_replayed());
+    assert_eq!(replay.item_ids, first.item_ids);
     assert_eq!(fireweed.metrics(&q).await.unwrap().pending, 2);
     drop(fireweed);
     let _ = std::fs::remove_file(&path);
@@ -402,15 +404,17 @@ async fn request_id_push_is_idempotent_on_memory_backend() {
     fireweed.create_queue(qdef()).await.unwrap();
 
     let rid = RequestId::new("push-req-1").unwrap();
-    let first = fireweed
+    let (first, first_disp) = fireweed
         .push_with_request_id(&q, rid.clone(), at(10))
         .await
         .unwrap();
-    let replay = fireweed
+    let (replay, replay_disp) = fireweed
         .push_with_request_id(&q, rid, at(10))
         .await
         .unwrap();
 
+    assert_eq!(first_disp, fireweed::PushDisposition::Fresh);
+    assert_eq!(replay_disp, fireweed::PushDisposition::Replayed);
     assert_eq!(first, replay, "same request id + same body replays the id");
     assert_eq!(
         fireweed.metrics(&q).await.unwrap().pending,

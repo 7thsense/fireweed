@@ -627,7 +627,9 @@ impl fireweed_engine::PushPort for LyingClaimedViewBackend {
         items: Vec<fireweed_engine::PushSpec>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
-    ) -> impl std::future::Future<Output = fireweed_engine::EngineResult<Vec<ItemId>>> + Send {
+    ) -> impl std::future::Future<
+        Output = fireweed_engine::EngineResult<fireweed_engine::PushBatchOutcome>,
+    > + Send {
         self.inner
             .push_with_request_id(shard, request_id, items, now, expected_epoch)
     }

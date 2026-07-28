@@ -89,8 +89,9 @@ pub use fireweed_engine::{
     ItemMutationOperation, ItemMutationOutcome, ItemMutationPrecondition, ItemMutationRequest,
     ItemMutationResponse, ItemMutationResult, ItemMutationReturning, ItemMutationSelectorAggregate,
     ItemMutationSnapshot, ItemMutationSummary, ItemPatch, ItemPredicate, ItemSelector,
-    ItemSelectorScope, ItemView, LeaseGuard, LifecyclePatch, LiveItemView, PayloadUpdate, QueueKey,
-    QueueMetrics, ScheduleUpdate, SelectedMutation, SideRecord, TimestampComparison, UpsertOutcome,
+    ItemSelectorScope, ItemView, LeaseGuard, LifecyclePatch, LiveItemView, PayloadUpdate,
+    PushBatchOutcome, PushDisposition, QueueKey, QueueMetrics, ScheduleUpdate, SelectedMutation,
+    SideRecord, TimestampComparison, UpsertOutcome,
 };
 
 /// An active-scope result stamped with the exact queue and granularity used for discovery.
@@ -2740,42 +2741,29 @@ impl<B: LibBackend> RuntimeCore<B> {
 
     /// Enqueue one item under an API-001 request id. Replaying the same request body with the same
     /// `request_id` returns the original item id on backends that implement durable request replay.
+    ///
+    /// See [`Self::push_batch_with_request_id`] for replay-vs-fresh disposition.
     pub async fn push_with_request_id(
         &self,
         queue: &QueueKey,
         request_id: RequestId,
         item: NewItem,
-    ) -> EngineResult<ItemId> {
-        let ids = self
+    ) -> EngineResult<(ItemId, PushDisposition)> {
+        let outcome = self
             .push_batch_with_request_id(queue, request_id, vec![item])
             .await?;
-        Ok(ids.into_iter().next().expect("one id per pushed item"))
+        let id = outcome
+            .item_ids
+            .into_iter()
+            .next()
+            .expect("one id per pushed item");
+        Ok((id, outcome.disposition))
     }
 
     /// Enqueue a batch of new items in one command (append). Returns the server-assigned ids in order.
     pub async fn push_batch(
         &self,
         queue: &QueueKey,
-        items: Vec<NewItem>,
-    ) -> EngineResult<Vec<ItemId>> {
-        self.push_batch_inner(queue, None, items).await
-    }
-
-    /// Enqueue a batch under an API-001 request id. Replaying the same batch body with the same request id
-    /// returns the original ids in order; a different body returns `RequestIdConflict`.
-    pub async fn push_batch_with_request_id(
-        &self,
-        queue: &QueueKey,
-        request_id: RequestId,
-        items: Vec<NewItem>,
-    ) -> EngineResult<Vec<ItemId>> {
-        self.push_batch_inner(queue, Some(request_id), items).await
-    }
-
-    async fn push_batch_inner(
-        &self,
-        queue: &QueueKey,
-        request_id: Option<RequestId>,
         items: Vec<NewItem>,
     ) -> EngineResult<Vec<ItemId>> {
         let definition = self.backend.queue_definition(queue).await?;
@@ -2785,13 +2773,32 @@ impl<B: LibBackend> RuntimeCore<B> {
         let specs: Vec<PushSpec> = items.into_iter().map(new_item_to_spec).collect();
         let epoch = self.session_epoch(queue).await?;
         let now = self.clock.now();
-        let r = if let Some(request_id) = request_id {
-            self.backend
-                .push_with_request_id(queue, request_id, specs, now, epoch)
-                .await
-        } else {
-            self.backend.push(queue, specs, now, epoch).await
-        };
+        let r = self.backend.push(queue, specs, now, epoch).await;
+        self.note(queue, r)
+    }
+
+    /// Enqueue a batch under an API-001 request id.
+    ///
+    /// Replaying the same batch body with the same request id returns the original ids and
+    /// [`PushDisposition::Replayed`]. A first application returns [`PushDisposition::Fresh`].
+    /// A different body for the same request id returns `RequestIdConflict`.
+    pub async fn push_batch_with_request_id(
+        &self,
+        queue: &QueueKey,
+        request_id: RequestId,
+        items: Vec<NewItem>,
+    ) -> EngineResult<PushBatchOutcome> {
+        let definition = self.backend.queue_definition(queue).await?;
+        if items.len() > definition.max_push_batch_size as usize {
+            return Err(EngineError::BatchTooLarge);
+        }
+        let specs: Vec<PushSpec> = items.into_iter().map(new_item_to_spec).collect();
+        let epoch = self.session_epoch(queue).await?;
+        let now = self.clock.now();
+        let r = self
+            .backend
+            .push_with_request_id(queue, request_id, specs, now, epoch)
+            .await;
         self.note(queue, r)
     }
 

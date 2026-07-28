@@ -18,7 +18,7 @@ trait FireweedDataPlane: Send + Sync {
         queue: &'a QueueKey,
         request_id: RequestId,
         item: NewItem,
-    ) -> FacadeFuture<'a, ItemId>;
+    ) -> FacadeFuture<'a, (ItemId, PushDisposition)>;
     fn push_batch<'a>(
         &'a self,
         queue: &'a QueueKey,
@@ -29,7 +29,7 @@ trait FireweedDataPlane: Send + Sync {
         queue: &'a QueueKey,
         request_id: RequestId,
         items: Vec<NewItem>,
-    ) -> FacadeFuture<'a, Vec<ItemId>>;
+    ) -> FacadeFuture<'a, PushBatchOutcome>;
     fn upsert<'a>(
         &'a self,
         queue: &'a QueueKey,
@@ -342,7 +342,7 @@ impl<B: LibBackend + 'static> FireweedDataPlane for RuntimeCore<B> {
         queue: &'a QueueKey,
         request_id: RequestId,
         item: NewItem,
-    ) -> FacadeFuture<'a, ItemId> {
+    ) -> FacadeFuture<'a, (ItemId, PushDisposition)> {
         Box::pin(RuntimeCore::push_with_request_id(
             self, queue, request_id, item,
         ))
@@ -359,7 +359,7 @@ impl<B: LibBackend + 'static> FireweedDataPlane for RuntimeCore<B> {
         queue: &'a QueueKey,
         request_id: RequestId,
         items: Vec<NewItem>,
-    ) -> FacadeFuture<'a, Vec<ItemId>> {
+    ) -> FacadeFuture<'a, PushBatchOutcome> {
         Box::pin(RuntimeCore::push_batch_with_request_id(
             self, queue, request_id, items,
         ))
@@ -845,7 +845,7 @@ impl Fireweed {
         queue: &QueueKey,
         request_id: RequestId,
         item: NewItem,
-    ) -> EngineResult<ItemId> {
+    ) -> EngineResult<(ItemId, PushDisposition)> {
         self.inner
             .push_with_request_id(queue, request_id, item)
             .await
@@ -862,7 +862,7 @@ impl Fireweed {
         queue: &QueueKey,
         request_id: RequestId,
         items: Vec<NewItem>,
-    ) -> EngineResult<Vec<ItemId>> {
+    ) -> EngineResult<PushBatchOutcome> {
         self.inner
             .push_batch_with_request_id(queue, request_id, items)
             .await

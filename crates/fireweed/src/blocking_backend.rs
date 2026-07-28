@@ -380,7 +380,7 @@ impl<B: super::LibBackend + 'static> PushPort for BlockingLibBackend<B> {
         items: Vec<PushSpec>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
-    ) -> impl Future<Output = EngineResult<Vec<ItemId>>> + Send {
+    ) -> impl Future<Output = EngineResult<fireweed_engine::PushBatchOutcome>> + Send {
         let queue = shard.clone();
         self.dispatch(queue.clone(), move |inner| async move {
             inner

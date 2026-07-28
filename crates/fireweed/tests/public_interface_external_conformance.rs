@@ -335,17 +335,17 @@ async fn seed_reopen_probe(cell: &str, fireweed: &Fireweed) -> ReopenProbe {
             .created
     );
     let request_id = RequestId::new("reopen-push-v1").unwrap();
-    let item_id = fireweed
+    let (item_id, first_disp) = fireweed
         .push_with_request_id(&queue, request_id.clone(), reopen_item(b"before"))
         .await
         .unwrap();
-    assert_eq!(
-        fireweed
-            .push_with_request_id(&queue, request_id, reopen_item(b"before"))
-            .await
-            .unwrap(),
-        item_id
-    );
+    assert_eq!(first_disp, fireweed::PushDisposition::Fresh);
+    let (replayed_id, replay_disp) = fireweed
+        .push_with_request_id(&queue, request_id, reopen_item(b"before"))
+        .await
+        .unwrap();
+    assert_eq!(replay_disp, fireweed::PushDisposition::Replayed);
+    assert_eq!(replayed_id, item_id);
     let batch = BatchUpdateRequest {
         request_id: RequestId::new("reopen-batch-v1").unwrap(),
         updates: vec![BatchUpdateEntry {
@@ -475,17 +475,16 @@ async fn verify_reopen_probe(fireweed: &Fireweed, probe: ReopenProbe) {
         fireweed.queue_definition(&probe.queue).await.unwrap(),
         probe.definition
     );
-    assert_eq!(
-        fireweed
-            .push_with_request_id(
-                &probe.queue,
-                RequestId::new("reopen-push-v1").unwrap(),
-                reopen_item(b"before"),
-            )
-            .await
-            .unwrap(),
-        probe.item_id
-    );
+    let (replayed_id, replay_disp) = fireweed
+        .push_with_request_id(
+            &probe.queue,
+            RequestId::new("reopen-push-v1").unwrap(),
+            reopen_item(b"before"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay_disp, fireweed::PushDisposition::Replayed);
+    assert_eq!(replayed_id, probe.item_id);
     assert_eq!(
         fireweed
             .batch_update(&probe.queue, probe.batch.clone())

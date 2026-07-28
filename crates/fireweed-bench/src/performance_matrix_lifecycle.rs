@@ -224,17 +224,17 @@ async fn populate(
             .map_err(|error| format!("lifecycle request id: {error}"))?;
         let batch_items = make_batch(shape, offset, batch);
         content_records.extend(new_item_content(&batch_items));
-        let ids = fireweed
+        let outcome = fireweed
             .push_batch_with_request_id(queue, request_id, batch_items)
             .await
             .map_err(|error| format!("populate lifecycle queue: {error}"))?;
-        if ids.len() != batch {
+        if outcome.len() != batch {
             return Err(format!(
                 "populate returned {} ids, expected {batch}",
-                ids.len()
+                outcome.len()
             ));
         }
-        accepted.extend(ids);
+        accepted.extend(outcome.into_item_ids());
     }
     accepted.sort_unstable();
     accepted.dedup();

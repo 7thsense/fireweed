@@ -2006,7 +2006,7 @@ mod tests {
             _items: Vec<PushSpec>,
             _now: UtcTimestamp,
             _expected_epoch: Option<u64>,
-        ) -> EngineResult<Vec<ItemId>> {
+        ) -> EngineResult<fireweed_engine::PushBatchOutcome> {
             unreachable!("RESP XADD does not carry request_id")
         }
     }

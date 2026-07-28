@@ -380,14 +380,16 @@ Object-log profiles additionally consume `projection_control` and its four
 operations. No Snorri public or private type may retain a `LibBackend` bound.
 
 The Snorri-critical method signatures MUST remain type-equivalent in parameter
-ownership and result shape to the v0.19.6 facade, with `Self` changed from
-`Fireweed<B>` to `Fireweed`. In particular:
+ownership and result shape to the current public facade contract. Through v0.21.0
+the request-id push path returned only item ids; from v0.22.0 it also reports
+per-request replay-vs-fresh disposition (downstream snorri create/enqueue
+counters). In particular:
 
 ```rust
 pub async fn create_queue(&self, definition: QueueDefinition) -> EngineResult<CreateQueueOutcome>;
 pub async fn push(&self, queue: &QueueKey, item: NewItem) -> EngineResult<ItemId>;
-pub async fn push_with_request_id(&self, queue: &QueueKey, request_id: RequestId, item: NewItem) -> EngineResult<ItemId>;
-pub async fn push_batch_with_request_id(&self, queue: &QueueKey, request_id: RequestId, items: Vec<NewItem>) -> EngineResult<Vec<ItemId>>;
+pub async fn push_with_request_id(&self, queue: &QueueKey, request_id: RequestId, item: NewItem) -> EngineResult<(ItemId, PushDisposition)>;
+pub async fn push_batch_with_request_id(&self, queue: &QueueKey, request_id: RequestId, items: Vec<NewItem>) -> EngineResult<PushBatchOutcome>;
 pub async fn upsert(&self, queue: &QueueKey, key: ClientItemKey, item: NewItem) -> EngineResult<UpsertOutcome>;
 pub async fn claim_with(&self, queue: &QueueKey, max: usize, lease_ms: u64, compatibility: ClaimCompatibility) -> EngineResult<Vec<ClaimedItem>>;
 pub async fn claim_by_query(&self, queue: &QueueKey, request: ClaimByQueryRequest) -> EngineResult<Claimed>;

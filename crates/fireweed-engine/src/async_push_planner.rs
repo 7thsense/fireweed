@@ -459,7 +459,9 @@ mod tests {
 
         let first = futures::executor::block_on(backend.push(make(b"one"))).unwrap();
         let replay = futures::executor::block_on(backend.push(make(b"one"))).unwrap();
-        assert_eq!(replay, first);
+        assert!(first.is_fresh());
+        assert!(replay.is_replayed());
+        assert_eq!(replay.item_ids, first.item_ids);
         assert_eq!(commits.load(Ordering::SeqCst), 1);
         assert_eq!(axes.validated.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -522,7 +524,8 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(replay, vec![replayed_id]);
+        assert!(replay.is_replayed());
+        assert_eq!(replay.item_ids, vec![replayed_id]);
         assert_eq!(commits.load(Ordering::SeqCst), 0);
         assert_eq!(axes.validated.load(Ordering::SeqCst), 0);
     }

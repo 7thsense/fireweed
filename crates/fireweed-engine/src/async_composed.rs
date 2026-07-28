@@ -745,7 +745,10 @@ where
     /// Once accepted by the dispatcher this operation is backend-owned: dropping the caller only loses
     /// the response. A commit-phase error may therefore represent an unknown outcome. Supplying a
     /// `request_id` lets the injected planner resolve that outcome on retry from retained replay state.
-    pub async fn push(&self, request: AsyncPushRequest) -> Result<Vec<ItemId>, AsyncPushError> {
+    pub async fn push(
+        &self,
+        request: AsyncPushRequest,
+    ) -> Result<crate::PushBatchOutcome, AsyncPushError> {
         let queue = request.shard.clone();
         let strategy = Arc::clone(&self.strategy);
         let planner = Arc::clone(&self.push_planner);
@@ -779,7 +782,9 @@ where
                     AsyncPushPlanKind::Replay(item_ids) => {
                         validate_push_replay(&request, &item_ids)
                             .map_err(PushExecutionError::BeforeCommit)?;
-                        return Ok::<Vec<ItemId>, PushExecutionError>(item_ids);
+                        return Ok::<crate::PushBatchOutcome, PushExecutionError>(
+                            crate::PushBatchOutcome::replayed(item_ids),
+                        );
                     }
                     AsyncPushPlanKind::Commit { request, item_ids } => (request, item_ids),
                 };
@@ -796,7 +801,7 @@ where
                         source,
                     },
                 )?;
-                Ok(item_ids)
+                Ok(crate::PushBatchOutcome::fresh(item_ids))
             })
         })
         .await
@@ -2731,7 +2736,7 @@ mod tests {
         assert!(fixture.dispatcher.drive_next());
         assert!(matches!(
             poll_once(push.as_mut()),
-            Poll::Ready(Ok(ids)) if ids == vec![fixture.item_id]
+            Poll::Ready(Ok(outcome)) if outcome.is_fresh() && outcome.item_ids == vec![fixture.item_id]
         ));
         assert_eq!(fixture.plan_calls.load(Ordering::Acquire), 1);
         assert_eq!(fixture.commit_calls.load(Ordering::Acquire), 1);
@@ -2746,7 +2751,7 @@ mod tests {
         assert!(fixture.dispatcher.drive_next());
         assert!(matches!(
             poll_once(replay.as_mut()),
-            Poll::Ready(Ok(ids)) if ids == vec![fixture.item_id]
+            Poll::Ready(Ok(outcome)) if outcome.is_replayed() && outcome.item_ids == vec![fixture.item_id]
         ));
         assert_eq!(fixture.commit_calls.load(Ordering::Acquire), 0);
 

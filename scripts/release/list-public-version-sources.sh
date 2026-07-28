@@ -4,7 +4,7 @@ set -euo pipefail
 # ADR-020 fixes the first Fireweed-branded release at v0.20.0. This command
 # inventories public version coordinates for the requested release target;
 # it does not rewrite compatibility names or historical release notes.
-target_release="${1:-v0.21.0}"
+target_release="${1:-v0.22.0}"
 if [[ ! "$target_release" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo "usage: $0 [vMAJOR.MINOR.PATCH]" >&2
     exit 2

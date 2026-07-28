@@ -159,6 +159,7 @@ async fn push_rid(
             None,
         )
         .await
+        .map(|outcome| outcome.into_item_ids())
 }
 
 /// Fully drain the deferred checkpoint backlog (advances the durable SQLite high-water).

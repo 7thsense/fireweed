@@ -7177,7 +7177,8 @@ impl PushPort for PostgresRelationalBackend {
         items: Vec<PushSpec>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
-    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::PushBatchOutcome>> + Send
+    {
         let result = (|| {
             validate_gate_push(self.supports_gates(), &items)?;
             let mut g = self.inner.lock().expect("poisoned");
@@ -7219,7 +7220,7 @@ impl PushPort for PostgresRelationalBackend {
                 &fingerprint,
                 ts_nanos(now),
             )? {
-                return Ok(ids);
+                return Ok(fireweed_engine::PushBatchOutcome::replayed(ids));
             }
             let epoch = expected_epoch.unwrap_or(0);
             let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
@@ -7265,7 +7266,7 @@ impl PushPort for PostgresRelationalBackend {
             )?;
             st(tx.commit())?;
             apply_token_ops(live_tokens, token_ops);
-            Ok(ids)
+            Ok(fireweed_engine::PushBatchOutcome::fresh(ids))
         })();
         std::future::ready(result)
     }
@@ -13104,7 +13105,9 @@ mod gated_group_summary_tests {
         let replay =
             block_on(b.push_with_request_id(&shard(), request_id, vec![spec.clone()], ts(1), None))
                 .unwrap();
-        assert_eq!(first, replay);
+        assert!(first.is_fresh());
+        assert!(replay.is_replayed());
+        assert_eq!(first.item_ids, replay.item_ids);
         assert_eq!(group_count(&b), 1);
         assert!(block_on(b.push(&shard(), vec![spec], ts(2), None)).is_err());
         assert_eq!(
