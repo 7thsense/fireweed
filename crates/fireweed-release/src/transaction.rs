@@ -6,8 +6,30 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// Canonical required Postgres storage-pair profiles (slash form kept for release-gate messages
+/// and fixture compatibility). Axis-named backends (`postgres×sqlite`, `postgres×postgres`) are
+/// accepted as aliases of these keys.
 pub const REQUIRED_PROFILES: [&str; 2] = ["postgres/sqlite", "postgres/postgres"];
 pub const REQUIRED_ACS: [&str; 4] = ["AC-TXN-1", "AC-TXN-2", "AC-TXN-3", "AC-TXN-6"];
+
+/// Map evidence `backend` strings onto the required-profile key space.
+///
+/// Accepts both historical slash pairs (`postgres/sqlite`) and matrix axis names
+/// (`postgres×sqlite`). Optional Class A cells that are not release-gated return `None` only
+/// when unrecognized — use [`is_optional_matrix_profile`] for `postgres×memory`.
+pub fn required_profile_key(backend: &str) -> Option<&'static str> {
+    match backend {
+        "postgres/sqlite" | "postgres×sqlite" => Some("postgres/sqlite"),
+        "postgres/postgres" | "postgres×postgres" => Some("postgres/postgres"),
+        _ => None,
+    }
+}
+
+/// Optional axis-named cells allowed in the same evidence files without counting as required
+/// release pairs (postgres log × memory projection / legacy composed-postgres row).
+pub fn is_optional_matrix_profile(backend: &str) -> bool {
+    matches!(backend, "postgres×memory" | "postgres")
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -125,13 +147,21 @@ pub fn verify_transaction_evidence(
                     row.spec
                 )));
             }
-            if !REQUIRED_PROFILES.contains(&row.backend.as_str()) {
-                errors.push(TransactionEvidenceError(format!(
-                    "{context}: profile is not an exact shipped Postgres storage pair"
-                )));
-                continue;
-            }
+            let profile_key = match required_profile_key(&row.backend) {
+                Some(key) => Some(key),
+                None if is_optional_matrix_profile(&row.backend) => None,
+                None => {
+                    errors.push(TransactionEvidenceError(format!(
+                        "{context}: profile is not an exact shipped Postgres storage pair"
+                    )));
+                    continue;
+                }
+            };
             if !REQUIRED_ACS.contains(&row.ac.as_str()) {
+                // Optional matrix cells may carry only AC-TXN-1/2/3 without AC-TXN-6.
+                if profile_key.is_none() {
+                    continue;
+                }
                 errors.push(TransactionEvidenceError(format!(
                     "{context}: AC is outside the required exact-pair contract"
                 )));
@@ -143,12 +173,17 @@ pub fn verify_transaction_evidence(
                 )));
             }
 
-            let key = (row.backend.clone(), row.ac.clone());
-            if !summary.satisfied.insert(key) {
-                errors.push(TransactionEvidenceError(format!(
-                    "{context}: duplicate authority row"
-                )));
-                continue;
+            // Required pairs: track satisfaction under the canonical slash key so axis-named
+            // evidence (`postgres×sqlite`) fulfills the same slot as `postgres/sqlite`.
+            // Optional profiles (postgres×memory) are validated but not required.
+            if let Some(profile) = profile_key {
+                let key = (profile.to_string(), row.ac.clone());
+                if !summary.satisfied.insert(key) {
+                    errors.push(TransactionEvidenceError(format!(
+                        "{context}: duplicate authority row"
+                    )));
+                    continue;
+                }
             }
             match row.result.as_str() {
                 "pass" => {

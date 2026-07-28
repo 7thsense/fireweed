@@ -5000,7 +5000,7 @@ fn ac_txn_contract_matrix_postgres() {
         &mut records,
         &mut failures,
         "AC-TXN-1",
-        "postgres",
+        "postgres×memory",
         futures::executor::block_on(ac_txn_1_success_durable_visible(pg_factory(
             "txn1".into(),
             url.clone(),
@@ -5010,7 +5010,7 @@ fn ac_txn_contract_matrix_postgres() {
         &mut records,
         &mut failures,
         "AC-TXN-2",
-        "postgres",
+        "postgres×memory",
         futures::executor::block_on(ac_txn_2_rejection_no_effect(
             pg_factory("txn2".into(), url.clone()),
             DURABLE,
@@ -5020,7 +5020,7 @@ fn ac_txn_contract_matrix_postgres() {
         &mut records,
         &mut failures,
         "AC-TXN-3",
-        "postgres",
+        "postgres×memory",
         futures::executor::block_on(ac_txn_3_unknown_outcome_replay(
             pg_factory("txn3".into(), url.clone()),
             DURABLE,
@@ -5065,7 +5065,7 @@ fn ac_txn_contract_matrix_postgres_storage_pairs() {
         &mut records,
         &mut failures,
         "AC-TXN-1",
-        "postgres/sqlite",
+        "postgres×sqlite",
         futures::executor::block_on(ac_txn_1_success_durable_visible(postgres_sqlite_factory(
             url.clone(),
             "pgsqlite_txn1",
@@ -5075,7 +5075,7 @@ fn ac_txn_contract_matrix_postgres_storage_pairs() {
         &mut records,
         &mut failures,
         "AC-TXN-2",
-        "postgres/sqlite",
+        "postgres×sqlite",
         futures::executor::block_on(ac_txn_2_rejection_no_effect(
             postgres_sqlite_factory(url.clone(), "pgsqlite_txn2"),
             DURABLE,
@@ -5085,7 +5085,7 @@ fn ac_txn_contract_matrix_postgres_storage_pairs() {
         &mut records,
         &mut failures,
         "AC-TXN-3",
-        "postgres/sqlite",
+        "postgres×sqlite",
         futures::executor::block_on(ac_txn_3_unknown_outcome_replay(
             postgres_sqlite_factory(url.clone(), "pgsqlite_txn3"),
             DURABLE,
@@ -5096,7 +5096,7 @@ fn ac_txn_contract_matrix_postgres_storage_pairs() {
         &mut records,
         &mut failures,
         "AC-TXN-1",
-        "postgres/postgres",
+        "postgres×postgres",
         futures::executor::block_on(ac_txn_1_success_durable_visible(postgres_postgres_factory(
             url.clone(),
             "pgpg_txn1",
@@ -5106,7 +5106,7 @@ fn ac_txn_contract_matrix_postgres_storage_pairs() {
         &mut records,
         &mut failures,
         "AC-TXN-2",
-        "postgres/postgres",
+        "postgres×postgres",
         futures::executor::block_on(ac_txn_2_rejection_no_effect(
             postgres_postgres_factory(url.clone(), "pgpg_txn2"),
             DURABLE,
@@ -5116,7 +5116,7 @@ fn ac_txn_contract_matrix_postgres_storage_pairs() {
         &mut records,
         &mut failures,
         "AC-TXN-3",
-        "postgres/postgres",
+        "postgres×postgres",
         futures::executor::block_on(ac_txn_3_unknown_outcome_replay(
             postgres_postgres_factory(url, "pgpg_txn3"),
             DURABLE,
@@ -5159,11 +5159,11 @@ fn ac_txn_6_postgres_storage_pair_parity() {
         &mut records,
         &mut failures,
         "AC-TXN-6",
-        "postgres/sqlite",
+        "postgres×sqlite",
         parity.clone().map(|assertions| {
             assertions
                 .into_iter()
-                .map(|a| format!("parity peer=postgres/postgres: {a}"))
+                .map(|a| format!("parity peer=postgres×postgres: {a}"))
                 .collect()
         }),
     );
@@ -5171,11 +5171,11 @@ fn ac_txn_6_postgres_storage_pair_parity() {
         &mut records,
         &mut failures,
         "AC-TXN-6",
-        "postgres/postgres",
+        "postgres×postgres",
         parity.map(|assertions| {
             assertions
                 .into_iter()
-                .map(|a| format!("parity peer=postgres/sqlite: {a}"))
+                .map(|a| format!("parity peer=postgres×sqlite: {a}"))
                 .collect()
         }),
     );
