@@ -42,9 +42,8 @@ declare -A KUBECONFORM_SHA256=(
 )
 
 # Storage combinations to validate. Each maps to a CI values file under charts/fireweed-queue/ci/.
-# Public projection axis is memory|sqlite|postgres only (hybrid*/turso demoted from chart schema).
-# Includes first-class public axes (filesystem, memory, s3) and legacy objectlog/inmemory compat.
-COMBINATIONS=(filesystem-memory objectlog-inmemory objectlog-sqlite shared-s3-postgres-control-plane s3-sqlite-postgres-control-plane postgres-inmemory postgres-sqlite postgres-postgres lakebase-postgres)
+# Public axes only: logs memory|sqlite|postgres|filesystem|s3; projections memory|sqlite|postgres.
+COMBINATIONS=(filesystem-memory filesystem-sqlite shared-s3-postgres-control-plane s3-sqlite-postgres-control-plane postgres-memory postgres-sqlite postgres-postgres lakebase-postgres)
 
 err() { echo "helm-gate: $*" >&2; }
 
@@ -131,11 +130,10 @@ values_file_for() {
     local combination="$1"
     case "$combination" in
         filesystem-memory) echo "${CHART_DIR}/ci/filesystem-memory-values.yaml" ;;
-        objectlog-inmemory) echo "${CHART_DIR}/ci/objectlog-inmemory-values.yaml" ;;
-        objectlog-sqlite) echo "${CHART_DIR}/ci/objectlog-sqlite-values.yaml" ;;
+        filesystem-sqlite) echo "${CHART_DIR}/ci/filesystem-sqlite-values.yaml" ;;
         shared-s3-postgres-control-plane) echo "${CHART_DIR}/ci/shared-s3-postgres-control-plane-values.yaml" ;;
         s3-sqlite-postgres-control-plane) echo "${CHART_DIR}/ci/s3-sqlite-postgres-control-plane-values.yaml" ;;
-        postgres-inmemory) echo "${CHART_DIR}/ci/postgres-inmemory-values.yaml" ;;
+        postgres-memory) echo "${CHART_DIR}/ci/postgres-memory-values.yaml" ;;
         postgres-sqlite) echo "${CHART_DIR}/ci/postgres-sqlite-values.yaml" ;;
         postgres-postgres) echo "${CHART_DIR}/ci/postgres-postgres-values.yaml" ;;
         lakebase-postgres) echo "${CHART_DIR}/ci/lakebase-postgres-values.yaml" ;;
@@ -190,31 +188,17 @@ assert_filesystem_memory_contract() {
     assert_no_fixture_credentials "$rendered" "filesystem/memory rendered manifest"
 }
 
-assert_objectlog_inmemory_contract() {
+assert_filesystem_sqlite_contract() {
     local rendered="$1"
 
-    assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "objectlog"' "objectlog log axis"
-    assert_contains "$rendered" 'FIREWEED_PROJECTION_BACKEND: "inmemory"' "in-memory projection axis"
-    assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_STORE: "local"' "legacy objectlog store selection"
-    assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_ROOT: "/var/lib/fireweed/projection/object-log"' "object-log root"
-    assert_contains "$rendered" 'kind: PersistentVolumeClaim' "storage PVC"
-    assert_contains "$rendered" 'name: storage' "storage volume"
-    assert_contains "$rendered" 'mountPath: "/var/lib/fireweed/projection"' "SQLite projection volume mount"
-    assert_not_contains "$rendered" 'FIREWEED_SQLITE_PROJECTION_PATH' "sqlite projection path"
-    assert_not_contains "$rendered" 'name: FIREWEED_POSTGRES_DATABASE_URL' "Postgres env"
-    assert_no_fixture_credentials "$rendered" "object-log rendered manifest"
-}
-
-assert_objectlog_sqlite_contract() {
-    local rendered="$1"
-
-    assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "objectlog"' "objectlog log axis"
+    assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "filesystem"' "filesystem log axis"
     assert_contains "$rendered" 'FIREWEED_PROJECTION_BACKEND: "sqlite"' "sqlite projection axis"
     assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_ROOT: "/var/lib/fireweed/projection/object-log"' "object-log root"
     assert_contains "$rendered" 'FIREWEED_SQLITE_PROJECTION_PATH: "/var/lib/fireweed/projection/projection.db"' "sqlite projection path"
     assert_contains "$rendered" 'kind: PersistentVolumeClaim' "storage PVC"
     assert_contains "$rendered" 'name: storage' "storage volume"
-    assert_no_fixture_credentials "$rendered" "objectlog/sqlite rendered manifest"
+    assert_not_contains "$rendered" 'FIREWEED_OBJECT_LOG_STORE' "legacy store env"
+    assert_no_fixture_credentials "$rendered" "filesystem/sqlite rendered manifest"
 }
 
 assert_shared_s3_postgres_control_plane_contract() {
@@ -222,10 +206,10 @@ assert_shared_s3_postgres_control_plane_contract() {
 
     assert_contains "$rendered" 'replicas: 3' "shared profile replica count"
     assert_contains "$rendered" 'FIREWEED_REPLICA_COUNT: "3"' "replica count env"
-    assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "objectlog"' "objectlog log axis"
+    assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "s3"' "s3 log axis"
     assert_contains "$rendered" 'FIREWEED_CONTROL_PLANE: "postgres"' "postgres control-plane axis"
     assert_contains "$rendered" 'FIREWEED_PROJECTION_BACKEND: "sqlite"' "sqlite projection axis"
-    assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_STORE: "s3"' "shared object-log store selection"
+    assert_not_contains "$rendered" 'FIREWEED_OBJECT_LOG_STORE' "legacy store env"
     assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_S3_ENDPOINT: "https://s3.example.com"' "S3 endpoint"
     assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_S3_BUCKET: "fireweed-shared"' "S3 bucket"
     assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_S3_REGION: "us-east-1"' "S3 region"
@@ -288,10 +272,10 @@ assert_lakebase_postgres_contract() {
     local rendered="$1"
 
     # The binary connects to Lakebase from the self-sufficient log DSN alone (host/port/db +
-    # sslmode=require in the Secret). It does NOT read FIREWEED_LAKEBASE_* metadata, and the only
-    # wired postgres combination is log=postgres + projection=inmemory, so the Lakebase profile
+    # sslmode=require in the Secret). It does NOT read FIREWEED_LAKEBASE_* metadata, and a common
+    # wired postgres combination is log=postgres + projection=memory, so the Lakebase profile
     # renders neither FIREWEED_LAKEBASE_* nor a projection DSN.
-    assert_postgres_contract "$rendered" "inmemory"
+    assert_postgres_contract "$rendered" "memory"
     assert_not_contains "$rendered" 'FIREWEED_LAKEBASE_' "Lakebase metadata env (binary ignores it)"
     assert_not_contains "$rendered" 'name: FIREWEED_POSTGRES_PROJECTION_DATABASE_URL' "projection DSN env (binary ignores it)"
     assert_contains "$rendered" 'name: DATABRICKS_HOST' "Databricks host Secret env"
@@ -320,17 +304,17 @@ assert_generated_bootstrap_contract() {
 }
 
 assert_demoted_projection_schema_exclusion() {
-    # Public projection enum is memory|inmemory|sqlite|postgres only.
-    # Demoted names (hybrid, hybrid-async, hybrid-strict, turso) must fail schema validation.
+    # Public projection enum is memory|sqlite|postgres only.
+    # Demoted names (hybrid, hybrid-async, hybrid-strict, turso, inmemory) must fail schema validation.
     local demoted
-    for demoted in hybrid hybrid-async hybrid-strict turso; do
+    for demoted in hybrid hybrid-async hybrid-strict turso inmemory; do
         local output
         output="$(mktemp)"
 
         if helm template "fireweed-demoted-${demoted}" "$CHART_DIR" \
-            --set storage.log.backend=objectlog \
+            --set storage.log.backend=filesystem \
             --set "storage.projection.backend=${demoted}" >"$output" 2>&1; then
-            err "objectlog/${demoted} unexpectedly rendered; demoted projections must remain outside the chart schema"
+            err "filesystem/${demoted} unexpectedly rendered; demoted projections must remain outside the chart schema"
             cat "$output" >&2
             rm -f "$output"
             exit 1
@@ -340,10 +324,10 @@ assert_demoted_projection_schema_exclusion() {
         # path and allowed public enum from either formatter so a schema expansion, a
         # template-time rejection, or an unrelated render failure cannot satisfy
         # this public-support boundary.
-        local helm4_error="- at '/storage/projection/backend': value must be one of 'memory', 'inmemory', 'sqlite', 'postgres'"
-        local helm3_error='storage.projection.backend: storage.projection.backend must be one of the following: "memory", "inmemory", "sqlite", "postgres"'
+        local helm4_error="- at '/storage/projection/backend': value must be one of 'memory', 'sqlite', 'postgres'"
+        local helm3_error='storage.projection.backend: storage.projection.backend must be one of the following: "memory", "sqlite", "postgres"'
         if ! grep -Fq -- "$helm4_error" "$output" && ! grep -Fq -- "$helm3_error" "$output"; then
-            err "objectlog/${demoted} did not fail with the exact public projection enum-exclusion error"
+            err "filesystem/${demoted} did not fail with the exact public projection enum-exclusion error"
             cat "$output" >&2
             rm -f "$output"
             exit 1
@@ -351,6 +335,19 @@ assert_demoted_projection_schema_exclusion() {
 
         rm -f "$output"
     done
+
+    # Legacy log name objectlog must fail schema validation.
+    local log_output
+    log_output="$(mktemp)"
+    if helm template fireweed-demoted-objectlog "$CHART_DIR" \
+        --set storage.log.backend=objectlog \
+        --set storage.projection.backend=memory >"$log_output" 2>&1; then
+        err "objectlog log backend unexpectedly rendered; must remain outside the chart schema"
+        cat "$log_output" >&2
+        rm -f "$log_output"
+        exit 1
+    fi
+    rm -f "$log_output"
 }
 
 assert_combination_contract() {
@@ -360,11 +357,10 @@ assert_combination_contract() {
     echo "--- rendered contract assertions [${combination}] ---"
     case "$combination" in
         filesystem-memory) assert_filesystem_memory_contract "$rendered" ;;
-        objectlog-inmemory) assert_objectlog_inmemory_contract "$rendered" ;;
-        objectlog-sqlite) assert_objectlog_sqlite_contract "$rendered" ;;
+        filesystem-sqlite) assert_filesystem_sqlite_contract "$rendered" ;;
         shared-s3-postgres-control-plane) assert_shared_s3_postgres_control_plane_contract "$rendered" ;;
         s3-sqlite-postgres-control-plane) assert_s3_sqlite_postgres_control_plane_contract "$rendered" ;;
-        postgres-inmemory) assert_postgres_contract "$rendered" "inmemory" ;;
+        postgres-memory) assert_postgres_contract "$rendered" "memory" ;;
         postgres-sqlite) assert_postgres_contract "$rendered" "sqlite" ;;
         postgres-postgres) assert_postgres_contract "$rendered" "postgres" ;;
         lakebase-postgres) assert_lakebase_postgres_contract "$rendered" ;;
@@ -387,14 +383,14 @@ main() {
     echo "--- generated bootstrap inventory contract ---"
     assert_generated_bootstrap_contract
 
-    echo "--- objectlog/hybrid-strict chart exclusion contract ---"
+    echo "--- demoted projection/log chart exclusion contract ---"
     assert_demoted_projection_schema_exclusion
 
     echo "--- local profile fail-closed contract ---"
     local scaled_local
     scaled_local="$(mktemp)"
-    if helm template fireweed-local-scaled "$CHART_DIR" --values "${CHART_DIR}/ci/objectlog-sqlite-values.yaml" --set replicaCount=2 >"$scaled_local" 2>&1; then
-        err "scaled local objectlog/sqlite profile unexpectedly rendered"
+    if helm template fireweed-local-scaled "$CHART_DIR" --values "${CHART_DIR}/ci/filesystem-sqlite-values.yaml" --set replicaCount=2 >"$scaled_local" 2>&1; then
+        err "scaled local filesystem/sqlite profile unexpectedly rendered"
         cat "$scaled_local" >&2
         rm -f "$scaled_local"
         exit 1

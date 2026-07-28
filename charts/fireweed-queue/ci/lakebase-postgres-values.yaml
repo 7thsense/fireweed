@@ -5,8 +5,8 @@
 # host=<pooler-or-direct-host> port=5432 user=<user> password=<secret> dbname=databricks_postgres sslmode=require
 #
 # The binary connects from this DSN alone; the lakebase.* metadata below is operator
-# documentation for constructing that DSN, not consumed at runtime. The only wired
-# postgres combination is log=postgres + projection=inmemory (durable via the DSN log;
+# documentation for constructing that DSN, not consumed at runtime. A common wired
+# postgres combination is log=postgres + projection=memory (durable via the DSN log;
 # fast in-memory projection apply).
 storage:
   lakebase:
@@ -24,6 +24,6 @@ storage:
       existingSecret: fireweed-lakebase-dsn
       databaseUrlKey: database-url
   projection:
-    backend: inmemory
+    backend: memory
 image:
   tag: ci-tls

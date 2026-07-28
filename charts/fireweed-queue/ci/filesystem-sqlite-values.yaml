@@ -1,0 +1,8 @@
+# Fireweed Queue CI runtime values: filesystem log with a durable SQLite projection.
+storage:
+  log:
+    backend: filesystem
+  projection:
+    backend: sqlite
+image:
+  tag: ci

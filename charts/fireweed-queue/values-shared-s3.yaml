@@ -5,9 +5,8 @@ replicaCount: 3
 
 storage:
   log:
-    backend: objectlog
+    backend: s3
     objectLog:
-      store: s3
       s3:
         endpoint: https://s3.example.com
         bucket: fireweed-shared

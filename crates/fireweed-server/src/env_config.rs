@@ -11,10 +11,10 @@
 //! Public product names (injection values):
 //! - log: `memory` | `sqlite` | `postgres` | `filesystem` | `s3`
 //! - projection: `memory` | `sqlite` | `postgres`
-//! Compat aliases: `objectlog` (+ store local/s3 → filesystem/s3), `inmemory` → memory.
-//! Demoted / non-public: `hybrid`, `hybrid-async`, and `hybrid-strict` are rejected on this
-//! public env surface. `turso` is feature-gated (`turso-projection`) and is not a public matrix
-//! value. Direct [`Config`] / [`BackendSpec`] construction can still name internal profiles.
+//!
+//! Legacy / non-public names are **hard-rejected** on this surface (no long-lived aliases):
+//! `objectlog`, `inmemory`, `hybrid`, `hybrid-strict`, `hybrid-async`, `turso`. Direct
+//! [`Config`] / [`BackendSpec`] construction can still name internal profiles.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -353,8 +353,7 @@ fn required_nonempty(env: &BTreeMap<String, String>, key: &str) -> Result<String
         .ok_or_else(|| ConfigError::new(format!("{key} is required and must not be empty")))
 }
 
-/// S3-compatible object-log fields (shared by `FIREWEED_LOG_BACKEND=s3` and
-/// legacy `objectlog` + `FIREWEED_OBJECT_LOG_STORE=s3`).
+/// S3-compatible object-log fields for `FIREWEED_LOG_BACKEND=s3`.
 fn object_log_spec_s3(
     env: &BTreeMap<String, String>,
     segments: SegmentConfig,
@@ -402,44 +401,16 @@ fn object_log_spec_s3(
     Ok(spec)
 }
 
-fn object_log_spec(
-    env: &BTreeMap<String, String>,
-    segments: SegmentConfig,
-) -> Result<ObjectLogSpec, ConfigError> {
-    const S3_PREFIX: &str = "FIREWEED_OBJECT_LOG_S3_";
-    let profile = env_or(env, "FIREWEED_OBJECT_LOG_STORE", "local");
-    match profile.as_str() {
-        "local" => {
-            if let Some((key, _)) = env.iter().find(|(key, _)| key.starts_with(S3_PREFIX)) {
-                return Err(ConfigError::new(format!(
-                    "{key} is set while FIREWEED_OBJECT_LOG_STORE=local; refusing to ignore shared S3 configuration and fall back to node-local storage"
-                )));
-            }
-            Ok(ObjectLogSpec::local(
-                PathBuf::from(env_or(
-                    env,
-                    "FIREWEED_OBJECT_LOG_ROOT",
-                    "/var/lib/fireweed/object-log",
-                )),
-                segments,
-            ))
-        }
-        "s3" => object_log_spec_s3(env, segments),
-        other => Err(ConfigError::new(format!(
-            "unknown FIREWEED_OBJECT_LOG_STORE={other:?}; expected local|s3"
-        ))),
-    }
-}
-
 fn parse_backend(
     env: &BTreeMap<String, String>,
     segments: SegmentConfig,
 ) -> Result<BackendSpec, ConfigError> {
-    let log = env_or(env, "FIREWEED_LOG_BACKEND", "objectlog");
-    let projection = env_or(env, "FIREWEED_PROJECTION_BACKEND", "inmemory");
+    // Product defaults: filesystem log × memory projection (public axes only).
+    let log = env_or(env, "FIREWEED_LOG_BACKEND", "filesystem");
+    let projection = env_or(env, "FIREWEED_PROJECTION_BACKEND", "memory");
 
     // Public product log names: memory|sqlite|postgres|filesystem|s3.
-    // Compat aliases: objectlog (+ store local/s3) → filesystem/s3.
+    // Legacy `objectlog` (+ store local/s3) is hard-rejected — use filesystem or s3.
     let log_spec = match log.as_str() {
         "memory" => LogSpec::Memory,
         "sqlite" => LogSpec::Sqlite {
@@ -470,8 +441,14 @@ fn parse_backend(
         }
         // First-class S3-compatible object log.
         "s3" => LogSpec::ObjectLog(object_log_spec_s3(env, segments)?),
-        // Legacy alias: objectlog + FIREWEED_OBJECT_LOG_STORE=local|s3 → filesystem|s3.
-        "objectlog" => LogSpec::ObjectLog(object_log_spec(env, segments)?),
+        "objectlog" => {
+            return Err(unsupported_storage(
+                &log,
+                &projection,
+                "objectlog is not a public product log value (public: memory|sqlite|postgres|filesystem|s3); \
+                 use FIREWEED_LOG_BACKEND=filesystem (local/NAS) or FIREWEED_LOG_BACKEND=s3",
+            ));
+        }
         #[cfg(feature = "postgres")]
         "postgres" => {
             // Resolve the DSN + optional Databricks credentials from the env names the Helm Lakebase
@@ -495,19 +472,17 @@ fn parse_backend(
                 &log,
                 &projection,
                 &format!(
-                    "unknown FIREWEED_LOG_BACKEND={other:?}; expected memory|sqlite|postgres|filesystem|s3 \
-                     (aliases: objectlog)"
+                    "unknown FIREWEED_LOG_BACKEND={other:?}; expected memory|sqlite|postgres|filesystem|s3"
                 ),
             ));
         }
     };
 
     // Public product projection names: memory|sqlite|postgres.
-    // Compat aliases: inmemory → memory.
-    // Demoted hybrid* names are rejected on this public env surface (construct Config directly for
-    // internal/tests). Turso is feature-gated and is not a public matrix value.
+    // Legacy `inmemory`, demoted hybrid*, and non-public `turso` are hard-rejected (construct
+    // Config directly for internal/tests).
     let projection_spec = match projection.as_str() {
-        "memory" | "inmemory" => ProjectionSpec::InMemory,
+        "memory" => ProjectionSpec::InMemory,
         "sqlite" => ProjectionSpec::Sqlite {
             path: PathBuf::from(env_or(
                 env,
@@ -515,33 +490,20 @@ fn parse_backend(
                 "/var/lib/fireweed/fireweed-projection.db",
             )),
         },
-        "turso" => {
-            #[cfg(not(feature = "turso-projection"))]
+        "inmemory" => {
             return Err(unsupported_storage(
                 &log,
                 &projection,
-                "turso is not a public product projection (public: memory|sqlite|postgres); \
-                 the Turso derived projection is feature-gated and non-public — rebuild fireweed-server \
-                 with `--features turso-projection` only for experimental wiring",
+                "inmemory is not a public product projection (public: memory|sqlite|postgres); \
+                 use FIREWEED_PROJECTION_BACKEND=memory",
             ));
-            #[cfg(feature = "turso-projection")]
-            {
-                let raw = env_or(
-                    env,
-                    "FIREWEED_TURSO_PROJECTION_PATH",
-                    "/var/lib/fireweed/fireweed-turso.db",
-                );
-                if raw.trim().is_empty() {
-                    return Err(unsupported_storage(
-                        &log,
-                        &projection,
-                        "FIREWEED_TURSO_PROJECTION_PATH must be a non-empty local path",
-                    ));
-                }
-                ProjectionSpec::Turso {
-                    path: PathBuf::from(raw),
-                }
-            }
+        }
+        "turso" => {
+            return Err(unsupported_storage(
+                &log,
+                &projection,
+                "turso is not a public product projection (public: memory|sqlite|postgres)",
+            ));
         }
         // Demoted from the public projection axis: hybrid profiles remain in the type system for
         // direct Config construction / internal tests, but the env adapter rejects public select.
@@ -549,9 +511,8 @@ fn parse_backend(
             return Err(unsupported_storage(
                 &log,
                 &projection,
-                "this projection is not a public product value (public: memory|sqlite|postgres; \
-                 aliases: inmemory). hybrid|hybrid-strict|hybrid-async are demoted from the public \
-                 env/Helm projection axis",
+                "this projection is not a public product value (public: memory|sqlite|postgres). \
+                 hybrid|hybrid-strict|hybrid-async are demoted from the public env/Helm projection axis",
             ));
         }
         #[cfg(feature = "postgres")]
@@ -577,16 +538,16 @@ fn parse_backend(
                 &log,
                 &projection,
                 &format!(
-                    "unknown FIREWEED_PROJECTION_BACKEND={other:?}; expected memory|sqlite|postgres \
-                     (aliases: inmemory)"
+                    "unknown FIREWEED_PROJECTION_BACKEND={other:?}; expected memory|sqlite|postgres"
                 ),
             ));
         }
     };
 
-    // Only specific log×projection pairings are wired (preserve the prior behavior): memory/inmemory
-    // (+ Class B memory/{sqlite,postgres}), sqlite/{inmemory,sqlite,postgres}, objectlog/inmemory,
-    // objectlog/sqlite, and (with the feature) postgres/{inmemory,sqlite,postgres}.
+    // Only specific log×projection pairings are wired (preserve the prior behavior): memory×memory
+    // (+ Class B memory/{sqlite,postgres}), sqlite/{memory,sqlite,postgres}, filesystem|s3 ×
+    // {memory,sqlite[,postgres]}, and (with the feature) postgres/{memory,sqlite,postgres}.
+    // Internal Hybrid/Turso specs remain in the type system for direct Config construction.
     let wired = match (&log_spec, &projection_spec) {
         (LogSpec::Memory, ProjectionSpec::InMemory) => true,
         // Class B: memory log × durable projection (projection survives process death; no log rebuild).
@@ -898,7 +859,7 @@ mod tests {
     fn memory_backend_and_scalar_knobs_are_honored() {
         let config = Config::from_env(&map(&[
             ("FIREWEED_LOG_BACKEND", "memory"),
-            ("FIREWEED_PROJECTION_BACKEND", "inmemory"),
+            ("FIREWEED_PROJECTION_BACKEND", "memory"),
             ("FIREWEED_NODE_ID", "7"),
             ("FIREWEED_LISTEN_ADDR", "127.0.0.1:6390"),
             ("FIREWEED_WORKER_THREADS", "4"),
@@ -1045,15 +1006,44 @@ mod tests {
             config.backend.projection,
             ProjectionSpec::Sqlite { ref path } if path == &PathBuf::from("/data/s3-proj.db")
         ));
+    }
 
-        // legacy objectlog+local still maps to filesystem label
-        let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "objectlog"),
-            ("FIREWEED_OBJECT_LOG_STORE", "local"),
-            ("FIREWEED_PROJECTION_BACKEND", "inmemory"),
-        ]))
-        .expect("objectlog alias");
-        assert_eq!(config.backend.log.label(), "filesystem");
+    #[test]
+    fn legacy_product_aliases_are_hard_rejected() {
+        // objectlog (+ store local/s3 product path) — use filesystem|s3 instead.
+        for (log, projection) in [
+            ("objectlog", "memory"),
+            ("objectlog", "sqlite"),
+            ("filesystem", "inmemory"),
+            ("memory", "inmemory"),
+        ] {
+            let Err(err) = Config::from_env(&map(&[
+                ("FIREWEED_LOG_BACKEND", log),
+                ("FIREWEED_PROJECTION_BACKEND", projection),
+            ])) else {
+                panic!("{log}×{projection} must be hard-rejected on the public env surface");
+            };
+            assert!(
+                err.0.contains("FIREWEED_LOG_BACKEND=")
+                    || err.0.contains("FIREWEED_PROJECTION_BACKEND="),
+                "unexpected error for {log}×{projection}: {}",
+                err.0
+            );
+            if log == "objectlog" {
+                assert!(
+                    err.0.contains("objectlog is not a public product log"),
+                    "{}",
+                    err.0
+                );
+            }
+            if projection == "inmemory" {
+                assert!(
+                    err.0.contains("inmemory is not a public product projection"),
+                    "{}",
+                    err.0
+                );
+            }
+        }
     }
 
     /// First-class `s3` log pairs with the postgres projection (requires `postgres` feature).
@@ -1334,11 +1324,12 @@ mod tests {
     }
 
     #[test]
-    fn objectlog_sqlite_projection_carries_paths_and_segment_config() {
-        // The object log's only production form is the segmented group-commit substrate; the retired
-        // `FIREWEED_OBJECT_LOG_MODE` knob is ignored, and the projection axis is the derived sqlite store.
+    fn filesystem_sqlite_projection_carries_paths_and_segment_config() {
+        // The filesystem object log's only production form is the segmented group-commit substrate;
+        // the retired `FIREWEED_OBJECT_LOG_MODE` knob is ignored, and the projection axis is the
+        // derived sqlite store.
         let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "objectlog"),
+            ("FIREWEED_LOG_BACKEND", "filesystem"),
             ("FIREWEED_PROJECTION_BACKEND", "sqlite"),
             ("FIREWEED_OBJECT_LOG_ROOT", "/data/olog"),
             ("FIREWEED_SQLITE_PROJECTION_PATH", "/data/proj.db"),
@@ -1359,49 +1350,24 @@ mod tests {
                 assert_eq!(segment_config.target_bytes, 131_072);
                 assert_eq!(segment_config.max_latency_ms, 5);
             }
-            _ => panic!("expected objectlog log × sqlite projection"),
+            _ => panic!("expected filesystem log × sqlite projection"),
         }
     }
 
-    #[cfg(feature = "turso-projection")]
     #[test]
-    fn objectlog_turso_projection_requires_and_carries_local_path() {
-        let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "objectlog"),
+    fn turso_projection_is_hard_rejected_on_public_env_surface() {
+        // Turso remains in the type system for direct Config construction / experimental wiring,
+        // but the public env adapter never accepts it (feature flags do not re-open the select).
+        let Err(error) = Config::from_env(&map(&[
+            ("FIREWEED_LOG_BACKEND", "filesystem"),
             ("FIREWEED_PROJECTION_BACKEND", "turso"),
             ("FIREWEED_OBJECT_LOG_ROOT", "/data/olog"),
             ("FIREWEED_TURSO_PROJECTION_PATH", "/data/projection.turso"),
-        ]))
-        .expect("feature-enabled Turso profile");
-        assert!(matches!(config.backend.log, LogSpec::ObjectLog(_)));
-        assert!(matches!(
-            config.backend.projection,
-            ProjectionSpec::Turso { path }
-                if path.as_path() == std::path::Path::new("/data/projection.turso")
-        ));
-
-        let Err(error) = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "objectlog"),
-            ("FIREWEED_PROJECTION_BACKEND", "turso"),
-            ("FIREWEED_TURSO_PROJECTION_PATH", ""),
         ])) else {
-            panic!("empty Turso path must fail closed")
-        };
-        assert!(error.0.contains("non-empty local path"), "{}", error.0);
-    }
-
-    #[cfg(not(feature = "turso-projection"))]
-    #[test]
-    fn objectlog_turso_selection_explains_feature_disabled_build() {
-        let Err(error) = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "objectlog"),
-            ("FIREWEED_PROJECTION_BACKEND", "turso"),
-        ])) else {
-            panic!("default build must reject Turso selection")
+            panic!("public env surface must hard-reject turso")
         };
         assert!(
-            error.0.contains("--features turso-projection")
-                || error.0.contains("not a public product projection"),
+            error.0.contains("turso is not a public product projection"),
             "{}",
             error.0
         );
@@ -1413,7 +1379,7 @@ mod tests {
         // axis. Internal Config construction may still name them; the env adapter fails closed.
         for projection in ["hybrid", "hybrid-strict", "hybrid-async"] {
             let result = Config::from_env(&map(&[
-                ("FIREWEED_LOG_BACKEND", "objectlog"),
+                ("FIREWEED_LOG_BACKEND", "filesystem"),
                 ("FIREWEED_PROJECTION_BACKEND", projection),
                 ("FIREWEED_OBJECT_LOG_ROOT", "/data/olog"),
                 ("FIREWEED_SQLITE_PROJECTION_PATH", "/data/hybrid.db"),
@@ -1448,12 +1414,24 @@ mod tests {
     fn demoted_hybrid_strict_and_async_are_rejected_for_any_log_backend() {
         // Demotion is at the projection name, not only the pairing matrix — any log × hybrid*
         // env selection fails closed on the public surface.
-        for log in ["memory", "sqlite", "objectlog"] {
+        for log in ["memory", "sqlite", "filesystem", "s3"] {
             for projection in ["hybrid-strict", "hybrid-async"] {
-                let result = Config::from_env(&map(&[
+                let mut pairs = vec![
                     ("FIREWEED_LOG_BACKEND", log),
                     ("FIREWEED_PROJECTION_BACKEND", projection),
-                ]));
+                ];
+                if log == "s3" {
+                    // Provide minimal S3 fields so rejection is on the projection name, not S3 parse.
+                    pairs.extend_from_slice(&[
+                        ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "https://s3.example.com"),
+                        ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fw"),
+                        ("FIREWEED_OBJECT_LOG_S3_REGION", "us-east-1"),
+                        ("FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE", "static"),
+                        ("FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID", "ak"),
+                        ("FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY", "sk"),
+                    ]);
+                }
+                let result = Config::from_env(&map(&pairs));
                 let Err(err) = result else {
                     panic!("{log}/{projection} must be rejected on the public env surface");
                 };
@@ -1593,7 +1571,7 @@ mod tests {
     }
 
     #[test]
-    fn non_objectlog_hybrid_pairing_is_rejected() {
+    fn hybrid_pairing_is_rejected_for_any_public_log() {
         let result = Config::from_env(&map(&[
             ("FIREWEED_LOG_BACKEND", "sqlite"),
             ("FIREWEED_PROJECTION_BACKEND", "hybrid"),
@@ -1626,7 +1604,7 @@ mod tests {
     fn lakebase_postgres_env_resolves_with_tls_and_databricks_credentials() {
         let config = Config::from_env(&map(&[
             ("FIREWEED_LOG_BACKEND", "postgres"),
-            ("FIREWEED_PROJECTION_BACKEND", "inmemory"),
+            ("FIREWEED_PROJECTION_BACKEND", "memory"),
             (
                 "FIREWEED_POSTGRES_LOG_DATABASE_URL",
                 "postgres://app:native-password@instance.lakebase.cloud:5432/db?sslmode=require",

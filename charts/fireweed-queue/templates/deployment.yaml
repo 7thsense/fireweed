@@ -79,7 +79,7 @@ spec:
             {{- end }}
             {{- if eq .Values.storage.projection.backend "postgres" }}
             {{- /* Relational-projection DSN for postgres × postgres composition.
-                   Lakebase fixtures use projection=inmemory/memory, so this never renders there. */}}
+                   Lakebase fixtures use projection=memory, so this never renders there. */}}
             - name: FIREWEED_POSTGRES_PROJECTION_DATABASE_URL
               valueFrom:
                 secretKeyRef:

@@ -375,7 +375,7 @@
         "log": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Command-log axis isomorphic to StorageConfig.log. Public: memory|sqlite|postgres|filesystem|s3. Compat: objectlog + objectLog.store local|s3 maps to filesystem|s3.",
+          "description": "Command-log axis isomorphic to StorageConfig.log. Public product values: memory|sqlite|postgres|filesystem|s3.",
           "required": [
             "backend",
             "objectLog",
@@ -390,36 +390,26 @@
                 "sqlite",
                 "postgres",
                 "filesystem",
-                "s3",
-                "objectlog"
+                "s3"
               ]
             },
             "objectLog": {
               "type": "object",
               "additionalProperties": false,
-              "description": "Filesystem root and S3 blocks for filesystem/s3 logs (and legacy objectlog + store).",
+              "description": "Filesystem root and S3 blocks for filesystem/s3 logs.",
               "required": [
-                "store",
                 "root"
               ],
               "properties": {
-                "store": {
-                  "type": "string",
-                  "description": "Only meaningful with backend=objectlog (local→filesystem, s3→s3). Ignored for first-class filesystem|s3 backends.",
-                  "enum": [
-                    "local",
-                    "s3"
-                  ]
-                },
                 "root": {
                   "type": "string",
                   "minLength": 1,
-                  "description": "Filesystem object-log root (local disk or NAS path). Used when backend is filesystem or objectlog+local."
+                  "description": "Filesystem object-log root (local disk or NAS path). Used when backend is filesystem."
                 },
                 "s3": {
                   "type": "object",
                   "additionalProperties": false,
-                  "description": "S3-compatible object-log credentials and endpoint. Used when backend is s3 or objectlog+store=s3.",
+                  "description": "S3-compatible object-log credentials and endpoint. Used when backend is s3.",
                   "required": [
                     "endpoint",
                     "bucket",
@@ -488,7 +478,7 @@
         "projection": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Projection axis isomorphic to StorageConfig.projection. Public product values: memory|sqlite|postgres. Compat alias: inmemory→memory.",
+          "description": "Projection axis isomorphic to StorageConfig.projection. Public product values: memory|sqlite|postgres.",
           "required": [
             "backend",
             "sqlite",
@@ -499,7 +489,6 @@
               "type": "string",
               "enum": [
                 "memory",
-                "inmemory",
                 "sqlite",
                 "postgres"
               ]

@@ -1,11 +1,10 @@
 # Fireweed Queue static and live kind CI values: shared S3 object-log with a postgres ownership control plane
-# and pod-local rebuildable SQLite projections.
+# and pod-local rebuildable SQLite projections (public log.backend=s3).
 replicaCount: 3
 storage:
   log:
-    backend: objectlog
+    backend: s3
     objectLog:
-      store: s3
       s3:
         endpoint: https://s3.example.com
         bucket: fireweed-shared
