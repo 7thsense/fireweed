@@ -544,6 +544,23 @@ fn projection_path(label: &str) -> String {
         .to_string()
 }
 
+fn recovery_queue_id(profile: &str, process_id: u32, run_number: u64, nanos: u128) -> String {
+    format!("e3rec-{profile}-{process_id}-{run_number}-{nanos}")
+}
+
+/// Give every recovery invocation its own durable object-log namespace. The full matrix and the
+/// standalone exact-recovery tests run in the same test process, and therefore cannot use the process id
+/// alone as a queue identity.
+fn unique_recovery_queue_id(profile: &str) -> String {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let run_number = N.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    recovery_queue_id(profile, std::process::id(), run_number, nanos)
+}
+
 fn copy_sqlite_projection(source: &str, destination: &str) {
     let connection =
         rusqlite::Connection::open(source).expect("open SQLite projection control source");
@@ -2016,7 +2033,7 @@ where
     B: E3Backend + E3RecoveryProbe + E3OrderProbe,
     F: Fn(Arc<dyn BlobStore>, &str, SegmentConfig) -> fireweed_engine::EngineResult<B>,
 {
-    let qid = format!("e3rec-{profile}-{}", std::process::id());
+    let qid = unique_recovery_queue_id(profile);
     let def = qdef("e3", &qid);
     let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
     let proj = projection_path(&format!("recovery-{profile}"));
@@ -3745,6 +3762,20 @@ fn canonical_recovery_command_counts_include_the_sqlite_crash_tail() {
         ) + 1,
         10_001,
         "SQLite snapshot load plus its committed crash tail is 10,001 commands"
+    );
+}
+
+#[test]
+fn recovery_queue_ids_isolate_concurrent_and_repeated_runs() {
+    let first = recovery_queue_id("object_log_sqlite_projection", 42, 0, 1234);
+    assert_eq!(first, "e3rec-object_log_sqlite_projection-42-0-1234");
+    assert_ne!(
+        first,
+        recovery_queue_id("object_log_sqlite_projection", 42, 1, 1234)
+    );
+    assert_ne!(
+        first,
+        recovery_queue_id("object_log_sqlite_projection", 42, 0, 1235)
     );
 }
 

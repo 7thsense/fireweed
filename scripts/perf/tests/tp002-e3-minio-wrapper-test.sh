@@ -7,7 +7,8 @@ DRIFT_SENTINEL="$REPO_ROOT/.e3-wrapper-drift-test-$$"
 OUTPUT=$(mktemp)
 FENCE_OUTPUT=$(mktemp)
 TRANSACTION_OUTPUT=$(mktemp)
-trap 'rm -f "$DIRTY_SENTINEL" "$DRIFT_SENTINEL" "$OUTPUT" "$FENCE_OUTPUT" "$TRANSACTION_OUTPUT"' EXIT
+CARGO_ARGS_OUTPUT=$(mktemp)
+trap 'rm -f "$DIRTY_SENTINEL" "$DRIFT_SENTINEL" "$OUTPUT" "$FENCE_OUTPUT" "$TRANSACTION_OUTPUT" "$CARGO_ARGS_OUTPUT"' EXIT
 
 touch "$DIRTY_SENTINEL"
 set +e
@@ -42,6 +43,7 @@ grep -q "release requires resident=10000000" "$OUTPUT"
 set +e
 PATH="$REPO_ROOT/scripts/perf/tests/fixtures:$PATH" \
 FIREWEED_E3_DRIFT_SENTINEL="$DRIFT_SENTINEL" \
+FIREWEED_E3_CARGO_ARGS_OUT="$CARGO_ARGS_OUTPUT" \
 FIREWEED_E3_MINIO_CONTAINER=fake-minio \
 FIREWEED_E3_POSTGRES_POINTER_DATABASE_URL=postgres://test.invalid/e3 \
 FIREWEED_E3_FENCE_EVIDENCE_OUT="$FENCE_OUTPUT" \
@@ -57,3 +59,6 @@ if [ "$STATUS" -ne 2 ]; then
   exit 1
 fi
 grep -q "worktree changed during release measurement" "$OUTPUT"
+grep -Fq \
+  "test -p fireweed-server --release --test performance_object_log_e3_live_tests performance_object_log_e3_live_tests -- --nocapture" \
+  "$CARGO_ARGS_OUTPUT"
