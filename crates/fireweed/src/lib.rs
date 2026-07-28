@@ -992,9 +992,8 @@ impl ProjectionStoreConfig {
 /// Normative composition root for log × projection (+ related axes). API-005 / product brief.
 ///
 /// Every cell of the 5×3 matrix is a valid selection; durability class differs by log axis
-/// ([`LogConfig::is_durable_log`]). Opening a not-yet-wired cell may still return
-/// [`EngineError::Unavailable`] until Phase 2 composition beads land — construction and
-/// validation of this type accept all 15 pairs.
+/// ([`LogConfig::is_durable_log`]). Open all 15 pairs via [`open`] / [`open_async`] (cargo features
+/// must enable the chosen adapters; postgres cells require the `postgres` feature).
 #[derive(Debug, Clone)]
 pub struct StorageConfig {
     pub log: LogConfig,
@@ -1385,6 +1384,253 @@ mod storage_config_matrix_tests {
             url: ConfigSecret::new("postgres://authority"),
         });
         assert!(matches!(fs.validate(), Err(EngineError::Invalid(_))));
+    }
+}
+
+/// T0 construct tests for [`open`] / [`StorageConfig`] across the public matrix.
+#[cfg(test)]
+mod storage_config_open_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn clock() -> Arc<dyn Clock> {
+        Arc::new(SystemClock)
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "fireweed-matrix-open-{}-{}-{}",
+            label,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    fn base_cfg(log: LogConfig, projection: ProjectionStoreConfig) -> StorageConfig {
+        let mut cfg = StorageConfig::memory();
+        cfg.log = log;
+        cfg.projection = projection;
+        cfg.namespace = "matrix-open".to_owned();
+        if matches!(
+            &cfg.log,
+            LogConfig::Filesystem { .. } | LogConfig::S3 { .. }
+        ) {
+            cfg.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+        }
+        cfg
+    }
+
+    #[test]
+    fn open_opens_multiple_local_matrix_cells_via_storage_config() {
+        let root = temp_dir("local-cells");
+        let clock = clock();
+        let mut opened = Vec::new();
+
+        // memory × memory (Class B)
+        #[cfg(feature = "memory")]
+        {
+            let fw = open(StorageConfig::memory(), Arc::clone(&clock)).expect("memory×memory");
+            opened.push(("memory", "memory"));
+            drop(fw);
+        }
+
+        // memory × sqlite (Class B durable projection)
+        #[cfg(all(feature = "memory", feature = "sqlite"))]
+        {
+            let proj = root.join("mem-sqlite-proj.db");
+            let cfg = base_cfg(
+                LogConfig::Memory,
+                ProjectionStoreConfig::Sqlite { path: proj },
+            );
+            let fw = open(cfg, Arc::clone(&clock)).expect("memory×sqlite");
+            opened.push(("memory", "sqlite"));
+            drop(fw);
+        }
+
+        // sqlite × memory
+        #[cfg(feature = "sqlite")]
+        {
+            let log = root.join("sqlite-mem-log.db");
+            let cfg = base_cfg(
+                LogConfig::Sqlite { path: log },
+                ProjectionStoreConfig::Memory,
+            );
+            let fw = open(cfg, Arc::clone(&clock)).expect("sqlite×memory");
+            opened.push(("sqlite", "memory"));
+            drop(fw);
+        }
+
+        // sqlite × sqlite (distinct paths)
+        #[cfg(feature = "sqlite")]
+        {
+            let log = root.join("sqlite-sqlite-log.db");
+            let proj = root.join("sqlite-sqlite-proj.db");
+            let cfg = base_cfg(
+                LogConfig::Sqlite { path: log },
+                ProjectionStoreConfig::Sqlite { path: proj },
+            );
+            let fw = open(cfg, Arc::clone(&clock)).expect("sqlite×sqlite");
+            opened.push(("sqlite", "sqlite"));
+            drop(fw);
+        }
+
+        // filesystem × memory
+        #[cfg(feature = "objectlog")]
+        {
+            let fs_root = root.join("object-log");
+            std::fs::create_dir_all(&fs_root).expect("object-log root");
+            let cfg = base_cfg(
+                LogConfig::Filesystem { root: fs_root },
+                ProjectionStoreConfig::Memory,
+            );
+            let fw = open(cfg, Arc::clone(&clock)).expect("filesystem×memory");
+            opened.push(("filesystem", "memory"));
+            drop(fw);
+        }
+
+        // filesystem × sqlite
+        #[cfg(all(feature = "objectlog", feature = "sqlite"))]
+        {
+            let fs_root = root.join("object-log-sqlite");
+            std::fs::create_dir_all(&fs_root).expect("object-log root");
+            let proj = root.join("fs-sqlite-proj.db");
+            let cfg = base_cfg(
+                LogConfig::Filesystem { root: fs_root },
+                ProjectionStoreConfig::Sqlite { path: proj },
+            );
+            let fw = open(cfg, Arc::clone(&clock)).expect("filesystem×sqlite");
+            opened.push(("filesystem", "sqlite"));
+            drop(fw);
+        }
+
+        assert!(
+            opened.len() >= 2,
+            "expected multiple matrix cells to open via StorageConfig, got {opened:?}"
+        );
+        // Default features open at least memory×memory, sqlite×memory, sqlite×sqlite, filesystem×memory, filesystem×sqlite.
+        assert!(
+            opened.len() >= 4,
+            "default feature set should open ≥4 local cells, got {opened:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn open_dispatches_postgres_and_s3_cells_or_skips_without_live_env() {
+        let clock = clock();
+
+        // Compile/dispatch path for postgres×memory: skip when no live DB.
+        #[cfg(feature = "postgres")]
+        {
+            if let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") {
+                let cfg = base_cfg(
+                    LogConfig::Postgres {
+                        url: ConfigSecret::new(url),
+                        schema: Some("fw_matrix_open".to_owned()),
+                        mode: PostgresMode::LogReplay,
+                        node_id: None,
+                        coordination: None,
+                    },
+                    ProjectionStoreConfig::Memory,
+                );
+                let fw = open(cfg, Arc::clone(&clock)).expect("postgres×memory with live PG");
+                drop(fw);
+            } else {
+                eprintln!("storage_config_open: postgres cell skipped (FIREWEED_PG_TEST_URL unset)");
+            }
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            let cfg = base_cfg(
+                LogConfig::Postgres {
+                    url: ConfigSecret::new("postgres://localhost/fireweed"),
+                    schema: None,
+                    mode: PostgresMode::LogReplay,
+                    node_id: None,
+                    coordination: None,
+                },
+                ProjectionStoreConfig::Memory,
+            );
+            let err = open(cfg, Arc::clone(&clock)).expect_err("postgres without feature");
+            assert!(
+                matches!(err, EngineError::Invalid(msg) if msg.contains("postgres")),
+                "expected clear feature-gate error, got {err:?}"
+            );
+        }
+
+        // S3 dispatch: without live endpoint, open may fail at network/storage — still exercises match arm.
+        #[cfg(feature = "objectlog")]
+        {
+            if std::env::var("FIREWEED_S3_TEST_ENDPOINT").is_ok() {
+                let endpoint = std::env::var("FIREWEED_S3_TEST_ENDPOINT").unwrap();
+                let bucket = std::env::var("FIREWEED_S3_TEST_BUCKET").unwrap_or_else(|_| "fireweed".into());
+                let region = std::env::var("FIREWEED_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
+                let access = std::env::var("FIREWEED_S3_TEST_ACCESS_KEY")
+                    .unwrap_or_else(|_| "minioadmin".into());
+                let secret = std::env::var("FIREWEED_S3_TEST_SECRET_KEY")
+                    .unwrap_or_else(|_| "minioadmin".into());
+                let cfg = base_cfg(
+                    LogConfig::S3 {
+                        endpoint,
+                        bucket,
+                        region,
+                        access_key_id: ConfigSecret::new(access),
+                        secret_access_key: ConfigSecret::new(secret),
+                        allow_insecure_http: true,
+                    },
+                    ProjectionStoreConfig::Memory,
+                );
+                let fw = open(cfg, Arc::clone(&clock)).expect("s3×memory with live S3");
+                drop(fw);
+            } else {
+                // Ensure the S3 arm is selected (validation + open attempt) without requiring live S3.
+                let cfg = base_cfg(
+                    LogConfig::S3 {
+                        endpoint: "http://127.0.0.1:1".to_owned(),
+                        bucket: "fireweed".to_owned(),
+                        region: "us-east-1".to_owned(),
+                        access_key_id: ConfigSecret::new("akid"),
+                        secret_access_key: ConfigSecret::new("secret"),
+                        allow_insecure_http: true,
+                    },
+                    ProjectionStoreConfig::Memory,
+                );
+                // Open will fail (connection refused / storage); the cell is still dispatched.
+                let err = open(cfg, Arc::clone(&clock));
+                assert!(err.is_err(), "unreachable S3 endpoint must not succeed");
+                eprintln!("storage_config_open: s3×memory dispatch exercised (no live S3)");
+            }
+        }
+    }
+
+    #[test]
+    fn open_sqlite_wrapper_matches_storage_config_cell() {
+        #[cfg(feature = "sqlite")]
+        {
+            let root = temp_dir("wrapper");
+            let path = root.join("log.db");
+            let path_s = path.to_str().unwrap();
+            let via_wrapper = open_sqlite(path_s, clock()).expect("open_sqlite");
+            drop(via_wrapper);
+            let via_config = open(
+                base_cfg(
+                    LogConfig::Sqlite { path: path.clone() },
+                    ProjectionStoreConfig::Memory,
+                ),
+                clock(),
+            )
+            .expect("open StorageConfig sqlite×memory");
+            drop(via_config);
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 }
 
@@ -4315,14 +4561,474 @@ impl<B: LibBackend> RuntimeCore<B> {
 // on an internal crate (strong-by-default, not absolute — OD-6).
 // ---------------------------------------------------------------------------
 
+/// Open a [`Fireweed`] for any cell of the public 5×3 log × projection matrix (API-005).
+///
+/// Validates [`StorageConfig`], then dispatches to the composition path for that pair. Missing cargo
+/// features (e.g. requesting postgres without `--features postgres`) return
+/// [`EngineError::Invalid`] with a clear message — no partially opened handle escapes.
+///
+/// Prefer this entry for new full-matrix work. Convenience `open_*` constructors remain as thin
+/// sugar over common cells.
+pub fn open(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
+    config.validate()?;
+    open_validated(config, clock)
+}
+
+/// Async-safe variant of [`open`].
+///
+/// When a Tokio runtime is active and the selected cell may touch the synchronous postgres client
+/// (or object-log authority that uses it), construction runs on `spawn_blocking`. Other cells call
+/// [`open`] directly.
+pub async fn open_async(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
+    config.validate()?;
+    #[cfg(feature = "postgres")]
+    {
+        if storage_open_needs_blocking_offload(&config) && tokio::runtime::Handle::try_current().is_ok()
+        {
+            return tokio::task::spawn_blocking(move || open_validated(config, clock))
+                .await
+                .map_err(|error| {
+                    EngineError::Storage(format!("open_async task failed: {error}"))
+                })?;
+        }
+    }
+    open_validated(config, clock)
+}
+
+#[cfg(feature = "postgres")]
+fn storage_open_needs_blocking_offload(config: &StorageConfig) -> bool {
+    matches!(
+        &config.log,
+        LogConfig::Postgres { .. }
+            | LogConfig::S3 { .. }
+            | LogConfig::Filesystem { .. }
+    ) || matches!(&config.projection, ProjectionStoreConfig::Postgres { .. })
+        || matches!(
+            &config.authority,
+            Some(ObjectLogAuthority::Postgres { .. })
+        )
+}
+
+fn open_validated(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
+    match (config.log, config.projection) {
+        // --- memory log (Class B) ---
+        (LogConfig::Memory, projection) => open_memory_log_cell(projection, clock),
+
+        // --- sqlite log (Class A) ---
+        (LogConfig::Sqlite { path }, projection) => open_sqlite_log_cell(path, projection, clock),
+
+        // --- postgres log (Class A) ---
+        (
+            LogConfig::Postgres {
+                url,
+                schema,
+                mode,
+                node_id,
+                coordination,
+            },
+            projection,
+        ) => open_postgres_log_cell(url, schema, mode, node_id, coordination, projection, clock),
+
+        // --- filesystem object log (Class A) ---
+        (LogConfig::Filesystem { root }, projection) => open_object_log_cell(
+            ObjectLogStorage::Local { root },
+            config.authority,
+            projection,
+            config.response_barrier,
+            config.segments,
+            config.namespace,
+            config.recovery,
+            clock,
+        ),
+
+        // --- s3 object log (Class A) ---
+        (
+            LogConfig::S3 {
+                endpoint,
+                bucket,
+                region,
+                access_key_id,
+                secret_access_key,
+                allow_insecure_http,
+            },
+            projection,
+        ) => open_object_log_cell(
+            ObjectLogStorage::S3Compatible {
+                endpoint,
+                bucket,
+                region,
+                access_key_id,
+                secret_access_key,
+                allow_insecure_http,
+            },
+            config.authority,
+            projection,
+            config.response_barrier,
+            config.segments,
+            config.namespace,
+            config.recovery,
+            clock,
+        ),
+    }
+}
+
+fn path_utf8(path: &std::path::Path) -> EngineResult<&str> {
+    path.to_str()
+        .ok_or(EngineError::Invalid("storage path must be valid UTF-8"))
+}
+
+#[cfg(any(feature = "sqlite", feature = "objectlog", feature = "postgres", test))]
+fn wrap_blocking_backend<B>(backend: Arc<B>, clock: Arc<dyn Clock>) -> EngineResult<Fireweed>
+where
+    B: LibBackend + BatchUpdatePort + ItemMutationPort + 'static,
+{
+    Ok(Fireweed::from_runtime(RuntimeCore::new(
+        Arc::new(blocking_backend::BlockingLibBackend::new(backend)?),
+        clock,
+    )))
+}
+
+fn open_memory_log_cell(
+    projection: ProjectionStoreConfig,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Fireweed> {
+    match projection {
+        ProjectionStoreConfig::Memory => {
+            #[cfg(feature = "memory")]
+            {
+                Ok(Fireweed::from_runtime(RuntimeCore::new(
+                    Arc::new(fireweed_memory::composed_memory_backend()),
+                    clock,
+                )))
+            }
+            #[cfg(not(feature = "memory"))]
+            {
+                let _ = clock;
+                Err(EngineError::Invalid(
+                    "memory×memory requires the `memory` cargo feature",
+                ))
+            }
+        }
+        ProjectionStoreConfig::Sqlite { path } => {
+            #[cfg(all(feature = "memory", feature = "sqlite"))]
+            {
+                use fireweed_engine::{ComposedBackend, InProcessControlPlane};
+                let path = path_utf8(&path)?;
+                let log = fireweed_projection::MemoryLog::new();
+                let projection = fireweed_sqlite::SqliteProjectionStore::open(path)?;
+                let backend = Arc::new(
+                    ComposedBackend::new(log, projection, InProcessControlPlane::new()).recover()?,
+                );
+                wrap_blocking_backend(backend, clock)
+            }
+            #[cfg(not(all(feature = "memory", feature = "sqlite")))]
+            {
+                let _ = (path, clock);
+                Err(EngineError::Invalid(
+                    "memory×sqlite requires the `memory` and `sqlite` cargo features",
+                ))
+            }
+        }
+        ProjectionStoreConfig::Postgres { url } => {
+            #[cfg(all(feature = "memory", feature = "postgres"))]
+            {
+                use fireweed_engine::{ComposedBackend, InProcessControlPlane};
+                let log = fireweed_projection::MemoryLog::new();
+                let projection = fireweed_postgres::PostgresRelational::connect(&url.0.0)?;
+                let backend = Arc::new(
+                    ComposedBackend::new(log, projection, InProcessControlPlane::new()).recover()?,
+                );
+                wrap_blocking_backend(backend, clock)
+            }
+            #[cfg(not(all(feature = "memory", feature = "postgres")))]
+            {
+                let _ = (url, clock);
+                Err(EngineError::Invalid(
+                    "memory×postgres requires the `memory` and `postgres` cargo features",
+                ))
+            }
+        }
+    }
+}
+
+fn open_sqlite_log_cell(
+    path: PathBuf,
+    projection: ProjectionStoreConfig,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Fireweed> {
+    #[cfg(not(feature = "sqlite"))]
+    {
+        let _ = (path, projection, clock);
+        return Err(EngineError::Invalid(
+            "sqlite log cells require the `sqlite` cargo feature",
+        ));
+    }
+    #[cfg(feature = "sqlite")]
+    {
+        let log_path = path_utf8(&path)?.to_owned();
+        match projection {
+            ProjectionStoreConfig::Memory => open_sqlite(&log_path, clock),
+            ProjectionStoreConfig::Sqlite {
+                path: projection_path,
+            } => {
+                let proj_path = path_utf8(&projection_path)?;
+                open_sqlite_sqlite_projection(&log_path, proj_path, clock)
+            }
+            ProjectionStoreConfig::Postgres { url } => {
+                #[cfg(feature = "postgres")]
+                {
+                    open_sqlite_postgres_projection(&log_path, &url.0.0, clock)
+                }
+                #[cfg(not(feature = "postgres"))]
+                {
+                    let _ = (url, clock);
+                    Err(EngineError::Invalid(
+                        "sqlite×postgres requires the `postgres` cargo feature",
+                    ))
+                }
+            }
+        }
+    }
+}
+
+fn open_postgres_log_cell(
+    url: ConfigSecret,
+    schema: Option<String>,
+    mode: PostgresMode,
+    node_id: Option<u8>,
+    coordination: Option<PostgresCoordinationConfig>,
+    projection: ProjectionStoreConfig,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Fireweed> {
+    #[cfg(not(feature = "postgres"))]
+    {
+        let _ = (url, schema, mode, node_id, coordination, projection, clock);
+        return Err(EngineError::Invalid(
+            "postgres log cells require the `postgres` cargo feature",
+        ));
+    }
+    #[cfg(feature = "postgres")]
+    {
+        let url_str = url.0.0;
+        match projection {
+            ProjectionStoreConfig::Memory => open_postgres_runtime(
+                PostgresRuntimeConfig {
+                    url: ConfigSecret::new(url_str),
+                    schema,
+                    // Memory projection is the log-replay composition.
+                    mode: PostgresMode::LogReplay,
+                    node_id,
+                    coordination,
+                },
+                clock,
+            ),
+            ProjectionStoreConfig::Sqlite { path } => {
+                #[cfg(feature = "sqlite")]
+                {
+                    use fireweed_engine::{ComposedBackend, InProcessControlPlane};
+                    let proj_path = path_utf8(&path)?;
+                    let log = match schema.as_deref() {
+                        Some(schema) => {
+                            fireweed_postgres::PostgresLog::connect_in_schema(&url_str, schema)?
+                        }
+                        None => fireweed_postgres::PostgresLog::connect(&url_str)?,
+                    };
+                    let projection = fireweed_sqlite::SqliteProjectionStore::open(proj_path)?;
+                    let mut backend =
+                        ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                            .recover()?;
+                    if let Some(node_id) = node_id {
+                        backend = backend.with_node_id(node_id);
+                    }
+                    let _ = (mode, coordination);
+                    wrap_blocking_backend(Arc::new(backend), clock)
+                }
+                #[cfg(not(feature = "sqlite"))]
+                {
+                    let _ = (path, clock, mode, node_id, coordination, schema);
+                    Err(EngineError::Invalid(
+                        "postgres×sqlite requires the `sqlite` cargo feature",
+                    ))
+                }
+            }
+            ProjectionStoreConfig::Postgres {
+                url: projection_url,
+            } => {
+                // TD-002 / server rule: postgres×postgres is the unified relational backend; log and
+                // projection URLs must be identical.
+                if url_str != projection_url.0.0 {
+                    return Err(EngineError::Invalid(
+                        "postgres×postgres requires identical log and projection URLs",
+                    ));
+                }
+                let _ = mode; // public matrix cell is always unified relational
+                open_postgres_runtime(
+                    PostgresRuntimeConfig {
+                        url: ConfigSecret::new(url_str),
+                        schema,
+                        mode: PostgresMode::Relational,
+                        node_id,
+                        coordination,
+                    },
+                    clock,
+                )
+            }
+        }
+    }
+}
+
+fn open_object_log_cell(
+    object_log: ObjectLogStorage,
+    authority: Option<ObjectLogAuthority>,
+    projection: ProjectionStoreConfig,
+    response_barrier: ResponseBarrier,
+    segments: SegmentConfig,
+    namespace: String,
+    recovery: RecoveryPolicy,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Fireweed> {
+    #[cfg(not(feature = "objectlog"))]
+    {
+        let _ = (
+            object_log,
+            authority,
+            projection,
+            response_barrier,
+            segments,
+            namespace,
+            recovery,
+            clock,
+        );
+        return Err(EngineError::Invalid(
+            "filesystem/s3 log cells require the `objectlog` cargo feature",
+        ));
+    }
+    #[cfg(feature = "objectlog")]
+    {
+        let authority = authority.unwrap_or(ObjectLogAuthority::NativeConditionalWrite);
+        match projection {
+            ProjectionStoreConfig::Memory => {
+                open_objectlog_memory_projection(object_log, authority, segments, namespace, clock)
+            }
+            ProjectionStoreConfig::Sqlite { path } => {
+                #[cfg(feature = "sqlite")]
+                {
+                    open_objectlog_sqlite(
+                        ObjectLogRuntimeConfig {
+                            object_log,
+                            authority,
+                            projection: ProjectionConfig::Sqlite { path },
+                            response_barrier,
+                            segments,
+                            namespace,
+                            recovery,
+                        },
+                        clock,
+                    )
+                }
+                #[cfg(not(feature = "sqlite"))]
+                {
+                    let _ = (
+                        object_log,
+                        authority,
+                        path,
+                        response_barrier,
+                        segments,
+                        namespace,
+                        recovery,
+                        clock,
+                    );
+                    Err(EngineError::Invalid(
+                        "object-log×sqlite requires the `sqlite` cargo feature",
+                    ))
+                }
+            }
+            ProjectionStoreConfig::Postgres { url } => {
+                #[cfg(feature = "postgres")]
+                {
+                    open_objectlog_postgres(
+                        ObjectLogRuntimeConfig {
+                            object_log,
+                            authority,
+                            projection: ProjectionConfig::Postgres { url },
+                            response_barrier,
+                            segments,
+                            namespace,
+                            recovery,
+                        },
+                        clock,
+                    )
+                }
+                #[cfg(not(feature = "postgres"))]
+                {
+                    let _ = (
+                        object_log,
+                        authority,
+                        url,
+                        response_barrier,
+                        segments,
+                        namespace,
+                        recovery,
+                        clock,
+                    );
+                    Err(EngineError::Invalid(
+                        "object-log×postgres requires the `postgres` cargo feature",
+                    ))
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "objectlog")]
+fn open_objectlog_memory_projection(
+    object_log: ObjectLogStorage,
+    authority: ObjectLogAuthority,
+    segments: SegmentConfig,
+    namespace: String,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Fireweed> {
+    use fireweed_engine::ComposedBackend;
+    use fireweed_projection::InMemoryProjection;
+
+    // Common local path: reuse the dedicated convenience constructor.
+    if let ObjectLogStorage::Local { root } = &object_log
+        && matches!(authority, ObjectLogAuthority::NativeConditionalWrite)
+        && namespace == "default"
+        && segments.target_bytes == 1024 * 1024
+        && segments.max_latency_ms == 5
+    {
+        return open_objectlog(root.clone(), clock);
+    }
+
+    let composed = ObjectLogRuntimeConfig {
+        object_log,
+        authority,
+        // ProjectionConfig has no Memory variant; placeholder is never opened — only the log is.
+        projection: ProjectionConfig::Sqlite {
+            path: PathBuf::from("__fireweed_matrix_memory_projection__"),
+        },
+        response_barrier: ResponseBarrier::Strict,
+        segments,
+        namespace,
+        recovery: RecoveryPolicy::default(),
+    }
+    .into_storage_config();
+    composed.validate()?;
+    let log = open_composed_object_log(&composed, false)?;
+    let backend = Arc::new(
+        ComposedBackend::new(log.clone(), InMemoryProjection::new(), log).recover()?,
+    );
+    wrap_blocking_backend(backend, clock)
+}
+
 /// Open a **sole-owner**, in-memory Fireweed handle (atomic durability class) — the zero-setup path.
 /// Requires the `memory` feature (default).
+///
+/// Matrix cell: `log=memory` × `projection=memory` (Class B). Thin sugar over [`open`].
 #[cfg(feature = "memory")]
 pub fn open_memory(clock: Arc<dyn Clock>) -> Fireweed {
-    Fireweed::from_runtime(RuntimeCore::new(
-        Arc::new(fireweed_memory::composed_memory_backend()),
-        clock,
-    ))
+    open(StorageConfig::memory(), clock).expect("memory×memory open is infallible after validation")
 }
 
 /// Open a **sole-owner**, SQLite-backed Fireweed handle with a durable command log and an in-memory

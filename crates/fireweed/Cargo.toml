@@ -42,6 +42,8 @@ fireweed-memory = { version = "0.22.0", path = "../fireweed-memory", optional = 
 fireweed-sqlite = { version = "0.22.0", path = "../fireweed-sqlite", optional = true }
 fireweed-objectlog = { version = "0.22.0", path = "../fireweed-objectlog", optional = true }
 fireweed-postgres = { version = "0.22.0", path = "../fireweed-postgres", optional = true }
+# Composition-root only: Class B MemoryLog pairings and object-log × memory projection assembly.
+fireweed-projection = { version = "0.22.0", path = "../fireweed-projection", optional = true }
 tokio = { version = "1", features = ["rt"], optional = true }
 
 [features]
@@ -49,9 +51,9 @@ tokio = { version = "1", features = ["rt"], optional = true }
 # wants only one backend uses e.g. `--no-default-features --features sqlite`. `postgres` is OPT-IN (it pulls
 # the postgres client) and is the multi-instance backend (`open_postgres` / `open_postgres_coordinated`).
 default = ["memory", "sqlite", "objectlog"]
-memory = ["dep:fireweed-memory"]
+memory = ["dep:fireweed-memory", "dep:fireweed-projection"]
 sqlite = ["dep:fireweed-sqlite"]
-objectlog = ["dep:fireweed-objectlog"]
+objectlog = ["dep:fireweed-objectlog", "dep:fireweed-projection"]
 postgres = ["dep:fireweed-postgres", "dep:tokio"]
 
 [dev-dependencies]
