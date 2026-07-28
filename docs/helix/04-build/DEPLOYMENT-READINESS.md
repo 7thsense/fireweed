@@ -25,15 +25,58 @@ ddx:
 ## Scope
 
 This document is the production deployment readiness contract for the fireweed
-BUILD-001 release line. Runtime and Helm configuration are expressed as two
-storage axes:
+BUILD-001 release line.
 
-- log backend: `objectlog` or `postgres` (plus the local `sqlite` and dev-only `memory` log axes)
-- projection backend: `inmemory`, `sqlite`, `turso`, `hybrid`, `hybrid-strict`, `hybrid-async`, or `postgres`
+### Product storage model (normative)
 
-The release contract must not collapse those axes into named deployment modes. A
-release artifact can claim only the combinations that its runtime, chart
-rendering, and CI evidence actually cover.
+Runtime and Helm configuration are expressed as **two storage axes** (plus
+control plane, composed but not redefined here). The product model is the
+orthogonal product of log backend × projection store — not a list of named
+deployment profiles. Typed `StorageConfig` (API-005) is the normative
+composition root for the library and the target for service/Helm configuration
+layering (`orthogonal-storage-matrix-brief`).
+
+| Axis | Public values | Responsibility |
+|------|---------------|----------------|
+| **Log backend** | `memory`, `sqlite`, `postgres`, `filesystem`, `s3` | Command append, epoch/fence authority, replay when durable |
+| **Projection** | `memory`, `sqlite`, `postgres` | Serving, claim selection, validation, apply |
+
+`filesystem` and `s3` are first-class object-log peers (same protocol: segments,
+manifest, conditional write / authority, retention). They are not test-only
+substitutes for each other. Pair strings such as `objectlog/sqlite` may appear
+in historical evidence IDs and transitional runtime wiring; they are **not**
+public product SKUs.
+
+Full public matrix (15 cells). Semantics differ by durability class (Class A:
+durable log; Class B: memory log — see API-005 and ADR-013), not by a second
+architecture:
+
+| Log \ Projection | `memory` | `sqlite` | `postgres` |
+|------------------|----------|----------|------------|
+| `memory` | Class B | Class B | Class B |
+| `sqlite` | Class A | Class A | Class A |
+| `postgres` | Class A | Class A | Class A |
+| `filesystem` | Class A | Class A | Class A |
+| `s3` | Class A | Class A | Class A |
+
+**Configuration layering:** structured `StorageConfig` fields and Helm
+`storage.log.*` / `storage.projection.*` define storage. Environment variables
+are a container injection adapter into that model, not the product vocabulary
+(see `docs/deployment/container-runtime-contract.md`).
+
+The release contract **must not collapse those axes** into named deployment
+modes. A release artifact can claim only the **cells** that its runtime, chart
+rendering, and CI evidence actually cover on that revision.
+
+### Current release boundary (transitional wiring)
+
+Until Helm and the server composition root are fully isomorphic to the 5×3
+`StorageConfig` matrix, executable combinations may still be selected through
+legacy spellings (`objectlog` + local/s3 store, `inmemory`, optional hybrid
+implementation paths). Those spellings map onto the axes above; they do not
+replace them. Hybrid, hybrid-async, hybrid-strict, and turso are **not** public
+projection product values; where still wired, they are transitional
+implementation paths under a durable projection, not matrix rows.
 
 ## Current Release Boundary
 
@@ -127,15 +170,22 @@ negative schema assertion; implementation work does not imply support.
 ## Production Target
 
 The production deployment target is a Kubernetes installation delivered by Helm.
+Helm `storage.*` is the deploy document for the structured log × projection
+model and must remain isomorphic to typed `StorageConfig` as that surface lands.
 Release readiness requires:
 
-- chart schema and templates that expose `storage.log.backend` and
-  `storage.projection.backend`;
-- rendered environment variables `FIREWEED_LOG_BACKEND` and
-  `FIREWEED_PROJECTION_BACKEND`;
+- chart schema and templates that expose structured log and projection axes
+  (`storage.log.backend` and `storage.projection.backend`, evolving toward the
+  five public log values including `filesystem` and `s3` and the three public
+  projection values);
+- rendered container injection for the selected cell (today:
+  `FIREWEED_LOG_BACKEND` / `FIREWEED_PROJECTION_BACKEND` and related path/URL
+  keys — adapter only, not the product definition);
 - Secret references for Postgres log and projection URLs when those axes choose
   `postgres`;
-- object-log storage path/configuration when the log axis chooses `objectlog`;
+- object-log root or S3 endpoint/bucket configuration when the log axis is
+  `filesystem` or `s3` (legacy chart spelling may still say `objectlog` +
+  local/s3 store until the Helm isomorphic cutover);
 - SQLite projection path and persistence when the projection axis chooses
   `sqlite`;
 - a live `kind` install smoke for every combination that the service runtime
@@ -369,28 +419,37 @@ Update (2026-07): the `commit_transition` implementation for
 unified-backend server wiring, `RecoveryReadPort`, or delayed-timer refinements
 require separately scoped work.
 
-## Object-Log Boundary
+## Object-Log Boundary (`filesystem` and `s3` log backends)
 
-`storage.log.backend=objectlog` selects the fjord object-log runtime path. In
-the current release, the live Kubernetes proof pairs it with
-`storage.projection.backend=inmemory`.
+Public product names for the object-log peers are **`filesystem`** (directory
+tree / NAS root) and **`s3`** (S3-compatible API). Both share the same
+object-log protocol. Transitional chart/runtime spelling
+`storage.log.backend=objectlog` with `storage.log.objectLog.store=local|s3`
+selects those peers until Helm is isomorphic to `StorageConfig`. In the current
+release, the live Kubernetes proof commonly pairs the local/filesystem object
+log with a memory projection (`inmemory` legacy spelling).
 
-The object-log release path must prove:
+The object-log release path for a claimed cell must prove:
 
-- the chart renders `FIREWEED_LOG_BACKEND=objectlog`;
-- the chart renders `FIREWEED_PROJECTION_BACKEND=<projection backend>`;
-- object-log root/configuration is present for the container runtime;
+- the chart selects the intended log backend (`filesystem` or `s3`, or the
+  transitional `objectlog` + store mapping) and projection axis;
+- container injection renders the corresponding adapter keys (for example
+  `FIREWEED_LOG_BACKEND` and projection backend/path or URL keys);
+- object-log root (filesystem) or endpoint/bucket (s3) configuration is present
+  for the container runtime;
 - the deployed service writes through the configured object-log runtime path;
-- after a rollout restart, acknowledged state can be read back through RESP.
+- after a rollout restart, acknowledged state can be read back through RESP
+  (Class A recovery: high-water + tail when a durable projection is used);
 - the configured `FIREWEED_SEGMENT_MAX_LATENCY_MS` / commit-latency-bound value is
   included in release evidence;
-- TP-003 `AC-TXN-*` passes for the claimed projection backend; and
-- TP-002 E3 reports the latency/cost/recovery curve for that projection backend.
+- TP-003 `AC-TXN-*` passes for the claimed log × projection cell; and
+- TP-002 E3 reports the latency/cost/recovery curve for that cell when an
+  object-log production claim is made.
 
 Provider-specific S3 readiness requires a later acceptance run with a named
 provider or provider-compatible endpoint, credentials, conditional-write
 semantics, the same transaction-contract matrix, and release evidence separate
-from the local object-log fixture.
+from the local filesystem object-log fixture.
 
 ## Verification Commands
 
