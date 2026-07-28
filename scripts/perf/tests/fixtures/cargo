@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 : "${FIREWEED_E3_DRIFT_SENTINEL:?test must provide drift sentinel}"
+if [ -n "${FIREWEED_E3_CARGO_ARGS_OUT:-}" ]; then
+  printf '%s\n' "$*" >>"$FIREWEED_E3_CARGO_ARGS_OUT"
+fi
 touch "$FIREWEED_E3_DRIFT_SENTINEL"

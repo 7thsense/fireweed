@@ -76,7 +76,10 @@ FIREWEED_S3_TEST_ENDPOINT="$FIREWEED_S3_TEST_ENDPOINT" \
 FIREWEED_S3_TEST_BUCKET=${FIREWEED_S3_TEST_BUCKET:-fireweed-test} \
 FIREWEED_S3_TEST_ACCESS_KEY=${FIREWEED_S3_TEST_ACCESS_KEY:-minioadmin} \
 FIREWEED_S3_TEST_SECRET_KEY=${FIREWEED_S3_TEST_SECRET_KEY:-minioadmin} \
-cargo test -p fireweed-server --release --test performance_object_log_e3_live_tests -- --nocapture
+# The matrix itself executes exact snapshot-tail and genesis recovery. Keep the standalone exact-recovery
+# entrypoints available for focused runs without duplicating both 10M datasets in this governed run.
+cargo test -p fireweed-server --release --test performance_object_log_e3_live_tests \
+  performance_object_log_e3_live_tests -- --nocapture
 TEST_STATUS=$?
 set -e
 
