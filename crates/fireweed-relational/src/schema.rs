@@ -59,6 +59,11 @@ CREATE INDEX IF NOT EXISTS fireweed_items_group_due_idx
 CREATE INDEX IF NOT EXISTS fireweed_items_active_scope_idx
     ON fireweed_items (tenant_id, queue_id, group_key, eligible_since, not_before, item_id)
     WHERE lifecycle_state = 'Pending' AND superseded = 0;
+-- Pending recovery/peek readers keyset-page in this exact strict order. Keeping the filter in the
+-- partial-index predicate lets SQLite both seek to the queue/cursor and satisfy ORDER BY in index order.
+CREATE INDEX IF NOT EXISTS fireweed_items_pending_order_idx
+    ON fireweed_items (tenant_id, queue_id, priority_sort, created_seq, item_id)
+    WHERE lifecycle_state = 'Pending' AND superseded = 0;
 CREATE INDEX IF NOT EXISTS fireweed_items_expired_lease_idx
     ON fireweed_items (tenant_id, queue_id, lease_expires_at, item_id)
     WHERE lifecycle_state = 'Leased' AND cohort_size IS NULL AND fenced = 0 AND superseded = 0;
