@@ -1145,6 +1145,99 @@ struct StateFingerprint {
     invalid: u64,
 }
 
+type IdentityRow = (i64, String);
+
+fn create_identity_index(conn: &rusqlite::Connection) {
+    // This database is disposable verifier state. The negative cache_size is SQLite's advisory 8 MiB page-
+    // cache target; file-backed temp storage and disabled mmap keep scratch memory independent of resident.
+    conn.execute_batch(
+        "PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; \
+         PRAGMA cache_size=-8192; PRAGMA temp_store=FILE; PRAGMA mmap_size=0; \
+         CREATE TABLE seen_ids (\
+             id INTEGER PRIMARY KEY,\
+             client_key TEXT NOT NULL UNIQUE,\
+             order_seen INTEGER NOT NULL DEFAULT 0 CHECK (order_seen IN (0,1))\
+         )",
+    )
+    .unwrap();
+}
+
+fn json_rows(rows: &[IdentityRow]) -> String {
+    serde_json::to_string(rows).unwrap()
+}
+
+/// Add one bounded live-state page with one atomic set operation. The item-id primary key and unique client
+/// key retain the old verifier's exact duplicate checks without one SQLite statement per resident item.
+/// Missing deterministic ordinals are tracked directly by the live-read loop's `missing` count.
+fn insert_identity_page(conn: &rusqlite::Connection, rows: &[IdentityRow]) -> u64 {
+    if rows.is_empty() {
+        return 0;
+    }
+    let inserted = conn
+        .execute(
+            "INSERT OR IGNORE INTO seen_ids(id,client_key) \
+             SELECT \
+                 CAST(json_extract(value,'$[0]') AS INTEGER), \
+                 CAST(json_extract(value,'$[1]') AS TEXT) \
+             FROM json_each(?1)",
+            [json_rows(rows)],
+        )
+        .unwrap();
+    rows.len().saturating_sub(inserted) as u64
+}
+
+/// Validate one authoritative-order page with one set update regardless of page width. A row changes only
+/// when both identity fields match and the item has not appeared in an earlier page; therefore the changed
+/// count detects missing identities, mismatched key/id linkage, and duplicates within or across pages. Order
+/// itself remains covered by the canonical streaming digest: concurrent load completion need not match
+/// client-key ordinal, but recovery must reproduce its exact order.
+fn validate_order_page(conn: &mut rusqlite::Connection, rows: &[IdentityRow]) -> u64 {
+    if rows.is_empty() {
+        return 0;
+    }
+    let changed = conn
+        .execute(
+            "WITH page AS (\
+                 SELECT \
+                     CAST(json_extract(value,'$[0]') AS INTEGER) AS id, \
+                     CAST(json_extract(value,'$[1]') AS TEXT) AS client_key \
+                 FROM json_each(?1)\
+             ) \
+             UPDATE seen_ids SET order_seen=1 \
+             FROM page \
+             WHERE seen_ids.id=page.id \
+               AND seen_ids.client_key=page.client_key \
+               AND seen_ids.order_seen=0",
+            [json_rows(rows)],
+        )
+        .unwrap();
+    rows.len().saturating_sub(changed) as u64
+}
+
+fn finish_order_validation(conn: &rusqlite::Connection, resident: u64) -> u64 {
+    let ordered_unique: u64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM seen_ids WHERE order_seen=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    resident.abs_diff(ordered_unique)
+}
+
+fn update_order_digest(
+    digest: &mut StreamingDigest,
+    ordinal: u64,
+    item: &fireweed_engine::ItemView,
+) {
+    digest.update(b"authoritative-order");
+    digest.update(&ordinal.to_le_bytes());
+    digest.update(&item.item_id.as_u64().to_le_bytes());
+    digest.update(item.client_item_key.as_str().as_bytes());
+    digest.update(&serde_json::to_vec(&item.priority).unwrap());
+    digest.update(&item.item_version.to_le_bytes());
+}
+
 /// Canonically fingerprint the complete ack-control state in bounded pages. Caller keys provide the
 /// stable cross-arm identity/order; the disk index proves server-assigned item ids are also unique without
 /// retaining a resident-sized set in memory.
@@ -1271,13 +1364,7 @@ async fn fingerprint_state<B: ProjectionRead + E3OrderProbe>(
     let mut id_sum = 0u64;
     let identity_path = projection_path("recovery-identity-index");
     let mut identity_db = rusqlite::Connection::open(&identity_path).unwrap();
-    identity_db
-        .execute_batch(
-            "PRAGMA journal_mode=OFF; \
-             CREATE TABLE seen_ids (id INTEGER PRIMARY KEY, client_key TEXT NOT NULL UNIQUE); \
-             CREATE TABLE seen_order_ids (id INTEGER PRIMARY KEY)",
-        )
-        .unwrap();
+    create_identity_index(&identity_db);
     let mut identity_domain = None;
     let mut duplicates = 0u64;
     let mut invalid = 0u64;
@@ -1289,7 +1376,7 @@ async fn fingerprint_state<B: ProjectionRead + E3OrderProbe>(
             .collect::<Vec<_>>();
         let views = backend.live_items(shard, &keys).await.unwrap();
         assert_eq!(views.len(), keys.len(), "live_items preserves input shape");
-        let tx = identity_db.transaction().unwrap();
+        let mut identity_rows = Vec::with_capacity(keys.len());
         for (index, (key, view)) in keys.iter().zip(views).enumerate() {
             let ordinal = start + index as u64;
             let Some(view) = view else {
@@ -1316,18 +1403,10 @@ async fn fingerprint_state<B: ProjectionRead + E3OrderProbe>(
             if identity_domain.get_or_insert(domain) != &domain {
                 duplicates += 1;
             } else {
-                let inserted = tx
-                    .execute(
-                        "INSERT OR IGNORE INTO seen_ids(id, client_key) VALUES (?1, ?2)",
-                        rusqlite::params![
-                            view.item_id.as_u64() as i64,
-                            view.client_item_key.as_str()
-                        ],
-                    )
-                    .unwrap();
-                if inserted != 1 {
-                    duplicates += 1;
-                }
+                identity_rows.push((
+                    view.item_id.as_u64() as i64,
+                    view.client_item_key.as_str().to_owned(),
+                ));
             }
             digest.update(&ordinal.to_le_bytes());
             digest.update(key.as_str().as_bytes());
@@ -1345,7 +1424,7 @@ async fn fingerprint_state<B: ProjectionRead + E3OrderProbe>(
                 digest.update(&value);
             }
         }
-        tx.commit().unwrap();
+        duplicates = duplicates.saturating_add(insert_identity_page(&identity_db, &identity_rows));
         start = end;
     }
     let unique_ids: u64 = identity_db
@@ -1366,41 +1445,24 @@ async fn fingerprint_state<B: ProjectionRead + E3OrderProbe>(
             invalid = invalid.saturating_add((resident as usize - order_offset) as u64);
             break;
         }
+        let order_rows = page
+            .iter()
+            .map(|item| {
+                (
+                    item.item_id.as_u64() as i64,
+                    item.client_item_key.as_str().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        invalid = invalid.saturating_add(validate_order_page(&mut identity_db, &order_rows));
         for (index, item) in page.iter().enumerate() {
             let ordinal = order_offset + index;
-            let belongs_to_verified_state = identity_db
-                .query_row(
-                    "SELECT 1 FROM seen_ids WHERE id=?1 AND client_key=?2",
-                    rusqlite::params![item.item_id.as_u64() as i64, item.client_item_key.as_str()],
-                    |_| Ok(()),
-                )
-                .is_ok();
-            let first_in_order = identity_db
-                .execute(
-                    "INSERT OR IGNORE INTO seen_order_ids(id) VALUES (?1)",
-                    [item.item_id.as_u64() as i64],
-                )
-                .unwrap()
-                == 1;
-            if !belongs_to_verified_state || !first_in_order {
-                invalid += 1;
-            }
-            digest.update(b"authoritative-order");
-            digest.update(&(ordinal as u64).to_le_bytes());
-            digest.update(&item.item_id.as_u64().to_le_bytes());
-            digest.update(item.client_item_key.as_str().as_bytes());
-            digest.update(&serde_json::to_vec(&item.priority).unwrap());
-            digest.update(&item.item_version.to_le_bytes());
+            update_order_digest(&mut digest, ordinal as u64, item);
         }
         order_cursor = page.last().map(|item| item.item_id);
         order_offset += page.len();
     }
-    let ordered_unique: u64 = identity_db
-        .query_row("SELECT COUNT(*) FROM seen_order_ids", [], |row| row.get(0))
-        .unwrap();
-    if ordered_unique != resident {
-        invalid = invalid.saturating_add(resident.abs_diff(ordered_unique));
-    }
+    invalid = invalid.saturating_add(finish_order_validation(&identity_db, resident));
     drop(identity_db);
     let _ = std::fs::remove_file(identity_path);
     StateFingerprint {
@@ -1409,6 +1471,241 @@ async fn fingerprint_state<B: ProjectionRead + E3OrderProbe>(
         missing,
         duplicates,
         invalid,
+    }
+}
+
+#[cfg(test)]
+mod verifier_tests {
+    use super::*;
+
+    static SET_STATEMENTS: AtomicU64 = AtomicU64::new(0);
+
+    fn count_set_statement(sql: &str) {
+        if sql.starts_with("INSERT OR IGNORE INTO seen_ids") || sql.starts_with("WITH page AS") {
+            SET_STATEMENTS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn row(ordinal: u64) -> IdentityRow {
+        ((ordinal + 10_000) as i64, format!("i{ordinal}"))
+    }
+
+    fn seeded_identity_index(resident: u64) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        create_identity_index(&conn);
+        for start in (0..resident).step_by(256) {
+            let end = (start + 256).min(resident);
+            let rows = (start..end).map(row).collect::<Vec<_>>();
+            assert_eq!(insert_identity_page(&conn, &rows), 0);
+        }
+        conn
+    }
+
+    fn item(identity: &IdentityRow) -> fireweed_engine::ItemView {
+        fireweed_engine::ItemView {
+            item_id: fireweed_core::ItemId::from_u64(identity.0 as u64),
+            client_item_key: ClientItemKey::new(identity.1.clone()).unwrap(),
+            priority: None,
+            item_version: 1,
+        }
+    }
+
+    fn order_digest(pages: &[Vec<IdentityRow>]) -> String {
+        let mut digest = StreamingDigest::new();
+        let mut ordinal = 0u64;
+        for page in pages {
+            for identity in page {
+                update_order_digest(&mut digest, ordinal, &item(identity));
+                ordinal += 1;
+            }
+        }
+        digest.finish()
+    }
+
+    #[test]
+    fn set_verifier_accepts_exact_identity_pages() {
+        let mut conn = seeded_identity_index(5);
+        assert_eq!(validate_order_page(&mut conn, &[row(0), row(1)]), 0);
+        assert_eq!(validate_order_page(&mut conn, &[row(2), row(3), row(4)]), 0);
+        assert_eq!(finish_order_validation(&conn, 5), 0);
+    }
+
+    #[test]
+    fn identity_page_rejects_duplicate_ids_and_client_keys() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        create_identity_index(&conn);
+        let duplicate_id = vec![row(0), (row(0).0, "i1".to_owned())];
+        assert_eq!(insert_identity_page(&conn, &duplicate_id), 1);
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        create_identity_index(&conn);
+        let duplicate_key = vec![row(0), (row(1).0, row(0).1)];
+        assert_eq!(insert_identity_page(&conn, &duplicate_key), 1);
+    }
+
+    #[test]
+    fn scratch_sql_statement_count_is_constant_per_page() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        create_identity_index(&conn);
+        let rows = (0..512).map(row).collect::<Vec<_>>();
+        SET_STATEMENTS.store(0, Ordering::Relaxed);
+        conn.trace(Some(count_set_statement));
+        assert_eq!(insert_identity_page(&conn, &rows), 0);
+        assert_eq!(validate_order_page(&mut conn, &rows), 0);
+        conn.trace(None);
+        assert_eq!(SET_STATEMENTS.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn set_verifier_rejects_missing_order_item() {
+        let mut conn = seeded_identity_index(4);
+        assert_eq!(validate_order_page(&mut conn, &[row(0), row(1), row(3)]), 0);
+        assert!(finish_order_validation(&conn, 4) > 0);
+    }
+
+    #[test]
+    fn set_verifier_rejects_duplicate_order_item() {
+        let mut conn = seeded_identity_index(4);
+        let invalid = validate_order_page(&mut conn, &[row(0), row(1), row(1), row(2), row(3)]);
+        assert!(invalid > 0);
+        assert_eq!(finish_order_validation(&conn, 4), 0);
+    }
+
+    #[test]
+    fn set_verifier_rejects_mismatched_item_key_linkage() {
+        let mut conn = seeded_identity_index(3);
+        let mut mismatch = row(1);
+        mismatch.1 = "i2".to_owned();
+        assert!(validate_order_page(&mut conn, &[row(0), mismatch, row(2)]) > 0);
+    }
+
+    #[test]
+    fn canonical_order_digest_rejects_reorder_and_is_page_boundary_independent() {
+        let canonical = order_digest(&[vec![row(0), row(1)], vec![row(2), row(3)]]);
+        let one_page = order_digest(&[vec![row(0), row(1), row(2), row(3)]]);
+        let reordered = order_digest(&[vec![row(0), row(2)], vec![row(1), row(3)]]);
+        assert_eq!(canonical, one_page);
+        assert_ne!(canonical, reordered);
+    }
+
+    fn legacy_validate_order(conn: &mut rusqlite::Connection, rows: &[IdentityRow]) -> u64 {
+        let mut invalid = 0u64;
+        for (id, key) in rows {
+            let belongs = conn
+                .query_row(
+                    "SELECT 1 FROM seen_ids WHERE id=?1 AND client_key=?2",
+                    rusqlite::params![id, key],
+                    |_| Ok(()),
+                )
+                .is_ok();
+            let first = conn
+                .execute(
+                    "INSERT OR IGNORE INTO legacy_seen_order_ids(id) VALUES (?1)",
+                    [id],
+                )
+                .unwrap()
+                == 1;
+            if !belongs || !first {
+                invalid += 1;
+            }
+        }
+        invalid
+    }
+
+    fn legacy_insert_identity(conn: &mut rusqlite::Connection, rows: &[IdentityRow]) -> u64 {
+        let tx = conn.transaction().unwrap();
+        let mut duplicates = 0;
+        for (id, key) in rows {
+            if tx
+                .execute(
+                    "INSERT OR IGNORE INTO seen_ids(id,client_key) VALUES (?1,?2)",
+                    rusqlite::params![id, key],
+                )
+                .unwrap()
+                != 1
+            {
+                duplicates += 1;
+            }
+        }
+        tx.commit().unwrap();
+        duplicates
+    }
+
+    fn disk_identity_index(label: &str, legacy: bool) -> (String, rusqlite::Connection) {
+        let path = projection_path(label);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        create_identity_index(&conn);
+        if legacy {
+            conn.execute_batch("CREATE TABLE legacy_seen_order_ids (id INTEGER PRIMARY KEY)")
+                .unwrap();
+        }
+        (path, conn)
+    }
+
+    /// Manual scaled regression benchmark for the release verifier's exact scratch-index hot path.
+    #[test]
+    #[ignore]
+    fn order_verifier_scaled_benchmark() {
+        const RESIDENT: u64 = 100_000;
+        const PAGE: u64 = 512;
+        let (legacy_path, mut legacy) = disk_identity_index("legacy-verifier-bench", true);
+        let (set_path, mut set_based) = disk_identity_index("set-verifier-bench", false);
+
+        let started = Instant::now();
+        let mut legacy_duplicates = 0;
+        for start in (0..RESIDENT).step_by(PAGE as usize) {
+            let end = (start + PAGE).min(RESIDENT);
+            let rows = (start..end).map(row).collect::<Vec<_>>();
+            legacy_duplicates += legacy_insert_identity(&mut legacy, &rows);
+        }
+        let mut legacy_invalid = 0;
+        for start in (0..RESIDENT).step_by(PAGE as usize) {
+            let end = (start + PAGE).min(RESIDENT);
+            let rows = (start..end).map(row).collect::<Vec<_>>();
+            legacy_invalid += legacy_validate_order(&mut legacy, &rows);
+        }
+        let legacy_elapsed = started.elapsed();
+
+        let started = Instant::now();
+        let mut set_duplicates = 0;
+        for start in (0..RESIDENT).step_by(PAGE as usize) {
+            let end = (start + PAGE).min(RESIDENT);
+            let rows = (start..end).map(row).collect::<Vec<_>>();
+            set_duplicates += insert_identity_page(&set_based, &rows);
+        }
+        let mut set_invalid = 0;
+        for start in (0..RESIDENT).step_by(PAGE as usize) {
+            let end = (start + PAGE).min(RESIDENT);
+            let rows = (start..end).map(row).collect::<Vec<_>>();
+            set_invalid += validate_order_page(&mut set_based, &rows);
+        }
+        let set_elapsed = started.elapsed();
+
+        assert_eq!(legacy_duplicates, 0);
+        assert_eq!(set_duplicates, 0);
+        assert_eq!(legacy_invalid, 0);
+        assert_eq!(set_invalid, 0);
+        let legacy_seen: u64 = legacy
+            .query_row("SELECT COUNT(*) FROM legacy_seen_order_ids", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(legacy_seen, RESIDENT);
+        assert_eq!(finish_order_validation(&set_based, RESIDENT), 0);
+        assert!(
+            set_elapsed < legacy_elapsed,
+            "set verifier should outperform item-at-a-time scratch SQL"
+        );
+        eprintln!(
+            "complete scratch verifier benchmark: resident={RESIDENT} page={PAGE} legacy_ms={:.3} set_ms={:.3} speedup={:.2}x",
+            legacy_elapsed.as_secs_f64() * 1_000.0,
+            set_elapsed.as_secs_f64() * 1_000.0,
+            legacy_elapsed.as_secs_f64() / set_elapsed.as_secs_f64()
+        );
+        drop(legacy);
+        drop(set_based);
+        let _ = std::fs::remove_file(legacy_path);
+        let _ = std::fs::remove_file(set_path);
     }
 }
 
