@@ -42,8 +42,9 @@ declare -A KUBECONFORM_SHA256=(
 )
 
 # Storage combinations to validate. Each maps to a CI values file under charts/fireweed-queue/ci/.
+# Public projection axis is memory|sqlite|postgres only (hybrid*/turso demoted from chart schema).
 # Includes first-class public axes (filesystem, memory, s3) and legacy objectlog/inmemory compat.
-COMBINATIONS=(filesystem-memory objectlog-inmemory objectlog-sqlite objectlog-hybrid objectlog-hybrid-async shared-s3-postgres-control-plane s3-sqlite-postgres-control-plane postgres-inmemory postgres-sqlite postgres-postgres lakebase-postgres)
+COMBINATIONS=(filesystem-memory objectlog-inmemory objectlog-sqlite shared-s3-postgres-control-plane s3-sqlite-postgres-control-plane postgres-inmemory postgres-sqlite postgres-postgres lakebase-postgres)
 
 err() { echo "helm-gate: $*" >&2; }
 
@@ -132,8 +133,6 @@ values_file_for() {
         filesystem-memory) echo "${CHART_DIR}/ci/filesystem-memory-values.yaml" ;;
         objectlog-inmemory) echo "${CHART_DIR}/ci/objectlog-inmemory-values.yaml" ;;
         objectlog-sqlite) echo "${CHART_DIR}/ci/objectlog-sqlite-values.yaml" ;;
-        objectlog-hybrid) echo "${CHART_DIR}/ci/objectlog-hybrid-values.yaml" ;;
-        objectlog-hybrid-async) echo "${CHART_DIR}/ci/objectlog-hybrid-async-values.yaml" ;;
         shared-s3-postgres-control-plane) echo "${CHART_DIR}/ci/shared-s3-postgres-control-plane-values.yaml" ;;
         s3-sqlite-postgres-control-plane) echo "${CHART_DIR}/ci/s3-sqlite-postgres-control-plane-values.yaml" ;;
         postgres-inmemory) echo "${CHART_DIR}/ci/postgres-inmemory-values.yaml" ;;
@@ -216,37 +215,6 @@ assert_objectlog_sqlite_contract() {
     assert_contains "$rendered" 'kind: PersistentVolumeClaim' "storage PVC"
     assert_contains "$rendered" 'name: storage' "storage volume"
     assert_no_fixture_credentials "$rendered" "objectlog/sqlite rendered manifest"
-}
-
-assert_objectlog_hybrid_contract() {
-    local rendered="$1"
-
-    assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "objectlog"' "objectlog log axis"
-    assert_contains "$rendered" 'FIREWEED_PROJECTION_BACKEND: "hybrid"' "hybrid projection axis"
-    assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_ROOT: "/var/lib/fireweed/projection/object-log"' "object-log root"
-    assert_contains "$rendered" 'FIREWEED_SQLITE_PROJECTION_PATH: "/var/lib/fireweed/projection/projection.db"' "hybrid sqlite projection path"
-    assert_contains "$rendered" 'kind: PersistentVolumeClaim' "storage PVC"
-    assert_contains "$rendered" 'name: storage' "storage volume"
-    assert_no_fixture_credentials "$rendered" "objectlog/hybrid rendered manifest"
-}
-
-assert_objectlog_hybrid_async_contract() {
-    local rendered="$1"
-
-    assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "objectlog"' "objectlog log axis"
-    assert_contains "$rendered" 'FIREWEED_PROJECTION_BACKEND: "hybrid-async"' "hybrid-async projection axis"
-    assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_ROOT: "/var/lib/fireweed/projection/object-log"' "object-log root"
-    assert_contains "$rendered" 'FIREWEED_SQLITE_PROJECTION_PATH: "/var/lib/fireweed/projection/projection.db"' "hybrid-async sqlite projection path"
-    assert_contains "$rendered" 'FIREWEED_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS: "100000"' "hybrid-async command-lag bound"
-    assert_contains "$rendered" 'FIREWEED_HYBRID_ASYNC_APPLY_DEBT_MAX_BYTES: "536870912"' "hybrid-async byte-debt bound"
-    assert_contains "$rendered" 'FIREWEED_HYBRID_ASYNC_APPLY_QUEUE_DEPTH_MAX: "1024"' "hybrid-async queue-depth bound"
-    assert_contains "$rendered" 'FIREWEED_HYBRID_ASYNC_OLDEST_UNAPPLIED_MAX_MS: "60000"' "hybrid-async oldest-unapplied bound"
-    assert_contains "$rendered" 'FIREWEED_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD: "3"' "hybrid-async poison retry threshold"
-    assert_contains "$rendered" 'kind: PersistentVolumeClaim' "storage PVC"
-    assert_contains "$rendered" 'name: storage' "storage volume"
-    assert_contains "$rendered" 'mountPath: "/var/lib/fireweed/projection"' "hybrid-async projection volume mount"
-    assert_not_contains "$rendered" 'FIREWEED_BACKEND_PROFILE' "legacy profile env"
-    assert_no_fixture_credentials "$rendered" "objectlog/hybrid-async rendered manifest"
 }
 
 assert_shared_s3_postgres_control_plane_contract() {
@@ -351,33 +319,38 @@ assert_generated_bootstrap_contract() {
     rm -f "$rendered"
 }
 
-assert_hybrid_strict_schema_exclusion() {
-    local output
-    output="$(mktemp)"
+assert_demoted_projection_schema_exclusion() {
+    # Public projection enum is memory|inmemory|sqlite|postgres only.
+    # Demoted names (hybrid, hybrid-async, hybrid-strict, turso) must fail schema validation.
+    local demoted
+    for demoted in hybrid hybrid-async hybrid-strict turso; do
+        local output
+        output="$(mktemp)"
 
-    if helm template fireweed-hybrid-strict "$CHART_DIR" \
-        --set storage.log.backend=objectlog \
-        --set storage.projection.backend=hybrid-strict >"$output" 2>&1; then
-        err "objectlog/hybrid-strict unexpectedly rendered; the profile is runtime-only and must remain outside the chart schema"
-        cat "$output" >&2
+        if helm template "fireweed-demoted-${demoted}" "$CHART_DIR" \
+            --set storage.log.backend=objectlog \
+            --set "storage.projection.backend=${demoted}" >"$output" 2>&1; then
+            err "objectlog/${demoted} unexpectedly rendered; demoted projections must remain outside the chart schema"
+            cat "$output" >&2
+            rm -f "$output"
+            exit 1
+        fi
+
+        # Helm 3 and Helm 4 format schema failures differently. Require the exact
+        # path and allowed public enum from either formatter so a schema expansion, a
+        # template-time rejection, or an unrelated render failure cannot satisfy
+        # this public-support boundary.
+        local helm4_error="- at '/storage/projection/backend': value must be one of 'memory', 'inmemory', 'sqlite', 'postgres'"
+        local helm3_error='storage.projection.backend: storage.projection.backend must be one of the following: "memory", "inmemory", "sqlite", "postgres"'
+        if ! grep -Fq -- "$helm4_error" "$output" && ! grep -Fq -- "$helm3_error" "$output"; then
+            err "objectlog/${demoted} did not fail with the exact public projection enum-exclusion error"
+            cat "$output" >&2
+            rm -f "$output"
+            exit 1
+        fi
+
         rm -f "$output"
-        exit 1
-    fi
-
-    # Helm 3 and Helm 4 format schema failures differently. Require the exact
-    # path and allowed enum from either formatter so a schema expansion, a
-    # template-time rejection, or an unrelated render failure cannot satisfy
-    # this public-support boundary. Public memory is included; hybrid-strict is not.
-    local helm4_error="- at '/storage/projection/backend': value must be one of 'memory', 'inmemory', 'sqlite', 'turso', 'hybrid', 'hybrid-async', 'postgres'"
-    local helm3_error='storage.projection.backend: storage.projection.backend must be one of the following: "memory", "inmemory", "sqlite", "turso", "hybrid", "hybrid-async", "postgres"'
-    if ! grep -Fq -- "$helm4_error" "$output" && ! grep -Fq -- "$helm3_error" "$output"; then
-        err "objectlog/hybrid-strict did not fail with the exact projection enum-exclusion error"
-        cat "$output" >&2
-        rm -f "$output"
-        exit 1
-    fi
-
-    rm -f "$output"
+    done
 }
 
 assert_combination_contract() {
@@ -389,8 +362,6 @@ assert_combination_contract() {
         filesystem-memory) assert_filesystem_memory_contract "$rendered" ;;
         objectlog-inmemory) assert_objectlog_inmemory_contract "$rendered" ;;
         objectlog-sqlite) assert_objectlog_sqlite_contract "$rendered" ;;
-        objectlog-hybrid) assert_objectlog_hybrid_contract "$rendered" ;;
-        objectlog-hybrid-async) assert_objectlog_hybrid_async_contract "$rendered" ;;
         shared-s3-postgres-control-plane) assert_shared_s3_postgres_control_plane_contract "$rendered" ;;
         s3-sqlite-postgres-control-plane) assert_s3_sqlite_postgres_control_plane_contract "$rendered" ;;
         postgres-inmemory) assert_postgres_contract "$rendered" "inmemory" ;;
@@ -417,7 +388,7 @@ main() {
     assert_generated_bootstrap_contract
 
     echo "--- objectlog/hybrid-strict chart exclusion contract ---"
-    assert_hybrid_strict_schema_exclusion
+    assert_demoted_projection_schema_exclusion
 
     echo "--- local profile fail-closed contract ---"
     local scaled_local

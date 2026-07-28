@@ -128,8 +128,6 @@ values_file_for() {
     case "$1:$2" in
         objectlog:inmemory) echo "${CHART_DIR}/ci/objectlog-inmemory-values.yaml" ;;
         objectlog:sqlite) echo "${CHART_DIR}/ci/objectlog-sqlite-values.yaml" ;;
-        objectlog:hybrid) echo "${CHART_DIR}/ci/objectlog-hybrid-values.yaml" ;;
-        objectlog:hybrid-async) echo "${CHART_DIR}/ci/objectlog-hybrid-async-values.yaml" ;;
         postgres:inmemory) echo "${CHART_DIR}/ci/postgres-inmemory-values.yaml" ;;
         postgres:sqlite) echo "${CHART_DIR}/ci/postgres-sqlite-values.yaml" ;;
         postgres:postgres) echo "${CHART_DIR}/ci/postgres-postgres-values.yaml" ;;
@@ -276,12 +274,10 @@ validate_config() {
     case "${LOG_BACKEND}:${PROJECTION_BACKEND}" in
         objectlog:inmemory) ;;
         objectlog:sqlite) ;;
-        objectlog:hybrid) ;;
-        objectlog:hybrid-async) ;;
         postgres:inmemory) ;;
         postgres:sqlite) ;;
         postgres:postgres) ;;
-        *) die "runtime smoke supports log=objectlog projection={inmemory,sqlite,hybrid,hybrid-async}, and log=postgres projection={inmemory,sqlite,postgres}; requested log=${LOG_BACKEND} projection=${PROJECTION_BACKEND}" ;;
+        *) die "runtime smoke supports log=objectlog projection={inmemory,sqlite}, and log=postgres projection={inmemory,sqlite,postgres}; hybrid/turso are demoted from the public projection axis (requested log=${LOG_BACKEND} projection=${PROJECTION_BACKEND})" ;;
     esac
     [[ "${IMAGE}" == *:* ]] || die "--image must include an explicit tag, for example fireweed-service:ci"
     [[ -d "${IMAGE_CONTEXT}" ]] || die "--image-context must be an existing directory: ${IMAGE_CONTEXT}"

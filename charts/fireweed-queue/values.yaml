@@ -129,21 +129,10 @@ storage:
       databaseUrlKey: database-url
   projection:
     # Product default is memory. inmemory remains a parse/render alias.
+    # Public projections: memory | sqlite | postgres
     backend: memory
     sqlite:
       path: /var/lib/fireweed/projection/projection.db
-    # Temporary non-public projection values (feature-gated / demotion-pending).
-    turso:
-      path: /var/lib/fireweed/projection/projection.turso
-    # Async-apply debt/backpressure/poison thresholds for hybrid-async. Rendered as
-    # FIREWEED_HYBRID_ASYNC_* env only when projection.backend is "hybrid-async". Defaults mirror the server's
-    # HybridAsyncThresholds::default(); every bound must be > 0 (a zero bound is instantly backpressured).
-    hybridAsync:
-      applyLagMaxCommands: 100000
-      applyDebtMaxBytes: 536870912
-      applyQueueDepthMax: 1024
-      oldestUnappliedMaxMs: 60000
-      applyPoisonRetryThreshold: 3
     postgres:
       existingSecret: ""
       databaseUrlKey: database-url

@@ -20,7 +20,8 @@ SUPPORT_LOG="${PROOF_DIR}/supporting-artifacts.tsv"
 KIND_IMAGE_CONTEXT="${PROOF_DIR}/kind-image"
 KIND_IMAGE_DOCKERFILE="${KIND_IMAGE_CONTEXT}/Dockerfile"
 
-STORAGE_COMBINATIONS=("objectlog:inmemory" "objectlog:sqlite" "objectlog:hybrid" "objectlog:hybrid-async")
+# Public projection axis only (hybrid*/turso demoted from chart schema and public env select).
+STORAGE_COMBINATIONS=("objectlog:inmemory" "objectlog:sqlite")
 KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.31.0}"
 export KIND_NODE_IMAGE
 

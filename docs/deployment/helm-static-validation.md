@@ -7,37 +7,16 @@ The chart storage contract is expressed as axes isomorphic to `StorageConfig`:
 
 - `storage.log.backend`: public `memory` | `sqlite` | `postgres` | `filesystem` | `s3`; compat alias `objectlog` (+ `objectLog.store` local|s3 → filesystem|s3)
 - `storage.log.objectLog.root` / `objectLog.s3.*`: filesystem root and S3 credential blocks (structured fields)
-- `storage.projection.backend`: public `memory` | `sqlite` | `postgres`; compat `inmemory`; temporary non-public `turso` | `hybrid` | `hybrid-async`
+- `storage.projection.backend`: public `memory` | `sqlite` | `postgres`; compat `inmemory` only
 - `storage.controlPlane.backend`: `inprocess` or `postgres`
 
-`objectlog/hybrid-strict` is not part of the chart contract or public support
-surface. The server retains an experimental env/direct-config-only runtime path,
-but the chart schema intentionally excludes `hybrid-strict`. The gate contains
-a named negative assertion that requires Helm to reject that value at
-`/storage/projection/backend` with the exact allowed enum; an unrelated render
-failure cannot satisfy the assertion.
-
-The chart renders the authoritative `FIREWEED_*` environment namespace. `hybrid`
-is the projection value for the normative `objectlog/hybrid` contract: the runtime
-renders `FIREWEED_PROJECTION_BACKEND=hybrid`, uses `FIREWEED_SQLITE_PROJECTION_PATH`, applies
-SQLite first and then memory, and must
-fail closed for unsupported non-objectlog pairings until they are implemented and
-tested.
-
-`hybrid-async` is the projection value for the `objectlog/hybrid-async` profile:
-the runtime renders `FIREWEED_PROJECTION_BACKEND=hybrid-async`,
-the same `FIREWEED_SQLITE_PROJECTION_PATH`, and the async-apply threshold env
-`FIREWEED_HYBRID_ASYNC_*` from `storage.projection.hybridAsync`. The chart schema
-constrains every threshold to `>= 1`; a checked-in CI values profile,
-`charts/fireweed-queue/ci/objectlog-hybrid-async-values.yaml`, renders the combination and
-is included in the static gate. Its rendered-contract assertions require the
-SQLite path and persistent volume mount plus all five fail-closed controls:
-`FIREWEED_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS`,
-`FIREWEED_HYBRID_ASYNC_APPLY_DEBT_MAX_BYTES`,
-`FIREWEED_HYBRID_ASYNC_APPLY_QUEUE_DEPTH_MAX`,
-`FIREWEED_HYBRID_ASYNC_OLDEST_UNAPPLIED_MAX_MS`, and
-`FIREWEED_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD`. Only the object-log log
-axis pairs with `hybrid-async`; other pairings fail closed at startup.
+Demoted projection values (`hybrid`, `hybrid-async`, `hybrid-strict`, `turso`) are
+**not** part of the chart contract or public support surface. The gate contains a
+named negative assertion that requires Helm to reject each demoted value at
+`/storage/projection/backend` with the exact public allowed enum; an unrelated
+render failure cannot satisfy the assertion. Server-side hybrid runtime code may
+still exist for direct `Config` construction / internal tests, but the public
+env adapter rejects hybrid selection and Turso remains feature-gated non-public.
 
 `shared-s3-postgres-control-plane` is the replica-safe shared profile. It
 renders `FIREWEED_OBJECT_LOG_S3_*`,
@@ -50,7 +29,7 @@ conditional PutObject support.
 The chart fails closed if a local object-log profile is scaled beyond one
 replica.
 
-The gate first proves the `hybrid-strict` schema exclusion, then runs
+The gate first proves demoted-projection schema exclusion, then runs
 `helm lint --strict`, renders checked-in CI values for selected axis
 combinations, asserts the rendered environment variables, and validates the
 manifests with `kubeconform`.
@@ -63,5 +42,5 @@ Runtime smoke testing is separate:
 
 ```sh
 bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend inmemory
-bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend hybrid-async
+bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend sqlite
 ```

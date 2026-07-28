@@ -56,10 +56,10 @@ Legacy spellings still parse for one minor and map onto the public axes:
 - `storage.log.backend=objectlog` + `objectLog.store=s3` → `s3`
 - `storage.projection.backend=inmemory` → `memory`
 
-Prefer public axis names in new values. Temporary non-public projection values
-(`hybrid`, `hybrid-async`, `turso`) may still be schema-accepted for
-transitional wiring; they are not public matrix rows. Helm schema validation
-rejects `storage.projection.backend=hybrid-strict`.
+Prefer public axis names in new values. Hybrid (`hybrid`, `hybrid-async`,
+`hybrid-strict`) and `turso` are **not** public projection values: the Helm
+schema rejects them, and the server env adapter rejects hybrid selection (Turso
+remains feature-gated as non-public experimental wiring only).
 
 ### Wiring honesty
 
@@ -103,8 +103,7 @@ The chart renders:
   `objectlog` + local store)
 - `FIREWEED_OBJECT_LOG_S3_*` when the log is `s3` (or compat `objectlog` + s3 store)
 - `FIREWEED_SQLITE_LOG_PATH` when the log is `sqlite`
-- `FIREWEED_SQLITE_PROJECTION_PATH` when the projection is `sqlite` (and for
-  transitional hybrid paths that still use a SQLite image path)
+- `FIREWEED_SQLITE_PROJECTION_PATH` when the projection is `sqlite`
 - Postgres log/projection/control-plane database URL Secret refs when those
   axes use `postgres`
 

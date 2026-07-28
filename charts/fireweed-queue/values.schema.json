@@ -488,11 +488,10 @@
         "projection": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Projection axis isomorphic to StorageConfig.projection. Public: memory|sqlite|postgres. Compat aliases: inmemory→memory. hybrid|hybrid-async|turso remain temporarily until demoted.",
+          "description": "Projection axis isomorphic to StorageConfig.projection. Public product values: memory|sqlite|postgres. Compat alias: inmemory→memory.",
           "required": [
             "backend",
             "sqlite",
-            "turso",
             "postgres"
           ],
           "properties": {
@@ -502,9 +501,6 @@
                 "memory",
                 "inmemory",
                 "sqlite",
-                "turso",
-                "hybrid",
-                "hybrid-async",
                 "postgres"
               ]
             },
@@ -518,51 +514,6 @@
                 "path": {
                   "type": "string",
                   "minLength": 1
-                }
-              }
-            },
-            "turso": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["path"],
-              "properties": {
-                "path": {
-                  "type": "string",
-                  "minLength": 1
-                }
-              }
-            },
-            "hybridAsync": {
-              "type": "object",
-              "additionalProperties": false,
-              "description": "Async-apply debt/backpressure/poison thresholds for the objectlog/hybrid-async projection profile (rendered as FIREWEED_HYBRID_ASYNC_* only when projection.backend is hybrid-async). Every bound MUST be > 0 (a zero bound is instantly backpressured).",
-              "required": [
-                "applyLagMaxCommands",
-                "applyDebtMaxBytes",
-                "applyQueueDepthMax",
-                "oldestUnappliedMaxMs",
-                "applyPoisonRetryThreshold"
-              ],
-              "properties": {
-                "applyLagMaxCommands": {
-                  "type": "integer",
-                  "minimum": 1
-                },
-                "applyDebtMaxBytes": {
-                  "type": "integer",
-                  "minimum": 1
-                },
-                "applyQueueDepthMax": {
-                  "type": "integer",
-                  "minimum": 1
-                },
-                "oldestUnappliedMaxMs": {
-                  "type": "integer",
-                  "minimum": 1
-                },
-                "applyPoisonRetryThreshold": {
-                  "type": "integer",
-                  "minimum": 1
                 }
               }
             },

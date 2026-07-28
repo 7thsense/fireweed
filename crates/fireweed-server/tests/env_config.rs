@@ -195,13 +195,7 @@ fn objectlog_s3_env_builds_typed_shared_profile() {
 
 #[test]
 fn every_objectlog_s3_projection_accepts_postgres_publication_authority() {
-    for projection in [
-        "inmemory",
-        "sqlite",
-        "hybrid",
-        "hybrid-strict",
-        "hybrid-async",
-    ] {
+    for projection in ["memory", "inmemory", "sqlite"] {
         let config = Config::from_env(&env(&[
             ("FIREWEED_LOG_BACKEND", "objectlog"),
             ("FIREWEED_PROJECTION_BACKEND", projection),
@@ -232,6 +226,72 @@ fn every_objectlog_s3_projection_accepts_postgres_publication_authority() {
             ControlPlaneSpec::Postgres { .. }
         ));
     }
+}
+
+/// First-class `FIREWEED_LOG_BACKEND=s3` (not only the objectlog+store alias) pairs with
+/// public projections memory and sqlite; postgres when the `postgres` feature is on.
+#[test]
+fn first_class_s3_log_backend_pairs_with_memory_and_sqlite() {
+    for (projection, extra) in [
+        ("memory", None),
+        ("sqlite", Some(("FIREWEED_SQLITE_PROJECTION_PATH", "/data/s3.db"))),
+    ] {
+        let mut pairs = vec![
+            ("FIREWEED_LOG_BACKEND", "s3"),
+            ("FIREWEED_PROJECTION_BACKEND", projection),
+            ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "https://s3.example.com"),
+            ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fireweed-prod"),
+            ("FIREWEED_OBJECT_LOG_S3_REGION", "us-west-2"),
+            ("FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE", "static"),
+            ("FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID", "production-access"),
+            (
+                "FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY",
+                "production-secret",
+            ),
+        ];
+        if let Some((k, v)) = extra {
+            pairs.push((k, v));
+        }
+        let config = Config::from_env(&env(&pairs))
+            .unwrap_or_else(|error| panic!("s3/{projection} must parse: {error}"));
+        assert!(matches!(
+            config.backend.log,
+            LogSpec::ObjectLog(ObjectLogSpec::S3 { .. })
+        ));
+    }
+}
+
+#[cfg(feature = "postgres")]
+#[test]
+fn first_class_s3_log_backend_pairs_with_postgres_projection() {
+    use fireweed_server::ProjectionSpec;
+
+    let config = Config::from_env(&env(&[
+        ("FIREWEED_LOG_BACKEND", "s3"),
+        ("FIREWEED_PROJECTION_BACKEND", "postgres"),
+        (
+            "FIREWEED_POSTGRES_PROJECTION_DATABASE_URL",
+            "postgres://fireweed:secret@postgres.internal/fireweed",
+        ),
+        ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "https://s3.example.com"),
+        ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fireweed-prod"),
+        ("FIREWEED_OBJECT_LOG_S3_REGION", "us-west-2"),
+        ("FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE", "static"),
+        ("FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID", "production-access"),
+        (
+            "FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY",
+            "production-secret",
+        ),
+    ]))
+    .expect("s3×postgres must parse");
+    assert!(matches!(
+        config.backend.log,
+        LogSpec::ObjectLog(ObjectLogSpec::S3 { .. })
+    ));
+    assert!(matches!(
+        config.backend.projection,
+        ProjectionSpec::Postgres { .. }
+    ));
 }
 
 #[test]

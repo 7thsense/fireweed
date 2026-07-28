@@ -90,7 +90,7 @@ True when the selected log axis is S3-compatible object storage
 True when the selected projection needs a local durable image path under the storage volume.
 */}}
 {{- define "fireweed-queue.projectionNeedsLocalVolume" -}}
-{{- or (eq .Values.storage.projection.backend "sqlite") (eq .Values.storage.projection.backend "turso") (eq .Values.storage.projection.backend "hybrid") (eq .Values.storage.projection.backend "hybrid-async") -}}
+{{- eq .Values.storage.projection.backend "sqlite" -}}
 {{- end -}}
 
 {{/*

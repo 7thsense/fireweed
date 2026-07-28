@@ -12,8 +12,9 @@
 //! - log: `memory` | `sqlite` | `postgres` | `filesystem` | `s3`
 //! - projection: `memory` | `sqlite` | `postgres`
 //! Compat aliases: `objectlog` (+ store local/s3 → filesystem/s3), `inmemory` → memory.
-//! Transitional non-public projection names (`hybrid`, `hybrid-async`, `hybrid-strict`, `turso`) remain
-//! parseable until demoted.
+//! Demoted / non-public: `hybrid`, `hybrid-async`, and `hybrid-strict` are rejected on this
+//! public env surface. `turso` is feature-gated (`turso-projection`) and is not a public matrix
+//! value. Direct [`Config`] / [`BackendSpec`] construction can still name internal profiles.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -501,7 +502,9 @@ fn parse_backend(
     };
 
     // Public product projection names: memory|sqlite|postgres.
-    // Compat aliases: inmemory → memory. Hybrid/turso remain parseable (non-public) until removed later.
+    // Compat aliases: inmemory → memory.
+    // Demoted hybrid* names are rejected on this public env surface (construct Config directly for
+    // internal/tests). Turso is feature-gated and is not a public matrix value.
     let projection_spec = match projection.as_str() {
         "memory" | "inmemory" => ProjectionSpec::InMemory,
         "sqlite" => ProjectionSpec::Sqlite {
@@ -516,7 +519,9 @@ fn parse_backend(
             return Err(unsupported_storage(
                 &log,
                 &projection,
-                "the Turso derived projection is feature-gated; rebuild fireweed-server with `--features turso-projection`",
+                "turso is not a public product projection (public: memory|sqlite|postgres); \
+                 the Turso derived projection is feature-gated and non-public — rebuild fireweed-server \
+                 with `--features turso-projection` only for experimental wiring",
             ));
             #[cfg(feature = "turso-projection")]
             {
@@ -537,35 +542,17 @@ fn parse_backend(
                 }
             }
         }
-        "hybrid" => ProjectionSpec::Hybrid {
-            path: PathBuf::from(env_or(
-                env,
-                "FIREWEED_SQLITE_PROJECTION_PATH",
-                "/var/lib/fireweed/fireweed-projection.db",
-            )),
-        },
-        // The `objectlog/hybrid-strict` profile (TD-004): same hot-memory-over-durable-SQLite substrate as
-        // `hybrid`, but the group-commit write path commits the sealed batch DURABLY to SQLite BEFORE applying
-        // it to hot memory (`apply_durable_then_memory`). Selected under its canonical name so the SQLite
-        // durable-before-visible barrier and the SQLite-commit-then-memory-fail poison cut land on the real
-        // server write pipeline.
-        "hybrid-strict" => ProjectionSpec::HybridStrict {
-            path: PathBuf::from(env_or(
-                env,
-                "FIREWEED_SQLITE_PROJECTION_PATH",
-                "/var/lib/fireweed/fireweed-projection.db",
-            )),
-        },
-        // The `objectlog/hybrid-async` profile (TD-004): same hot-memory-over-durable-SQLite substrate as
-        // `hybrid`, selected under its canonical name so the deployment carries the async-apply threshold
-        // config (`FIREWEED_HYBRID_ASYNC_*`, already parsed into `Config::hybrid_async`).
-        "hybrid-async" => ProjectionSpec::HybridAsync {
-            path: PathBuf::from(env_or(
-                env,
-                "FIREWEED_SQLITE_PROJECTION_PATH",
-                "/var/lib/fireweed/fireweed-projection.db",
-            )),
-        },
+        // Demoted from the public projection axis: hybrid profiles remain in the type system for
+        // direct Config construction / internal tests, but the env adapter rejects public select.
+        "hybrid" | "hybrid-strict" | "hybrid-async" => {
+            return Err(unsupported_storage(
+                &log,
+                &projection,
+                "this projection is not a public product value (public: memory|sqlite|postgres; \
+                 aliases: inmemory). hybrid|hybrid-strict|hybrid-async are demoted from the public \
+                 env/Helm projection axis",
+            ));
+        }
         #[cfg(feature = "postgres")]
         "postgres" => {
             // Resolve the DSN from the env names the Helm chart's `storage.projection.postgres` axis
@@ -590,7 +577,7 @@ fn parse_backend(
                 &projection,
                 &format!(
                     "unknown FIREWEED_PROJECTION_BACKEND={other:?}; expected memory|sqlite|postgres \
-                     (aliases: inmemory; legacy non-public: turso|hybrid|hybrid-strict|hybrid-async)"
+                     (aliases: inmemory)"
                 ),
             ));
         }
@@ -1032,6 +1019,31 @@ mod tests {
             LogSpec::ObjectLog(ObjectLogSpec::S3 { .. })
         ));
         assert_eq!(config.backend.log.label(), "s3");
+        assert_eq!(config.backend.projection.label(), "memory");
+
+        // s3 log (first-class) × sqlite projection
+        let config = Config::from_env(&map(&[
+            ("FIREWEED_LOG_BACKEND", "s3"),
+            ("FIREWEED_PROJECTION_BACKEND", "sqlite"),
+            ("FIREWEED_SQLITE_PROJECTION_PATH", "/data/s3-proj.db"),
+            ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "https://s3.example.com"),
+            ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fireweed-prod"),
+            ("FIREWEED_OBJECT_LOG_S3_REGION", "us-west-2"),
+            ("FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE", "static"),
+            ("FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID", "ak"),
+            ("FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY", "sk"),
+        ]))
+        .expect("s3×sqlite");
+        assert_eq!(config.backend.log.label(), "s3");
+        assert!(matches!(
+            config.backend.log,
+            LogSpec::ObjectLog(ObjectLogSpec::S3 { .. })
+        ));
+        assert_eq!(config.backend.projection.label(), "sqlite");
+        assert!(matches!(
+            config.backend.projection,
+            ProjectionSpec::Sqlite { ref path } if path == &PathBuf::from("/data/s3-proj.db")
+        ));
 
         // legacy objectlog+local still maps to filesystem label
         let config = Config::from_env(&map(&[
@@ -1041,6 +1053,70 @@ mod tests {
         ]))
         .expect("objectlog alias");
         assert_eq!(config.backend.log.label(), "filesystem");
+    }
+
+    /// First-class `s3` log pairs with the postgres projection (requires `postgres` feature).
+    /// Shares the ObjectLog × Postgres server composition arm with `filesystem`.
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn s3_log_pairs_with_postgres_projection() {
+        let config = Config::from_env(&map(&[
+            ("FIREWEED_LOG_BACKEND", "s3"),
+            ("FIREWEED_PROJECTION_BACKEND", "postgres"),
+            (
+                "FIREWEED_POSTGRES_PROJECTION_DATABASE_URL",
+                "postgres://fireweed:fireweed@127.0.0.1:5432/fireweed",
+            ),
+            ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "https://s3.example.com"),
+            ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fireweed-prod"),
+            ("FIREWEED_OBJECT_LOG_S3_REGION", "us-west-2"),
+            ("FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE", "static"),
+            ("FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID", "production-access"),
+            (
+                "FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY",
+                "production-secret",
+            ),
+        ]))
+        .expect("s3×postgres");
+        assert_eq!(config.backend.log.label(), "s3");
+        assert!(matches!(
+            config.backend.log,
+            LogSpec::ObjectLog(ObjectLogSpec::S3 { .. })
+        ));
+        assert_eq!(config.backend.projection.label(), "postgres");
+        assert!(matches!(
+            config.backend.projection,
+            ProjectionSpec::Postgres { .. }
+        ));
+    }
+
+    /// Public product names: log=s3 × projection={memory,sqlite} (and postgres under feature).
+    #[test]
+    fn first_class_s3_log_pairs_with_public_projections() {
+        let s3_base: &[(&str, &str)] = &[
+            ("FIREWEED_LOG_BACKEND", "s3"),
+            ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "https://s3.example.com"),
+            ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fireweed"),
+            ("FIREWEED_OBJECT_LOG_S3_REGION", "us-east-1"),
+            ("FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE", "static"),
+            ("FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID", "ak"),
+            ("FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY", "sk"),
+        ];
+        for (projection, expect_label) in [("memory", "memory"), ("sqlite", "sqlite")] {
+            let mut pairs = s3_base.to_vec();
+            pairs.push(("FIREWEED_PROJECTION_BACKEND", projection));
+            if projection == "sqlite" {
+                pairs.push(("FIREWEED_SQLITE_PROJECTION_PATH", "/var/lib/fw/proj.db"));
+            }
+            let config = Config::from_env(&map(&pairs))
+                .unwrap_or_else(|e| panic!("s3×{projection} must parse: {e}"));
+            assert_eq!(config.backend.log.label(), "s3");
+            assert!(matches!(
+                config.backend.log,
+                LogSpec::ObjectLog(ObjectLogSpec::S3 { .. })
+            ));
+            assert_eq!(config.backend.projection.label(), expect_label);
+        }
     }
 
     /// Class B cell: memory log × postgres projection is allowlisted (feature `postgres`).
@@ -1323,37 +1399,33 @@ mod tests {
             panic!("default build must reject Turso selection")
         };
         assert!(
-            error.0.contains("--features turso-projection"),
+            error.0.contains("--features turso-projection")
+                || error.0.contains("not a public product projection"),
             "{}",
             error.0
         );
     }
 
     #[test]
-    fn objectlog_hybrid_projection_carries_sqlite_path_and_segment_config() {
-        let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "objectlog"),
-            ("FIREWEED_PROJECTION_BACKEND", "hybrid"),
-            ("FIREWEED_OBJECT_LOG_ROOT", "/data/olog"),
-            ("FIREWEED_SQLITE_PROJECTION_PATH", "/data/hybrid.db"),
-            ("FIREWEED_SEGMENT_TARGET_BYTES", "65536"),
-            ("FIREWEED_SEGMENT_MAX_LATENCY_MS", "7"),
-        ]))
-        .expect("valid hybrid env");
-        match (config.backend.log, config.backend.projection) {
-            (
-                LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem {
-                    root,
-                    segment_config,
-                }),
-                ProjectionSpec::Hybrid { path },
-            ) => {
-                assert_eq!(root, PathBuf::from("/data/olog"));
-                assert_eq!(path, PathBuf::from("/data/hybrid.db"));
-                assert_eq!(segment_config.target_bytes, 65_536);
-                assert_eq!(segment_config.max_latency_ms, 7);
-            }
-            _ => panic!("expected objectlog log × hybrid projection"),
+    fn demoted_hybrid_projection_is_rejected_on_public_env_surface() {
+        // hybrid|hybrid-strict|hybrid-async are demoted from the public FIREWEED_PROJECTION_BACKEND
+        // axis. Internal Config construction may still name them; the env adapter fails closed.
+        for projection in ["hybrid", "hybrid-strict", "hybrid-async"] {
+            let result = Config::from_env(&map(&[
+                ("FIREWEED_LOG_BACKEND", "objectlog"),
+                ("FIREWEED_PROJECTION_BACKEND", projection),
+                ("FIREWEED_OBJECT_LOG_ROOT", "/data/olog"),
+                ("FIREWEED_SQLITE_PROJECTION_PATH", "/data/hybrid.db"),
+            ]));
+            let Err(err) = result else {
+                panic!("{projection} must be rejected on the public env surface");
+            };
+            assert!(
+                err.0.contains("FIREWEED_PROJECTION_BACKEND=")
+                    && (err.0.contains("not a public product value") || err.0.contains("demoted")),
+                "unexpected error for {projection}: {}",
+                err.0
+            );
         }
     }
 
@@ -1372,98 +1444,24 @@ mod tests {
     }
 
     #[test]
-    fn objectlog_hybrid_strict_projection_selects_profile_and_carries_sqlite_path() {
-        // The canonical `objectlog/hybrid-strict` runtime profile (TD-004): the object-log log axis paired
-        // with the hybrid-strict projection, carrying the sqlite durable-projection path. This is the profile
-        // whose group-commit write path commits SQLite durably BEFORE hot memory.
-        let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "objectlog"),
-            ("FIREWEED_PROJECTION_BACKEND", "hybrid-strict"),
-            ("FIREWEED_OBJECT_LOG_ROOT", "/data/olog"),
-            ("FIREWEED_SQLITE_PROJECTION_PATH", "/data/hybrid-strict.db"),
-            ("FIREWEED_SEGMENT_TARGET_BYTES", "65536"),
-            ("FIREWEED_SEGMENT_MAX_LATENCY_MS", "9"),
-        ]))
-        .expect("valid hybrid-strict env");
-        match (config.backend.log, config.backend.projection) {
-            (
-                LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem {
-                    root,
-                    segment_config,
-                }),
-                ProjectionSpec::HybridStrict { path },
-            ) => {
-                assert_eq!(root, PathBuf::from("/data/olog"));
-                assert_eq!(path, PathBuf::from("/data/hybrid-strict.db"));
-                assert_eq!(segment_config.target_bytes, 65_536);
-                assert_eq!(segment_config.max_latency_ms, 9);
+    fn demoted_hybrid_strict_and_async_are_rejected_for_any_log_backend() {
+        // Demotion is at the projection name, not only the pairing matrix — any log × hybrid*
+        // env selection fails closed on the public surface.
+        for log in ["memory", "sqlite", "objectlog"] {
+            for projection in ["hybrid-strict", "hybrid-async"] {
+                let result = Config::from_env(&map(&[
+                    ("FIREWEED_LOG_BACKEND", log),
+                    ("FIREWEED_PROJECTION_BACKEND", projection),
+                ]));
+                let Err(err) = result else {
+                    panic!("{log}/{projection} must be rejected on the public env surface");
+                };
+                assert!(
+                    err.0.contains(&format!("FIREWEED_PROJECTION_BACKEND={projection}")),
+                    "{}",
+                    err.0
+                );
             }
-            _ => panic!("expected objectlog log × hybrid-strict projection"),
-        }
-    }
-
-    #[test]
-    fn non_objectlog_hybrid_strict_pairing_is_rejected() {
-        // Only the object-log log axis pairs with hybrid-strict; any other log backend fails closed.
-        for log in ["memory", "sqlite"] {
-            let result = Config::from_env(&map(&[
-                ("FIREWEED_LOG_BACKEND", log),
-                ("FIREWEED_PROJECTION_BACKEND", "hybrid-strict"),
-            ]));
-            let Err(err) = result else {
-                panic!("{log}/hybrid-strict must not be wired");
-            };
-            assert!(
-                err.0.contains("FIREWEED_PROJECTION_BACKEND=hybrid-strict"),
-                "{}",
-                err.0
-            );
-        }
-    }
-
-    #[test]
-    fn objectlog_hybrid_async_projection_selects_profile_and_carries_paths_and_thresholds() {
-        // The canonical `objectlog/hybrid-async` runtime profile: the object-log log axis paired with the
-        // hybrid-async projection, carrying both the sqlite checkpoint path and the async-apply thresholds.
-        let config = Config::from_env(&map(&[
-            ("FIREWEED_LOG_BACKEND", "objectlog"),
-            ("FIREWEED_PROJECTION_BACKEND", "hybrid-async"),
-            ("FIREWEED_OBJECT_LOG_ROOT", "/data/olog"),
-            ("FIREWEED_SQLITE_PROJECTION_PATH", "/data/hybrid-async.db"),
-            ("FIREWEED_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS", "4096"),
-            ("FIREWEED_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD", "9"),
-        ]))
-        .expect("valid hybrid-async env");
-        assert_eq!(config.hybrid_async.apply_lag_max_commands, 4096);
-        assert_eq!(config.hybrid_async.apply_poison_retry_threshold, 9);
-        match (config.backend.log, config.backend.projection) {
-            (
-                LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem { root, .. }),
-                ProjectionSpec::HybridAsync { path },
-            ) => {
-                assert_eq!(root, PathBuf::from("/data/olog"));
-                assert_eq!(path, PathBuf::from("/data/hybrid-async.db"));
-            }
-            _ => panic!("expected objectlog log × hybrid-async projection"),
-        }
-    }
-
-    #[test]
-    fn non_objectlog_hybrid_async_pairing_is_rejected() {
-        // Only the object-log log axis pairs with hybrid-async; any other log backend fails closed.
-        for log in ["memory", "sqlite"] {
-            let result = Config::from_env(&map(&[
-                ("FIREWEED_LOG_BACKEND", log),
-                ("FIREWEED_PROJECTION_BACKEND", "hybrid-async"),
-            ]));
-            let Err(err) = result else {
-                panic!("{log}/hybrid-async must not be wired");
-            };
-            assert!(
-                err.0.contains("FIREWEED_PROJECTION_BACKEND=hybrid-async"),
-                "{}",
-                err.0
-            );
         }
     }
 
@@ -1581,12 +1579,12 @@ mod tests {
 
     #[test]
     fn unwired_pairing_is_rejected() {
-        // s3 log + hybrid is still wired (objectlog family); memory + hybrid is not.
+        // Public surface never accepts hybrid; demoted names fail before pairing checks.
         let result = Config::from_env(&map(&[
             ("FIREWEED_LOG_BACKEND", "memory"),
             ("FIREWEED_PROJECTION_BACKEND", "hybrid"),
         ]));
-        assert!(result.is_err(), "memory/hybrid is not wired");
+        assert!(result.is_err(), "memory/hybrid is demoted from public select");
     }
 
     #[test]
@@ -1596,7 +1594,7 @@ mod tests {
             ("FIREWEED_PROJECTION_BACKEND", "hybrid"),
         ]));
         let Err(err) = result else {
-            panic!("sqlite/hybrid is not wired");
+            panic!("sqlite/hybrid must be rejected");
         };
         assert!(
             err.0
