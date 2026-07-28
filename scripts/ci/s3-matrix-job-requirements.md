@@ -1,5 +1,7 @@
 # Mandatory S3-compatible CI job requirements
 
+Bead: `fireweed-a9f67f91` (Full T0–T4 s3 log three cells with mandatory S3 CI).
+
 Governing bar: [`docs/helix/04-build/storage-matrix-completion-brief.md`](../../docs/helix/04-build/storage-matrix-completion-brief.md) §2
 (“required jobs for product-claimed cells **must not skip** when fixtures are missing”).
 
