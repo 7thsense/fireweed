@@ -5,9 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fireweed_release::e3_contract::{
     E3_EVIDENCE_LINK_SCHEMA_VERSION, E3AuthorityMode, E3EvidenceLink, E3FenceAuthorityEvidence,
     E3FenceAuthorityObservation, E3FenceObservation, E3ObservedOutcome, E3TransactionObservation,
-    POSTGRES_POINTER_COST_SCOPE_EXCLUDED_DISCLOSED, build_e3_contract_manifest,
-    build_e3_fence_evidence, build_e3_transaction_evidence_row, verify_e3_contract,
-    write_e3_contract, write_e3_fence_evidence,
+    build_e3_contract_manifest, build_e3_fence_evidence, build_e3_transaction_evidence_row,
+    verify_e3_contract, write_e3_contract, write_e3_fence_evidence,
 };
 
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
@@ -16,12 +15,12 @@ const RUN_ID: &str = "e3-run-20260728";
 const COMPOSITION_FINGERPRINT: &str =
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-fn evidence_link(authority_mode: E3AuthorityMode) -> E3EvidenceLink {
+fn evidence_link() -> E3EvidenceLink {
     E3EvidenceLink {
         schema_version: E3_EVIDENCE_LINK_SCHEMA_VERSION,
         run_id: RUN_ID.into(),
         composition_fingerprint: COMPOSITION_FINGERPRINT.into(),
-        authority_mode,
+        authority_mode: E3AuthorityMode::NativeCreateOnly,
     }
 }
 
@@ -34,32 +33,10 @@ fn passed(observation: &str) -> E3ObservedOutcome {
 fn native_fence_observation() -> E3FenceObservation {
     E3FenceObservation {
         source_revision: REVISION.into(),
-        evidence_link: evidence_link(E3AuthorityMode::NativeCreateOnly),
+        evidence_link: evidence_link(),
         authority: E3FenceAuthorityObservation::NativeCreateOnly {
             stale_epoch: passed("stale owner seal returned EpochFenced"),
             current_epoch: passed("current owner commit was readable"),
-        },
-    }
-}
-
-fn postgres_fence_observation() -> E3FenceObservation {
-    E3FenceObservation {
-        source_revision: REVISION.into(),
-        evidence_link: evidence_link(E3AuthorityMode::PostgresPointer),
-        authority: E3FenceAuthorityObservation::PostgresPointer {
-            stale_epoch: passed("stale owner seal returned EpochFenced"),
-            current_epoch: passed("current owner commit was readable"),
-            pointer_and_epoch_atomic: passed("pointer and epoch committed in one transaction"),
-            object_store_manifest_head_write_attempts: 0,
-            restart_fresh_postgres_client: passed("restart opened a fresh Postgres client"),
-            restart_read_authoritative_pointer: passed("restart read the Postgres pointer"),
-            object_namespace_count: 1,
-            pointer_namespace_count: 1,
-            postgres_pointer_operation_count: 8,
-            postgres_pointer_cost_scope: POSTGRES_POINTER_COST_SCOPE_EXCLUDED_DISCLOSED.into(),
-            postgres_pointer_cost_disclosure:
-                "Postgres pointer operations are measured but excluded from S3 request pricing"
-                    .into(),
         },
     }
 }
@@ -132,41 +109,6 @@ impl Fixture {
         fs::write(path, format!("{body}\n")).unwrap();
     }
 
-    fn use_postgres_pointer_authority(&self) {
-        self.mutate_json("contract.json", |value| {
-            value["evidence_link"]["authority_mode"] = serde_json::json!("postgres-pointer");
-            for entry in value["entries"].as_array_mut().unwrap() {
-                entry["manifest_fence"]["store_profile"] = serde_json::json!("s3_postgres_pointer");
-                entry["manifest_fence"]["authority_mode"] = serde_json::json!("postgres-pointer");
-            }
-        });
-        for index in 0..2 {
-            self.mutate_e3_row(index, |row| {
-                row["measurements"]["storage_authority_mode"] =
-                    serde_json::json!("postgres-pointer");
-                row["measurements"]["object_namespace_count"] = serde_json::json!(1);
-                row["measurements"]["pointer_namespace_count"] = serde_json::json!(1);
-                row["measurements"]["postgres_pointer_operation_count"] = serde_json::json!(8);
-                row["measurements"]["postgres_pointer_cost_scope"] =
-                    serde_json::json!(POSTGRES_POINTER_COST_SCOPE_EXCLUDED_DISCLOSED);
-                row["measurements"]["postgres_pointer_cost_disclosure"] = serde_json::json!(
-                    "Postgres pointer operations are measured but excluded from S3 request pricing"
-                );
-            });
-        }
-        for index in 0..48 {
-            self.mutate_transaction_row(index, |row| {
-                row["e3_authority_mode"] = serde_json::json!("postgres-pointer");
-            });
-        }
-        let row = build_e3_fence_evidence(postgres_fence_observation()).unwrap();
-        fs::write(
-            self.root.join("fencing.json"),
-            serde_json::to_vec_pretty(&row).unwrap(),
-        )
-        .unwrap();
-    }
-
     fn errors(&self) -> String {
         verify_e3_contract(&self.manifest(), REVISION)
             .unwrap_err()
@@ -190,16 +132,6 @@ fn accepts_all_profiles_bounds_transaction_authorities_and_fence() {
     assert_eq!(summary.entries, 8);
     assert_eq!(summary.transaction_rows, 48);
     assert_eq!(summary.cost_rows, 8);
-}
-
-#[test]
-fn accepts_native_and_postgres_pointer_authority_profiles() {
-    let native = Fixture::new();
-    verify_e3_contract(&native.manifest(), REVISION).unwrap();
-
-    let postgres = Fixture::new();
-    postgres.use_postgres_pointer_authority();
-    verify_e3_contract(&postgres.manifest(), REVISION).unwrap();
 }
 
 #[test]
@@ -259,22 +191,6 @@ fn rejects_old_contract_fence_and_unlinked_transaction_artifacts() {
             .errors()
             .contains("requires exactly one revision/profile/bound/timing-bound TP-003 row")
     );
-}
-
-#[test]
-fn postgres_pointer_release_rows_require_namespace_counts_and_cost_disclosure() {
-    let fixture = Fixture::new();
-    fixture.use_postgres_pointer_authority();
-    fixture.mutate_e3_row(0, |row| {
-        row["measurements"]
-            .as_object_mut()
-            .unwrap()
-            .remove("pointer_namespace_count");
-        row["measurements"]["postgres_pointer_cost_disclosure"] = serde_json::json!("");
-    });
-    let errors = fixture.errors();
-    assert!(errors.contains("requires positive pointer_namespace_count"));
-    assert!(errors.contains("requires an explicit Postgres-pointer cost scope and disclosure"));
 }
 
 #[allow(non_snake_case)]
@@ -393,7 +309,7 @@ fn production_generator_builds_and_semantically_verifies_the_full_matrix() {
     let generated = fixture.root.join("generated.json");
     let manifest = build_e3_contract_manifest(
         REVISION.into(),
-        evidence_link(E3AuthorityMode::NativeCreateOnly),
+        evidence_link(),
         "e3.jsonl".into(),
         "tp003.jsonl".into(),
         "fencing.json".into(),
@@ -842,7 +758,7 @@ fn rejects_undeclared_topology_or_authority_mode_mismatched_to_manifest() {
 
     let fixture = Fixture::new();
     fixture.mutate_e3_row(0, |row| {
-        row["measurements"]["storage_authority_mode"] = serde_json::json!("postgres-pointer");
+        row["measurements"]["storage_authority_mode"] = serde_json::json!("unsupported-authority");
     });
     let errors = fixture.errors();
     assert!(errors.contains("storage_authority_mode"), "{errors}");
@@ -990,42 +906,10 @@ fn native_fence_builder_derives_pass_from_executed_outcomes() {
 }
 
 #[test]
-fn postgres_pointer_fence_requires_outcomes_namespace_counts_and_cost_disclosure() {
-    let row = build_e3_fence_evidence(postgres_fence_observation()).unwrap();
-    assert_eq!(row.result, "pass");
-    assert_eq!(row.store_profile, "s3_postgres_pointer");
-
-    let mut failed = postgres_fence_observation();
-    if let E3FenceAuthorityObservation::PostgresPointer {
-        pointer_and_epoch_atomic,
-        ..
-    } = &mut failed.authority
-    {
-        *pointer_and_epoch_atomic = E3ObservedOutcome::Failed {
-            observation: "pointer and epoch split across transactions".into(),
-        };
-    }
-    assert_eq!(build_e3_fence_evidence(failed).unwrap().result, "fail");
-
-    let mut missing_cost = postgres_fence_observation();
-    if let E3FenceAuthorityObservation::PostgresPointer {
-        postgres_pointer_cost_disclosure,
-        ..
-    } = &mut missing_cost.authority
-    {
-        postgres_pointer_cost_disclosure.clear();
-    }
-    assert_eq!(
-        build_e3_fence_evidence(missing_cost).unwrap().result,
-        "fail"
-    );
-}
-
-#[test]
 fn transaction_builder_requires_executed_exact_revision_profile_bound_and_ac() {
     let observation = E3TransactionObservation {
         source_revision: REVISION.into(),
-        evidence_link: evidence_link(E3AuthorityMode::NativeCreateOnly),
+        evidence_link: evidence_link(),
         profile: "object_log_inmemory_projection".into(),
         bound_ms: 20,
         ac: "AC-TXN-7".into(),

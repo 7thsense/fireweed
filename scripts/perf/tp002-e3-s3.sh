@@ -36,8 +36,7 @@ fi
 : "${FIREWEED_E3_STORAGE_TOPOLOGY_ID:?set a stable topology identifier}"
 : "${FIREWEED_E3_STORAGE_TOPOLOGY:?describe the measured storage topology}"
 : "${FIREWEED_E3_STORAGE_DURABILITY_CLAIM:?declare the durability claim}"
-: "${FIREWEED_E3_AUTHORITY_MODE:?set native-create-only or postgres-pointer}"
-: "${FIREWEED_E3_POSTGRES_POINTER_DATABASE_URL:?set the Postgres DSN used for the independent no-CAS pointer fence proof}"
+: "${FIREWEED_E3_AUTHORITY_MODE:?set native-create-only}"
 : "${FIREWEED_E3_S3_BUCKET_MODE:?set preexisting or create}"
 : "${FIREWEED_E3_S3_BUCKET_ACK:?acknowledge the exact isolated E3 bucket name}"
 : "${FIREWEED_E3_RUN_ID:?set a unique E3 run id}"
@@ -55,12 +54,8 @@ if [ "$FIREWEED_E3_STORAGE_DURABILITY_CLAIM" != excluded ]; then
 fi
 case "$FIREWEED_E3_AUTHORITY_MODE" in
   native-create-only) ;;
-  postgres-pointer)
-    echo "E3 authority check failed: postgres-pointer measurement is not yet implemented; the current harness uses the native create-only backend and proves the Postgres pointer independently" >&2
-    exit 2
-    ;;
   *)
-    echo "E3 authority check failed: authority mode must be native-create-only or postgres-pointer" >&2
+    echo "E3 authority check failed: authority mode must be native-create-only" >&2
     exit 2
     ;;
 esac
@@ -152,6 +147,8 @@ FIREWEED_E3_RECORDED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 set +e
 env \
   FIREWEED_E3_SOURCE_REVISION="$SOURCE_REVISION" \
+  FIREWEED_E3_RUN_ID="$FIREWEED_E3_RUN_ID" \
+  FIREWEED_E3_COMPOSITION_FINGERPRINT="$COMPOSITION_FINGERPRINT" \
   FIREWEED_E3_RECORDED_AT="$FIREWEED_E3_RECORDED_AT" \
   FIREWEED_E3_TRANSACTION_EVIDENCE_OUT="$FIREWEED_E3_TRANSACTION_EVIDENCE_OUT" \
   cargo test -p fireweed-conformance --release --test external_transaction_contract_matrix_tests \
@@ -177,7 +174,6 @@ env \
   FIREWEED_E3_STORAGE_DURABILITY_CLAIM="$FIREWEED_E3_STORAGE_DURABILITY_CLAIM" \
   FIREWEED_E3_AUTHORITY_MODE="$FIREWEED_E3_AUTHORITY_MODE" \
   FIREWEED_E3_SOURCE_REVISION="$SOURCE_REVISION" \
-  FIREWEED_E3_POSTGRES_POINTER_DATABASE_URL="$FIREWEED_E3_POSTGRES_POINTER_DATABASE_URL" \
   FIREWEED_E3_FENCE_EVIDENCE_OUT="$FIREWEED_E3_FENCE_EVIDENCE_OUT" \
   FIREWEED_LEDGER_DIR="$FIREWEED_LEDGER_DIR" \
   FIREWEED_S3_TEST_ENDPOINT="$FIREWEED_S3_TEST_ENDPOINT" \
@@ -218,7 +214,10 @@ cargo run -q -p fireweed-release --bin fireweed-build-e3-contract -- \
   --source-revision "$SOURCE_REVISION" \
   --e3-ledger "$LEDGER_OUT" \
   --transaction-evidence "$FIREWEED_E3_TRANSACTION_EVIDENCE_OUT" \
-  --fencing-evidence "$FIREWEED_E3_FENCE_EVIDENCE_OUT"
+  --fencing-evidence "$FIREWEED_E3_FENCE_EVIDENCE_OUT" \
+  --run-id "$FIREWEED_E3_RUN_ID" \
+  --composition-fingerprint "$COMPOSITION_FINGERPRINT" \
+  --authority-mode "$FIREWEED_E3_AUTHORITY_MODE"
 if [[ ! -f "$CONTRACT_OUT" || ! -s "$CONTRACT_OUT" ]]; then
   fail "semantic verifier did not produce a fresh E3 contract"
 fi

@@ -29,12 +29,10 @@ pub const E3_FENCE_SCHEMA_VERSION: u32 = 5;
 pub const E3_EVIDENCE_LINK_SCHEMA_VERSION: u32 = 1;
 pub const FENCE_SUITE: &str = "e3_s3_publication_authority_fence";
 pub const NATIVE_FENCE_PROFILE: &str = "s3_native_create_only";
-pub const POSTGRES_POINTER_FENCE_PROFILE: &str = "s3_postgres_pointer";
 pub const FENCE_MODE: &str = "create_only_put_if_absent";
 pub const TRANSACTION_SUITE: &str = "external_transaction_contract_matrix_tests";
 pub const E3_PRODUCER_SUITE: &str = "performance_object_log_e3_live_tests";
 pub const E3_PRODUCER_COMMAND: &str = "scripts/perf/tp002-e3-s3.sh";
-pub const POSTGRES_POINTER_COST_SCOPE_EXCLUDED_DISCLOSED: &str = "excluded-disclosed";
 pub const E3_INMEMORY_PASS_BAR: &str = "E3: 1/5/20/100ms bounds; sustained batched commits with valid latency distributions and logically identical interleaved recorder controls; 10M ephemeral in-memory projection rebuilt by exact bounded durable-log genesis replay; streaming complete-state digests match with zero missing, duplicate, or invalid items; replay progress and bounded-resource samples are monotonic; absolute capacity is reported for the declared topology, not used as a portable gate";
 pub const E3_SQLITE_PASS_BAR: &str = "E3: 1/5/20/100ms bounds; sustained batched commits with valid latency distributions and logically identical interleaved recorder controls; 10M SQLite projection rebuilt from durable snapshot high-water plus bounded tail; streaming complete-state digests match with zero missing, duplicate, or invalid items; replay progress and bounded-resource samples are monotonic; absolute capacity is reported for the declared topology, not used as a portable gate";
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
@@ -93,21 +91,18 @@ pub struct E3FenceAuthority {
 #[serde(rename_all = "kebab-case")]
 pub enum E3AuthorityMode {
     NativeCreateOnly,
-    PostgresPointer,
 }
 
 impl E3AuthorityMode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::NativeCreateOnly => "native-create-only",
-            Self::PostgresPointer => "postgres-pointer",
         }
     }
 
     const fn fence_profile(self) -> &'static str {
         match self {
             Self::NativeCreateOnly => NATIVE_FENCE_PROFILE,
-            Self::PostgresPointer => POSTGRES_POINTER_FENCE_PROFILE,
         }
     }
 }
@@ -163,19 +158,6 @@ pub enum E3FenceAuthorityEvidence {
         stale_epoch_rejected: bool,
         current_epoch_committed: bool,
     },
-    PostgresPointer {
-        stale_epoch_rejected: bool,
-        current_epoch_committed: bool,
-        pointer_and_epoch_atomic: bool,
-        object_store_manifest_head_write_attempts: u64,
-        restart_fresh_postgres_client: bool,
-        restart_read_authoritative_pointer: bool,
-        object_namespace_count: u64,
-        pointer_namespace_count: u64,
-        postgres_pointer_operation_count: u64,
-        postgres_pointer_cost_scope: String,
-        postgres_pointer_cost_disclosure: String,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,19 +177,6 @@ pub enum E3FenceAuthorityObservation {
     NativeCreateOnly {
         stale_epoch: E3ObservedOutcome,
         current_epoch: E3ObservedOutcome,
-    },
-    PostgresPointer {
-        stale_epoch: E3ObservedOutcome,
-        current_epoch: E3ObservedOutcome,
-        pointer_and_epoch_atomic: E3ObservedOutcome,
-        object_store_manifest_head_write_attempts: u64,
-        restart_fresh_postgres_client: E3ObservedOutcome,
-        restart_read_authoritative_pointer: E3ObservedOutcome,
-        object_namespace_count: u64,
-        pointer_namespace_count: u64,
-        postgres_pointer_operation_count: u64,
-        postgres_pointer_cost_scope: String,
-        postgres_pointer_cost_disclosure: String,
     },
 }
 
@@ -381,56 +350,6 @@ pub fn build_e3_fence_evidence(
                 stale_epoch_rejected && current_epoch_committed,
             )
         }
-        E3FenceAuthorityObservation::PostgresPointer {
-            stale_epoch,
-            current_epoch,
-            pointer_and_epoch_atomic,
-            object_store_manifest_head_write_attempts,
-            restart_fresh_postgres_client,
-            restart_read_authoritative_pointer,
-            object_namespace_count,
-            pointer_namespace_count,
-            postgres_pointer_operation_count,
-            postgres_pointer_cost_scope,
-            postgres_pointer_cost_disclosure,
-        } => {
-            let stale_epoch_rejected = stale_epoch.passed();
-            let current_epoch_committed = current_epoch.passed();
-            let pointer_and_epoch_atomic = pointer_and_epoch_atomic.passed();
-            let restart_fresh_postgres_client = restart_fresh_postgres_client.passed();
-            let restart_read_authoritative_pointer = restart_read_authoritative_pointer.passed();
-            let counts_and_costs_disclosed = object_namespace_count > 0
-                && pointer_namespace_count > 0
-                && postgres_pointer_operation_count > 0
-                && valid_postgres_pointer_cost_disclosure(
-                    &postgres_pointer_cost_scope,
-                    &postgres_pointer_cost_disclosure,
-                );
-            let passed = stale_epoch_rejected
-                && current_epoch_committed
-                && pointer_and_epoch_atomic
-                && object_store_manifest_head_write_attempts == 0
-                && restart_fresh_postgres_client
-                && restart_read_authoritative_pointer
-                && counts_and_costs_disclosed;
-            (
-                E3AuthorityMode::PostgresPointer,
-                E3FenceAuthorityEvidence::PostgresPointer {
-                    stale_epoch_rejected,
-                    current_epoch_committed,
-                    pointer_and_epoch_atomic,
-                    object_store_manifest_head_write_attempts,
-                    restart_fresh_postgres_client,
-                    restart_read_authoritative_pointer,
-                    object_namespace_count,
-                    pointer_namespace_count,
-                    postgres_pointer_operation_count,
-                    postgres_pointer_cost_scope,
-                    postgres_pointer_cost_disclosure,
-                },
-                passed,
-            )
-        }
     };
     if observation.evidence_link.authority_mode != authority_mode {
         return Err(E3ContractError(
@@ -467,10 +386,6 @@ fn validate_evidence_link(link: &E3EvidenceLink) -> Result<(), E3ContractError> 
     } else {
         Ok(())
     }
-}
-
-fn valid_postgres_pointer_cost_disclosure(scope: &str, disclosure: &str) -> bool {
-    scope == POSTGRES_POINTER_COST_SCOPE_EXCLUDED_DISCLOSED && !disclosure.trim().is_empty()
 }
 
 pub fn write_e3_fence_evidence(path: &Path, row: &E3FenceEvidenceRow) -> std::io::Result<()> {
@@ -834,28 +749,6 @@ fn verify_e3_ledger(
             serde_json::json!(evidence_link.authority_mode.as_str()),
             errors,
         );
-        if evidence_link.authority_mode == E3AuthorityMode::PostgresPointer {
-            require_positive_u64(&row, "object_namespace_count", errors);
-            require_positive_u64(&row, "pointer_namespace_count", errors);
-            require_positive_u64(&row, "postgres_pointer_operation_count", errors);
-            let scope = row
-                .measurements
-                .values
-                .get("postgres_pointer_cost_scope")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            let disclosure = row
-                .measurements
-                .values
-                .get("postgres_pointer_cost_disclosure")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            if !valid_postgres_pointer_cost_disclosure(scope, disclosure) {
-                errors.push(E3ContractError(format!(
-                    "E3 ledger profile {profile} requires an explicit Postgres-pointer cost scope and disclosure"
-                )));
-            }
-        }
         for key in ["storage_topology_id", "storage_topology_description"] {
             if row
                 .measurements
@@ -1343,25 +1236,6 @@ fn require_value(
     }
 }
 
-fn require_positive_u64(
-    row: &LedgerRow,
-    key: &str,
-    errors: &mut Vec<E3ContractError>,
-) -> Option<u64> {
-    let value = row
-        .measurements
-        .values
-        .get(key)
-        .and_then(serde_json::Value::as_u64);
-    if value.is_none_or(|value| value == 0) {
-        errors.push(E3ContractError(format!(
-            "E3 ledger profile {} requires positive {key}",
-            row.backend_profile
-        )));
-    }
-    value
-}
-
 fn read_transaction_rows(
     path: &Path,
     errors: &mut Vec<E3ContractError>,
@@ -1611,34 +1485,6 @@ fn verify_fence(
                 && cas_mode == FENCE_MODE
                 && *stale_epoch_rejected
                 && *current_epoch_committed
-        }
-        E3FenceAuthorityEvidence::PostgresPointer {
-            stale_epoch_rejected,
-            current_epoch_committed,
-            pointer_and_epoch_atomic,
-            object_store_manifest_head_write_attempts,
-            restart_fresh_postgres_client,
-            restart_read_authoritative_pointer,
-            object_namespace_count,
-            pointer_namespace_count,
-            postgres_pointer_operation_count,
-            postgres_pointer_cost_scope,
-            postgres_pointer_cost_disclosure,
-        } => {
-            row.evidence_link.authority_mode == E3AuthorityMode::PostgresPointer
-                && *stale_epoch_rejected
-                && *current_epoch_committed
-                && *pointer_and_epoch_atomic
-                && *object_store_manifest_head_write_attempts == 0
-                && *restart_fresh_postgres_client
-                && *restart_read_authoritative_pointer
-                && *object_namespace_count > 0
-                && *pointer_namespace_count > 0
-                && *postgres_pointer_operation_count > 0
-                && valid_postgres_pointer_cost_disclosure(
-                    postgres_pointer_cost_scope,
-                    postgres_pointer_cost_disclosure,
-                )
         }
     };
     if row.schema_version != E3_FENCE_SCHEMA_VERSION

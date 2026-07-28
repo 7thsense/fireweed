@@ -20,26 +20,12 @@ COMMON_ENV=(
   FIREWEED_E3_STORAGE_TOPOLOGY_ID=generic-s3-test
   FIREWEED_E3_STORAGE_TOPOLOGY="test-only S3 topology; durability excluded"
   FIREWEED_E3_STORAGE_DURABILITY_CLAIM=excluded
-  FIREWEED_E3_POSTGRES_POINTER_DATABASE_URL=postgres://test.invalid/e3
   FIREWEED_E3_S3_BUCKET_MODE=create
   FIREWEED_E3_S3_BUCKET_ACK=fireweed-e3
   FIREWEED_E3_RUN_ID=fixture-run-0001
   FIREWEED_E3_S3_PROVIDER_IDENTITY=fixture-s3-control-plane
   FIREWEED_E3_S3_PROVIDER_ADAPTER="$REPO_ROOT/scripts/perf/tests/fixtures/e3-s3-provider-adapter"
 )
-
-set +e
-env "${COMMON_ENV[@]}" FIREWEED_E3_AUTHORITY_MODE=postgres-pointer \
-  FIREWEED_E3_EVIDENCE_DIR="$PREFLIGHT_EVIDENCE_ROOT" \
-  "$REPO_ROOT/scripts/perf/tp002-e3-s3.sh" >"$OUTPUT" 2>&1
-STATUS=$?
-set -e
-if [ "$STATUS" -ne 2 ]; then
-  echo "expected unsupported pointer-backed measurement rejection exit 2, got $STATUS" >&2
-  cat "$OUTPUT" >&2
-  exit 1
-fi
-grep -q "postgres-pointer measurement is not yet implemented" "$OUTPUT"
 
 : >"$OUTPUT"
 : >"$EVENT_LOG"

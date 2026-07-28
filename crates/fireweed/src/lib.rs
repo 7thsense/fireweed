@@ -791,7 +791,6 @@ pub(crate) struct ComposedStorageConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ObjectLogAuthorityConfig {
     NativeConditionalWrite,
-    Postgres { url: SecretValue },
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -831,7 +830,6 @@ pub enum ObjectLogStorage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectLogAuthority {
     NativeConditionalWrite,
-    Postgres { url: ConfigSecret },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1038,9 +1036,7 @@ impl StorageConfig {
     /// barrier combinations (API-005 intent).
     pub fn validate(&self) -> EngineResult<()> {
         if self.namespace.trim().is_empty() {
-            return Err(EngineError::Invalid(
-                "storage namespace must not be empty",
-            ));
+            return Err(EngineError::Invalid("storage namespace must not be empty"));
         }
         if self.segments.target_bytes == 0 || self.segments.max_latency_ms == 0 {
             return Err(EngineError::Invalid(
@@ -1060,9 +1056,7 @@ impl StorageConfig {
             }
             LogConfig::Sqlite { .. } => {}
             LogConfig::Postgres { url, .. } if url.0.is_empty() => {
-                return Err(EngineError::Invalid(
-                    "postgres log URL must not be empty",
-                ));
+                return Err(EngineError::Invalid("postgres log URL must not be empty"));
             }
             LogConfig::Postgres { .. } => {}
             LogConfig::Filesystem { root } if root.as_os_str().is_empty() => {
@@ -1070,16 +1064,7 @@ impl StorageConfig {
                     "filesystem object-log root must not be empty",
                 ));
             }
-            LogConfig::Filesystem { .. } => {
-                match &self.authority {
-                    None | Some(ObjectLogAuthority::NativeConditionalWrite) => {}
-                    Some(ObjectLogAuthority::Postgres { .. }) => {
-                        return Err(EngineError::Invalid(
-                            "filesystem object-log requires NativeConditionalWrite authority",
-                        ));
-                    }
-                }
-            }
+            LogConfig::Filesystem { .. } => {}
             LogConfig::S3 {
                 endpoint,
                 bucket,
@@ -1096,13 +1081,6 @@ impl StorageConfig {
                 {
                     return Err(EngineError::Invalid(
                         "S3 object-log configuration fields must not be empty",
-                    ));
-                }
-                if let Some(ObjectLogAuthority::Postgres { url }) = &self.authority
-                    && url.0.is_empty()
-                {
-                    return Err(EngineError::Invalid(
-                        "PostgreSQL object-log authority URL must not be empty",
                     ));
                 }
             }
@@ -1192,14 +1170,7 @@ impl ObjectLogRuntimeConfig {
                     allow_insecure_http,
                 },
             },
-            object_log_authority: match self.authority {
-                ObjectLogAuthority::NativeConditionalWrite => {
-                    ObjectLogAuthorityConfig::NativeConditionalWrite
-                }
-                ObjectLogAuthority::Postgres { url } => {
-                    ObjectLogAuthorityConfig::Postgres { url: url.0 }
-                }
-            },
+            object_log_authority: ObjectLogAuthorityConfig::NativeConditionalWrite,
             projection: match self.projection {
                 ProjectionConfig::Sqlite { path } => ComposedProjectionConfig::Sqlite { path },
                 ProjectionConfig::Postgres { url } => {
@@ -1331,9 +1302,13 @@ mod storage_config_matrix_tests {
                 ) {
                     config.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
                 }
-                config
-                    .validate()
-                    .unwrap_or_else(|e| panic!("cell {}×{}: {e:?}", config.log.axis_name(), projection.axis_name()));
+                config.validate().unwrap_or_else(|e| {
+                    panic!(
+                        "cell {}×{}: {e:?}",
+                        config.log.axis_name(),
+                        projection.axis_name()
+                    )
+                });
                 cells += 1;
             }
         }
@@ -1362,8 +1337,13 @@ mod storage_config_matrix_tests {
         };
         let mapped = StorageConfig::from_object_log_runtime(ol);
         assert!(matches!(mapped.log, LogConfig::Filesystem { .. }));
-        assert!(matches!(mapped.projection, ProjectionStoreConfig::Sqlite { .. }));
-        mapped.validate().expect("mapped object-log config validates");
+        assert!(matches!(
+            mapped.projection,
+            ProjectionStoreConfig::Sqlite { .. }
+        ));
+        mapped
+            .validate()
+            .expect("mapped object-log config validates");
     }
 
     #[test]
@@ -1373,17 +1353,6 @@ mod storage_config_matrix_tests {
             path: PathBuf::new(),
         };
         assert!(matches!(bad.validate(), Err(EngineError::Invalid(_))));
-
-        let mut fs = base(
-            LogConfig::Filesystem {
-                root: PathBuf::from("/tank/log"),
-            },
-            ProjectionStoreConfig::Memory,
-        );
-        fs.authority = Some(ObjectLogAuthority::Postgres {
-            url: ConfigSecret::new("postgres://authority"),
-        });
-        assert!(matches!(fs.validate(), Err(EngineError::Invalid(_))));
     }
 }
 
@@ -1544,7 +1513,9 @@ mod storage_config_open_tests {
                 let fw = open(cfg, Arc::clone(&clock)).expect("postgres×memory with live PG");
                 drop(fw);
             } else {
-                eprintln!("storage_config_open: postgres cell skipped (FIREWEED_PG_TEST_URL unset)");
+                eprintln!(
+                    "storage_config_open: postgres cell skipped (FIREWEED_PG_TEST_URL unset)"
+                );
             }
         }
         #[cfg(not(feature = "postgres"))]
@@ -1571,8 +1542,10 @@ mod storage_config_open_tests {
         {
             if std::env::var("FIREWEED_S3_TEST_ENDPOINT").is_ok() {
                 let endpoint = std::env::var("FIREWEED_S3_TEST_ENDPOINT").unwrap();
-                let bucket = std::env::var("FIREWEED_S3_TEST_BUCKET").unwrap_or_else(|_| "fireweed".into());
-                let region = std::env::var("FIREWEED_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
+                let bucket =
+                    std::env::var("FIREWEED_S3_TEST_BUCKET").unwrap_or_else(|_| "fireweed".into());
+                let region =
+                    std::env::var("FIREWEED_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
                 let access = std::env::var("FIREWEED_S3_TEST_ACCESS_KEY")
                     .unwrap_or_else(|_| "minioadmin".into());
                 let secret = std::env::var("FIREWEED_S3_TEST_SECRET_KEY")
@@ -1665,26 +1638,6 @@ impl ComposedStorageConfig {
                 ));
             }
             _ => {}
-        }
-        match (&self.object_log, &self.object_log_authority) {
-            (ObjectLogConfig::Local { .. }, ObjectLogAuthorityConfig::NativeConditionalWrite) => {}
-            (ObjectLogConfig::Local { .. }, ObjectLogAuthorityConfig::Postgres { .. }) => {
-                return Err(EngineError::Invalid(
-                    "local object-log storage requires native conditional-write authority",
-                ));
-            }
-            (
-                ObjectLogConfig::S3Compatible { .. },
-                ObjectLogAuthorityConfig::NativeConditionalWrite,
-            ) => {}
-            (ObjectLogConfig::S3Compatible { .. }, ObjectLogAuthorityConfig::Postgres { url })
-                if url.is_empty() =>
-            {
-                return Err(EngineError::Invalid(
-                    "PostgreSQL object-log authority URL must not be empty",
-                ));
-            }
-            (ObjectLogConfig::S3Compatible { .. }, ObjectLogAuthorityConfig::Postgres { .. }) => {}
         }
         match &self.projection {
             ComposedProjectionConfig::Sqlite { path } if path.as_os_str().is_empty() => {
@@ -2372,11 +2325,7 @@ fn open_composed_object_log(
         config.segments.target_bytes,
         config.segments.max_latency_ms,
     )?;
-    let probe_native_s3 = matches!(&config.object_log, ObjectLogConfig::S3Compatible { .. })
-        && matches!(
-            &config.object_log_authority,
-            ObjectLogAuthorityConfig::NativeConditionalWrite
-        );
+    let probe_native_s3 = matches!(&config.object_log, ObjectLogConfig::S3Compatible { .. });
     let raw: Arc<dyn BlobStore> = match &config.object_log {
         ObjectLogConfig::Local { root } => Arc::new(LocalFsBlobStore::open(root)?),
         ObjectLogConfig::S3Compatible {
@@ -2399,22 +2348,6 @@ fn open_composed_object_log(
                 &secret_access_key.0,
                 region,
             )?)
-        }
-    };
-    let raw: Arc<dyn BlobStore> = match &config.object_log_authority {
-        ObjectLogAuthorityConfig::NativeConditionalWrite => raw,
-        ObjectLogAuthorityConfig::Postgres { url } => {
-            #[cfg(feature = "postgres")]
-            {
-                use fireweed_objectlog::segmented::PointerFencedBlobStore;
-                let pointers = Arc::new(fireweed_postgres::PostgresManifestPointer::open(&url.0)?);
-                Arc::new(PointerFencedBlobStore::new(raw, pointers))
-            }
-            #[cfg(not(feature = "postgres"))]
-            {
-                let _ = url;
-                return Err(EngineError::Unavailable);
-            }
         }
     };
     let namespace = object_log_namespace(&config.namespace);
@@ -4583,7 +4516,8 @@ pub async fn open_async(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineR
     config.validate()?;
     #[cfg(feature = "postgres")]
     {
-        if storage_open_needs_blocking_offload(&config) && tokio::runtime::Handle::try_current().is_ok()
+        if storage_open_needs_blocking_offload(&config)
+            && tokio::runtime::Handle::try_current().is_ok()
         {
             return tokio::task::spawn_blocking(move || open_validated(config, clock))
                 .await
@@ -4599,14 +4533,8 @@ pub async fn open_async(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineR
 fn storage_open_needs_blocking_offload(config: &StorageConfig) -> bool {
     matches!(
         &config.log,
-        LogConfig::Postgres { .. }
-            | LogConfig::S3 { .. }
-            | LogConfig::Filesystem { .. }
+        LogConfig::Postgres { .. } | LogConfig::S3 { .. } | LogConfig::Filesystem { .. }
     ) || matches!(&config.projection, ProjectionStoreConfig::Postgres { .. })
-        || matches!(
-            &config.authority,
-            Some(ObjectLogAuthority::Postgres { .. })
-        )
 }
 
 fn open_validated(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
@@ -4672,12 +4600,15 @@ fn open_validated(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineResult<
     }
 }
 
+#[cfg(any(feature = "sqlite", feature = "objectlog", feature = "postgres"))]
+#[allow(dead_code)] // Feature combinations compile this helper without every caller.
 fn path_utf8(path: &std::path::Path) -> EngineResult<&str> {
     path.to_str()
         .ok_or(EngineError::Invalid("storage path must be valid UTF-8"))
 }
 
-#[cfg(any(feature = "sqlite", feature = "objectlog", feature = "postgres", test))]
+#[cfg(any(feature = "sqlite", feature = "objectlog", feature = "postgres"))]
+#[allow(dead_code)] // Feature combinations compile this helper without every caller.
 fn wrap_blocking_backend<B>(backend: Arc<B>, clock: Arc<dyn Clock>) -> EngineResult<Fireweed>
 where
     B: LibBackend + BatchUpdatePort + ItemMutationPort + 'static,
@@ -4717,7 +4648,8 @@ fn open_memory_log_cell(
                 let log = fireweed_projection::MemoryLog::new();
                 let projection = fireweed_sqlite::SqliteProjectionStore::open(path)?;
                 let backend = Arc::new(
-                    ComposedBackend::new(log, projection, InProcessControlPlane::new()).recover()?,
+                    ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                        .recover()?,
                 );
                 wrap_blocking_backend(backend, clock)
             }
@@ -4736,7 +4668,8 @@ fn open_memory_log_cell(
                 let log = fireweed_projection::MemoryLog::new();
                 let projection = fireweed_postgres::PostgresRelational::connect(&url.0.0)?;
                 let backend = Arc::new(
-                    ComposedBackend::new(log, projection, InProcessControlPlane::new()).recover()?,
+                    ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                        .recover()?,
                 );
                 wrap_blocking_backend(backend, clock)
             }
@@ -4759,9 +4692,9 @@ fn open_sqlite_log_cell(
     #[cfg(not(feature = "sqlite"))]
     {
         let _ = (path, projection, clock);
-        return Err(EngineError::Invalid(
+        Err(EngineError::Invalid(
             "sqlite log cells require the `sqlite` cargo feature",
-        ));
+        ))
     }
     #[cfg(feature = "sqlite")]
     {
@@ -4877,6 +4810,7 @@ fn open_postgres_log_cell(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Mirrors the public StorageConfig axes at one conversion boundary.
 fn open_object_log_cell(
     object_log: ObjectLogStorage,
     authority: Option<ObjectLogAuthority>,
@@ -4899,9 +4833,9 @@ fn open_object_log_cell(
             recovery,
             clock,
         );
-        return Err(EngineError::Invalid(
+        Err(EngineError::Invalid(
             "filesystem/s3 log cells require the `objectlog` cargo feature",
-        ));
+        ))
     }
     #[cfg(feature = "objectlog")]
     {
@@ -5016,9 +4950,8 @@ fn open_objectlog_memory_projection(
     .into_storage_config();
     composed.validate()?;
     let log = open_composed_object_log(&composed, false)?;
-    let backend = Arc::new(
-        ComposedBackend::new(log.clone(), InMemoryProjection::new(), log).recover()?,
-    );
+    let backend =
+        Arc::new(ComposedBackend::new(log.clone(), InMemoryProjection::new(), log).recover()?);
     wrap_blocking_backend(backend, clock)
 }
 

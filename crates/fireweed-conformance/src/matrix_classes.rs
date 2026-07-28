@@ -514,9 +514,8 @@ mod tests {
             abused.core = true;
             abused.durable_log_replay = true; // illegal for memory log
 
-            let err = register_suite_claims(cell, abused).expect_err(
-                "memory log must not register durable_log_replay",
-            );
+            let err = register_suite_claims(cell, abused)
+                .expect_err("memory log must not register durable_log_replay");
             assert_eq!(err.flag, "durable_log_replay");
             assert_eq!(err.product_class, ProductDurabilityClass::ClassB);
             assert!(
@@ -547,8 +546,9 @@ mod tests {
     #[test]
     fn register_suite_claims_accepts_canonical_allow_list_for_every_cell() {
         for cell in all_matrix_cells() {
-            let registered = register_suite_claims(cell, cell.claims())
-                .unwrap_or_else(|e| panic!("canonical claims must register for {}: {e}", cell.id()));
+            let registered = register_suite_claims(cell, cell.claims()).unwrap_or_else(|e| {
+                panic!("canonical claims must register for {}: {e}", cell.id())
+            });
             assert_eq!(registered.cell(), cell);
             assert_eq!(registered.claims(), cell.claims());
             if cell.product_durability_class().is_class_b() {
@@ -606,7 +606,10 @@ mod tests {
         for cell in all_matrix_cells() {
             if cell.product_durability_class().is_class_b() {
                 validate_claims_for_cell(cell, &cell.claims()).unwrap_or_else(|e| {
-                    panic!("Class B allow-list must be self-consistent for {}: {e}", cell.id())
+                    panic!(
+                        "Class B allow-list must be self-consistent for {}: {e}",
+                        cell.id()
+                    )
                 });
                 assert!(!cell.claims().durable_log_replay);
             }

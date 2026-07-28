@@ -26,7 +26,6 @@ FIREWEED_E3_STORAGE_TOPOLOGY_ID=provider-topology-1 \
 FIREWEED_E3_STORAGE_TOPOLOGY='operator-verified isolated S3 topology; host durability excluded' \
 FIREWEED_E3_STORAGE_DURABILITY_CLAIM=excluded \
 FIREWEED_E3_AUTHORITY_MODE=native-create-only \
-FIREWEED_E3_POSTGRES_POINTER_DATABASE_URL=... \
 FIREWEED_E3_S3_BUCKET_MODE=create \
 FIREWEED_E3_S3_BUCKET_ACK=isolated-fireweed-e3 \
 FIREWEED_E3_RUN_ID=20260728-release-001 \
@@ -69,10 +68,9 @@ or sibling prefix. On every failed preflight, test, freshness, provenance, or se
 runner deliberately skips cleanup, retaining the provider namespace for investigation. Adapter stdout/stderr
 is suppressed by the wrapper; adapters must not emit credentials.
 
-`native-create-only` is the only measured authority mode currently supported. The wrapper recognizes
-`postgres-pointer` but rejects it before execution because the E3 measurement backend is not yet wrapped in
-the Postgres manifest-pointer adapter. The existing Postgres-pointer fence remains an independent executed
-proof and must not be mistaken for a pointer-backed E3 measurement.
+`native-create-only` is the only supported authority mode. The endpoint must
+provide atomic conditional object creation; the run fails closed when it does
+not, rather than adding another storage authority.
 
 ## Local MinIO convenience profile
 

@@ -61,8 +61,7 @@ fn main() -> ExitCode {
     };
     let authority_mode = match authority_mode.as_str() {
         "native-create-only" => E3AuthorityMode::NativeCreateOnly,
-        "postgres-pointer" => E3AuthorityMode::PostgresPointer,
-        _ => return fail("--authority-mode must be native-create-only or postgres-pointer"),
+        _ => return fail("--authority-mode must be native-create-only"),
     };
     let output = PathBuf::from(output);
     let evidence_link = E3EvidenceLink {

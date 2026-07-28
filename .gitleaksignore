@@ -4,3 +4,12 @@
 162effa3c9f75db63f524d34aa7f5b7dc0e79481:docs/helix/02-design/contracts/API-001-native-client-interface.md:generic-api-key:301
 # API-001 BatchFinalize fixture: this repeats the same illustrative token to demonstrate lease finalization.
 162effa3c9f75db63f524d34aa7f5b7dc0e79481:docs/helix/02-design/contracts/API-001-native-client-interface.md:generic-api-key:317
+# Historical pre-rename copies of the relational admission design use `lease tokens`
+# in prose; this is a field name, not an issued credential.
+85bea3c65b114e1b71e65fd2a580091d20fcb112:helix/02-design/technical-designs/TD-012-relational-batch-row-byte-admission.md:generic-api-key:127
+5e1269e02f3932d5a6b9599e8e9ef8e4d5e6d565:docs/helix/02-design/technical-designs/TD-011-relational-batch-row-byte-admission.md:generic-api-key:127
+4600eb3d68b09c3466bf99fc60e0ecd36ab526dc:docs/helix/02-design/technical-designs/TD-011-relational-batch-row-byte-admission.md:generic-api-key:127
+# Historical API-001 examples repeat the same illustrative lease token already
+# triaged above; it is not an issued credential.
+85bea3c65b114e1b71e65fd2a580091d20fcb112:helix/02-design/contracts/API-001-native-client-interface.md:generic-api-key:1059
+85bea3c65b114e1b71e65fd2a580091d20fcb112:helix/02-design/contracts/API-001-native-client-interface.md:generic-api-key:1075

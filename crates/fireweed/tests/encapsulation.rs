@@ -9,11 +9,11 @@
 use std::sync::Arc;
 
 use fireweed::{
-    CohortPolicy, CommitResponseBarrier, ComposedStorageConfig, CreateQueue, EligibilityPolicy,
-    ObjectLogAuthorityConfig, ObjectLogConfig, OrderingMode, PriorityDirection, PriorityModel,
-    PriorityModelKind, PriorityTieBreaker, PriorityValue, ProjectionRecoveryAction,
-    ProjectionRecoveryPolicy, ComposedProjectionConfig, QueueCreationPolicy, QueueDefinition, QueueId,
-    QueueKey, RecurrencePolicy, RetryPolicy, SecretValue, SegmentSettings, TenantId,
+    CohortPolicy, CommitResponseBarrier, ComposedProjectionConfig, ComposedStorageConfig,
+    CreateQueue, EligibilityPolicy, ObjectLogAuthorityConfig, ObjectLogConfig, OrderingMode,
+    PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
+    ProjectionRecoveryAction, ProjectionRecoveryPolicy, QueueCreationPolicy, QueueDefinition,
+    QueueId, QueueKey, RecurrencePolicy, RetryPolicy, SecretValue, SegmentSettings, TenantId,
 };
 use fireweed_memory::ManualClock;
 

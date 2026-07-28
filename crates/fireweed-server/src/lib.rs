@@ -24,7 +24,7 @@ use fireweed_engine::{
 use fireweed_memory::composed_memory_backend;
 use fireweed_objectlog::ObjectLog;
 use fireweed_objectlog::segmented::{
-    BlobStore, LocalFsBlobStore, PointerFencedBlobStore, S3BlobStore, probe_create_only_semantics,
+    BlobStore, LocalFsBlobStore, S3BlobStore, probe_create_only_semantics,
 };
 use fireweed_resp::{
     RespBackend, RespHooks, RouteDecision, SystemClock, route, serve_with_shutdown,
@@ -323,29 +323,18 @@ impl ObjectLogSpec {
         }
     }
 
-    /// Open the production blob-store composition for this object-log profile. Local filesystems retain
-    /// their native create-only implementation. S3 either uses the configured PostgreSQL authority for
-    /// every create-only publication or proves the endpoint's native primitive before startup proceeds.
-    fn open_blob_store_with_authority(
-        &self,
-        postgres_pointer_url: Option<&str>,
-    ) -> EngineResult<Arc<dyn BlobStore>> {
+    /// Open the production blob-store composition for this object-log profile.
+    /// S3 always proves native conditional-create semantics before startup.
+    fn open_blob_store_with_authority(&self) -> EngineResult<Arc<dyn BlobStore>> {
         let store = self.open_blob_store()?;
-        match (self, postgres_pointer_url) {
-            (Self::LocalFilesystem { .. }, _) => Ok(store),
-            (Self::S3 { .. }, Some(url)) => {
-                let pointers = Arc::new(fireweed_postgres::PostgresManifestPointer::open(url)?);
-                Ok(Arc::new(PointerFencedBlobStore::new(store, pointers)))
-            }
-            (Self::S3 { .. }, None) => {
-                probe_create_only_semantics(store.as_ref()).map_err(|error| {
-                    EngineError::Storage(format!(
-                        "S3 object-log endpoint does not provide Fireweed's required native create-only semantics; configure FIREWEED_CONTROL_PLANE=postgres and FIREWEED_POSTGRES_CONTROL_PLANE_DATABASE_URL to use PostgreSQL publication authority: {error}"
-                    ))
-                })?;
-                Ok(store)
-            }
+        if matches!(self, Self::S3 { .. }) {
+            probe_create_only_semantics(store.as_ref()).map_err(|error| {
+                EngineError::Storage(format!(
+                    "S3 object-log endpoint does not provide Fireweed's required native create-only semantics: {error}"
+                ))
+            })?;
         }
+        Ok(store)
     }
 }
 
@@ -2186,12 +2175,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         projection,
         control_plane,
     } = config.backend;
-    // The PostgreSQL control-plane DSN is also the production publication authority for S3 stores that do
-    // not implement an atomic create-only PutObject. Capture it before erasing the control-plane type.
-    let postgres_pointer_url = match &control_plane {
-        ControlPlaneSpec::InProcess => None,
-        ControlPlaneSpec::Postgres { url, .. } => Some(url.clone()),
-    };
     // The sync Postgres client owns an internal runtime, so connect off the Tokio reactor. Erase the
     // concrete implementation only after construction; every backend arm receives this same selected
     // queue-ownership authority instead of manufacturing a private per-process control plane.
@@ -2414,7 +2397,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             // projection rebuilt by `read_all` replay on open.
             let backends = tokio::task::spawn_blocking(move || {
                 let segment_config = spec.segment_config();
-                let store = spec.open_blob_store_with_authority(postgres_pointer_url.as_deref())?;
+                let store = spec.open_blob_store_with_authority()?;
                 (0..8)
                     .map(|index| {
                         SegmentedObjectLogInMemoryBackend::open_with_blob_store(
@@ -2468,7 +2451,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 .map_err(|_| EngineError::Storage("non-utf8 path".into()))?;
             let backends = tokio::task::spawn_blocking(move || {
                 let segment_config = spec.segment_config();
-                let store = spec.open_blob_store_with_authority(postgres_pointer_url.as_deref())?;
+                let store = spec.open_blob_store_with_authority()?;
                 let projection = Arc::new(fireweed_sqlite::SqliteProjectionStore::open(&p)?);
                 (0..8)
                     .map(|index| {
@@ -2519,11 +2502,9 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         #[cfg(feature = "turso-projection")]
         (LogSpec::ObjectLog(spec), ProjectionSpec::Turso { path }) => {
             let segment_config = spec.segment_config();
-            let store = tokio::task::spawn_blocking(move || {
-                spec.open_blob_store_with_authority(postgres_pointer_url.as_deref())
-            })
-            .await
-            .map_err(|e| EngineError::Storage(format!("object-log open task failed: {e}")))??;
+            let store = tokio::task::spawn_blocking(move || spec.open_blob_store_with_authority())
+                .await
+                .map_err(|e| EngineError::Storage(format!("object-log open task failed: {e}")))??;
             let backend = Arc::new(
                 ObjectLogTursoBackend::open_with_blob_store(store, &path, segment_config).await?,
             );
@@ -2546,7 +2527,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         (LogSpec::ObjectLog(spec), ProjectionSpec::Hybrid { path }) => {
             let backends = tokio::task::spawn_blocking(move || {
                 let segment_config = spec.segment_config();
-                let store = spec.open_blob_store_with_authority(postgres_pointer_url.as_deref())?;
+                let store = spec.open_blob_store_with_authority()?;
                 (0..8)
                     .map(|index| {
                         open_objectlog_hybrid_backend(
@@ -2615,7 +2596,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             // the durable SQLite `ProjectionImage`.
             let backends = tokio::task::spawn_blocking(move || {
                 let segment_config = spec.segment_config();
-                let store = spec.open_blob_store_with_authority(postgres_pointer_url.as_deref())?;
+                let store = spec.open_blob_store_with_authority()?;
                 (0..8)
                     .map(|index| {
                         open_objectlog_hybrid_backend(
@@ -2694,7 +2675,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             );
             let backends = tokio::task::spawn_blocking(move || {
                 let segment_config = spec.segment_config();
-                let store = spec.open_blob_store_with_authority(postgres_pointer_url.as_deref())?;
+                let store = spec.open_blob_store_with_authority()?;
                 (0..8)
                     .map(|index| {
                         open_objectlog_hybrid_backend(
@@ -2763,7 +2744,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 open_objectlog_postgres_backend(
                     &spec,
                     &url,
-                    postgres_pointer_url.as_deref(),
                     recovery_max_tail,
                     node_id,
                     objectlog_byte_budget,
@@ -2981,14 +2961,13 @@ fn open_objectlog_hybrid_backend(
 fn open_objectlog_postgres_backend(
     spec: &ObjectLogSpec,
     projection_url: &str,
-    postgres_pointer_url: Option<&str>,
     recovery_max_tail: u64,
     node_id: u8,
     byte_budget: BufferedByteBudget,
     queue_byte_limit: usize,
 ) -> EngineResult<Arc<ObjectLogPostgresBackend>> {
     let segment_config = spec.segment_config();
-    let store = spec.open_blob_store_with_authority(postgres_pointer_url)?;
+    let store = spec.open_blob_store_with_authority()?;
     // Authoritative group-commit object log (same durability class as facade open_objectlog_postgres).
     let log = ObjectLog::open_group_commit_authoritative_with_blob_store(store, segment_config)?;
     let projection = fireweed_postgres::PostgresRelational::connect(projection_url)?;
@@ -4608,26 +4587,109 @@ mod byte_admission_wiring_tests {
     }
 }
 
-/// Class B (ADR-013) memory-log compositions: durable projection survives process death without
-/// Class A log-replay claims. Exercises the same `MemoryLog × ProjectionStore` assembly the server
-/// match arms use (`recover` seeds definitions/counters from the projection only).
+/// Class B (ADR-013) memory-log cells: full T0–T3 via [`fireweed::open`] / [`fireweed::open_async`].
+///
+/// Cells: `memory×memory`, `memory×sqlite`, `memory×postgres`.
+///
+/// | Layer | Meaning (Class B) |
+/// |-------|-------------------|
+/// | **T0 Construct** | `StorageConfig` validate + open succeeds |
+/// | **T1 Lifecycle** | create_queue → push → claim → complete; claim → fail (reject) |
+/// | **T2 Reopen** | process death → projection-only recover (empty OK for memory×memory) |
+/// | **T3 Contract** | projection durability + rejection; `durable_log_replay` must not be claimed |
+///
+/// Postgres cell runs when `FIREWEED_PG_TEST_URL` is set (and fireweed is built with `postgres`);
+/// otherwise it is skipped with an explicit `eprintln!`.
 #[cfg(test)]
 mod class_b_memory_log_tests {
-    use super::*;
-    use fireweed_core::{
-        EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-        PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
-        UtcTimestamp,
-    };
-    use fireweed_engine::{
-        ControlPlaneStore, LogStore, ProjectionRead, PushPort, PushSpec, QueueKey,
-    };
-    use fireweed_projection::MemoryLog;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    fn class_b_qdef() -> QueueDefinition {
+    use fireweed::{
+        ClientItemKey, ConfigSecret, EligibilityPolicy, LogConfig, NewItem, OrderingMode,
+        PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
+        ProjectionStoreConfig, QueueDefinition, QueueId, QueueKey, RecoveryPolicy,
+        RecurrencePolicy, ResponseBarrier, RetryPolicy, SegmentConfig, StorageConfig, SystemClock,
+        TenantId, open_async,
+    };
+    use fireweed_conformance::matrix_classes::{
+        CellConformanceClaims, MatrixCell, MatrixLog, MatrixProjection, ProductDurabilityClass,
+        register_suite_claims, validate_claims_for_cell,
+    };
+
+    static FIXTURE_ORDINAL: AtomicU64 = AtomicU64::new(0);
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ClassBProjection {
+        Memory,
+        Sqlite,
+        Postgres,
+    }
+
+    impl ClassBProjection {
+        fn name(self) -> &'static str {
+            match self {
+                Self::Memory => "memory",
+                Self::Sqlite => "sqlite",
+                Self::Postgres => "postgres",
+            }
+        }
+
+        fn is_durable(self) -> bool {
+            !matches!(self, Self::Memory)
+        }
+
+        fn matrix_projection(self) -> MatrixProjection {
+            match self {
+                Self::Memory => MatrixProjection::Memory,
+                Self::Sqlite => MatrixProjection::Sqlite,
+                Self::Postgres => MatrixProjection::Postgres,
+            }
+        }
+    }
+
+    struct FixtureRoot(PathBuf);
+
+    impl FixtureRoot {
+        fn new(label: &str) -> Self {
+            let ordinal = FIXTURE_ORDINAL.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "fireweed-class-b-t0t3-{label}-{}-{ordinal}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("class B fixture root");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for FixtureRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn segments() -> SegmentConfig {
+        SegmentConfig::new(1024 * 1024, 5).expect("valid segments")
+    }
+
+    fn queue_slug(proj: ClassBProjection) -> String {
+        format!(
+            "cb_{}_{}",
+            proj.name(),
+            FIXTURE_ORDINAL.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    fn queue_definition(slug: &str) -> QueueDefinition {
         QueueDefinition {
-            tenant_id: TenantId::new("t1").unwrap(),
-            queue_id: QueueId::new("q1").unwrap(),
+            tenant_id: TenantId::new("class-b-t0t3").unwrap(),
+            queue_id: QueueId::new(slug).unwrap(),
             priority_model: PriorityModel {
                 kind: PriorityModelKind::Int64,
                 direction: PriorityDirection::Ascending,
@@ -4639,9 +4701,9 @@ mod class_b_memory_log_tests {
             eligibility_policy: EligibilityPolicy::default(),
             cohort_policy: None,
             recurrence: RecurrencePolicy::default(),
-            request_id_retention_ms: 60_000,
-            client_item_key_retention_ms: 60_000,
-            terminal_retention_ms: 60_000,
+            request_id_retention_ms: 3_600_000,
+            client_item_key_retention_ms: 3_600_000,
+            terminal_retention_ms: 3_600_000,
             max_lease_duration_ms: 60_000,
             retry_policy: RetryPolicy { max_attempts: 3 },
             max_push_batch_size: 100,
@@ -4654,8 +4716,277 @@ mod class_b_memory_log_tests {
         }
     }
 
-    fn class_b_shard() -> QueueKey {
-        QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
+    fn queue_key(slug: &str) -> QueueKey {
+        QueueKey::new(
+            TenantId::new("class-b-t0t3").unwrap(),
+            QueueId::new(slug).unwrap(),
+        )
+    }
+
+    fn build_class_b_config(proj: ClassBProjection, root: &Path, slug: &str) -> StorageConfig {
+        let projection = match proj {
+            ClassBProjection::Memory => ProjectionStoreConfig::Memory,
+            ClassBProjection::Sqlite => ProjectionStoreConfig::Sqlite {
+                path: root.join("projection.db"),
+            },
+            ClassBProjection::Postgres => {
+                let url = std::env::var("FIREWEED_PG_TEST_URL")
+                    .expect("postgres skip_reason must gate this path");
+                ProjectionStoreConfig::Postgres {
+                    url: ConfigSecret::new(url),
+                }
+            }
+        };
+        StorageConfig {
+            log: LogConfig::Memory,
+            projection,
+            control_plane: None,
+            authority: None,
+            response_barrier: ResponseBarrier::Strict,
+            segments: segments(),
+            namespace: format!("class-b-{}-{}-{}", proj.name(), slug, std::process::id()),
+            recovery: RecoveryPolicy::default(),
+        }
+    }
+
+    /// T3 hard rule: Class B must never register or validate `durable_log_replay`.
+    fn assert_class_b_t3_claims(proj: ClassBProjection) {
+        let cell = MatrixCell::new(MatrixLog::Memory, proj.matrix_projection());
+        assert_eq!(
+            cell.product_durability_class(),
+            ProductDurabilityClass::ClassB,
+            "{} must be product Class B",
+            cell.id()
+        );
+        let max = cell.claims();
+        assert!(
+            !max.durable_log_replay,
+            "Class B {} must not allow durable_log_replay in max claims",
+            cell.id()
+        );
+        // Allowed claims for Class B (core + optional projection_reopen; never log-replay).
+        let allowed = CellConformanceClaims {
+            core: true,
+            durable_log_replay: false,
+            projection_reopen: proj.is_durable(),
+            relational_reconnect: false,
+            eventual_apply: false,
+            in_process_log_read: true,
+        };
+        validate_claims_for_cell(cell, &allowed)
+            .unwrap_or_else(|e| panic!("{} T3 validate_claims: {e}", cell.id()));
+        register_suite_claims(cell, allowed)
+            .unwrap_or_else(|e| panic!("{} T3 register_suite_claims: {e}", cell.id()));
+
+        // Explicit ban: attempting durable_log_replay must fail registration.
+        let illegal = CellConformanceClaims {
+            durable_log_replay: true,
+            ..allowed
+        };
+        let err = validate_claims_for_cell(cell, &illegal)
+            .expect_err("Class B must reject durable_log_replay claim");
+        assert_eq!(err.flag, "durable_log_replay");
+        assert!(
+            err.reason.contains("Class B") || err.reason.contains("memory log"),
+            "ban reason should name Class B / memory log: {}",
+            err.reason
+        );
+    }
+
+    /// Full T0–T3 body for one Class B cell via `fireweed::open_async(StorageConfig)`.
+    async fn run_class_b_cell_t0_t3(proj: ClassBProjection) {
+        let cell_id = format!("memory×{}", proj.name());
+
+        if matches!(proj, ClassBProjection::Postgres)
+            && std::env::var("FIREWEED_PG_TEST_URL").is_err()
+        {
+            eprintln!(
+                "class_b T0-T3: {cell_id} skipped (FIREWEED_PG_TEST_URL unset; rebuild with --features postgres when live PG is available)"
+            );
+            // T3 claims still enforced offline — no durable_log_replay even when the live cell skips.
+            assert_class_b_t3_claims(proj);
+            return;
+        }
+
+        let root = FixtureRoot::new(proj.name());
+        let slug = queue_slug(proj);
+        let definition = queue_definition(&slug);
+        let key = queue_key(&slug);
+        let clock = Arc::new(SystemClock);
+
+        // --- T0 Construct ---
+        let cfg = build_class_b_config(proj, root.path(), &slug);
+        assert!(
+            !cfg.log.is_durable_log(),
+            "{cell_id} T0: memory log is Class B (non-durable)"
+        );
+        cfg.validate()
+            .unwrap_or_else(|e| panic!("{cell_id} T0 validate: {e:?}"));
+        let fireweed = open_async(cfg.clone(), Arc::clone(&clock) as _)
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T0 open(StorageConfig): {e:?}"));
+
+        // --- T1 Lifecycle: create_queue → push → claim → complete; push → claim → fail ---
+        fireweed
+            .create_queue(definition.clone())
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T1 create_queue: {e:?}"));
+
+        let complete_id = fireweed
+            .push(
+                &key,
+                NewItem {
+                    client_item_key: Some(
+                        ClientItemKey::new(format!("{slug}_complete")).unwrap(),
+                    ),
+                    priority: Some(PriorityValue::Int64(10)),
+                    ..NewItem::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T1 push(complete path): {e:?}"));
+
+        let claimed = fireweed
+            .claim(&key, 1, 30_000)
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T1 claim: {e:?}"));
+        assert_eq!(claimed.len(), 1, "{cell_id} T1 claim batch");
+        assert_eq!(claimed[0].item_id, complete_id);
+
+        fireweed
+            .complete(&key, claimed.iter().map(|item| item.item_id))
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T1 complete: {e:?}"));
+
+        // Reject path: fail dead-letters a second claimed item.
+        let fail_id = fireweed
+            .push(
+                &key,
+                NewItem {
+                    client_item_key: Some(ClientItemKey::new(format!("{slug}_fail")).unwrap()),
+                    priority: Some(PriorityValue::Int64(11)),
+                    ..NewItem::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T1 push(fail path): {e:?}"));
+        let fail_claimed = fireweed
+            .claim(&key, 1, 30_000)
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T1 claim(fail path): {e:?}"));
+        assert_eq!(fail_claimed.len(), 1);
+        assert_eq!(fail_claimed[0].item_id, fail_id);
+        fireweed
+            .fail(&key, fail_claimed.iter().map(|item| item.item_id))
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T1 fail/reject: {e:?}"));
+
+        let metrics_after_t1 = fireweed
+            .metrics(&key)
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T1 metrics: {e:?}"));
+        assert_eq!(
+            metrics_after_t1.complete, 1,
+            "{cell_id} T1: one completed item"
+        );
+        assert_eq!(
+            metrics_after_t1.failed, 1,
+            "{cell_id} T1: one failed (rejected) item"
+        );
+        assert_eq!(
+            metrics_after_t1.pending, 0,
+            "{cell_id} T1: no pending after finalize+fail"
+        );
+        assert_eq!(
+            metrics_after_t1.leased, 0,
+            "{cell_id} T1: no leased after finalize+fail"
+        );
+
+        // Seed a pending item for T2 reopen (not claimed).
+        let _pending_id = fireweed
+            .push(
+                &key,
+                NewItem {
+                    client_item_key: Some(
+                        ClientItemKey::new(format!("{slug}_pending")).unwrap(),
+                    ),
+                    priority: Some(PriorityValue::Int64(20)),
+                    ..NewItem::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T2 seed push: {e:?}"));
+        assert_eq!(
+            fireweed.metrics(&key).await.unwrap().pending,
+            1,
+            "{cell_id}: seed pending before process death"
+        );
+
+        drop(fireweed);
+
+        // --- T2 Reopen (class-correct) ---
+        let reopened = open_async(cfg, clock as _)
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T2 reopen open(StorageConfig): {e:?}"));
+
+        if proj.is_durable() {
+            // Projection-only recover: pending + terminal states survive; no log rebuild claim.
+            let m = reopened
+                .metrics(&key)
+                .await
+                .unwrap_or_else(|e| panic!("{cell_id} T2 metrics (durable proj): {e:?}"));
+            assert_eq!(
+                m.pending, 1,
+                "{cell_id} T2: durable projection keeps 1 pending (projection-only reopen, not log replay)"
+            );
+            assert_eq!(
+                m.complete, 1,
+                "{cell_id} T2: complete survives via projection"
+            );
+            assert_eq!(
+                m.failed, 1,
+                "{cell_id} T2: failed/rejected survives via projection"
+            );
+
+            let claimed = reopened
+                .claim(&key, 1, 30_000)
+                .await
+                .unwrap_or_else(|e| panic!("{cell_id} T2 claim: {e:?}"));
+            assert_eq!(claimed.len(), 1, "{cell_id} T2 claim pending");
+            reopened
+                .complete(&key, claimed.iter().map(|item| item.item_id))
+                .await
+                .unwrap_or_else(|e| panic!("{cell_id} T2 complete: {e:?}"));
+        } else {
+            // memory×memory: fully process-local. Empty reopen is correct Class B semantics.
+            let outcome = reopened
+                .create_queue(definition)
+                .await
+                .unwrap_or_else(|e| panic!("{cell_id} T2 create_queue (process-local): {e:?}"));
+            assert!(
+                outcome.created,
+                "{cell_id} T2: reopen must not recover prior queue (process-local Class B)"
+            );
+            let m = reopened
+                .metrics(&key)
+                .await
+                .unwrap_or_else(|e| panic!("{cell_id} T2 metrics (process-local): {e:?}"));
+            assert_eq!(
+                m.pending, 0,
+                "{cell_id} T2 memory×memory: empty reopen is OK (Class B process-local)"
+            );
+            assert_eq!(m.complete, 0, "{cell_id} T2: no durable complete state");
+            assert_eq!(m.failed, 0, "{cell_id} T2: no durable failed state");
+            eprintln!(
+                "class_b T0-T3: {cell_id} T2 process-local empty reopen (documented Class B)"
+            );
+        }
+
+        drop(reopened);
+
+        // --- T3 Contract: claims ban + projection durability already exercised in T2 ---
+        assert_class_b_t3_claims(proj);
+        eprintln!("class_b T0-T3: {cell_id} passed (no durable_log_replay claim)");
     }
 
     #[test]
@@ -4688,91 +5019,610 @@ mod class_b_memory_log_tests {
             !mem_sqlite.contains("rebuilds the in-memory projection by replaying"),
             "Class B must not claim log-replay rebuild"
         );
+        // Composition must not advertise Class A log-replay product claims for memory log arms.
+        assert!(
+            !mem_sqlite.contains("durable_log_replay"),
+            "Class B arm must not mention durable_log_replay"
+        );
+    }
+
+    /// T3 offline: every Class B cell's max claim set bans `durable_log_replay`.
+    #[test]
+    fn class_b_three_cells_never_claim_durable_log_replay() {
+        for proj in [
+            ClassBProjection::Memory,
+            ClassBProjection::Sqlite,
+            ClassBProjection::Postgres,
+        ] {
+            assert_class_b_t3_claims(proj);
+        }
     }
 
     #[tokio::test]
-    async fn memory_sqlite_projection_survives_reopen_without_log_replay() {
-        let path = std::env::temp_dir().join(format!(
-            "fireweed-class-b-memory-sqlite-{}-{:?}.db",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
-        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
-        let path_s = path.to_str().expect("utf8 path");
+    async fn class_b_memory_memory_t0_t3() {
+        run_class_b_cell_t0_t3(ClassBProjection::Memory).await;
+    }
 
-        let def = class_b_qdef();
-        let shard = class_b_shard();
-        let now = UtcTimestamp::new(1_000, 0).unwrap();
+    #[tokio::test]
+    async fn class_b_memory_sqlite_t0_t3() {
+        run_class_b_cell_t0_t3(ClassBProjection::Sqlite).await;
+    }
 
-        {
-            let log = MemoryLog::new();
-            assert!(
-                !log.is_durable_log(),
-                "MemoryLog must report non-durable (Class B)"
-            );
-            let projection = fireweed_sqlite::SqliteProjectionStore::open(path_s)
-                .expect("open sqlite projection");
-            let backend = ComposedBackend::new(log, projection, InProcessControlPlane::new())
-                .recover()
-                .expect("fresh Class B recover is a no-op");
-            backend
-                .create_queue(def.clone())
-                .await
-                .expect("create_queue");
-            let pushed = backend
-                .push(&shard, vec![PushSpec::default()], now, None)
-                .await
-                .expect("push");
-            assert_eq!(pushed.len(), 1);
-            assert_eq!(
-                backend.metrics(&shard).await.expect("metrics").pending,
-                1,
-                "item visible in durable projection before process death"
-            );
+    /// `memory×postgres` Class B: requires live `FIREWEED_PG_TEST_URL` (and fireweed `postgres` feature).
+    /// Skips with `eprintln!` when the fixture is absent; T3 claim ban still runs offline.
+    #[tokio::test]
+    async fn class_b_memory_postgres_t0_t3() {
+        run_class_b_cell_t0_t3(ClassBProjection::Postgres).await;
+    }
+
+    /// Table registration: all three Class B cells are covered by the T0–T3 harness.
+    #[tokio::test]
+    async fn class_b_all_three_cells_t0_t3() {
+        for proj in [
+            ClassBProjection::Memory,
+            ClassBProjection::Sqlite,
+            ClassBProjection::Postgres,
+        ] {
+            run_class_b_cell_t0_t3(proj).await;
+        }
+    }
+}
+
+/// Full T0–T4 bar for the three Class A **filesystem** log cells
+/// (`filesystem×memory`, `filesystem×sqlite`, `filesystem×postgres`).
+///
+/// Governing bar: `docs/helix/04-build/storage-matrix-completion-brief.md` §2
+///
+/// | Layer | Coverage here |
+/// |-------|---------------|
+/// | **T0 Construct** | open product backends over LocalFsBlobStore |
+/// | **T1 Lifecycle** | create_queue → push → claim → finalize; invalid entity rejected |
+/// | **T2 Reopen** | process-local drop → reopen recovers pending (Class A log SoT) |
+/// | **T3 Contract** | request_id Fresh→Replayed (AC-TXN-3); reject has no durable effect (AC-TXN-2) |
+/// | **T4 Deploy** | chart CI values declare public axes for chart-installable cells |
+///
+/// Live postgres cells need `--features postgres` and `FIREWEED_PG_TEST_URL`.
+#[cfg(test)]
+mod filesystem_matrix_t0_t4_tests {
+    use super::*;
+    use bytes::Bytes;
+    use fireweed_core::{
+        EligibilityPolicy, LeaseToken, Metadata, OrderingMode, PriorityDirection, PriorityModel,
+        PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy,
+        RequestId, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
+    };
+    use fireweed_engine::{
+        ClaimCompatibility, ClaimPort, ClaimRequest, ControlPlaneStore, EngineError, FinalizeKind,
+        FinalizeOutcome, FinalizePort, ProjectionRead, PushPort, PushSpec, QueueKey,
+    };
+    use fireweed_objectlog::segmented::LocalFsBlobStore;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static FS_ORDINAL: AtomicU64 = AtomicU64::new(0);
+
+    struct FsFixture {
+        root: PathBuf,
+    }
+
+    impl FsFixture {
+        fn new(label: &str) -> Self {
+            let ordinal = FS_ORDINAL.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "fireweed-fs-matrix-{label}-{}-{ordinal}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).expect("filesystem matrix fixture root");
+            Self { root }
         }
 
-        {
-            let log = MemoryLog::new();
-            assert!(!LogStore::is_durable_log(&log));
-            assert!(
-                log.high_water(&shard).ok().flatten().is_none(),
-                "fresh MemoryLog has no entries to replay (Class B: no log rebuild)"
-            );
-            let projection = fireweed_sqlite::SqliteProjectionStore::open(path_s)
-                .expect("reopen sqlite projection");
-            let backend = ComposedBackend::new(log, projection, InProcessControlPlane::new())
-                .recover()
-                .expect("Class B projection-only recover");
-            assert_eq!(
-                backend
-                    .metrics(&shard)
-                    .await
-                    .expect("metrics after reopen")
-                    .pending,
-                1,
-                "pending item survives via durable projection after process death (not log replay)"
-            );
-            let pushed = backend
-                .push(
-                    &shard,
-                    vec![PushSpec::default()],
-                    UtcTimestamp::new(2_000, 0).unwrap(),
-                    None,
+        fn path(&self) -> &Path {
+            &self.root
+        }
+
+        fn object_root(&self) -> PathBuf {
+            let p = self.root.join("object-log");
+            std::fs::create_dir_all(&p).expect("object-log root");
+            p
+        }
+
+        fn projection_path(&self) -> String {
+            self.root
+                .join("projection.db")
+                .to_str()
+                .expect("utf8 projection path")
+                .to_owned()
+        }
+    }
+
+    impl Drop for FsFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn seal_each() -> SegmentConfig {
+        // Seal every command so reopen does not depend on a background flusher.
+        SegmentConfig::new(1, 1).expect("valid segment config")
+    }
+
+    fn queue_def(tenant: &str, queue: &str) -> QueueDefinition {
+        QueueDefinition {
+            tenant_id: TenantId::new(tenant).unwrap(),
+            queue_id: QueueId::new(queue).unwrap(),
+            priority_model: PriorityModel {
+                kind: PriorityModelKind::Int64,
+                direction: PriorityDirection::Ascending,
+                tie_breaker: PriorityTieBreaker::CreatedSequence,
+            },
+            ordering_mode: OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 60_000,
+            eligibility_policy: EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: RecurrencePolicy::default(),
+            request_id_retention_ms: 3_600_000,
+            client_item_key_retention_ms: 3_600_000,
+            terminal_retention_ms: 3_600_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 100,
+            max_claim_batch_size: 100,
+            max_eligible_group_size: None,
+            secondary_indexes: vec![],
+            entity_schema: Some(
+                serde_json::from_value(
+                    json!({
+                        "entity_schema": {
+                            "type": "object",
+                            "required": ["name"],
+                            "properties": {
+                                "name": {"type": "string"}
+                            }
+                        }
+                    }),
                 )
-                .await
-                .expect("post-reopen push");
-            assert_eq!(pushed.len(), 1);
-            assert_eq!(
-                backend.metrics(&shard).await.expect("metrics").pending,
-                2,
-                "post-reopen push applies to the durable projection"
-            );
+                .unwrap(),
+            ),
+            typed_indexes: vec![],
+            emit_change_records: true,
         }
+    }
 
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
-        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    fn shard_of(def: &QueueDefinition) -> QueueKey {
+        QueueKey::new(def.tenant_id.clone(), def.queue_id.clone())
+    }
+
+    fn now() -> UtcTimestamp {
+        UtcTimestamp::new(1_700_000_000, 0).unwrap()
+    }
+
+    fn claim_req(shard: &QueueKey, token: &str) -> ClaimRequest {
+        ClaimRequest {
+            shard: shard.clone(),
+            worker_id: WorkerId::new("fs-matrix-worker").unwrap(),
+            max_items: 1,
+            lease_token: LeaseToken::new(token).unwrap(),
+            lease_expires_at: UtcTimestamp::new(now().seconds + 60, 0).unwrap(),
+            now: now(),
+            eligibility_time: None,
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: None,
+        }
+    }
+
+    fn valid_spec(payload: &str) -> PushSpec {
+        PushSpec {
+            client_item_key: None,
+            priority: None,
+            not_before: None,
+            group_key: None,
+            payload: Some(Bytes::from(payload.to_string())),
+            fields: BTreeMap::new(),
+            metadata: Metadata::default(),
+            cohort_size: None,
+            gate_keys: Vec::new(),
+            entity: Some(json!({"name": payload})),
+        }
+    }
+
+    fn invalid_spec(payload: &str) -> PushSpec {
+        PushSpec {
+            entity: Some(json!({"count": payload.len()})),
+            ..valid_spec(payload)
+        }
+    }
+
+    /// Shared T0–T3 body for any filesystem log backend implementing the engine ports.
+    async fn run_class_a_filesystem_t0_t3<B>(
+        cell_id: &str,
+        open: impl Fn() -> B,
+        reopen: impl Fn() -> B,
+    ) where
+        B: ControlPlaneStore + PushPort + ClaimPort + FinalizePort + ProjectionRead,
+    {
+        let def = queue_def("fs-matrix", cell_id);
+        let shard = shard_of(&def);
+
+        // --- T0 Construct + T1 Lifecycle ---
+        let backend = open();
+        backend
+            .create_queue(def.clone())
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T0/T1 create_queue: {e:?}"));
+
+        // T3 AC-TXN-2: rejection has no durable effect.
+        let reject_err = backend
+            .push(&shard, vec![invalid_spec("bad")], now(), None)
+            .await
+            .expect_err("{cell_id} T1/T3 invalid entity must reject");
+        assert!(
+            matches!(reject_err, EngineError::EntitySchemaViolation(_)),
+            "{cell_id} T1/T3: expected EntitySchemaViolation, got {reject_err:?}"
+        );
+        assert_eq!(
+            backend.metrics(&shard).await.unwrap().pending,
+            0,
+            "{cell_id} T1/T3: rejected push must leave pending=0"
+        );
+
+        // T3 AC-TXN-3: request_id Fresh then Replayed (same body).
+        let rid = RequestId::new(format!("{cell_id}-req-1")).unwrap();
+        let first = backend
+            .push_with_request_id(
+                &shard,
+                rid.clone(),
+                vec![valid_spec("lifecycle")],
+                now(),
+                None,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T1 push_with_request_id: {e:?}"));
+        assert!(
+            first.is_fresh(),
+            "{cell_id} T3: first request_id must be Fresh, got {first:?}"
+        );
+        assert_eq!(first.len(), 1);
+        assert_eq!(backend.metrics(&shard).await.unwrap().pending, 1);
+
+        let replay = backend
+            .push_with_request_id(
+                &shard,
+                rid.clone(),
+                vec![valid_spec("lifecycle")],
+                now(),
+                None,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T3 replay: {e:?}"));
+        assert!(
+            replay.is_replayed(),
+            "{cell_id} T3: same request_id + body must be Replayed, got {replay:?}"
+        );
+        assert_eq!(
+            first.item_ids, replay.item_ids,
+            "{cell_id} T3: replay must reuse committed item ids"
+        );
+        assert_eq!(
+            backend.metrics(&shard).await.unwrap().pending,
+            1,
+            "{cell_id} T3: replay must not double-insert"
+        );
+
+        // T1 claim + finalize (complete).
+        let claimed = backend
+            .claim(claim_req(&shard, "lease-lifecycle"))
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T1 claim: {e:?}"));
+        assert_eq!(claimed.items.len(), 1, "{cell_id} T1 claim count");
+        assert_eq!(claimed.items[0].item_id, first.item_ids[0]);
+        backend
+            .finalize(
+                &shard,
+                vec![FinalizeOutcome::new(
+                    claimed.items[0].item_id,
+                    FinalizeKind::Complete,
+                )],
+                now(),
+                None,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T1 finalize: {e:?}"));
+        let metrics = backend.metrics(&shard).await.unwrap();
+        assert_eq!(metrics.pending, 0, "{cell_id} T1 pending after complete");
+        assert_eq!(metrics.complete, 1, "{cell_id} T1 complete count");
+
+        // Seed pending for T2 reopen (Class A log recovery).
+        let pending_rid = RequestId::new(format!("{cell_id}-pending")).unwrap();
+        let pending = backend
+            .push_with_request_id(
+                &shard,
+                pending_rid.clone(),
+                vec![valid_spec("pending-seed")],
+                now(),
+                None,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T2 seed: {e:?}"));
+        assert!(pending.is_fresh());
+        assert_eq!(backend.metrics(&shard).await.unwrap().pending, 1);
+        drop(backend);
+
+        // --- T2 Reopen (Class A): durable log recovers pending ---
+        let reopened = reopen();
+        // create_queue is idempotent reopen/recovery entry for object-log backends.
+        let outcome = reopened
+            .create_queue(def.clone())
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T2 create_queue/reopen: {e:?}"));
+        assert!(
+            !outcome.created,
+            "{cell_id} T2: queue must already exist via Class A log recovery"
+        );
+        assert_eq!(
+            reopened.metrics(&shard).await.unwrap().pending,
+            1,
+            "{cell_id} T2 Class A: expected 1 pending after reopen"
+        );
+
+        // T3 request_id still Replayed across crash (AC-TXN-1/3 durability).
+        let after_crash = reopened
+            .push_with_request_id(
+                &shard,
+                pending_rid,
+                vec![valid_spec("pending-seed")],
+                now(),
+                None,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T3 post-reopen replay: {e:?}"));
+        assert!(
+            after_crash.is_replayed(),
+            "{cell_id} T3: request_id must replay across reopen, got {after_crash:?}"
+        );
+        assert_eq!(after_crash.item_ids, pending.item_ids);
+        assert_eq!(reopened.metrics(&shard).await.unwrap().pending, 1);
+
+        let claimed = reopened
+            .claim(claim_req(&shard, "lease-reopen"))
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T2 claim: {e:?}"));
+        assert_eq!(claimed.items.len(), 1, "{cell_id} T2 claim after reopen");
+        reopened
+            .finalize(
+                &shard,
+                vec![FinalizeOutcome::new(
+                    claimed.items[0].item_id,
+                    FinalizeKind::Complete,
+                )],
+                now(),
+                None,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T2 finalize: {e:?}"));
+        assert_eq!(
+            reopened.metrics(&shard).await.unwrap().pending,
+            0,
+            "{cell_id} T2: pending cleared after post-reopen complete"
+        );
+    }
+
+    /// filesystem×memory — Class A: durable local object-log + process-local projection rebuild on open.
+    #[tokio::test]
+    async fn filesystem_memory_t0_t3_lifecycle_recovery_and_request_id() {
+        let fx = FsFixture::new("memory");
+        let object_root = fx.object_root();
+        let config = seal_each();
+
+        run_class_a_filesystem_t0_t3(
+            "filesystem×memory",
+            || {
+                SegmentedObjectLogInMemoryBackend::open(object_root.clone(), config)
+                    .expect("open filesystem×memory")
+            },
+            || {
+                SegmentedObjectLogInMemoryBackend::open(object_root.clone(), config)
+                    .expect("reopen filesystem×memory")
+            },
+        )
+        .await;
+    }
+
+    /// filesystem×sqlite — Class A: durable object-log + durable SQLite projection.
+    #[tokio::test]
+    async fn filesystem_sqlite_t0_t3_lifecycle_recovery_and_request_id() {
+        let fx = FsFixture::new("sqlite");
+        let object_root = fx.object_root();
+        let proj = fx.projection_path();
+        let config = seal_each();
+
+        run_class_a_filesystem_t0_t3(
+            "filesystem×sqlite",
+            || {
+                SegmentedObjectLogSqliteBackend::open(
+                    object_root.clone(),
+                    &proj,
+                    config,
+                )
+                .expect("open filesystem×sqlite")
+            },
+            || {
+                SegmentedObjectLogSqliteBackend::open(
+                    object_root.clone(),
+                    &proj,
+                    config,
+                )
+                .expect("reopen filesystem×sqlite")
+            },
+        )
+        .await;
+    }
+
+    /// filesystem×postgres — Class A: durable object-log + Postgres relational projection.
+    /// Skips cleanly when `--features postgres` is off or `FIREWEED_PG_TEST_URL` is unset.
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn filesystem_postgres_t0_t3_lifecycle_recovery_and_request_id_when_pg_available() {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
+            eprintln!(
+                "filesystem×postgres T0–T3 SKIPPED — set FIREWEED_PG_TEST_URL to a live DB"
+            );
+            return;
+        };
+
+        let schema = format!(
+            "fw_fs_matrix_{}_{}",
+            std::process::id(),
+            FS_ORDINAL.fetch_add(1, Ordering::Relaxed)
+        );
+        let mut client =
+            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
+                .expect("connect for schema");
+        client
+            .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema};"))
+            .expect("create schema");
+        drop(client);
+
+        let scoped = if url.contains('?') {
+            format!("{url}&options=-csearch_path%3D{schema}")
+        } else {
+            format!("{url}?options=-csearch_path%3D{schema}")
+        };
+
+        let fx = FsFixture::new("postgres");
+        let object_root = fx.object_root();
+        let segment_config = seal_each();
+        let log_spec = ObjectLogSpec::local(&object_root, segment_config);
+        let budget = BufferedByteBudget::new(BufferedByteBudgetConfig::new(8_192).unwrap());
+
+        // open/reopen share the same filesystem log root + postgres search_path.
+        run_class_a_filesystem_t0_t3(
+            "filesystem×postgres",
+            || {
+                let backend = open_objectlog_postgres_backend(
+                    &log_spec,
+                    &scoped,
+                    DEFAULT_RECOVERY_MAX_TAIL,
+                    0,
+                    budget.clone(),
+                    4_096,
+                )
+                .expect("open filesystem×postgres");
+                // Return the Arc's inner by cloning the Arc and dereferencing through a wrapper
+                // that implements the ports — ComposedBackend is behind Arc; use Arc as the handle.
+                // The ports are implemented on ComposedBackend; Arc<ObjectLogPostgresBackend>
+                // does not auto-impl PushPort. Drive via Arc by re-opening each time instead.
+                // For the first open we need a value of type B. Use a re-open each call:
+                drop(backend);
+                open_objectlog_postgres_backend(
+                    &log_spec,
+                    &scoped,
+                    DEFAULT_RECOVERY_MAX_TAIL,
+                    0,
+                    budget.clone(),
+                    4_096,
+                )
+                .expect("open filesystem×postgres (owned)")
+            },
+            || {
+                open_objectlog_postgres_backend(
+                    &log_spec,
+                    &scoped,
+                    DEFAULT_RECOVERY_MAX_TAIL,
+                    0,
+                    budget.clone(),
+                    4_096,
+                )
+                .expect("reopen filesystem×postgres")
+            },
+        )
+        .await;
+
+        // Cleanup schema best-effort.
+        if let Ok(mut client) =
+            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
+        {
+            let _ = client.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE;"));
+        }
+        let _ = object_root;
+        let _ = LocalFsBlobStore::open; // silence unused when postgres feature only
+    }
+
+    /// T4 Deploy: chart CI values cover chart-installable filesystem cells with public axes only.
+    #[test]
+    fn filesystem_t4_deploy_ci_values_cover_chart_installable_cells() {
+        let chart_ci = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../charts/fireweed-queue/ci");
+
+        let memory = std::fs::read_to_string(chart_ci.join("filesystem-memory-values.yaml"))
+            .expect("filesystem-memory-values.yaml must exist for T4");
+        assert!(
+            memory.contains("backend: filesystem") && memory.contains("backend: memory"),
+            "filesystem-memory CI values must select filesystem log × memory projection:\n{memory}"
+        );
+
+        let sqlite = std::fs::read_to_string(chart_ci.join("filesystem-sqlite-values.yaml"))
+            .expect("filesystem-sqlite-values.yaml must exist for T4");
+        assert!(
+            sqlite.contains("backend: filesystem") && sqlite.contains("backend: sqlite"),
+            "filesystem-sqlite CI values must select filesystem log × sqlite projection:\n{sqlite}"
+        );
+
+        // filesystem×postgres is chart-installable when a projection secret is supplied.
+        let pg_path = chart_ci.join("filesystem-postgres-values.yaml");
+        let postgres = std::fs::read_to_string(&pg_path).unwrap_or_else(|_| {
+            panic!(
+                "filesystem-postgres-values.yaml missing at {} — T4 requires a chart CI values file \
+                 for the filesystem×postgres cell",
+                pg_path.display()
+            )
+        });
+        assert!(
+            postgres.contains("backend: filesystem") && postgres.contains("backend: postgres"),
+            "filesystem-postgres CI values must select filesystem log × postgres projection:\n{postgres}"
+        );
+
+        // Helm gate must register the two local filesystem cells (postgres optional in gate list).
+        let helm_gate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/ci/helm-gate.sh");
+        let gate = std::fs::read_to_string(&helm_gate).expect("helm-gate.sh");
+        assert!(
+            gate.contains("filesystem-memory") && gate.contains("filesystem-sqlite"),
+            "helm-gate must render filesystem-memory and filesystem-sqlite combinations"
+        );
+        assert!(
+            gate.contains("assert_filesystem_memory_contract")
+                && gate.contains("assert_filesystem_sqlite_contract"),
+            "helm-gate must assert filesystem cell contracts"
+        );
+    }
+
+    /// Structural: product composition root keeps the three filesystem projection arms.
+    #[test]
+    fn filesystem_composition_root_owns_all_three_projection_arms() {
+        let source = include_str!("lib.rs");
+        assert!(
+            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::InMemory"),
+            "filesystem×memory arm"
+        );
+        assert!(
+            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::Sqlite"),
+            "filesystem×sqlite arm"
+        );
+        assert!(
+            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::Postgres"),
+            "filesystem×postgres arm"
+        );
+        assert!(
+            source.contains("LocalFilesystem { .. }) => \"filesystem\""),
+            "product label filesystem"
+        );
+        assert!(
+            source.contains("open_objectlog_postgres_backend"),
+            "filesystem|s3 × postgres composition root"
+        );
     }
 }

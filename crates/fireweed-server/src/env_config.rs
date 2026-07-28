@@ -1038,7 +1038,8 @@ mod tests {
             }
             if projection == "inmemory" {
                 assert!(
-                    err.0.contains("inmemory is not a public product projection"),
+                    err.0
+                        .contains("inmemory is not a public product projection"),
                     "{}",
                     err.0
                 );
