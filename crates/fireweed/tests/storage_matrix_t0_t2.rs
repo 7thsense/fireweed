@@ -1229,8 +1229,7 @@ fn s3_log_t3_t4_evidence_and_helm_values_present() {
         );
     }
 
-    let chart_ci =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../charts/fireweed-queue/ci");
+    let chart_ci = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../charts/fireweed-queue/ci");
     for name in [
         "s3-memory-values.yaml",
         "s3-sqlite-values.yaml",

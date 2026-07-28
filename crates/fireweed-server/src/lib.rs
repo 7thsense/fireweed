@@ -7250,12 +7250,7 @@ mod postgres_log_matrix_tests {
 
     fn schema_name(prefix: &str) -> String {
         let n = POSTGRES_LOG_FIXTURE.fetch_add(1, Ordering::Relaxed);
-        format!(
-            "fw_pg_log_{}_{}_{}",
-            prefix,
-            std::process::id(),
-            n
-        )
+        format!("fw_pg_log_{}_{}_{}", prefix, std::process::id(), n)
     }
 
     /// T0: composition root wires all three postgres-log × projection cells.
@@ -7488,8 +7483,9 @@ mod postgres_log_matrix_tests {
         let schema = schema_name("pgpg");
 
         {
-            let backend = fireweed_postgres::PostgresRelationalBackend::connect_in_schema(&url, &schema)
-                .unwrap_or_else(|e| panic!("{cell} T0 open: {e:?}"));
+            let backend =
+                fireweed_postgres::PostgresRelationalBackend::connect_in_schema(&url, &schema)
+                    .unwrap_or_else(|e| panic!("{cell} T0 open: {e:?}"));
             lifecycle_push_claim_complete(&backend, cell).await;
             let pending = backend
                 .push(&shard(), vec![PushSpec::default()], ts(10), None)
@@ -7668,8 +7664,9 @@ mod postgres_log_matrix_tests {
                 let proj = cell_base.join(format!("{tag}-proj.db"));
                 let log = fireweed_postgres::PostgresLog::connect_in_schema(&url_c, &log_schema)
                     .expect("connect postgres log");
-                let projection = fireweed_sqlite::SqliteProjectionStore::open(proj.to_str().unwrap())
-                    .expect("open sqlite projection");
+                let projection =
+                    fireweed_sqlite::SqliteProjectionStore::open(proj.to_str().unwrap())
+                        .expect("open sqlite projection");
                 ComposedBackend::new(log, projection, InProcessControlPlane::new())
                     .recover()
                     .expect("recover postgres×sqlite")
@@ -7692,8 +7689,9 @@ mod postgres_log_matrix_tests {
                 let proj = cell_base.join(format!("{tag}-proj.db"));
                 let log = fireweed_postgres::PostgresLog::connect_in_schema(&url_c, &log_schema)
                     .expect("connect postgres log");
-                let projection = fireweed_sqlite::SqliteProjectionStore::open(proj.to_str().unwrap())
-                    .expect("open sqlite projection");
+                let projection =
+                    fireweed_sqlite::SqliteProjectionStore::open(proj.to_str().unwrap())
+                        .expect("open sqlite projection");
                 ComposedBackend::new(log, projection, InProcessControlPlane::new())
                     .recover()
                     .expect("recover postgres×sqlite")
@@ -7716,8 +7714,9 @@ mod postgres_log_matrix_tests {
                 let proj = cell_base.join(format!("{tag}-proj.db"));
                 let log = fireweed_postgres::PostgresLog::connect_in_schema(&url_c, &log_schema)
                     .expect("connect postgres log");
-                let projection = fireweed_sqlite::SqliteProjectionStore::open(proj.to_str().unwrap())
-                    .expect("open sqlite projection");
+                let projection =
+                    fireweed_sqlite::SqliteProjectionStore::open(proj.to_str().unwrap())
+                        .expect("open sqlite projection");
                 ComposedBackend::new(log, projection, InProcessControlPlane::new())
                     .recover()
                     .expect("recover postgres×sqlite")
@@ -7886,14 +7885,17 @@ mod postgres_log_matrix_tests {
         for axis in ["postgres×memory", "postgres×sqlite", "postgres×postgres"] {
             let escaped = axis.replace('×', "\\u00d7");
             assert!(
-                body.contains(axis) || body.contains(&escaped) || body.contains(&axis.replace('×', "/")),
+                body.contains(axis)
+                    || body.contains(&escaped)
+                    || body.contains(&axis.replace('×', "/")),
                 "evidence must name axis {axis} (or slash alias); body head: {}",
                 body.chars().take(200).collect::<String>()
             );
         }
 
         // Memory composition also appears in the legacy composed-postgres evidence file.
-        let legacy = fireweed_conformance::fault::evidence_dir().join("tp003-ac-txn-matrix-postgres.jsonl");
+        let legacy =
+            fireweed_conformance::fault::evidence_dir().join("tp003-ac-txn-matrix-postgres.jsonl");
         if legacy.is_file() {
             let legacy_body = std::fs::read_to_string(&legacy).unwrap();
             assert!(
