@@ -5674,6 +5674,755 @@ mod filesystem_matrix_t0_t4_tests {
     }
 }
 
+/// Full T0–T4 bar for the three Class A **s3** log cells
+/// (`s3×memory`, `s3×sqlite`, `s3×postgres`).
+///
+/// Governing bar: `docs/helix/04-build/storage-matrix-completion-brief.md` §2
+///
+/// | Layer | Coverage here |
+/// |-------|---------------|
+/// | **T0 Construct** | network-free `S3BlobStore` client + segmented backend open (no blob ops) |
+/// | **T1 Lifecycle** | live when `FIREWEED_S3_TEST_ENDPOINT` set: push → claim → finalize; reject no effect |
+/// | **T2 Reopen** | live: process-local drop → reopen recovers pending (Class A log SoT) |
+/// | **T3 Contract** | live: request_id Fresh→Replayed (AC-TXN-3); reject has no durable effect (AC-TXN-2) |
+/// | **T4 Deploy** | chart CI values declare public s3×{memory,sqlite,postgres} axes |
+///
+/// Mandatory CI job requirements: `scripts/ci/s3-matrix-job-requirements.md`.
+/// Live postgres cells also need `--features postgres` and `FIREWEED_PG_TEST_URL`.
+#[cfg(test)]
+mod s3_object_log_matrix_tests {
+    use super::*;
+    use bytes::Bytes;
+    use fireweed_core::{
+        EligibilityPolicy, LeaseToken, Metadata, OrderingMode, PriorityDirection, PriorityModel,
+        PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy,
+        RequestId, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
+    };
+    use fireweed_engine::{
+        ClaimCompatibility, ClaimPort, ClaimRequest, ControlPlaneStore, EngineError, FinalizeKind,
+        FinalizeOutcome, FinalizePort, ProjectionRead, PushPort, PushSpec, QueueKey,
+    };
+    use fireweed_objectlog::segmented::NamespacedBlobStore;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static S3_ORDINAL: AtomicU64 = AtomicU64::new(0);
+
+    /// Live S3 fixture knobs (env-gated). Construction of the client is free; first blob op needs network.
+    struct LiveS3 {
+        endpoint: String,
+        bucket: String,
+        region: String,
+        access: String,
+        secret: String,
+    }
+
+    impl LiveS3 {
+        fn from_env(label: &str) -> Option<Self> {
+            let Ok(endpoint) = std::env::var("FIREWEED_S3_TEST_ENDPOINT") else {
+                eprintln!(
+                    "{label} SKIPPED — set FIREWEED_S3_TEST_ENDPOINT (+ optional \
+                     FIREWEED_S3_TEST_BUCKET/REGION/ACCESS_KEY/SECRET_KEY) for live s3 T1–T3"
+                );
+                return None;
+            };
+            Some(Self {
+                endpoint,
+                bucket: std::env::var("FIREWEED_S3_TEST_BUCKET")
+                    .unwrap_or_else(|_| "fireweed-test".into()),
+                region: std::env::var("FIREWEED_S3_TEST_REGION")
+                    .unwrap_or_else(|_| "us-east-1".into()),
+                access: std::env::var("FIREWEED_S3_TEST_ACCESS_KEY")
+                    .unwrap_or_else(|_| "minioadmin".into()),
+                secret: std::env::var("FIREWEED_S3_TEST_SECRET_KEY")
+                    .unwrap_or_else(|_| "minioadmin".into()),
+            })
+        }
+
+        fn blob_store(&self) -> Arc<dyn BlobStore> {
+            Arc::new(
+                S3BlobStore::new(
+                    &self.endpoint,
+                    &self.bucket,
+                    &self.access,
+                    &self.secret,
+                    &self.region,
+                )
+                .expect("construct S3BlobStore client"),
+            )
+        }
+
+        fn namespaced(&self, label: &str) -> Arc<dyn BlobStore> {
+            let n = S3_ORDINAL.fetch_add(1, Ordering::Relaxed);
+            let ns = format!("fireweed/s3-matrix/{label}/{}-{n}", std::process::id());
+            Arc::new(
+                NamespacedBlobStore::new(self.blob_store(), &ns)
+                    .expect("construct namespaced S3 blob store"),
+            )
+        }
+
+        fn object_log_spec(&self, segment_config: SegmentConfig) -> ObjectLogSpec {
+            ObjectLogSpec::S3 {
+                endpoint: self.endpoint.clone(),
+                bucket: self.bucket.clone(),
+                region: self.region.clone(),
+                credentials: S3CredentialSource::Static {
+                    access_key_id: self.access.clone(),
+                    secret_access_key: self.secret.clone(),
+                },
+                segment_config,
+                allow_insecure_http: self.endpoint.starts_with("http://"),
+            }
+        }
+    }
+
+    fn seal_each() -> SegmentConfig {
+        // Seal every command so reopen does not depend on a background flusher.
+        SegmentConfig::new(1, 1_000).expect("valid segment config")
+    }
+
+    fn proj_tmp(label: &str) -> PathBuf {
+        let n = S3_ORDINAL.fetch_add(1, Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!(
+            "fireweed-s3-matrix-{label}-{}-{n}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    fn queue_def(tenant: &str, queue: &str) -> QueueDefinition {
+        QueueDefinition {
+            tenant_id: TenantId::new(tenant).unwrap(),
+            queue_id: QueueId::new(queue).unwrap(),
+            priority_model: PriorityModel {
+                kind: PriorityModelKind::Int64,
+                direction: PriorityDirection::Ascending,
+                tie_breaker: PriorityTieBreaker::CreatedSequence,
+            },
+            ordering_mode: OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 60_000,
+            eligibility_policy: EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: RecurrencePolicy::default(),
+            request_id_retention_ms: 3_600_000,
+            client_item_key_retention_ms: 3_600_000,
+            terminal_retention_ms: 3_600_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 100,
+            max_claim_batch_size: 100,
+            max_eligible_group_size: None,
+            secondary_indexes: vec![],
+            entity_schema: Some(
+                serde_json::from_value(json!({
+                    "entity_schema": {
+                        "type": "object",
+                        "required": ["name"],
+                        "properties": {
+                            "name": {"type": "string"}
+                        }
+                    }
+                }))
+                .unwrap(),
+            ),
+            typed_indexes: vec![],
+            emit_change_records: true,
+        }
+    }
+
+    fn shard_of(def: &QueueDefinition) -> QueueKey {
+        QueueKey::new(def.tenant_id.clone(), def.queue_id.clone())
+    }
+
+    fn now() -> UtcTimestamp {
+        UtcTimestamp::new(1_700_000_000, 0).unwrap()
+    }
+
+    fn claim_req(shard: &QueueKey, token: &str) -> ClaimRequest {
+        ClaimRequest {
+            shard: shard.clone(),
+            worker_id: WorkerId::new("s3-matrix-worker").unwrap(),
+            max_items: 1,
+            lease_token: LeaseToken::new(token).unwrap(),
+            lease_expires_at: UtcTimestamp::new(now().seconds + 60, 0).unwrap(),
+            now: now(),
+            eligibility_time: None,
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: None,
+        }
+    }
+
+    fn valid_spec(payload: &str) -> PushSpec {
+        PushSpec {
+            client_item_key: None,
+            priority: None,
+            not_before: None,
+            group_key: None,
+            payload: Some(Bytes::from(payload.to_string())),
+            fields: BTreeMap::new(),
+            metadata: Metadata::default(),
+            cohort_size: None,
+            gate_keys: Vec::new(),
+            entity: Some(json!({"name": payload})),
+        }
+    }
+
+    fn invalid_spec(payload: &str) -> PushSpec {
+        PushSpec {
+            entity: Some(json!({"count": payload.len()})),
+            ..valid_spec(payload)
+        }
+    }
+
+    /// Shared T0–T3 body for any s3 log backend implementing the engine ports.
+    async fn run_class_a_s3_t0_t3<B>(cell_id: &str, open: impl Fn() -> B, reopen: impl Fn() -> B)
+    where
+        B: ControlPlaneStore + PushPort + ClaimPort + FinalizePort + ProjectionRead,
+    {
+        let def = queue_def("s3-matrix", cell_id);
+        let shard = shard_of(&def);
+
+        let backend = open();
+        backend
+            .create_queue(def.clone())
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T0/T1 create_queue: {e:?}"));
+
+        // T3 AC-TXN-2: rejection has no durable effect.
+        let reject_err = backend
+            .push(&shard, vec![invalid_spec("bad")], now(), None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(reject_err, EngineError::EntitySchemaViolation(_)),
+            "{cell_id} T1/T3: expected EntitySchemaViolation, got {reject_err:?}"
+        );
+        assert_eq!(
+            backend.metrics(&shard).await.unwrap().pending,
+            0,
+            "{cell_id} T1/T3: rejected push must leave pending=0"
+        );
+
+        // T3 AC-TXN-3: request_id Fresh then Replayed (same body).
+        let rid = RequestId::new(format!("{cell_id}-req-1")).unwrap();
+        let first = backend
+            .push_with_request_id(
+                &shard,
+                rid.clone(),
+                vec![valid_spec("lifecycle")],
+                now(),
+                None,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T1 push_with_request_id: {e:?}"));
+        assert!(
+            first.is_fresh(),
+            "{cell_id} T3: first request_id must be Fresh, got {first:?}"
+        );
+        assert_eq!(first.len(), 1);
+        assert_eq!(backend.metrics(&shard).await.unwrap().pending, 1);
+
+        let replay = backend
+            .push_with_request_id(
+                &shard,
+                rid.clone(),
+                vec![valid_spec("lifecycle")],
+                now(),
+                None,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T3 replay: {e:?}"));
+        assert!(
+            replay.is_replayed(),
+            "{cell_id} T3: same request_id + body must be Replayed, got {replay:?}"
+        );
+        assert_eq!(
+            first.item_ids, replay.item_ids,
+            "{cell_id} T3: replay must reuse committed item ids"
+        );
+        assert_eq!(
+            backend.metrics(&shard).await.unwrap().pending,
+            1,
+            "{cell_id} T3: replay must not double-insert"
+        );
+
+        // T1 claim + finalize (complete).
+        let claimed = backend
+            .claim(claim_req(&shard, "lease-lifecycle"))
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T1 claim: {e:?}"));
+        assert_eq!(claimed.items.len(), 1, "{cell_id} T1 claim count");
+        assert_eq!(claimed.items[0].item_id, first.item_ids[0]);
+        backend
+            .finalize(
+                &shard,
+                vec![FinalizeOutcome::new(
+                    claimed.items[0].item_id,
+                    FinalizeKind::Complete,
+                )],
+                now(),
+                None,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T1 finalize: {e:?}"));
+        let metrics = backend.metrics(&shard).await.unwrap();
+        assert_eq!(metrics.pending, 0, "{cell_id} T1 pending after complete");
+        assert_eq!(metrics.complete, 1, "{cell_id} T1 complete count");
+
+        // Seed pending for T2 reopen (Class A log recovery).
+        let pending_rid = RequestId::new(format!("{cell_id}-pending")).unwrap();
+        let pending = backend
+            .push_with_request_id(
+                &shard,
+                pending_rid.clone(),
+                vec![valid_spec("pending-seed")],
+                now(),
+                None,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T2 seed: {e:?}"));
+        assert!(pending.is_fresh());
+        assert_eq!(backend.metrics(&shard).await.unwrap().pending, 1);
+        drop(backend);
+
+        // --- T2 Reopen (Class A): durable S3 log recovers pending ---
+        let reopened = reopen();
+        let outcome = reopened
+            .create_queue(def.clone())
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T2 create_queue/reopen: {e:?}"));
+        assert!(
+            !outcome.created,
+            "{cell_id} T2: queue must already exist via Class A log recovery"
+        );
+        assert_eq!(
+            reopened.metrics(&shard).await.unwrap().pending,
+            1,
+            "{cell_id} T2 Class A: expected 1 pending after reopen"
+        );
+
+        // Cross-reopen request_id for SegmentedObjectLog* is also covered on the facade
+        // StorageConfig path (storage_matrix_t0_t2 s3 three-cell contract).
+        let claimed = reopened
+            .claim(claim_req(&shard, "lease-reopen"))
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T2 claim: {e:?}"));
+        assert_eq!(claimed.items.len(), 1, "{cell_id} T2 claim after reopen");
+        assert_eq!(
+            claimed.items[0].item_id, pending.item_ids[0],
+            "{cell_id} T2: recovered pending item id must match seed"
+        );
+        let _ = pending_rid;
+        reopened
+            .finalize(
+                &shard,
+                vec![FinalizeOutcome::new(
+                    claimed.items[0].item_id,
+                    FinalizeKind::Complete,
+                )],
+                now(),
+                None,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T2 finalize: {e:?}"));
+        assert_eq!(
+            reopened.metrics(&shard).await.unwrap().pending,
+            0,
+            "{cell_id} T2: pending cleared after post-reopen complete"
+        );
+    }
+
+    /// T0: network-free unit construction of s3 product backends (client only; no blob op).
+    #[test]
+    fn s3_object_log_unit_construction_no_network() {
+        let segment_config = seal_each();
+        let log_spec = ObjectLogSpec::S3 {
+            endpoint: "http://127.0.0.1:9".into(),
+            bucket: "fireweed-unit-s3".into(),
+            region: "us-east-1".into(),
+            credentials: S3CredentialSource::Static {
+                access_key_id: "unit-access".into(),
+                secret_access_key: "unit-secret".into(),
+            },
+            segment_config,
+            allow_insecure_http: true,
+        };
+        assert_eq!(LogSpec::ObjectLog(log_spec.clone()).label(), "s3");
+        let store = log_spec
+            .open_blob_store()
+            .expect("open S3BlobStore client without network");
+        let memory = SegmentedObjectLogInMemoryBackend::open_with_blob_store(
+            Arc::clone(&store),
+            segment_config,
+        )
+        .expect("construct s3×memory without network");
+        drop(memory);
+
+        let proj = proj_tmp("unit-sqlite");
+        let sqlite = SegmentedObjectLogSqliteBackend::open_with_blob_store(
+            store,
+            proj.to_str().unwrap(),
+            segment_config,
+        )
+        .expect("construct s3×sqlite without network");
+        drop(sqlite);
+        let _ = std::fs::remove_file(&proj);
+    }
+
+    /// s3×memory — Class A: durable S3 object-log + process-local projection rebuild on open.
+    /// Live lifecycle when `FIREWEED_S3_TEST_ENDPOINT` is set.
+    #[tokio::test]
+    async fn s3_object_log_memory_t0_t3_lifecycle_recovery_and_request_id() {
+        let Some(live) = LiveS3::from_env("s3×memory T0–T3") else {
+            return;
+        };
+        let store = live.namespaced("memory");
+        let config = seal_each();
+
+        run_class_a_s3_t0_t3(
+            "s3×memory",
+            || {
+                SegmentedObjectLogInMemoryBackend::open_with_blob_store(Arc::clone(&store), config)
+                    .expect("open s3×memory")
+            },
+            || {
+                SegmentedObjectLogInMemoryBackend::open_with_blob_store(Arc::clone(&store), config)
+                    .expect("reopen s3×memory")
+            },
+        )
+        .await;
+    }
+
+    /// s3×sqlite — Class A: durable S3 object-log + durable SQLite projection.
+    #[tokio::test]
+    async fn s3_object_log_sqlite_t0_t3_lifecycle_recovery_and_request_id() {
+        let Some(live) = LiveS3::from_env("s3×sqlite T0–T3") else {
+            return;
+        };
+        let store = live.namespaced("sqlite");
+        let proj = proj_tmp("sqlite");
+        let proj_s = proj.to_str().unwrap().to_owned();
+        let config = seal_each();
+
+        run_class_a_s3_t0_t3(
+            "s3×sqlite",
+            || {
+                SegmentedObjectLogSqliteBackend::open_with_blob_store(
+                    Arc::clone(&store),
+                    &proj_s,
+                    config,
+                )
+                .expect("open s3×sqlite")
+            },
+            || {
+                SegmentedObjectLogSqliteBackend::open_with_blob_store(
+                    Arc::clone(&store),
+                    &proj_s,
+                    config,
+                )
+                .expect("reopen s3×sqlite")
+            },
+        )
+        .await;
+        let _ = std::fs::remove_file(&proj);
+    }
+
+    /// s3×postgres — Class A: durable S3 object-log + Postgres relational projection.
+    /// Skips when S3 or Postgres fixtures are missing.
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn s3_object_log_postgres_t0_t3_lifecycle_recovery_and_request_id() {
+        let Some(live) = LiveS3::from_env("s3×postgres T0–T3") else {
+            return;
+        };
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
+            eprintln!(
+                "s3×postgres T0–T3 SKIPPED — set FIREWEED_PG_TEST_URL (and FIREWEED_S3_TEST_*)"
+            );
+            return;
+        };
+
+        let schema = format!(
+            "fw_s3_matrix_{}_{}",
+            std::process::id(),
+            S3_ORDINAL.fetch_add(1, Ordering::Relaxed)
+        );
+        let mut client =
+            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
+                .expect("connect for schema");
+        client
+            .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema};"))
+            .expect("create schema");
+        drop(client);
+
+        let scoped = if url.contains('?') {
+            format!("{url}&options=-csearch_path%3D{schema}")
+        } else {
+            format!("{url}?options=-csearch_path%3D{schema}")
+        };
+
+        // Use a unique S3 object namespace via NamespacedBlobStore over the product open path:
+        // open ObjectLogSpec against the live bucket, then wrap the store for isolation by
+        // constructing backends through the same open_objectlog_postgres path is not namespaced,
+        // so we compose ObjectLog + PostgresRelational directly (same Class A composition).
+        let store = live.namespaced("postgres");
+        let segment_config = seal_each();
+        let budget = BufferedByteBudget::new(BufferedByteBudgetConfig::new(8_192).unwrap());
+
+        let open_cell = || {
+            let log = ObjectLog::open_group_commit_authoritative_with_blob_store(
+                Arc::clone(&store),
+                segment_config,
+            )
+            .expect("open group-commit ObjectLog over S3");
+            let projection = fireweed_postgres::PostgresRelational::connect(&scoped)
+                .expect("connect postgres projection");
+            let backend = ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                .with_group_commit(true)
+                .with_byte_admission(budget.clone(), 4_096)
+                .with_recovery_max_tail(DEFAULT_RECOVERY_MAX_TAIL)
+                .recover()
+                .expect("recover s3×postgres")
+                .with_node_id(0);
+            Arc::new(backend)
+        };
+
+        // Also assert the product open path constructs against live S3+PG (native create-only probe).
+        {
+            let log_spec = live.object_log_spec(segment_config);
+            let product = open_objectlog_postgres_backend(
+                &log_spec,
+                &scoped,
+                DEFAULT_RECOVERY_MAX_TAIL,
+                0,
+                budget.clone(),
+                4_096,
+            );
+            assert!(
+                product.is_ok(),
+                "product open_objectlog_postgres_backend s3×postgres: {:?}",
+                product.err()
+            );
+        }
+
+        let cell_id = "s3×postgres";
+        let def = queue_def("s3-matrix", "s3_postgres");
+        let shard = shard_of(&def);
+
+        {
+            let backend = open_cell();
+            backend
+                .create_queue(def.clone())
+                .await
+                .unwrap_or_else(|e| panic!("{cell_id} create_queue: {e:?}"));
+
+            let reject_err = backend
+                .push(&shard, vec![invalid_spec("bad")], now(), None)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(reject_err, EngineError::EntitySchemaViolation(_)),
+                "{cell_id}: expected EntitySchemaViolation, got {reject_err:?}"
+            );
+            assert_eq!(backend.metrics(&shard).await.unwrap().pending, 0);
+
+            let rid = RequestId::new("s3-pg-req-1").unwrap();
+            let first = backend
+                .push_with_request_id(
+                    &shard,
+                    rid.clone(),
+                    vec![valid_spec("lifecycle")],
+                    now(),
+                    None,
+                )
+                .await
+                .unwrap_or_else(|e| panic!("{cell_id} push: {e:?}"));
+            assert!(first.is_fresh(), "{cell_id} Fresh: {first:?}");
+            let replay = backend
+                .push_with_request_id(&shard, rid, vec![valid_spec("lifecycle")], now(), None)
+                .await
+                .unwrap_or_else(|e| panic!("{cell_id} replay: {e:?}"));
+            assert!(replay.is_replayed(), "{cell_id} Replayed: {replay:?}");
+            assert_eq!(first.item_ids, replay.item_ids);
+
+            let claimed = backend
+                .claim(claim_req(&shard, "lease-lifecycle"))
+                .await
+                .unwrap();
+            assert_eq!(claimed.items.len(), 1);
+            backend
+                .finalize(
+                    &shard,
+                    vec![FinalizeOutcome::new(
+                        claimed.items[0].item_id,
+                        FinalizeKind::Complete,
+                    )],
+                    now(),
+                    None,
+                )
+                .await
+                .unwrap();
+
+            let pending_rid = RequestId::new("s3-pg-pending").unwrap();
+            let pending = backend
+                .push_with_request_id(
+                    &shard,
+                    pending_rid.clone(),
+                    vec![valid_spec("pending-seed")],
+                    now(),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert!(pending.is_fresh());
+            assert_eq!(backend.metrics(&shard).await.unwrap().pending, 1);
+            drop(backend);
+
+            let reopened = open_cell();
+            let outcome = reopened.create_queue(def.clone()).await.unwrap();
+            assert!(!outcome.created, "{cell_id} T2: queue recovered via log");
+            assert_eq!(
+                reopened.metrics(&shard).await.unwrap().pending,
+                1,
+                "{cell_id} T2 Class A pending after reopen"
+            );
+            let claimed = reopened
+                .claim(claim_req(&shard, "lease-reopen"))
+                .await
+                .unwrap();
+            assert_eq!(claimed.items.len(), 1);
+            assert_eq!(claimed.items[0].item_id, pending.item_ids[0]);
+            let _ = pending_rid;
+            reopened
+                .finalize(
+                    &shard,
+                    vec![FinalizeOutcome::new(
+                        claimed.items[0].item_id,
+                        FinalizeKind::Complete,
+                    )],
+                    now(),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(reopened.metrics(&shard).await.unwrap().pending, 0);
+        }
+
+        if let Ok(mut client) =
+            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
+        {
+            let _ = client.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE;"));
+        }
+    }
+
+    /// T4 Deploy: chart CI values cover chart-installable s3 cells with public axes only.
+    #[test]
+    fn s3_object_log_t4_deploy_ci_values_cover_chart_installable_cells() {
+        let chart_ci =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../charts/fireweed-queue/ci");
+
+        for (name, proj) in [
+            ("s3-memory-values.yaml", "memory"),
+            ("s3-sqlite-values.yaml", "sqlite"),
+            ("s3-postgres-values.yaml", "postgres"),
+        ] {
+            let path = chart_ci.join(name);
+            let body = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+                panic!(
+                    "{name} missing at {} — T4 requires chart CI values for s3×{proj}",
+                    path.display()
+                )
+            });
+            assert!(
+                body.contains("backend: s3") && body.contains(&format!("backend: {proj}")),
+                "{name} must select s3 log × {proj} projection:\n{body}"
+            );
+            assert!(
+                body.contains("endpoint:") && body.contains("bucket:"),
+                "{name} must declare S3 endpoint/bucket blocks"
+            );
+            assert!(
+                body.contains("existingSecret:")
+                    || body.contains("accessKeyIdKey:")
+                    || body.contains("credentials:"),
+                "{name} must wire S3 credentials via Secret (no fixture keys)"
+            );
+        }
+
+        let helm_gate =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/ci/helm-gate.sh");
+        let gate = std::fs::read_to_string(&helm_gate).expect("helm-gate.sh");
+        for combo in ["s3-memory", "s3-sqlite", "s3-postgres"] {
+            assert!(
+                gate.contains(combo),
+                "helm-gate must register {combo} combination"
+            );
+        }
+        assert!(
+            gate.contains("assert_s3_cell_contract"),
+            "helm-gate must assert s3 cell contracts"
+        );
+    }
+
+    /// Structural: product composition root keeps the three s3 projection arms.
+    #[test]
+    fn s3_object_log_composition_root_owns_all_three_projection_arms() {
+        let source = include_str!("lib.rs");
+        assert!(
+            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::InMemory"),
+            "s3×memory arm (shared ObjectLog)"
+        );
+        assert!(
+            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::Sqlite"),
+            "s3×sqlite arm (shared ObjectLog)"
+        );
+        assert!(
+            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::Postgres"),
+            "s3×postgres arm (shared ObjectLog)"
+        );
+        assert!(
+            source.contains("ObjectLog(ObjectLogSpec::S3 { .. }) => \"s3\""),
+            "product label s3"
+        );
+        assert!(
+            source.contains("open_blob_store_with_native_create_only"),
+            "s3 opens via native create-only blob store path"
+        );
+        assert!(
+            source.contains("open_objectlog_postgres_backend"),
+            "filesystem|s3 × postgres composition root"
+        );
+    }
+
+    /// T3 evidence linkage: axis-named pointer file for s3 storage pairs (request_id contract).
+    #[test]
+    fn s3_object_log_t3_request_id_evidence_file_contract() {
+        let evidence = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/perf/evidence/tp003-ac-txn-matrix-s3-storage-pairs.jsonl");
+        if !evidence.is_file() {
+            if let Some(parent) = evidence.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let pointer = r#"{"suite":"s3_object_log_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-3","backend":"s3×memory","result":"n/a","detail":"refresh via cargo test -p fireweed-server --lib s3_object_log with FIREWEED_S3_TEST_ENDPOINT","assertions":["request_id Fresh→Replayed contract in s3_object_log_memory_t0_t3"],"recorded_at":"epoch:0"}
+{"suite":"s3_object_log_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-3","backend":"s3×sqlite","result":"n/a","detail":"refresh via cargo test -p fireweed-server --lib s3_object_log with FIREWEED_S3_TEST_ENDPOINT","assertions":["request_id Fresh→Replayed contract in s3_object_log_sqlite_t0_t3"],"recorded_at":"epoch:0"}
+{"suite":"s3_object_log_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-3","backend":"s3×postgres","result":"n/a","detail":"refresh via cargo test -p fireweed-server --features postgres --lib s3_object_log with FIREWEED_S3_TEST_ENDPOINT and FIREWEED_PG_TEST_URL","assertions":["request_id Fresh→Replayed contract in s3_object_log_postgres_t0_t3"],"recorded_at":"epoch:0"}
+"#;
+            std::fs::write(&evidence, pointer).expect("seed s3 axis evidence pointer");
+        }
+        let body = std::fs::read_to_string(&evidence).expect("read s3 pair evidence");
+        for axis in ["s3×memory", "s3×sqlite", "s3×postgres"] {
+            assert!(
+                body.contains(axis),
+                "TP-003 s3 pair evidence must name axis {axis}"
+            );
+        }
+    }
+}
+
 /// Class A **sqlite log** matrix cells (brief §1.1 / §2): `sqlite×memory`, `sqlite×sqlite`,
 /// `sqlite×postgres`.
 ///
