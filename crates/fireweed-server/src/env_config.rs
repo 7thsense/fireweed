@@ -596,9 +596,9 @@ fn parse_backend(
         }
     };
 
-    // Only specific log×projection pairings are wired (preserve the prior behavior): memory/inmemory,
-    // sqlite/inmemory, objectlog/inmemory, objectlog/sqlite, and (with the feature) postgres/inmemory,
-    // postgres/sqlite, postgres/postgres.
+    // Only specific log×projection pairings are wired (preserve the prior behavior): memory/inmemory
+    // (+ Class B memory/{sqlite,postgres}), sqlite/{inmemory,sqlite,postgres}, objectlog/inmemory,
+    // objectlog/sqlite, and (with the feature) postgres/{inmemory,sqlite,postgres}.
     let wired = match (&log_spec, &projection_spec) {
         (LogSpec::Memory, ProjectionSpec::InMemory) => true,
         // Class B: memory log × durable projection (projection survives process death; no log rebuild).
@@ -606,12 +606,17 @@ fn parse_backend(
         #[cfg(feature = "postgres")]
         (LogSpec::Memory, ProjectionSpec::Postgres { .. }) => true,
         (LogSpec::Sqlite { .. }, ProjectionSpec::InMemory) => true,
+        (LogSpec::Sqlite { .. }, ProjectionSpec::Sqlite { .. }) => true,
+        #[cfg(feature = "postgres")]
+        (LogSpec::Sqlite { .. }, ProjectionSpec::Postgres { .. }) => true,
         (LogSpec::ObjectLog(_), ProjectionSpec::InMemory) => true,
         (LogSpec::ObjectLog(_), ProjectionSpec::Sqlite { .. }) => true,
         (LogSpec::ObjectLog(_), ProjectionSpec::Turso { .. }) => true,
         (LogSpec::ObjectLog(_), ProjectionSpec::Hybrid { .. }) => true,
         (LogSpec::ObjectLog(_), ProjectionSpec::HybridStrict { .. }) => true,
         (LogSpec::ObjectLog(_), ProjectionSpec::HybridAsync { .. }) => true,
+        #[cfg(feature = "postgres")]
+        (LogSpec::ObjectLog(_), ProjectionSpec::Postgres { .. }) => true,
         #[cfg(feature = "postgres")]
         (LogSpec::Postgres { .. }, ProjectionSpec::InMemory) => true,
         #[cfg(feature = "postgres")]
@@ -954,6 +959,23 @@ mod tests {
         assert_eq!(config.backend.log.label(), "memory");
         assert_eq!(config.backend.projection.label(), "memory");
 
+        // filesystem log (first-class) × memory projection
+        let config = Config::from_env(&map(&[
+            ("FIREWEED_LOG_BACKEND", "filesystem"),
+            ("FIREWEED_OBJECT_LOG_ROOT", "/data/fw-log"),
+            ("FIREWEED_PROJECTION_BACKEND", "memory"),
+        ]))
+        .expect("filesystem×memory");
+        assert_eq!(config.backend.log.label(), "filesystem");
+        assert!(matches!(
+            config.backend.log,
+            LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem { .. })
+        ));
+        assert!(matches!(
+            config.backend.projection,
+            ProjectionSpec::InMemory
+        ));
+
         // Class B: memory log × sqlite projection (durable projection; no log rebuild)
         let config = Config::from_env(&map(&[
             ("FIREWEED_LOG_BACKEND", "memory"),
@@ -1042,6 +1064,32 @@ mod tests {
         ));
         assert_eq!(config.backend.log.label(), "memory");
         assert_eq!(config.backend.projection.label(), "postgres");
+    }
+
+    /// First-class `filesystem` log pairs with the postgres projection (requires `postgres` feature).
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn filesystem_log_pairs_with_postgres_projection() {
+        let config = Config::from_env(&map(&[
+            ("FIREWEED_LOG_BACKEND", "filesystem"),
+            ("FIREWEED_OBJECT_LOG_ROOT", "/data/fw-log"),
+            ("FIREWEED_PROJECTION_BACKEND", "postgres"),
+            (
+                "FIREWEED_POSTGRES_PROJECTION_DATABASE_URL",
+                "postgres://fireweed:fireweed@127.0.0.1:5432/fireweed",
+            ),
+        ]))
+        .expect("filesystem×postgres");
+        assert_eq!(config.backend.log.label(), "filesystem");
+        assert!(matches!(
+            config.backend.log,
+            LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem { .. })
+        ));
+        assert_eq!(config.backend.projection.label(), "postgres");
+        assert!(matches!(
+            config.backend.projection,
+            ProjectionSpec::Postgres { .. }
+        ));
     }
 
     #[test]
@@ -1483,13 +1531,62 @@ mod tests {
     }
 
     #[test]
-    fn unwired_pairing_is_rejected() {
-        // sqlite log + sqlite projection is not a wired pairing (only objectlog pairs with sqlite proj).
-        let result = Config::from_env(&map(&[
+    fn sqlite_log_sqlite_projection_carries_distinct_paths() {
+        // Class A: durable sqlite command log × derived sqlite projection (distinct store paths).
+        let config = Config::from_env(&map(&[
             ("FIREWEED_LOG_BACKEND", "sqlite"),
             ("FIREWEED_PROJECTION_BACKEND", "sqlite"),
+            ("FIREWEED_SQLITE_LOG_PATH", "/data/log.db"),
+            ("FIREWEED_SQLITE_PROJECTION_PATH", "/data/projection.db"),
+        ]))
+        .expect("sqlite × sqlite is a wired Class A pairing");
+        match (config.backend.log, config.backend.projection) {
+            (LogSpec::Sqlite { path: log_path }, ProjectionSpec::Sqlite { path: proj_path }) => {
+                assert_eq!(log_path, PathBuf::from("/data/log.db"));
+                assert_eq!(proj_path, PathBuf::from("/data/projection.db"));
+                assert_ne!(
+                    log_path, proj_path,
+                    "log and projection must use distinct paths"
+                );
+            }
+            _ => panic!("expected LogSpec::Sqlite × ProjectionSpec::Sqlite"),
+        }
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn sqlite_log_postgres_projection_carries_distinct_stores() {
+        // Class A: durable sqlite command log × derived postgres relational projection.
+        let config = Config::from_env(&map(&[
+            ("FIREWEED_LOG_BACKEND", "sqlite"),
+            ("FIREWEED_PROJECTION_BACKEND", "postgres"),
+            ("FIREWEED_SQLITE_LOG_PATH", "/data/sqlite-log.db"),
+            (
+                "FIREWEED_POSTGRES_PROJECTION_DATABASE_URL",
+                "postgres://app@127.0.0.1:5432/fireweed_projection",
+            ),
+        ]))
+        .expect("sqlite × postgres is a wired Class A pairing");
+        match (config.backend.log, config.backend.projection) {
+            (LogSpec::Sqlite { path }, ProjectionSpec::Postgres { url }) => {
+                assert_eq!(path, PathBuf::from("/data/sqlite-log.db"));
+                assert!(
+                    url.contains("fireweed_projection"),
+                    "projection URL should be the postgres projection DSN, got {url}"
+                );
+            }
+            _ => panic!("expected LogSpec::Sqlite × ProjectionSpec::Postgres"),
+        }
+    }
+
+    #[test]
+    fn unwired_pairing_is_rejected() {
+        // s3 log + hybrid is still wired (objectlog family); memory + hybrid is not.
+        let result = Config::from_env(&map(&[
+            ("FIREWEED_LOG_BACKEND", "memory"),
+            ("FIREWEED_PROJECTION_BACKEND", "hybrid"),
         ]));
-        assert!(result.is_err(), "sqlite/sqlite is not wired");
+        assert!(result.is_err(), "memory/hybrid is not wired");
     }
 
     #[test]

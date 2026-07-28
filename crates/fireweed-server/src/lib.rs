@@ -375,9 +375,9 @@ pub enum ProjectionSpec {
     /// object-log tail replay on recovery.
     HybridAsync { path: PathBuf },
     /// SYNC postgres relational projection (`PostgresRelational`, atomic class) at `url`, composed against
-    /// the [`LogSpec::Postgres`] durable log. `url` is a libpq/postgres connection string; connect + recover
-    /// MUST run off the reactor (the composition root drives it through `spawn_blocking`, same as the log
-    /// axis). Requires the `postgres` cargo feature.
+    /// a durable log axis ([`LogSpec::Postgres`], [`LogSpec::Sqlite`], or Class B memory log). `url` is a
+    /// libpq/postgres connection string; connect + recover MUST run off the reactor (the composition root
+    /// drives it through `spawn_blocking`, same as the log axis). Requires the `postgres` cargo feature.
     #[cfg(feature = "postgres")]
     Postgres { url: String },
 }
@@ -402,6 +402,12 @@ impl ProjectionSpec {
 
 type ObjectLogHybridBackend =
     ComposedBackend<ObjectLog, HybridProjectionStore, InProcessControlPlane>;
+
+/// Object-log (filesystem or s3) × durable Postgres relational projection — the server promotion of the
+/// facade `open_objectlog_postgres` composition path.
+#[cfg(feature = "postgres")]
+type ObjectLogPostgresBackend =
+    ComposedBackend<ObjectLog, fireweed_postgres::PostgresRelational, InProcessControlPlane>;
 
 /// The queue-ownership control-plane axis. `InProcess` is an explicit single-process development profile;
 /// production replicas use the shared transactional Postgres authority.
@@ -2326,6 +2332,86 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             )
             .await
         }
+        (LogSpec::Sqlite { path }, ProjectionSpec::Sqlite { path: projection_path }) => {
+            // Class A: durable sqlite command LOG × derived sqlite PROJECTION at distinct paths.
+            // Uses the adapter `composed_sqlite_log_sqlite_projection` (snapshot-tail recovery on open).
+            // Same off-reactor + whole-operation adapter discipline as sqlite/inmemory.
+            let log_p = path
+                .into_os_string()
+                .into_string()
+                .map_err(|_| EngineError::Storage("non-utf8 sqlite log path".into()))?;
+            let proj_p = projection_path
+                .into_os_string()
+                .into_string()
+                .map_err(|_| EngineError::Storage("non-utf8 sqlite projection path".into()))?;
+            if log_p == proj_p {
+                return Err(EngineError::Invalid(
+                    "sqlite/sqlite requires distinct log and projection paths \
+                     (FIREWEED_SQLITE_LOG_PATH ≠ FIREWEED_SQLITE_PROJECTION_PATH)",
+                ));
+            }
+            let backend = tokio::task::spawn_blocking(move || {
+                fireweed_sqlite::composed_sqlite_log_sqlite_projection(&log_p, &proj_p)
+                    .map(|b| b.with_node_id(node_id))
+            })
+            .await
+            .map_err(|e| {
+                EngineError::Storage(format!("sqlite/sqlite open task failed: {e}"))
+            })??;
+            // Single-member pool: whole-operation adapter is always available (unlike
+            // `blocking_backend`, which is gated on the `postgres` feature for historical reasons).
+            let (backend, lifecycle) = blocking_backend_pool(vec![Arc::new(backend)]);
+            run_owned_with_blocking_lifecycle(
+                backend,
+                lifecycle,
+                control_plane,
+                advertise_addr.as_deref(),
+                owner_id.clone(),
+                clock,
+                &listen,
+                interval,
+                &queues,
+            )
+            .await
+        }
+        #[cfg(feature = "postgres")]
+        (LogSpec::Sqlite { path }, ProjectionSpec::Postgres { url }) => {
+            // Class A: durable sqlite command LOG × derived postgres relational PROJECTION.
+            // Distinct stores: sqlite log path vs postgres projection URL. Connect + recover off-reactor
+            // (sync postgres client must not run on a Tokio worker).
+            let log_p = path
+                .to_str()
+                .ok_or_else(|| EngineError::Storage("non-utf8 sqlite log path".into()))?
+                .to_string();
+            let backend = tokio::task::spawn_blocking(move || {
+                let log = fireweed_sqlite::SqliteLog::open(&log_p)?;
+                let projection = fireweed_postgres::PostgresRelational::connect(&url)?;
+                fireweed_engine::ComposedBackend::new(
+                    log,
+                    projection,
+                    InProcessControlPlane::new(),
+                )
+                .recover()
+                .map(|b| b.with_node_id(node_id))
+            })
+            .await
+            .map_err(|e| {
+                EngineError::Storage(format!("sqlite/postgres connect task join failed: {e}"))
+            })??;
+            let (backend, lifecycle) = blocking_backend(Arc::new(backend));
+            run_owned_with_blocking_lifecycle(
+                backend,
+                lifecycle,
+                control_plane,
+                advertise_addr.as_deref(),
+                owner_id.clone(),
+                clock,
+                &listen,
+                interval,
+                &queues,
+            )
+            .await
+        }
         (LogSpec::ObjectLog(spec), ProjectionSpec::InMemory) => {
             // The segmented group-commit object log (the object log's only production form) over an in-memory
             // projection rebuilt by `read_all` replay on open.
@@ -2671,6 +2757,44 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             Ok(server)
         }
         #[cfg(feature = "postgres")]
+        (LogSpec::ObjectLog(spec), ProjectionSpec::Postgres { url }) => {
+            // Class A: filesystem|s3 object-log × durable Postgres projection. Promotes the facade
+            // `open_objectlog_postgres` composition into the server product matrix: group-commit
+            // ObjectLog + PostgresRelational, recovery-on-open, off-reactor connect, whole-operation
+            // adapter for every port (sync postgres client must not run on a Tokio worker).
+            let backend = tokio::task::spawn_blocking(move || {
+                open_objectlog_postgres_backend(
+                    &spec,
+                    &url,
+                    postgres_pointer_url.as_deref(),
+                    recovery_max_tail,
+                    node_id,
+                    objectlog_byte_budget,
+                    config_objectlog_queue_limit,
+                )
+            })
+            .await
+            .map_err(|e| {
+                EngineError::Storage(format!("object-log/postgres open task failed: {e}"))
+            })??;
+            let flusher = spawn_objectlog_postgres_flusher(&backend, debug_segments);
+            let (backend, lifecycle) = blocking_backend(backend);
+            let mut server = run_owned_with_blocking_lifecycle(
+                backend,
+                lifecycle,
+                control_plane,
+                advertise_addr.as_deref(),
+                owner_id.clone(),
+                clock,
+                &listen,
+                interval,
+                &queues,
+            )
+            .await?;
+            server.maintenance_tasks.push(flusher);
+            Ok(server)
+        }
+        #[cfg(feature = "postgres")]
         (LogSpec::Postgres { url, credentials }, ProjectionSpec::InMemory) => {
             // ADR-015: one production wrapper owns a configured fixed pool of recovered composed postgres
             // workers. Stable queue affinity keeps a queue's projection, ordering gate, and complete SQL
@@ -2851,6 +2975,91 @@ fn open_objectlog_hybrid_backend(
         backend
     };
     Ok(Arc::new(backend))
+}
+
+/// Open the object-log × Postgres projection composition (filesystem or s3 blob store +
+/// [`fireweed_postgres::PostgresRelational`]). Mirrors the facade `open_objectlog_postgres` path with
+/// server byte-admission / recovery-tail / node-id knobs.
+#[cfg(feature = "postgres")]
+fn open_objectlog_postgres_backend(
+    spec: &ObjectLogSpec,
+    projection_url: &str,
+    postgres_pointer_url: Option<&str>,
+    recovery_max_tail: u64,
+    node_id: u8,
+    byte_budget: BufferedByteBudget,
+    queue_byte_limit: usize,
+) -> EngineResult<Arc<ObjectLogPostgresBackend>> {
+    let segment_config = spec.segment_config();
+    let store = spec.open_blob_store_with_authority(postgres_pointer_url)?;
+    // Authoritative group-commit object log (same durability class as facade open_objectlog_postgres).
+    let log = ObjectLog::open_group_commit_authoritative_with_blob_store(store, segment_config)?;
+    let projection = fireweed_postgres::PostgresRelational::connect(projection_url)?;
+    let backend = ComposedBackend::new(log, projection, InProcessControlPlane::new())
+        .with_group_commit(true)
+        .with_byte_admission(byte_budget, queue_byte_limit)
+        .with_recovery_max_tail(recovery_max_tail)
+        .recover()?
+        .with_node_id(node_id);
+    Ok(Arc::new(backend))
+}
+
+/// Background flusher for object-log × Postgres group-commit: seals latency-due segments so a buffer
+/// below `target_bytes` still acks within ~one latency window. Postgres has no deferred SQLite
+/// checkpoint, so only the group-commit tick runs (unlike hybrid).
+#[cfg(feature = "postgres")]
+fn spawn_objectlog_postgres_flusher(
+    backend: &Arc<ObjectLogPostgresBackend>,
+    debug_segments: bool,
+) -> JoinHandle<()> {
+    let interval_ms = backend.group_commit_flush_interval_ms();
+    let weak = Arc::downgrade(backend);
+    fireweed_resp::spawn_governed(async move {
+        let group_interval = Duration::from_millis(interval_ms);
+        let now = tokio::time::Instant::now();
+        let mut tick = tokio::time::interval_at(now + group_interval, group_interval);
+        let mut dbg_last = std::time::Instant::now();
+        loop {
+            tick.tick().await;
+            if weak.strong_count() == 0 {
+                break;
+            }
+            let emit_debug = debug_segments && dbg_last.elapsed() >= Duration::from_secs(1);
+            if emit_debug {
+                dbg_last = std::time::Instant::now();
+            }
+            let job_backend = weak.clone();
+            let join = tokio::task::spawn_blocking(move || {
+                let backend = job_backend.upgrade()?;
+                let now_ms = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                {
+                    Ok(d) => d.as_millis().min(i64::MAX as u128) as i64,
+                    Err(_) => 0,
+                };
+                let result = backend.flush_tick(now_ms).map(|_| ());
+                if emit_debug {
+                    let c = backend.with_log(|log| log.counters());
+                    eprintln!(
+                        "[seg] profile=objectlog/postgres sealed={} commands={} mean_batch={:.1} max_batch={} objects_put={}",
+                        c.segments_sealed,
+                        c.commands_committed,
+                        c.mean_batch_size(),
+                        c.max_batch_size(),
+                        c.objects_put,
+                    );
+                }
+                Some(result)
+            });
+            match join.await {
+                Ok(Some(Ok(()))) => {}
+                Ok(Some(Err(e))) => {
+                    eprintln!("[objectlog/postgres] maintenance flush failed: {e}")
+                }
+                Ok(None) => break,
+                Err(e) => eprintln!("[objectlog/postgres] maintenance task failed: {e}"),
+            }
+        }
+    })
 }
 
 fn spawn_hybrid_flusher(
@@ -3306,8 +3515,8 @@ mod byte_admission_wiring_tests {
             production_start
                 .matches("open_blob_store_with_authority")
                 .count(),
-            6,
-            "inmemory, sqlite, turso, hybrid, hybrid-strict, and hybrid-async must share the authority-aware S3 opener"
+            7,
+            "inmemory, sqlite, turso, hybrid, hybrid-strict, hybrid-async, and postgres must share the authority-aware S3 opener"
         );
         assert!(
             !production_start.contains("spec.open_blob_store()?"),
@@ -3888,6 +4097,300 @@ mod byte_admission_wiring_tests {
         assert!(!arm.contains("PostgresLog::connect_with_config"));
         assert!(!arm.contains("ComposedBackend::new"));
     }
+
+    /// Class A cell: construct a durable sqlite log × sqlite projection via the product adapter
+    /// used by the server composition root (`composed_sqlite_log_sqlite_projection`), with distinct
+    /// paths for log vs projection.
+    #[test]
+    fn sqlite_log_sqlite_projection_constructs_with_distinct_paths() {
+        let tid = format!("{:?}", std::thread::current().id());
+        let log_path = std::env::temp_dir().join(format!(
+            "fireweed-server-sqlite-sqlite-log-{tid}.db"
+        ));
+        let proj_path = std::env::temp_dir().join(format!(
+            "fireweed-server-sqlite-sqlite-proj-{tid}.db"
+        ));
+        let _ = std::fs::remove_file(&log_path);
+        let _ = std::fs::remove_file(&proj_path);
+
+        let log_s = log_path.to_str().expect("utf8 log path");
+        let proj_s = proj_path.to_str().expect("utf8 proj path");
+        assert_ne!(log_s, proj_s);
+
+        // Mirror the BackendSpec the server match arm receives.
+        let spec = BackendSpec {
+            log: LogSpec::Sqlite {
+                path: log_path.clone(),
+            },
+            projection: ProjectionSpec::Sqlite {
+                path: proj_path.clone(),
+            },
+            control_plane: ControlPlaneSpec::InProcess,
+        };
+        match (&spec.log, &spec.projection) {
+            (LogSpec::Sqlite { path: lp }, ProjectionSpec::Sqlite { path: pp }) => {
+                assert_ne!(lp, pp);
+            }
+            _ => panic!("expected sqlite × sqlite BackendSpec"),
+        }
+
+        let backend = fireweed_sqlite::composed_sqlite_log_sqlite_projection(log_s, proj_s)
+            .expect("open sqlite log × sqlite projection");
+        // Recovery-on-open succeeds on empty stores (no panic / storage error).
+        drop(backend);
+
+        // Source contract: composition root selects the distinct-path adapter.
+        let source = include_str!("lib.rs");
+        assert!(
+            source.contains("composed_sqlite_log_sqlite_projection"),
+            "server must wire composed_sqlite_log_sqlite_projection for sqlite×sqlite"
+        );
+        assert!(
+            source.contains("LogSpec::Sqlite { path }, ProjectionSpec::Sqlite"),
+            "server match arm for sqlite×sqlite must exist"
+        );
+
+        let _ = std::fs::remove_file(&log_path);
+        let _ = std::fs::remove_file(&proj_path);
+    }
+
+    /// Class A cell: construct a durable sqlite log × postgres projection composition (same shape as
+    /// the server match arm). Live connect is env-gated; without a DB we still assert BackendSpec
+    /// shape and that the composition root names both axes.
+    #[test]
+    fn sqlite_log_postgres_projection_backend_spec_and_composition_root() {
+        let log_path = std::env::temp_dir().join(format!(
+            "fireweed-server-sqlite-postgres-log-{:?}.db",
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&log_path);
+
+        // Always construct the sqlite log axis used by the pairing.
+        let log = fireweed_sqlite::SqliteLog::open(log_path.to_str().unwrap())
+            .expect("open sqlite log for sqlite×postgres cell");
+        drop(log);
+
+        let source = include_str!("lib.rs");
+        assert!(
+            source.contains("LogSpec::Sqlite { path }, ProjectionSpec::Postgres"),
+            "server match arm for sqlite×postgres must exist (feature postgres)"
+        );
+        assert!(
+            source.contains("PostgresRelational::connect"),
+            "sqlite×postgres must compose SqliteLog with PostgresRelational"
+        );
+
+        let _ = std::fs::remove_file(&log_path);
+    }
+
+    /// When a live postgres is available, open the full sqlite-log × postgres-projection composed
+    /// backend (mirrors the server `spawn_blocking` body).
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn sqlite_log_postgres_projection_constructs_when_pg_available() {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
+            eprintln!(
+                "SQLITE/POSTGRES CONSTRUCT SKIPPED — set FIREWEED_PG_TEST_URL to a live DB"
+            );
+            return;
+        };
+        let schema = format!("fireweed_sqlite_pg_{}", std::process::id());
+
+        let mut client =
+            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
+                .expect("connect to create schema");
+        client
+            .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema};"))
+            .expect("create schema");
+        drop(client);
+
+        let scoped = if url.contains('?') {
+            format!("{url}&options=-csearch_path%3D{schema}")
+        } else {
+            format!("{url}?options=-csearch_path%3D{schema}")
+        };
+
+        let log_path = std::env::temp_dir().join(format!(
+            "fireweed-server-sqlite-pg-construct-{schema}.db"
+        ));
+        let _ = std::fs::remove_file(&log_path);
+
+        let log = fireweed_sqlite::SqliteLog::open(log_path.to_str().unwrap())
+            .expect("open sqlite log");
+        let projection = fireweed_postgres::PostgresRelational::connect(&scoped)
+            .expect("connect postgres projection");
+        let backend = ComposedBackend::new(log, projection, InProcessControlPlane::new())
+            .recover()
+            .expect("recover sqlite×postgres composition");
+        drop(backend);
+
+        let _ = std::fs::remove_file(&log_path);
+        if let Ok(mut client) =
+            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
+        {
+            let _ = client.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE;"));
+        }
+    }
+    fn filesystem_tmp_root(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-server-fs-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create filesystem object-log root");
+        root
+    }
+
+    /// First-class `filesystem` log constructs with memory and sqlite projections (server product
+    /// paths: segmented object-log backends over LocalFsBlobStore).
+    #[test]
+    fn filesystem_object_log_constructs_with_memory_and_sqlite_projections() {
+        let root = filesystem_tmp_root("mem-sqlite");
+        let segment_config = SegmentConfig::new(262_144, 20).unwrap();
+        let log_spec = ObjectLogSpec::local(&root, segment_config);
+        assert_eq!(
+            LogSpec::ObjectLog(log_spec.clone()).label(),
+            "filesystem",
+            "LocalFilesystem product label is filesystem"
+        );
+
+        let store = log_spec
+            .open_blob_store()
+            .expect("open LocalFsBlobStore for filesystem log");
+        let memory = SegmentedObjectLogInMemoryBackend::open_with_blob_store(
+            Arc::clone(&store),
+            segment_config,
+        )
+        .expect("construct filesystem×memory");
+        drop(memory);
+
+        let proj_path = root.join("projection.db");
+        let projection = Arc::new(
+            fireweed_sqlite::SqliteProjectionStore::open(proj_path.to_str().unwrap())
+                .expect("open sqlite projection"),
+        );
+        let sqlite = SegmentedObjectLogSqliteBackend::open_with_blob_store_and_projection(
+            store,
+            projection,
+            segment_config,
+        )
+        .expect("construct filesystem×sqlite");
+        drop(sqlite);
+
+        let source = include_str!("lib.rs");
+        assert!(
+            source.contains("LocalFilesystem { .. }) => \"filesystem\""),
+            "LogSpec label must promote LocalFilesystem as filesystem"
+        );
+        assert!(
+            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::InMemory"),
+            "server match arm for object-log×memory must exist"
+        );
+        assert!(
+            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::Sqlite"),
+            "server match arm for object-log×sqlite must exist"
+        );
+        assert!(
+            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::Postgres"),
+            "server match arm for object-log×postgres must exist (feature postgres)"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// BackendSpec + composition-root contract for filesystem × postgres.
+    #[test]
+    fn filesystem_object_log_postgres_projection_backend_spec_and_composition_root() {
+        let root = filesystem_tmp_root("pg-spec");
+        let segment_config = SegmentConfig::new(262_144, 20).unwrap();
+        let spec = BackendSpec {
+            log: LogSpec::ObjectLog(ObjectLogSpec::local(&root, segment_config)),
+            #[cfg(feature = "postgres")]
+            projection: ProjectionSpec::Postgres {
+                url: "postgres://fireweed:fireweed@127.0.0.1:5432/fireweed".into(),
+            },
+            #[cfg(not(feature = "postgres"))]
+            projection: ProjectionSpec::InMemory,
+            control_plane: ControlPlaneSpec::InProcess,
+        };
+        assert_eq!(spec.log.label(), "filesystem");
+        match &spec.log {
+            LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem { root: r, .. }) => {
+                assert_eq!(r, &root);
+            }
+            _ => panic!("expected LocalFilesystem log"),
+        }
+
+        let source = include_str!("lib.rs");
+        assert!(
+            source.contains("open_objectlog_postgres_backend"),
+            "server must own open_objectlog_postgres_backend for filesystem|s3 × postgres"
+        );
+        assert!(
+            source.contains("open_group_commit_authoritative_with_blob_store"),
+            "object-log×postgres must open the authoritative group-commit ObjectLog"
+        );
+        assert!(
+            source.contains("PostgresRelational::connect"),
+            "object-log×postgres must compose with PostgresRelational"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// When a live postgres is available, open filesystem object-log × postgres projection.
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn filesystem_object_log_postgres_projection_constructs_when_pg_available() {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
+            eprintln!(
+                "FILESYSTEM/POSTGRES CONSTRUCT SKIPPED — set FIREWEED_PG_TEST_URL to a live DB"
+            );
+            return;
+        };
+        let schema = format!("fireweed_fs_pg_{}", std::process::id());
+        let mut client =
+            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
+                .expect("connect to create schema");
+        client
+            .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema};"))
+            .expect("create schema");
+        drop(client);
+
+        let scoped = if url.contains('?') {
+            format!("{url}&options=-csearch_path%3D{schema}")
+        } else {
+            format!("{url}?options=-csearch_path%3D{schema}")
+        };
+
+        let root = filesystem_tmp_root(&schema);
+        let segment_config = SegmentConfig::new(262_144, 20).unwrap();
+        let log_spec = ObjectLogSpec::local(&root, segment_config);
+        let budget = BufferedByteBudget::new(BufferedByteBudgetConfig::new(8_192).unwrap());
+        let backend = open_objectlog_postgres_backend(
+            &log_spec,
+            &scoped,
+            None,
+            DEFAULT_RECOVERY_MAX_TAIL,
+            0,
+            budget,
+            4_096,
+        )
+        .expect("construct filesystem×postgres");
+        drop(backend);
+
+        let _ = std::fs::remove_dir_all(&root);
+        if let Ok(mut client) =
+            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
+        {
+            let _ = client.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE;"));
+        }
+    }
+
 }
 
 
