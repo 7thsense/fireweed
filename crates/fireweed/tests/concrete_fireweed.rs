@@ -7,6 +7,7 @@ use fireweed::{
     PriorityModelKind, PriorityTieBreaker, PriorityValue, ProjectionConfig, QueueDefinition,
     QueueId, QueueKey, RecoveryPolicy, RecurrencePolicy, ResponseBarrier, RetryPolicy,
     ScheduleUpdate, SegmentConfig, SystemClock, TenantId, WorkerId, open_memory, open_sqlite,
+    open_sqlite_sqlite_projection,
 };
 
 fn queue_definition() -> QueueDefinition {
@@ -141,4 +142,47 @@ async fn sqlite_uses_the_same_concrete_handle_and_operation_families() {
     exercise_operation_families(&fireweed, "operation-families-sqlite").await;
     drop(fireweed);
     let _ = std::fs::remove_file(path);
+}
+
+/// Class A matrix cell: durable sqlite log × durable sqlite projection (distinct paths).
+#[tokio::test]
+async fn sqlite_sqlite_projection_uses_the_same_concrete_handle() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let log = std::env::temp_dir().join(format!(
+        "fireweed-concrete-sqlite-log-{}-{nonce}.db",
+        std::process::id()
+    ));
+    let proj = std::env::temp_dir().join(format!(
+        "fireweed-concrete-sqlite-proj-{}-{nonce}.db",
+        std::process::id()
+    ));
+    let fireweed = open_sqlite_sqlite_projection(
+        log.to_str().unwrap(),
+        proj.to_str().unwrap(),
+        Arc::new(SystemClock),
+    )
+    .expect("open sqlite×sqlite facade cell");
+    accepts_concrete_handle(&fireweed);
+    exercise_operation_families(&fireweed, "operation-families-sqlite-sqlite").await;
+    drop(fireweed);
+    let _ = std::fs::remove_file(log);
+    let _ = std::fs::remove_file(proj);
+}
+
+#[test]
+fn open_sqlite_sqlite_projection_rejects_identical_paths() {
+    let err = open_sqlite_sqlite_projection(
+        "/tmp/fireweed-same-path.db",
+        "/tmp/fireweed-same-path.db",
+        Arc::new(SystemClock),
+    )
+    .expect_err("identical paths must fail");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("distinct"),
+        "error should mention distinct paths: {msg}"
+    );
 }

@@ -4103,12 +4103,15 @@ mod byte_admission_wiring_tests {
     /// paths for log vs projection.
     #[test]
     fn sqlite_log_sqlite_projection_constructs_with_distinct_paths() {
-        let tid = format!("{:?}", std::thread::current().id());
+        let uniq = format!("{}-{}", std::process::id(), std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0));
         let log_path = std::env::temp_dir().join(format!(
-            "fireweed-server-sqlite-sqlite-log-{tid}.db"
+            "fireweed-server-sqlite-sqlite-log-{uniq}.db"
         ));
         let proj_path = std::env::temp_dir().join(format!(
-            "fireweed-server-sqlite-sqlite-proj-{tid}.db"
+            "fireweed-server-sqlite-sqlite-proj-{uniq}.db"
         ));
         let _ = std::fs::remove_file(&log_path);
         let _ = std::fs::remove_file(&proj_path);
@@ -4160,8 +4163,12 @@ mod byte_admission_wiring_tests {
     #[test]
     fn sqlite_log_postgres_projection_backend_spec_and_composition_root() {
         let log_path = std::env::temp_dir().join(format!(
-            "fireweed-server-sqlite-postgres-log-{:?}.db",
-            std::thread::current().id()
+            "fireweed-server-sqlite-postgres-log-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
         ));
         let _ = std::fs::remove_file(&log_path);
 

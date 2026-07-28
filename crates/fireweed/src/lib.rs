@@ -4327,9 +4327,63 @@ pub fn open_memory(clock: Arc<dyn Clock>) -> Fireweed {
 
 /// Open a **sole-owner**, SQLite-backed Fireweed handle with a durable command log and an in-memory
 /// projection rebuilt from that log at `path`. Requires the `sqlite` feature (default).
+///
+/// Matrix cell: `log=sqlite` × `projection=memory` (Class A log-replay).
 #[cfg(feature = "sqlite")]
 pub fn open_sqlite(path: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
     let backend = Arc::new(fireweed_sqlite::composed_sqlite_backend(path)?);
+    Ok(Fireweed::from_runtime(RuntimeCore::new(
+        Arc::new(blocking_backend::BlockingLibBackend::new(backend)?),
+        clock,
+    )))
+}
+
+/// Open a **sole-owner** Fireweed handle with a durable sqlite command log at `log_path` and a
+/// derived sqlite projection at `projection_path` (Class A; distinct store paths required).
+///
+/// Matrix cell: `log=sqlite` × `projection=sqlite`. Recovery-on-open replays only the log tail
+/// beyond the projection high-water. Requires the `sqlite` feature (default).
+#[cfg(feature = "sqlite")]
+pub fn open_sqlite_sqlite_projection(
+    log_path: &str,
+    projection_path: &str,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Fireweed> {
+    if log_path == projection_path {
+        return Err(EngineError::Invalid(
+            "sqlite×sqlite requires distinct log_path and projection_path",
+        ));
+    }
+    let backend = Arc::new(fireweed_sqlite::composed_sqlite_log_sqlite_projection(
+        log_path,
+        projection_path,
+    )?);
+    Ok(Fireweed::from_runtime(RuntimeCore::new(
+        Arc::new(blocking_backend::BlockingLibBackend::new(backend)?),
+        clock,
+    )))
+}
+
+/// Open a **sole-owner** Fireweed handle with a durable sqlite command log at `log_path` and a
+/// derived postgres relational projection at `projection_url` (Class A; distinct stores).
+///
+/// Matrix cell: `log=sqlite` × `projection=postgres`. Requires `sqlite` + `postgres` features.
+#[cfg(all(feature = "sqlite", feature = "postgres"))]
+pub fn open_sqlite_postgres_projection(
+    log_path: &str,
+    projection_url: &str,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Fireweed> {
+    let log = fireweed_sqlite::SqliteLog::open(log_path)?;
+    let projection = fireweed_postgres::PostgresRelational::connect(projection_url)?;
+    let backend = Arc::new(
+        fireweed_engine::ComposedBackend::new(
+            log,
+            projection,
+            fireweed_engine::InProcessControlPlane::new(),
+        )
+        .recover()?,
+    );
     Ok(Fireweed::from_runtime(RuntimeCore::new(
         Arc::new(blocking_backend::BlockingLibBackend::new(backend)?),
         clock,
@@ -4340,6 +4394,9 @@ pub fn open_sqlite(path: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> 
 /// its authoritative projection in relational tables and supports [`Fireweed::discover_active_scopes`],
 /// including per-group discovery. Queue creation is atomic across independently opened handles and returns
 /// the definition decoded from the durable `queues` catalog. Requires the `sqlite` feature (default).
+///
+/// Note: this is the **unified** sqlite relational backend (same store on both axes), not the orthogonal
+/// [`open_sqlite_sqlite_projection`] matrix cell.
 #[cfg(feature = "sqlite")]
 pub fn open_sqlite_relational(path: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
     let backend = Arc::new(fireweed_sqlite::composed_sqlite_relational(path)?);
