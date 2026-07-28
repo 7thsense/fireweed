@@ -101,17 +101,14 @@ storage:
   # Structured storage axes (isomorphic to server StorageConfig / BackendSpec).
   # Public logs: memory | sqlite | postgres | filesystem | s3
   # Public projections: memory | sqlite | postgres
-  # Compat: objectlog + objectLog.store local|s3 → filesystem|s3; inmemory → memory.
   log:
-    # Product default is filesystem (local/NAS object log). objectlog remains a parse/render alias.
+    # Product default is filesystem (local/NAS object log).
     backend: filesystem
-    # Filesystem root + S3 credential block (shared by filesystem, s3, and legacy objectlog).
+    # Filesystem root + S3 credential block for filesystem|s3 logs.
     objectLog:
-      # Only meaningful when backend=objectlog (local→filesystem, s3→s3).
-      store: local
-      # Used when backend is filesystem or objectlog with store=local (NAS-capable path ok).
+      # Used when backend is filesystem (NAS-capable path ok).
       root: /var/lib/fireweed/projection/object-log
-      # Used when backend is s3 or objectlog with store=s3.
+      # Used when backend is s3.
       s3:
         endpoint: ""
         bucket: ""
@@ -128,8 +125,7 @@ storage:
       existingSecret: ""
       databaseUrlKey: database-url
   projection:
-    # Product default is memory. inmemory remains a parse/render alias.
-    # Public projections: memory | sqlite | postgres
+    # Product default is memory. Public projections: memory | sqlite | postgres
     backend: memory
     sqlite:
       path: /var/lib/fireweed/projection/projection.db

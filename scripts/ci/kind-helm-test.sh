@@ -126,17 +126,20 @@ kubectl_cmd() {
 
 values_file_for() {
     case "$1:$2" in
-        objectlog:inmemory) echo "${CHART_DIR}/ci/objectlog-inmemory-values.yaml" ;;
-        objectlog:sqlite) echo "${CHART_DIR}/ci/objectlog-sqlite-values.yaml" ;;
-        postgres:inmemory) echo "${CHART_DIR}/ci/postgres-inmemory-values.yaml" ;;
+        filesystem:memory) echo "${CHART_DIR}/ci/filesystem-memory-values.yaml" ;;
+        filesystem:sqlite) echo "${CHART_DIR}/ci/filesystem-sqlite-values.yaml" ;;
+        # Historical kind matrix keys still accepted; fixtures use public product names.
+        objectlog:inmemory|objectlog:memory) echo "${CHART_DIR}/ci/filesystem-memory-values.yaml" ;;
+        objectlog:sqlite) echo "${CHART_DIR}/ci/filesystem-sqlite-values.yaml" ;;
+        postgres:memory|postgres:inmemory) echo "${CHART_DIR}/ci/postgres-memory-values.yaml" ;;
         postgres:sqlite) echo "${CHART_DIR}/ci/postgres-sqlite-values.yaml" ;;
         postgres:postgres) echo "${CHART_DIR}/ci/postgres-postgres-values.yaml" ;;
         *) die "no runtime CI values file for log=$1 projection=$2" ;;
     esac
 }
 
-# The Kubernetes Secret name + key the postgres-inmemory/postgres-sqlite values files expect the log DSN
-# under (must match charts/fireweed-queue/ci/postgres-inmemory-values.yaml and postgres-sqlite-values.yaml:
+# The Kubernetes Secret name + key the postgres-memory/postgres-sqlite values files expect the log DSN
+# under (must match charts/fireweed-queue/ci/postgres-memory-values.yaml and postgres-sqlite-values.yaml:
 # storage.log.postgres.existingSecret/databaseUrlKey).
 PG_SECRET_NAME="fireweed-postgres-log"
 PG_SECRET_KEY="database-url"

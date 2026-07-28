@@ -71,19 +71,17 @@ Name of the storage persistent volume claim.
 {{- end -}}
 
 {{/*
-True when the selected log axis is a local/NAS filesystem object log
-(first-class filesystem, or legacy objectlog + store=local).
+True when the selected log axis is a local/NAS filesystem object log.
 */}}
 {{- define "fireweed-queue.logIsFilesystemLocal" -}}
-{{- or (eq .Values.storage.log.backend "filesystem") (and (eq .Values.storage.log.backend "objectlog") (eq .Values.storage.log.objectLog.store "local")) -}}
+{{- eq .Values.storage.log.backend "filesystem" -}}
 {{- end -}}
 
 {{/*
-True when the selected log axis is S3-compatible object storage
-(first-class s3, or legacy objectlog + store=s3).
+True when the selected log axis is S3-compatible object storage.
 */}}
 {{- define "fireweed-queue.logIsS3" -}}
-{{- or (eq .Values.storage.log.backend "s3") (and (eq .Values.storage.log.backend "objectlog") (eq .Values.storage.log.objectLog.store "s3")) -}}
+{{- eq .Values.storage.log.backend "s3" -}}
 {{- end -}}
 
 {{/*
@@ -103,7 +101,7 @@ True when the pod needs a local data volume (filesystem/sqlite log or durable lo
 {{/*
 Fail closed when a multi-replica deployment is not using the replica-safe shared
 S3/Postgres profile. Local filesystem object-log storage stays single-replica only.
-Shared profile: log=s3 (or objectlog+store=s3) × controlPlane=postgres × projection=sqlite.
+Shared profile: log=s3 × controlPlane=postgres × projection=sqlite.
 */}}
 {{- define "fireweed-queue.validateReplicaProfile" -}}
 {{- $replicas := int .Values.replicaCount -}}
@@ -111,7 +109,7 @@ Shared profile: log=s3 (or objectlog+store=s3) × controlPlane=postgres × proje
 {{- $shared := and $s3Log (eq .Values.storage.controlPlane.backend "postgres") (eq .Values.storage.projection.backend "sqlite") -}}
 {{- if gt $replicas 1 -}}
 {{- if not $shared -}}
-{{- fail "replicaCount > 1 requires storage.log.backend=s3 (or objectlog with objectLog.store=s3), storage.controlPlane.backend=postgres, storage.projection.backend=sqlite, and persistence.enabled=false" -}}
+{{- fail "replicaCount > 1 requires storage.log.backend=s3, storage.controlPlane.backend=postgres, storage.projection.backend=sqlite, and persistence.enabled=false" -}}
 {{- end -}}
 {{- if .Values.persistence.enabled -}}
 {{- fail "replicaCount > 1 requires persistence.enabled=false so SQLite projections stay pod-local" -}}

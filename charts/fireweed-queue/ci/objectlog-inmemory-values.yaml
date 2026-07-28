@@ -1,8 +1,9 @@
-# Fireweed Queue CI runtime values: objectlog log with the currently wired in-memory projection.
+# Fireweed Queue CI runtime values: filesystem log × memory projection (public StorageConfig axes).
+# Filename retained for historical CI script keys; content uses public product names only.
 storage:
   log:
-    backend: objectlog
+    backend: filesystem
   projection:
-    backend: inmemory
+    backend: memory
 image:
   tag: ci

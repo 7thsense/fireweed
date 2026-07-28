@@ -48,23 +48,17 @@ protocol). Configure them with structured fields:
   only if the projection is durable. After process death only the projection
   remains — no Class A log-rebuild claims for a memory log.
 
-### Compat aliases
+### Non-public names (rejected)
 
-Legacy spellings still parse for one minor and map onto the public axes:
+The following names are **not** public product values. The Helm schema and the
+server env adapter hard-reject them (no long-lived aliases):
 
-- `storage.log.backend=objectlog` + `objectLog.store=local` → `filesystem`
-- `storage.log.backend=objectlog` + `objectLog.store=s3` → `s3`
-- `storage.projection.backend=inmemory` → `memory`
-
-Prefer public axis names in new values. Hybrid (`hybrid`, `hybrid-async`,
-`hybrid-strict`) and `turso` are **not** public projection values: the Helm
-schema rejects them, and the server env adapter rejects hybrid selection (Turso
-remains feature-gated as non-public experimental wiring only).
+- log: `objectlog` (use `filesystem` or `s3`)
+- projection: `inmemory` (use `memory`), `hybrid`, `hybrid-async`,
+  `hybrid-strict`, `turso`
 
 ### Wiring honesty
 
-The current `fireweed-server` binary still selects many combinations through
-legacy env spellings while composition converges on full `StorageConfig`.
 Unsupported or not-yet-verified log×projection cells fail loudly at startup
 instead of silent downgrade. Postgres log/projection paths require a binary
 built with the `postgres` cargo feature (`--features postgres`, or
@@ -99,9 +93,8 @@ The chart renders:
 
 - `FIREWEED_LOG_BACKEND` from `storage.log.backend`
 - `FIREWEED_PROJECTION_BACKEND` from `storage.projection.backend`
-- `FIREWEED_OBJECT_LOG_ROOT` when the log is `filesystem` (or compat
-  `objectlog` + local store)
-- `FIREWEED_OBJECT_LOG_S3_*` when the log is `s3` (or compat `objectlog` + s3 store)
+- `FIREWEED_OBJECT_LOG_ROOT` when the log is `filesystem`
+- `FIREWEED_OBJECT_LOG_S3_*` when the log is `s3`
 - `FIREWEED_SQLITE_LOG_PATH` when the log is `sqlite`
 - `FIREWEED_SQLITE_PROJECTION_PATH` when the projection is `sqlite`
 - Postgres log/projection/control-plane database URL Secret refs when those

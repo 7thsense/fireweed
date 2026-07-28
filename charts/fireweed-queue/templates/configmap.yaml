@@ -25,10 +25,6 @@ data:
   FIREWEED_CONTROL_PLANE_HEARTBEAT_TTL_MS: {{ .Values.storage.controlPlane.postgres.heartbeatTtlMs | int64 | quote }}
   FIREWEED_CONTROL_PLANE_LEASE_TTL_MS: {{ .Values.storage.controlPlane.postgres.leaseTtlMs | int64 | quote }}
   {{- end }}
-  {{- /* Compat: legacy objectlog still injects OBJECT_LOG_STORE for the server adapter. */}}
-  {{- if eq .Values.storage.log.backend "objectlog" }}
-  FIREWEED_OBJECT_LOG_STORE: {{ .Values.storage.log.objectLog.store | quote }}
-  {{- end }}
   {{- if eq (include "fireweed-queue.logIsFilesystemLocal" .) "true" }}
   FIREWEED_OBJECT_LOG_ROOT: {{ .Values.storage.log.objectLog.root | quote }}
   {{- end }}
