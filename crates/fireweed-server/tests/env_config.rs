@@ -234,7 +234,10 @@ fn every_objectlog_s3_projection_accepts_postgres_publication_authority() {
 fn first_class_s3_log_backend_pairs_with_memory_and_sqlite() {
     for (projection, extra) in [
         ("memory", None),
-        ("sqlite", Some(("FIREWEED_SQLITE_PROJECTION_PATH", "/data/s3.db"))),
+        (
+            "sqlite",
+            Some(("FIREWEED_SQLITE_PROJECTION_PATH", "/data/s3.db")),
+        ),
     ] {
         let mut pairs = vec![
             ("FIREWEED_LOG_BACKEND", "s3"),

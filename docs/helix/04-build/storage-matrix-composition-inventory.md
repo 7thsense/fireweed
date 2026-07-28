@@ -9,10 +9,10 @@ ddx:
 
 # Storage matrix composition inventory (5×3)
 
-**Bead**: `fireweed-7ab8e390`  
-**Scope**: Inventory only — map each public log × projection cell to an existing
-composition path, or mark **MISSING**. No wiring changes.  
-**Sources read** (2026-07-28):
+**Bead**: `fireweed-7ab8e390` (inventory) · updated by Phase-2 wire beads incl. `fireweed-b89a086d`  
+**Scope**: Map each public log × projection cell to composition path; keep grid
+aligned with server allowlist + match arms after wiring.  
+**Sources read / revalidated** (2026-07-28):
 
 | Surface | Path |
 |---------|------|
@@ -45,18 +45,18 @@ facade: no single `open(StorageConfig)` dispatcher yet).
 
 | Log \ Projection | `memory` | `sqlite` | `postgres` |
 |------------------|----------|----------|------------|
-| **memory** | yes | **MISSING** | **MISSING** |
-| **sqlite** | yes | **MISSING**¹ | **MISSING** |
+| **memory** | yes | yes | yes (`postgres` feature) |
+| **sqlite** | yes | yes | yes (`postgres` feature) |
 | **postgres** | yes | yes | yes |
-| **filesystem** | yes | yes | **MISSING**² |
-| **s3** | yes | yes | **MISSING**² |
+| **filesystem** | yes | yes | yes (`postgres` feature) |
+| **s3** | yes | yes | yes (`postgres` feature) |
 
-¹ Adapter constructor exists (`composed_sqlite_log_sqlite_projection`); not in
-server allowlist / match arm and not a public facade `open_*`.  
-² Facade has `open_objectlog_postgres` (filesystem or s3 log); server does **not**
-wire `ObjectLog × Postgres`.
+Object-log cells (`filesystem` / `s3`) share `LogSpec::ObjectLog(_)` match arms;
+S3 is selected via `ObjectLogSpec::S3` (env `FIREWEED_LOG_BACKEND=s3` or legacy
+`objectlog` + `FIREWEED_OBJECT_LOG_STORE=s3`).
 
-**Counts (server public matrix)**: 9 wired · 6 MISSING.
+**Counts (server public matrix)**: 15 wired (postgres projection cells require the
+`postgres` cargo feature).
 
 ---
 
@@ -83,21 +83,21 @@ Legend for **wired**:
 
 | Field | Value |
 |-------|--------|
-| **Wired** | Server **no** · Facade **no** |
-| **Server path** | **MISSING** — not in allowlist; falls through to “pairing is not wired” |
-| **Facade** | **MISSING** — no `open_*` for MemoryLog × SqliteProjection |
-| **Constructor** | No dedicated adapter helper found |
-| **Notes** | Class B intent (brief): durable projection survives process death without log rebuild. Needs Phase-2 composition bead. |
+| **Wired** | Server **yes** · Facade **partial** (no dedicated public `open_*`; server Class B arm) |
+| **Server path** | Allowlist `(Memory, Sqlite)`; match arm `MemoryLog` × `SqliteProjectionStore` + recover |
+| **Facade** | No dedicated `open_memory_sqlite`; composition available via server / engine adapters |
+| **Constructor** | Server Class B assembly in `lib.rs` |
+| **Notes** | Class B: durable projection survives process death without log rebuild. |
 
 ### 3. `memory` × `postgres`
 
 | Field | Value |
 |-------|--------|
-| **Wired** | Server **no** · Facade **no** |
-| **Server path** | **MISSING** |
-| **Facade** | **MISSING** |
-| **Constructor** | No dedicated adapter helper found |
-| **Notes** | Class B; same gap class as memory×sqlite. |
+| **Wired** | Server **yes** (feature `postgres`) · Facade **partial** |
+| **Server path** | Allowlist + match arm `MemoryLog` × `PostgresRelational` |
+| **Facade** | No dedicated `open_memory_postgres` |
+| **Constructor** | Server Class B assembly in `lib.rs` |
+| **Notes** | Class B; feature-gated postgres projection. |
 
 ### 4. `sqlite` × `memory`
 
@@ -113,21 +113,21 @@ Legend for **wired**:
 
 | Field | Value |
 |-------|--------|
-| **Wired** | Server **no** · Facade **no** (public matrix) |
-| **Server path** | **MISSING** from allowlist and match arms |
-| **Facade** | **MISSING** as orthogonal cell. Related but distinct: `open_sqlite_relational` uses unified `SqliteRelational` (same store on both axes), not `SqliteLog` × `SqliteProjectionStore` |
-| **Constructor (adapter only)** | `fireweed_sqlite::composed_sqlite_log_sqlite_projection(log_path, projection_path)` → `ComposedBackend<SqliteLog, SqliteProjectionStore, …>` |
-| **Notes** | Adapter path exists and is exercised in sqlite crate tests; product composition (server + facade) does not expose it. |
+| **Wired** | Server **yes** · Facade **yes** |
+| **Server path** | Allowlist + match arm with **distinct** log path vs projection path |
+| **Facade** | `open_sqlite_sqlite_projection` (orthogonal log × projection paths) |
+| **Constructor** | `ComposedBackend<SqliteLog, SqliteProjectionStore, …>` (not unified relational) |
+| **Notes** | Distinct from `open_sqlite_relational` (same-store unified relational). |
 
 ### 6. `sqlite` × `postgres`
 
 | Field | Value |
 |-------|--------|
-| **Wired** | Server **no** · Facade **no** |
-| **Server path** | **MISSING** |
-| **Facade** | **MISSING** |
-| **Constructor** | No dedicated helper found |
-| **Notes** | Class A cell; would be `SqliteLog` × `PostgresRelational` (or equivalent) via generic `ComposedBackend`. |
+| **Wired** | Server **yes** (feature `postgres`) · Facade **yes** (feature `postgres`) |
+| **Server path** | Allowlist + match arm `SqliteLog` × `PostgresRelational` (off-reactor connect) |
+| **Facade** | `open_sqlite_postgres_projection` |
+| **Constructor** | `ComposedBackend<SqliteLog, PostgresRelational, …>` |
+| **Notes** | Class A; distinct sqlite log path + postgres projection DSN. |
 
 ### 7. `postgres` × `memory`
 
@@ -183,11 +183,11 @@ Legend for **wired**:
 
 | Field | Value |
 |-------|--------|
-| **Wired** | Server **no** · Facade **yes** (feature `objectlog` + `postgres`) |
-| **Server path** | **MISSING** — no `(ObjectLog(_), ProjectionSpec::Postgres)` arm; allowlist rejects pairing |
-| **Facade** | `open_objectlog_postgres` / `_async` with `ObjectLogStorage::Local` → `open_objectlog_postgres_blocking` → `ComposedBackend<ObjectLog, PostgresRelational, …>` |
-| **Constructor** | Facade-only composition in `crates/fireweed/src/lib.rs` |
-| **Notes** | Primary gap for “filesystem with all projections” product wire-up is **server** promotion of the existing facade path. |
+| **Wired** | Server **yes** (feature `postgres`) · Facade **yes** (feature `objectlog` + `postgres`) |
+| **Server path** | Shared `(LogSpec::ObjectLog(spec), ProjectionSpec::Postgres)` → `open_objectlog_postgres_backend` (authoritative group-commit ObjectLog + `PostgresRelational`) |
+| **Facade** | `open_objectlog_postgres` / `_async` with `ObjectLogStorage::Local` |
+| **Constructor** | Server: `open_objectlog_postgres_backend`; facade: `open_objectlog_postgres_blocking` |
+| **Notes** | Same composition arm as s3×postgres; blob store is `LocalFsBlobStore`. |
 
 ### 13. `s3` × `memory`
 
@@ -213,11 +213,11 @@ Legend for **wired**:
 
 | Field | Value |
 |-------|--------|
-| **Wired** | Server **no** · Facade **yes** (feature `objectlog` + `postgres`) |
-| **Server path** | **MISSING** (same as filesystem×postgres) |
+| **Wired** | Server **yes** (feature `postgres`) · Facade **yes** (feature `objectlog` + `postgres`) |
+| **Server path** | Shared `(LogSpec::ObjectLog(spec), ProjectionSpec::Postgres)` → `open_objectlog_postgres_backend` over `ObjectLogSpec::S3` (+ optional Postgres publication authority for create-only) |
 | **Facade** | `open_objectlog_postgres` with `ObjectLogStorage::S3Compatible` |
-| **Constructor** | Same facade `open_objectlog_postgres_blocking` path as filesystem×postgres |
-| **Notes** | Often cited as the last object-log × durable-projection gap for server/env selection. |
+| **Constructor** | Server: `open_objectlog_postgres_backend`; facade: `open_objectlog_postgres_blocking` |
+| **Notes** | First-class env: `FIREWEED_LOG_BACKEND=s3` + `FIREWEED_PROJECTION_BACKEND=postgres` + S3 + projection DSN. Unit tests cover env parse + composition root; live open when S3+PG fixtures are set. Bead `fireweed-b89a086d`. |
 
 ---
 
@@ -227,9 +227,10 @@ Legend for **wired**:
 pairings as wired (public + legacy non-public):
 
 ```text
-Memory          × InMemory
-Sqlite          × InMemory
-ObjectLog       × InMemory | Sqlite | Turso | Hybrid | HybridStrict | HybridAsync
+Memory          × InMemory | Sqlite | Postgres(feature postgres)
+Sqlite          × InMemory | Sqlite | Postgres(feature postgres)
+ObjectLog       × InMemory | Sqlite | Postgres(feature postgres)
+                  | Turso | Hybrid | HybridStrict | HybridAsync   (legacy non-public)
 Postgres        × InMemory | Sqlite | Postgres   (feature postgres)
 ```
 
@@ -254,23 +255,23 @@ Runtime double-check: the catch-all match arm in `lib.rs` errors with
 | `open_sqlite_relational` | *(unified sqlite relational)* | Not orthogonal sqlite×sqlite |
 | `open_objectlog` | filesystem×memory | Local root convenience only |
 | `open_objectlog_sqlite` | filesystem×sqlite, s3×sqlite | Via `ObjectLogRuntimeConfig` storage variant |
-| `open_objectlog_postgres` | filesystem×postgres, s3×postgres | Feature-gated; **not** server-wired |
+| `open_objectlog_postgres` | filesystem×postgres, s3×postgres | Feature-gated; **server-wired** via shared ObjectLog arm |
 | `open_postgres` / `_async` | postgres×memory | Log-replay |
 | `open_postgres_runtime*` | postgres×memory / postgres relational modes | Schema, node_id, coordination knobs |
 | `open_postgres_coordinated` | multi-instance postgres | Coordination-focused |
-| *none* | memory×sqlite, memory×postgres, sqlite×sqlite, sqlite×postgres | **MISSING** |
+| `open_sqlite_sqlite_projection` / `open_sqlite_postgres_projection` | sqlite×sqlite, sqlite×postgres | Server-wired; Class B memory cells are server-primary |
 | *none* | full `open(StorageConfig)` | Type exists; open dispatcher **MISSING** |
 
 ---
 
-## Gap list (actionable for Phase-2 beads)
+## Gap list (post Phase-2 wire beads)
 
-| Priority theme | MISSING / incomplete cells | Existing reuse |
-|----------------|----------------------------|----------------|
-| Class B memory log | memory×sqlite, memory×postgres | `MemoryLog` + projection adapters; server allowlist + match arms |
-| Sqlite log orthogonal projections | sqlite×sqlite, sqlite×postgres | Adapter: `composed_sqlite_log_sqlite_projection`; no postgres-projection twin |
-| Object-log × postgres (server) | filesystem×postgres, s3×postgres | Facade `open_objectlog_postgres` already composes both blob stores |
-| Product open surface | all 15 via one entrypoint | `StorageConfig` validation ready; need composition dispatcher + server alignment |
+| Priority theme | Status | Remaining work |
+|----------------|--------|----------------|
+| Class B memory log | Server wired (memory×sqlite, memory×postgres) | Dedicated facade `open_*` optional |
+| Sqlite log orthogonal projections | Server + facade wired | Evidence/conformance beads |
+| Object-log × postgres (server) | Server wired for filesystem\|s3 × postgres | Live S3×PG CI when fixtures present |
+| Product open surface | Typed `StorageConfig` validates all 15 | Single `open(StorageConfig)` dispatcher still optional |
 
 ---
 
@@ -290,5 +291,6 @@ Runtime double-check: the catch-all match arm in `lib.rs` errors with
 - Document path: `docs/helix/04-build/storage-matrix-composition-inventory.md`
 - Mentions all five logs: `memory`, `sqlite`, `postgres`, `filesystem`, `s3`
 - Mentions all three projections: `memory`, `sqlite`, `postgres`
-- Marks **MISSING** cells explicitly for gaps above
+- Marks remaining optional product-surface gaps (dispatcher / dedicated facade opens)
+- Updated for Phase-2 wire beads including `fireweed-b89a086d` (s3 × all projections)
 )

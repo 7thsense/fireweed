@@ -2254,9 +2254,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                     .map(|b| b.with_node_id(node_id))
             })
             .await
-            .map_err(|e| {
-                EngineError::Storage(format!("memory/sqlite open task failed: {e}"))
-            })??;
+            .map_err(|e| EngineError::Storage(format!("memory/sqlite open task failed: {e}")))??;
             // Single-member pool: SQLite projection is blocking-safe via whole-operation adapter.
             let (backend, lifecycle) = blocking_backend_pool(vec![Arc::new(backend)]);
             run_owned_with_blocking_lifecycle(
@@ -2332,7 +2330,12 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             )
             .await
         }
-        (LogSpec::Sqlite { path }, ProjectionSpec::Sqlite { path: projection_path }) => {
+        (
+            LogSpec::Sqlite { path },
+            ProjectionSpec::Sqlite {
+                path: projection_path,
+            },
+        ) => {
             // Class A: durable sqlite command LOG × derived sqlite PROJECTION at distinct paths.
             // Uses the adapter `composed_sqlite_log_sqlite_projection` (snapshot-tail recovery on open).
             // Same off-reactor + whole-operation adapter discipline as sqlite/inmemory.
@@ -2355,9 +2358,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                     .map(|b| b.with_node_id(node_id))
             })
             .await
-            .map_err(|e| {
-                EngineError::Storage(format!("sqlite/sqlite open task failed: {e}"))
-            })??;
+            .map_err(|e| EngineError::Storage(format!("sqlite/sqlite open task failed: {e}")))??;
             // Single-member pool: whole-operation adapter is always available (unlike
             // `blocking_backend`, which is gated on the `postgres` feature for historical reasons).
             let (backend, lifecycle) = blocking_backend_pool(vec![Arc::new(backend)]);
@@ -2386,13 +2387,9 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             let backend = tokio::task::spawn_blocking(move || {
                 let log = fireweed_sqlite::SqliteLog::open(&log_p)?;
                 let projection = fireweed_postgres::PostgresRelational::connect(&url)?;
-                fireweed_engine::ComposedBackend::new(
-                    log,
-                    projection,
-                    InProcessControlPlane::new(),
-                )
-                .recover()
-                .map(|b| b.with_node_id(node_id))
+                fireweed_engine::ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                    .recover()
+                    .map(|b| b.with_node_id(node_id))
             })
             .await
             .map_err(|e| {
@@ -3031,11 +3028,11 @@ fn spawn_objectlog_postgres_flusher(
             let job_backend = weak.clone();
             let join = tokio::task::spawn_blocking(move || {
                 let backend = job_backend.upgrade()?;
-                let now_ms = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-                {
-                    Ok(d) => d.as_millis().min(i64::MAX as u128) as i64,
-                    Err(_) => 0,
-                };
+                let now_ms =
+                    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                        Ok(d) => d.as_millis().min(i64::MAX as u128) as i64,
+                        Err(_) => 0,
+                    };
                 let result = backend.flush_tick(now_ms).map(|_| ());
                 if emit_debug {
                     let c = backend.with_log(|log| log.counters());
@@ -4103,16 +4100,18 @@ mod byte_admission_wiring_tests {
     /// paths for log vs projection.
     #[test]
     fn sqlite_log_sqlite_projection_constructs_with_distinct_paths() {
-        let uniq = format!("{}-{}", std::process::id(), std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0));
-        let log_path = std::env::temp_dir().join(format!(
-            "fireweed-server-sqlite-sqlite-log-{uniq}.db"
-        ));
-        let proj_path = std::env::temp_dir().join(format!(
-            "fireweed-server-sqlite-sqlite-proj-{uniq}.db"
-        ));
+        let uniq = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let log_path =
+            std::env::temp_dir().join(format!("fireweed-server-sqlite-sqlite-log-{uniq}.db"));
+        let proj_path =
+            std::env::temp_dir().join(format!("fireweed-server-sqlite-sqlite-proj-{uniq}.db"));
         let _ = std::fs::remove_file(&log_path);
         let _ = std::fs::remove_file(&proj_path);
 
@@ -4196,9 +4195,7 @@ mod byte_admission_wiring_tests {
     #[test]
     fn sqlite_log_postgres_projection_constructs_when_pg_available() {
         let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "SQLITE/POSTGRES CONSTRUCT SKIPPED — set FIREWEED_PG_TEST_URL to a live DB"
-            );
+            eprintln!("SQLITE/POSTGRES CONSTRUCT SKIPPED — set FIREWEED_PG_TEST_URL to a live DB");
             return;
         };
         let schema = format!("fireweed_sqlite_pg_{}", std::process::id());
@@ -4217,13 +4214,12 @@ mod byte_admission_wiring_tests {
             format!("{url}?options=-csearch_path%3D{schema}")
         };
 
-        let log_path = std::env::temp_dir().join(format!(
-            "fireweed-server-sqlite-pg-construct-{schema}.db"
-        ));
+        let log_path =
+            std::env::temp_dir().join(format!("fireweed-server-sqlite-pg-construct-{schema}.db"));
         let _ = std::fs::remove_file(&log_path);
 
-        let log = fireweed_sqlite::SqliteLog::open(log_path.to_str().unwrap())
-            .expect("open sqlite log");
+        let log =
+            fireweed_sqlite::SqliteLog::open(log_path.to_str().unwrap()).expect("open sqlite log");
         let projection = fireweed_postgres::PostgresRelational::connect(&scoped)
             .expect("connect postgres projection");
         let backend = ComposedBackend::new(log, projection, InProcessControlPlane::new())
@@ -4398,8 +4394,219 @@ mod byte_admission_wiring_tests {
         }
     }
 
-}
+    fn s3_unit_spec(segment_config: SegmentConfig) -> ObjectLogSpec {
+        // S3BlobStore::new is client-only (no network). Unit construction of segmented backends
+        // over that client does not contact the endpoint until a first blob op.
+        ObjectLogSpec::S3 {
+            endpoint: "http://127.0.0.1:9".into(),
+            bucket: "fireweed-unit-s3".into(),
+            region: "us-east-1".into(),
+            credentials: S3CredentialSource::Static {
+                access_key_id: "unit-access".into(),
+                secret_access_key: "unit-secret".into(),
+            },
+            segment_config,
+            allow_insecure_http: true,
+        }
+    }
 
+    /// First-class `s3` log constructs with memory and sqlite projections (shared ObjectLog arms
+    /// over `S3BlobStore`; client construction is network-free).
+    #[test]
+    fn s3_object_log_constructs_with_memory_and_sqlite_projections() {
+        let segment_config = SegmentConfig::new(262_144, 20).unwrap();
+        let log_spec = s3_unit_spec(segment_config);
+        assert_eq!(
+            LogSpec::ObjectLog(log_spec.clone()).label(),
+            "s3",
+            "S3 product label is s3"
+        );
+        assert!(log_spec.is_shared());
+
+        let store = log_spec
+            .open_blob_store()
+            .expect("open S3BlobStore client for s3 log");
+        let memory = SegmentedObjectLogInMemoryBackend::open_with_blob_store(
+            Arc::clone(&store),
+            segment_config,
+        )
+        .expect("construct s3×memory");
+        drop(memory);
+
+        let proj_path = std::env::temp_dir().join(format!(
+            "fireweed-server-s3-sqlite-proj-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&proj_path);
+        let projection = Arc::new(
+            fireweed_sqlite::SqliteProjectionStore::open(proj_path.to_str().unwrap())
+                .expect("open sqlite projection"),
+        );
+        let sqlite = SegmentedObjectLogSqliteBackend::open_with_blob_store_and_projection(
+            store,
+            projection,
+            segment_config,
+        )
+        .expect("construct s3×sqlite");
+        drop(sqlite);
+        let _ = std::fs::remove_file(&proj_path);
+
+        let source = include_str!("lib.rs");
+        assert!(
+            source.contains("ObjectLog(ObjectLogSpec::S3 { .. }) => \"s3\""),
+            "LogSpec label must promote S3 as s3"
+        );
+        assert!(
+            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::InMemory"),
+            "server match arm for object-log×memory must cover s3"
+        );
+        assert!(
+            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::Sqlite"),
+            "server match arm for object-log×sqlite must cover s3"
+        );
+        assert!(
+            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::Postgres"),
+            "server match arm for object-log×postgres must cover s3 (feature postgres)"
+        );
+        assert!(
+            source.contains("open_blob_store_with_authority"),
+            "s3 object-log arms must open via the authority-aware blob store path"
+        );
+    }
+
+    /// BackendSpec + composition-root contract for s3 × postgres (shared ObjectLog arm).
+    #[test]
+    fn s3_object_log_postgres_projection_backend_spec_and_composition_root() {
+        let segment_config = SegmentConfig::new(262_144, 20).unwrap();
+        let spec = BackendSpec {
+            log: LogSpec::ObjectLog(s3_unit_spec(segment_config)),
+            #[cfg(feature = "postgres")]
+            projection: ProjectionSpec::Postgres {
+                url: "postgres://fireweed:fireweed@127.0.0.1:5432/fireweed".into(),
+            },
+            #[cfg(not(feature = "postgres"))]
+            projection: ProjectionSpec::InMemory,
+            control_plane: ControlPlaneSpec::InProcess,
+        };
+        assert_eq!(spec.log.label(), "s3");
+        match &spec.log {
+            LogSpec::ObjectLog(ObjectLogSpec::S3 {
+                endpoint,
+                bucket,
+                allow_insecure_http,
+                ..
+            }) => {
+                assert_eq!(endpoint, "http://127.0.0.1:9");
+                assert_eq!(bucket, "fireweed-unit-s3");
+                assert!(*allow_insecure_http);
+            }
+            _ => panic!("expected S3 object log"),
+        }
+
+        let source = include_str!("lib.rs");
+        assert!(
+            source.contains("open_objectlog_postgres_backend"),
+            "server must own open_objectlog_postgres_backend for filesystem|s3 × postgres"
+        );
+        assert!(
+            source.contains("Class A: filesystem|s3 object-log × durable Postgres projection"),
+            "postgres composition arm documents shared filesystem|s3 coverage"
+        );
+        assert!(
+            source.contains("open_group_commit_authoritative_with_blob_store"),
+            "object-log×postgres must open the authoritative group-commit ObjectLog"
+        );
+        assert!(
+            source.contains("PostgresRelational::connect"),
+            "object-log×postgres must compose with PostgresRelational"
+        );
+    }
+
+    /// Live s3 × postgres construction when S3-compatible + Postgres test envs are set.
+    /// Without live services this is a no-op skip (unit coverage lives in the construction tests above).
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn s3_object_log_postgres_projection_constructs_when_s3_and_pg_available() {
+        let required = [
+            "FIREWEED_S3_TEST_ENDPOINT",
+            "FIREWEED_S3_TEST_BUCKET",
+            "FIREWEED_S3_TEST_REGION",
+            "FIREWEED_S3_TEST_ACCESS_KEY",
+            "FIREWEED_S3_TEST_SECRET_KEY",
+            "FIREWEED_PG_TEST_URL",
+        ];
+        let values: Option<Vec<_>> = required
+            .iter()
+            .map(|name| std::env::var(name).ok().map(|value| (*name, value)))
+            .collect();
+        let Some(values) = values else {
+            eprintln!(
+                "S3/POSTGRES CONSTRUCT SKIPPED — set {} for live s3×postgres open",
+                required.join(", ")
+            );
+            return;
+        };
+        let lookup = |name: &str| {
+            values
+                .iter()
+                .find_map(|(key, value)| (*key == name).then_some(value.as_str()))
+                .expect("required live-test variable")
+        };
+
+        let url = lookup("FIREWEED_PG_TEST_URL").to_owned();
+        let schema = format!("fireweed_s3_pg_{}", std::process::id());
+        let mut client =
+            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
+                .expect("connect to create schema");
+        client
+            .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema};"))
+            .expect("create schema");
+        drop(client);
+
+        let scoped = if url.contains('?') {
+            format!("{url}&options=-csearch_path%3D{schema}")
+        } else {
+            format!("{url}?options=-csearch_path%3D{schema}")
+        };
+
+        // Postgres publication authority is required for S3 stores without native create-only.
+        let pointer_url = scoped.clone();
+        let segment_config = SegmentConfig::new(262_144, 20).unwrap();
+        let log_spec = ObjectLogSpec::S3 {
+            endpoint: lookup("FIREWEED_S3_TEST_ENDPOINT").to_owned(),
+            bucket: lookup("FIREWEED_S3_TEST_BUCKET").to_owned(),
+            region: lookup("FIREWEED_S3_TEST_REGION").to_owned(),
+            credentials: S3CredentialSource::Static {
+                access_key_id: lookup("FIREWEED_S3_TEST_ACCESS_KEY").to_owned(),
+                secret_access_key: lookup("FIREWEED_S3_TEST_SECRET_KEY").to_owned(),
+            },
+            segment_config,
+            allow_insecure_http: lookup("FIREWEED_S3_TEST_ENDPOINT").starts_with("http://"),
+        };
+        let budget = BufferedByteBudget::new(BufferedByteBudgetConfig::new(8_192).unwrap());
+        let backend = open_objectlog_postgres_backend(
+            &log_spec,
+            &scoped,
+            Some(pointer_url.as_str()),
+            DEFAULT_RECOVERY_MAX_TAIL,
+            0,
+            budget,
+            4_096,
+        )
+        .expect("construct s3×postgres");
+        drop(backend);
+
+        if let Ok(mut client) =
+            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
+        {
+            let _ = client.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE;"));
+        }
+    }
+}
 
 /// Class B (ADR-013) memory-log compositions: durable projection survives process death without
 /// Class A log-replay claims. Exercises the same `MemoryLog × ProjectionStore` assembly the server
@@ -4501,13 +4708,19 @@ mod class_b_memory_log_tests {
 
         {
             let log = MemoryLog::new();
-            assert!(!log.is_durable_log(), "MemoryLog must report non-durable (Class B)");
+            assert!(
+                !log.is_durable_log(),
+                "MemoryLog must report non-durable (Class B)"
+            );
             let projection = fireweed_sqlite::SqliteProjectionStore::open(path_s)
                 .expect("open sqlite projection");
             let backend = ComposedBackend::new(log, projection, InProcessControlPlane::new())
                 .recover()
                 .expect("fresh Class B recover is a no-op");
-            backend.create_queue(def.clone()).await.expect("create_queue");
+            backend
+                .create_queue(def.clone())
+                .await
+                .expect("create_queue");
             let pushed = backend
                 .push(&shard, vec![PushSpec::default()], now, None)
                 .await
@@ -4533,7 +4746,11 @@ mod class_b_memory_log_tests {
                 .recover()
                 .expect("Class B projection-only recover");
             assert_eq!(
-                backend.metrics(&shard).await.expect("metrics after reopen").pending,
+                backend
+                    .metrics(&shard)
+                    .await
+                    .expect("metrics after reopen")
+                    .pending,
                 1,
                 "pending item survives via durable projection after process death (not log replay)"
             );

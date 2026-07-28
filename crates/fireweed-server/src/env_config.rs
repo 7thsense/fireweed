@@ -396,8 +396,9 @@ fn object_log_spec_s3(
         segment_config: segments,
         allow_insecure_http,
     };
-    spec.validate()
-        .map_err(|error| ConfigError::new(format!("invalid S3 object-log configuration: {error}")))?;
+    spec.validate().map_err(|error| {
+        ConfigError::new(format!("invalid S3 object-log configuration: {error}"))
+    })?;
     Ok(spec)
 }
 
@@ -1457,7 +1458,8 @@ mod tests {
                     panic!("{log}/{projection} must be rejected on the public env surface");
                 };
                 assert!(
-                    err.0.contains(&format!("FIREWEED_PROJECTION_BACKEND={projection}")),
+                    err.0
+                        .contains(&format!("FIREWEED_PROJECTION_BACKEND={projection}")),
                     "{}",
                     err.0
                 );
@@ -1584,7 +1586,10 @@ mod tests {
             ("FIREWEED_LOG_BACKEND", "memory"),
             ("FIREWEED_PROJECTION_BACKEND", "hybrid"),
         ]));
-        assert!(result.is_err(), "memory/hybrid is demoted from public select");
+        assert!(
+            result.is_err(),
+            "memory/hybrid is demoted from public select"
+        );
     }
 
     #[test]
