@@ -315,21 +315,33 @@ fn rejects_true_recorder_marker_without_matching_complete_state_fingerprints() {
 }
 
 #[test]
-fn rejects_missing_or_unbounded_interleaved_recorder_degradation() {
+fn accepts_large_consistent_interleaved_recorder_ratio_as_diagnostic() {
     let fixture = Fixture::new();
     let path = fixture.root.join("e3.jsonl");
-    let body = fs::read_to_string(&path).unwrap().replacen(
-        "\"bound_1ms_recorder_overhead_ratio\":1.0",
-        "\"bound_1ms_recorder_overhead_ratio\":1.021",
-        1,
-    );
+    let body = fs::read_to_string(&path)
+        .unwrap()
+        .replacen(
+            "\"bound_1ms_recorder_overhead_ratio\":1.0",
+            "\"bound_1ms_recorder_overhead_ratio\":1.5",
+            1,
+        )
+        .replacen(
+            "\"bound_1ms_recorder_overhead_ratio_samples\":[1.0,1.0,1.0,1.0,1.0]",
+            "\"bound_1ms_recorder_overhead_ratio_samples\":[1.5,1.5,1.5,1.5,1.5]",
+            1,
+        );
     fs::write(path, body).unwrap();
+    // The checked-in fixture may independently fail newer topology-exclusion requirements. This assertion
+    // stays focused on the recorder contract: a large, internally consistent ratio is not an E3 error.
+    let errors = fixture.errors();
     assert!(
-        fixture
-            .errors()
-            .contains("must prove recorder overhead ratio <= 1.02")
+        !errors.contains("finite positive recorder ratio"),
+        "{errors}"
     );
+}
 
+#[test]
+fn rejects_missing_or_invalid_interleaved_recorder_measurement() {
     let fixture = Fixture::new();
     let path = fixture.root.join("e3.jsonl");
     let body = fs::read_to_string(&path).unwrap().replacen(
@@ -341,8 +353,28 @@ fn rejects_missing_or_unbounded_interleaved_recorder_degradation() {
     assert!(
         fixture
             .errors()
-            .contains("positive interleaved disabled-recorder control")
+            .contains("positive disabled-recorder control")
     );
+
+    let fixture = Fixture::new();
+    let path = fixture.root.join("e3.jsonl");
+    let body = fs::read_to_string(&path).unwrap().replacen(
+        "\"bound_1ms_recorder_overhead_ratio\":1.0",
+        "\"bound_1ms_recorder_overhead_ratio\":0.0",
+        1,
+    );
+    fs::write(path, body).unwrap();
+    assert!(fixture.errors().contains("finite positive recorder ratio"));
+
+    let fixture = Fixture::new();
+    let path = fixture.root.join("e3.jsonl");
+    let body = fs::read_to_string(&path).unwrap().replacen(
+        "\"bound_1ms_recorder_overhead_ratio_samples\":[1.0,1.0,1.0,1.0,1.0]",
+        "\"bound_1ms_recorder_overhead_ratio_samples\":[0.0,1.0,1.0,1.0,1.0]",
+        1,
+    );
+    fs::write(path, body).unwrap();
+    assert!(fixture.errors().contains("finite positive recorder ratio"));
 }
 
 #[test]
@@ -368,7 +400,7 @@ fn rejects_lockstepped_or_forged_recorder_control_distribution() {
     assert!(
         fixture
             .errors()
-            .contains("must prove recorder overhead ratio <= 1.02")
+            .contains("median matches the interleaved samples")
     );
 }
 
