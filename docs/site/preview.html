@@ -35,20 +35,56 @@
             within each supported 0.x minor line. It is not a 1.0 SemVer, SLA, capacity,
             or production-readiness claim.
           </p>
+          <p>
+            Storage is <strong>Log × Projection</strong> axes—not fixed product SKUs.
+            Postgres is a first-class log backend and projection backend.
+          </p>
         </div>
+
+        <div class="prose">
+          <h2>Storage axes</h2>
+          <ul>
+            <li><strong>Log backends:</strong> <code>memory</code>, <code>sqlite</code>, <code>postgres</code>, <code>filesystem</code>, <code>s3</code></li>
+            <li><strong>Projection backends:</strong> <code>memory</code>, <code>sqlite</code>, <code>postgres</code></li>
+          </ul>
+          <p>
+            <code>filesystem</code> and <code>s3</code> are peer object-log backends (same protocol).
+            Class B applies when the log is <code>memory</code>: after process death only the
+            projection remains; durability is limited to a durable projection.
+          </p>
+        </div>
+
         <div class="table-wrap"><table class="data">
-          <thead><tr><th>Profile</th><th>Status</th><th>Notes</th></tr></thead>
+          <thead><tr><th>Log \ Projection</th><th><code>memory</code></th><th><code>sqlite</code></th><th><code>postgres</code></th></tr></thead>
           <tbody>
-            <tr><td><code>sqlite/inmemory</code></td><td><span class="badge ok">supported</span></td><td>Single-process, locally durable embed.</td></tr>
-            <tr><td><code>objectlog/inmemory</code></td><td><span class="badge ok">supported</span></td><td>Durable object log, rebuildable memory projection.</td></tr>
-            <tr><td><code>objectlog/sqlite</code></td><td><span class="badge ok">supported baseline</span></td><td>Reference persistent local projection.</td></tr>
-            <tr><td><code>objectlog/hybrid</code></td><td><span class="badge ok">supported</span></td><td>Hot-memory reads over durable SQLite projection.</td></tr>
-            <tr><td><code>objectlog/hybrid-async</code></td><td><span class="badge warn">supported with limits</span></td><td>Async debt/backpressure required; scale/cost claims deferred.</td></tr>
-            <tr><td><code>memory/inmemory</code></td><td><span class="badge neutral">development only</span></td><td>Does not survive process loss.</td></tr>
-            <tr><td><code>objectlog/turso</code></td><td><span class="badge warn">experimental</span></td><td>Feature-gated; not a supported user profile.</td></tr>
-            <tr><td><code>postgres/*</code></td><td><span class="badge blocked">deferred</span></td><td>Wired and exercised; outside preview support contract.</td></tr>
+            <tr><td><code>memory</code></td><td>Class B</td><td>Class B</td><td>Class B</td></tr>
+            <tr><td><code>sqlite</code></td><td>Class A</td><td>Class A</td><td>Class A</td></tr>
+            <tr><td><code>postgres</code></td><td>Class A</td><td>Class A</td><td>Class A</td></tr>
+            <tr><td><code>filesystem</code></td><td>Class A</td><td>Class A</td><td>Class A</td></tr>
+            <tr><td><code>s3</code></td><td>Class A</td><td>Class A</td><td>Class A</td></tr>
           </tbody>
         </table></div>
+
+        <div class="prose">
+          <p>
+            Target product surface: full 5×3 matrix. Not every cell is claimed preview-supported
+            on the current revision—see the support table and deployment readiness.
+          </p>
+        </div>
+
+        <div class="table-wrap"><table class="data">
+          <thead><tr><th>Log</th><th>Projection</th><th>Status</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td><code>sqlite</code></td><td><code>memory</code></td><td><span class="badge ok">supported</span></td><td>Single-process, locally durable embed.</td></tr>
+            <tr><td><code>filesystem</code> / <code>s3</code></td><td><code>memory</code></td><td><span class="badge ok">supported</span></td><td>Durable object log, rebuildable memory projection.</td></tr>
+            <tr><td><code>filesystem</code> / <code>s3</code></td><td><code>sqlite</code></td><td><span class="badge ok">supported baseline</span></td><td>Reference persistent local projection.</td></tr>
+            <tr><td><code>memory</code></td><td><code>memory</code></td><td><span class="badge neutral">development only</span></td><td>Class B; does not survive process loss.</td></tr>
+            <tr><td><code>memory</code></td><td>durable</td><td><span class="badge warn">evolving</span></td><td>Class B; durability limited to projection.</td></tr>
+            <tr><td><code>postgres</code></td><td>any</td><td><span class="badge warn">first-class · evolving</span></td><td>Wired log and projection axes; support tracks readiness evidence—not deferred product family.</td></tr>
+            <tr><td>other Class A cells</td><td>—</td><td><span class="badge warn">evolving</span></td><td>Target matrix; see deployment readiness for wiring status.</td></tr>
+          </tbody>
+        </table></div>
+
         <div class="prose">
           <h2>What this release ships</h2>
           <ul>
@@ -68,6 +104,8 @@
             <a href="../helix/00-discover/public-preview-boundary.md">public-preview-boundary.md</a>.
             Checklist:
             <a href="../helix/05-deploy/public-preview-checklist.md">public-preview-checklist.md</a>.
+            Storage product model:
+            <a href="../helix/02-design/orthogonal-storage-matrix-brief.md">orthogonal-storage-matrix-brief.md</a>.
           </p>
         </div>
 

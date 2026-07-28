@@ -48,7 +48,7 @@ The naming analysis is explicit: the product is **not merely a priority queue**.
 It owns the durable work lifecycle:
 
 acceptance → configurable ordering → eligibility → grouping → claims & leases →
-retries → idempotency → terminal state → recovery across storage profiles.
+retries → idempotency → terminal state → recovery across log × projection combinations.
 
 It is **not** a workflow engine and does **not** define dependency graphs.
 
@@ -165,7 +165,7 @@ emoji flora.
     "Seamless job pool at scale"         "Group-aware claims for downstream batches"
     "Blazing priority queue"             "Priority and eligibility are separate"
     "Your workflow engine"               "Not a workflow DAG—work-state lifecycle"
-    "Production-ready everything"        "Public preview; postgres/* deferred"
+    "Production-ready everything"        "Public preview; matrix support is evidence-bound"
     "Just works™"                        "Unsupported pairings fail at startup"
 ```
 
@@ -178,7 +178,7 @@ slogans:
 2. **Bounded progress guarantees** — relaxation without starving eligible work  
 3. **Durable execution lifecycle** — recoverable across worker/process failure  
 4. **Batch and group-aware claims** — downstream-compatible batches  
-5. **Backend-independent transaction integrity** — same external contract across profiles  
+5. **Backend-independent transaction integrity** — same external contract across log × projection cells  
 6. **Tunable durability economics** — commit-latency bound vs object-log cost (ops tone)  
 
 Pillars 1–5 are default marketing. Pillar 6 is for deploy/operator surfaces.
@@ -236,7 +236,8 @@ Pillars 1–5 are default marketing. Pillar 6 is for deploy/operator surfaces.
 
 - Descriptor and lifecycle ownership from the naming analysis  
 - Priority/eligibility selection; leased claim; complete/retry/release/fail  
-- External transaction contract on **supported durable** profiles  
+- External transaction contract on **supported durable** Class A cells  
+
 - Log × projection axes; fail-loud unsupported pairings  
 - Source release; dual license; issues-only contributions  
 - Value props above, without universal capacity numbers  
