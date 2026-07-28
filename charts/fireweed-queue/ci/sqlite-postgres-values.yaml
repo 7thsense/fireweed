@@ -1,0 +1,14 @@
+# Fireweed Queue CI values: sqlite log × postgres projection (Class A).
+storage:
+  log:
+    backend: sqlite
+    sqlite:
+      path: /var/lib/fireweed/projection/fireweed-log.db
+  projection:
+    backend: postgres
+    postgres:
+      existingSecret: fireweed-postgres-projection
+      databaseUrlKey: database-url
+image:
+  tag: ci
+replicaCount: 1

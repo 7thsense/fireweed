@@ -1,0 +1,12 @@
+# Fireweed Queue CI values: first-class filesystem log × postgres projection (public StorageConfig axes).
+# Chart-installable Class A cell; projection DSN is injected via Secret (never fixture credentials).
+storage:
+  log:
+    backend: filesystem
+  projection:
+    backend: postgres
+    postgres:
+      existingSecret: fireweed-postgres-projection
+      databaseUrlKey: database-url
+image:
+  tag: ci

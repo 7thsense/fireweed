@@ -1,0 +1,13 @@
+# Fireweed Queue CI values: sqlite log × sqlite projection (Class A; distinct paths).
+storage:
+  log:
+    backend: sqlite
+    sqlite:
+      path: /var/lib/fireweed/projection/fireweed-log.db
+  projection:
+    backend: sqlite
+    sqlite:
+      path: /var/lib/fireweed/projection/projection.db
+image:
+  tag: ci
+replicaCount: 1

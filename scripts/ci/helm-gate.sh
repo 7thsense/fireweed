@@ -43,7 +43,7 @@ declare -A KUBECONFORM_SHA256=(
 
 # Storage combinations to validate. Each maps to a CI values file under charts/fireweed-queue/ci/.
 # Public axes only: logs memory|sqlite|postgres|filesystem|s3; projections memory|sqlite|postgres.
-COMBINATIONS=(filesystem-memory filesystem-sqlite shared-s3-postgres-control-plane s3-sqlite-postgres-control-plane postgres-memory postgres-sqlite postgres-postgres lakebase-postgres)
+COMBINATIONS=(filesystem-memory filesystem-sqlite filesystem-postgres sqlite-memory sqlite-sqlite sqlite-postgres shared-s3-postgres-control-plane s3-sqlite-postgres-control-plane postgres-memory postgres-sqlite postgres-postgres lakebase-postgres)
 
 err() { echo "helm-gate: $*" >&2; }
 
@@ -131,6 +131,10 @@ values_file_for() {
     case "$combination" in
         filesystem-memory) echo "${CHART_DIR}/ci/filesystem-memory-values.yaml" ;;
         filesystem-sqlite) echo "${CHART_DIR}/ci/filesystem-sqlite-values.yaml" ;;
+        filesystem-postgres) echo "${CHART_DIR}/ci/filesystem-postgres-values.yaml" ;;
+        sqlite-memory) echo "${CHART_DIR}/ci/sqlite-memory-values.yaml" ;;
+        sqlite-sqlite) echo "${CHART_DIR}/ci/sqlite-sqlite-values.yaml" ;;
+        sqlite-postgres) echo "${CHART_DIR}/ci/sqlite-postgres-values.yaml" ;;
         shared-s3-postgres-control-plane) echo "${CHART_DIR}/ci/shared-s3-postgres-control-plane-values.yaml" ;;
         s3-sqlite-postgres-control-plane) echo "${CHART_DIR}/ci/s3-sqlite-postgres-control-plane-values.yaml" ;;
         postgres-memory) echo "${CHART_DIR}/ci/postgres-memory-values.yaml" ;;
@@ -199,6 +203,40 @@ assert_filesystem_sqlite_contract() {
     assert_contains "$rendered" 'name: storage' "storage volume"
     assert_not_contains "$rendered" 'FIREWEED_OBJECT_LOG_STORE' "legacy store env"
     assert_no_fixture_credentials "$rendered" "filesystem/sqlite rendered manifest"
+}
+
+
+assert_filesystem_postgres_contract() {
+    local rendered="$1"
+
+    assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "filesystem"' "filesystem log axis"
+    assert_contains "$rendered" 'FIREWEED_PROJECTION_BACKEND: "postgres"' "postgres projection axis"
+    assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_ROOT: "/var/lib/fireweed/projection/object-log"' "filesystem object-log root"
+    assert_contains "$rendered" 'kind: PersistentVolumeClaim' "storage PVC"
+    assert_contains "$rendered" 'name: storage' "storage volume"
+    assert_contains "$rendered" 'mountPath: "/var/lib/fireweed/projection"' "filesystem volume mount"
+    assert_contains "$rendered" 'name: FIREWEED_POSTGRES_PROJECTION_DATABASE_URL' "postgres projection DSN env"
+    assert_not_contains "$rendered" 'FIREWEED_OBJECT_LOG_STORE' "legacy objectlog store env on first-class filesystem"
+    assert_no_fixture_credentials "$rendered" "filesystem/postgres rendered manifest"
+}
+
+assert_sqlite_log_contract() {
+    local rendered="$1"
+    local projection="$2"
+
+    assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "sqlite"' "sqlite log axis"
+    assert_contains "$rendered" "FIREWEED_PROJECTION_BACKEND: \"${projection}\"" "${projection} projection axis"
+    assert_contains "$rendered" 'FIREWEED_SQLITE_LOG_PATH: "/var/lib/fireweed/projection/fireweed-log.db"' "sqlite log path"
+    assert_contains "$rendered" 'kind: PersistentVolumeClaim' "storage PVC"
+    assert_contains "$rendered" 'name: storage' "storage volume"
+    if [[ "$projection" == "sqlite" ]]; then
+        assert_contains "$rendered" 'FIREWEED_SQLITE_PROJECTION_PATH: "/var/lib/fireweed/projection/projection.db"' "sqlite projection path"
+    fi
+    if [[ "$projection" == "postgres" ]]; then
+        assert_contains "$rendered" 'name: FIREWEED_POSTGRES_PROJECTION_DATABASE_URL' "postgres projection DSN env"
+    fi
+    assert_not_contains "$rendered" 'FIREWEED_BACKEND_PROFILE' "legacy profile env"
+    assert_no_fixture_credentials "$rendered" "sqlite/${projection} rendered manifest"
 }
 
 assert_shared_s3_postgres_control_plane_contract() {
@@ -358,6 +396,10 @@ assert_combination_contract() {
     case "$combination" in
         filesystem-memory) assert_filesystem_memory_contract "$rendered" ;;
         filesystem-sqlite) assert_filesystem_sqlite_contract "$rendered" ;;
+        filesystem-postgres) assert_filesystem_postgres_contract "$rendered" ;;
+        sqlite-memory) assert_sqlite_log_contract "$rendered" "memory" ;;
+        sqlite-sqlite) assert_sqlite_log_contract "$rendered" "sqlite" ;;
+        sqlite-postgres) assert_sqlite_log_contract "$rendered" "postgres" ;;
         shared-s3-postgres-control-plane) assert_shared_s3_postgres_control_plane_contract "$rendered" ;;
         s3-sqlite-postgres-control-plane) assert_s3_sqlite_postgres_control_plane_contract "$rendered" ;;
         postgres-memory) assert_postgres_contract "$rendered" "memory" ;;

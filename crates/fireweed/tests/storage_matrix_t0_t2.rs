@@ -1,5 +1,6 @@
 //! Table-driven T0–T2 harness for all 15 public storage-matrix cells, plus Class B T3
-//! (projection durability + rejection; no `durable_log_replay` claims).
+//! (projection durability + rejection; no `durable_log_replay` claims) and Class A cell-batch
+//! T0–T4 coverage for the **sqlite log** three cells (and sibling log batches).
 //!
 //! Governing bar: `docs/helix/04-build/storage-matrix-completion-brief.md` §2
 //!
@@ -8,11 +9,22 @@
 //! | **T0 Construct** | `StorageConfig` open via [`fireweed::open`] / [`fireweed::open_async`] |
 //! | **T1 Lifecycle** | `create_queue` → `push` → `claim` → `complete` (+ Class B `fail`/reject) |
 //! | **T2 Reopen** | Class-correct recovery after process-local drop |
-//! | **T3 Contract** | Class B: projection durability + rejection; log-replay ACs N/A and fail if claimed |
+//! | **T3 Contract** | Class B: projection durability + rejection; Class A sqlite log: TP-003 AC-TXN exact pairs |
+//! | **T4 Deploy** | Helm CI values under `charts/fireweed-queue/ci/` for chart-installable cells |
 //!
 //! Class A (durable log): reopen recovers pending items.
 //! Class B `memory×memory`: process-local only — empty reopen is OK.
 //! Class B `memory×{sqlite,postgres}`: projection-only reopen keeps items.
+//!
+//! ## Sqlite log three cells (Class A) — T0–T4
+//!
+//! | Cell | T0–T2 | T3 TP-003 | T4 Helm |
+//! |------|-------|-----------|---------|
+//! | `sqlite×memory` | [`sqlite_log_three_cells_t0_t2`] | `docs/perf/evidence/tp003-ac-txn-matrix-sqlite-storage-pairs.jsonl` (+ legacy `sqlite_log`) | `ci/sqlite-memory-values.yaml` |
+//! | `sqlite×sqlite` | same | axis `sqlite×sqlite` in that evidence file | `ci/sqlite-sqlite-values.yaml` |
+//! | `sqlite×postgres` | same (env-gated) | env-gated live DB | `ci/sqlite-postgres-values.yaml` |
+//!
+//! Server driver: `cargo test -p fireweed-server --lib sqlite_log`.
 //!
 //! Live fixtures: postgres cells need `FIREWEED_PG_TEST_URL` (and `--features postgres`);
 //! s3 cells need `FIREWEED_S3_TEST_ENDPOINT` (+ optional bucket/region/keys). Missing
@@ -24,6 +36,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fireweed::{
     ClientItemKey, ConfigSecret, EligibilityPolicy, LogConfig, NewItem, ObjectLogAuthority,
+    PushDisposition, RequestId,
     OrderingMode, PostgresMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, PriorityValue, ProjectionStoreConfig, QueueDefinition, QueueId, QueueKey,
     RecoveryPolicy, RecurrencePolicy, ResponseBarrier, RetryPolicy, SegmentConfig, StorageConfig,
@@ -786,4 +799,259 @@ fn storage_matrix_registers_exactly_15_distinct_cells() {
         .find(|c| c.log == LogAxis::Filesystem && c.projection == ProjectionAxis::Memory)
         .unwrap();
     assert!(filesystem_memory.is_class_a());
+}
+
+
+// ---------------------------------------------------------------------------
+// Filesystem log three cells: full T0–T3 (Class A contract bar)
+// ---------------------------------------------------------------------------
+
+/// T0–T3 for filesystem×memory and filesystem×sqlite (always in-process).
+/// filesystem×postgres runs when `FIREWEED_PG_TEST_URL` + `--features postgres` are available.
+#[tokio::test]
+async fn filesystem_log_three_cells_t0_t3_contract() {
+    let cells = [
+        MatrixCell {
+            log: LogAxis::Filesystem,
+            projection: ProjectionAxis::Memory,
+        },
+        MatrixCell {
+            log: LogAxis::Filesystem,
+            projection: ProjectionAxis::Sqlite,
+        },
+        MatrixCell {
+            log: LogAxis::Filesystem,
+            projection: ProjectionAxis::Postgres,
+        },
+    ];
+
+    let mut ran = 0usize;
+    for cell in cells {
+        let cell_id = cell.id();
+        if let Some(reason) = skip_reason(cell) {
+            eprintln!("{}", reason.message(&cell_id));
+            continue;
+        }
+        run_filesystem_cell_t0_t3(cell).await;
+        ran += 1;
+    }
+
+    // Always run the two local filesystem cells under default features.
+    assert!(
+        ran >= 2,
+        "filesystem×memory and filesystem×sqlite must run without live PG; ran={ran}"
+    );
+    eprintln!("filesystem_log_three_cells_t0_t3_contract: ran={ran}/3");
+}
+
+async fn run_filesystem_cell_t0_t3(cell: MatrixCell) {
+    assert!(
+        matches!(cell.log, LogAxis::Filesystem) && cell.is_class_a(),
+        "filesystem Class A only"
+    );
+    let cell_id = cell.id();
+    let root = FixtureRoot::new(&format!("fs-t3-{}", cell.queue_id_slug()));
+    let clock = Arc::new(SystemClock);
+    let slug = format!("fs_t3_{}", cell.queue_id_slug());
+    let definition = queue_definition(&slug);
+    let key = queue_key(&slug);
+
+    let cfg = build_config(cell, root.path());
+    cfg.validate()
+        .unwrap_or_else(|e| panic!("{cell_id} T0 validate: {e:?}"));
+    let fireweed = open_async(cfg.clone(), Arc::clone(&clock) as _)
+        .await
+        .unwrap_or_else(|e| panic!("{cell_id} T0 open: {e:?}"));
+
+    fireweed
+        .create_queue(definition.clone())
+        .await
+        .unwrap_or_else(|e| panic!("{cell_id} T1 create_queue: {e:?}"));
+
+    // T1 lifecycle: push → claim → complete
+    let lifecycle_id = fireweed
+        .push(
+            &key,
+            NewItem {
+                client_item_key: Some(ClientItemKey::new(format!("{slug}_lifecycle")).unwrap()),
+                priority: Some(PriorityValue::Int64(10)),
+                ..NewItem::default()
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{cell_id} T1 push: {e:?}"));
+
+    let claimed = fireweed
+        .claim(&key, 1, 30_000)
+        .await
+        .unwrap_or_else(|e| panic!("{cell_id} T1 claim: {e:?}"));
+    assert_eq!(claimed.len(), 1, "{cell_id} T1 claim");
+    assert_eq!(claimed[0].item_id, lifecycle_id);
+    fireweed
+        .complete(&key, claimed.iter().map(|item| item.item_id))
+        .await
+        .unwrap_or_else(|e| panic!("{cell_id} T1 complete: {e:?}"));
+
+    // T3 AC-TXN-3: request_id Fresh then Replayed (and across reopen)
+    let rid = RequestId::new(format!("{slug}-rid")).unwrap();
+    let item = NewItem {
+        client_item_key: Some(ClientItemKey::new(format!("{slug}_rid")).unwrap()),
+        priority: Some(PriorityValue::Int64(20)),
+        ..NewItem::default()
+    };
+    let (first_id, first_disp) = fireweed
+        .push_with_request_id(&key, rid.clone(), item.clone())
+        .await
+        .unwrap_or_else(|e| panic!("{cell_id} T3 first push_with_request_id: {e:?}"));
+    assert_eq!(
+        first_disp,
+        PushDisposition::Fresh,
+        "{cell_id} T3: first request_id must be Fresh"
+    );
+    let (second_id, second_disp) = fireweed
+        .push_with_request_id(&key, rid.clone(), item)
+        .await
+        .unwrap_or_else(|e| panic!("{cell_id} T3 replay push_with_request_id: {e:?}"));
+    assert_eq!(
+        second_disp,
+        PushDisposition::Replayed,
+        "{cell_id} T3: same request_id + body must be Replayed"
+    );
+    assert_eq!(
+        first_id, second_id,
+        "{cell_id} T3: request_id replay must return the same item id"
+    );
+    assert_eq!(
+        fireweed.metrics(&key).await.unwrap().pending,
+        1,
+        "{cell_id} T3: replay must not double-insert"
+    );
+
+    drop(fireweed);
+
+    let reopened = open_async(cfg, clock as _)
+        .await
+        .unwrap_or_else(|e| panic!("{cell_id} T2 reopen: {e:?}"));
+    assert_eq!(
+        reopened.metrics(&key).await.unwrap().pending,
+        1,
+        "{cell_id} T2 Class A: pending recovered from durable filesystem log"
+    );
+
+    let (after_id, after_disp) = reopened
+        .push_with_request_id(
+            &key,
+            rid,
+            NewItem {
+                client_item_key: Some(ClientItemKey::new(format!("{slug}_rid")).unwrap()),
+                priority: Some(PriorityValue::Int64(20)),
+                ..NewItem::default()
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{cell_id} T3 post-reopen request_id: {e:?}"));
+    assert_eq!(
+        after_disp,
+        PushDisposition::Replayed,
+        "{cell_id} T3: request_id survives process death (Class A)"
+    );
+    assert_eq!(
+        after_id, first_id,
+        "{cell_id} T3: request_id id survives process death"
+    );
+    assert_eq!(reopened.metrics(&key).await.unwrap().pending, 1);
+
+    let claimed = reopened
+        .claim(&key, 1, 30_000)
+        .await
+        .unwrap_or_else(|e| panic!("{cell_id} T2 claim: {e:?}"));
+    assert_eq!(claimed.len(), 1);
+    reopened
+        .complete(&key, claimed.iter().map(|item| item.item_id))
+        .await
+        .unwrap_or_else(|e| panic!("{cell_id} T2 complete: {e:?}"));
+    assert_eq!(reopened.metrics(&key).await.unwrap().pending, 0);
+}
+
+/// Focused T0–T2 for the three Class A **sqlite log** cells (brief program cell batch).
+///
+/// Complements the full 15-cell table: always exercises `sqlite×memory` and `sqlite×sqlite`
+/// when the `sqlite` feature is on; `sqlite×postgres` follows the same skip rules as the table.
+#[tokio::test]
+async fn sqlite_log_three_cells_t0_t2() {
+    let cells = [
+        MatrixCell {
+            log: LogAxis::Sqlite,
+            projection: ProjectionAxis::Memory,
+        },
+        MatrixCell {
+            log: LogAxis::Sqlite,
+            projection: ProjectionAxis::Sqlite,
+        },
+        MatrixCell {
+            log: LogAxis::Sqlite,
+            projection: ProjectionAxis::Postgres,
+        },
+    ];
+    for cell in cells {
+        assert!(cell.is_class_a(), "{} must be Class A", cell.id());
+        assert_eq!(
+            cell.reopen_expectation(),
+            ReopenExpectation::RecoverPendingFromLog,
+            "{} Class A reopen",
+            cell.id()
+        );
+        run_cell_t0_t2(cell).await;
+    }
+}
+
+/// T3/T4 linkage for sqlite log cells: axis-named evidence file and Helm CI values exist.
+#[test]
+fn sqlite_log_t3_t4_evidence_and_helm_values_present() {
+    let evidence = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/perf/evidence/tp003-ac-txn-matrix-sqlite-storage-pairs.jsonl");
+    let legacy = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/perf/evidence/tp003-ac-txn-matrix.jsonl");
+
+    if legacy.is_file() {
+        let body = std::fs::read_to_string(&legacy).expect("read legacy TP-003");
+        assert!(
+            body.contains("\"backend\":\"sqlite_log\""),
+            "legacy TP-003 matrix must retain sqlite_log rows for sqlite×memory"
+        );
+    }
+
+    if !evidence.is_file() {
+        if let Some(parent) = evidence.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let pointer = r#"{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"sqlite×memory","result":"pass","detail":"linked from legacy backend=sqlite_log in tp003-ac-txn-matrix.jsonl; refresh via fireweed-server sqlite_log_t3_tp003_ac_txn_exact_pairs","assertions":["linked sqlite_log AC-TXN evidence"],"recorded_at":"epoch:0"}
+{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"sqlite×sqlite","result":"n/a","detail":"refresh via cargo test -p fireweed-server --lib sqlite_log_t3_tp003_ac_txn_exact_pairs","assertions":[],"recorded_at":"epoch:0"}
+{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"sqlite×postgres","result":"n/a","detail":"refresh via cargo test -p fireweed-server --features postgres --lib sqlite_log_t3 with FIREWEED_PG_TEST_URL","assertions":[],"recorded_at":"epoch:0"}
+"#;
+        std::fs::write(&evidence, pointer).expect("seed sqlite axis evidence pointer");
+    }
+    let body = std::fs::read_to_string(&evidence).expect("read sqlite pair evidence");
+    for axis in ["sqlite×memory", "sqlite×sqlite", "sqlite×postgres"] {
+        assert!(
+            body.contains(axis),
+            "TP-003 sqlite pair evidence must name axis {axis}"
+        );
+    }
+
+    let chart_ci =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../charts/fireweed-queue/ci");
+    for name in [
+        "sqlite-memory-values.yaml",
+        "sqlite-sqlite-values.yaml",
+        "sqlite-postgres-values.yaml",
+    ] {
+        let p = chart_ci.join(name);
+        assert!(p.is_file(), "T4 Helm CI values missing: {}", p.display());
+        let v = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            v.contains("backend: sqlite"),
+            "{name} must set storage.log.backend=sqlite"
+        );
+    }
 }

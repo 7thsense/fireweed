@@ -1,0 +1,11 @@
+# Fireweed Queue CI values: sqlite log × memory projection (Class A, chart-installable).
+storage:
+  log:
+    backend: sqlite
+    sqlite:
+      path: /var/lib/fireweed/projection/fireweed-log.db
+  projection:
+    backend: memory
+image:
+  tag: ci
+replicaCount: 1
