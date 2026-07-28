@@ -19,9 +19,9 @@ use fireweed_engine::{
     OwnerResolution, ProjectionRead, PushPort, PushSpec, QueueControlPlane, QueueKey, QueueLease,
 };
 use fireweed_objectlog::segmented::{
-    BlobStore, FaultCutPoint, FaultHook, NamespacedBlobStore, PointerFencedBlobStore, S3BlobStore,
+    BlobStore, FaultCutPoint, FaultHook, NamespacedBlobStore, S3BlobStore,
 };
-use fireweed_postgres::{PostgresControlPlane, PostgresManifestPointer};
+use fireweed_postgres::PostgresControlPlane;
 use fireweed_resp::{RespHooks, RouteDecision};
 use fireweed_server::{OwnershipRuntime, SegmentConfig, SegmentedObjectLogSqliteBackend};
 
@@ -283,17 +283,11 @@ fn projection_path(label: &str) -> String {
 
 fn backend(
     store: Arc<dyn BlobStore>,
-    postgres_url: &str,
     namespace: &str,
     label: &str,
 ) -> Arc<SegmentedObjectLogSqliteBackend> {
-    let pointers = Arc::new(
-        PostgresManifestPointer::open(postgres_url)
-            .expect("open PostgreSQL object-publication authority"),
-    );
-    let fenced: Arc<dyn BlobStore> = Arc::new(PointerFencedBlobStore::new(store, pointers));
     let namespaced: Arc<dyn BlobStore> = Arc::new(
-        NamespacedBlobStore::new(fenced, namespace).expect("construct unique object namespace"),
+        NamespacedBlobStore::new(store, namespace).expect("construct unique object namespace"),
     );
     Arc::new(
         SegmentedObjectLogSqliteBackend::open_with_blob_store(
@@ -563,7 +557,7 @@ fn acquire_fences_manifest_before_serving() {
         lease_ttl_ms: 10_000,
     };
     let cp = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
-    let backend = backend(store, &pg, &namespace, "acquire");
+    let backend = backend(store, &namespace, "acquire");
     let runtime = OwnershipRuntime::new(
         backend.clone(),
         cp.clone(),
@@ -609,7 +603,7 @@ fn concurrent_acquires_publish_exactly_one_usable_owner() {
     let cp_a = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
     let cp_b = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
     let observer = PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap();
-    let backend = backend(store, &pg, &namespace, "concurrent");
+    let backend = backend(store, &namespace, "concurrent");
     let a = Arc::new(OwnershipRuntime::new(
         backend.clone(),
         cp_a,
@@ -659,8 +653,8 @@ fn pending_fence_gap_linearizes_old_commit_before_storage_fence_then_rejects_sta
         resume: Mutex::new(resume_rx),
     });
     let observer = PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap();
-    let a_backend = backend(store.clone(), &pg, &namespace, "pending-gap-a");
-    let b_backend = backend(store, &pg, &namespace, "pending-gap-b");
+    let a_backend = backend(store.clone(), &namespace, "pending-gap-a");
+    let b_backend = backend(store, &namespace, "pending-gap-b");
     let a = Arc::new(OwnershipRuntime::new(
         a_backend.clone(),
         cp_a,
@@ -738,8 +732,8 @@ fn greater_epoch_owner_hydrates_snapshot_tail_before_serving() {
     let cp_a = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
     let cp_b = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
     let observer = PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap();
-    let a_backend = backend(store.clone(), &pg, &namespace, "hydrate-a");
-    let b_backend = backend(store, &pg, &namespace, "hydrate-b");
+    let a_backend = backend(store.clone(), &namespace, "hydrate-a");
+    let b_backend = backend(store, &namespace, "hydrate-b");
     let a = OwnershipRuntime::new(
         a_backend.clone(),
         cp_a,
@@ -860,8 +854,8 @@ fn greater_epoch_owner_rebuilds_projection_initialized_before_writes() {
     let cp_a = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
     let cp_b = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
     let observer = PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap();
-    let a_backend = backend(store.clone(), &pg, &namespace, "empty-hydrate-a");
-    let b_backend = backend(store, &pg, &namespace, "empty-hydrate-b");
+    let a_backend = backend(store.clone(), &namespace, "empty-hydrate-a");
+    let b_backend = backend(store, &namespace, "empty-hydrate-b");
     let a = OwnershipRuntime::new(
         a_backend.clone(),
         cp_a,
@@ -928,8 +922,8 @@ fn stale_append_paused_before_authority_cannot_survive_handoff() {
     };
     let cp_a = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
     let cp_b = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
-    let a_backend = backend(store.clone(), &pg, &namespace, "race-a");
-    let b_backend = backend(store.clone(), &pg, &namespace, "race-b");
+    let a_backend = backend(store.clone(), &namespace, "race-a");
+    let b_backend = backend(store.clone(), &namespace, "race-b");
     let a = Arc::new(OwnershipRuntime::new(
         a_backend.clone(),
         cp_a,
@@ -953,7 +947,7 @@ fn stale_append_paused_before_authority_cannot_survive_handoff() {
         resume: Mutex::new(resume_rx),
         fired: AtomicBool::new(false),
     })));
-    let reopened = backend(store, &pg, &namespace, "race-reopen");
+    let reopened = backend(store, &namespace, "race-reopen");
     let seam_stage = Arc::new(Mutex::new(StaleHandoffStage::AwaitingFaultEntry));
     let supervised_stage = seam_stage.clone();
     test_runtime().block_on(async {
@@ -1022,7 +1016,7 @@ fn failed_fence_and_failed_compensation_remain_non_serving_across_restart() {
         heartbeat_ttl_ms: 5_000,
         lease_ttl_ms: 10_000,
     };
-    let backend = backend(store, &pg, &namespace, "failure");
+    let backend = backend(store, &namespace, "failure");
     let failing_cp = Arc::new(FailReleaseControlPlane {
         inner: PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap(),
         fail_release: AtomicBool::new(false),

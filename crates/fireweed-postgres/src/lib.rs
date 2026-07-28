@@ -1973,5 +1973,3 @@ mod batching_structure_tests {
         assert!(!write.contains("COUNT(*)"));
     }
 }
-mod manifest_pointer;
-pub use manifest_pointer::PostgresManifestPointer;
