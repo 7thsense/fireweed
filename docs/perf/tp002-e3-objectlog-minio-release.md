@@ -14,7 +14,7 @@ Start a fresh MinIO instance with a tmpfs data volume:
 
 ```bash
 docker run -d --name fireweed-e3-minio \
-  --tmpfs /data:rw,size=8g \
+  --tmpfs /data:rw,size=16g \
   -e MINIO_ROOT_USER=minioadmin \
   -e MINIO_ROOT_PASSWORD=minioadmin \
   minio/minio server /data
@@ -29,11 +29,15 @@ first eight commands and fails closed unless the smallest four exceed the segmen
 the smallest three remain below it, each command remains below the target, and the full wave's conservative
 byte-admission charge is at most
 half the 16 MiB per-queue cap. These are byte-shape checks, not elapsed-time or host-performance gates.
+The fresh run requires a 16 GiB MinIO `/data` tmpfs: the exact 10M workload exhausted the prior 8 GiB
+topology with MinIO HTTP 507 (`XMinioStorageFull`) before evidence could be accepted. This capacity correction
+does not add a host-speed gate or a durability claim.
 
 ## Topology and hardware
 
 - One local Rust test process drove one MinIO container over live HTTP/S3 at its bridge IP.
-- MinIO `RELEASE.2025-09-07T16-13-09Z` stored object data on an 8 GiB tmpfs mounted at `/data`.
+- The invalid historical run used MinIO `RELEASE.2025-09-07T16-13-09Z` on an 8 GiB `/data` tmpfs; the fresh
+  governed release run uses a 16 GiB tmpfs after the exact workload exhausted the former capacity.
 - Docker server 29.1.3 ran under Linux 6.6.87.2 WSL2.
 - Host: AMD Ryzen 9 5950X, 16 cores / 32 threads, 94 GiB RAM.
 - No cluster orchestration or published loopback port was used.

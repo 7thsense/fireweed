@@ -2999,7 +2999,7 @@ pub mod cost {
                 .values
                 .get("storage_topology_id")
                 .and_then(serde_json::Value::as_str)
-                != Some("minio-tmpfs-8g")
+                != Some("minio-tmpfs-16g")
                 || row
                     .measurements
                     .values
@@ -4382,7 +4382,7 @@ pub mod cost {
                 ("host_speed_gate".into(), serde_json::json!(false)),
                 (
                     "storage_topology_id".into(),
-                    serde_json::json!("minio-tmpfs-8g"),
+                    serde_json::json!("minio-tmpfs-16g"),
                 ),
                 (
                     "storage_durability_claim".into(),

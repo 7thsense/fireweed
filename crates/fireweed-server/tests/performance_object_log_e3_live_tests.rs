@@ -2855,7 +2855,7 @@ async fn performance_object_log_e3_live_tests() {
         );
         assert_eq!(
             std::env::var("FIREWEED_E3_STORAGE_TOPOLOGY_ID").as_deref(),
-            Ok("minio-tmpfs-8g"),
+            Ok("minio-tmpfs-16g"),
             "release E3 evidence requires wrapper-verified MinIO /data tmpfs topology"
         );
         assert_eq!(

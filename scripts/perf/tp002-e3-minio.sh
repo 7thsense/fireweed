@@ -43,8 +43,8 @@ if [ "$FIREWEED_S3_TEST_ENDPOINT" != "http://$MINIO_IP:9000" ]; then
   exit 2
 fi
 case ",$MINIO_TMPFS," in
-  *,size=8g,*) ;;
-  *) echo "E3 topology check failed: /data is not an 8g tmpfs" >&2; exit 2 ;;
+  *,size=16g,*) ;;
+  *) echo "E3 topology check failed: /data is not a 16g tmpfs" >&2; exit 2 ;;
 esac
 
 set +e
@@ -66,8 +66,8 @@ FIREWEED_E3_ACK_PUSHES="$FIREWEED_E3_ACK_PUSHES" \
 FIREWEED_E3_ACK_CONCURRENCY="$FIREWEED_E3_ACK_CONCURRENCY" \
 FIREWEED_E3_LOAD_CONCURRENCY="$FIREWEED_E3_LOAD_CONCURRENCY" \
 FIREWEED_RECOVERY_MAX_TAIL_COMMANDS="$FIREWEED_RECOVERY_MAX_TAIL_COMMANDS" \
-FIREWEED_E3_STORAGE_TOPOLOGY="wrapper-verified MinIO /data 8g tmpfs; live HTTP/S3 semantics; host durability and restart excluded" \
-FIREWEED_E3_STORAGE_TOPOLOGY_ID=minio-tmpfs-8g \
+FIREWEED_E3_STORAGE_TOPOLOGY="wrapper-verified MinIO /data 16g tmpfs; live HTTP/S3 semantics; host durability and restart excluded" \
+FIREWEED_E3_STORAGE_TOPOLOGY_ID=minio-tmpfs-16g \
 FIREWEED_E3_STORAGE_DURABILITY_CLAIM=excluded \
 FIREWEED_E3_SOURCE_REVISION="$SOURCE_REVISION" \
 FIREWEED_E3_POSTGRES_POINTER_DATABASE_URL="$FIREWEED_E3_POSTGRES_POINTER_DATABASE_URL" \
