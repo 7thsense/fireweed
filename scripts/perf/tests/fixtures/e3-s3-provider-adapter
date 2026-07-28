@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+action=${1:?provider action required}
+if [ -n "${FIREWEED_E3_PROVIDER_FIXTURE_LOG:-}" ]; then
+  printf '%s\n' "$action" >>"$FIREWEED_E3_PROVIDER_FIXTURE_LOG"
+fi
+if [ "$action" = "${FIREWEED_E3_PROVIDER_FIXTURE_FAIL_ACTION:-}" ]; then
+  exit 1
+fi

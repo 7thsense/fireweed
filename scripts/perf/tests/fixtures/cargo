@@ -1,7 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
-: "${FIREWEED_E3_DRIFT_SENTINEL:?test must provide drift sentinel}"
 if [ -n "${FIREWEED_E3_CARGO_ARGS_OUT:-}" ]; then
   printf '%s\n' "$*" >>"$FIREWEED_E3_CARGO_ARGS_OUT"
 fi
-touch "$FIREWEED_E3_DRIFT_SENTINEL"
+if [ -n "${FIREWEED_E3_CARGO_EVENT_LOG:-}" ]; then
+  printf 'cargo %s\n' "$*" >>"$FIREWEED_E3_CARGO_EVENT_LOG"
+fi
+if [ -n "${FIREWEED_E3_TEST_ARTIFACTS:-}" ]; then
+  case " $* " in
+    *" external_transaction_contract_matrix_tests "*)
+      printf 'fixture transaction evidence\n' >"$FIREWEED_E3_TRANSACTION_EVIDENCE_OUT"
+      ;;
+    *" performance_object_log_e3_live_tests "*)
+      printf 'fixture fence evidence\n' >"$FIREWEED_E3_FENCE_EVIDENCE_OUT"
+      printf 'fixture ledger evidence\n' >"$FIREWEED_LEDGER_DIR/performance_object_log_e3_live_tests.jsonl"
+      ;;
+    *" fireweed-build-e3-contract "*)
+      previous=
+      for arg in "$@"; do
+        if [ "$previous" = --out ]; then
+          printf 'fixture semantic contract\n' >"$arg"
+          break
+        fi
+        previous=$arg
+      done
+      ;;
+  esac
+fi
+if [ -n "${FIREWEED_E3_DRIFT_SENTINEL:-}" ]; then
+  touch "$FIREWEED_E3_DRIFT_SENTINEL"
+fi
