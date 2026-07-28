@@ -7,9 +7,11 @@ ddx:
     - adr-auth-tenancy-and-storage-isolation
     - adr-granularity-mapping-and-claim-domain
     - adr-queue-as-shard-unit-and-projection-families
+    - adr-orthogonal-log-projection-composition
+    - adr-log-single-source-of-truth
     - adr-full-async-storage-boundaries
     - adr-async-commit-strategy-and-dispatch
-    - adr-turso-derived-projection
+    - orthogonal-storage-matrix-brief
     - concerns
     - prd
   review:
@@ -30,14 +32,16 @@ ddx:
 
 # Technical Design: TD-001 Storage Architecture and Backend Contracts
 
-**Contract**: API-001 | **ADR**: ADR-001, ADR-004, ADR-008 | **Scope**: storage architecture
+**Contract**: API-001, API-005 | **ADR**: ADR-001, ADR-004, ADR-008, ADR-012, ADR-013 |
+**Scope**: storage architecture | **Product intent**: `orthogonal-storage-matrix-brief`
 
 ## Scope
 
 This technical design defines the storage component boundaries that must satisfy
 API-001. It is intentionally system-level: later story-level designs and beads
-inherit these contracts when implementing the Rust workspace, Postgres-native
-mode, S3/object-log mode, and conformance tests.
+inherit these contracts when implementing the Rust workspace, Postgres log and
+projection adapters, object-log (`filesystem` / `s3`) modes, and conformance
+tests.
 
 In scope:
 
@@ -49,7 +53,8 @@ In scope:
 - Queue-to-owner assignment, execution epochs, and fencing requirements
   (per-queue; the mechanism is TD-003).
 - The two projection families and conformance as the behavior contract.
-- Backend profiles and conformance requirements.
+- **Orthogonal public axes** (log × projection × control plane), the 5×3
+  matrix, durability Class A / Class B, and conformance requirements.
 - Runtime-neutral full-async storage boundaries, typed commit operations,
   blocking-adapter rules, commit-strategy/dispatcher injection, and cancellation outcomes (ADR-015,
   ADR-017).
@@ -58,11 +63,12 @@ Out of scope:
 
 - Exact Postgres DDL, indexes, and query plans. TD-002 owns Postgres-native
   reference mode.
-- Exact S3 object byte-framing and physical deployment sizing. TD-004 owns S3
+- Exact object-log byte-framing and physical deployment sizing. TD-004 owns
   object layout, manifest semantics, manifest-commit fencing against the current
   control-plane epoch, group-commit thresholds, in-flight claim reservation,
-  snapshot/expiry rules, and object-log latency/cost validation for the
-  `object_log_sqlite_projection` profile.
+  snapshot/expiry rules, and object-log latency/cost validation for
+  `filesystem` / `s3` log compositions (historically named
+  `object_log_sqlite_projection` in evidence).
 - HTTP route implementation and SDK packaging. API-001 owns client semantics.
 - Queue-to-owner assignment, leases, epoch allocation, drain, reassignment, and
   recovery *mechanism*. TD-003 owns ownership and fencing; TD-001 defines only
@@ -79,38 +85,64 @@ Out of scope:
 ## Technical Approach
 
 **Strategy**: implement fireweed as a command-log-backed queue engine with a
-backend capability layer. The native API commits durable command records first,
-then applies those records to a query-optimized projection used for priority
-claim, lease renewal, finalization, and metrics. Postgres is the preferred
-control-plane store across all modes; Postgres-native mode may also combine log
-and projection in one transactional backend.
+backend capability layer. Composition is orthogonal (ADR-012):
+
+```text
+Backend = LogStore × ProjectionStore × ControlPlane
+```
+
+The native API appends command records on the selected log, then applies those
+records to a query-optimized projection used for priority claim, lease renewal,
+finalization, and metrics. Typed `StorageConfig` (API-005) is the composition
+root: five public logs × three public projections. Postgres is a first-class log
+and projection backend and the preferred control-plane store; a single Postgres
+deployment may host log and projection together when both axes select `postgres`.
 
 **Key Decisions**:
 
 - **Capability traits over a flat storage adapter**: backends differ too much in
   commit latency, replay, conditional writes, and query semantics for a single
   generic store interface.
-- **Command log is the ack boundary**: mutating API calls may return success
-  only after their commands reach the configured durable boundary and accepted
-  effects are externally visible through the serving projection or equivalent
-  committed response state.
-- **External transaction contract is invariant**: backend profiles may differ in
+- **Axes, not profile SKUs**: public storage is selected as independent log and
+  projection values (`memory` | `sqlite` | `postgres` | `filesystem` | `s3` ×
+  `memory` | `sqlite` | `postgres`). Pair strings may appear in test IDs and
+  historical evidence filenames only. There is no public product type named
+  “profile.”
+- **Command log is the ack boundary (per durability class)**: mutating API calls
+  may return success only after their commands reach the class’s durable boundary
+  and accepted effects are externally visible through the serving projection or
+  equivalent committed response state.
+- **External transaction contract is invariant**: matrix cells may differ in
   latency, cost, capacity, and recovery time, but every supported combination
   must preserve API-001 success, structured rejection, unknown-outcome
-  `request_id` replay, read-after-success visibility, and single-active-lease
-  guarantees.
-- **Every projection is rebuildable; the durable log is mandatory (ADR-013)**:
-  SQLite, local, or relational projection state may accelerate claims, but every
-  backend — including the relational family — persists the durable command log,
-  and the log plus snapshots must recover acknowledged state after node loss.
-  There is no production log-less posture; a no-op log exists for tests only and
-  is rejected by production configuration surfaces.
+  `request_id` replay (where applicable to the class), read-after-success
+  visibility, and single-active-lease guarantees for that cell’s durability
+  class.
+- **Durability Class A vs Class B (ADR-013, matrix brief)**: every cell remains
+  `LogStore × ProjectionStore` with append → apply → acknowledge. Persistence
+  envelopes differ:
+  - **Class A** (`log` ∈ {`sqlite`, `postgres`, `filesystem`, `s3`}): the durable
+    command log is the system of record; every projection — including relational
+    `fireweed_items` — is a rebuildable cache. Success ⇒ durable on log and
+    visible in serving projection; recovery via high-water + tail replay;
+    `request_id` resolves ambiguity across crash. Branch, read-as-of, and
+    change-record-from-log require Class A.
+  - **Class B** (`log` = `memory`): in-process `LogStore` for ordering and fencing
+    while alive; after process death only the projection remains. Success ⇒
+    visible in projection; durable **iff** the projection is durable
+    (`sqlite` / `postgres`). No log rebuild, branch, read-as-of, or
+    change-record-from-log. Class B MUST be explicitly selectable; silent
+    null-log / absent-log composition is forbidden. Must not claim Class A
+    guarantees.
 - **The projection is a family, held by conformance (ADR-008)**: fireweed supports
   two projection families — an **in-memory log-replay** projection
-  (embedded/object-log) and a **relational/DB-resident** projection (`fireweed_items`
-  + SQL `FOR UPDATE SKIP LOCKED` claim, sqlite/postgres). They share **behavior,
-  not code**; the conformance suite is the contract that holds them identical (see
-  "Projection Families and Conformance as Contract").
+  (embedded / disposable serving views) and a **relational/DB-resident** projection
+  (`fireweed_items` + SQL `FOR UPDATE SKIP LOCKED` claim, sqlite/postgres). They
+  share **behavior, not code**; the conformance suite is the contract that holds
+  them identical (see "Projection Families and Conformance as Contract"). Public
+  projection **axis** values remain only `memory`, `sqlite`, and `postgres`.
+  Hybrid apply strategies and Turso adapters are not public projection axis
+  values (see matrix non-goals).
 - **The queue is the unit of sharding (ADR-008)**: a whole queue is owned by
   exactly one node at a time; there is no intra-queue sharding, no cross-owner
   claim fan-out, and no cross-owner progress aggregation. Horizontal scale is
@@ -118,7 +150,7 @@ and projection in one transactional backend.
   for vacuum/index-size isolation (TD-002), but that partition is a client-invisible
   storage detail, never an ownership or routing unit.
 - **Control plane is pluggable; Postgres is the default**: queue definitions,
-  queue-to-owner assignment, backend profile, and epochs live in the
+  queue-to-owner assignment, storage axis selection, and epochs live in the
   `ControlPlaneStore`. Postgres is the preferred and only v1-settled
   implementation. The object-store control plane — the object log providing
   per-queue multi-node fencing and coordination via its manifest-CAS series —
@@ -139,21 +171,24 @@ and projection in one transactional backend.
   envelope-level admission concern outside the per-item eligibility/claim pipeline,
   and protects the fireweed deployment — never a caller's downstream API.
 - **Conformance tests define backend eligibility**: no backend implementation is
-  usable until it passes the same durability, idempotency, lease, replay, and
-  progress-bound scenarios.
-- **Commit-latency bound is a profile knob, not a correctness knob**:
-  durable-log profiles expose a group-commit latency bound that trades mutation
-  latency against log/object-store request cost and batch density. The knob must
-  be covered by scale evidence and must never weaken transaction integrity.
+  usable until it passes the durability, idempotency, lease, replay, and
+  progress-bound scenarios that match its durability class.
+- **Commit-latency bound is a composition knob, not a correctness knob**:
+  durable object-log compositions (`filesystem` / `s3`) expose a group-commit
+  latency bound that trades mutation latency against log/object-store request cost
+  and batch density. The knob must be covered by scale evidence and must never
+  weaken transaction integrity.
 
 **Trade-offs**:
 
 - We gain backend flexibility and a clean correctness boundary, but every
-  backend must implement non-trivial conformance behavior.
-- We gain low-cost S3/object-log viability for batched workloads, but accept
-  higher acknowledgement latency in that profile.
-- We gain a simple Postgres-native path, but must avoid letting one Postgres
-  deployment become the unexamined long-term data-plane bottleneck.
+  matrix cell must implement non-trivial conformance behavior for its class.
+- We gain low-cost `filesystem` / `s3` object-log viability for batched
+  workloads, but accept higher acknowledgement latency on those logs.
+- We gain a simple Postgres log×projection path, but must avoid letting one
+  Postgres deployment become the unexamined long-term data-plane bottleneck.
+- Class B enables ephemeral and projection-durable-only deployments without a
+  second architecture, but operators must not confuse it with Class A recovery.
 
 ## Component Changes
 
@@ -199,37 +234,70 @@ composition root:
 - **`fireweed-server`**: the composition root binary — dependency injection,
   ReclaimDriver ticker, ownership renewal loop, health probe.
 
-### New: Backend Profiles
+### Public storage axes (5×3 matrix)
 
-| Profile | LogStore | ProjectionStore | SnapshotStore | ControlPlaneStore |
-|---------|----------|-----------------|---------------|-------------------|
-| `postgres_native` | Postgres | Postgres (relational family) | Optional Postgres/object storage | Postgres |
-| `object_log_inmemory_projection` | S3-compatible object log | In-memory local/rebuildable (log-replay family) | S3-compatible object storage | Postgres |
-| `object_log_sqlite_projection` | S3-compatible object log | SQLite local/rebuildable (relational family) | S3-compatible object storage | Postgres |
-| `object_log_turso_projection` | S3-compatible object log | Turso local/rebuildable, native async (relational family) | S3-compatible object storage | Postgres |
-| `object_log_hybrid_projection` | S3-compatible object log | Hybrid: hot in-memory + durable local SQLite projection image | S3-compatible object storage | Postgres |
-| `kafka_log_sqlite_projection` (retired) | Kafka/Redpanda partition log | SQLite local/rebuildable | Object storage or Postgres checkpoint | Postgres |
-| `dynamodb_authority` (retired) | DynamoDB transaction/log table | DynamoDB query tables or local projection | DynamoDB/object storage | Postgres |
+Public storage is the orthogonal product of log and projection axes
+(`orthogonal-storage-matrix-brief`, ADR-012, API-005 `StorageConfig`). There is
+**no** public profile SKU product type.
 
-`postgres_native` (TD-002) is the reference correctness backend and is
-implemented first; it delivers the single-deployment envelope.
-The object-log profiles are the committed high-scale path for v1. The in-memory
-projection variant is the low-latency serving reference for object-log replay;
-the SQLite projection variant is the durable local-index reference for larger hot
-sets and process restarts. The feature-gated Turso variant is the Rust-native,
-native-async relational projection specified by TD-010; it is not a log authority
-and cannot ship until differential conformance passes. `object_log_hybrid_projection` combines those
-properties: SQLite is applied first as the local durable projection image, then
-the same committed batch is applied to the in-memory hot model used for reads and
-pre-commit validation. TD-004 owns their shared object-log semantics and
-projection-specific recovery requirements. The remaining profiles
-(`kafka_log_sqlite_projection`, `dynamodb_authority`) are **retired**: they were
-design targets only, and the ADR-007 cutover (which deleted the Kafka adapter,
-superseding ADR-005) plus ADR-012's composition model removed any commitment to
-them. They remain in the table as capability-mapping illustrations; nothing may
-cite them as supported. Every profile, including committed ones, becomes
-usable for a queue only after it passes the shared backend conformance suite
-defined in this document.
+| Axis | Public values | Responsibility |
+|------|---------------|----------------|
+| **Log** | `memory`, `sqlite`, `postgres`, `filesystem`, `s3` | Command append, epoch/fence authority, replay when durable (Class A) |
+| **Projection** | `memory`, `sqlite`, `postgres` | Serving, claim selection, validation, apply |
+| **Control plane** | (pluggable; Postgres default) | Queue definitions, placement, ownership — composed, not redefined here |
+
+**Not public product values:** `hybrid`, `hybrid-async`, `hybrid-strict`,
+`turso`, `objectlog/*` profile names, `postgres/*` wildcards. Hybrid/async apply
+knobs and Turso adapters, if retained as implementation detail, are not matrix
+rows and MUST NOT be advertised as public projection axis values.
+
+#### Full matrix (15 cells)
+
+Every cell is a valid selection. Semantics differ only by **durability class**
+(ADR-013):
+
+| Log \ Projection | `memory` | `sqlite` | `postgres` |
+|------------------|----------|----------|------------|
+| `memory` | Class B | Class B | Class B |
+| `sqlite` | Class A | Class A | Class A |
+| `postgres` | Class A | Class A | Class A |
+| `filesystem` | Class A | Class A | Class A |
+| `s3` | Class A | Class A | Class A |
+
+#### Object-log peers (`filesystem` and `s3`)
+
+| Log | Blob store | Typical use |
+|-----|------------|-------------|
+| `filesystem` | Directory tree (local disk, NAS e.g. `/tank/…`) | Single-site shared FS, simple tests, real path durability |
+| `s3` | S3-compatible API | Multi-node cloud / MinIO / Garage |
+
+Same object-log protocol (segments, manifest, conditional write / authority,
+retention). Multi-writer still requires ownership and fencing; a NAS path is not
+an automatic free multi-writer free-for-all. TD-004 owns shared object-log
+semantics and recovery requirements for both peers.
+
+#### Capability mapping (illustrative cells)
+
+Historical evidence and test IDs may still name pair strings; those are **not**
+product SKUs. Mapping of common cells onto capability traits:
+
+| Cell (log × projection) | Class | LogStore | ProjectionStore | SnapshotStore | Notes |
+|-------------------------|-------|----------|-----------------|---------------|-------|
+| `postgres` × `postgres` | A | Postgres | Postgres (relational family) | Optional Postgres/object | Single-deployment reference (TD-002); formerly `postgres_native` |
+| `sqlite` × `sqlite` | A | SQLite | SQLite (relational or local) | Optional | Embedded durable (TD-005) |
+| `filesystem` × `memory` | A | Filesystem object log | In-memory (log-replay family) | Filesystem | Low-latency serving over local object log |
+| `filesystem` × `sqlite` | A | Filesystem object log | SQLite local (relational family) | Filesystem | Durable local index over object log |
+| `s3` × `memory` | A | S3 object log | In-memory (log-replay family) | S3 | Multi-node object-log serving |
+| `s3` × `sqlite` | A | S3 object log | SQLite local (relational family) | S3 | Horizontal envelope reference (TD-004); formerly `object_log_sqlite_projection` |
+| `s3` × `postgres` | A | S3 object log | Postgres (relational family) | S3 | First-class matrix cell; not “deferred product” |
+| `memory` × `memory` | B | In-process memory log | In-memory | n/a | Ephemeral; loses log and projection on process death |
+| `memory` × `sqlite` / `postgres` | B | In-process memory log | Durable projection | n/a | Projection-only reopen; no log rebuild |
+
+Control plane remains Postgres-preferred across compositions unless a later
+settled control-plane adapter is selected. Kafka and DynamoDB log backends are
+**retired** (design targets only; ADR-007 cutover deleted Kafka). Every cell
+becomes usable for a queue only after it passes the shared backend conformance
+suite for its durability class.
 
 ### Projection Families and Conformance as Contract
 
@@ -238,33 +306,35 @@ Two families exist, and the **conformance suite is the contract** that holds the
 behaviorally identical:
 
 - **In-memory log-replay** projection: the projection is rebuilt by replaying the
-  durable log (embedded and `object_log_sqlite_projection` use this for recovery).
+  durable log under Class A (embedded and disposable serving views over
+  `filesystem` / `s3` logs use this for recovery). Under Class B the in-process
+  memory log is not durable across process death.
 - **Relational / DB-resident** projection: `fireweed_items` is a **materialized
   cache with a persisted applied-high-water** (ADR-013 retired the
   "authoritative in-place" framing) and claim is an SQL `FOR UPDATE SKIP LOCKED`
-  statement (`postgres_native`, and the SQLite local projection). The relational
-  family persists the same durable command log and MUST be rebuildable from it.
+  statement (`postgres` and `sqlite` projection axis values). Under Class A the
+  relational family persists or is paired with a durable command log and MUST be
+  rebuildable from it. Under Class B with a durable projection, post-restart
+  authority is projection-only.
 
 The conformance suite partitions into capability classes:
 
 | Suite | What it asserts | Who runs it |
 |-------|-----------------|-------------|
-| **core** | Observable queue behavior independent of durability substrate: ordering, eligibility (API-001 Eligibility Precedence), claim atomicity, single-active-lease, idempotency (`request_id` + `client_item_key`), lease renewal/expiry/reclaim, epoch fencing, and the per-queue progress bound. | **Every** projection family / backend. |
-| **transaction contract** | Success is durable and visible; structured envelope rejection has no committed effect; per-item rejection has no effect for that item; unknown outcomes resolve exactly once by `request_id`; crashes at every append/apply/response boundary preserve the same visible history. | **Every** supported implementation combination. |
-| **log** | Replay-from-log, snapshot + log-tail recovery, segment/manifest group-commit fencing, orphan-segment handling, and commit-latency-bound behavior. | Log-bearing backends (`object_log_inmemory_projection`, `object_log_sqlite_projection`, `object_log_hybrid_projection`; the relational family joins once its ADR-013 rebuildability migration lands). |
-| **relational durability** | Reconnect-after-crash durability: after process loss the DB-resident projection still holds acknowledged state. Per ADR-013 this is a **supplement to, not a substitute for**, replay-from-log — once the relational family's rebuildability migration lands it also runs the **log** class (replay tail from its persisted command log). | Relational-family backends (`postgres_native`). |
+| **core** | Observable queue behavior independent of durability substrate: ordering, eligibility (API-001 Eligibility Precedence), claim atomicity, single-active-lease, idempotency (`request_id` + `client_item_key`), lease renewal/expiry/reclaim, epoch fencing, and the per-queue progress bound. | **Every** matrix cell / projection family. |
+| **transaction contract** | Success is visible per the cell’s durability class; structured envelope rejection has no committed effect; per-item rejection has no effect for that item; unknown outcomes resolve exactly once by `request_id` where the class provides a durable replay substrate; crashes at every append/apply/response boundary preserve the same visible history **for that class**. | **Every** supported matrix cell (assertions scoped to Class A vs Class B). |
+| **log** | Replay-from-log, snapshot + log-tail recovery, segment/manifest group-commit fencing, orphan-segment handling, and commit-latency-bound behavior. | **Class A** cells (`log` ∈ {`sqlite`, `postgres`, `filesystem`, `s3`}). **Not** Class B (`log=memory`). |
+| **relational durability** | Reconnect-after-crash durability: after process loss the DB-resident projection still holds acknowledged state. Under Class A this is a **supplement to, not a substitute for**, replay-from-log — relational Class A cells also run the **log** class. Under Class B with a durable projection this is the **only** cross-restart durability path. | Relational-family projections (`sqlite` / `postgres` projection axis). |
 
-A backend is admissible for a queue only after it passes **core**,
-**transaction contract**, and whichever of **log** / **relational durability**
-matches its durability class. Durability class follows the durability
-**substrate, not the projection family**: a
-relational-family projection that is rebuilt from a log (the SQLite local
-projection under `object_log_sqlite_projection`) discharges its durability
-obligation via **log** (replay/snapshot+tail); the transactional relational
-projection (`postgres_native`) runs the reconnect-after-crash class in addition
-to — never instead of — the ADR-013 rebuild-from-log obligation. The fencing and ownership scenarios (stale-epoch
-reject, reassignment recovery) are part of **core** and bind every backend; their
-*mechanism* is TD-003.
+A cell is admissible for a queue only after it passes **core**, **transaction
+contract** (scoped to class), and whichever of **log** / **relational
+durability** matches its durability class and projection family. Durability
+class follows the **log axis**, not the projection family: a relational-family
+projection rebuilt from a durable log (`s3` × `sqlite`, `postgres` × `postgres`,
+etc.) discharges Class A obligations via **log** (replay/snapshot+tail);
+Class B cells never claim log rebuild. The fencing and ownership scenarios
+(stale-epoch reject, reassignment recovery) are part of **core** and bind every
+backend; their *mechanism* is TD-003.
 
 ## API/Interface Design
 
@@ -305,11 +375,12 @@ per-connection synchronization belongs inside adapters; the generic composition 
 access by placing all stores behind one awaited global lock.
 
 `AsyncComposedBackend` receives an explicit commit strategy and owned-task dispatcher (ADR-017). An atomic
-profile supplies `UnifiedAtomicCommit`, which owns the single transaction covering log, projection,
-cursor/frontier, and replay outcome. An object-log profile supplies `SeparateReplayCommit`, which is legal
-only for `EventualApply` and preserves the ADR-013 response barrier. The engine never infers a commit
+composition (e.g. unified Postgres or SQLite log+projection txn) supplies `UnifiedAtomicCommit`, which
+owns the single transaction covering log, projection, cursor/frontier, and replay outcome. An object-log
+composition (`filesystem` / `s3`) supplies `SeparateReplayCommit`, which is legal only for
+`EventualApply` and preserves the ADR-013 response barrier for Class A. The engine never infers a commit
 sequence from `durability_class()` and never implements an atomic mutation as sequential async append and
-apply calls.
+apply calls. Class B still uses a real `LogStore` (memory) and a response barrier for the live process.
 
 The dispatcher is runtime-neutral at the engine boundary. Admission and the queue-local gate complete
 before submission; submission transfers owned request and commit state to backend-owned execution. The
@@ -428,10 +499,10 @@ pub trait ControlPlaneStore {
         key: &QueueKey,
     ) -> impl Future<Output = Result<QueueAssignment, ControlPlaneError>> + Send;
 
-    fn backend_profile(
+    fn storage_config(
         &self,
         key: &QueueKey,
-    ) -> impl Future<Output = Result<BackendProfileConfig, ControlPlaneError>> + Send;
+    ) -> impl Future<Output = Result<StorageAxesConfig, ControlPlaneError>> + Send;
 }
 ```
 
@@ -439,8 +510,9 @@ pub trait ControlPlaneStore {
 default and only v1-settled implementation. TD-003 adds the queue-ownership
 operations (`register_owner`, `resolve_queue_owner`, `acquire_queue_lease`,
 `renew_queue_lease`, `begin_drain`, `release_queue_lease`) to this trait and owns
-their semantics; TD-001 specifies only the base definition/assignment/profile
-reads above.
+their semantics; TD-001 specifies only the base definition/assignment/storage-axis
+reads above. `StorageAxesConfig` records the selected log × projection (and
+related composition fields); it is not a profile SKU name.
 
 `CohortExpired` is the single cohort-liveness command emitted when a cohort's
 `completion_bound_ms` elapses (G6; `CohortDegraded` is not in v1). `PurgeItems`
@@ -530,19 +602,22 @@ Backends may choose one of two valid response models:
 - **Replay response**: append commits first; projection and response records
   catch up from the log before returning, or are reconstructed on retry.
 
-Object-log and Kafka-style profiles are expected to use replay response
-semantics. Postgres-native mode should use transactional response semantics
-unless TD-002 proves that a split model is needed for scale.
+Object-log cells (`filesystem` / `s3` log) are expected to use replay response
+semantics. Atomic Class A cells that commit log and projection together (e.g.
+`postgres` × `postgres`, `sqlite` × `sqlite`) should use transactional response
+semantics unless TD-002 proves that a split model is needed for scale.
 
-For `objectlog/hybrid`, replay response includes durable push request-id replay:
-after a manifest commit but before response delivery, restart and retry of the
-same `request_id` MUST converge by reading the committed command envelope and
-the recorded or reconstructed push item ids. A same-body retry returns the
-original ids without a second append; a different-body retry returns
-`request-id-conflict`. The implementation may repopulate the generic
-idempotency cache from replayed envelopes or persist equivalent SQLite rows
-during apply, but it MUST NOT rely only on a transient in-memory cache for
-committed pushes.
+For Class A object-log cells with a durable projection apply path, replay
+response includes durable push request-id replay: after a manifest commit but
+before response delivery, restart and retry of the same `request_id` MUST
+converge by reading the committed command envelope and the recorded or
+reconstructed push item ids. A same-body retry returns the original ids without
+a second append; a different-body retry returns `request-id-conflict`. The
+implementation may repopulate the generic idempotency cache from replayed
+envelopes or persist equivalent durable projection rows during apply, but it
+MUST NOT rely only on a transient in-memory cache for committed pushes.
+Class B cells resolve `request_id` only while the process (and, if durable, the
+projection) retain outcome state; they MUST NOT claim log-tail replay.
 
 `rearm` and `purge` are covered by these rules: replay returns the recorded
 effective values (`not_before`, `eligible_since`, `priority`, `item_version`)
@@ -566,7 +641,7 @@ assigned.
 
 This keeps the hot path bounded to tenant/queue routing plus backend fencing. It
 does not require fireweed to maintain a cluster membership protocol, but it does
-require each backend profile to document how epoch fencing is enforced.
+require each log backend to document how epoch fencing is enforced.
 
 The full ownership lifecycle — deterministic queue-to-owner assignment (target
 vs active owner) over a live worker set via HRW/rendezvous hashing, storage-backed
@@ -645,7 +720,7 @@ QueueDefinition {
   retry_policy,
   max_push_batch_size,
   max_claim_batch_size,
-  backend_profile,
+  storage_axes,              // selected log × projection (and related fields); not a profile SKU
   recurrence,
   created_at,
   updated_at
@@ -654,7 +729,7 @@ QueueDefinition {
 QueueAssignment {
   tenant_id,
   queue_id,
-  backend_profile,
+  storage_axes,              // selected log × projection for the queue; not a profile SKU
   assignment_epoch,          // monotonic per queue; durably fenced into the log on acquire (TD-003)
   active_owner_id,           // current lease holder; null when unassigned
   target_owner_id,           // deterministic assignment-function target
@@ -738,7 +813,7 @@ duplicated here; they come from the single `fireweed_group_summary`.
 | From | To | Method | Data |
 |------|----|--------|------|
 | `fireweed-resp` / `fireweed` (library) | `fireweed-engine` | Direct Rust call | API-001 operation structs |
-| `fireweed-engine` | `ControlPlaneStore` | Trait | queue definitions, queue assignment, backend profile |
+| `fireweed-engine` | `ControlPlaneStore` | Trait | queue definitions, queue assignment, storage axes |
 | `fireweed-engine` | `LogStore` | Trait | durable command envelopes |
 | `fireweed-engine` | `ProjectionStore` | Trait | committed commands, claim plans, metrics reads |
 | `fireweed-engine` | `SnapshotStore` | Trait | projection snapshots and recovery checkpoints |
@@ -748,11 +823,12 @@ duplicated here; they come from the single `fireweed_group_summary`.
 
 - **Postgres**: preferred `ControlPlaneStore`; fallback is no service-mode queue
   creation or queue routing until Postgres is restored.
-- **Log backend**: authoritative durable commit boundary; fallback is to reject
-  mutating operations with retryable commit errors.
-- **Object storage**: required for object-log command segments and snapshots;
-  fallback is to stop acknowledging object-log commands until durable commit
-  resumes.
+- **Log backend**: Class A authoritative durable commit boundary (or Class B
+  in-process ordering); fallback is to reject mutating operations with retryable
+  commit errors when the log cannot accept appends.
+- **Object storage / filesystem root**: required for `filesystem` / `s3` command
+  segments and snapshots; fallback is to stop acknowledging those commands until
+  durable commit resumes.
 
 ## Security
 
@@ -781,7 +857,7 @@ duplicated here; they come from the single `fireweed_group_summary`.
 - **Expected Load**: at least 10M items in a hot queue; at least 1000 concurrently
   active cold queues plus one designated hot queue per node (queue density,
   TP-002 E2); representative concurrent operation mixes; and large batches for
-  cost-optimized object-log profiles.
+  cost-optimized `filesystem` / `s3` object-log cells.
 - **Queue density (at least 1,001 active queues per node)**: backend implementations of
   the capability traits MUST NOT allocate unbounded per-queue resources.
   Background work — lease-expiry sweeps, progress-bound aggregation,
@@ -797,27 +873,29 @@ duplicated here; they come from the single `fireweed_group_summary`.
 - **Response Target**: API-001 core batch operations preserve exact outcomes and
   monotonic progress within declared resource bounds. Interleaved same-run
   controls quantify degradation; absolute latency percentiles are capacity
-  evidence, including for object-log profiles whose configured batch windows
+  evidence, including for object-log cells whose configured batch windows
   intentionally trade acknowledgement latency for cost.
-- **`objectlog/hybrid` hot-read target**: claim selection, `peek`, `pending`,
-  metrics, live-item lookup, secondary-index lookup, and pre-commit validation
-  MUST be served from the in-memory projection. SQLite work is amortized on
-  sealed-segment apply and recovery image export, not on hot reads. Release-tier
-  hybrid evidence MUST compare against `objectlog/inmemory` and
-  `objectlog/sqlite` with identical segment settings, seeded work, and
-  interleaved same-run control windows. It proves exact operation counts, hot
-  reads served from memory, bounded queue/task/memory debt, and a declared
+- **In-memory projection hot-read target** (`*` × `memory`, Class A when the log
+  is durable): claim selection, `peek`, `pending`, metrics, live-item lookup,
+  secondary-index lookup, and pre-commit validation MUST be served from the
+  in-memory projection. Durable apply work (when paired with a durable projection
+  image elsewhere) is amortized on sealed-segment apply and recovery image
+  export, not on hot reads. Release-tier evidence for memory-projection cells
+  MUST compare against peer cells with identical segment settings, seeded work,
+  and interleaved same-run control windows. It proves exact operation counts,
+  hot reads served from memory, bounded queue/task/memory debt, and a declared
   relative degradation envelope. It reports p50/p95/p99, throughput, segment
   batch density, object PUT count, owner-local recovery elapsed time, object-log
   tail length, and maximum memory rehydrate time as topology-bound capacity.
 - **Delivered envelopes**: these figures define two delivered v1 envelopes. The
-  single-deployment envelope is delivered by `postgres_native` and validated
-  against E0's portable correctness, progress, and bounded-resource contract
-  (E1). The horizontal envelope spreads write/claim load **across queues**
-  distributed over independent owners (cross-queue scale-out, ADR-008) and is
-  delivered by per-queue ownership (TD-003) and the `object_log_sqlite_projection`
-  backend (TD-004); it is validated by TP-002 E2/E3. Per-queue ownership and the
-  `QueueKey` routing primitive deliver this, not intra-queue sharding.
+  single-deployment envelope is delivered by `postgres` × `postgres` (and
+  peers) and validated against E0's portable correctness, progress, and
+  bounded-resource contract (E1). The horizontal envelope spreads write/claim
+  load **across queues** distributed over independent owners (cross-queue
+  scale-out, ADR-008) and is delivered by per-queue ownership (TD-003) and
+  object-log cells such as `s3` × `sqlite` (TD-004); it is validated by TP-002
+  E2/E3. Per-queue ownership and the `QueueKey` routing primitive deliver this,
+  not intra-queue sharding.
 - **Optimizations**:
   - route by `tenant_id / queue_id` to the queue's owner
   - keep claim indexes in `ProjectionStore`
@@ -850,8 +928,9 @@ duplicated here; they come from the single `fireweed_group_summary`.
 
 | Scenario | Required Evidence |
 |----------|-------------------|
-| Durable append before ack | Kill process after ack; replay shows command. |
-| Commit timeout retry | Retrying same `request_id` converges or returns recorded response. |
+| Durable append before ack (Class A) | Kill process after ack; log replay shows command. |
+| Class B projection reopen | With `log=memory` and a durable projection, reopen after process death observes projection state only; no log rebuild claim. |
+| Commit timeout retry | Retrying same `request_id` converges or returns recorded response (Class A: log substrate; Class B: live process / durable projection only). |
 | Request-id conflict | Same `request_id` with different body fails. |
 | Duplicate push | Same `client_item_key` returns existing item without mutation. |
 | Mutable schedule | Pending item priority and `not_before` update changes claim order. |
@@ -870,13 +949,13 @@ duplicated here; they come from the single `fireweed_group_summary`.
 | Owner-local claim + order | A non-group claim returns a deterministic ordered batch within `max_items` from the owner's projection; no cross-owner merge. |
 | Per-queue progress bound | The queue's oldest-eligible item is claimed before `progress_bound_ms` (queue-global, computed locally on the owner, D1). |
 | Claim replay convergence | A replayed claim `request_id` returns the same active lease set; `request-expired` once all leases under that `request_id` are inactive. |
-| Group-commit ack boundary | For batched-log profiles, no command is acked before its durable segment/manifest commit; kill after segment write, before manifest commit, shows command not acked and re-drivable by `request_id`. |
+| Group-commit ack boundary | For batched object-log cells (`filesystem` / `s3`), no command is acked before its durable segment/manifest commit; kill after segment write, before manifest commit, shows command not acked and re-drivable by `request_id`. |
 | Current-epoch manifest fencing | A writer whose queue was reassigned (control-plane epoch advanced) before the new owner wrote any data manifest entry MUST fail its commit; manifest-recorded-epoch-only validation is insufficient and MUST NOT pass. New epoch holder reproduces acknowledged state. |
 | In-flight claim reservation safety | Concurrent claims cannot both reserve the same candidate while a segment is pending; CAS failure / timeout / fence / writer crash rolls back reservations with no durable lease; retry converges. |
 | Snapshot + log-tail recovery | Restore latest snapshot, replay segments after the snapshot position, validate checksums, reproduce projection state. |
-| Hybrid ProjectionImage hydration | For `objectlog/hybrid`, export the durable SQLite `ProjectionImage`, hydrate the in-memory projection, and only then return SQLite recovery high-water; failed or partial hydration fails closed or replays from genesis. |
-| Hybrid poisoned-memory apply | Inject failure after SQLite commit but before memory apply; the operation returns storage failure, all subsequent reads/validation/writes fail closed, and restart hydrates memory from SQLite before serving. |
-| Hybrid durable request-id replay | Crash after manifest commit and after SQLite commit before memory apply for push requests with `request_id`; same-body retry returns original ids without another append, different-body retry returns `request-id-conflict`. |
+| Snapshot + durable-projection hydration (Class A, when used) | When a composition exports a durable projection image for recovery (implementation detail, not a public hybrid axis), hydrate the serving projection from that image and only then return recovery high-water; failed or partial hydration fails closed or replays from genesis. |
+| Poisoned serving-projection apply (Class A object-log) | Inject failure after durable projection commit but before serving-view apply when dual-write apply is used; the operation returns storage failure, subsequent reads/validation/writes fail closed, and restart hydrates from durable state before serving. Not a public hybrid projection product. |
+| Durable request-id replay (Class A) | Crash after manifest commit and after durable projection commit before response for push requests with `request_id`; same-body retry returns original ids without another append, different-body retry returns `request-id-conflict`. |
 | Queue-scoped command convergence | A queue-scoped command (`SetGates`) applies to the queue's owner before ack, all-or-nothing; retry by `request_id` converges with no double-apply. |
 | Safe log-segment expiry | A log segment is deletable only after a covering committed snapshot plus recovery window; no expired segment is required for an in-window recovery. |
 | Reject one-object-per-command | A production configuration that seals one command per durable object is rejected; only an explicit dev/test flag permits it. |
@@ -895,10 +974,11 @@ duplicated here; they come from the single `fireweed_group_summary`.
 - **Data Migration**: first implementation starts empty. Seventh Sense migration
   requires a later migration design mapping existing queue tables into
   `BatchPush`/`BatchUpdate` commands.
-- **Feature Toggle**: backend profile is queue configuration. New profiles can
-  be enabled per queue after conformance tests pass.
-- **Rollback**: disable a backend profile for new queues; keep existing queues
-  on their last known-good backend until a migration/repair design exists.
+- **Feature Toggle**: storage axes (log × projection) are queue configuration.
+  New matrix cells can be enabled per queue after conformance tests for that
+  cell’s durability class pass.
+- **Rollback**: disable a matrix cell for new queues; keep existing queues
+  on their last known-good composition until a migration/repair design exists.
 
 ## Implementation Sequence
 
@@ -910,29 +990,33 @@ duplicated here; they come from the single `fireweed_group_summary`.
    Tests: backend-agnostic conformance fixtures (core / log / relational-durability).
 3. Implement Postgres `ControlPlaneStore`.
    Files: `crates/fireweed-postgres/src/control_plane/**`.
-   Tests: tenant-scoped queue create/read, queue assignment, backend profile.
-4. Implement Postgres-native `LogStore` and `ProjectionStore` per TD-002
-   (single-deployment envelope; relational projection family).
+   Tests: tenant-scoped queue create/read, queue assignment, storage axes.
+4. Implement Postgres `LogStore` and `ProjectionStore` per TD-002
+   (`postgres` × `postgres` and related Class A cells; relational projection
+   family).
 5. Implement per-queue ownership and fencing per TD-003 (queue lease, HRW owner
    assignment, epoch fence, drain, reassignment, recovery).
-6. Implement the `object_log_sqlite_projection` backend per TD-004: S3 `LogStore`
-   (group-commit segments + manifest with current-epoch fencing), SQLite
-   `ProjectionStore` (with in-flight claim reservations), S3 `SnapshotStore`,
+6. Implement object-log peers per TD-004: `filesystem` and `s3` `LogStore`
+   (group-commit segments + manifest with current-epoch fencing), pairable with
+   each public projection (`memory`, `sqlite`, `postgres`), including
+   in-flight claim reservations for durable projections, `SnapshotStore`,
    bounded replay, and the per-queue epoch binding to TD-003 (horizontal envelope
-   cost/scale).
+   cost/scale). Wire Class B (`memory` log × each projection) via the same
+   composition path.
    Files: `crates/fireweed-objectlog/src/**`, `crates/fireweed-sqlite/src/**`.
-   Tests: shared conformance suite (including the object-log rows) plus the
+   Tests: shared conformance suite by durability class plus the
    TD-004 scale/cost evidence record (TP-002 E3 vs E0).
 7. Implement the driving faces after core structs and first backend compile:
    the RESP wire adapter (`fireweed-resp`, TD-006), the library facade (`fireweed`,
-   ADR-009), and the `fireweed-server` composition root. (The originally planned
-   `fireweed-service` HTTP binding was superseded by the ADR-007 clean cutover.)
+   ADR-009 / API-005 `StorageConfig`), and the `fireweed-server` composition root.
+   (The originally planned `fireweed-service` HTTP binding was superseded by the
+   ADR-007 clean cutover.)
 8. Migrate storage axes to ADR-015 in dependency order: typed commit/fault seam,
    reference composition and memory, whole-transaction blocking adapters, then
    removal of legacy synchronous traits and composition-root wrappers.
-9. Extract the relational substrate and implement the feature-gated
-   `object_log_turso_projection` profile per TD-010. SQLite remains the
-   differential reference and rollback path until all Turso gates pass.
+9. Optional derived projections (e.g. Turso) remain non-public axis values;
+   SQLite remains the differential reference. TD-010 covers any gated Turso
+   adapter work without promoting Turso to a public projection axis.
 
 **Prerequisites**: API-001 complete; ADR-001, ADR-002, ADR-003, ADR-004, and
 ADR-008 accepted; TD-002, TD-003, and TD-004 accepted; TP-002 available for test
@@ -942,10 +1026,11 @@ traceability; Rust workspace setup bead filed from ADR-003.
 
 | Risk | Prob | Impact | Mitigation |
 |------|------|--------|------------|
-| Trait abstraction hides backend-specific correctness requirements | M | H | Capability-specific conformance tests and durability profile metadata. |
-| Postgres-native mode becomes the de facto only architecture | M | M | Keep backend profile boundaries and command positions in the first implementation; the second committed backend (object-log) is held to the same conformance contract. |
-| Object-log profile cannot meet acceptable ack latency | M | M | Spike group commit latency before implementation; document latency/cost profile. |
-| Local projections diverge from durable log | M | H | Apply only committed commands; test replay and snapshot recovery. |
+| Trait abstraction hides backend-specific correctness requirements | M | H | Capability-specific conformance tests and durability class metadata (Class A / Class B). |
+| Postgres cells become the de facto only architecture | M | M | Keep orthogonal axis boundaries and command positions; object-log cells (`filesystem` / `s3`) and Class B are held to the same composition contract with class-scoped conformance. |
+| Object-log cells cannot meet acceptable ack latency | M | M | Spike group commit latency before implementation; document latency/cost per log axis. |
+| Local projections diverge from durable log (Class A) | M | H | Apply only committed commands; test replay and snapshot recovery. |
+| Class B marketed as Class A | M | H | Explicit `log=memory` selection; preview and support claims name durability class; forbid silent null-log. |
 | Idempotency storage grows without bound | M | M | Enforce separate request and item-key retention windows. |
 | Claim compatibility causes hidden starvation | M | H | Test server-selected group fairness and document caller-filtered domain limits. |
 | Incomplete/gated cohort starves queue-global progress bound | M | H | Hard `completion_bound_ms <= progress_bound_ms` check at `CreateQueue`; linearized `CohortExpired`. |
@@ -954,11 +1039,16 @@ traceability; Rust workspace setup bead filed from ADR-003.
 
 - [x] Governing API-001 operations map to storage flows.
 - [x] ADR-001 CQRS/log-projection decision is preserved.
+- [x] Orthogonal 5×3 matrix (logs: memory, sqlite, postgres, filesystem, s3;
+      projections: memory, sqlite, postgres); no public profile SKU; hybrid/turso
+      not public projection axes (`orthogonal-storage-matrix-brief`).
+- [x] Durability Class A vs Class B documented (ADR-013); silent null-log
+      forbidden; Class B does not claim Class A guarantees.
 - [x] Control plane is a pluggable capability; Postgres preference preserved
       (ADR-008; object-store impl deferred).
 - [x] Backend capability interfaces are explicit; the owned/routed unit is the
       whole queue (`QueueKey`), no `ShardKey` in the contract surface (ADR-008).
-- [x] Durable ack boundary is explicit.
+- [x] Durable ack boundary is explicit per durability class.
 - [x] Idempotency, leases, item versions, and replay are explicit.
 - [x] Security covers tenant authorization and data isolation.
 - [x] Performance targets reference PRD scale requirements; horizontal envelope is
