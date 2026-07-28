@@ -53,6 +53,23 @@
 //! validated locally; the postgres-relational half runs the identical class wiring but its live-DB
 //! evidence is env-gated on `FIREWEED_PG_TEST_URL` and deferred-with-reason where no database is present
 //! (convergence-review I3).
+//!
+//! ## Product durability classes (Class A / Class B)
+//!
+//! The public 5×3 log × projection matrix (matrix brief) uses a separate product
+//! **durability class** axis from engine `DurabilityClass` (Atomic / EventualApply):
+//!
+//! | Product class | Logs | Durable log-replay after process death? |
+//! |---|---|---|
+//! | **Class A** | `sqlite`, `postgres`, `filesystem`, `s3` | Yes — log is system of record |
+//! | **Class B** | `memory` | **No** — projection-only reopen when projection is durable |
+//!
+//! See [`matrix_classes`] for the per-cell claim table (unit-tested: Class B never
+//! claims `durable_log_replay`). Full CI / suite map:
+//! `docs/helix/04-build/storage-matrix-conformance-classes.md`.
+//!
+//! Note: in-process `log_replay_suite!` on `memory` × `memory` exercises live-process
+//! `LogRead` only; it is **not** a product Class A recovery claim.
 
 use std::collections::BTreeMap;
 
@@ -70,6 +87,7 @@ use fireweed_engine::{
 };
 
 pub mod fault;
+pub mod matrix_classes;
 pub mod scenarios;
 
 #[cfg(test)]
