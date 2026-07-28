@@ -45,8 +45,9 @@
 //!     cargo test -p fireweed-server --release --test performance_object_log_e3_live_tests -- --nocapture
 //! ```
 //!
-//! Optional overrides: `FIREWEED_S3_TEST_BUCKET` (default `fireweed-test`), `FIREWEED_S3_TEST_ACCESS_KEY` /
-//! `FIREWEED_S3_TEST_SECRET_KEY` (default `minioadmin`), `FIREWEED_E3_LOAD_BATCH` (items per push command during
+//! Optional overrides: `FIREWEED_S3_TEST_BUCKET` (default `fireweed-test`), `FIREWEED_S3_TEST_REGION`
+//! (default `us-east-1`), `FIREWEED_S3_TEST_ACCESS_KEY` / `FIREWEED_S3_TEST_SECRET_KEY` (default
+//! `minioadmin`), `FIREWEED_E3_LOAD_BATCH` (items per push command during
 //! the recovery-load phase, default 1000), `FIREWEED_E3_ACK_PUSHES` (pushes per ack-latency config, default
 //! 100000), `FIREWEED_E3_ACK_CONCURRENCY` (concurrent push tasks, default 384), `FIREWEED_E3_LOAD_CONCURRENCY`
 //! (concurrent recovery-load tasks, default 8).
@@ -168,14 +169,8 @@ fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std:
     let postgres_url = std::env::var("FIREWEED_E3_POSTGRES_POINTER_DATABASE_URL")
         .expect("governed no-CAS proof requires FIREWEED_E3_POSTGRES_POINTER_DATABASE_URL");
     let raw_objects: Arc<dyn BlobStore> = Arc::new(
-        S3BlobStore::new(
-            &s3.endpoint,
-            &s3.bucket,
-            &s3.access,
-            &s3.secret,
-            "us-east-1",
-        )
-        .expect("build no-CAS S3 object store"),
+        S3BlobStore::new(&s3.endpoint, &s3.bucket, &s3.access, &s3.secret, &s3.region)
+            .expect("build no-CAS S3 object store"),
     );
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
     let push = |id: &str, suffix: &str| {
@@ -423,6 +418,23 @@ struct S3Env {
     bucket: String,
     access: String,
     secret: String,
+    region: String,
+}
+
+const DEFAULT_E3_S3_REGION: &str = "us-east-1";
+
+fn e3_s3_region(configured: Option<String>) -> String {
+    configured.unwrap_or_else(|| DEFAULT_E3_S3_REGION.into())
+}
+
+fn live_e3_s3_region() -> String {
+    e3_s3_region(std::env::var("FIREWEED_S3_TEST_REGION").ok())
+}
+
+#[test]
+fn e3_s3_region_defaults_and_accepts_override() {
+    assert_eq!(e3_s3_region(None), DEFAULT_E3_S3_REGION);
+    assert_eq!(e3_s3_region(Some("garage".into())), "garage");
 }
 
 impl S3Env {
@@ -435,7 +447,7 @@ impl S3Env {
             &self.bucket,
             &self.access,
             &self.secret,
-            "us-east-1",
+            &self.region,
         )
         .expect("build S3 client");
         let recorder = Arc::new(if recorder_enabled {
@@ -1950,17 +1962,12 @@ async fn e3_release_load_shape_calibration() {
             .unwrap_or_else(|_| "minioadmin".into()),
         secret: std::env::var("FIREWEED_S3_TEST_SECRET_KEY")
             .unwrap_or_else(|_| "minioadmin".into()),
+        region: live_e3_s3_region(),
     };
-    S3BlobStore::new(
-        &s3.endpoint,
-        &s3.bucket,
-        &s3.access,
-        &s3.secret,
-        "us-east-1",
-    )
-    .expect("build S3 client")
-    .create_bucket()
-    .expect("create bucket");
+    S3BlobStore::new(&s3.endpoint, &s3.bucket, &s3.access, &s3.secret, &s3.region)
+        .expect("build S3 client")
+        .create_bucket()
+        .expect("create bucket");
 
     let preflight = assert_release_load_preflight();
     let smallest_size_seal_raw =
@@ -3136,17 +3143,12 @@ async fn performance_object_log_e3_live_tests() {
             .unwrap_or_else(|_| "minioadmin".into()),
         secret: std::env::var("FIREWEED_S3_TEST_SECRET_KEY")
             .unwrap_or_else(|_| "minioadmin".into()),
+        region: live_e3_s3_region(),
     };
-    S3BlobStore::new(
-        &s3.endpoint,
-        &s3.bucket,
-        &s3.access,
-        &s3.secret,
-        "us-east-1",
-    )
-    .expect("build S3 client")
-    .create_bucket()
-    .expect("create/ensure bucket");
+    S3BlobStore::new(&s3.endpoint, &s3.bucket, &s3.access, &s3.secret, &s3.region)
+        .expect("build S3 client")
+        .create_bucket()
+        .expect("create/ensure bucket");
 
     let perf_env = std::env::var("FIREWEED_PERF_ENV").is_ok();
     let resident = env_u64("FIREWEED_E3_RESIDENT", 4_000);
@@ -3376,17 +3378,12 @@ fn e3_release_fence_proofs_only() {
             .unwrap_or_else(|_| "minioadmin".into()),
         secret: std::env::var("FIREWEED_S3_TEST_SECRET_KEY")
             .unwrap_or_else(|_| "minioadmin".into()),
+        region: live_e3_s3_region(),
     };
-    S3BlobStore::new(
-        &s3.endpoint,
-        &s3.bucket,
-        &s3.access,
-        &s3.secret,
-        "us-east-1",
-    )
-    .expect("build S3 client")
-    .create_bucket()
-    .expect("create/ensure bucket");
+    S3BlobStore::new(&s3.endpoint, &s3.bucket, &s3.access, &s3.secret, &s3.region)
+        .expect("build S3 client")
+        .create_bucket()
+        .expect("create/ensure bucket");
     let source_revision =
         std::env::var("FIREWEED_E3_SOURCE_REVISION").expect("exact source revision");
     let output = std::env::var("FIREWEED_E3_FENCE_EVIDENCE_OUT").expect("fence evidence path");
@@ -3805,6 +3802,7 @@ fn live_e3_s3_env() -> Option<S3Env> {
             .unwrap_or_else(|_| "minioadmin".into()),
         secret: std::env::var("FIREWEED_S3_TEST_SECRET_KEY")
             .unwrap_or_else(|_| "minioadmin".into()),
+        region: live_e3_s3_region(),
     })
 }
 
@@ -3859,16 +3857,10 @@ async fn TestE3RecoveryExactSnapshotTailReplay() {
     let Some(s3) = live_e3_s3_env() else {
         return;
     };
-    S3BlobStore::new(
-        &s3.endpoint,
-        &s3.bucket,
-        &s3.access,
-        &s3.secret,
-        "us-east-1",
-    )
-    .expect("build S3 client")
-    .create_bucket()
-    .expect("create/ensure bucket");
+    S3BlobStore::new(&s3.endpoint, &s3.bucket, &s3.access, &s3.secret, &s3.region)
+        .expect("build S3 client")
+        .create_bucket()
+        .expect("create/ensure bucket");
 
     let recovery = run_recovery::<SegmentedObjectLogSqliteBackend, _>(
         &s3,
@@ -3890,16 +3882,10 @@ async fn TestE3RecoveryExactGenesisReplay() {
     let Some(s3) = live_e3_s3_env() else {
         return;
     };
-    S3BlobStore::new(
-        &s3.endpoint,
-        &s3.bucket,
-        &s3.access,
-        &s3.secret,
-        "us-east-1",
-    )
-    .expect("build S3 client")
-    .create_bucket()
-    .expect("create/ensure bucket");
+    S3BlobStore::new(&s3.endpoint, &s3.bucket, &s3.access, &s3.secret, &s3.region)
+        .expect("build S3 client")
+        .create_bucket()
+        .expect("create/ensure bucket");
 
     let recovery = run_recovery::<SegmentedObjectLogInMemoryBackend, _>(
         &s3,
