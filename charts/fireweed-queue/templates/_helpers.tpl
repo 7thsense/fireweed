@@ -71,15 +71,47 @@ Name of the storage persistent volume claim.
 {{- end -}}
 
 {{/*
+True when the selected log axis is a local/NAS filesystem object log
+(first-class filesystem, or legacy objectlog + store=local).
+*/}}
+{{- define "fireweed-queue.logIsFilesystemLocal" -}}
+{{- or (eq .Values.storage.log.backend "filesystem") (and (eq .Values.storage.log.backend "objectlog") (eq .Values.storage.log.objectLog.store "local")) -}}
+{{- end -}}
+
+{{/*
+True when the selected log axis is S3-compatible object storage
+(first-class s3, or legacy objectlog + store=s3).
+*/}}
+{{- define "fireweed-queue.logIsS3" -}}
+{{- or (eq .Values.storage.log.backend "s3") (and (eq .Values.storage.log.backend "objectlog") (eq .Values.storage.log.objectLog.store "s3")) -}}
+{{- end -}}
+
+{{/*
+True when the selected projection needs a local durable image path under the storage volume.
+*/}}
+{{- define "fireweed-queue.projectionNeedsLocalVolume" -}}
+{{- or (eq .Values.storage.projection.backend "sqlite") (eq .Values.storage.projection.backend "turso") (eq .Values.storage.projection.backend "hybrid") (eq .Values.storage.projection.backend "hybrid-async") -}}
+{{- end -}}
+
+{{/*
+True when the pod needs a local data volume (filesystem/sqlite log or durable local projection).
+*/}}
+{{- define "fireweed-queue.needsLocalVolume" -}}
+{{- or (eq (include "fireweed-queue.logIsFilesystemLocal" .) "true") (eq .Values.storage.log.backend "sqlite") (eq (include "fireweed-queue.projectionNeedsLocalVolume" .) "true") -}}
+{{- end -}}
+
+{{/*
 Fail closed when a multi-replica deployment is not using the replica-safe shared
-S3/Postgres profile. Local object-log storage stays single-replica only.
+S3/Postgres profile. Local filesystem object-log storage stays single-replica only.
+Shared profile: log=s3 (or objectlog+store=s3) × controlPlane=postgres × projection=sqlite.
 */}}
 {{- define "fireweed-queue.validateReplicaProfile" -}}
 {{- $replicas := int .Values.replicaCount -}}
-{{- $shared := and (eq .Values.storage.log.backend "objectlog") (eq .Values.storage.log.objectLog.store "s3") (eq .Values.storage.controlPlane.backend "postgres") (eq .Values.storage.projection.backend "sqlite") -}}
+{{- $s3Log := eq (include "fireweed-queue.logIsS3" .) "true" -}}
+{{- $shared := and $s3Log (eq .Values.storage.controlPlane.backend "postgres") (eq .Values.storage.projection.backend "sqlite") -}}
 {{- if gt $replicas 1 -}}
 {{- if not $shared -}}
-{{- fail "replicaCount > 1 requires storage.log.backend=objectlog, storage.log.objectLog.store=s3, storage.controlPlane.backend=postgres, storage.projection.backend=sqlite, and persistence.enabled=false" -}}
+{{- fail "replicaCount > 1 requires storage.log.backend=s3 (or objectlog with objectLog.store=s3), storage.controlPlane.backend=postgres, storage.projection.backend=sqlite, and persistence.enabled=false" -}}
 {{- end -}}
 {{- if .Values.persistence.enabled -}}
 {{- fail "replicaCount > 1 requires persistence.enabled=false so SQLite projections stay pod-local" -}}

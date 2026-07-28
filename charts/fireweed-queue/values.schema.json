@@ -375,22 +375,29 @@
         "log": {
           "type": "object",
           "additionalProperties": false,
+          "description": "Command-log axis isomorphic to StorageConfig.log. Public: memory|sqlite|postgres|filesystem|s3. Compat: objectlog + objectLog.store local|s3 maps to filesystem|s3.",
           "required": [
             "backend",
             "objectLog",
+            "sqlite",
             "postgres"
           ],
           "properties": {
             "backend": {
               "type": "string",
               "enum": [
+                "memory",
+                "sqlite",
                 "postgres",
+                "filesystem",
+                "s3",
                 "objectlog"
               ]
             },
             "objectLog": {
               "type": "object",
               "additionalProperties": false,
+              "description": "Filesystem root and S3 blocks for filesystem/s3 logs (and legacy objectlog + store).",
               "required": [
                 "store",
                 "root"
@@ -398,6 +405,7 @@
               "properties": {
                 "store": {
                   "type": "string",
+                  "description": "Only meaningful with backend=objectlog (local→filesystem, s3→s3). Ignored for first-class filesystem|s3 backends.",
                   "enum": [
                     "local",
                     "s3"
@@ -405,11 +413,13 @@
                 },
                 "root": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "description": "Filesystem object-log root (local disk or NAS path). Used when backend is filesystem or objectlog+local."
                 },
                 "s3": {
                   "type": "object",
                   "additionalProperties": false,
+                  "description": "S3-compatible object-log credentials and endpoint. Used when backend is s3 or objectlog+store=s3.",
                   "required": [
                     "endpoint",
                     "bucket",
@@ -456,6 +466,20 @@
                 }
               }
             },
+            "sqlite": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "SQLite command-log path when backend is sqlite.",
+              "required": [
+                "path"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
             "postgres": {
               "$ref": "#/$defs/postgresSecret"
             }
@@ -464,6 +488,7 @@
         "projection": {
           "type": "object",
           "additionalProperties": false,
+          "description": "Projection axis isomorphic to StorageConfig.projection. Public: memory|sqlite|postgres. Compat aliases: inmemory→memory. hybrid|hybrid-async|turso remain temporarily until demoted.",
           "required": [
             "backend",
             "sqlite",
@@ -474,6 +499,7 @@
             "backend": {
               "type": "string",
               "enum": [
+                "memory",
                 "inmemory",
                 "sqlite",
                 "turso",

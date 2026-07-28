@@ -42,7 +42,8 @@ declare -A KUBECONFORM_SHA256=(
 )
 
 # Storage combinations to validate. Each maps to a CI values file under charts/fireweed-queue/ci/.
-COMBINATIONS=(objectlog-inmemory objectlog-sqlite objectlog-hybrid objectlog-hybrid-async shared-s3-postgres-control-plane postgres-inmemory postgres-sqlite postgres-postgres lakebase-postgres)
+# Includes first-class public axes (filesystem, memory, s3) and legacy objectlog/inmemory compat.
+COMBINATIONS=(filesystem-memory objectlog-inmemory objectlog-sqlite objectlog-hybrid objectlog-hybrid-async shared-s3-postgres-control-plane s3-sqlite-postgres-control-plane postgres-inmemory postgres-sqlite postgres-postgres lakebase-postgres)
 
 err() { echo "helm-gate: $*" >&2; }
 
@@ -128,11 +129,13 @@ ensure_kubeconform() {
 values_file_for() {
     local combination="$1"
     case "$combination" in
+        filesystem-memory) echo "${CHART_DIR}/ci/filesystem-memory-values.yaml" ;;
         objectlog-inmemory) echo "${CHART_DIR}/ci/objectlog-inmemory-values.yaml" ;;
         objectlog-sqlite) echo "${CHART_DIR}/ci/objectlog-sqlite-values.yaml" ;;
         objectlog-hybrid) echo "${CHART_DIR}/ci/objectlog-hybrid-values.yaml" ;;
         objectlog-hybrid-async) echo "${CHART_DIR}/ci/objectlog-hybrid-async-values.yaml" ;;
         shared-s3-postgres-control-plane) echo "${CHART_DIR}/ci/shared-s3-postgres-control-plane-values.yaml" ;;
+        s3-sqlite-postgres-control-plane) echo "${CHART_DIR}/ci/s3-sqlite-postgres-control-plane-values.yaml" ;;
         postgres-inmemory) echo "${CHART_DIR}/ci/postgres-inmemory-values.yaml" ;;
         postgres-sqlite) echo "${CHART_DIR}/ci/postgres-sqlite-values.yaml" ;;
         postgres-postgres) echo "${CHART_DIR}/ci/postgres-postgres-values.yaml" ;;
@@ -174,11 +177,26 @@ assert_no_fixture_credentials() {
     done
 }
 
+assert_filesystem_memory_contract() {
+    local rendered="$1"
+
+    assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "filesystem"' "filesystem log axis"
+    assert_contains "$rendered" 'FIREWEED_PROJECTION_BACKEND: "memory"' "memory projection axis"
+    assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_ROOT: "/var/lib/fireweed/projection/object-log"' "filesystem object-log root"
+    assert_contains "$rendered" 'kind: PersistentVolumeClaim' "storage PVC"
+    assert_contains "$rendered" 'name: storage' "storage volume"
+    assert_contains "$rendered" 'mountPath: "/var/lib/fireweed/projection"' "filesystem volume mount"
+    assert_not_contains "$rendered" 'FIREWEED_OBJECT_LOG_STORE' "legacy objectlog store env on first-class filesystem"
+    assert_not_contains "$rendered" 'FIREWEED_SQLITE_PROJECTION_PATH' "sqlite projection path"
+    assert_no_fixture_credentials "$rendered" "filesystem/memory rendered manifest"
+}
+
 assert_objectlog_inmemory_contract() {
     local rendered="$1"
 
     assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "objectlog"' "objectlog log axis"
     assert_contains "$rendered" 'FIREWEED_PROJECTION_BACKEND: "inmemory"' "in-memory projection axis"
+    assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_STORE: "local"' "legacy objectlog store selection"
     assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_ROOT: "/var/lib/fireweed/projection/object-log"' "object-log root"
     assert_contains "$rendered" 'kind: PersistentVolumeClaim' "storage PVC"
     assert_contains "$rendered" 'name: storage' "storage volume"
@@ -263,6 +281,23 @@ assert_shared_s3_postgres_control_plane_contract() {
     assert_no_fixture_credentials "$rendered" "shared S3/postgres rendered manifest"
 }
 
+assert_s3_sqlite_postgres_control_plane_contract() {
+    local rendered="$1"
+
+    assert_contains "$rendered" 'replicas: 3' "shared profile replica count"
+    assert_contains "$rendered" 'FIREWEED_LOG_BACKEND: "s3"' "first-class s3 log axis"
+    assert_contains "$rendered" 'FIREWEED_CONTROL_PLANE: "postgres"' "postgres control-plane axis"
+    assert_contains "$rendered" 'FIREWEED_PROJECTION_BACKEND: "sqlite"' "sqlite projection axis"
+    assert_not_contains "$rendered" 'FIREWEED_OBJECT_LOG_STORE' "legacy objectlog store on first-class s3"
+    assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_S3_ENDPOINT: "https://s3.example.com"' "S3 endpoint"
+    assert_contains "$rendered" 'FIREWEED_OBJECT_LOG_S3_BUCKET: "fireweed-shared"' "S3 bucket"
+    assert_contains "$rendered" 'name: FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID' "S3 access key secret env"
+    assert_contains "$rendered" 'name: FIREWEED_POSTGRES_CONTROL_PLANE_DATABASE_URL' "postgres control-plane secret env"
+    assert_not_contains "$rendered" 'kind: PersistentVolumeClaim' "shared PVC"
+    assert_contains "$rendered" 'emptyDir: {}' "pod-local projection volume"
+    assert_no_fixture_credentials "$rendered" "first-class s3 rendered manifest"
+}
+
 assert_postgres_contract() {
     local rendered="$1"
     local projection="$2"
@@ -332,9 +367,9 @@ assert_hybrid_strict_schema_exclusion() {
     # Helm 3 and Helm 4 format schema failures differently. Require the exact
     # path and allowed enum from either formatter so a schema expansion, a
     # template-time rejection, or an unrelated render failure cannot satisfy
-    # this public-support boundary.
-    local helm4_error="- at '/storage/projection/backend': value must be one of 'inmemory', 'sqlite', 'turso', 'hybrid', 'hybrid-async', 'postgres'"
-    local helm3_error='storage.projection.backend: storage.projection.backend must be one of the following: "inmemory", "sqlite", "turso", "hybrid", "hybrid-async", "postgres"'
+    # this public-support boundary. Public memory is included; hybrid-strict is not.
+    local helm4_error="- at '/storage/projection/backend': value must be one of 'memory', 'inmemory', 'sqlite', 'turso', 'hybrid', 'hybrid-async', 'postgres'"
+    local helm3_error='storage.projection.backend: storage.projection.backend must be one of the following: "memory", "inmemory", "sqlite", "turso", "hybrid", "hybrid-async", "postgres"'
     if ! grep -Fq -- "$helm4_error" "$output" && ! grep -Fq -- "$helm3_error" "$output"; then
         err "objectlog/hybrid-strict did not fail with the exact projection enum-exclusion error"
         cat "$output" >&2
@@ -351,11 +386,13 @@ assert_combination_contract() {
 
     echo "--- rendered contract assertions [${combination}] ---"
     case "$combination" in
+        filesystem-memory) assert_filesystem_memory_contract "$rendered" ;;
         objectlog-inmemory) assert_objectlog_inmemory_contract "$rendered" ;;
         objectlog-sqlite) assert_objectlog_sqlite_contract "$rendered" ;;
         objectlog-hybrid) assert_objectlog_hybrid_contract "$rendered" ;;
         objectlog-hybrid-async) assert_objectlog_hybrid_async_contract "$rendered" ;;
         shared-s3-postgres-control-plane) assert_shared_s3_postgres_control_plane_contract "$rendered" ;;
+        s3-sqlite-postgres-control-plane) assert_s3_sqlite_postgres_control_plane_contract "$rendered" ;;
         postgres-inmemory) assert_postgres_contract "$rendered" "inmemory" ;;
         postgres-sqlite) assert_postgres_contract "$rendered" "sqlite" ;;
         postgres-postgres) assert_postgres_contract "$rendered" "postgres" ;;
@@ -391,7 +428,7 @@ main() {
         rm -f "$scaled_local"
         exit 1
     fi
-    assert_contains "$scaled_local" 'replicaCount > 1 requires storage.log.backend=objectlog' "scaled local fail-closed message"
+    assert_contains "$scaled_local" 'replicaCount > 1 requires storage.log.backend=s3' "scaled local fail-closed message"
     rm -f "$scaled_local"
 
     echo "--- helm package ---"

@@ -1,13 +1,19 @@
-//! The single OPTIONAL environment-variable populator for [`Config`] (feature `env-config`).
+//! The single OPTIONAL environment-variable **adapter** for [`Config`] (feature `env-config`).
 //!
-//! This is the ONE place that knows the documented `FIREWEED_*` and retained `DATABRICKS_*` env names and maps them onto
-//! the typed [`Config`]. It is a PURE function over a caller-supplied `BTreeMap<String, String>` — it never
+//! Env vars are **not** the product storage vocabulary. The normative model is the orthogonal
+//! StorageConfig axes (log × projection); this module is the container injection map that
+//! deserializes documented `FIREWEED_*` / retained `DATABRICKS_*` names into typed [`Config`] /
+//! [`BackendSpec`]. It is a PURE function over a caller-supplied `BTreeMap<String, String>` — it never
 //! touches the process environment. The bin (`fireweed-service`) is the only caller that reads the live process
 //! env (`std::env::vars().collect()`); a pure-library embedder builds [`Config`] directly and, by compiling
 //! with `default-features = false`, drops this module (and all env-name knowledge) entirely.
 //!
-//! Behaviour (names + defaults) is preserved EXACTLY from the previous in-bin parsing so the Helm chart and
-//! deployments keep working unchanged.
+//! Public product names (injection values):
+//! - log: `memory` | `sqlite` | `postgres` | `filesystem` | `s3`
+//! - projection: `memory` | `sqlite` | `postgres`
+//! Compat aliases: `objectlog` (+ store local/s3 → filesystem/s3), `inmemory` → memory.
+//! Transitional non-public projection names (`hybrid`, `hybrid-async`, `hybrid-strict`, `turso`) remain
+//! parseable until demoted.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

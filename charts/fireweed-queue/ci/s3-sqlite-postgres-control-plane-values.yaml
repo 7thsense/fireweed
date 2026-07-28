@@ -1,0 +1,31 @@
+# Fireweed Queue replica-safe shared profile using first-class log.backend=s3 (not objectlog+store).
+replicaCount: 3
+
+storage:
+  log:
+    backend: s3
+    objectLog:
+      s3:
+        endpoint: https://s3.example.com
+        bucket: fireweed-shared
+        region: us-east-1
+        allowInsecureHttp: false
+        credentials:
+          existingSecret: fireweed-objectlog-s3
+          accessKeyIdKey: access-key-id
+          secretAccessKeyKey: secret-access-key
+  controlPlane:
+    backend: postgres
+    postgres:
+      existingSecret: fireweed-control-plane
+      databaseUrlKey: database-url
+      heartbeatTtlMs: 5000
+      leaseTtlMs: 15000
+  projection:
+    backend: sqlite
+
+persistence:
+  enabled: false
+
+image:
+  tag: ci

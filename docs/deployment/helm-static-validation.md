@@ -3,11 +3,11 @@
 `scripts/ci/helm-gate.sh` validates the Fireweed Queue Helm chart without creating a
 cluster.
 
-The chart storage contract is expressed as axes:
+The chart storage contract is expressed as axes isomorphic to `StorageConfig`:
 
-- `storage.log.backend`: `objectlog` or `postgres`
-- `storage.log.objectLog.store`: `local` or `s3`
-- `storage.projection.backend`: `inmemory`, `sqlite`, `turso`, `hybrid`, `hybrid-async`, or `postgres`
+- `storage.log.backend`: public `memory` | `sqlite` | `postgres` | `filesystem` | `s3`; compat alias `objectlog` (+ `objectLog.store` local|s3 → filesystem|s3)
+- `storage.log.objectLog.root` / `objectLog.s3.*`: filesystem root and S3 credential blocks (structured fields)
+- `storage.projection.backend`: public `memory` | `sqlite` | `postgres`; compat `inmemory`; temporary non-public `turso` | `hybrid` | `hybrid-async`
 - `storage.controlPlane.backend`: `inprocess` or `postgres`
 
 `objectlog/hybrid-strict` is not part of the chart contract or public support
