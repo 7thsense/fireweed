@@ -5121,7 +5121,6 @@ mod filesystem_matrix_t0_t4_tests {
             Self { root }
         }
 
-
         fn object_root(&self) -> PathBuf {
             let p = self.root.join("object-log");
             std::fs::create_dir_all(&p).expect("object-log root");
@@ -5374,8 +5373,7 @@ mod filesystem_matrix_t0_t4_tests {
             .unwrap_or_else(|e| panic!("{cell_id} T2 claim: {e:?}"));
         assert_eq!(claimed.items.len(), 1, "{cell_id} T2 claim after reopen");
         assert_eq!(
-            claimed.items[0].item_id,
-            pending.item_ids[0],
+            claimed.items[0].item_id, pending.item_ids[0],
             "{cell_id} T2: recovered pending item id must match seed"
         );
         let _ = pending_rid;

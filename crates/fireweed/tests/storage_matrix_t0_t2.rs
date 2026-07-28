@@ -36,11 +36,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fireweed::{
     ClientItemKey, ConfigSecret, EligibilityPolicy, LogConfig, NewItem, ObjectLogAuthority,
-    PushDisposition, RequestId,
     OrderingMode, PostgresMode, PriorityDirection, PriorityModel, PriorityModelKind,
-    PriorityTieBreaker, PriorityValue, ProjectionStoreConfig, QueueDefinition, QueueId, QueueKey,
-    RecoveryPolicy, RecurrencePolicy, ResponseBarrier, RetryPolicy, SegmentConfig, StorageConfig,
-    SystemClock, TenantId, open_async,
+    PriorityTieBreaker, PriorityValue, ProjectionStoreConfig, PushDisposition, QueueDefinition,
+    QueueId, QueueKey, RecoveryPolicy, RecurrencePolicy, RequestId, ResponseBarrier, RetryPolicy,
+    SegmentConfig, StorageConfig, SystemClock, TenantId, open_async,
 };
 
 static FIXTURE_ORDINAL: AtomicU64 = AtomicU64::new(0);
@@ -801,7 +800,6 @@ fn storage_matrix_registers_exactly_15_distinct_cells() {
     assert!(filesystem_memory.is_class_a());
 }
 
-
 // ---------------------------------------------------------------------------
 // Filesystem log three cells: full T0–T3 (Class A contract bar)
 // ---------------------------------------------------------------------------
@@ -1039,8 +1037,7 @@ fn sqlite_log_t3_t4_evidence_and_helm_values_present() {
         );
     }
 
-    let chart_ci =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../charts/fireweed-queue/ci");
+    let chart_ci = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../charts/fireweed-queue/ci");
     for name in [
         "sqlite-memory-values.yaml",
         "sqlite-sqlite-values.yaml",
