@@ -135,6 +135,10 @@ fail at startup instead of silently selecting another backend.
   covers images, charts, archives, and checksums.
 - [Operator deploy console](docs/site/deploy/index.html) (also linked from the
   legacy [docs/operator](docs/operator/index.html) shim).
+- [v0.23.1 release notes](docs/releases/v0.23.1.md) describe the completed
+  native-S3 storage-matrix conformance coverage.
+- [v0.23.0 release notes](docs/releases/v0.23.0.md) describe the native-S3
+  authority cutover and provider-neutral E3 runner.
 - [v0.22.0 release notes](docs/releases/v0.22.0.md) describe request-id push
   Fresh/Replayed disposition for Snorri create/enqueue counters.
 - [v0.21.0 release notes](docs/releases/v0.21.0.md) describe the complete
