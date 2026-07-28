@@ -14,7 +14,7 @@ use fireweed::{
     NewItem, ObjectLogAuthority, ObjectLogAuthorityConfig, ObjectLogConfig, ObjectLogRuntimeConfig,
     ObjectLogStorage, OrderField, OrderingMode, PriorityDirection, PriorityModel,
     PriorityModelKind, PriorityTieBreaker, PriorityValue, ProjectionConfig,
-    ProjectionRecoveryPolicy, ProjectionStoreConfig, QueryFilter, QueueDefinition, QueueId,
+    ProjectionRecoveryPolicy, ComposedProjectionConfig, QueryFilter, QueueDefinition, QueueId,
     QueueIndex, QueueKey, RangeScanRequest, RecoveryPolicy, RecurrencePolicy, RequestId,
     ResponseBarrier, RetryPolicy, SecretValue, SegmentConfig, SegmentSettings, SelectedMutation,
     SideRecord, SortDirection, TenantId, TypedValue, UtcTimestamp,
@@ -54,7 +54,7 @@ fn config(root: &Path, schema: &str, url: &str) -> ComposedStorageConfig {
             root: root.to_path_buf(),
         },
         object_log_authority: ObjectLogAuthorityConfig::NativeConditionalWrite,
-        projection: ProjectionStoreConfig::Postgres {
+        projection: ComposedProjectionConfig::Postgres {
             url: SecretValue::new(url),
         },
         response_barrier: CommitResponseBarrier::Strict,

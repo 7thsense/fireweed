@@ -668,9 +668,10 @@ impl fmt::Debug for ObjectLogConfig {
     }
 }
 
-/// Disposable materialized projection selected by an composed deployment.
+/// Disposable materialized projection selected by an composed object-log deployment
+/// (crate-private; the public projection axis is [`ProjectionStoreConfig`]).
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) enum ProjectionStoreConfig {
+pub(crate) enum ComposedProjectionConfig {
     Sqlite {
         path: PathBuf,
     },
@@ -680,7 +681,7 @@ pub(crate) enum ProjectionStoreConfig {
     },
 }
 
-impl fmt::Debug for ProjectionStoreConfig {
+impl fmt::Debug for ComposedProjectionConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Sqlite { path } => f.debug_struct("Sqlite").field("path", path).finish(),
@@ -780,7 +781,7 @@ fn derived_postgres_schema_name(namespace: &str) -> String {
 pub(crate) struct ComposedStorageConfig {
     pub object_log: ObjectLogConfig,
     pub object_log_authority: ObjectLogAuthorityConfig,
-    pub projection: ProjectionStoreConfig,
+    pub projection: ComposedProjectionConfig,
     pub response_barrier: CommitResponseBarrier,
     pub segments: SegmentSettings,
     pub namespace: String,
@@ -896,21 +897,21 @@ pub struct ObjectLogRuntimeConfig {
     pub recovery: RecoveryPolicy,
 }
 
-#[cfg(feature = "postgres")]
+/// PostgreSQL log-axis mode (API-005). Construction input only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PostgresMode {
     LogReplay,
     Relational,
 }
 
-#[cfg(feature = "postgres")]
+/// Multi-instance coordination inputs for a PostgreSQL composition (API-005).
 #[derive(Debug, Clone)]
 pub struct PostgresCoordinationConfig {
     pub instance_id: OwnerId,
     pub control_plane: ControlPlaneConfig,
 }
 
-#[cfg(feature = "postgres")]
+/// Convenience construction inputs for `open_postgres_runtime*` (maps onto [`LogConfig::Postgres`]).
 #[derive(Debug, Clone)]
 pub struct PostgresRuntimeConfig {
     pub url: ConfigSecret,
@@ -920,7 +921,258 @@ pub struct PostgresRuntimeConfig {
     pub coordination: Option<PostgresCoordinationConfig>,
 }
 
+/// Public log axis: five first-class values (orthogonal storage matrix / API-005).
+#[derive(Debug, Clone)]
+pub enum LogConfig {
+    /// Class B: in-process command log (no log rebuild after process death).
+    Memory,
+    /// Class A: durable SQLite command log.
+    Sqlite { path: PathBuf },
+    /// Class A: durable PostgreSQL command log.
+    Postgres {
+        url: ConfigSecret,
+        schema: Option<String>,
+        mode: PostgresMode,
+        node_id: Option<u8>,
+        coordination: Option<PostgresCoordinationConfig>,
+    },
+    /// Class A: local directory tree / NAS path object log (same protocol as S3).
+    Filesystem { root: PathBuf },
+    /// Class A: S3-compatible object log.
+    S3 {
+        endpoint: String,
+        bucket: String,
+        region: String,
+        access_key_id: ConfigSecret,
+        secret_access_key: ConfigSecret,
+        allow_insecure_http: bool,
+    },
+}
+
+impl LogConfig {
+    /// Canonical public name for this log axis value.
+    pub fn axis_name(&self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Sqlite { .. } => "sqlite",
+            Self::Postgres { .. } => "postgres",
+            Self::Filesystem { .. } => "filesystem",
+            Self::S3 { .. } => "s3",
+        }
+    }
+
+    /// Class A (durable log) vs Class B (memory log) durability envelope.
+    pub fn is_durable_log(&self) -> bool {
+        !matches!(self, Self::Memory)
+    }
+}
+
+/// Public projection axis: three first-class values (orthogonal storage matrix / API-005).
+///
+/// Object-log convenience constructors still use [`ProjectionConfig`] (sqlite/postgres only);
+/// full-matrix work uses this type (includes [`Memory`](Self::Memory)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectionStoreConfig {
+    Memory,
+    Sqlite { path: PathBuf },
+    Postgres { url: ConfigSecret },
+}
+
+impl ProjectionStoreConfig {
+    /// Canonical public name for this projection axis value.
+    pub fn axis_name(&self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Sqlite { .. } => "sqlite",
+            Self::Postgres { .. } => "postgres",
+        }
+    }
+}
+
+/// Normative composition root for log × projection (+ related axes). API-005 / product brief.
+///
+/// Every cell of the 5×3 matrix is a valid selection; durability class differs by log axis
+/// ([`LogConfig::is_durable_log`]). Opening a not-yet-wired cell may still return
+/// [`EngineError::Unavailable`] until Phase 2 composition beads land — construction and
+/// validation of this type accept all 15 pairs.
+#[derive(Debug, Clone)]
+pub struct StorageConfig {
+    pub log: LogConfig,
+    pub projection: ProjectionStoreConfig,
+    pub control_plane: Option<ControlPlaneConfig>,
+    /// Object-log peers only ([`LogConfig::Filesystem`], [`LogConfig::S3`]); ignored for other logs.
+    pub authority: Option<ObjectLogAuthority>,
+    pub response_barrier: ResponseBarrier,
+    pub segments: SegmentConfig,
+    pub namespace: String,
+    pub recovery: RecoveryPolicy,
+}
+
+impl StorageConfig {
+    /// Class B reference cell: memory log × memory projection.
+    pub fn memory() -> Self {
+        Self {
+            log: LogConfig::Memory,
+            projection: ProjectionStoreConfig::Memory,
+            control_plane: None,
+            authority: None,
+            response_barrier: ResponseBarrier::Strict,
+            segments: SegmentConfig {
+                target_bytes: 1024 * 1024,
+                max_latency_ms: 5,
+            },
+            namespace: "default".to_owned(),
+            recovery: RecoveryPolicy::default(),
+        }
+    }
+
+    /// Map an object-log convenience config onto the full-matrix surface
+    /// (`Local` → [`LogConfig::Filesystem`], `S3Compatible` → [`LogConfig::S3`]).
+    pub fn from_object_log_runtime(config: ObjectLogRuntimeConfig) -> Self {
+        config.into_matrix_config()
+    }
+
+    /// Structural validation for the 5×3 matrix. Does not open stores.
+    ///
+    /// Returns [`EngineError::Invalid`] for malformed fields and
+    /// [`EngineError::Unavailable`] for clearly mismatched object-log authority /
+    /// barrier combinations (API-005 intent).
+    pub fn validate(&self) -> EngineResult<()> {
+        if self.namespace.trim().is_empty() {
+            return Err(EngineError::Invalid(
+                "storage namespace must not be empty",
+            ));
+        }
+        if self.segments.target_bytes == 0 || self.segments.max_latency_ms == 0 {
+            return Err(EngineError::Invalid(
+                "segment target_bytes and max_latency_ms must be non-zero",
+            ));
+        }
+        if self.recovery.max_tail_commands == 0 {
+            return Err(EngineError::Invalid(
+                "recovery max_tail_commands must be non-zero",
+            ));
+        }
+
+        match &self.log {
+            LogConfig::Memory => {}
+            LogConfig::Sqlite { path } if path.as_os_str().is_empty() => {
+                return Err(EngineError::Invalid("sqlite log path must not be empty"));
+            }
+            LogConfig::Sqlite { .. } => {}
+            LogConfig::Postgres { url, .. } if url.0.is_empty() => {
+                return Err(EngineError::Invalid(
+                    "postgres log URL must not be empty",
+                ));
+            }
+            LogConfig::Postgres { .. } => {}
+            LogConfig::Filesystem { root } if root.as_os_str().is_empty() => {
+                return Err(EngineError::Invalid(
+                    "filesystem object-log root must not be empty",
+                ));
+            }
+            LogConfig::Filesystem { .. } => {
+                match &self.authority {
+                    None | Some(ObjectLogAuthority::NativeConditionalWrite) => {}
+                    Some(ObjectLogAuthority::Postgres { .. }) => {
+                        return Err(EngineError::Invalid(
+                            "filesystem object-log requires NativeConditionalWrite authority",
+                        ));
+                    }
+                }
+            }
+            LogConfig::S3 {
+                endpoint,
+                bucket,
+                region,
+                access_key_id,
+                secret_access_key,
+                ..
+            } => {
+                if endpoint.is_empty()
+                    || bucket.is_empty()
+                    || region.is_empty()
+                    || access_key_id.0.is_empty()
+                    || secret_access_key.0.is_empty()
+                {
+                    return Err(EngineError::Invalid(
+                        "S3 object-log configuration fields must not be empty",
+                    ));
+                }
+                if let Some(ObjectLogAuthority::Postgres { url }) = &self.authority
+                    && url.0.is_empty()
+                {
+                    return Err(EngineError::Invalid(
+                        "PostgreSQL object-log authority URL must not be empty",
+                    ));
+                }
+            }
+        }
+
+        match &self.projection {
+            ProjectionStoreConfig::Memory => {}
+            ProjectionStoreConfig::Sqlite { path } if path.as_os_str().is_empty() => {
+                return Err(EngineError::Invalid(
+                    "sqlite projection path must not be empty",
+                ));
+            }
+            ProjectionStoreConfig::Sqlite { .. } => {}
+            ProjectionStoreConfig::Postgres { url } if url.0.is_empty() => {
+                return Err(EngineError::Invalid(
+                    "postgres projection URL must not be empty",
+                ));
+            }
+            ProjectionStoreConfig::Postgres { .. } => {
+                // Object-log × Postgres projection requires a strict response barrier.
+                if matches!(
+                    &self.log,
+                    LogConfig::Filesystem { .. } | LogConfig::S3 { .. }
+                ) && self.response_barrier != ResponseBarrier::Strict
+                {
+                    return Err(EngineError::Unavailable);
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
 impl ObjectLogRuntimeConfig {
+    /// Map this convenience config onto the normative full-matrix [`StorageConfig`].
+    pub fn into_matrix_config(self) -> StorageConfig {
+        StorageConfig {
+            log: match self.object_log {
+                ObjectLogStorage::Local { root } => LogConfig::Filesystem { root },
+                ObjectLogStorage::S3Compatible {
+                    endpoint,
+                    bucket,
+                    region,
+                    access_key_id,
+                    secret_access_key,
+                    allow_insecure_http,
+                } => LogConfig::S3 {
+                    endpoint,
+                    bucket,
+                    region,
+                    access_key_id,
+                    secret_access_key,
+                    allow_insecure_http,
+                },
+            },
+            projection: match self.projection {
+                ProjectionConfig::Sqlite { path } => ProjectionStoreConfig::Sqlite { path },
+                ProjectionConfig::Postgres { url } => ProjectionStoreConfig::Postgres { url },
+            },
+            control_plane: None,
+            authority: Some(self.authority),
+            response_barrier: self.response_barrier,
+            segments: self.segments,
+            namespace: self.namespace,
+            recovery: self.recovery,
+        }
+    }
+
     fn into_storage_config(self) -> ComposedStorageConfig {
         ComposedStorageConfig {
             object_log: match self.object_log {
@@ -950,9 +1202,9 @@ impl ObjectLogRuntimeConfig {
                 }
             },
             projection: match self.projection {
-                ProjectionConfig::Sqlite { path } => ProjectionStoreConfig::Sqlite { path },
+                ProjectionConfig::Sqlite { path } => ComposedProjectionConfig::Sqlite { path },
                 ProjectionConfig::Postgres { url } => {
-                    ProjectionStoreConfig::Postgres { url: url.0 }
+                    ComposedProjectionConfig::Postgres { url: url.0 }
                 }
             },
             response_barrier: match self.response_barrier {
@@ -978,7 +1230,161 @@ impl ObjectLogRuntimeConfig {
     }
 
     pub fn validate(&self) -> EngineResult<()> {
+        // Full-matrix validation first (covers empty fields / authority pairing).
+        self.clone().into_matrix_config().validate()?;
         self.clone().into_storage_config().validate()
+    }
+}
+
+#[cfg(test)]
+mod storage_config_matrix_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn segments() -> SegmentConfig {
+        SegmentConfig::new(1024, 5).expect("valid segments")
+    }
+
+    fn base(log: LogConfig, projection: ProjectionStoreConfig) -> StorageConfig {
+        StorageConfig {
+            log,
+            projection,
+            control_plane: None,
+            authority: None,
+            response_barrier: ResponseBarrier::Strict,
+            segments: segments(),
+            namespace: "matrix-test".to_owned(),
+            recovery: RecoveryPolicy::default(),
+        }
+    }
+
+    fn all_logs() -> Vec<LogConfig> {
+        vec![
+            LogConfig::Memory,
+            LogConfig::Sqlite {
+                path: PathBuf::from("/tmp/log.db"),
+            },
+            LogConfig::Postgres {
+                url: ConfigSecret::new("postgres://localhost/fireweed"),
+                schema: Some("fw".to_owned()),
+                mode: PostgresMode::Relational,
+                node_id: Some(1),
+                coordination: None,
+            },
+            LogConfig::Filesystem {
+                root: PathBuf::from("/var/lib/fireweed/object-log"),
+            },
+            LogConfig::S3 {
+                endpoint: "https://s3.example".to_owned(),
+                bucket: "fireweed".to_owned(),
+                region: "us-east-1".to_owned(),
+                access_key_id: ConfigSecret::new("akid"),
+                secret_access_key: ConfigSecret::new("secret"),
+                allow_insecure_http: false,
+            },
+        ]
+    }
+
+    fn all_projections() -> Vec<ProjectionStoreConfig> {
+        vec![
+            ProjectionStoreConfig::Memory,
+            ProjectionStoreConfig::Sqlite {
+                path: PathBuf::from("/tmp/projection.db"),
+            },
+            ProjectionStoreConfig::Postgres {
+                url: ConfigSecret::new("postgres://localhost/projection"),
+            },
+        ]
+    }
+
+    #[test]
+    fn constructs_and_validates_all_five_logs_and_three_projections() {
+        let logs = all_logs();
+        assert_eq!(logs.len(), 5);
+        let projections = all_projections();
+        assert_eq!(projections.len(), 3);
+
+        let mut axis_names = Vec::new();
+        for log in &logs {
+            axis_names.push(log.axis_name());
+            assert_eq!(log.is_durable_log(), log.axis_name() != "memory");
+        }
+        assert_eq!(
+            axis_names,
+            vec!["memory", "sqlite", "postgres", "filesystem", "s3"]
+        );
+        assert_eq!(
+            projections
+                .iter()
+                .map(|p| p.axis_name())
+                .collect::<Vec<_>>(),
+            vec!["memory", "sqlite", "postgres"]
+        );
+
+        // All 15 matrix cells construct and structurally validate.
+        let mut cells = 0usize;
+        for log in logs {
+            for projection in &projections {
+                let mut config = base(log.clone(), projection.clone());
+                if matches!(
+                    &config.log,
+                    LogConfig::Filesystem { .. } | LogConfig::S3 { .. }
+                ) {
+                    config.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+                }
+                config
+                    .validate()
+                    .unwrap_or_else(|e| panic!("cell {}×{}: {e:?}", config.log.axis_name(), projection.axis_name()));
+                cells += 1;
+            }
+        }
+        assert_eq!(cells, 15);
+    }
+
+    #[test]
+    fn memory_helper_and_objectlog_mapping() {
+        let mem = StorageConfig::memory();
+        assert!(matches!(mem.log, LogConfig::Memory));
+        assert!(matches!(mem.projection, ProjectionStoreConfig::Memory));
+        mem.validate().expect("memory defaults validate");
+
+        let ol = ObjectLogRuntimeConfig {
+            object_log: ObjectLogStorage::Local {
+                root: PathBuf::from("/data/log"),
+            },
+            authority: ObjectLogAuthority::NativeConditionalWrite,
+            projection: ProjectionConfig::Sqlite {
+                path: PathBuf::from("/data/proj.db"),
+            },
+            response_barrier: ResponseBarrier::Strict,
+            segments: segments(),
+            namespace: "ol".to_owned(),
+            recovery: RecoveryPolicy::default(),
+        };
+        let mapped = StorageConfig::from_object_log_runtime(ol);
+        assert!(matches!(mapped.log, LogConfig::Filesystem { .. }));
+        assert!(matches!(mapped.projection, ProjectionStoreConfig::Sqlite { .. }));
+        mapped.validate().expect("mapped object-log config validates");
+    }
+
+    #[test]
+    fn rejects_empty_paths_and_filesystem_postgres_authority() {
+        let mut bad = StorageConfig::memory();
+        bad.log = LogConfig::Sqlite {
+            path: PathBuf::new(),
+        };
+        assert!(matches!(bad.validate(), Err(EngineError::Invalid(_))));
+
+        let mut fs = base(
+            LogConfig::Filesystem {
+                root: PathBuf::from("/tank/log"),
+            },
+            ProjectionStoreConfig::Memory,
+        );
+        fs.authority = Some(ObjectLogAuthority::Postgres {
+            url: ConfigSecret::new("postgres://authority"),
+        });
+        assert!(matches!(fs.validate(), Err(EngineError::Invalid(_))));
     }
 }
 
@@ -1035,12 +1441,12 @@ impl ComposedStorageConfig {
             (ObjectLogConfig::S3Compatible { .. }, ObjectLogAuthorityConfig::Postgres { .. }) => {}
         }
         match &self.projection {
-            ProjectionStoreConfig::Sqlite { path } if path.as_os_str().is_empty() => {
+            ComposedProjectionConfig::Sqlite { path } if path.as_os_str().is_empty() => {
                 return Err(EngineError::Invalid(
                     "SQLite projection path must not be empty",
                 ));
             }
-            ProjectionStoreConfig::Postgres { url } if url.is_empty() => {
+            ComposedProjectionConfig::Postgres { url } if url.is_empty() => {
                 return Err(EngineError::Invalid(
                     "PostgreSQL projection URL must not be empty",
                 ));
@@ -4026,13 +4432,13 @@ fn open_objectlog_postgres_blocking(
         return Err(EngineError::Unavailable);
     }
     let projection = match &config.projection {
-        ProjectionStoreConfig::Postgres { url } => {
+        ComposedProjectionConfig::Postgres { url } => {
             fireweed_postgres::PostgresRelational::connect_in_schema(
                 &url.0,
                 &derived_postgres_schema_name(&config.namespace),
             )?
         }
-        ProjectionStoreConfig::Sqlite { .. } => return Err(EngineError::Unavailable),
+        ComposedProjectionConfig::Sqlite { .. } => return Err(EngineError::Unavailable),
     };
     let log = open_composed_object_log(&config, true)?;
 
@@ -4106,8 +4512,8 @@ pub(crate) fn open_composed_sqlite(
 
     config.validate()?;
     let projection_path = match &config.projection {
-        ProjectionStoreConfig::Sqlite { path } => path,
-        ProjectionStoreConfig::Postgres { .. } => return Err(EngineError::Unavailable),
+        ComposedProjectionConfig::Sqlite { path } => path,
+        ComposedProjectionConfig::Postgres { .. } => return Err(EngineError::Unavailable),
     };
     let projection_path = projection_path.to_str().ok_or(EngineError::Invalid(
         "SQLite projection path must be valid UTF-8",

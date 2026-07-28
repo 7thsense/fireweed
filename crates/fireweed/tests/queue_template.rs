@@ -7,7 +7,7 @@ use fireweed::{
     EligibilityPolicy, EnsureQueueError, EntitySchemaDocument, Fireweed, GateKeyPolicy,
     IndexDeclaration, IndexDef, IndexSpec, IndexType, MetadataValue, ObjectLogConfig, OrderingMode,
     PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker,
-    ProjectionRecoveryPolicy, ProjectionStoreConfig, QueueCreationPolicy, QueueDefinition, QueueId,
+    ProjectionRecoveryPolicy, ComposedProjectionConfig, QueueCreationPolicy, QueueDefinition, QueueId,
     QueueIndex, QueueKey, QueueTemplate, RecurrenceMode, RecurrencePolicy, RetryPolicy,
     SegmentSettings, TenantId, UtcTimestamp,
 };
@@ -385,7 +385,7 @@ fn composed_config(root: &Path, sqlite: &Path) -> ComposedStorageConfig {
             root: root.to_path_buf(),
         },
         object_log_authority: fireweed::ObjectLogAuthorityConfig::NativeConditionalWrite,
-        projection: ProjectionStoreConfig::Sqlite {
+        projection: ComposedProjectionConfig::Sqlite {
             path: sqlite.to_path_buf(),
         },
         response_barrier: CommitResponseBarrier::Strict,
@@ -433,7 +433,7 @@ fn postgres_public_constructors_and_composed_reopen_idempotently() {
             root: composed_root.clone(),
         },
         object_log_authority: fireweed::ObjectLogAuthorityConfig::NativeConditionalWrite,
-        projection: ProjectionStoreConfig::Postgres {
+        projection: ComposedProjectionConfig::Postgres {
             url: fireweed::SecretValue::new(url),
         },
         response_barrier: CommitResponseBarrier::Strict,

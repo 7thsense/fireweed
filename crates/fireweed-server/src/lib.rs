@@ -98,11 +98,14 @@ pub enum LogSpec {
 }
 
 impl LogSpec {
+    /// Public product axis name (orthogonal storage matrix). Object-log local/s3 map to
+    /// `filesystem` / `s3`; the legacy `objectlog` env name remains an accepted parse alias.
     fn label(&self) -> &'static str {
         match self {
             LogSpec::Memory => "memory",
             LogSpec::Sqlite { .. } => "sqlite",
-            LogSpec::ObjectLog(_) => "objectlog",
+            LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem { .. }) => "filesystem",
+            LogSpec::ObjectLog(ObjectLogSpec::S3 { .. }) => "s3",
             #[cfg(feature = "postgres")]
             LogSpec::Postgres { .. } => "postgres",
         }
@@ -380,9 +383,12 @@ pub enum ProjectionSpec {
 }
 
 impl ProjectionSpec {
+    /// Public product axis name when the value is one of the three matrix projections;
+    /// legacy hybrid/turso names remain for non-public implementation profiles.
     fn label(&self) -> &'static str {
         match self {
-            ProjectionSpec::InMemory => "inmemory",
+            // Public matrix name is `memory` (env alias `inmemory` still parses).
+            ProjectionSpec::InMemory => "memory",
             ProjectionSpec::Sqlite { .. } => "sqlite",
             ProjectionSpec::Turso { .. } => "turso",
             ProjectionSpec::Hybrid { .. } => "hybrid",

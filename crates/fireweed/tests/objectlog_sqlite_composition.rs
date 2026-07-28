@@ -14,7 +14,7 @@ use fireweed::{
     IndexDeclaration, IndexType, InstanceFence, MetricsByQueryRequest, MultiClaimCommitEntry,
     MultiClaimCommitRequest, NewItem, ObjectLogConfig, OrderField, OrderingMode, PriorityDirection,
     PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, ProjectionRecoveryPolicy,
-    ProjectionStoreConfig, QueryFilter, QueueDefinition, QueueId, QueueIndex, QueueKey,
+    ComposedProjectionConfig, QueryFilter, QueueDefinition, QueueId, QueueIndex, QueueKey,
     RangeScanRequest, RecurrencePolicy, RequestId, RetryPolicy, SecretValue, SegmentSettings,
     SideRecord, SortDirection, TenantId, TypedValue, UtcTimestamp,
 };
@@ -108,7 +108,7 @@ fn local_config(root: &Path, sqlite: &Path) -> ComposedStorageConfig {
             root: root.to_path_buf(),
         },
         object_log_authority: fireweed::ObjectLogAuthorityConfig::NativeConditionalWrite,
-        projection: ProjectionStoreConfig::Sqlite {
+        projection: ComposedProjectionConfig::Sqlite {
             path: sqlite.to_path_buf(),
         },
         response_barrier: CommitResponseBarrier::Strict,
@@ -1252,7 +1252,7 @@ fn public_s3_sqlite_delete_and_rebuild() {
             allow_insecure_http: true,
         },
         object_log_authority: fireweed::ObjectLogAuthorityConfig::NativeConditionalWrite,
-        projection: ProjectionStoreConfig::Sqlite {
+        projection: ComposedProjectionConfig::Sqlite {
             path: fixture.join("projection.sqlite"),
         },
         response_barrier: CommitResponseBarrier::Strict,

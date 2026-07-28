@@ -346,6 +346,54 @@ fn required_nonempty(env: &BTreeMap<String, String>, key: &str) -> Result<String
         .ok_or_else(|| ConfigError::new(format!("{key} is required and must not be empty")))
 }
 
+/// S3-compatible object-log fields (shared by `FIREWEED_LOG_BACKEND=s3` and
+/// legacy `objectlog` + `FIREWEED_OBJECT_LOG_STORE=s3`).
+fn object_log_spec_s3(
+    env: &BTreeMap<String, String>,
+    segments: SegmentConfig,
+) -> Result<ObjectLogSpec, ConfigError> {
+    if env.contains_key("FIREWEED_OBJECT_LOG_ROOT") {
+        return Err(ConfigError::new(
+            "FIREWEED_OBJECT_LOG_ROOT is filesystem/local-only and must not be set for an S3 log backend",
+        ));
+    }
+    let endpoint = required_nonempty(env, "FIREWEED_OBJECT_LOG_S3_ENDPOINT")?;
+    let bucket = required_nonempty(env, "FIREWEED_OBJECT_LOG_S3_BUCKET")?;
+    let region = required_nonempty(env, "FIREWEED_OBJECT_LOG_S3_REGION")?;
+    let credential_source = required_nonempty(env, "FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE")?;
+    if credential_source != "static" {
+        return Err(ConfigError::new(format!(
+            "unsupported FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE={credential_source:?}; expected static"
+        )));
+    }
+    let access_key_id = required_nonempty(env, "FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID")?;
+    let secret_access_key = required_nonempty(env, "FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY")?;
+    let allow_insecure_http = match env.get("FIREWEED_OBJECT_LOG_S3_ALLOW_INSECURE_HTTP") {
+        None => false,
+        Some(value) if matches!(value.as_str(), "1" | "true") => true,
+        Some(value) if matches!(value.as_str(), "0" | "false") => false,
+        Some(value) => {
+            return Err(ConfigError::new(format!(
+                "FIREWEED_OBJECT_LOG_S3_ALLOW_INSECURE_HTTP must be true|false|1|0, got {value:?}"
+            )));
+        }
+    };
+    let spec = ObjectLogSpec::S3 {
+        endpoint,
+        bucket,
+        region,
+        credentials: S3CredentialSource::Static {
+            access_key_id,
+            secret_access_key,
+        },
+        segment_config: segments,
+        allow_insecure_http,
+    };
+    spec.validate()
+        .map_err(|error| ConfigError::new(format!("invalid S3 object-log configuration: {error}")))?;
+    Ok(spec)
+}
+
 fn object_log_spec(
     env: &BTreeMap<String, String>,
     segments: SegmentConfig,
@@ -368,51 +416,7 @@ fn object_log_spec(
                 segments,
             ))
         }
-        "s3" => {
-            if env.contains_key("FIREWEED_OBJECT_LOG_ROOT") {
-                return Err(ConfigError::new(
-                    "FIREWEED_OBJECT_LOG_ROOT is local-only and must not be set when FIREWEED_OBJECT_LOG_STORE=s3",
-                ));
-            }
-            let endpoint = required_nonempty(env, "FIREWEED_OBJECT_LOG_S3_ENDPOINT")?;
-            let bucket = required_nonempty(env, "FIREWEED_OBJECT_LOG_S3_BUCKET")?;
-            let region = required_nonempty(env, "FIREWEED_OBJECT_LOG_S3_REGION")?;
-            let credential_source =
-                required_nonempty(env, "FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE")?;
-            if credential_source != "static" {
-                return Err(ConfigError::new(format!(
-                    "unsupported FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE={credential_source:?}; expected static"
-                )));
-            }
-            let access_key_id = required_nonempty(env, "FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID")?;
-            let secret_access_key =
-                required_nonempty(env, "FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY")?;
-            let allow_insecure_http = match env.get("FIREWEED_OBJECT_LOG_S3_ALLOW_INSECURE_HTTP") {
-                None => false,
-                Some(value) if matches!(value.as_str(), "1" | "true") => true,
-                Some(value) if matches!(value.as_str(), "0" | "false") => false,
-                Some(value) => {
-                    return Err(ConfigError::new(format!(
-                        "FIREWEED_OBJECT_LOG_S3_ALLOW_INSECURE_HTTP must be true|false|1|0, got {value:?}"
-                    )));
-                }
-            };
-            let spec = ObjectLogSpec::S3 {
-                endpoint,
-                bucket,
-                region,
-                credentials: S3CredentialSource::Static {
-                    access_key_id,
-                    secret_access_key,
-                },
-                segment_config: segments,
-                allow_insecure_http,
-            };
-            spec.validate().map_err(|error| {
-                ConfigError::new(format!("invalid S3 object-log configuration: {error}"))
-            })?;
-            Ok(spec)
-        }
+        "s3" => object_log_spec_s3(env, segments),
         other => Err(ConfigError::new(format!(
             "unknown FIREWEED_OBJECT_LOG_STORE={other:?}; expected local|s3"
         ))),
@@ -426,6 +430,8 @@ fn parse_backend(
     let log = env_or(env, "FIREWEED_LOG_BACKEND", "objectlog");
     let projection = env_or(env, "FIREWEED_PROJECTION_BACKEND", "inmemory");
 
+    // Public product log names: memory|sqlite|postgres|filesystem|s3.
+    // Compat aliases: objectlog (+ store local/s3) → filesystem/s3.
     let log_spec = match log.as_str() {
         "memory" => LogSpec::Memory,
         "sqlite" => LogSpec::Sqlite {
@@ -435,6 +441,28 @@ fn parse_backend(
                 "/var/lib/fireweed/fireweed-log.db",
             )),
         },
+        // First-class filesystem object log (local directory / NAS).
+        "filesystem" => {
+            if let Some((key, _)) = env
+                .iter()
+                .find(|(key, _)| key.starts_with("FIREWEED_OBJECT_LOG_S3_"))
+            {
+                return Err(ConfigError::new(format!(
+                    "{key} is set while FIREWEED_LOG_BACKEND=filesystem; refusing to ignore shared S3 configuration"
+                )));
+            }
+            LogSpec::ObjectLog(ObjectLogSpec::local(
+                PathBuf::from(env_or(
+                    env,
+                    "FIREWEED_OBJECT_LOG_ROOT",
+                    "/var/lib/fireweed/object-log",
+                )),
+                segments,
+            ))
+        }
+        // First-class S3-compatible object log.
+        "s3" => LogSpec::ObjectLog(object_log_spec_s3(env, segments)?),
+        // Legacy alias: objectlog + FIREWEED_OBJECT_LOG_STORE=local|s3 → filesystem|s3.
         "objectlog" => LogSpec::ObjectLog(object_log_spec(env, segments)?),
         #[cfg(feature = "postgres")]
         "postgres" => {
@@ -459,14 +487,17 @@ fn parse_backend(
                 &log,
                 &projection,
                 &format!(
-                    "unknown FIREWEED_LOG_BACKEND={other:?}; expected memory|sqlite|objectlog|postgres"
+                    "unknown FIREWEED_LOG_BACKEND={other:?}; expected memory|sqlite|postgres|filesystem|s3 \
+                     (aliases: objectlog)"
                 ),
             ));
         }
     };
 
+    // Public product projection names: memory|sqlite|postgres.
+    // Compat aliases: inmemory → memory. Hybrid/turso remain parseable (non-public) until removed later.
     let projection_spec = match projection.as_str() {
-        "inmemory" => ProjectionSpec::InMemory,
+        "memory" | "inmemory" => ProjectionSpec::InMemory,
         "sqlite" => ProjectionSpec::Sqlite {
             path: PathBuf::from(env_or(
                 env,
@@ -552,7 +583,8 @@ fn parse_backend(
                 &log,
                 &projection,
                 &format!(
-                    "unknown FIREWEED_PROJECTION_BACKEND={other:?}; expected inmemory|sqlite|turso|hybrid|hybrid-strict|hybrid-async|postgres"
+                    "unknown FIREWEED_PROJECTION_BACKEND={other:?}; expected memory|sqlite|postgres \
+                     (aliases: inmemory; legacy non-public: turso|hybrid|hybrid-strict|hybrid-async)"
                 ),
             ));
         }
@@ -894,6 +926,74 @@ mod tests {
         assert!(config.debug_segments);
         assert_eq!(config.queues.len(), 2);
         assert_eq!(config.queues[1].queue_id.as_str(), "qb");
+    }
+
+    #[test]
+    fn public_matrix_names_parse_five_logs_and_three_projections() {
+        // memory log × memory projection (public name, not only inmemory alias)
+        let config = Config::from_env(&map(&[
+            ("FIREWEED_LOG_BACKEND", "memory"),
+            ("FIREWEED_PROJECTION_BACKEND", "memory"),
+        ]))
+        .expect("memory×memory");
+        assert!(matches!(config.backend.log, LogSpec::Memory));
+        assert!(matches!(
+            config.backend.projection,
+            ProjectionSpec::InMemory
+        ));
+        assert_eq!(config.backend.log.label(), "memory");
+        assert_eq!(config.backend.projection.label(), "memory");
+
+        // filesystem log (first-class) × sqlite projection
+        let config = Config::from_env(&map(&[
+            ("FIREWEED_LOG_BACKEND", "filesystem"),
+            ("FIREWEED_OBJECT_LOG_ROOT", "/data/fw-log"),
+            ("FIREWEED_PROJECTION_BACKEND", "sqlite"),
+            ("FIREWEED_SQLITE_PROJECTION_PATH", "/data/fw-proj.db"),
+        ]))
+        .expect("filesystem×sqlite");
+        match &config.backend.log {
+            LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem { root, .. }) => {
+                assert_eq!(root, &PathBuf::from("/data/fw-log"));
+            }
+            _ => panic!(
+                "expected filesystem object log, got label={}",
+                config.backend.log.label()
+            ),
+        }
+        assert_eq!(config.backend.log.label(), "filesystem");
+        assert!(matches!(
+            config.backend.projection,
+            ProjectionSpec::Sqlite { .. }
+        ));
+
+        // s3 log (first-class) × memory projection
+        let config = Config::from_env(&map(&[
+            ("FIREWEED_LOG_BACKEND", "s3"),
+            ("FIREWEED_PROJECTION_BACKEND", "memory"),
+            ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "http://127.0.0.1:9000"),
+            ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fw"),
+            ("FIREWEED_OBJECT_LOG_S3_REGION", "us-east-1"),
+            ("FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE", "static"),
+            ("FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID", "minio"),
+            ("FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY", "minio123"),
+            ("FIREWEED_OBJECT_LOG_S3_ALLOW_INSECURE_HTTP", "true"),
+        ]))
+        .expect("s3×memory");
+        assert!(matches!(
+            config.backend.log,
+            LogSpec::ObjectLog(ObjectLogSpec::S3 { .. })
+        ));
+        assert_eq!(config.backend.log.label(), "s3");
+
+        // legacy objectlog+local still maps to filesystem label
+        let config = Config::from_env(&map(&[
+            ("FIREWEED_LOG_BACKEND", "objectlog"),
+            ("FIREWEED_OBJECT_LOG_STORE", "local"),
+            ("FIREWEED_PROJECTION_BACKEND", "inmemory"),
+        ]))
+        .expect("objectlog alias");
+        assert_eq!(config.backend.log.label(), "filesystem");
     }
 
     #[test]

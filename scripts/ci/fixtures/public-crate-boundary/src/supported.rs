@@ -1,9 +1,10 @@
 use std::{path::PathBuf, sync::Arc};
 
 use fireweed::{
-    ConfigSecret, ControlPlaneConfig, Fireweed, ObjectLogAuthority, ObjectLogRuntimeConfig,
-    ObjectLogStorage, OwnerId, PostgresCoordinationConfig, PostgresMode, PostgresRuntimeConfig,
-    ProjectionConfig, RecoveryPolicy, ResponseBarrier, SegmentConfig,
+    ConfigSecret, ControlPlaneConfig, Fireweed, LogConfig, ObjectLogAuthority,
+    ObjectLogRuntimeConfig, ObjectLogStorage, OwnerId, PostgresCoordinationConfig, PostgresMode,
+    PostgresRuntimeConfig, ProjectionConfig, ProjectionStoreConfig, RecoveryPolicy, ResponseBarrier,
+    SegmentConfig, StorageConfig,
 };
 
 #[allow(unused_imports)]
@@ -75,6 +76,82 @@ fn objectlog_config(projection: ProjectionConfig) -> ObjectLogRuntimeConfig {
         namespace: "fixture".to_owned(),
         recovery: RecoveryPolicy::default(),
     }
+}
+
+#[allow(dead_code)]
+fn full_matrix_storage_config_is_constructible() -> fireweed::EngineResult<()> {
+    let segments = SegmentConfig::new(1024, 5)?;
+    let logs = [
+        LogConfig::Memory,
+        LogConfig::Sqlite {
+            path: PathBuf::from("log.db"),
+        },
+        LogConfig::Postgres {
+            url: ConfigSecret::new("postgres://example"),
+            schema: None,
+            mode: PostgresMode::Relational,
+            node_id: None,
+            coordination: None,
+        },
+        LogConfig::Filesystem {
+            root: PathBuf::from("object-log"),
+        },
+        LogConfig::S3 {
+            endpoint: "https://s3.example".to_owned(),
+            bucket: "fw".to_owned(),
+            region: "us-east-1".to_owned(),
+            access_key_id: ConfigSecret::new("akid"),
+            secret_access_key: ConfigSecret::new("secret"),
+            allow_insecure_http: false,
+        },
+    ];
+    let projections = [
+        ProjectionStoreConfig::Memory,
+        ProjectionStoreConfig::Sqlite {
+            path: PathBuf::from("projection.db"),
+        },
+        ProjectionStoreConfig::Postgres {
+            url: ConfigSecret::new("postgres://example/projection"),
+        },
+    ];
+    for log in logs {
+        for projection in &projections {
+            let mut config = StorageConfig {
+                log: log.clone(),
+                projection: projection.clone(),
+                control_plane: None,
+                authority: None,
+                response_barrier: ResponseBarrier::Strict,
+                segments,
+                namespace: "fixture".to_owned(),
+                recovery: RecoveryPolicy::default(),
+            };
+            if matches!(
+                &config.log,
+                LogConfig::Filesystem { .. } | LogConfig::S3 { .. }
+            ) {
+                config.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+            }
+            config.validate()?;
+        }
+    }
+    let _: StorageConfig = StorageConfig::memory();
+    let _: StorageConfig =
+        ObjectLogRuntimeConfig {
+            object_log: ObjectLogStorage::Local {
+                root: PathBuf::from("object-log"),
+            },
+            authority: ObjectLogAuthority::NativeConditionalWrite,
+            projection: ProjectionConfig::Sqlite {
+                path: PathBuf::from("projection.db"),
+            },
+            response_barrier: ResponseBarrier::Strict,
+            segments,
+            namespace: "fixture".to_owned(),
+            recovery: RecoveryPolicy::default(),
+        }
+        .into_matrix_config();
+    Ok(())
 }
 
 #[allow(dead_code)]

@@ -12,7 +12,7 @@ use fireweed::{
     CohortPolicy, CommitResponseBarrier, ComposedStorageConfig, CreateQueue, EligibilityPolicy,
     ObjectLogAuthorityConfig, ObjectLogConfig, OrderingMode, PriorityDirection, PriorityModel,
     PriorityModelKind, PriorityTieBreaker, PriorityValue, ProjectionRecoveryAction,
-    ProjectionRecoveryPolicy, ProjectionStoreConfig, QueueCreationPolicy, QueueDefinition, QueueId,
+    ProjectionRecoveryPolicy, ComposedProjectionConfig, QueueCreationPolicy, QueueDefinition, QueueId,
     QueueKey, RecurrencePolicy, RetryPolicy, SecretValue, SegmentSettings, TenantId,
 };
 use fireweed_memory::ManualClock;
@@ -80,7 +80,7 @@ fn composed_storage_config(inputs: &mut [String]) -> ComposedStorageConfig {
             allow_insecure_http: true,
         },
         object_log_authority: ObjectLogAuthorityConfig::NativeConditionalWrite,
-        projection: ProjectionStoreConfig::Postgres {
+        projection: ComposedProjectionConfig::Postgres {
             url: SecretValue::new(std::mem::take(&mut inputs[5])),
         },
         response_barrier: CommitResponseBarrier::Strict,
@@ -120,7 +120,7 @@ fn composed_storage_config_is_owned_and_secret_safe() {
             root: "local-log".into(),
         },
         object_log_authority: ObjectLogAuthorityConfig::NativeConditionalWrite,
-        projection: ProjectionStoreConfig::Sqlite {
+        projection: ComposedProjectionConfig::Sqlite {
             path: "projection.sqlite".into(),
         },
         response_barrier: CommitResponseBarrier::AsyncProjection,
