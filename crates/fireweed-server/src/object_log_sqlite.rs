@@ -29,8 +29,7 @@ use fireweed_engine::{
     validate_gate_command, validate_gate_push,
 };
 use fireweed_objectlog::segmented::{
-    BlobStore, FaultHook, LocalFsBlobStore, ManifestPointerStore, PointerFencedBlobStore,
-    SegmentConfig, SegmentCounters, SegmentedObjectLog,
+    BlobStore, FaultHook, LocalFsBlobStore, SegmentConfig, SegmentCounters, SegmentedObjectLog,
 };
 use fireweed_objectlog::{
     LocalObjectLog, ObjectLogByteAdmissionSnapshot, prepare_serialized_commands,
@@ -1309,34 +1308,6 @@ impl SegmentedObjectLogSqliteBackend {
         })
     }
 
-    /// Open over a no-CAS object store with a transactional manifest-pointer authority.
-    pub fn open_with_manifest_pointer(
-        store: Arc<dyn BlobStore>,
-        pointers: Arc<dyn ManifestPointerStore>,
-        projection_path: &str,
-        config: SegmentConfig,
-    ) -> EngineResult<Self> {
-        Self::open_with_blob_store(
-            Arc::new(PointerFencedBlobStore::new(store, pointers)),
-            projection_path,
-            config,
-        )
-    }
-
-    /// Production no-CAS composition: immutable objects remain in the supplied store while Postgres owns
-    /// the atomically versioned manifest head and assignment epoch.
-    pub fn open_with_postgres_manifest_pointer(
-        store: Arc<dyn BlobStore>,
-        postgres_url: &str,
-        projection_path: &str,
-        config: SegmentConfig,
-    ) -> EngineResult<Self> {
-        let pointers = Arc::new(fireweed_postgres::PostgresManifestPointer::open(
-            postgres_url,
-        )?);
-        Self::open_with_manifest_pointer(store, pointers, projection_path, config)
-    }
-
     /// A snapshot of the measured group-commit segment/object counters (segments sealed, objects PUT,
     /// commands committed, per-segment batch sizes) — the release-ledger object-log cost surface the
     /// TP-002 E3 harness reports per segment-size configuration.
@@ -2571,31 +2542,6 @@ impl SegmentedObjectLogInMemoryBackend {
             queue_byte_limit: crate::DEFAULT_OBJECTLOG_QUEUE_WAITING_BYTES,
             debug_segments: false,
         })
-    }
-
-    /// Open over a no-CAS object store with a transactional manifest-pointer authority.
-    pub fn open_with_manifest_pointer(
-        store: Arc<dyn BlobStore>,
-        pointers: Arc<dyn ManifestPointerStore>,
-        config: SegmentConfig,
-    ) -> EngineResult<Self> {
-        Self::open_with_blob_store(
-            Arc::new(PointerFencedBlobStore::new(store, pointers)),
-            config,
-        )
-    }
-
-    /// Production no-CAS composition: immutable objects remain in the supplied store while Postgres owns
-    /// the atomically versioned manifest head and assignment epoch.
-    pub fn open_with_postgres_manifest_pointer(
-        store: Arc<dyn BlobStore>,
-        postgres_url: &str,
-        config: SegmentConfig,
-    ) -> EngineResult<Self> {
-        let pointers = Arc::new(fireweed_postgres::PostgresManifestPointer::open(
-            postgres_url,
-        )?);
-        Self::open_with_manifest_pointer(store, pointers, config)
     }
 
     /// A snapshot of the measured group-commit segment/object counters (segments sealed, objects PUT,

@@ -1303,7 +1303,7 @@ fn segmented_object_log_commits_through_minio() {
         );
         s3.delete(&probe).unwrap();
         eprintln!(
-            "S3 endpoint lacks native create-only PutObject; raw SegmentedObjectLog is correctly not exercised (use PointerFencedBlobStore with PostgreSQL authority)"
+            "S3 endpoint lacks native create-only PutObject; SegmentedObjectLog is correctly not exercised"
         );
         return;
     }
