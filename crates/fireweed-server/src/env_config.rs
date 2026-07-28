@@ -601,6 +601,10 @@ fn parse_backend(
     // postgres/sqlite, postgres/postgres.
     let wired = match (&log_spec, &projection_spec) {
         (LogSpec::Memory, ProjectionSpec::InMemory) => true,
+        // Class B: memory log × durable projection (projection survives process death; no log rebuild).
+        (LogSpec::Memory, ProjectionSpec::Sqlite { .. }) => true,
+        #[cfg(feature = "postgres")]
+        (LogSpec::Memory, ProjectionSpec::Postgres { .. }) => true,
         (LogSpec::Sqlite { .. }, ProjectionSpec::InMemory) => true,
         (LogSpec::ObjectLog(_), ProjectionSpec::InMemory) => true,
         (LogSpec::ObjectLog(_), ProjectionSpec::Sqlite { .. }) => true,
@@ -950,6 +954,21 @@ mod tests {
         assert_eq!(config.backend.log.label(), "memory");
         assert_eq!(config.backend.projection.label(), "memory");
 
+        // Class B: memory log × sqlite projection (durable projection; no log rebuild)
+        let config = Config::from_env(&map(&[
+            ("FIREWEED_LOG_BACKEND", "memory"),
+            ("FIREWEED_PROJECTION_BACKEND", "sqlite"),
+            ("FIREWEED_SQLITE_PROJECTION_PATH", "/data/mem-class-b.db"),
+        ]))
+        .expect("memory×sqlite Class B");
+        assert!(matches!(config.backend.log, LogSpec::Memory));
+        assert!(matches!(
+            config.backend.projection,
+            ProjectionSpec::Sqlite { ref path } if path == &PathBuf::from("/data/mem-class-b.db")
+        ));
+        assert_eq!(config.backend.log.label(), "memory");
+        assert_eq!(config.backend.projection.label(), "sqlite");
+
         // filesystem log (first-class) × sqlite projection
         let config = Config::from_env(&map(&[
             ("FIREWEED_LOG_BACKEND", "filesystem"),
@@ -1000,6 +1019,29 @@ mod tests {
         ]))
         .expect("objectlog alias");
         assert_eq!(config.backend.log.label(), "filesystem");
+    }
+
+    /// Class B cell: memory log × postgres projection is allowlisted (feature `postgres`).
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn memory_log_postgres_projection_is_wired() {
+        let config = Config::from_env(&map(&[
+            ("FIREWEED_LOG_BACKEND", "memory"),
+            ("FIREWEED_PROJECTION_BACKEND", "postgres"),
+            (
+                "FIREWEED_POSTGRES_PROJECTION_DATABASE_URL",
+                "postgres://postgres@127.0.0.1:5432/fireweed_proj",
+            ),
+        ]))
+        .expect("memory×postgres Class B");
+        assert!(matches!(config.backend.log, LogSpec::Memory));
+        assert!(matches!(
+            config.backend.projection,
+            ProjectionSpec::Postgres { ref url }
+                if url == "postgres://postgres@127.0.0.1:5432/fireweed_proj"
+        ));
+        assert_eq!(config.backend.log.label(), "memory");
+        assert_eq!(config.backend.projection.label(), "postgres");
     }
 
     #[test]

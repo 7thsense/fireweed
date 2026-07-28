@@ -2231,6 +2231,71 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             )
             .await
         }
+        (LogSpec::Memory, ProjectionSpec::Sqlite { path }) => {
+            // Class B (ADR-013): in-process MemoryLog for ordering while alive × durable SQLite
+            // projection. Reopen/recovery is projection-only — no Class A log-replay claims.
+            // `ComposedBackend::recover` repopulates definitions/counters from the projection and
+            // seeds the fresh MemoryLog high-water so subsequent appends continue the sequence space.
+            let p = path
+                .into_os_string()
+                .into_string()
+                .map_err(|_| EngineError::Storage("non-utf8 path".into()))?;
+            let backend = tokio::task::spawn_blocking(move || {
+                let log = fireweed_projection::MemoryLog::new();
+                let projection = fireweed_sqlite::SqliteProjectionStore::open(&p)?;
+                ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                    .recover()
+                    .map(|b| b.with_node_id(node_id))
+            })
+            .await
+            .map_err(|e| {
+                EngineError::Storage(format!("memory/sqlite open task failed: {e}"))
+            })??;
+            // Single-member pool: SQLite projection is blocking-safe via whole-operation adapter.
+            let (backend, lifecycle) = blocking_backend_pool(vec![Arc::new(backend)]);
+            run_owned_with_blocking_lifecycle(
+                backend,
+                lifecycle,
+                control_plane,
+                advertise_addr.as_deref(),
+                owner_id.clone(),
+                clock,
+                &listen,
+                interval,
+                &queues,
+            )
+            .await
+        }
+        #[cfg(feature = "postgres")]
+        (LogSpec::Memory, ProjectionSpec::Postgres { url }) => {
+            // Class B (ADR-013): in-process MemoryLog × durable postgres relational projection.
+            // Connect + recover off-reactor (sync postgres client must not run on a Tokio worker).
+            // Reopen is projection-only; no Class A log-rebuild claims.
+            let backend = tokio::task::spawn_blocking(move || {
+                let log = fireweed_projection::MemoryLog::new();
+                let projection = fireweed_postgres::PostgresRelational::connect(&url)?;
+                ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                    .recover()
+                    .map(|b| b.with_node_id(node_id))
+            })
+            .await
+            .map_err(|e| {
+                EngineError::Storage(format!("memory/postgres connect task join failed: {e}"))
+            })??;
+            let (backend, lifecycle) = blocking_backend(Arc::new(backend));
+            run_owned_with_blocking_lifecycle(
+                backend,
+                lifecycle,
+                control_plane,
+                advertise_addr.as_deref(),
+                owner_id.clone(),
+                clock,
+                &listen,
+                interval,
+                &queues,
+            )
+            .await
+        }
         (LogSpec::Sqlite { path }, ProjectionSpec::InMemory) => {
             let p = path
                 .into_os_string()
@@ -3822,5 +3887,165 @@ mod byte_admission_wiring_tests {
         assert!(arm.contains("fixed_postgres_relational_pool"));
         assert!(!arm.contains("PostgresLog::connect_with_config"));
         assert!(!arm.contains("ComposedBackend::new"));
+    }
+}
+
+
+/// Class B (ADR-013) memory-log compositions: durable projection survives process death without
+/// Class A log-replay claims. Exercises the same `MemoryLog × ProjectionStore` assembly the server
+/// match arms use (`recover` seeds definitions/counters from the projection only).
+#[cfg(test)]
+mod class_b_memory_log_tests {
+    use super::*;
+    use fireweed_core::{
+        EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
+        PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
+        UtcTimestamp,
+    };
+    use fireweed_engine::{
+        ControlPlaneStore, LogStore, ProjectionRead, PushPort, PushSpec, QueueKey,
+    };
+    use fireweed_projection::MemoryLog;
+
+    fn class_b_qdef() -> QueueDefinition {
+        QueueDefinition {
+            tenant_id: TenantId::new("t1").unwrap(),
+            queue_id: QueueId::new("q1").unwrap(),
+            priority_model: PriorityModel {
+                kind: PriorityModelKind::Int64,
+                direction: PriorityDirection::Ascending,
+                tie_breaker: PriorityTieBreaker::CreatedSequence,
+            },
+            ordering_mode: OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 60_000,
+            eligibility_policy: EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 100,
+            max_claim_batch_size: 100,
+            max_eligible_group_size: None,
+            secondary_indexes: vec![],
+            entity_schema: None,
+            typed_indexes: vec![],
+            emit_change_records: false,
+        }
+    }
+
+    fn class_b_shard() -> QueueKey {
+        QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
+    }
+
+    #[test]
+    fn class_b_memory_projection_arms_exist_in_composition_root() {
+        let source = include_str!("lib.rs");
+        assert!(
+            source.contains("LogSpec::Memory, ProjectionSpec::Sqlite"),
+            "server match arm for memory×sqlite (Class B) must exist"
+        );
+        assert!(
+            source.contains("LogSpec::Memory, ProjectionSpec::Postgres"),
+            "server match arm for memory×postgres (Class B) must exist (feature postgres)"
+        );
+        assert!(
+            source.contains("fireweed_projection::MemoryLog::new()"),
+            "Class B arms must assemble MemoryLog (in-process ordering), not a durable log"
+        );
+        let mem_sqlite = source
+            .split("LogSpec::Memory, ProjectionSpec::Sqlite")
+            .nth(1)
+            .expect("memory×sqlite arm")
+            .split("LogSpec::")
+            .next()
+            .expect("arm boundary");
+        assert!(
+            mem_sqlite.contains("Class B"),
+            "memory×sqlite arm must document Class B semantics"
+        );
+        assert!(
+            !mem_sqlite.contains("rebuilds the in-memory projection by replaying"),
+            "Class B must not claim log-replay rebuild"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_sqlite_projection_survives_reopen_without_log_replay() {
+        let path = std::env::temp_dir().join(format!(
+            "fireweed-class-b-memory-sqlite-{}-{:?}.db",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        let path_s = path.to_str().expect("utf8 path");
+
+        let def = class_b_qdef();
+        let shard = class_b_shard();
+        let now = UtcTimestamp::new(1_000, 0).unwrap();
+
+        {
+            let log = MemoryLog::new();
+            assert!(!log.is_durable_log(), "MemoryLog must report non-durable (Class B)");
+            let projection = fireweed_sqlite::SqliteProjectionStore::open(path_s)
+                .expect("open sqlite projection");
+            let backend = ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                .recover()
+                .expect("fresh Class B recover is a no-op");
+            backend.create_queue(def.clone()).await.expect("create_queue");
+            let pushed = backend
+                .push(&shard, vec![PushSpec::default()], now, None)
+                .await
+                .expect("push");
+            assert_eq!(pushed.len(), 1);
+            assert_eq!(
+                backend.metrics(&shard).await.expect("metrics").pending,
+                1,
+                "item visible in durable projection before process death"
+            );
+        }
+
+        {
+            let log = MemoryLog::new();
+            assert!(!LogStore::is_durable_log(&log));
+            assert!(
+                log.high_water(&shard).ok().flatten().is_none(),
+                "fresh MemoryLog has no entries to replay (Class B: no log rebuild)"
+            );
+            let projection = fireweed_sqlite::SqliteProjectionStore::open(path_s)
+                .expect("reopen sqlite projection");
+            let backend = ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                .recover()
+                .expect("Class B projection-only recover");
+            assert_eq!(
+                backend.metrics(&shard).await.expect("metrics after reopen").pending,
+                1,
+                "pending item survives via durable projection after process death (not log replay)"
+            );
+            let pushed = backend
+                .push(
+                    &shard,
+                    vec![PushSpec::default()],
+                    UtcTimestamp::new(2_000, 0).unwrap(),
+                    None,
+                )
+                .await
+                .expect("post-reopen push");
+            assert_eq!(pushed.len(), 1);
+            assert_eq!(
+                backend.metrics(&shard).await.expect("metrics").pending,
+                2,
+                "post-reopen push applies to the durable projection"
+            );
+        }
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
     }
 }
