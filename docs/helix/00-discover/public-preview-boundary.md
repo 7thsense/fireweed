@@ -81,22 +81,37 @@ Every cell is a valid selection. Semantics differ only by durability class.
 
 ### Preview support honesty
 
-The **target** product surface is the full 5×3 matrix above. Runtime wiring and release evidence
-are still evolving toward full coverage; this boundary does **not** claim that all 15 cells are
-production-supported on the current preview revision.
+The **target** product surface is the full 5×3 matrix above. This boundary separates three
+facts that must not be collapsed:
 
-Honest support posture (prefer cells with evidence; otherwise mark evolving):
+1. **Wired** — the server composition root accepts the log × projection pair and assembles a
+   backend (postgres projection / log cells require the `postgres` cargo feature). Inventory:
+   [storage-matrix-composition-inventory.md](../04-build/storage-matrix-composition-inventory.md).
+2. **Preview-supported** — maintainers accept correctness reports against the documented contract
+   for that cell and intend configuration compatibility within the 0.x minor line (definition
+   above). A smaller set than the wired matrix.
+3. **Release / TP-003 evidence** — cell-level transaction-contract and deployment gates on a
+   given revision. Conformance obligations by durability class:
+   [storage-matrix-conformance-classes.md](../04-build/storage-matrix-conformance-classes.md).
+   Full TP-003 (or equivalent) coverage for every Class A cell may still be evolving; wiring
+   alone is not a production or preview-support claim.
 
-| Log backend | Projection | Durability | Preview posture (current honesty) |
-|-------------|------------|------------|-----------------------------------|
-| `sqlite` | `memory` | Class A | Preview-supported — single-process, locally durable embed |
-| `filesystem` / `s3` | `memory` | Class A | Preview-supported — durable object log, rebuildable memory projection |
-| `filesystem` / `s3` | `sqlite` | Class A | Preview-supported baseline — durable object log with reference persistent local projection |
-| `memory` | `memory` | Class B | Development only — does not survive process loss (memory log and memory projection) |
-| `memory` | `sqlite` / `postgres` | Class B | Available / evolving — durability limited to projection; no Class A log rebuild claims |
-| `sqlite` | `sqlite` / `postgres` | Class A | Available / wired or evolving — see [DEPLOYMENT-READINESS.md](../04-build/DEPLOYMENT-READINESS.md) |
-| `postgres` | `memory` / `sqlite` / `postgres` | Class A | First-class axes; wired and exercised in-repo; public preview support claims track deployment readiness (evolving, not “incomplete Postgres”) |
-| `filesystem` / `s3` | `postgres` | Class A | Target matrix cell; support status evolving with wiring and evidence |
+**Server product wire-up (current honesty):** all **15** public matrix cells are wired. That is
+true and checkable. It does **not** mean all 15 are preview-supported or that every cell has
+complete TP-003 release-gate evidence on the current revision.
+
+Honest support posture:
+
+| Log backend | Projection | Durability | Wire-up | Preview posture (current honesty) |
+|-------------|------------|------------|---------|-----------------------------------|
+| `sqlite` | `memory` | Class A | Wired | **Preview-supported** — single-process, locally durable embed |
+| `filesystem` / `s3` | `memory` | Class A | Wired | **Preview-supported** — durable object log, rebuildable memory projection |
+| `filesystem` / `s3` | `sqlite` | Class A | Wired | **Preview-supported baseline** — durable object log with reference persistent local projection |
+| `memory` | `memory` | Class B | Wired | **Development only** — Class B; memory log and memory projection do not survive process loss |
+| `memory` | `sqlite` / `postgres` | Class B | Wired | **Wired · Class B** — durability limited to the projection; **no** Class A log rebuild, branch, read-as-of, or change-record-from-log claims |
+| `sqlite` | `sqlite` / `postgres` | Class A | Wired | **Wired · evidence evolving** — compositions open; public preview promotion tracks release-gate / TP-003 cell evidence ([DEPLOYMENT-READINESS.md](../04-build/DEPLOYMENT-READINESS.md)) |
+| `postgres` | `memory` / `sqlite` / `postgres` | Class A | Wired (`postgres` feature) | **First-class · wired · evidence evolving** — Postgres is a first-class log and projection backend (not a deferred product family). Kind/smoke and partial TP-003 pairs exist in-repo; cell-level preview-support promotion tracks readiness, not packaging completeness |
+| `filesystem` / `s3` | `postgres` | Class A | Wired (`postgres` feature) | **Wired · evidence evolving** — object-log × postgres compositions are assembled; full TP-003 / release-gate promotion for these cells may still be incomplete |
 
 Optional implementation details under a durable projection (hot-memory / async knobs, feature-gated
 adapters such as Turso) may exist in the repository for evaluation. They are **not** public matrix
