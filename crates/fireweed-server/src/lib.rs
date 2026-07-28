@@ -4839,9 +4839,7 @@ mod class_b_memory_log_tests {
             .push(
                 &key,
                 NewItem {
-                    client_item_key: Some(
-                        ClientItemKey::new(format!("{slug}_complete")).unwrap(),
-                    ),
+                    client_item_key: Some(ClientItemKey::new(format!("{slug}_complete")).unwrap()),
                     priority: Some(PriorityValue::Int64(10)),
                     ..NewItem::default()
                 },
@@ -4910,9 +4908,7 @@ mod class_b_memory_log_tests {
             .push(
                 &key,
                 NewItem {
-                    client_item_key: Some(
-                        ClientItemKey::new(format!("{slug}_pending")).unwrap(),
-                    ),
+                    client_item_key: Some(ClientItemKey::new(format!("{slug}_pending")).unwrap()),
                     priority: Some(PriorityValue::Int64(20)),
                     ..NewItem::default()
                 },
@@ -5098,7 +5094,6 @@ mod filesystem_matrix_t0_t4_tests {
         ClaimCompatibility, ClaimPort, ClaimRequest, ControlPlaneStore, EngineError, FinalizeKind,
         FinalizeOutcome, FinalizePort, ProjectionRead, PushPort, PushSpec, QueueKey,
     };
-    use fireweed_objectlog::segmented::LocalFsBlobStore;
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -5149,7 +5144,7 @@ mod filesystem_matrix_t0_t4_tests {
 
     fn seal_each() -> SegmentConfig {
         // Seal every command so reopen does not depend on a background flusher.
-        SegmentConfig::new(1, 1).expect("valid segment config")
+        SegmentConfig::new(1, 1_000).expect("valid segment config")
     }
 
     fn queue_def(tenant: &str, queue: &str) -> QueueDefinition {
@@ -5177,17 +5172,15 @@ mod filesystem_matrix_t0_t4_tests {
             max_eligible_group_size: None,
             secondary_indexes: vec![],
             entity_schema: Some(
-                serde_json::from_value(
-                    json!({
-                        "entity_schema": {
-                            "type": "object",
-                            "required": ["name"],
-                            "properties": {
-                                "name": {"type": "string"}
-                            }
+                serde_json::from_value(json!({
+                    "entity_schema": {
+                        "type": "object",
+                        "required": ["name"],
+                        "properties": {
+                            "name": {"type": "string"}
                         }
-                    }),
-                )
+                    }
+                }))
                 .unwrap(),
             ),
             typed_indexes: vec![],
@@ -5261,7 +5254,7 @@ mod filesystem_matrix_t0_t4_tests {
         let reject_err = backend
             .push(&shard, vec![invalid_spec("bad")], now(), None)
             .await
-            .expect_err("{cell_id} T1/T3 invalid entity must reject");
+            .unwrap_err();
         assert!(
             matches!(reject_err, EngineError::EntitySchemaViolation(_)),
             "{cell_id} T1/T3: expected EntitySchemaViolation, got {reject_err:?}"
@@ -5445,34 +5438,24 @@ mod filesystem_matrix_t0_t4_tests {
         run_class_a_filesystem_t0_t3(
             "filesystem×sqlite",
             || {
-                SegmentedObjectLogSqliteBackend::open(
-                    object_root.clone(),
-                    &proj,
-                    config,
-                )
-                .expect("open filesystem×sqlite")
+                SegmentedObjectLogSqliteBackend::open(object_root.clone(), &proj, config)
+                    .expect("open filesystem×sqlite")
             },
             || {
-                SegmentedObjectLogSqliteBackend::open(
-                    object_root.clone(),
-                    &proj,
-                    config,
-                )
-                .expect("reopen filesystem×sqlite")
+                SegmentedObjectLogSqliteBackend::open(object_root.clone(), &proj, config)
+                    .expect("reopen filesystem×sqlite")
             },
         )
         .await;
     }
 
     /// filesystem×postgres — Class A: durable object-log + Postgres relational projection.
-    /// Skips cleanly when `--features postgres` is off or `FIREWEED_PG_TEST_URL` is unset.
+    /// Skips cleanly when `FIREWEED_PG_TEST_URL` is unset (requires `--features postgres`).
     #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn filesystem_postgres_t0_t3_lifecycle_recovery_and_request_id_when_pg_available() {
         let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "filesystem×postgres T0–T3 SKIPPED — set FIREWEED_PG_TEST_URL to a live DB"
-            );
+            eprintln!("filesystem×postgres T0–T3 SKIPPED — set FIREWEED_PG_TEST_URL to a live DB");
             return;
         };
 
@@ -5501,64 +5484,149 @@ mod filesystem_matrix_t0_t4_tests {
         let log_spec = ObjectLogSpec::local(&object_root, segment_config);
         let budget = BufferedByteBudget::new(BufferedByteBudgetConfig::new(8_192).unwrap());
 
-        // open/reopen share the same filesystem log root + postgres search_path.
-        run_class_a_filesystem_t0_t3(
-            "filesystem×postgres",
-            || {
-                let backend = open_objectlog_postgres_backend(
-                    &log_spec,
-                    &scoped,
-                    DEFAULT_RECOVERY_MAX_TAIL,
-                    0,
-                    budget.clone(),
-                    4_096,
-                )
-                .expect("open filesystem×postgres");
-                // Return the Arc's inner by cloning the Arc and dereferencing through a wrapper
-                // that implements the ports — ComposedBackend is behind Arc; use Arc as the handle.
-                // The ports are implemented on ComposedBackend; Arc<ObjectLogPostgresBackend>
-                // does not auto-impl PushPort. Drive via Arc by re-opening each time instead.
-                // For the first open we need a value of type B. Use a re-open each call:
-                drop(backend);
-                open_objectlog_postgres_backend(
-                    &log_spec,
-                    &scoped,
-                    DEFAULT_RECOVERY_MAX_TAIL,
-                    0,
-                    budget.clone(),
-                    4_096,
-                )
-                .expect("open filesystem×postgres (owned)")
-            },
-            || {
-                open_objectlog_postgres_backend(
-                    &log_spec,
-                    &scoped,
-                    DEFAULT_RECOVERY_MAX_TAIL,
-                    0,
-                    budget.clone(),
-                    4_096,
-                )
-                .expect("reopen filesystem×postgres")
-            },
-        )
-        .await;
+        let open_cell = || {
+            open_objectlog_postgres_backend(
+                &log_spec,
+                &scoped,
+                DEFAULT_RECOVERY_MAX_TAIL,
+                0,
+                budget.clone(),
+                4_096,
+            )
+            .expect("open filesystem×postgres")
+        };
 
-        // Cleanup schema best-effort.
+        let cell_id = "filesystem×postgres";
+        let def = queue_def("fs-matrix", "fs_postgres");
+        let shard = shard_of(&def);
+
+        // T0/T1 + T3 reject + request_id + claim/finalize, then T2 reopen.
+        {
+            let backend = open_cell();
+            backend
+                .create_queue(def.clone())
+                .await
+                .unwrap_or_else(|e| panic!("{cell_id} create_queue: {e:?}"));
+
+            let reject_err = backend
+                .push(&shard, vec![invalid_spec("bad")], now(), None)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(reject_err, EngineError::EntitySchemaViolation(_)),
+                "{cell_id}: expected EntitySchemaViolation, got {reject_err:?}"
+            );
+            assert_eq!(backend.metrics(&shard).await.unwrap().pending, 0);
+
+            let rid = RequestId::new("fs-pg-req-1").unwrap();
+            let first = backend
+                .push_with_request_id(
+                    &shard,
+                    rid.clone(),
+                    vec![valid_spec("lifecycle")],
+                    now(),
+                    None,
+                )
+                .await
+                .unwrap_or_else(|e| panic!("{cell_id} push: {e:?}"));
+            assert!(first.is_fresh(), "{cell_id} Fresh: {first:?}");
+            let replay = backend
+                .push_with_request_id(&shard, rid, vec![valid_spec("lifecycle")], now(), None)
+                .await
+                .unwrap_or_else(|e| panic!("{cell_id} replay: {e:?}"));
+            assert!(replay.is_replayed(), "{cell_id} Replayed: {replay:?}");
+            assert_eq!(first.item_ids, replay.item_ids);
+
+            let claimed = backend
+                .claim(claim_req(&shard, "lease-lifecycle"))
+                .await
+                .unwrap();
+            assert_eq!(claimed.items.len(), 1);
+            backend
+                .finalize(
+                    &shard,
+                    vec![FinalizeOutcome::new(
+                        claimed.items[0].item_id,
+                        FinalizeKind::Complete,
+                    )],
+                    now(),
+                    None,
+                )
+                .await
+                .unwrap();
+
+            let pending_rid = RequestId::new("fs-pg-pending").unwrap();
+            let pending = backend
+                .push_with_request_id(
+                    &shard,
+                    pending_rid.clone(),
+                    vec![valid_spec("pending-seed")],
+                    now(),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert!(pending.is_fresh());
+            assert_eq!(backend.metrics(&shard).await.unwrap().pending, 1);
+            // Drop Arc before reopen.
+            drop(backend);
+
+            let reopened = open_cell();
+            let outcome = reopened.create_queue(def.clone()).await.unwrap();
+            assert!(!outcome.created, "{cell_id} T2: queue recovered via log");
+            assert_eq!(
+                reopened.metrics(&shard).await.unwrap().pending,
+                1,
+                "{cell_id} T2 Class A pending after reopen"
+            );
+            let after = reopened
+                .push_with_request_id(
+                    &shard,
+                    pending_rid,
+                    vec![valid_spec("pending-seed")],
+                    now(),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert!(
+                after.is_replayed(),
+                "{cell_id} T3 request_id survives reopen: {after:?}"
+            );
+            assert_eq!(after.item_ids, pending.item_ids);
+
+            let claimed = reopened
+                .claim(claim_req(&shard, "lease-reopen"))
+                .await
+                .unwrap();
+            assert_eq!(claimed.items.len(), 1);
+            reopened
+                .finalize(
+                    &shard,
+                    vec![FinalizeOutcome::new(
+                        claimed.items[0].item_id,
+                        FinalizeKind::Complete,
+                    )],
+                    now(),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(reopened.metrics(&shard).await.unwrap().pending, 0);
+        }
+
         if let Ok(mut client) =
             fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
         {
             let _ = client.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE;"));
         }
-        let _ = object_root;
-        let _ = LocalFsBlobStore::open; // silence unused when postgres feature only
     }
 
     /// T4 Deploy: chart CI values cover chart-installable filesystem cells with public axes only.
     #[test]
     fn filesystem_t4_deploy_ci_values_cover_chart_installable_cells() {
-        let chart_ci = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../charts/fireweed-queue/ci");
+        let chart_ci =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../charts/fireweed-queue/ci");
 
         let memory = std::fs::read_to_string(chart_ci.join("filesystem-memory-values.yaml"))
             .expect("filesystem-memory-values.yaml must exist for T4");
@@ -5589,8 +5657,8 @@ mod filesystem_matrix_t0_t4_tests {
         );
 
         // Helm gate must register the two local filesystem cells (postgres optional in gate list).
-        let helm_gate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../scripts/ci/helm-gate.sh");
+        let helm_gate =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/ci/helm-gate.sh");
         let gate = std::fs::read_to_string(&helm_gate).expect("helm-gate.sh");
         assert!(
             gate.contains("filesystem-memory") && gate.contains("filesystem-sqlite"),
@@ -5644,7 +5712,7 @@ mod filesystem_matrix_t0_t4_tests {
 mod sqlite_log_matrix_tests {
     use super::*;
     use fireweed_conformance::fault::{
-        AcEvidence, ac_txn_1_success_durable_visible, ac_txn_2_rejection_no_effect,
+        AcEvidence, TxnCaps, ac_txn_1_success_durable_visible, ac_txn_2_rejection_no_effect,
         ac_txn_3_unknown_outcome_replay, write_evidence,
     };
     use fireweed_conformance::{claim_req, qdef, shard, ts};
@@ -5984,6 +6052,9 @@ mod sqlite_log_matrix_tests {
     /// - `sqlite×postgres` — env-gated live Postgres projection (same as server arm)
     #[test]
     fn sqlite_log_t3_tp003_ac_txn_exact_pairs() {
+        const DURABLE: TxnCaps = TxnCaps {
+            durable_reopen: true,
+        };
         let mut records: Vec<AcEvidence> = Vec::new();
         let mut failures: Vec<String> = Vec::new();
         let base = fixture_root("t3");
@@ -5993,34 +6064,41 @@ mod sqlite_log_matrix_tests {
             let cell = "sqlite×memory";
             let cell_base = base.join("memory");
             std::fs::create_dir_all(&cell_base).unwrap();
-            let factory = {
-                let cell_base = cell_base.clone();
-                move |tag: &str| {
-                    let path = cell_base.join(format!("{tag}.db"));
-                    fireweed_sqlite::composed_sqlite_backend(path.to_str().unwrap())
-                        .expect("open sqlite×memory")
-                }
+            let make = |tag: &str| {
+                let path = cell_base.join(format!("{tag}.db"));
+                fireweed_sqlite::composed_sqlite_backend(path.to_str().unwrap())
+                    .expect("open sqlite×memory")
             };
             record_outcome(
                 &mut records,
                 &mut failures,
                 "AC-TXN-1",
                 cell,
-                futures::executor::block_on(ac_txn_1_success_durable_visible(factory.clone())),
+                futures::executor::block_on(ac_txn_1_success_durable_visible(make)),
             );
+            let make = |tag: &str| {
+                let path = cell_base.join(format!("{tag}.db"));
+                fireweed_sqlite::composed_sqlite_backend(path.to_str().unwrap())
+                    .expect("open sqlite×memory")
+            };
             record_outcome(
                 &mut records,
                 &mut failures,
                 "AC-TXN-2",
                 cell,
-                futures::executor::block_on(ac_txn_2_rejection_no_effect(factory.clone(), true)),
+                futures::executor::block_on(ac_txn_2_rejection_no_effect(make, DURABLE)),
             );
+            let make = |tag: &str| {
+                let path = cell_base.join(format!("{tag}.db"));
+                fireweed_sqlite::composed_sqlite_backend(path.to_str().unwrap())
+                    .expect("open sqlite×memory")
+            };
             record_outcome(
                 &mut records,
                 &mut failures,
                 "AC-TXN-3",
                 cell,
-                futures::executor::block_on(ac_txn_3_unknown_outcome_replay(factory, true)),
+                futures::executor::block_on(ac_txn_3_unknown_outcome_replay(make, DURABLE)),
             );
         }
 
@@ -6029,38 +6107,53 @@ mod sqlite_log_matrix_tests {
             let cell = "sqlite×sqlite";
             let cell_base = base.join("sqlite");
             std::fs::create_dir_all(&cell_base).unwrap();
-            let factory = {
-                let cell_base = cell_base.clone();
-                move |tag: &str| {
-                    let log = cell_base.join(format!("{tag}-log.db"));
-                    let proj = cell_base.join(format!("{tag}-proj.db"));
-                    fireweed_sqlite::composed_sqlite_log_sqlite_projection(
-                        log.to_str().unwrap(),
-                        proj.to_str().unwrap(),
-                    )
-                    .expect("open sqlite×sqlite")
-                }
+            let make = |tag: &str| {
+                let log = cell_base.join(format!("{tag}-log.db"));
+                let proj = cell_base.join(format!("{tag}-proj.db"));
+                fireweed_sqlite::composed_sqlite_log_sqlite_projection(
+                    log.to_str().unwrap(),
+                    proj.to_str().unwrap(),
+                )
+                .expect("open sqlite×sqlite")
             };
             record_outcome(
                 &mut records,
                 &mut failures,
                 "AC-TXN-1",
                 cell,
-                futures::executor::block_on(ac_txn_1_success_durable_visible(factory.clone())),
+                futures::executor::block_on(ac_txn_1_success_durable_visible(make)),
             );
+            let make = |tag: &str| {
+                let log = cell_base.join(format!("{tag}-log.db"));
+                let proj = cell_base.join(format!("{tag}-proj.db"));
+                fireweed_sqlite::composed_sqlite_log_sqlite_projection(
+                    log.to_str().unwrap(),
+                    proj.to_str().unwrap(),
+                )
+                .expect("open sqlite×sqlite")
+            };
             record_outcome(
                 &mut records,
                 &mut failures,
                 "AC-TXN-2",
                 cell,
-                futures::executor::block_on(ac_txn_2_rejection_no_effect(factory.clone(), true)),
+                futures::executor::block_on(ac_txn_2_rejection_no_effect(make, DURABLE)),
             );
+            let make = |tag: &str| {
+                let log = cell_base.join(format!("{tag}-log.db"));
+                let proj = cell_base.join(format!("{tag}-proj.db"));
+                fireweed_sqlite::composed_sqlite_log_sqlite_projection(
+                    log.to_str().unwrap(),
+                    proj.to_str().unwrap(),
+                )
+                .expect("open sqlite×sqlite")
+            };
             record_outcome(
                 &mut records,
                 &mut failures,
                 "AC-TXN-3",
                 cell,
-                futures::executor::block_on(ac_txn_3_unknown_outcome_replay(factory, true)),
+                futures::executor::block_on(ac_txn_3_unknown_outcome_replay(make, DURABLE)),
             );
         }
 
@@ -6071,66 +6164,120 @@ mod sqlite_log_matrix_tests {
             let cell_base = base.join("postgres");
             std::fs::create_dir_all(&cell_base).unwrap();
             let run = SQLITE_LOG_FIXTURE.fetch_add(1, Ordering::Relaxed);
-            let factory = {
-                let cell_base = cell_base.clone();
-                let url = url.clone();
-                move |tag: &str| {
-                    let log_path = cell_base.join(format!("{tag}-log.db"));
-                    let schema = format!(
-                        "fw_sqlite_pg_t3_{}_{}_{}",
-                        std::process::id(),
-                        run,
-                        tag.replace('-', "_")
-                    );
-                    let mut client = fireweed_postgres::connect(
-                        fireweed_postgres::PostgresConnectConfig::new(&url),
-                    )
-                    .expect("connect for schema");
-                    client
-                        .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema};"))
-                        .expect("create schema");
-                    drop(client);
-                    let scoped = if url.contains('?') {
-                        format!("{url}&options=-csearch_path%3D{schema}")
-                    } else {
-                        format!("{url}?options=-csearch_path%3D{schema}")
-                    };
-                    let log = fireweed_sqlite::SqliteLog::open(log_path.to_str().unwrap())
-                        .expect("open sqlite log");
-                    let projection = fireweed_postgres::PostgresRelational::connect(&scoped)
-                        .expect("connect pg projection");
-                    ComposedBackend::new(log, projection, InProcessControlPlane::new())
-                        .recover()
-                        .expect("recover sqlite×postgres")
-                }
+            let url_c = url.clone();
+            let make = |tag: &str| {
+                let log_path = cell_base.join(format!("{tag}-log.db"));
+                let schema = format!(
+                    "fw_sqlite_pg_t3_{}_{}_{}",
+                    std::process::id(),
+                    run,
+                    tag.replace('-', "_")
+                );
+                let mut client = fireweed_postgres::connect(
+                    fireweed_postgres::PostgresConnectConfig::new(&url_c),
+                )
+                .expect("connect for schema");
+                client
+                    .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema};"))
+                    .expect("create schema");
+                drop(client);
+                let scoped = if url_c.contains('?') {
+                    format!("{url_c}&options=-csearch_path%3D{schema}")
+                } else {
+                    format!("{url_c}?options=-csearch_path%3D{schema}")
+                };
+                let log = fireweed_sqlite::SqliteLog::open(log_path.to_str().unwrap())
+                    .expect("open sqlite log");
+                let projection = fireweed_postgres::PostgresRelational::connect(&scoped)
+                    .expect("connect pg projection");
+                ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                    .recover()
+                    .expect("recover sqlite×postgres")
             };
             record_outcome(
                 &mut records,
                 &mut failures,
                 "AC-TXN-1",
                 cell,
-                futures::executor::block_on(ac_txn_1_success_durable_visible(factory.clone())),
+                futures::executor::block_on(ac_txn_1_success_durable_visible(make)),
             );
+            let make = |tag: &str| {
+                let log_path = cell_base.join(format!("{tag}-log.db"));
+                let schema = format!(
+                    "fw_sqlite_pg_t3_{}_{}_{}",
+                    std::process::id(),
+                    run,
+                    tag.replace('-', "_")
+                );
+                let mut client = fireweed_postgres::connect(
+                    fireweed_postgres::PostgresConnectConfig::new(&url_c),
+                )
+                .expect("connect for schema");
+                client
+                    .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema};"))
+                    .expect("create schema");
+                drop(client);
+                let scoped = if url_c.contains('?') {
+                    format!("{url_c}&options=-csearch_path%3D{schema}")
+                } else {
+                    format!("{url_c}?options=-csearch_path%3D{schema}")
+                };
+                let log = fireweed_sqlite::SqliteLog::open(log_path.to_str().unwrap())
+                    .expect("open sqlite log");
+                let projection = fireweed_postgres::PostgresRelational::connect(&scoped)
+                    .expect("connect pg projection");
+                ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                    .recover()
+                    .expect("recover sqlite×postgres")
+            };
             record_outcome(
                 &mut records,
                 &mut failures,
                 "AC-TXN-2",
                 cell,
-                futures::executor::block_on(ac_txn_2_rejection_no_effect(factory.clone(), true)),
+                futures::executor::block_on(ac_txn_2_rejection_no_effect(make, DURABLE)),
             );
+            let make = |tag: &str| {
+                let log_path = cell_base.join(format!("{tag}-log.db"));
+                let schema = format!(
+                    "fw_sqlite_pg_t3_{}_{}_{}",
+                    std::process::id(),
+                    run,
+                    tag.replace('-', "_")
+                );
+                let mut client = fireweed_postgres::connect(
+                    fireweed_postgres::PostgresConnectConfig::new(&url_c),
+                )
+                .expect("connect for schema");
+                client
+                    .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema};"))
+                    .expect("create schema");
+                drop(client);
+                let scoped = if url_c.contains('?') {
+                    format!("{url_c}&options=-csearch_path%3D{schema}")
+                } else {
+                    format!("{url_c}?options=-csearch_path%3D{schema}")
+                };
+                let log = fireweed_sqlite::SqliteLog::open(log_path.to_str().unwrap())
+                    .expect("open sqlite log");
+                let projection = fireweed_postgres::PostgresRelational::connect(&scoped)
+                    .expect("connect pg projection");
+                ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                    .recover()
+                    .expect("recover sqlite×postgres")
+            };
             record_outcome(
                 &mut records,
                 &mut failures,
                 "AC-TXN-3",
                 cell,
-                futures::executor::block_on(ac_txn_3_unknown_outcome_replay(factory, true)),
+                futures::executor::block_on(ac_txn_3_unknown_outcome_replay(make, DURABLE)),
             );
         } else {
             eprintln!(
                 "sqlite_log T3 sqlite×postgres SKIPPED (FIREWEED_PG_TEST_URL unset); \
                  AC-TXN-1/2/3 still recorded for sqlite×memory and sqlite×sqlite"
             );
-            // Document the skip so the evidence file still names the cell.
             records.push(AcEvidence {
                 ac: "AC-TXN-1",
                 backend: "sqlite×postgres".into(),
@@ -6243,8 +6390,8 @@ mod sqlite_log_matrix_tests {
     /// T4: chart-installable sqlite-log cells have CI values files and helm-gate registration.
     #[test]
     fn sqlite_log_t4_helm_ci_values_and_gate() {
-        let chart_ci = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../charts/fireweed-queue/ci");
+        let chart_ci =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../charts/fireweed-queue/ci");
         for name in [
             "sqlite-memory-values.yaml",
             "sqlite-sqlite-values.yaml",
@@ -6282,7 +6429,8 @@ mod sqlite_log_matrix_tests {
             .map(|s| s.success())
             .unwrap_or(false)
         {
-            let chart = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../charts/fireweed-queue");
+            let chart =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../charts/fireweed-queue");
             for (combo, values) in [
                 ("sqlite-memory", "sqlite-memory-values.yaml"),
                 ("sqlite-sqlite", "sqlite-sqlite-values.yaml"),
@@ -6311,7 +6459,9 @@ mod sqlite_log_matrix_tests {
                 );
             }
         } else {
-            eprintln!("sqlite_log T4 helm template skipped (helm not on PATH); values+gate checked");
+            eprintln!(
+                "sqlite_log T4 helm template skipped (helm not on PATH); values+gate checked"
+            );
         }
     }
 

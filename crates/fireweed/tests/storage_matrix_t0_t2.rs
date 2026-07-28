@@ -1,12 +1,14 @@
-//! Table-driven T0–T2 harness for all 15 public storage-matrix cells.
+//! Table-driven T0–T2 harness for all 15 public storage-matrix cells, plus Class B T3
+//! (projection durability + rejection; no `durable_log_replay` claims).
 //!
 //! Governing bar: `docs/helix/04-build/storage-matrix-completion-brief.md` §2
 //!
 //! | Layer | Meaning |
 //! |-------|---------|
 //! | **T0 Construct** | `StorageConfig` open via [`fireweed::open`] / [`fireweed::open_async`] |
-//! | **T1 Lifecycle** | `create_queue` → `push` → `claim` → `complete` |
+//! | **T1 Lifecycle** | `create_queue` → `push` → `claim` → `complete` (+ Class B `fail`/reject) |
 //! | **T2 Reopen** | Class-correct recovery after process-local drop |
+//! | **T3 Contract** | Class B: projection durability + rejection; log-replay ACs N/A and fail if claimed |
 //!
 //! Class A (durable log): reopen recovers pending items.
 //! Class B `memory×memory`: process-local only — empty reopen is OK.
@@ -419,8 +421,48 @@ fn build_config(cell: MatrixCell, root: &Path) -> StorageConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Per-cell T0–T2 body
+// Per-cell T0–T2 body (+ Class B T3 contract)
 // ---------------------------------------------------------------------------
+
+/// Class B T3: memory log never claims durable log-replay; durable projection may claim
+/// projection-only reopen. Enforced offline even when a live cell is fixture-skipped.
+fn assert_class_b_t3_no_durable_log_replay(cell: MatrixCell) {
+    assert!(!cell.is_class_a(), "{} is not Class B", cell.id());
+    assert!(
+        !cell.log.is_durable(),
+        "{} T3: memory log must not be durable",
+        cell.id()
+    );
+    // Product claim shape (mirrors fireweed-conformance hard rule without a dep cycle).
+    let durable_log_replay_claimed = false;
+    assert!(
+        !durable_log_replay_claimed,
+        "{} T3: Class B must not claim durable_log_replay",
+        cell.id()
+    );
+    match cell.reopen_expectation() {
+        ReopenExpectation::ProcessLocalEmptyOk => {
+            assert!(
+                !cell.projection.is_durable(),
+                "{} T3: process-local reopen only for memory projection",
+                cell.id()
+            );
+        }
+        ReopenExpectation::ProjectionKeepsItems => {
+            assert!(
+                cell.projection.is_durable(),
+                "{} T3: projection-only reopen requires durable projection",
+                cell.id()
+            );
+        }
+        ReopenExpectation::RecoverPendingFromLog => {
+            panic!(
+                "{} T3: Class B must never use RecoverPendingFromLog (that is log-replay)",
+                cell.id()
+            );
+        }
+    }
+}
 
 async fn run_cell_t0_t2(cell: MatrixCell) {
     let cell_id = cell.id();
@@ -428,6 +470,10 @@ async fn run_cell_t0_t2(cell: MatrixCell) {
 
     if let Some(reason) = skip_reason(cell) {
         eprintln!("{}", reason.message(&cell_id));
+        // Class B T3 claims are fixture-independent — still enforce offline.
+        if !cell.is_class_a() {
+            assert_class_b_t3_no_durable_log_replay(cell);
+        }
         return;
     }
 
@@ -494,6 +540,45 @@ async fn run_cell_t0_t2(cell: MatrixCell) {
         "{cell_id} T1: complete should be 1 after finalize"
     );
 
+    // Class B T1/T3: reject path (fail dead-letter) must terminalize without log-replay claims.
+    if !cell.is_class_a() {
+        let fail_id = fireweed
+            .push(
+                &key,
+                NewItem {
+                    client_item_key: Some(
+                        ClientItemKey::new(format!("{}_reject", cell.queue_id_slug())).unwrap(),
+                    ),
+                    priority: Some(PriorityValue::Int64(15)),
+                    ..NewItem::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T1/T3 push(reject): {e:?}"));
+        let fail_claimed = fireweed
+            .claim(&key, 1, 30_000)
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T1/T3 claim(reject): {e:?}"));
+        assert_eq!(fail_claimed.len(), 1);
+        assert_eq!(fail_claimed[0].item_id, fail_id);
+        fireweed
+            .fail(&key, fail_claimed.iter().map(|item| item.item_id))
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T1/T3 fail/reject: {e:?}"));
+        let m = fireweed
+            .metrics(&key)
+            .await
+            .unwrap_or_else(|e| panic!("{cell_id} T1/T3 metrics after fail: {e:?}"));
+        assert_eq!(
+            m.failed, 1,
+            "{cell_id} T3: reject path terminalizes failed=1"
+        );
+        assert_eq!(
+            m.complete, 1,
+            "{cell_id} T3: complete path undisturbed by reject"
+        );
+    }
+
     // Seed a pending item for T2 reopen checks.
     let pending_id = fireweed
         .push(
@@ -547,14 +632,22 @@ async fn run_cell_t0_t2(cell: MatrixCell) {
         }
         ReopenExpectation::ProjectionKeepsItems => {
             // Class B + durable projection: items remain via projection only (no log-rebuild claim).
-            let pending = reopened
+            let m = reopened
                 .metrics(&key)
                 .await
-                .unwrap_or_else(|e| panic!("{cell_id} T2 metrics (Class B proj): {e:?}"))
-                .pending;
+                .unwrap_or_else(|e| panic!("{cell_id} T2 metrics (Class B proj): {e:?}"));
             assert_eq!(
-                pending, 1,
+                m.pending, 1,
                 "{cell_id} T2 Class B: durable projection should keep 1 pending (projection-only reopen)"
+            );
+            // T3: terminal reject state also survives via projection (not log-replay).
+            assert_eq!(
+                m.failed, 1,
+                "{cell_id} T3 Class B: failed/rejected survives via durable projection"
+            );
+            assert_eq!(
+                m.complete, 1,
+                "{cell_id} T3 Class B: complete survives via durable projection"
             );
             let claimed = reopened
                 .claim(&key, 1, 30_000)
@@ -590,6 +683,12 @@ async fn run_cell_t0_t2(cell: MatrixCell) {
                 "storage_matrix_t0_t2: {cell_id} T2 process-local empty reopen (documented Class B)"
             );
         }
+    }
+
+    // --- T3 Contract (Class B only in this harness) ---
+    if !cell.is_class_a() {
+        assert_class_b_t3_no_durable_log_replay(cell);
+        eprintln!("storage_matrix_t0_t2: {cell_id} T3 Class B contract (no durable_log_replay)");
     }
 
     drop(reopened);

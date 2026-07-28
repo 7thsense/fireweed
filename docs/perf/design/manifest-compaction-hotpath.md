@@ -1,7 +1,7 @@
 # Object-log manifest authority and compaction
 
 Fireweed uses one current durable authority protocol. The versioned `authority_head` (or a configured
-`ManifestPointerStore`) names the winning immutable `manifest_candidates` entry and the immutable forward
+native conditional-create publication names the winning immutable `manifest_candidates` entry and the immutable forward
 `recovery_index/v1` root in one fenced compare-and-swap. Readers traverse only that winning recovery index;
 LIST and reverse candidate walks are not recovery authority.
 

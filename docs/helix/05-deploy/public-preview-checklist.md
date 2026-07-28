@@ -53,7 +53,7 @@ revision, result, and environment where applicable.
 | Function | Complete non-performance workspace functionality passes | Workspace sweep, then affected-package and explicitly enumerated non-performance server-target reruns | Passed at `51152e1d` (2026-07-25) |
 | Facade | Public constructor, mutation, and durability matrices pass | `cargo test --locked -p fireweed --all-features` plus the 13-cell external matrix | Passed at `51152e1d` (2026-07-25) |
 | PostgreSQL | PostgreSQL-backed matrix executes with no skips | `FIREWEED_PG_TEST_URL=<test-dsn> bash scripts/ci/record-postgres-transaction-evidence.sh` plus the live workspace suite | Passed against Niflheim PostgreSQL at `51152e1d` (2026-07-25) |
-| Object storage | S3-compatible object-log matrix executes against Garage on eldir with no skips | Public external matrix plus `objectlog_shared_ownership` using PostgreSQL publication authority | Passed against Garage: external 13/13 and ownership 9/9 at `51152e1d` (2026-07-25) |
+| Object storage | S3-compatible object-log matrix executes against Garage on eldir with no skips | Public external matrix plus native conditional-create, epoch-fencing, and recovery checks | Re-run required after the native-authority cutover; historical pointer-authority evidence is not current release evidence. |
 | Version | Cargo, docs, tag, and release-note versions agree | `bash scripts/release/list-public-version-sources.sh v0.21.0` | Passed at `51152e1d` (2026-07-25) |
 
 ## Rollout Plan
