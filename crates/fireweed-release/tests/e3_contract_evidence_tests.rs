@@ -3,13 +3,66 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fireweed_release::e3_contract::{
-    E3FenceObservation, E3TransactionObservation, build_e3_contract_manifest,
+    E3_EVIDENCE_LINK_SCHEMA_VERSION, E3AuthorityMode, E3EvidenceLink, E3FenceAuthorityEvidence,
+    E3FenceAuthorityObservation, E3FenceObservation, E3ObservedOutcome, E3TransactionObservation,
+    POSTGRES_POINTER_COST_SCOPE_EXCLUDED_DISCLOSED, build_e3_contract_manifest,
     build_e3_fence_evidence, build_e3_transaction_evidence_row, verify_e3_contract,
     write_e3_contract, write_e3_fence_evidence,
 };
 
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
 const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+const RUN_ID: &str = "e3-run-20260728";
+const COMPOSITION_FINGERPRINT: &str =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+fn evidence_link(authority_mode: E3AuthorityMode) -> E3EvidenceLink {
+    E3EvidenceLink {
+        schema_version: E3_EVIDENCE_LINK_SCHEMA_VERSION,
+        run_id: RUN_ID.into(),
+        composition_fingerprint: COMPOSITION_FINGERPRINT.into(),
+        authority_mode,
+    }
+}
+
+fn passed(observation: &str) -> E3ObservedOutcome {
+    E3ObservedOutcome::Passed {
+        observation: observation.into(),
+    }
+}
+
+fn native_fence_observation() -> E3FenceObservation {
+    E3FenceObservation {
+        source_revision: REVISION.into(),
+        evidence_link: evidence_link(E3AuthorityMode::NativeCreateOnly),
+        authority: E3FenceAuthorityObservation::NativeCreateOnly {
+            stale_epoch: passed("stale owner seal returned EpochFenced"),
+            current_epoch: passed("current owner commit was readable"),
+        },
+    }
+}
+
+fn postgres_fence_observation() -> E3FenceObservation {
+    E3FenceObservation {
+        source_revision: REVISION.into(),
+        evidence_link: evidence_link(E3AuthorityMode::PostgresPointer),
+        authority: E3FenceAuthorityObservation::PostgresPointer {
+            stale_epoch: passed("stale owner seal returned EpochFenced"),
+            current_epoch: passed("current owner commit was readable"),
+            pointer_and_epoch_atomic: passed("pointer and epoch committed in one transaction"),
+            object_store_manifest_head_write_attempts: 0,
+            restart_fresh_postgres_client: passed("restart opened a fresh Postgres client"),
+            restart_read_authoritative_pointer: passed("restart read the Postgres pointer"),
+            object_namespace_count: 1,
+            pointer_namespace_count: 1,
+            postgres_pointer_operation_count: 8,
+            postgres_pointer_cost_scope: POSTGRES_POINTER_COST_SCOPE_EXCLUDED_DISCLOSED.into(),
+            postgres_pointer_cost_disclosure:
+                "Postgres pointer operations are measured but excluded from S3 request pricing"
+                    .into(),
+        },
+    }
+}
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -63,6 +116,57 @@ impl Fixture {
         fs::write(path, format!("{body}\n")).unwrap();
     }
 
+    fn mutate_transaction_row(&self, index: usize, mutate: impl FnOnce(&mut serde_json::Value)) {
+        let path = self.root.join("tp003.jsonl");
+        let body = fs::read_to_string(&path).unwrap();
+        let mut rows = body
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        mutate(&mut rows[index]);
+        let body = rows
+            .into_iter()
+            .map(|row| serde_json::to_string(&row).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(path, format!("{body}\n")).unwrap();
+    }
+
+    fn use_postgres_pointer_authority(&self) {
+        self.mutate_json("contract.json", |value| {
+            value["evidence_link"]["authority_mode"] = serde_json::json!("postgres-pointer");
+            for entry in value["entries"].as_array_mut().unwrap() {
+                entry["manifest_fence"]["store_profile"] = serde_json::json!("s3_postgres_pointer");
+                entry["manifest_fence"]["authority_mode"] = serde_json::json!("postgres-pointer");
+            }
+        });
+        for index in 0..2 {
+            self.mutate_e3_row(index, |row| {
+                row["measurements"]["storage_authority_mode"] =
+                    serde_json::json!("postgres-pointer");
+                row["measurements"]["object_namespace_count"] = serde_json::json!(1);
+                row["measurements"]["pointer_namespace_count"] = serde_json::json!(1);
+                row["measurements"]["postgres_pointer_operation_count"] = serde_json::json!(8);
+                row["measurements"]["postgres_pointer_cost_scope"] =
+                    serde_json::json!(POSTGRES_POINTER_COST_SCOPE_EXCLUDED_DISCLOSED);
+                row["measurements"]["postgres_pointer_cost_disclosure"] = serde_json::json!(
+                    "Postgres pointer operations are measured but excluded from S3 request pricing"
+                );
+            });
+        }
+        for index in 0..48 {
+            self.mutate_transaction_row(index, |row| {
+                row["e3_authority_mode"] = serde_json::json!("postgres-pointer");
+            });
+        }
+        let row = build_e3_fence_evidence(postgres_fence_observation()).unwrap();
+        fs::write(
+            self.root.join("fencing.json"),
+            serde_json::to_vec_pretty(&row).unwrap(),
+        )
+        .unwrap();
+    }
+
     fn errors(&self) -> String {
         verify_e3_contract(&self.manifest(), REVISION)
             .unwrap_err()
@@ -86,6 +190,91 @@ fn accepts_all_profiles_bounds_transaction_authorities_and_fence() {
     assert_eq!(summary.entries, 8);
     assert_eq!(summary.transaction_rows, 48);
     assert_eq!(summary.cost_rows, 8);
+}
+
+#[test]
+fn accepts_native_and_postgres_pointer_authority_profiles() {
+    let native = Fixture::new();
+    verify_e3_contract(&native.manifest(), REVISION).unwrap();
+
+    let postgres = Fixture::new();
+    postgres.use_postgres_pointer_authority();
+    verify_e3_contract(&postgres.manifest(), REVISION).unwrap();
+}
+
+#[test]
+fn rejects_mixed_run_and_composition_artifacts() {
+    let ledger = Fixture::new();
+    ledger.mutate_e3_row(0, |row| {
+        row["measurements"]["e3_run_id"] = serde_json::json!("another-run-id");
+    });
+    assert!(ledger.errors().contains("requires e3_run_id"));
+
+    let transaction = Fixture::new();
+    transaction.mutate_transaction_row(0, |row| {
+        row["e3_composition_fingerprint"] =
+            serde_json::json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    });
+    assert!(
+        transaction
+            .errors()
+            .contains("requires exactly one revision/profile/bound/timing-bound TP-003 row")
+    );
+
+    let fence = Fixture::new();
+    fence.mutate_json("fencing.json", |value| {
+        value["evidence_link"]["run_id"] = serde_json::json!("another-run-id");
+    });
+    assert!(
+        fence
+            .errors()
+            .contains("does not prove the selected, run-bound S3 publication authority")
+    );
+}
+
+#[test]
+fn rejects_old_contract_fence_and_unlinked_transaction_artifacts() {
+    let contract = Fixture::new();
+    contract.mutate_json("contract.json", |value| {
+        value["schema_version"] = serde_json::json!(3);
+    });
+    assert!(contract.errors().contains("expected 4"));
+
+    let fence = Fixture::new();
+    fence.mutate_json("fencing.json", |value| {
+        value["schema_version"] = serde_json::json!(4);
+    });
+    assert!(
+        fence
+            .errors()
+            .contains("does not prove the selected, run-bound S3 publication authority")
+    );
+
+    let transaction = Fixture::new();
+    transaction.mutate_transaction_row(0, |row| {
+        row.as_object_mut().unwrap().remove("e3_run_id");
+    });
+    assert!(
+        transaction
+            .errors()
+            .contains("requires exactly one revision/profile/bound/timing-bound TP-003 row")
+    );
+}
+
+#[test]
+fn postgres_pointer_release_rows_require_namespace_counts_and_cost_disclosure() {
+    let fixture = Fixture::new();
+    fixture.use_postgres_pointer_authority();
+    fixture.mutate_e3_row(0, |row| {
+        row["measurements"]
+            .as_object_mut()
+            .unwrap()
+            .remove("pointer_namespace_count");
+        row["measurements"]["postgres_pointer_cost_disclosure"] = serde_json::json!("");
+    });
+    let errors = fixture.errors();
+    assert!(errors.contains("requires positive pointer_namespace_count"));
+    assert!(errors.contains("requires an explicit Postgres-pointer cost scope and disclosure"));
 }
 
 #[allow(non_snake_case)]
@@ -204,6 +393,7 @@ fn production_generator_builds_and_semantically_verifies_the_full_matrix() {
     let generated = fixture.root.join("generated.json");
     let manifest = build_e3_contract_manifest(
         REVISION.into(),
+        evidence_link(E3AuthorityMode::NativeCreateOnly),
         "e3.jsonl".into(),
         "tp003.jsonl".into(),
         "fencing.json".into(),
@@ -491,7 +681,7 @@ fn rejects_legacy_contract_without_explicit_fence_and_timing_links() {
     fixture.mutate_json("contract.json", |value| {
         value["schema_version"] = serde_json::json!(1);
     });
-    assert!(fixture.errors().contains("expected 3"));
+    assert!(fixture.errors().contains("expected 4"));
 }
 
 #[test]
@@ -636,7 +826,7 @@ fn rejects_non_governed_e3_producer() {
 }
 
 #[test]
-fn rejects_undeclared_topology_or_unsupported_s3_authority_mode() {
+fn rejects_undeclared_topology_or_authority_mode_mismatched_to_manifest() {
     let fixture = Fixture::new();
     fixture.mutate_e3_row(0, |row| {
         row["measurements"]
@@ -719,18 +909,7 @@ fn rejects_symlink_authority_and_writer_target() {
     let victim = fixture.root.join("victim.json");
     fs::write(&victim, "unchanged").unwrap();
     symlink(&victim, &output).unwrap();
-    let row = build_e3_fence_evidence(E3FenceObservation {
-        source_revision: REVISION.into(),
-        stale_epoch_rejected: true,
-        current_epoch_committed: true,
-        no_cas_stale_epoch_rejected: true,
-        no_cas_current_epoch_committed: true,
-        no_cas_pointer_and_epoch_atomic: true,
-        no_cas_object_store_manifest_head_write_attempts: 0,
-        no_cas_restart_fresh_postgres_client: true,
-        no_cas_restart_read_authoritative_pointer: true,
-    })
-    .unwrap();
+    let row = build_e3_fence_evidence(native_fence_observation()).unwrap();
     assert!(write_e3_fence_evidence(&output, &row).is_err());
     assert_eq!(fs::read_to_string(victim).unwrap(), "unchanged");
 }
@@ -773,72 +952,72 @@ fn rejects_entry_without_passing_manifest_fence_link() {
 }
 
 #[test]
-fn rejects_unproven_manifest_fence_or_fallback() {
+fn rejects_unproven_native_manifest_fence() {
     let fixture = Fixture::new();
     fixture.mutate_json("fencing.json", |value| {
-        value["stale_epoch_rejected"] = serde_json::json!(false);
+        value["authority"]["stale_epoch_rejected"] = serde_json::json!(false);
     });
     assert!(
         fixture
             .errors()
-            .contains("does not prove stale rejection/current commit")
-    );
-
-    let fixture = Fixture::new();
-    fixture.mutate_json("fencing.json", |value| {
-        value["no_cas_pointer_and_epoch_atomic"] = serde_json::json!(false);
-    });
-    assert!(
-        fixture
-            .errors()
-            .contains("Postgres transactional-pointer no-CAS")
-    );
-
-    let fixture = Fixture::new();
-    fixture.mutate_json("fencing.json", |value| {
-        value["no_cas_object_store_manifest_head_write_attempts"] = serde_json::json!(1);
-    });
-    assert!(
-        fixture
-            .errors()
-            .contains("Postgres transactional-pointer no-CAS")
+            .contains("does not prove the selected, run-bound S3 publication authority")
     );
 }
 
 #[test]
-fn fence_builder_fails_closed_and_emits_typed_release_profile() {
-    let row = build_e3_fence_evidence(E3FenceObservation {
-        source_revision: "0123456789abcdef0123456789abcdef01234567".into(),
-        stale_epoch_rejected: true,
-        current_epoch_committed: true,
-        no_cas_stale_epoch_rejected: true,
-        no_cas_current_epoch_committed: true,
-        no_cas_pointer_and_epoch_atomic: true,
-        no_cas_object_store_manifest_head_write_attempts: 0,
-        no_cas_restart_fresh_postgres_client: true,
-        no_cas_restart_read_authoritative_pointer: true,
-    })
-    .unwrap();
-    assert_eq!(row.schema_version, 4);
+fn native_fence_builder_derives_pass_from_executed_outcomes() {
+    let row = build_e3_fence_evidence(native_fence_observation()).unwrap();
+    assert_eq!(row.schema_version, 5);
     assert_eq!(row.result, "pass");
-    assert_eq!(row.store_profile, "minio_create_only_cas");
-    assert!(row.no_cas_pointer_and_epoch_atomic);
-    assert_eq!(row.no_cas_object_store_manifest_head_write_attempts, 0);
-    assert!(row.no_cas_restart_read_authoritative_pointer);
-
-    assert!(
-        build_e3_fence_evidence(E3FenceObservation {
-            source_revision: "not-a-revision".into(),
+    assert_eq!(row.store_profile, "s3_native_create_only");
+    assert!(matches!(
+        row.authority,
+        E3FenceAuthorityEvidence::NativeCreateOnly {
             stale_epoch_rejected: true,
             current_epoch_committed: true,
-            no_cas_stale_epoch_rejected: true,
-            no_cas_current_epoch_committed: true,
-            no_cas_pointer_and_epoch_atomic: true,
-            no_cas_object_store_manifest_head_write_attempts: 0,
-            no_cas_restart_fresh_postgres_client: true,
-            no_cas_restart_read_authoritative_pointer: true,
-        })
-        .is_err()
+            ..
+        }
+    ));
+
+    let mut failed = native_fence_observation();
+    failed.authority = E3FenceAuthorityObservation::NativeCreateOnly {
+        stale_epoch: E3ObservedOutcome::Failed {
+            observation: "stale writer unexpectedly committed".into(),
+        },
+        current_epoch: passed("current owner commit was readable"),
+    };
+    assert_eq!(build_e3_fence_evidence(failed).unwrap().result, "fail");
+}
+
+#[test]
+fn postgres_pointer_fence_requires_outcomes_namespace_counts_and_cost_disclosure() {
+    let row = build_e3_fence_evidence(postgres_fence_observation()).unwrap();
+    assert_eq!(row.result, "pass");
+    assert_eq!(row.store_profile, "s3_postgres_pointer");
+
+    let mut failed = postgres_fence_observation();
+    if let E3FenceAuthorityObservation::PostgresPointer {
+        pointer_and_epoch_atomic,
+        ..
+    } = &mut failed.authority
+    {
+        *pointer_and_epoch_atomic = E3ObservedOutcome::Failed {
+            observation: "pointer and epoch split across transactions".into(),
+        };
+    }
+    assert_eq!(build_e3_fence_evidence(failed).unwrap().result, "fail");
+
+    let mut missing_cost = postgres_fence_observation();
+    if let E3FenceAuthorityObservation::PostgresPointer {
+        postgres_pointer_cost_disclosure,
+        ..
+    } = &mut missing_cost.authority
+    {
+        postgres_pointer_cost_disclosure.clear();
+    }
+    assert_eq!(
+        build_e3_fence_evidence(missing_cost).unwrap().result,
+        "fail"
     );
 }
 
@@ -846,6 +1025,7 @@ fn fence_builder_fails_closed_and_emits_typed_release_profile() {
 fn transaction_builder_requires_executed_exact_revision_profile_bound_and_ac() {
     let observation = E3TransactionObservation {
         source_revision: REVISION.into(),
+        evidence_link: evidence_link(E3AuthorityMode::NativeCreateOnly),
         profile: "object_log_inmemory_projection".into(),
         bound_ms: 20,
         ac: "AC-TXN-7".into(),
@@ -866,6 +1046,7 @@ fn transaction_builder_requires_executed_exact_revision_profile_bound_and_ac() {
         row.request_id_timing.as_deref(),
         Some("force_sealed_config_independent")
     );
+    assert_eq!(row.e3_run_id.as_deref(), Some(RUN_ID));
 
     for invalid in [
         E3TransactionObservation {

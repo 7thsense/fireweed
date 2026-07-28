@@ -2,7 +2,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use fireweed_release::e3_contract::{
-    build_e3_contract_manifest, verify_e3_contract, write_e3_contract,
+    E3_EVIDENCE_LINK_SCHEMA_VERSION, E3AuthorityMode, E3EvidenceLink, build_e3_contract_manifest,
+    verify_e3_contract, write_e3_contract,
 };
 
 fn main() -> ExitCode {
@@ -11,6 +12,9 @@ fn main() -> ExitCode {
     let mut ledger = None;
     let mut transactions = None;
     let mut fencing = None;
+    let mut run_id = None;
+    let mut composition_fingerprint = None;
+    let mut authority_mode = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let target = match arg.as_str() {
@@ -19,6 +23,9 @@ fn main() -> ExitCode {
             "--e3-ledger" => &mut ledger,
             "--transaction-evidence" => &mut transactions,
             "--fencing-evidence" => &mut fencing,
+            "--run-id" => &mut run_id,
+            "--composition-fingerprint" => &mut composition_fingerprint,
+            "--authority-mode" => &mut authority_mode,
             _ => return fail(&format!("unknown argument: {arg}")),
         };
         let Some(value) = args.next() else {
@@ -28,16 +35,49 @@ fn main() -> ExitCode {
             return fail(&format!("duplicate argument: {arg}"));
         }
     }
-    let (Some(output), Some(revision), Some(ledger), Some(transactions), Some(fencing)) =
-        (output, revision, ledger, transactions, fencing)
+    let (
+        Some(output),
+        Some(revision),
+        Some(ledger),
+        Some(transactions),
+        Some(fencing),
+        Some(run_id),
+        Some(composition_fingerprint),
+        Some(authority_mode),
+    ) = (
+        output,
+        revision,
+        ledger,
+        transactions,
+        fencing,
+        run_id,
+        composition_fingerprint,
+        authority_mode,
+    )
     else {
         return fail(
-            "required: --out --source-revision --e3-ledger --transaction-evidence --fencing-evidence",
+            "required: --out --source-revision --e3-ledger --transaction-evidence --fencing-evidence --run-id --composition-fingerprint --authority-mode",
         );
     };
+    let authority_mode = match authority_mode.as_str() {
+        "native-create-only" => E3AuthorityMode::NativeCreateOnly,
+        "postgres-pointer" => E3AuthorityMode::PostgresPointer,
+        _ => return fail("--authority-mode must be native-create-only or postgres-pointer"),
+    };
     let output = PathBuf::from(output);
-    let manifest = match build_e3_contract_manifest(revision.clone(), ledger, transactions, fencing)
-    {
+    let evidence_link = E3EvidenceLink {
+        schema_version: E3_EVIDENCE_LINK_SCHEMA_VERSION,
+        run_id,
+        composition_fingerprint,
+        authority_mode,
+    };
+    let manifest = match build_e3_contract_manifest(
+        revision.clone(),
+        evidence_link,
+        ledger,
+        transactions,
+        fencing,
+    ) {
         Ok(manifest) => manifest,
         Err(error) => return fail(&error.0),
     };
