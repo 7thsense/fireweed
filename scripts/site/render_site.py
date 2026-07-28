@@ -485,6 +485,12 @@ cargo build -p fireweed-server
             See the README quickstart for a full <code>redis-cli</code> session, and
             <a href="examples/resp-drain.html">the RESP drain example</a> extracted from e2e tests.
           </p>
+          <p>
+            Worked <strong>Python</strong> queue-management scenarios (docs + e2e + optional
+            performance) live in the repository at
+            <a href="../../examples/python-resp/"><code>examples/python-resp/</code></a>
+            (<code>run_e2e.py</code>, <code>run_perf.py</code>).
+          </p>
           <h2>Next</h2>
           <ul>
             <li><a href="concepts.html">Concepts</a> for the product contract</li>
@@ -852,6 +858,13 @@ def page_api_resp(meta: dict) -> str:
             tested Streams worker subset, not a full API-001 mirror.
           </p>
           <p><a href="../examples/resp-drain.html">Example: Redis client drain</a></p>
+          <h2>Python examples and e2e</h2>
+          <p>
+            Runnable, commented scenarios for batch insert, pending update, due-batch
+            claim, complete, status, and performance load live in
+            <a href="../../examples/python-resp/"><code>examples/python-resp/</code></a>.
+            They double as an evidence-capturing e2e harness over <code>redis-py</code>.
+          </p>
         </div>
 """
     return layout(

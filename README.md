@@ -79,6 +79,18 @@ redis-cli -p 8080 XLEN t1:q1
 `XACK` returns `1`; and the final `XLEN` returns `0`. Stop the development
 service with `Ctrl-C`.
 
+For fuller **Python RESP** queue-management examples (documented scenarios + e2e
+evidence, optional performance suite), see
+[`examples/python-resp/`](examples/python-resp/README.md):
+
+```sh
+./examples/python-resp/scripts/start_dev_service.sh   # terminal 1; bootstrap demo:work
+cd examples/python-resp && python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+python run_e2e.py                    # functional
+PERF_N=10000 python run_perf.py      # performance smoke
+```
+
 To smoke-test the Fireweed binary without starting a listener:
 
 ```sh
