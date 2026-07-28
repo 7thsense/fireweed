@@ -624,6 +624,24 @@ pub(crate) fn peek_sql(
     Ok(out)
 }
 
+const PEEK_PAGE_AFTER_SQL: &str = "SELECT item_id, client_item_key, priority, item_version FROM fireweed_items \
+     WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+       AND (priority_sort, created_seq, item_id) > (SELECT priority_sort, created_seq, item_id \
+         FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3) \
+       AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
+         ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+         WHERE ig.tenant_id=fireweed_items.tenant_id AND ig.queue_id=fireweed_items.queue_id \
+         AND ig.item_id=fireweed_items.item_id) \
+     ORDER BY priority_sort, created_seq, item_id LIMIT ?4";
+
+const PEEK_PAGE_FIRST_SQL: &str = "SELECT item_id, client_item_key, priority, item_version FROM fireweed_items \
+     WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+     AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
+       ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+       WHERE ig.tenant_id=fireweed_items.tenant_id AND ig.queue_id=fireweed_items.queue_id \
+       AND ig.item_id=fireweed_items.item_id) \
+     ORDER BY priority_sort, created_seq, item_id LIMIT ?4";
+
 pub(crate) fn peek_page_sql(
     conn: &Connection,
     shard: &QueueKey,
@@ -632,23 +650,9 @@ pub(crate) fn peek_page_sql(
 ) -> EngineResult<Vec<ItemView>> {
     let (tenant, queue) = parts(shard);
     let sql = if after.is_some() {
-        "SELECT item_id, client_item_key, priority, item_version FROM fireweed_items \
-         WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
-           AND (priority_sort, created_seq, item_id) > (SELECT priority_sort, created_seq, item_id \
-             FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3) \
-           AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
-             ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
-             WHERE ig.tenant_id=fireweed_items.tenant_id AND ig.queue_id=fireweed_items.queue_id \
-             AND ig.item_id=fireweed_items.item_id) \
-         ORDER BY priority_sort, created_seq, item_id LIMIT ?4"
+        PEEK_PAGE_AFTER_SQL
     } else {
-        "SELECT item_id, client_item_key, priority, item_version FROM fireweed_items \
-         WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
-         AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs \
-           ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
-           WHERE ig.tenant_id=fireweed_items.tenant_id AND ig.queue_id=fireweed_items.queue_id \
-           AND ig.item_id=fireweed_items.item_id) \
-         ORDER BY priority_sort, created_seq, item_id LIMIT ?4"
+        PEEK_PAGE_FIRST_SQL
     };
     let mut stmt = st(conn.prepare(sql))?;
     let after = after.map(|item| item.to_string());
@@ -674,6 +678,99 @@ pub(crate) fn peek_page_sql(
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod peek_page_tests {
+    use super::*;
+
+    fn setup() -> (Connection, QueueKey, Vec<ItemId>) {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(fireweed_relational::RELATIONAL_SCHEMA)
+            .unwrap();
+        let shard = QueueKey::new(
+            TenantId::new("tenant").unwrap(),
+            QueueId::new("queue").unwrap(),
+        );
+        let (tenant, queue) = parts(&shard);
+        let mut expected = Vec::new();
+        for index in 0..9_u64 {
+            let item_id = ItemId::from_u64(index + 1);
+            conn.execute(
+                "INSERT INTO fireweed_items (tenant_id,queue_id,item_id,client_item_key,\
+                 lifecycle_state,priority_sort,item_version,last_command_sequence,created_at,\
+                 updated_at,max_attempts,created_seq) \
+                 VALUES (?1,?2,?3,?4,'Pending',?5,1,?6,0,0,1,?6)",
+                params![
+                    tenant,
+                    queue,
+                    item_id.to_string(),
+                    format!("key-{index}"),
+                    vec![(index / 3) as u8],
+                    index as i64,
+                ],
+            )
+            .unwrap();
+            expected.push(item_id);
+        }
+        (conn, shard, expected)
+    }
+
+    fn plan(conn: &Connection, sql: &str, shard: &QueueKey, after: Option<ItemId>) -> Vec<String> {
+        let (tenant, queue) = parts(shard);
+        conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(
+                params![tenant, queue, after.map(|item| item.to_string()), 3_i64,],
+                |row| row.get(3),
+            )
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    fn assert_pending_order_plan(details: &[String]) {
+        let plan = details.join("\n");
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("USING INDEX fireweed_items_pending_order_idx")),
+            "pending-order index absent from plan:\n{plan}"
+        );
+        assert!(
+            details
+                .iter()
+                .all(|detail| !detail.contains("USE TEMP B-TREE FOR ORDER BY")),
+            "ORDER BY spilled to a temporary B-tree:\n{plan}"
+        );
+    }
+
+    #[test]
+    fn peek_pages_use_pending_order_index_without_temp_sort() {
+        let (conn, shard, expected) = setup();
+        let first = plan(&conn, PEEK_PAGE_FIRST_SQL, &shard, None);
+        let after = plan(&conn, PEEK_PAGE_AFTER_SQL, &shard, Some(expected[2]));
+        eprintln!("first-page plan:\n{}", first.join("\n"));
+        eprintln!("after-cursor plan:\n{}", after.join("\n"));
+        assert_pending_order_plan(&first);
+        assert_pending_order_plan(&after);
+    }
+
+    #[test]
+    fn peek_keyset_pagination_returns_every_pending_item_once() {
+        let (conn, shard, expected) = setup();
+        let mut cursor = None;
+        let mut actual = Vec::new();
+        loop {
+            let page = peek_page_sql(&conn, &shard, cursor, 3).unwrap();
+            if page.is_empty() {
+                break;
+            }
+            cursor = page.last().map(|item| item.item_id);
+            actual.extend(page.into_iter().map(|item| item.item_id));
+        }
+        assert_eq!(actual, expected);
+    }
 }
 
 /// B-011 exact active-scope discovery. Keyed and ungrouped scopes are aggregated from the same live
