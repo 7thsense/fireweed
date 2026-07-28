@@ -5295,13 +5295,24 @@ mod recovery_tests {
             .await
             .unwrap();
         assert_eq!(first.len(), 1);
+        assert!(
+            first.is_fresh(),
+            "first successful push_with_request_id must be Fresh, got {first:?}"
+        );
         assert_eq!(backend.metrics(&shard).await.unwrap().pending, 1);
 
         let replay = backend
             .push_with_request_id(&shard, rid, vec![typed_valid_spec("ok")], ts(), None)
             .await
             .unwrap();
-        assert_eq!(first, replay, "valid replay must reuse the committed ids");
+        assert!(
+            replay.is_replayed(),
+            "same request_id + body must be Replayed, got {replay:?}"
+        );
+        assert_eq!(
+            first.item_ids, replay.item_ids,
+            "valid replay must reuse the committed ids"
+        );
         assert_eq!(backend.metrics(&shard).await.unwrap().pending, 1);
     }
 
