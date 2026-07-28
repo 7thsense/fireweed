@@ -9,6 +9,21 @@ if [ -n "$(git -C "$REPO_ROOT" status --porcelain)" ]; then
   exit 2
 fi
 
+# Reject a noncanonical release shape before performing local Docker topology inspection. The generic
+# wrapper repeats this fail-closed check before it executes either evidence producer.
+FIREWEED_E3_RESIDENT=${FIREWEED_E3_RESIDENT:-10000000}
+FIREWEED_E3_LOAD_BATCH=${FIREWEED_E3_LOAD_BATCH:-1000}
+FIREWEED_E3_ACK_PUSHES=${FIREWEED_E3_ACK_PUSHES:-100000}
+FIREWEED_E3_ACK_CONCURRENCY=${FIREWEED_E3_ACK_CONCURRENCY:-384}
+FIREWEED_E3_LOAD_CONCURRENCY=${FIREWEED_E3_LOAD_CONCURRENCY:-8}
+FIREWEED_RECOVERY_MAX_TAIL_COMMANDS=${FIREWEED_RECOVERY_MAX_TAIL_COMMANDS:-1000000}
+if [[ "$FIREWEED_E3_RESIDENT" != 10000000 || "$FIREWEED_E3_LOAD_BATCH" != 1000 \
+   || "$FIREWEED_E3_ACK_PUSHES" != 100000 || "$FIREWEED_E3_ACK_CONCURRENCY" != 384 \
+   || "$FIREWEED_E3_LOAD_CONCURRENCY" != 8 || "$FIREWEED_RECOVERY_MAX_TAIL_COMMANDS" != 1000000 ]]; then
+  echo "E3 shape check failed: release requires resident=10000000 load_batch=1000 ack_pushes=100000 ack_concurrency=384 load_concurrency=8 recovery_max_tail_commands=1000000" >&2
+  exit 2
+fi
+
 : "${FIREWEED_S3_TEST_ENDPOINT:?set FIREWEED_S3_TEST_ENDPOINT to the MinIO endpoint, e.g. http://<container-ip>:9000}"
 : "${FIREWEED_E3_MINIO_CONTAINER:?set FIREWEED_E3_MINIO_CONTAINER to the fresh MinIO container name}"
 
