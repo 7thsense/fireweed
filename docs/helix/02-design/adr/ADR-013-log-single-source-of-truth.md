@@ -5,6 +5,7 @@ ddx:
     - adr-cqrs-log-projection-storage-model
     - adr-queue-as-shard-unit-and-projection-families
     - adr-orthogonal-log-projection-composition
+    - orthogonal-storage-matrix-brief
   review:
     self_hash: 35052eb1b94371aa8abb8e8b348a21b459522c7d5feaba04b7146745a04bda62
     deps:
@@ -17,12 +18,13 @@ ddx:
 # Architecture Decision Record
 
 **ADR ID**: ADR-013
-**Title**: The durable command log is the single source of truth; every projection — including the relational family — is a rebuildable view
+**Title**: The durable command log is the single source of truth (Class A); Class B memory log is an explicit weaker durability class
 **Status**: Accepted
 **Related**: ADR-001 (CQRS log/projection — intent ratified), ADR-008 (queue as shard unit & two
 projection families — **amended**: the families remain, their authority claim does not), ADR-012
 (orthogonal composition), TD-007 (durability), TD-008 (change-record emission — depends on this ADR),
-TD-009 (experimentation surface — depends on this ADR).
+TD-009 (experimentation surface — depends on this ADR),
+`orthogonal-storage-matrix-brief` (durability Class A vs Class B; governing product intent).
 
 ## Context
 
@@ -44,7 +46,23 @@ branch-at-position, read-as-of-position, and change-record emission guarantees (
 entire relational family. External motivation: the Lakebase/LTAP storage model (2026-07-03 review)
 demonstrates the same discipline — the log/lake is the sole truth; row stores are caches.
 
+Separately, the orthogonal storage matrix (`orthogonal-storage-matrix-brief`) makes **log** and
+**projection** independent public axes. Every cell remains `LogStore × ProjectionStore`, but
+persistence guarantees differ by **durability class**: Class A (durable log backends) vs Class B
+(`log=memory`). An earlier absolute ban on any non-durable production log posture conflicted with
+explicit Class B product intent; this amendment aligns ADR-013 with that brief.
+
 ## Decision
+
+CQRS composition is universal: every supported cell is still
+`LogStore × ProjectionStore` (ADR-012), with append → apply → acknowledge for the selected
+durability class. There is no architecture that drops `LogStore` and runs projection-only.
+
+Durability semantics split by class:
+
+### Class A — Durable log is the single source of truth
+
+**Applies when log is `sqlite`, `postgres`, `filesystem`, or `s3`.**
 
 **The durable command log is the single, authoritative system of record for every queue. All
 projections — including the relational family (`fireweed_items` and peers) — are rebuildable, disposable
@@ -52,20 +70,62 @@ views derived solely from the committed log via `ProjectionData::apply_command` 
 `ProjectionStore::apply`.** No projection may hold acknowledged state that is not reconstructable by
 replaying the log from genesis or from a snapshot at a committed `CommandPosition`.
 
-This ratifies the `ComposedBackend` recovery contract as the universal invariant:
+This ratifies the `ComposedBackend` recovery contract as the Class A invariant:
 `recovery_high_water` (`crates/fireweed-engine/src/compose.rs:636`) plus tail replay (`:1196-1239`)
 must be able to reconstruct any projection, and `resolve_recovery_start` (`:389-404`) governs trust in
 a projection's recorded high-water.
 
-**Commit ordering is universal and non-negotiable: (1) the command is fully durable in the log,
-(2) the serving projection applies it, (3) only then is success returned to the client.** No backend
-may acknowledge before the log commit is durable, and no backend may acknowledge before the
-operation's own effects are visible through its serving projection (the response barrier). This holds
-for every durability class: the atomic class satisfies it inside one transaction; the log-then-apply
-class via the manifest-commit + response-barrier sequence (TD-007 §1). There is no configuration in
-which an acknowledged command can be lost or can race its own visibility.
+**Commit ordering (Class A): (1) the command is fully durable in the log, (2) the serving projection
+applies it, (3) only then is success returned to the client.** No Class A backend may acknowledge
+before the log commit is durable, and no backend may acknowledge before the operation's own effects
+are visible through its serving projection (the response barrier). The atomic class satisfies this
+inside one transaction; the log-then-apply class via the manifest-commit + response-barrier sequence
+(TD-007 §1). Client contract: success ⇒ durable on log and visible in serving projection; recovery
+via high-water + tail replay; `request_id` resolves ambiguity across crash.
+
+Class A rules for projections, recovery, branch, read-as-of, and change-record-from-log are unchanged
+by this amendment relative to the original ADR-013 stance.
+
+### Class B — Memory log (explicit weaker durability class)
+
+**Applies when log is `memory` (paired with any public projection: `memory`, `sqlite`, or `postgres`).**
+
+Class B is a weaker **persistence envelope**, not a second architecture and not “no LogStore”:
+
+1. **`LogStore` still exists** for in-process command ordering, fencing, and the append → apply
+   path while the process is alive.
+2. **After process death, only the projection remains.** There is no durable log to replay; recovery
+   cannot rebuild the projection from the log.
+3. **Unavailable under Class B:** log rebuild / crash-recovery-from-log, branch-at-position (TD-009),
+   read-as-of-position (TD-009), and change-record emission from a durable log tail (TD-008).
+4. **Client contract:** success ⇒ visible in the serving projection; durable **iff** the projection
+   itself is durable (`sqlite` / `postgres`). A `memory` × `memory` cell loses both log and
+   projection on process death.
+5. **Must be explicitly selectable** via the public configuration surface (typed `StorageConfig` /
+   Helm axes — see the matrix brief). Configuration MUST NOT silently substitute a no-op or absent
+   log; operators and embedders choose `log=memory` knowingly.
+6. **Must not claim Class A guarantees.** Docs, preview claims, and conformance must not market
+   Class B cells as log-rebuildable, branchable, or change-record-complete from log.
+
+**Commit ordering (Class B):** (1) append to the in-process `LogStore` (ordering/fence authority for
+the live process), (2) apply to the serving projection, (3) acknowledge only after projection
+visibility. The response barrier still holds for the live process; cross-restart durability is
+projection-only.
+
+### Silent null-log remains forbidden
+
+A **silent** or **implicit** log-less / projection-only mode (no `LogStore` in the composition, or a
+no-op log slipped in without explicit Class B selection) is not a supported product posture. Class B
+replaces that idea with an explicit `log=memory` cell and documented weaker guarantees.
+
+A pure no-op log implementation MAY exist **for tests only**. It MUST NOT be selectable as a
+production log backend under another name; the only public non-durable log value is `memory`
+(Class B).
 
 ### What changes for the relational family
+
+These requirements apply under **Class A** (and whenever a durable log is composed with the
+relational projection):
 
 1. The word "authoritative" applied to `fireweed_items` is retired. The relational projection becomes a
    **materialized cache with a persisted applied-high-water**, exactly like the sqlite hybrid
@@ -80,30 +140,8 @@ which an acknowledged command can be lost or can race its own visibility.
    projection uses" — the log append remains the ordering/fence authority
    (`compose.rs:1358-1364`).
 
-### The log is mandatory (no production null-log mode)
-
-Every production deployment MUST run with a durable command log. There is no supported log-less or
-projection-only durability posture, even where the projection store itself is highly durable (e.g. a
-managed Postgres projection): losing acknowledged data is never acceptable for the workloads fireweed
-serves, and a projection without a log cannot reproduce a prior state, cannot guarantee change-record
-emission, and leaves the acknowledgement path racing projection durability. An earlier draft of this
-ADR allowed a named, telemetry-surfaced degraded `null-log` mode; **that allowance is retired
-(product-owner decision, 2026-07-05)**.
-
-A no-op log implementation MAY exist **for tests only**. It MUST NOT be selectable through any
-production configuration surface (env parsing, Helm values, and static validation MUST reject it).
-The losses that made null-log unacceptable are the reasons the log is mandatory:
-
-- **No log replay / no crash-recovery-from-log** — recovery depends entirely on the projection's own
-  durability; a corrupt projection is unrecoverable.
-- **No branch** (TD-009) — there is no log to copy-on-write or replay into a branch.
-- **No read-as-of-position** (TD-009) — no historical positions exist; only "now."
-- **No change-record emission guarantee** (TD-008) — the niflheim sink is a log-tail consumer; with no
-  log there is no ordered, replayable tail, so downstream history cannot be guaranteed complete or
-  ordered.
-- **Weakened idempotency/fence recovery** — request-id replay records and instance fences must be
-  reconstructed from projection rows, not replayed; any gap in projection durability is a gap in the
-  idempotency contract.
+Under Class B with a relational projection, the projection may still persist applied state, but
+post-restart authority is projection-only; Class A rebuild-from-log claims do not apply.
 
 ## Derived implementation work
 
@@ -124,18 +162,25 @@ migration", plus its five children):
 One deliberately-scoped exception remains: ADR-012's decision note (2026-07-08, DDx B3.6) **retains** the
 monolithic DB-authoritative `SqliteRelationalBackend` as a differential test oracle and benchmark shape.
 That does not contradict this ADR — its only non-test construction site is the benchmark harness; it is
-not reachable through any production configuration surface (`FIREWEED_PROJECTION_BACKEND` composes every
-projection axis, including `sqlite`/`postgres` relational, with a durable log), so the mandatory-log
-invariant holds. Its eventual retirement conditions are tracked in ADR-012.
+not reachable through any production configuration surface. Production composition remains
+`LogStore × ProjectionStore` (Class A durable log or explicit Class B `memory` log). Its eventual
+retirement conditions are tracked in ADR-012.
+
+Class B wiring, matrix completeness, and public messaging are governed by
+`orthogonal-storage-matrix-brief` (Phase 0+), not by reopening the relational rebuild migration.
 
 ## Consequences
 
-- Positive: one durability contract; branch, read-as-of, and emitted history become possible for every
-  family; ADR-001's stated intent is finally true in code.
-- Negative: the relational family pays replay cost on cold recovery it currently avoids; migration
-  work to add `recovery_high_water` + rebuildability; single-node relational deployments that might
-  have preferred a projection-only posture must carry the log's write amplification — accepted, the
-  log is mandatory.
+- Positive (Class A): one log-authoritative durability contract; branch, read-as-of, and emitted
+  history become possible for every projection family; ADR-001's durable-log intent holds in code.
+- Positive (Class B): embedders and tests may select `log=memory` explicitly for ephemeral or
+  projection-durable-only deployments without inventing a second architecture; CQRS composition
+  stays intact.
+- Negative (Class A): the relational family pays replay cost on cold recovery; single-node
+  deployments that might have preferred projection-only authority still carry durable-log write
+  amplification when Class A is selected.
+- Negative (Class B): no log rebuild, branch, read-as-of, or change-record-from-log; operators must
+  not confuse Class B with Class A; preview and support claims must name the durability class.
 
 ## Prerequisite
 
@@ -143,5 +188,6 @@ Making the append-then-apply seam (`compose.rs:1346-1366`) the sole serializatio
 relational family's "concurrency-correct by construction" story (`relational.rs:11-19`). The Postgres
 high-water guard and `MAX(seq)+1` append allocation carry a documented TOCTOU under connection pooling
 (`crates/fireweed-postgres/src/lib.rs:16-46`). **The TOCTOU fix is a hard prerequisite for this ADR to be
-safe multi-node**; it was tracked as the blocking bead `pqueue-b59f4897` in this ADR's implementation
-chain and is now **closed** (verified as part of the rebuild-from-log migration, bead `pqueue-3c5aa2e0`).
+safe multi-node under Class A**; it was tracked as the blocking bead `pqueue-b59f4897` in this ADR's
+implementation chain and is now **closed** (verified as part of the rebuild-from-log migration, bead
+`pqueue-3c5aa2e0`).

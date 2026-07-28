@@ -177,7 +177,7 @@ The storage API must be capability-based rather than one flat generic store:
 | Capability | Responsibility |
 |------------|----------------|
 | `LogStore` | Append and read durable command records by tenant/queue. |
-| `ProjectionStore` | Maintain local query state optimized for priority claim and lease operations. A **family** of implementations — an in-memory log-replay projection and a relational / DB-resident projection — held identical by the conformance suite (ADR-008), not a single shared implementation. See ADR-013 for the single-source-of-truth amendment to that family contract. |
+| `ProjectionStore` | Maintain local query state optimized for priority claim and lease operations. A **family** of implementations — an in-memory log-replay projection and a relational / DB-resident projection — held identical by the conformance suite (ADR-008), not a single shared implementation. See ADR-013 for the single-source-of-truth amendment and durability Class A vs Class B (memory log). |
 | `SnapshotStore` | Persist projection snapshots at durable log positions and support bounded replay. |
 | `ControlPlaneStore` | Store queue metadata, queue assignment, backend configuration, epochs, placement, and queue-owner leases (TD-003). |
 
