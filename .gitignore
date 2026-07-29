@@ -32,3 +32,4 @@ target/
 .ddx/metrics/
 node_modules/
 __pycache__/
+examples/python-resp/.venv/
