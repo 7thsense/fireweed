@@ -1196,6 +1196,9 @@ pub(crate) fn live_items_sql(
     let mut found = HashMap::<String, LiveItemView>::with_capacity(keys.len());
     for chunk in keys.chunks(SQLITE_BATCH) {
         let placeholders = vec!["?"; chunk.len()].join(",");
+        // prepare_cached: chunk lengths are stable under SQLITE_BATCH, so 10M-item
+        // recovery verification reuses one statement plan instead of recompiling
+        // tens of thousands of identical IN-list queries.
         let sql = format!(
             "SELECT client_item_key, item_id, item_version, lifecycle_state, priority, group_key, \
              not_before, retry_count, payload, fields FROM fireweed_items \
@@ -1209,7 +1212,7 @@ pub(crate) fn live_items_sql(
                 .iter()
                 .map(|key| Value::Text(key.as_str().to_string())),
         );
-        let mut statement = st(conn.prepare(&sql))?;
+        let mut statement = st(conn.prepare_cached(&sql))?;
         let rows = st(
             statement.query_map(params_from_iter(parameters.iter()), |row| {
                 Ok((
