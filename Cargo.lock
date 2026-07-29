@@ -674,19 +674,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crossbeam"
-version = "0.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1137cd7e7fc0fb5d3c5a8678be38ec56e819125d8d7907411fe24ccb943faca8"
-dependencies = [
- "crossbeam-channel",
- "crossbeam-deque",
- "crossbeam-epoch",
- "crossbeam-queue",
- "crossbeam-utils",
-]
-
-[[package]]
 name = "crossbeam-channel"
 version = "0.5.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -696,29 +683,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "crossbeam-deque"
-version = "0.8.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5181e0de7b61eb03a81e347d6dd8797bae9da5146707b51077e2d71a54ec0ceb"
-dependencies = [
- "crossbeam-epoch",
- "crossbeam-utils",
-]
-
-[[package]]
 name = "crossbeam-epoch"
 version = "0.9.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
-dependencies = [
- "crossbeam-utils",
-]
-
-[[package]]
-name = "crossbeam-queue"
-version = "0.3.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "803d13fb3b09d88be9f4dbc29062c66b19bf7170867ceb746d2a8689bf6c7a26"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -1167,8 +1135,8 @@ dependencies = [
  "fjord-broker",
  "futures",
  "heimq",
- "heimq-broker",
- "heimq-protocol",
+ "heimq-broker 0.1.0 (git+https://github.com/easel/heimq?tag=v0.1.2)",
+ "heimq-protocol 0.15.1 (git+https://github.com/easel/heimq?tag=v0.1.2)",
  "postgres",
  "redis",
  "rskafka",
@@ -1224,7 +1192,7 @@ version = "0.1.3"
 source = "git+https://github.com/7thsense/fjord.git?tag=v0.1.3#4a1d562955fe6997483dc595245d0abf1d5e6fce"
 dependencies = [
  "bytes",
- "heimq-broker",
+ "heimq-broker 0.1.0 (git+https://github.com/easel/heimq?tag=v0.1.2)",
  "parking_lot",
 ]
 
@@ -1569,32 +1537,25 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "heimq"
-version = "0.1.0"
-source = "git+https://github.com/easel/heimq?tag=v0.1.2#dcbbff1b3cc7d36a3b66da0a7345e2eeb460d690"
+version = "0.1.6"
+source = "git+https://github.com/easel/heimq?tag=v0.1.6#be7c1c631c313f5519754fbd81aba4d77ace5c7b"
 dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
  "chrono",
  "clap",
- "crc32c",
- "crossbeam",
  "dashmap",
- "flate2",
- "heimq-broker",
- "heimq-protocol",
+ "heimq-broker 0.1.0 (git+https://github.com/easel/heimq?tag=v0.1.6)",
+ "heimq-handlers",
+ "heimq-protocol 0.15.1 (git+https://github.com/easel/heimq?tag=v0.1.6)",
  "heimq-wire",
- "lz4",
- "memmap2",
  "metrics",
  "metrics-exporter-prometheus",
  "parking_lot",
- "snap",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "zstd",
 ]
 
 [[package]]
@@ -1613,6 +1574,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "heimq-broker"
+version = "0.1.0"
+source = "git+https://github.com/easel/heimq?tag=v0.1.6#be7c1c631c313f5519754fbd81aba4d77ace5c7b"
+dependencies = [
+ "bytes",
+ "crc32c",
+ "flate2",
+ "lz4",
+ "parking_lot",
+ "snap",
+ "thiserror 2.0.18",
+ "zstd",
+]
+
+[[package]]
+name = "heimq-handlers"
+version = "0.1.0"
+source = "git+https://github.com/easel/heimq?tag=v0.1.6#be7c1c631c313f5519754fbd81aba4d77ace5c7b"
+dependencies = [
+ "bytes",
+ "chrono",
+ "heimq-broker 0.1.0 (git+https://github.com/easel/heimq?tag=v0.1.6)",
+ "heimq-protocol 0.15.1 (git+https://github.com/easel/heimq?tag=v0.1.6)",
+ "parking_lot",
+ "tracing",
+]
+
+[[package]]
 name = "heimq-protocol"
 version = "0.15.1"
 source = "git+https://github.com/easel/heimq?tag=v0.1.2#dcbbff1b3cc7d36a3b66da0a7345e2eeb460d690"
@@ -1621,10 +1610,23 @@ dependencies = [
  "bytes",
  "crc",
  "crc32c",
+ "indexmap",
+ "paste",
+ "uuid",
+]
+
+[[package]]
+name = "heimq-protocol"
+version = "0.15.1"
+source = "git+https://github.com/easel/heimq?tag=v0.1.6#be7c1c631c313f5519754fbd81aba4d77ace5c7b"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "crc",
+ "crc32c",
  "flate2",
  "indexmap",
  "lz4",
- "paste",
  "snap",
  "uuid",
  "zstd",
@@ -1633,7 +1635,7 @@ dependencies = [
 [[package]]
 name = "heimq-wire"
 version = "0.1.0"
-source = "git+https://github.com/easel/heimq?tag=v0.1.2#dcbbff1b3cc7d36a3b66da0a7345e2eeb460d690"
+source = "git+https://github.com/easel/heimq?tag=v0.1.6#be7c1c631c313f5519754fbd81aba4d77ace5c7b"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2286,15 +2288,6 @@ name = "memchr"
 version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
-
-[[package]]
-name = "memmap2"
-version = "0.9.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "memoffset"
