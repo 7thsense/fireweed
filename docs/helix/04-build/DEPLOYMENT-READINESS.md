@@ -327,15 +327,21 @@ Release evidence must record:
 
 ### Tag-gate evidence contract
 
-The tag workflow has two independent TP-002 lanes, and both are mandatory:
+The default local release gate and the tag workflow have distinct TP-002
+responsibilities:
 
-1. `scripts/ci/release-gate.sh` generates a clean smoke ledger and requires fresh
+1. The default local `scripts/ci/release-gate.sh` invocation generates a clean
+   smoke ledger and requires fresh
    smoke-tier E2 and E3 rows. It then validates the exact E0-E3 authority files
    listed by `target/tp002-release/composite-contract.json`, including
    `target/tp002-release/e3/e3-contract.json`, against the checked-out source
    revision. These exact-commit outputs are staged by the evidence producers;
    they cannot be checked into the commit whose SHA they bind.
-2. The release workflow verifies `target/tp002-release/attestation.json` with
+2. The release workflow invokes `scripts/ci/release-gate.sh
+   --governed-performance-only`, which runs functional release checks and the
+   exact-revision composite verifier without rerunning scaled local smoke
+   workloads on a shared GitHub runner. It then verifies
+   `target/tp002-release/attestation.json` with
    the resolved release tag and `GITHUB_SHA`. The tag must resolve to that exact
    checked-out commit, and every attested evidence/input digest must match.
 
