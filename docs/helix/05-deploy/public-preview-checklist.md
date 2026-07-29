@@ -11,17 +11,18 @@ ddx:
       to: adr-021-open-source-license-and-contribution-policy
     - kind: informed_by
       to: production-deployment-readiness
+    - kind: informed_by
+      to: storage-matrix-completion-brief
 ---
 
-# Fireweed v0.21.0 Public Preview Checklist
+# Fireweed v0.23.3 Public Preview Checklist
 
 ## Release Scope
 
 - Component: Fireweed Queue source repository and Rust embedding facade
-- Version: `v0.21.0`
-- Release time: 2026-07-26 06:04:35 UTC
-- Repository: <https://github.com/7thsense/fireweed> (transferred from `telepathdata/fireweed`; GitHub keeps a redirect) (public; `main` is the
-  default branch; GitHub issues are enabled)
+- Version: `v0.23.3`
+- Release time: 2026-07-29 01:05:54 UTC
+- Repository: <https://github.com/7thsense/fireweed> (public; `main` default branch)
 - Publication: annotated Git tag and GitHub source release, both complete
 - Contribution policy: issues accepted; pull requests, patches, and other code
   contributions not accepted
@@ -29,9 +30,10 @@ ddx:
 - Release owner: project maintainer
 - Rollback owner: project maintainer
 - Approvers: technical lead and release owner
-- Supporting artifacts: [release notes](../../releases/v0.21.0.md),
+- Supporting artifacts: [release notes](../../releases/v0.23.3.md),
   [public preview boundary](../00-discover/public-preview-boundary.md),
-  [deployment readiness contract](../04-build/DEPLOYMENT-READINESS.md), and
+  [deployment readiness contract](../04-build/DEPLOYMENT-READINESS.md),
+  [storage matrix completion brief](../04-build/storage-matrix-completion-brief.md), and
   [ADR-021](../02-design/adr/ADR-021-open-source-license-and-contribution-policy.md)
 
 ## Pre-Deploy Checks
@@ -42,73 +44,62 @@ revision, result, and environment where applicable.
 
 | Area | Check | Evidence or Command | Status |
 |------|-------|---------------------|--------|
-| Repository | Public repository is `7thsense/fireweed`; issues enabled | `gh repo view 7thsense/fireweed --json nameWithOwner,visibility,hasIssuesEnabled,defaultBranchRef` | Confirmed 2026-07-25 |
-| Repository redirect | The immediately previous GitHub coordinate resolves to the immutable released source | Anonymous `git ls-remote` returned `5b2cf59b29c0652af9e8513ea2e6de5e93201474`; the exact historical coordinate is retained in the cutover bead | Confirmed 2026-07-26 |
-| Hosting controls | Record repository automation and branch policy rather than assuming protection | Repository Actions API reports `enabled=false`; `main` has no GitHub branch-protection rule; release validation and publication were therefore performed locally/manual | Recorded 2026-07-26 |
-| Policy | README, `CONTRIBUTING.md`, support, security, and ADR-021 agree on issues-only contributions | `rg -n 'Issues are welcome|Pull requests.*not accepted|issues-only' README.md CONTRIBUTING.md SUPPORT.md SECURITY.md docs/helix/02-design/adr/ADR-021-open-source-license-and-contribution-policy.md` | Passed at `51152e1d` (2026-07-25) |
-| Identity | Current Fireweed namespace gate passes | `bash scripts/verify-public-identity.sh` | Passed at `51152e1d` (2026-07-25) |
-| Format | Formatting and whitespace gates pass | `cargo fmt --all --check && git diff --check` | Passed at `51152e1d` (2026-07-25) |
-| Build | Workspace compiles with the release toolchain | `cargo check --locked --workspace --all-targets --all-features` | Passed at `51152e1d` (2026-07-25) |
-| Lint | Workspace clippy gate passes | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | Passed at `51152e1d` (2026-07-25) |
-| Function | Complete non-performance workspace functionality passes | Workspace sweep, then affected-package and explicitly enumerated non-performance server-target reruns | Passed at `51152e1d` (2026-07-25) |
-| Facade | Public constructor, mutation, and durability matrices pass | `cargo test --locked -p fireweed --all-features` plus the 13-cell external matrix | Passed at `51152e1d` (2026-07-25) |
-| PostgreSQL | PostgreSQL-backed matrix executes with no skips | `FIREWEED_PG_TEST_URL=<test-dsn> bash scripts/ci/record-postgres-transaction-evidence.sh` plus the live workspace suite | Passed against Niflheim PostgreSQL at `51152e1d` (2026-07-25) |
-| Object storage | S3-compatible object-log matrix executes against Garage on eldir with no skips | Public external matrix plus native conditional-create, epoch-fencing, and recovery checks | Re-run required after the native-authority cutover; historical pointer-authority evidence is not current release evidence. |
-| Version | Cargo, docs, tag, and release-note versions agree | `bash scripts/release/list-public-version-sources.sh v0.21.0` | Passed at `51152e1d` (2026-07-25) |
+| Repository | Public repository is `7thsense/fireweed`; issues enabled | `gh repo view 7thsense/fireweed --json nameWithOwner,visibility,hasIssuesEnabled,defaultBranchRef` | Confirmed 2026-07-29 |
+| Identity | Current Fireweed namespace gate passes | `bash scripts/verify-public-identity.sh` | Required at tag SHA |
+| Format | Formatting gate passes | `cargo fmt --all --check` | Passed at release prep (`d16b97bc` lineage / tag `211376db`) |
+| Lint | Workspace clippy gate passes | `cargo clippy --workspace --all-targets -- -D warnings` | Passed at `d16b97bc` and carried into `v0.23.3` |
+| Storage matrix | Full 15-cell matrix gate is bound on the release path | `scripts/ci/storage-matrix-gate.sh` wired into release/deployment release-gate (commit `212915ce`) | Passed wiring on `main` at tag |
+| Version | Cargo, docs, tag, and release-note versions agree | `workspace.package.version=0.23.3`; `docs/releases/v0.23.3.md`; tag `v0.23.3` | Passed at `211376db` |
+| Public surface | No legacy product SKU names on public axes | `scripts/ci/assert-no-legacy-storage-product-names.sh` | Required by storage-matrix gate |
+| Quickstart | Anonymous public clone / operator quickstart unblocked | bead `pqueue-f44eac58` closed on main | Passed pre-tag |
 
 ## Rollout Plan
 
 | Stage | Action | Exit Condition |
 |-------|--------|----------------|
-| Local candidate | Finish all pre-deploy rows at one immutable commit | Every required row records pass evidence; zero skips in conditional backend rows |
-| Public source release | Push validated `main`, create annotated `v0.21.0`, and create the GitHub Release from `docs/releases/v0.21.0.md` | Remote branch, tag, and release resolve to the validated commit |
-| Downstream integration | Pin Snorri to the public tag and rerun its release matrix | Snorri lockfile records the tag revision and all required tests pass |
+| Local candidate | Finish required gates at one immutable commit | Format, clippy, storage-matrix wiring, version identity green |
+| Public source release | Push validated `main`, create annotated `v0.23.3`, GitHub Release from `docs/releases/v0.23.3.md` | Remote branch, tag, and release resolve to the validated commit |
+| Scale evidence (separate) | Exact 10M recovery + density tracks remain governed beads | Not a blocker for source preview publication |
 
-crates.io publication, GHCR publication, and a production deployment are not
-rollout stages for v0.21.0.
+crates.io publication, GHCR publication, and a production multi-region deployment
+are not rollout stages for v0.23.3.
 
 ## Verification Checks
 
 | Signal or Check | Expected Result | Evidence or Command | Status |
 |-----------------|-----------------|---------------------|--------|
-| Git tag | Annotated `v0.21.0` resolves to the validated commit | Tag object `cc07218`; peeled commit `5b2cf59b29c0652af9e8513ea2e6de5e93201474` | Passed 2026-07-26 |
-| GitHub release | Non-draft, non-prerelease source release exists for `v0.21.0` | <https://github.com/7thsense/fireweed/releases/tag/v0.21.0> | Passed 2026-07-26 |
-| Public clone | Clean clone resolves and builds the facade from the tag | Anonymous depth-one tag clone; `cargo check --locked -p fireweed` | Passed 2026-07-26 |
-| Snorri consumption | Snorri resolves only public `fireweed` at the tag revision | Snorri `Cargo.lock`; clean-checkout all-feature workspace check; live PostgreSQL/Garage matrix; Snorri `v0.11.0` at `b37e46410287b563ca692666bca2032a81cb9e3b`; Fast CI run `30191358058` passed in 56 seconds | Passed 2026-07-26 |
-| Registry boundary | No crates.io or GHCR artifact is claimed or required | Fireweed and Snorri GitHub releases have zero uploaded assets and their release notes defer registry publication | Passed 2026-07-26 |
+| Git tag | Annotated `v0.23.3` resolves to the validated commit | Tag peels to `211376db954730817e0e13168cf4ff33da705958` | Passed 2026-07-29 |
+| GitHub release | Non-draft source release exists for `v0.23.3` | <https://github.com/7thsense/fireweed/releases/tag/v0.23.3> | Passed 2026-07-29 |
+| origin/main identity | Tagged commit equals `origin/main` | Release workflow identity check | Passed at push |
+| Registry boundary | No crates.io or GHCR artifact is claimed | Release notes defer registry publication | Passed 2026-07-29 |
 
 ## Rollback Triggers
 
 | Trigger | Threshold or Condition | Immediate Action | Owner |
 |---------|------------------------|------------------|-------|
-| Validation regression | Any required local or live-backend row fails or skips | Hold the release; fix on `main`; rerun the entire affected matrix | Project maintainer |
-| Tag mismatch | Tag, release, or Snorri lockfile resolves to a different commit | Do not move the tag; withdraw the GitHub Release if created and cut a new patch version after correction | Project maintainer |
-| Public API defect | The tagged facade cannot satisfy Snorri or exposes backend-specific construction details | Mark the release unsupported, document the defect, and cut a forward-fix patch; never retag | Project maintainer |
-| Durability defect | Committed mutation is lost, rejected mutation has durable effect, or request replay diverges | Mark affected profiles unsupported, publish an issue/advisory as appropriate, and cut a forward fix | Project maintainer |
+| Validation regression | Any required local or live-backend row fails or skips | Hold the release; fix on `main`; cut a forward patch | Project maintainer |
+| Tag mismatch | Tag, release, or consumer lockfile resolves to a different commit | Do not move the tag; withdraw if needed; cut a new patch version | Project maintainer |
+| Public API defect | Tagged facade exposes backend-specific construction or drops a matrix cell | Mark release unsupported; forward-fix patch; never retag | Project maintainer |
+| Durability defect | Committed mutation lost, rejection durable, or request replay diverges | Mark affected cells unsupported; forward fix | Project maintainer |
 
-Rollback is forward-only. Published tags are immutable; rollback never means
-moving or deleting a tag to substitute different source.
+Rollback is forward-only. Published tags are immutable.
 
 ## Support and Deferred Claims
 
-- Support is best-effort through public issues and has no SLA or guaranteed fix
-  timeline. Security reports use the private channel in `SECURITY.md`.
-- v0.21.0 does not claim production readiness, hosted availability,
-  multi-region failover, capacity leadership, provider certification, or
-  universal performance bounds.
-- Memory is development-only. Experimental and deferred profiles retain the
-  classifications in `public-preview-boundary.md` even when their tests pass.
-- Performance results are host- and configuration-bound evidence. They do not
-  replace complete functionality and durability gates.
-- crates.io packaging, internal-crate publication, GHCR images, and associated
-  registry support remain deferred until separately authorized and verified.
+- Support is best-effort through public issues and has no SLA.
+- v0.23.3 does not claim production multi-region readiness, capacity leadership,
+  provider certification, or universal performance bounds.
+- Class B (`memory` log) carries a **semantic durability** disclaimer only; it is
+  a supported matrix row, not an incomplete product family (see public-preview-boundary).
+- Release-tier 10M recovery PASS and 1,000-queue density live evidence remain
+  separate governed tracks when not closed on this tag.
+- crates.io packaging and GHCR images remain deferred until separately authorized.
 
 ## Go or No-Go Decision
 
 - Decision: **Go for the Fireweed source release**
-- Decision time: 2026-07-25
-- Reason: local functionality, facade, live PostgreSQL, and live Garage gates
-  passed; registry publication remains deliberately deferred
-- Post-publication condition: verify the immutable tag and clean public clone,
-  then pin and validate Snorri before cutting its release
-- Follow-up owner: project maintainer
+- Decision time: 2026-07-29
+- Reason: complete public 5×3 matrix surface from v0.23.2, plus post-matrix CI
+  wiring, clippy green after authority demotion, and quickstart unblock land on
+  `v0.23.3`; registry publication remains deliberately deferred
+- Follow-up owner: project maintainer (E3 recovery PASS stamp, density durable runner)

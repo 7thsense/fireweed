@@ -88,85 +88,42 @@ The release contract **must not collapse those axes** into named deployment
 modes. A release artifact can claim only the **cells** that its runtime, chart
 rendering, and CI evidence actually cover on that revision.
 
-### Current release boundary (transitional wiring)
-
-Until Helm and the server composition root are fully isomorphic to the 5×3
-`StorageConfig` matrix, executable combinations may still be selected through
-legacy spellings (`objectlog` + local/s3 store, `inmemory`, optional hybrid
-implementation paths). Those spellings map onto the axes above; they do not
-replace them. Hybrid, hybrid-async, hybrid-strict, and turso are **not** public
-projection product values; where still wired, they are transitional
-implementation paths under a durable projection, not matrix rows.
-
 ## Current Release Boundary
 
 > **Version source of truth:** the workspace `Cargo.toml` `[workspace.package] version`
-> (currently **0.22.0**) is canonical for the current release line. Release tags follow it
-> (`v0.22.0`, …). Version-specific docs under `docs/releases/` and `docs/perf/` are
+> (currently **0.23.3**) is canonical for the current release line. Release tags follow it
+> (`v0.23.3`, …). Version-specific docs under `docs/releases/` and `docs/perf/` are
 > historical snapshots of the version in their filename and are not statements about the current line.
 
-The v0.22.0 release candidate validates the `fireweed-service` RESP binary and
-deployment packaging inputs. crates.io and GHCR publication are deferred by the
-public-preview checklist; no registry artifact is available until a later
-release explicitly publishes and verifies it. The service
-runtime (`crates/fireweed-server/src/env_config.rs`) currently wires these
-executable combinations:
+The public product is the **5×3 log × projection matrix** (`StorageConfig` +
+`open` / `open_async`). Helm and env adapters are isomorphic to those axes
+(`storage.log` / `storage.projection`; public log names `memory`, `sqlite`,
+`postgres`, `filesystem`, `s3`; public projection names `memory`, `sqlite`,
+`postgres`). Legacy spellings (`objectlog`, `inmemory`, hybrid/turso projection
+select) are **not** public product SKUs: they must fail closed on public
+surfaces (`scripts/ci/assert-no-legacy-storage-product-names.sh`).
 
-| Log backend | Projection backend | Runtime status |
-|-------------|--------------------|----------------|
-| `objectlog` | `inmemory` | Live container and Helm smoke path (in the CI kind matrix). |
-| `objectlog` | `sqlite` | Wired (durable SQLite projection over the object log; in the CI kind matrix). |
-| `objectlog` | `turso` | Wired behind the `turso-projection` feature; local-file recovery and authoritative object-log rebuild are covered by the focused Turso lane. |
-| `objectlog` | `hybrid` | Wired (TD-004 hot-memory-over-durable-SQLite; shipped v0.6.0). |
-| `objectlog` | `hybrid-strict` | Experimental runtime path (SQLite durable before memory apply). Env/direct-config only; intentionally not chart-selectable or production-supported. |
-| `objectlog` | `hybrid-async` | Wired (deferred async SQLite checkpoint with `FIREWEED_HYBRID_ASYNC_*` debt/backpressure thresholds). |
-| `postgres` | `inmemory` | Wired behind the `postgres` cargo feature (in the CI kind matrix). |
-| `postgres` | `sqlite` | Wired behind the `postgres` cargo feature (in the CI kind matrix). |
-| `postgres` | `postgres` | Wired behind the `postgres` cargo feature (in the CI kind matrix). |
-| `sqlite` | `inmemory` | Local single-process durable log path. |
-| `memory` | `inmemory` | Local development path, not a production claim. |
+| Log \ Projection | `memory` | `sqlite` | `postgres` |
+|------------------|----------|----------|------------|
+| `memory` | Class B | Class B | Class B |
+| `sqlite` | Class A | Class A | Class A |
+| `postgres` | Class A | Class A | Class A |
+| `filesystem` | Class A | Class A | Class A |
+| `s3` | Class A | Class A | Class A |
 
-The Helm chart renders storage-axis values for these release-facing
-combinations:
+crates.io and GHCR publication are deferred by the public-preview checklist; no
+registry artifact is available until a later release explicitly publishes and
+verifies it.
 
-| Log backend | Projection backend | Gate |
-|-------------|--------------------|------|
-| `objectlog` | `inmemory` | Helm render/lint and live `kind` smoke (CI matrix). |
-| `objectlog` | `sqlite` | Runtime wired, Helm render/lint, and live `kind` smoke in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend sqlite`). |
-| `objectlog` | `turso` | Feature-gated runtime and focused chart render fixture; intentionally outside the broad live-`kind` storage matrix. |
-| `objectlog` | `hybrid` | Runtime wired, Helm render/lint (`helm-gate.sh` `objectlog-hybrid`), and live `kind` smoke in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend hybrid`). |
-| `objectlog` | `hybrid-async` | Runtime wired, Helm render/lint with exact debt/backpressure-variable assertions, and live `kind` smoke in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend hybrid-async`). |
-| `objectlog` | `hybrid-strict` | Experimental env/direct-config-only runtime path; **not** chart-selectable or production-supported (projection enum omits it). |
-| `postgres` | `inmemory` | Postgres log adapter is wired (behind the `postgres` cargo feature via `PostgresNativeBackend`); live `kind` smoke passes in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend inmemory`). |
-| `postgres` | `sqlite` | Adapters wired; live `kind` smoke passes in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend sqlite`). Exact-pair TP-003 AC-TXN-1/2/3/6 evidence passes in `tp003-ac-txn-{matrix,parity}-postgres-storage-pairs.jsonl`. |
-| `postgres` | `postgres` | Adapters wired; live `kind` smoke passes in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend postgres`). Exact-pair TP-003 AC-TXN-1/2/3/6 evidence passes in `tp003-ac-txn-{matrix,parity}-postgres-storage-pairs.jsonl`; AC-TXN-3 records `commit_transition` capability-N/A because the shipped two-connection composition is eventual-apply, while proving push request-id replay at every applicable cut. |
-
-Unsupported runtime combinations must fail loudly at process startup with the
+Unsupported axis combinations must fail loudly at process startup with the
 requested log/projection pair. They must not be silently mapped onto a synthetic
 combined backend name.
 
-Runtime status is not a production transaction claim. A storage combination may
-be executable for smoke tests after it starts and preserves restart readback, but
-it may be production-claimed only after the TP-003 external transaction-contract
-matrix and the applicable TP-002 scale/latency evidence are green for that exact
-log/projection pair.
-
-### `objectlog/hybrid-strict` public-support decision
-
-**Decision (2026-07-19): DEFER public deployment support.**
-`objectlog/hybrid-strict` remains an experimental env/direct-config-only runtime
-path. It is excluded from the Helm schema, chart templates, live-`kind` matrix,
-deployment release matrix, release/tag gates, operator support contract, and
-public support claims.
-
-Runtime wiring is authorization to exercise and improve the profile; it is not
-authorization to advertise support. The current evidence proves only that
-`FIREWEED_LOG_BACKEND=objectlog` plus
-`FIREWEED_PROJECTION_BACKEND=hybrid-strict` selects the strict runtime with its
-SQLite path and that non-object-log pairings fail closed. The chart still omits
-`hybrid-strict` from `charts/fireweed/values.schema.json`; the PVC, ConfigMap, and
-Deployment templates do not include it; and the Helm, live-`kind`, deployment,
-and release/tag matrices do not exercise it.
+Runtime executability is not a production transaction claim. A storage cell may
+be smoke-tested after it starts and preserves reopen readback for its durability
+class, but production claims require the applicable TP-003 external
+transaction-contract evidence and any required TP-002 scale evidence for that
+exact log/projection pair.
 
 Revisit the support decision only after all of the following are green on one
 release candidate revision:
