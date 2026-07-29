@@ -38,9 +38,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument(
         "--suite",
-        choices=("functional", "perf", "all"),
+        choices=("functional", "perf", "ss", "all"),
         default="functional",
-        help="functional (default), perf, or all",
+        help="functional (default), perf, ss (Seventh Sense black box), or all",
     )
     p.add_argument(
         "--scenario",

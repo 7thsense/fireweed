@@ -62,6 +62,29 @@ python run_e2e.py --scenario 05_claim_due_batch
 python run_e2e.py --full   # includes lease reclaim wait
 ```
 
+## Seventh Sense black box (actions / scheduler / jobs)
+
+Profile: [`docs/perf/workload-seventh-sense-actions-scheduler.md`](../../docs/perf/workload-seventh-sense-actions-scheduler.md)
+
+Three bootstrap queues model the product tables over RESP only:
+
+```sh
+# Terminal A
+./examples/python-resp/scripts/start_ss_service.sh
+
+# Terminal B — smoke (default SS_N=5000, sub-second soft latency bars)
+cd examples/python-resp
+SS_N=5000 python run_e2e.py --suite ss
+```
+
+| Queue | Table |
+|-------|--------|
+| `ss:jobs` | jobs registry |
+| `ss:actions` | executable actions |
+| `ss:scheduled` | scheduled_actions (due / reschedule) |
+
+Evidence: `target/python-resp-ss/<timestamp>/`.
+
 ## Run performance e2e
 
 ```sh

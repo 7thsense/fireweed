@@ -388,13 +388,27 @@ Scale benchmarking must include:
   lower latency or lower cost configurations cannot publish weaker semantics;
 - recurrence under scale on both backend profiles.
 
+## Workload profile — Seventh Sense (RESP black box)
+
+Product-shaped black-box profile for **jobs / actions / scheduled_actions** over
+the RESP worker surface only:
+
+- Profile: `docs/perf/workload-seventh-sense-actions-scheduler.md`
+- Harness: `examples/python-resp` suite `ss` (`SS_N=5000` smoke;
+  `./examples/python-resp/scripts/start_ss_service.sh`)
+- Hard bars: insert / mutate / point-query / drain exactness on three bootstrap
+  queues (`ss:jobs`, `ss:actions`, `ss:scheduled`)
+- Soft latency: sub-second p95 defaults on smoke (capacity + regression); not a
+  substitute for E1–E3 Class A release stamps
+
 ## Manual or Deferred Evidence
 
 The following are not required before the first implementation bead but must be
 covered before claiming product validation:
 
 - Seventh Sense production scheduling SLA for concrete `progress_bound_ms`
-  validation.
+  validation (partially proxied by the RESP black-box drain timeout and first-
+  claim latency in the profile above; full bound remains library/metrics).
 - P1 operator redrive, purge, repair, and archive APIs, and any P1
   operator/compatibility-adapter discovery surface. (The native
   `DiscoverActiveScopes` operation is P0/native-service per PRD and API-001 and is

@@ -40,6 +40,11 @@ PERF_SCENARIOS = [
     "scenarios.perf.P05_end_to_end_pipeline",
 ]
 
+# Seventh Sense multi-queue black box (docs/perf/workload-seventh-sense-actions-scheduler.md)
+SS_SCENARIOS = [
+    "scenarios.ss.SS01_black_box",
+]
+
 
 def _load(module_path: str) -> Any:
     return importlib.import_module(module_path)
@@ -69,11 +74,15 @@ def run_suite(
     elif suite == "perf":
         modules = list(PERF_SCENARIOS)
         kind = "perf"
+    elif suite == "ss":
+        modules = list(SS_SCENARIOS)
+        kind = "ss"
     elif suite == "all":
         modules = list(FUNCTIONAL_SCENARIOS)
         if full:
             modules.extend(FUNCTIONAL_FULL_EXTRA)
         modules.extend(PERF_SCENARIOS)
+        modules.extend(SS_SCENARIOS)
         kind = "all"
     else:
         raise SystemExit(f"unknown suite: {suite}")
