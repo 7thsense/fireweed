@@ -66,7 +66,7 @@ const SCREENSHOT_ROUTES = [
   { id: "api", path: "/api/" },
   { id: "api-rust", path: "/api/rust.html" },
   { id: "deploy", path: "/deploy/" },
-  { id: "preview", path: "/preview.html" },
+  { id: "support", path: "/support.html" },
   { id: "contribute", path: "/contribute.html" },
 ];
 
@@ -220,6 +220,29 @@ async function assertLayout(page, routeId) {
     issues.push(
       `${routeId}: horizontal overflow (scrollWidth=${overflow.scrollWidth}, clientWidth=${overflow.clientWidth})`
     );
+  }
+
+  if (routeId.startsWith("home@")) {
+    const panel = page.locator(".signal-panel");
+    if ((await panel.count()) !== 1) {
+      issues.push(`${routeId}: missing priority queue signal panel`);
+    } else {
+      const box = await panel.boundingBox();
+      const viewport = page.viewportSize();
+      if (!box) {
+        issues.push(`${routeId}: priority queue signal panel has no bounds`);
+      } else if (
+        viewport &&
+        viewport.width >= 1024 &&
+        (box.width > viewport.width * 0.38 ||
+          box.height > 360 ||
+          Math.abs(box.width / box.height - 4 / 3) > 0.05)
+      ) {
+        issues.push(
+          `${routeId}: priority queue signal panel has an invalid desktop footprint (width=${box.width}, height=${box.height})`
+        );
+      }
+    }
   }
 
   return issues;

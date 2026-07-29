@@ -135,7 +135,7 @@ main {
 }
 
 .hero-home {
-  grid-template-columns: minmax(0, 1.1fr) minmax(300px, 0.9fr);
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.7fr);
   align-items: stretch;
   gap: 40px;
 }
@@ -153,7 +153,12 @@ main {
 
 .signal-panel {
   position: relative;
-  min-height: 360px;
+  width: clamp(320px, 32vw, 460px);
+  max-width: 100%;
+  aspect-ratio: 4 / 3;
+  min-height: 0;
+  align-self: center;
+  justify-self: end;
   overflow: hidden;
   border: 1px solid var(--ink);
   border-radius: 8px;
@@ -177,9 +182,9 @@ main {
 
 .signal-mark {
   position: absolute;
-  top: 32px;
+  top: 28px;
   right: 18px;
-  width: min(78%, 315px);
+  width: min(72%, 270px);
   height: auto;
 }
 
@@ -683,6 +688,10 @@ footer.site-footer a {
   .split,
   .hero-home {
     grid-template-columns: 1fr;
+  }
+
+  .signal-panel {
+    justify-self: start;
   }
 
   header.site-header {

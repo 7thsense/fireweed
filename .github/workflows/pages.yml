@@ -45,6 +45,29 @@ jobs:
       - name: Validate and stage microsite (fail closed on broken links)
         run: bash scripts/ci/microsite-gate.sh
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: scripts/site/package-lock.json
+
+      - name: Verify staged layout and screenshots
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd scripts/site
+          npm ci
+          npx playwright install chromium --with-deps
+          python3 -m http.server 4173 --bind 127.0.0.1 \
+            --directory "${GITHUB_WORKSPACE}/target/site-pages" >/tmp/fireweed-site-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "${server_pid}"' EXIT
+          BASE_URL=http://127.0.0.1:4173 \
+          SITE_PREFIX=/site \
+          SCREENSHOT_DIR="${GITHUB_WORKSPACE}/target/site-verify/prepublish-screenshots" \
+          REPORT_PATH="${GITHUB_WORKSPACE}/target/site-verify/prepublish-report.json" \
+          npm run verify
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
