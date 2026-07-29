@@ -18,6 +18,8 @@ fn density_harness_does_not_charge_canonical_storage_to_the_memory_cap() {
     assert!(DENSITY_KIND_HARNESS.contains("emptyDir: { sizeLimit: 64Gi }"));
     assert!(!DENSITY_KIND_HARNESS.contains("emptyDir: { medium: Memory"));
     assert!(DENSITY_KIND_HARNESS.contains("limits: { cpu: \"4000m\", memory: \"4Gi\" }"));
+    assert!(DENSITY_KIND_HARNESS.contains("{ name: FIREWEED_LOG_BACKEND, value: filesystem }"));
+    assert!(!DENSITY_KIND_HARNESS.contains("{ name: FIREWEED_LOG_BACKEND, value: objectlog }"));
 }
 
 #[test]

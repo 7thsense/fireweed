@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Live TP-002 E2 density proof: one durable objectlog/sqlite service with 1001 generated queues.
+# Live TP-002 E2 density proof: one durable filesystem object-log/SQLite service with 1001 generated queues.
 set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -120,7 +120,9 @@ spec:
           imagePullPolicy: Never
           ports: [ { containerPort: 8080 } ]
           env:
-            - { name: FIREWEED_LOG_BACKEND, value: objectlog }
+            # `filesystem` is the public local durable object-log selection. `objectlog` was a
+            # retired internal spelling and fails closed in the server's public configuration parser.
+            - { name: FIREWEED_LOG_BACKEND, value: filesystem }
             # Keep the governed E2 identity exact. FIREWEED_OBJECT_LOG_MODE is a retired pseudo-axis and
             # is intentionally absent; setting it would falsely imply that it selects behavior.
             - { name: FIREWEED_PROJECTION_BACKEND, value: "$PROJECTION_BACKEND" }
@@ -168,7 +170,7 @@ SERVER_IMAGE_ID=$(kubectl -n "$NAMESPACE" get pod "$SERVER_POD" -o jsonpath='{.s
 NODE_IMAGE=$(docker inspect "${CLUSTER}-control-plane" --format '{{.Config.Image}}')
 NODE_CAPACITY=$(kubectl get node -o jsonpath='{.items[0].status.capacity.cpu} {.items[0].status.capacity.memory}')
 HARDWARE="$(nproc) host cores; $(awk '/MemTotal/ {printf "%.1f GiB RAM", $2/1024/1024}' /proc/meminfo); kind node $NODE_IMAGE capacity $NODE_CAPACITY; server limit 4 cores/4 GiB RAM"
-TOPOLOGY="live one-node kind deployment; direct objectlog/sqlite projection on bounded 64 GiB disk-backed emptyDir; one service pod; $QUEUE_COUNT generated queues; one in-cluster load job"
+TOPOLOGY="live one-node kind deployment; direct filesystem objectlog/sqlite projection on bounded 64 GiB disk-backed emptyDir; one service pod; $QUEUE_COUNT generated queues; one in-cluster load job"
 
 cat <<YAML | kubectl apply -f -
 apiVersion: batch/v1
