@@ -58,7 +58,7 @@ On push to `main` (site-related paths) or `workflow_dispatch`:
 
 1. Validate source links + example provenance  
 2. Stage a Pages tree with `scripts/site/stage_pages.py` and run Playwright
-   screenshot/layout verification against that staged artifact  
+   screenshot/layout verification against that staged artifact
    (`site/`, `helix/`, `deployment/`, `operator/`, root policy files)  
 3. Deploy via `actions/deploy-pages`  
 4. Playwright post-deploy: screenshots at common viewports + link crawl  
