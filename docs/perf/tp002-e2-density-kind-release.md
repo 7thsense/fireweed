@@ -7,8 +7,8 @@ scripts/perf/tp002-e2-density-kind.sh
 ```
 
 The command builds the revision's `Dockerfile.e2` image, deploys one
-`fireweed-service` pod to kind with the durable local object-log authority and
-the governed direct SQLite projection, and provisions 1,001 queues
+`fireweed-service` pod to kind with the public `filesystem` durable local
+object-log authority and the governed direct SQLite projection, and provisions 1,001 queues
 through the generated bootstrap
 inventory (`density:q0` through `density:q1000`). `density:q1000` is the hot
 queue; the other 1,000 queues are cold neighbors.
@@ -23,7 +23,8 @@ release gates. The 64 GiB bound covers the canonical ingest plus durable
 claim/finalize command streams and their object-log metadata without relying on
 unbounded node storage. This one-node diagnostic excludes pod or node failover,
 so it makes no persistence claim beyond the live deployment.
-The wrapper does not set the retired `FIREWEED_OBJECT_LOG_MODE` pseudo-axis. The
+The wrapper uses the public `FIREWEED_LOG_BACKEND=filesystem` selection; the
+retired internal `objectlog` spelling fails closed. It does not set the retired `FIREWEED_OBJECT_LOG_MODE` pseudo-axis. The
 row identifies the exact `object_log_sqlite_projection` success barrier and
 does not relabel a hybrid projection as direct SQLite evidence.
 
