@@ -27,7 +27,7 @@ NAV = [
     ("examples/index.html", "Examples", "examples"),
     ("api/index.html", "API", "api"),
     ("deploy/index.html", "Deploy", "deploy"),
-    ("preview.html", "Preview", "preview"),
+    ("support.html", "Support", "support"),
 ]
 
 
@@ -107,8 +107,14 @@ def layout(
     <div class="shell">
       <header class="site-header">
         <a class="brand" href="{rel_to(page, "index.html")}">
+          <svg class="brand-mark" viewBox="0 0 80 80" role="img" aria-label="Fireweed branch signal mark">
+            <path d="M40 70V10M40 25 18 38m22 4 22-13M40 51 13 66m27-6 27-16" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="square"/>
+            <circle cx="40" cy="10" r="8" fill="#c13d74"/>
+            <circle cx="18" cy="38" r="5" fill="#0f766e"/>
+            <circle cx="62" cy="29" r="5" fill="#92ad61"/>
+          </svg>
           <h1>Fireweed Queue</h1>
-          <span>public preview · v{html.escape(version)}</span>
+          <span>v{html.escape(version)}</span>
         </a>
         <nav class="site-nav" aria-label="Primary">
         {nav_html(page, active)}
@@ -120,7 +126,7 @@ def layout(
       <footer class="site-footer">
         <p>
           Fireweed Queue v{html.escape(version)} · {html.escape(meta["status"])} ·
-          source release · crates.io and GHCR deferred ·
+          crates.io and GHCR deferred ·
           issues welcome · code contributions not accepted ·
           {html.escape(meta["license"])}.
         </p>
@@ -131,7 +137,7 @@ def layout(
           Brand voice and style:
           <a href="{rel_to(page, "DESIGN.md")}">DESIGN.md</a>.
           See <a href="{rel_to(page, "contribute.html")}">contribute</a> and
-          <a href="{rel_to(page, "preview.html")}">preview boundary</a>.
+          <a href="{rel_to(page, "support.html")}">support boundary</a>.
         </p>
       </footer>
     </div>
@@ -161,28 +167,42 @@ def write(page: str, content: str) -> None:
 
 def page_home(meta: dict) -> str:
     body = f"""
-        <section class="hero">
+        <section class="hero hero-home">
+          <div class="hero-copy">
           <div class="badge-row">
-            <span class="badge warn">public preview</span>
+            <span class="badge warn">priority queue</span>
             <span class="badge neutral">v{html.escape(meta["version"])}</span>
             <span class="badge ok">source release</span>
           </div>
           <h2>{html.escape(meta["descriptor"])}</h2>
           <p class="lede">
-            For engineers building durable async execution systems: priority,
-            eligibility, leases, retries, and final state in one queue contract—
-            not FIFO glue around a broker. Embed the Rust facade or run a
-            Redis Streams-shaped RESP worker path. Choose Fireweed when work is
-            selected by priority or eligibility, not read once in append order.
+            A durable priority queue for engineers building async execution systems.
+            Put priority first, then combine it with eligibility, leases, retries,
+            and final state in one queue contract. Embed the Rust facade or run a
+            Redis Streams-shaped RESP worker path when FIFO append order is not the
+            scheduling policy your work needs.
           </p>
           <div class="hero-actions">
             <a class="btn" href="get-started.html">Get started</a>
             <a class="btn secondary" href="why.html">Why not a stream?</a>
             <a class="btn secondary" href="examples/index.html">Browse examples</a>
           </div>
+          </div>
+          <aside class="signal-panel" aria-label="Priority queue lifecycle">
+            <span class="signal-label">Priority queue signal</span>
+            <svg class="signal-mark" viewBox="0 0 360 360" role="img" aria-label="Branch Signal mark">
+              <path d="M180 322V38M180 108 74 170m106 8 106-62M180 228 49 303m131-35 131-76" fill="none" stroke="#f8f5eb" stroke-width="5" stroke-linecap="square"/>
+              <circle cx="180" cy="38" r="28" fill="#c13d74" stroke="#17211d" stroke-width="3"/>
+              <circle cx="74" cy="170" r="17" fill="#0f766e" stroke="#17211d" stroke-width="3"/>
+              <circle cx="286" cy="116" r="17" fill="#92ad61" stroke="#17211d" stroke-width="3"/>
+              <circle cx="49" cy="303" r="12" fill="#d87950" stroke="#17211d" stroke-width="3"/>
+              <circle cx="311" cy="192" r="12" fill="#f5c85b" stroke="#17211d" stroke-width="3"/>
+            </svg>
+            <div class="signal-states"><span>accept</span><span>eligible</span><span>claim</span><span>finalize</span></div>
+          </aside>
         </section>
 
-        <div class="section-title"><h2>Why teams embed Fireweed</h2></div>
+        <div class="section-title"><h2>Priority is the primitive</h2></div>
         <div class="grid-3">
           <article class="card card-body">
             <h3>Configurable priority ordering</h3>
@@ -230,10 +250,10 @@ def page_home(meta: dict) -> str:
 
         <div class="callout">
           <p>
-            v{html.escape(meta["version"])} is a <strong>GitHub source</strong> public preview.
+            v{html.escape(meta["version"])} is a <strong>GitHub source release</strong>.
             Publication to crates.io and GHCR is deferred. Memory profiles are
-            development-only. Preview does not mean every compiled storage pairing
-            is production-ready—see the <a href="preview.html">preview boundary</a>.
+            development-only. Not every compiled storage pairing is supported for
+            production use—see the <a href="support.html">support boundary</a>.
           </p>
         </div>
 
@@ -254,7 +274,7 @@ def page_home(meta: dict) -> str:
     return layout(
         page="index.html",
         active="home",
-        title="Fireweed Queue — durable work-state engine",
+        title="Fireweed Queue — durable priority queue",
         body=body,
         meta=meta,
     )
@@ -455,7 +475,7 @@ cargo build -p fireweed-server
         <div class="page-intro">
           <h2>Get started</h2>
           <p>
-            Fireweed v{html.escape(meta["version"])} is a source public preview.
+            Fireweed v{html.escape(meta["version"])} is a source release.
             Clone the repository; crates.io and GHCR publication are deferred.
           </p>
         </div>
@@ -494,7 +514,7 @@ cargo build -p fireweed-server
           <h2>Next</h2>
           <ul>
             <li><a href="concepts.html">Concepts</a> for the product contract</li>
-            <li><a href="preview.html">Preview boundary</a> for supported profiles</li>
+            <li><a href="support.html">Support boundary</a> for supported profiles</li>
             <li><a href="deploy/index.html">Deploy</a> for Helm and runtime axes</li>
             <li><a href="api/index.html">API</a> for the two public faces</li>
           </ul>
@@ -509,12 +529,12 @@ cargo build -p fireweed-server
     )
 
 
-def page_preview(meta: dict) -> str:
+def page_support(meta: dict) -> str:
     body = f"""
         <div class="page-intro">
-          <h2>Public preview boundary</h2>
+          <h2>Support boundary</h2>
           <p>
-            Preview-supported means maintainers accept correctness reports against
+            Supported means maintainers accept correctness reports against
             the documented contract and intend to preserve configuration compatibility
             within each supported 0.x minor line. It is not a 1.0 SemVer, SLA, capacity,
             or production-readiness claim.
@@ -530,7 +550,7 @@ def page_preview(meta: dict) -> str:
             <tr><td><code>objectlog/hybrid-async</code></td><td><span class="badge warn">supported with limits</span></td><td>Async debt/backpressure required; scale/cost claims deferred.</td></tr>
             <tr><td><code>memory/inmemory</code></td><td><span class="badge neutral">development only</span></td><td>Does not survive process loss.</td></tr>
             <tr><td><code>objectlog/turso</code></td><td><span class="badge warn">experimental</span></td><td>Feature-gated; not a supported user profile.</td></tr>
-            <tr><td><code>postgres/*</code></td><td><span class="badge blocked">deferred</span></td><td>Wired and exercised; outside preview support contract.</td></tr>
+            <tr><td><code>postgres/*</code></td><td><span class="badge blocked">deferred</span></td><td>Wired and exercised; outside the current support contract.</td></tr>
           </tbody>
         </table>
         <div class="prose">
@@ -549,16 +569,16 @@ def page_preview(meta: dict) -> str:
           </ul>
           <p>
             Full boundary:
-            <a href="../helix/00-discover/public-preview-boundary.md">public-preview-boundary.md</a>.
+            <a href="../helix/00-discover/public-preview-boundary.md">support policy</a>.
             Checklist:
-            <a href="../helix/05-deploy/public-preview-checklist.md">public-preview-checklist.md</a>.
+            <a href="../helix/05-deploy/public-preview-checklist.md">release checklist</a>.
           </p>
         </div>
 """
     return layout(
-        page="preview.html",
-        active="preview",
-        title="Preview boundary — Fireweed Queue",
+        page="support.html",
+        active="support",
+        title="Support boundary — Fireweed Queue",
         body=body,
         meta=meta,
     )
@@ -780,15 +800,15 @@ def page_api_rust(meta: dict) -> str:
           <h2>Constructors</h2>
         </div>
         <table class="data">
-          <thead><tr><th>Constructor</th><th>Typical use</th><th>Preview note</th></tr></thead>
+          <thead><tr><th>Constructor</th><th>Typical use</th><th>Support note</th></tr></thead>
           <tbody>
             <tr><td><code>open_memory</code></td><td>Local experiments</td><td>Development only</td></tr>
             <tr><td><code>open_sqlite</code></td><td>SQLite log + memory projection</td><td>Supported path</td></tr>
             <tr><td><code>open_sqlite_relational</code></td><td>Relational projection + discovery</td><td>Supported path</td></tr>
             <tr><td><code>open_objectlog</code></td><td>Local object log + memory projection</td><td>Supported path</td></tr>
             <tr><td><code>open_objectlog_sqlite</code></td><td>Object log + SQLite projection</td><td>Supported baseline composition</td></tr>
-            <tr><td><code>open_objectlog_postgres*</code></td><td>Composed OL + Postgres projection</td><td>Outside preview support contract</td></tr>
-            <tr><td><code>open_postgres*</code></td><td>Postgres-backed profiles</td><td>Deferred in preview boundary</td></tr>
+            <tr><td><code>open_objectlog_postgres*</code></td><td>Composed OL + Postgres projection</td><td>Outside current support contract</td></tr>
+            <tr><td><code>open_postgres*</code></td><td>Postgres-backed profiles</td><td>Deferred in support boundary</td></tr>
           </tbody>
         </table>
         <div class="prose">
@@ -925,15 +945,15 @@ def page_deploy(meta: dict) -> str:
         <div class="page-intro">
           <h2>Operator deploy console</h2>
           <p>
-            v{html.escape(meta["version"])} is a source public preview. GHCR publication is deferred;
+            v{html.escape(meta["version"])} is a source release. GHCR publication is deferred;
             use only deployment assets explicitly listed on the GitHub Release.
           </p>
         </div>
         <div class="callout warn">
           <p>
-            Chart values may expose backends that are not preview-supported.
+            Chart values may expose backends that are not currently supported.
             Align production intent with the
-            <a href="../preview.html">preview boundary</a> and
+            <a href="../support.html">support boundary</a> and
             <a href="../../helix/04-build/DEPLOYMENT-READINESS.md">deployment readiness</a>
             contracts—not merely with what Helm renders.
           </p>
@@ -994,7 +1014,7 @@ bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend i
               <div class="storage-axis-list">
                 <article class="storage-axis">
                   <h3>log backend</h3>
-                  <p>Chart values may expose <code>objectlog</code> and <code>postgres</code>. Prefer preview-supported object-log compositions unless you knowingly operate outside the preview contract.</p>
+                  <p>Chart values may expose <code>objectlog</code> and <code>postgres</code>. Prefer supported object-log compositions unless you knowingly operate outside the support contract.</p>
                 </article>
                 <article class="storage-axis">
                   <h3>projection backend</h3>
@@ -1004,17 +1024,17 @@ bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend i
             </section>
             <section class="card" style="margin-top:18px" aria-labelledby="status-title">
               <div class="panel-heading">
-                <h2 id="status-title">Preview status (deploy)</h2>
+                <h2 id="status-title">Support status (deploy)</h2>
                 <span class="badge warn">not 1.0</span>
               </div>
               <div class="status-list">
                 <article class="status-row">
                   <h3><span class="badge ok">supported</span> objectlog + inmemory/sqlite/hybrid</h3>
-                  <p>Within the public preview boundary when release evidence and readiness gates pass for your topology.</p>
+                  <p>Supported when release evidence and readiness gates pass for your topology.</p>
                 </article>
                 <article class="status-row">
                   <h3><span class="badge blocked">deferred</span> postgres chart paths</h3>
-                  <p>May render and even test, but remain outside the preview support contract until promoted.</p>
+                  <p>May render and even test, but remains outside the support contract until promoted.</p>
                 </article>
                 <article class="status-row">
                   <h3><span class="badge warn">verify</span> release artifacts</h3>
@@ -1102,7 +1122,7 @@ def main() -> int:
     write("why.html", page_why(meta))
     write("concepts.html", page_concepts(meta))
     write("get-started.html", page_get_started(meta))
-    write("preview.html", page_preview(meta))
+    write("support.html", page_support(meta))
     write("contribute.html", page_contribute(meta))
     write("examples/index.html", page_examples_index(meta, examples))
     for ex in examples:

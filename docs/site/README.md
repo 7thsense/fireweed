@@ -27,7 +27,7 @@ xdg-open docs/site/index.html   # or open / start as appropriate
 | `examples/src/*.rs` | Provenance-tracked excerpts |
 | `api/` | Rust / RESP / types |
 | `deploy/` | Operator console |
-| `preview.html` | Support matrix |
+| `support.html` | Support matrix |
 | `contribute.html` | Issues-only policy |
 | `_meta/` | site version + example manifest |
 | `assets/` | Shared CSS/JS |

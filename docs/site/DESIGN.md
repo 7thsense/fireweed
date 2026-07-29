@@ -18,7 +18,7 @@ fresh marketing exercise:
 |----------|---------------------|
 | [name-and-positioning-analysis](../helix/00-discover/name-and-positioning-analysis.md) | Selected name, descriptor, identifier map, anti-positions, reject lessons, trademark caveat |
 | [product-vision](../helix/00-discover/product-vision.md) | Mission, north star, audience, value props |
-| [public-preview-boundary](../helix/00-discover/public-preview-boundary.md) | What we may claim in public preview |
+| [public-preview-boundary](../helix/00-discover/public-preview-boundary.md) | Current support posture and deferred profiles |
 | [choosing-fireweed](../helix/01-frame/guides/choosing-fireweed.md) | Fireweed vs stream decision language |
 
 When this file and those artifacts disagree on **identity or claims**, update
@@ -36,7 +36,7 @@ From the 2026-07-23 naming decision (`pqueue-1dd9158f`):
   do not imply trademark finality).
 - **Public descriptor (required first reference):**
 
-  > A durable work-state engine for ordered, recoverable execution.
+  > A durable priority queue for ordered, recoverable execution.
 
 - **Reserve fallback only if clearance fails:** Taskcairn  
 - **Historical only (never current identity):** Queueyard, `pqueue`  
@@ -44,8 +44,8 @@ From the 2026-07-23 naming decision (`pqueue-1dd9158f`):
 
 ### Product semantics the name must carry
 
-The naming analysis is explicit: the product is **not merely a priority queue**.
-It owns the durable work lifecycle:
+Fireweed is a **durable priority queue**. Its priority-queue contract includes
+the durable work lifecycle:
 
 acceptance → configurable ordering → eligibility → grouping → claims & leases →
 retries → idempotency → terminal state → recovery across log × projection combinations.
@@ -55,7 +55,7 @@ It is **not** a workflow engine and does **not** define dependency graphs.
 The name and all public copy must support that broader contract **without**
 promising:
 
-- strict FIFO behavior,
+- FIFO-only behavior,
 - a generic message broker,
 - a worker pool, or
 - a workflow-DAG engine.
@@ -87,7 +87,7 @@ Translate those selection criteria into brand personality:
 
 | Naming criterion | Brand implication |
 |------------------|-------------------|
-| **Semantic fit** | Copy leads with work-state lifecycle, not “yet another queue” |
+| **Semantic fit** | Copy leads with priority-queue semantics, then the lifecycle that makes priority durable |
 | **Distinctiveness** | Prefer a clear, slightly natural-world name over generic infra mashups |
 | **Identifier ergonomics** | Short stems; easy to say and type (`fireweed`, `FIREWEED_`); no clever misspellings |
 | **Collision risk** | Avoid names that parse as adjacent products, industrial jargon, or physical-queue businesses |
@@ -149,9 +149,9 @@ emoji flora.
 
 | Trait | Grounding | In practice |
 |-------|-----------|-------------|
-| **Lifecycle-precise** | Product semantics list in naming analysis | Use claim, lease, finalize, eligibility, request identity—not soft synonyms |
+| **Priority-precise** | Product semantics list in naming analysis | Lead with priority; use claim, lease, finalize, eligibility, request identity—not soft synonyms |
 | **Contract-first** | Vision external transaction contract | Success durable+visible; rejection no effect; ambiguity via `request_id` |
-| **Operator-honest** | Preview boundary | Supported / deferred / experimental / dev-only said early |
+| **Operator-honest** | Support boundary | Supported / deferred / experimental / dev-only said early |
 | **Engineer-first** | Target market table | Explain why a primitive exists; no motivational fluff |
 | **Ergonomic** | Identifier ergonomics score | Short names, scannable tables, no ornamental prose |
 | **Collision-aware** | Naming diligence | No claims that invite confusion with brokers, pools, or streams |
@@ -163,9 +163,9 @@ emoji flora.
 ❌  Hype / generic infra             ✅  Fireweed (research-aligned)
     "Unlock next-gen throughput"         "Claim eligible work under a lease"
     "Seamless job pool at scale"         "Group-aware claims for downstream batches"
-    "Blazing priority queue"             "Priority and eligibility are separate"
+    "Blazing priority queue"             "A durable priority queue where priority and eligibility are separate"
     "Your workflow engine"               "Not a workflow DAG—work-state lifecycle"
-    "Production-ready everything"        "Public preview; matrix support is evidence-bound"
+    "Production-ready everything"        "Support is evidence-bound by storage profile"
     "Just works™"                        "Unsupported pairings fail at startup"
 ```
 
@@ -174,7 +174,7 @@ emoji flora.
 Use these as **value pillars** on home and get-started—worded as contracts, not
 slogans:
 
-1. **Configurable priority ordering** — without rewriting workers  
+1. **Priority ordering** — the primary queue contract, without rewriting workers  
 2. **Bounded progress guarantees** — relaxation without starving eligible work  
 3. **Durable execution lifecycle** — recoverable across worker/process failure  
 4. **Batch and group-aware claims** — downstream-compatible batches  
@@ -194,14 +194,14 @@ Pillars 1–5 are default marketing. Pillar 6 is for deploy/operator surfaces.
 
 | Surface | Register | Research cue |
 |---------|----------|--------------|
-| Microsite home | Descriptor + pillars + status badges | Naming descriptor + vision props |
+| Microsite home | Priority-queue descriptor + pillars + status badges | Naming descriptor + vision props |
 | Why | Decision tables vs streams | choosing-fireweed |
 | Concepts | Definitions, out-of-scope | Product semantics list |
 | Examples | What it proves + provenance | Engineer-first honesty |
 | API | Normative families; public vs internal | Identifier map + facade boundary |
-| Deploy | Verify-first; axes; deferred registries | Preview + operator honesty |
+| Deploy | Verify-first; axes; deferred registries | Support boundary + operator honesty |
 | Contribute | Issues-only; security private | ADR-021 (policy), not naming |
-| Release notes | Past-tense deltas + deferred | Preview boundary |
+| Release notes | Past-tense deltas + deferred | Support boundary |
 
 ---
 
@@ -218,9 +218,8 @@ Pillars 1–5 are default marketing. Pillar 6 is for deploy/operator surfaces.
 | eligible / eligibility | “ready” alone | Distinct from priority |
 | projection | “cache” as the model | Durable composition axis |
 | command log / durable log | “the stream” for internal log | Workers do not consume the log as an app stream |
-| work-state engine | workflow engine / DAG | Explicit anti-position |
-| public preview | beta (unless a different program) | Preview boundary language |
-| preview-supported | production-ready (unless certified) | Honesty criterion |
+| durable priority queue | workflow engine / DAG | Product identity and explicit anti-position |
+| supported | production-ready (unless certified) | Evidence-bound support language |
 | construction / `open_*` | “backend type parameter” as public model | Concrete `Fireweed` facade |
 
 ### Public surface vocabulary
@@ -232,9 +231,9 @@ Pillars 1–5 are default marketing. Pillar 6 is for deploy/operator surfaces.
 
 ### Claims discipline
 
-**May claim** (with preview framing where relevant)
+**May claim** (with support framing where relevant)
 
-- Descriptor and lifecycle ownership from the naming analysis  
+- Durable priority-queue semantics and lifecycle ownership  
 - Priority/eligibility selection; leased claim; complete/retry/release/fail  
 - External transaction contract on **supported durable** Class A cells  
 
@@ -244,7 +243,7 @@ Pillars 1–5 are default marketing. Pillar 6 is for deploy/operator surfaces.
 
 **Must not claim**
 
-- FIFO-as-product, generic broker, worker pool, workflow DAG (naming decision)  
+- FIFO-only product, generic broker, worker pool, workflow DAG  
 - Production readiness for every compiled pairing  
 - Universal latency/throughput leadership  
 - crates.io / GHCR as default install while deferred  
@@ -252,7 +251,7 @@ Pillars 1–5 are default marketing. Pillar 6 is for deploy/operator surfaces.
 - Community code PR program  
 - Trademark-cleared finality of the name while diligence says clearance pending  
 
-When unsure → [public-preview-boundary](../helix/00-discover/public-preview-boundary.md).
+When unsure → [support boundary](../helix/00-discover/public-preview-boundary.md).
 
 ---
 
@@ -260,7 +259,7 @@ When unsure → [public-preview-boundary](../helix/00-discover/public-preview-bo
 
 ### Hero formula
 
-1. Status badges (preview · version · source release)  
+1. Status badges (priority queue · version · source release)  
 2. **Exact descriptor** from naming analysis  
 3. Lede: audience + lifecycle capabilities + “priority or eligibility, not append order”  
 4. CTAs: Get started · Why not a stream? · Examples  
@@ -285,7 +284,7 @@ guide forbids stream-as-consumption-model confusion.
 
 ### Footers (always-on honesty)
 
-- version + public preview  
+- version + source release  
 - crates.io / GHCR deferred (while true)  
 - issues welcome · code contributions not accepted  
 - MIT OR Apache-2.0  
@@ -335,7 +334,7 @@ Names match `assets/site.css`. Change this table and CSS together.
 | `--accent` | `#0f766e` | Links, focus, emphasis |
 | `--accent-2` | `#9f1239` | Rare strong emphasis |
 | `--ok` | `#146c43` | Supported / success |
-| `--warn` | `#b45309` | Preview / verify-first |
+| `--warn` | `#b45309` | Verify-first |
 | `--blocked` | `#b91c1c` | Deferred / danger |
 | `--shadow` | `0 16px 40px rgba(31, 28, 22, 0.14)` | Elevation |
 
@@ -374,6 +373,10 @@ Canonical classes: `.badge`, `.card`, `.callout`, `table.data`, `.code-block`,
 ### Imagery
 
 - Topology SVG and tables over icon packs  
+- **Branch Signal** is the canonical Fireweed mark: a central durable spine with
+  branching priority paths and sparse state nodes. Use the full SVG in the home
+  hero and a simplified version in the header; never substitute a literal flower,
+  leaf, flame, or mascot.  
 - No stock photos, no generative mascots  
 - Diagrams reuse ink/panel/ok/warn fills  
 
@@ -396,19 +399,19 @@ Canonical classes: `.badge`, `.card`, `.callout`, `table.data`, `.code-block`,
 
 | Route | Must include | Must not |
 |-------|--------------|----------|
-| Home | Descriptor, pillars, two faces, preview honesty | Broker/DAG identity |
+| Home | Priority-queue descriptor, pillars, two faces, support honesty | Broker/DAG identity |
 | Why | Stream decision table | Vendor dunking |
 | Concepts | Lifecycle list from naming semantics | Full helix dump |
 | Get started | Source-clone path; deferred registries | Fake crates.io install |
 | Examples | Provenance to real tests | Idealized rewrite of product semantics |
 | API | Public `fireweed` + RESP only | Internal crates as SDKs |
-| Deploy | Verify-first; chart ≠ preview support | “All values production” |
-| Preview | Support matrix | Silent overclaim |
+| Deploy | Verify-first; chart ≠ current support | “All values production” |
+| Support | Support matrix | Silent overclaim |
 | Contribute | Issues-only | PR welcome |
 
 ### Pipeline
 
-1. Naming / vision / preview boundary (governing)  
+1. Naming / vision / support boundary (governing)  
 2. **This DESIGN.md** (voice + visual)  
 3. `render_site.py` + example manifest  
 4. `site.css` tokens  
@@ -416,10 +419,10 @@ Canonical classes: `.badge`, `.card`, `.callout`, `table.data`, `.code-block`,
 
 ### Anti-patterns (compiled)
 
-- Omitting preview status on entry pages  
+- Omitting support status on entry pages  
 - Using Queueyard/pqueue as current identity  
 - Spool/pool/yard/cairn metaphors  
-- Deploy badges that contradict preview boundary  
+- Deploy badges that contradict the support boundary  
 - Examples without provenance  
 - Glassmorphism / purple SaaS skin  
 - “Open a PR” / Discord-first community  
@@ -431,7 +434,7 @@ Canonical classes: `.badge`, `.card`, `.callout`, `table.data`, `.code-block`,
 1. **Name:** Fireweed Queue first; short Fireweed after; no historical-as-current  
 2. **Descriptor:** exact line on major entry surfaces  
 3. **Anti-positions:** not FIFO product, broker, pool, or DAG  
-4. **Status:** public preview + version visible  
+4. **Status:** source release + version visible  
 5. **Deferred:** crates.io / GHCR while deferred  
 6. **North star:** no lost work, no dual active claims, explicit final state  
 7. **Clearance:** no “trademark secured” language while caveat holds  
@@ -447,7 +450,7 @@ Canonical classes: `.badge`, `.card`, `.callout`, `table.data`, `.code-block`,
 |--------|----------|
 | Tone tweak inside this voice | Ordinary review |
 | New public name or descriptor | Update naming analysis **first**, then this file |
-| New claim class / install path | Preview boundary + this file |
+| New claim class / install path | Support boundary + this file |
 | Color / type / component family | §5 + `site.css` together |
 | Fallback rename to Taskcairn | Naming decision + full identity pass (out of band) |
 
