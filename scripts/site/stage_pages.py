@@ -129,8 +129,9 @@ def validate_staged_links(out: Path) -> list[str]:
             except ValueError:
                 errors.append(f"{page.relative_to(out)} escapes stage: {href}")
                 continue
-            if not target.exists():
-                errors.append(f"{page.relative_to(out)} broken: {href}")
+            if target.is_file() or target.is_dir():
+                continue
+            errors.append(f"{page.relative_to(out)} broken: {href}")
     return errors
 
 

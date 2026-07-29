@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="A durable work-state engine for ordered, recoverable execution." />
+    <meta name="description" content="retry and retry_after aliases, absolute vs relative delay, empty claim before due, and max_attempts exhaustion to failed." />
     <title>Absolute and relative retry delays — Fireweed Queue</title>
     <link rel="stylesheet" href="../assets/site.css" />
   </head>
@@ -12,7 +12,7 @@
       <header class="site-header">
         <a class="brand" href="../index.html">
           <h1>Fireweed Queue</h1>
-          <span>public preview · v0.22.0</span>
+          <span>public preview · v0.23.3</span>
         </a>
         <nav class="site-nav" aria-label="Primary">
         <a href="../index.html">Home</a>
@@ -29,7 +29,7 @@
 
         <div class="page-intro">
           <h2>Absolute and relative retry delays</h2>
-          <p></p>
+          <p>retry and retry_after aliases, absolute vs relative delay, empty claim before due, and max_attempts exhaustion to failed.</p>
         </div>
         <div class="example-meta">
           <span class="badge neutral">lifecycle</span>
@@ -119,7 +119,7 @@ async fn retry_aliases_match_absolute_relative_and_exhaustion_behavior() {
       </main>
       <footer class="site-footer">
         <p>
-          Fireweed Queue v0.22.0 · public preview ·
+          Fireweed Queue v0.23.3 · public preview ·
           source release · crates.io and GHCR deferred ·
           issues welcome · code contributions not accepted ·
           MIT OR Apache-2.0.

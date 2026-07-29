@@ -488,7 +488,7 @@ cargo build -p fireweed-server
           <p>
             Worked <strong>Python</strong> queue-management scenarios (docs + e2e + optional
             performance) live in the repository at
-            <a href="../../examples/python-resp/"><code>examples/python-resp/</code></a>
+            <a href="{html.escape(meta['repository'])}/tree/main/examples/python-resp"><code>examples/python-resp/</code></a>
             (<code>run_e2e.py</code>, <code>run_perf.py</code>).
           </p>
           <h2>Next</h2>
@@ -829,7 +829,8 @@ def page_api_rust(meta: dict) -> str:
 
 
 def page_api_resp(meta: dict) -> str:
-    body = """
+    py_examples = f"{html.escape(meta['repository'])}/tree/main/examples/python-resp"
+    body = f"""
         <div class="page-intro">
           <h2>RESP worker API</h2>
           <p>
@@ -862,7 +863,7 @@ def page_api_resp(meta: dict) -> str:
           <p>
             Runnable, commented scenarios for batch insert, pending update, due-batch
             claim, complete, status, and performance load live in
-            <a href="../../examples/python-resp/"><code>examples/python-resp/</code></a>.
+            <a href="{py_examples}"><code>examples/python-resp/</code></a>.
             They double as an evidence-capturing e2e harness over <code>redis-py</code>.
           </p>
         </div>

@@ -71,3 +71,20 @@ Forbidden on execute-bead branches: `gh pr merge --squash`,
 `git filter-branch`, `git filter-repo`, and `git commit --amend` on
 any commit already in the trail.
 <!-- DDX-AGENTS:END -->
+
+## Microsite gate (agents)
+
+The public product microsite (`docs/site/`) deploys via `.github/workflows/pages.yml`
+to GitHub Pages. Broken local hrefs fail that workflow and leave
+https://7thsense.github.io/fireweed/ stale.
+
+**Before committing or landing changes that touch site HTML, site render scripts,
+or example paths linked from the site, run:**
+
+```sh
+bash scripts/ci/microsite-gate.sh
+```
+
+That is the same check used by `pr-gate` bootstrap and the pages build job
+(`check_links` + example provenance + stage validation). Do not ship docs/site
+edits that fail this gate.

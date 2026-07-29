@@ -42,13 +42,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Validate source microsite links and example provenance
-        run: |
-          python3 scripts/site/check_links.py
-          python3 scripts/site/check_example_provenance.py
-
-      - name: Stage GitHub Pages artifact
-        run: python3 scripts/site/stage_pages.py target/site-pages
+      - name: Validate and stage microsite (fail closed on broken links)
+        run: bash scripts/ci/microsite-gate.sh
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

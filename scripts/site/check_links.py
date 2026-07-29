@@ -43,8 +43,21 @@ def check_html(path: Path) -> list[str]:
         except ValueError:
             errors.append(f"{path.relative_to(ROOT)} escapes repo: {href}")
             continue
-        if not target.is_file():
+        # Accept files or directories (directory links often use a trailing slash).
+        if target.is_file():
+            continue
+        if target.is_dir() and (
+            href.rstrip("/").endswith(target.name)
+            or (target / "index.html").is_file()
+            or (target / "README.md").is_file()
+        ):
+            continue
+        if not target.exists():
             errors.append(f"{path.relative_to(ROOT)} broken local link: {href}")
+        else:
+            errors.append(
+                f"{path.relative_to(ROOT)} broken local link (not a file/dir target): {href}"
+            )
     return errors
 
 

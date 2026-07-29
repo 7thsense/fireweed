@@ -392,8 +392,7 @@ validate_docs_microsite() {
         fi
     done
 
-    python3 scripts/site/check_links.py
-    python3 scripts/site/check_example_provenance.py
+    bash scripts/ci/microsite-gate.sh
 }
 
 kind_unavailable_reasons() {

@@ -85,4 +85,7 @@ bash "${SCRIPT_DIR}/coverage-report.sh"
 echo "--- property + fuzz smoke ---"
 bash "${SCRIPT_DIR}/property-fuzz-smoke.sh"
 
+echo "--- microsite gate ---"
+bash "${SCRIPT_DIR}/microsite-gate.sh"
+
 echo "=== pr-gate [${MODE}] PASSED ==="
