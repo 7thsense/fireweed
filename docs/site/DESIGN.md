@@ -174,7 +174,7 @@ emoji flora.
 Use these as **value pillars** on home and get-started—worded as contracts, not
 slogans:
 
-1. **Priority ordering** — the primary queue contract, without rewriting workers  
+1. **Priority ordering** — the primary queue contract, without rewriting workers
 2. **Bounded progress guarantees** — relaxation without starving eligible work  
 3. **Durable execution lifecycle** — recoverable across worker/process failure  
 4. **Batch and group-aware claims** — downstream-compatible batches  
@@ -233,7 +233,7 @@ Pillars 1–5 are default marketing. Pillar 6 is for deploy/operator surfaces.
 
 **May claim** (with support framing where relevant)
 
-- Durable priority-queue semantics and lifecycle ownership  
+- Durable priority-queue semantics and lifecycle ownership
 - Priority/eligibility selection; leased claim; complete/retry/release/fail  
 - External transaction contract on **supported durable** Class A cells  
 
@@ -243,7 +243,7 @@ Pillars 1–5 are default marketing. Pillar 6 is for deploy/operator surfaces.
 
 **Must not claim**
 
-- FIFO-only product, generic broker, worker pool, workflow DAG  
+- FIFO-only product, generic broker, worker pool, workflow DAG
 - Production readiness for every compiled pairing  
 - Universal latency/throughput leadership  
 - crates.io / GHCR as default install while deferred  
@@ -259,7 +259,7 @@ When unsure → [support boundary](../helix/00-discover/public-preview-boundary.
 
 ### Hero formula
 
-1. Status badges (priority queue · version · source release)  
+1. Status badges (priority queue · version · source release)
 2. **Exact descriptor** from naming analysis  
 3. Lede: audience + lifecycle capabilities + “priority or eligibility, not append order”  
 4. CTAs: Get started · Why not a stream? · Examples  
@@ -284,7 +284,7 @@ guide forbids stream-as-consumption-model confusion.
 
 ### Footers (always-on honesty)
 
-- version + source release  
+- version + source release
 - crates.io / GHCR deferred (while true)  
 - issues welcome · code contributions not accepted  
 - MIT OR Apache-2.0  
@@ -376,7 +376,7 @@ Canonical classes: `.badge`, `.card`, `.callout`, `table.data`, `.code-block`,
 - **Branch Signal** is the canonical Fireweed mark: a central durable spine with
   branching priority paths and sparse state nodes. Use the full SVG in the home
   hero and a simplified version in the header; never substitute a literal flower,
-  leaf, flame, or mascot.  
+  leaf, flame, or mascot.
 - No stock photos, no generative mascots  
 - Diagrams reuse ink/panel/ok/warn fills  
 
@@ -411,7 +411,7 @@ Canonical classes: `.badge`, `.card`, `.callout`, `table.data`, `.code-block`,
 
 ### Pipeline
 
-1. Naming / vision / support boundary (governing)  
+1. Naming / vision / support boundary (governing)
 2. **This DESIGN.md** (voice + visual)  
 3. `render_site.py` + example manifest  
 4. `site.css` tokens  
@@ -419,10 +419,10 @@ Canonical classes: `.badge`, `.card`, `.callout`, `table.data`, `.code-block`,
 
 ### Anti-patterns (compiled)
 
-- Omitting support status on entry pages  
+- Omitting support status on entry pages
 - Using Queueyard/pqueue as current identity  
 - Spool/pool/yard/cairn metaphors  
-- Deploy badges that contradict the support boundary  
+- Deploy badges that contradict the support boundary
 - Examples without provenance  
 - Glassmorphism / purple SaaS skin  
 - “Open a PR” / Discord-first community  
@@ -434,7 +434,7 @@ Canonical classes: `.badge`, `.card`, `.callout`, `table.data`, `.code-block`,
 1. **Name:** Fireweed Queue first; short Fireweed after; no historical-as-current  
 2. **Descriptor:** exact line on major entry surfaces  
 3. **Anti-positions:** not FIFO product, broker, pool, or DAG  
-4. **Status:** source release + version visible  
+4. **Status:** source release + version visible
 5. **Deferred:** crates.io / GHCR while deferred  
 6. **North star:** no lost work, no dual active claims, explicit final state  
 7. **Clearance:** no “trademark secured” language while caveat holds  
