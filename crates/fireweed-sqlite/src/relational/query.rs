@@ -654,7 +654,7 @@ pub(crate) fn peek_page_sql(
     } else {
         PEEK_PAGE_FIRST_SQL
     };
-    let mut stmt = st(conn.prepare(sql))?;
+    let mut stmt = st(conn.prepare_cached(sql))?;
     let after = after.map(|item| item.to_string());
     let rows = st(
         stmt.query_map(params![tenant, queue, after, limit as i64], |row| {

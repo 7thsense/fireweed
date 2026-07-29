@@ -523,10 +523,16 @@ pub(crate) fn open_inner(conn: Connection) -> EngineResult<Inner> {
     // fsync (durable at checkpoint). The projection is rebuildable from the durable object log, so this
     // trades nothing the object-log authority does not already guarantee. `busy_timeout` keeps a
     // concurrent checkpoint/reader from turning into a spurious SQLITE_BUSY. (No-ops on `:memory:`.)
+    // WAL + NORMAL for cheap group-commit applies. Large page-cache (256 MiB advisory) keeps multi-million
+    // live_items / peek pages off the disk for recovery verification and hot claim paths; the projection
+    // remains rebuildable from the durable log so a larger cache is not a durability claim.
     st(conn.execute_batch(
         "PRAGMA journal_mode=WAL;\
          PRAGMA synchronous=NORMAL;\
-         PRAGMA busy_timeout=5000;",
+         PRAGMA busy_timeout=5000;\
+         PRAGMA cache_size=-262144;\
+         PRAGMA temp_store=MEMORY;\
+         PRAGMA mmap_size=268435456;",
     ))?;
     st(conn.execute_batch(RELATIONAL_SCHEMA))?;
     backfill_id_high_water_once(&conn)?;
