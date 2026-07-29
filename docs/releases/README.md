@@ -1,16 +1,21 @@
 # Release tag evidence gate
 
-Every Fireweed tag must pass two distinct evidence lanes before artifacts are
-published.
+Fireweed release qualification has a local smoke-evidence lane and a
+tag-publishing governed-evidence lane; neither permits a missing semantic
+authority to be substituted.
 
-`scripts/ci/release-gate.sh` first creates a clean ledger and runs the current
-smoke suites. Fresh smoke-tier E2 and E3 rows are required. The same command then
-validates the governed TP-002 composite at
+The default local invocation of `scripts/ci/release-gate.sh` first creates a
+clean ledger and runs the current smoke suites. Fresh smoke-tier E2 and E3 rows
+are required. The same command then validates the governed TP-002 composite at
 `target/tp002-release/composite-contract.json`. Exact-commit evidence producers stage
 these files outside Git because a commit cannot contain a file that embeds that
 same commit's not-yet-computed SHA. The composite names separate E0, E1, E2
 cross-owner, E2 density, E2 failover/routing, and E3 authorities. No directory
 scan or generic `bars_met=true` row can satisfy a missing semantic authority.
+The tag workflow invokes `release-gate.sh --governed-performance-only`: it runs
+the functional release checks and exact-revision composite verifier, but does
+not rerun scaled local smoke workloads on a GitHub runner. Its required
+performance authority is the acquired, semantic-verified governed archive.
 
 The tag workflow then verifies `target/tp002-release/attestation.json`. It
 verifies that the resolved tag points to `GITHUB_SHA`, that the attestation
