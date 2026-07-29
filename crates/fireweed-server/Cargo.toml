@@ -33,7 +33,7 @@ heimq-broker = { git = "https://github.com/easel/heimq", tag = "v0.1.2" }
 # kafka-protocol 0.15.1 that bounds Array/CompactArray decode allocation (fixes the OOM DoS). Used to
 # encode change records for the in-process log append path, matching the version the embedded fjord/heimq
 # broker decodes with (`RecordBatchView::from_bytes`). No upstream kafka-protocol, no C/cmake/libcurl.
-heimq-protocol = { git = "https://github.com/easel/heimq", tag = "v0.1.2", default-features = false }
+heimq-protocol = { git = "https://github.com/easel/heimq", tag = "v0.1.6", default-features = false }
 # OPTIONAL external-Kafka deployment seam: a pure-Rust Kafka producer used only when the operator opts a
 # deployment into publishing change records to an EXTERNAL Kafka instead of the in-process embedded fjord
 # surface. Default-off; `default-features = false` keeps the C compression codecs (lz4/zstd) out.
