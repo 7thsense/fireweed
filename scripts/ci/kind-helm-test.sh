@@ -151,14 +151,11 @@ needs_in_cluster_postgres() {
     [[ "${LOG_BACKEND}" == "postgres" || "${PROJECTION_BACKEND}" == "postgres" ]]
 }
 
-# The cargo features the Fireweed image must be built with for the selected backend. The postgres log axis
-# needs the `postgres` feature (Backend::PostgresNative); everything else ships the default (no-feature) image.
+# Extra cargo features for the image build. Postgres log/projection are default-on in
+# fireweed-server (full public matrix is runtime-selectable); only native-tls is opt-in.
+# Override with IMAGE_CARGO_FEATURES=tls when the smoke needs sslmode=require.
 image_cargo_features() {
-    if needs_in_cluster_postgres; then
-        echo "postgres"
-    else
-        echo ""
-    fi
+    echo "${IMAGE_CARGO_FEATURES:-}"
 }
 
 cleanup() {

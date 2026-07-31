@@ -41,8 +41,10 @@ PERF_SCENARIOS = [
 ]
 
 # Seventh Sense multi-queue black box (docs/perf/workload-seventh-sense-actions-scheduler.md)
+# SS02 is the parameterized lifecycle framework demo (N, N/x, y, Z).
 SS_SCENARIOS = [
     "scenarios.ss.SS01_black_box",
+    "scenarios.ss.SS02_lifecycle",
 ]
 
 
