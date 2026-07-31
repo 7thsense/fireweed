@@ -29,7 +29,10 @@ fn paths() -> (String, String) {
     (log, proj)
 }
 
-fn make() -> fireweed_sqlite::ComposedSqliteLogSqliteProjectionBackend {
+fn make() -> fireweed_engine::AsyncLogReplayBackend<
+    fireweed_sqlite::SqliteLog,
+    fireweed_sqlite::SqliteProjectionStore,
+> {
     let (log, proj) = paths();
     CLEANED.with(|c| {
         if !c.get() {

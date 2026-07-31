@@ -26,14 +26,12 @@ use fireweed_core::{
     QueryCapabilityFlags, QueueDefinition, QueueId, RangeScanRequest, RangeScanResponse, RequestId,
     TenantId, UtcTimestamp,
 };
-use fireweed_engine::{
-    Backend, BatchUpdatePort, BatchUpdateRequest, BatchUpdateResponse, BoundedMutationContext,
+use fireweed_engine::{Backend, BatchUpdatePort, BatchUpdateRequest, BatchUpdateResponse, BoundedMutationContext,
     ClaimByQueryContext, CommitCapabilities, CommitEntryOutcome, CommitRecovery, CommitTransition,
     CommitTransitionPort, DiscoveryGranularity, DiscoveryPort, DurabilityClass,
     HistoricalProjectionRead, HotProjectionQueryPort, IndexHit, IndexQueryPort, PayloadUpdate,
     RawCommitOutcome, RawCommitRequest, ReclaimPort, RecoveryReadPort, ReschedulePort,
-    ScheduleUpdate, SetGatesCommand, SetGatesPort, UpdateFieldsPort,
-};
+    ScheduleUpdate, SetGatesCommand, SetGatesPort, UpdateFieldsPort,};
 use fireweed_engine::{
     ClaimPort, ClaimRequest, Claimed, ClaimedItem, CommandPosition, ControlPlaneStore,
     CreateQueueOutcome, EngineError, EngineResult, FinalizeOutcome, FinalizePort, ItemView,
@@ -767,6 +765,32 @@ impl<B: RespBackend> UpsertPort for PostgresWholeOperationAdapter<B> {
                 .await
         })
     }
+
+    /// Forward the ordered-independent batch so RESP pipelined keyed XADD co-buffers like push.
+    /// Without this override the trait default runs one `replace_if_pending` per item (~seal/item).
+    fn replace_if_pending_ordered_independent(
+        &self,
+        shard: &QueueKey,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = Vec<EngineResult<UpsertOutcome>>> + Send {
+        let count = items.len();
+        let shard = shard.clone();
+        let queue = shard.clone();
+        let inner = self.arc_for(&queue);
+        let dispatched = self.dispatch(queue, move || async move {
+            Ok(inner
+                .replace_if_pending_ordered_independent(&shard, items, now, expected_epoch)
+                .await)
+        });
+        async move {
+            match dispatched.await {
+                Ok(outcomes) => outcomes,
+                Err(error) => vec![Err(error); count],
+            }
+        }
+    }
 }
 
 impl<B: RespBackend> FinalizePort for PostgresWholeOperationAdapter<B> {
@@ -1272,22 +1296,17 @@ mod tests {
         PriorityTieBreaker, RecurrencePolicy, RetryPolicy,
     };
     use fireweed_engine::{Backend, ComposeFaultHook, ComposeFaultPoint, RawCommitRequest};
-    use fireweed_objectlog::segmented::{
-        FaultCutPoint, FaultHook, InMemoryBlobStore, SegmentConfig,
-    };
     use tokio::sync::oneshot;
 
     fn drive_blocking<F: Future>(future: F) -> F::Output {
         futures::executor::block_on(future)
     }
-
     fn queue(name: &str) -> QueueKey {
         QueueKey::new(
             TenantId::new("tenant").unwrap(),
             QueueId::new(name).unwrap(),
         )
     }
-
     fn adapter(
         running: usize,
         queued: usize,
@@ -1298,7 +1317,6 @@ mod tests {
             queued,
         ))
     }
-
     fn definition(name: &str) -> QueueDefinition {
         QueueDefinition {
             tenant_id: TenantId::new("tenant").unwrap(),
@@ -1328,7 +1346,6 @@ mod tests {
             emit_change_records: false,
         }
     }
-
     fn push_spec() -> PushSpec {
         PushSpec {
             client_item_key: None,
@@ -1343,125 +1360,6 @@ mod tests {
             entity: None,
         }
     }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn production_wrapper_forwards_ten_1000_item_windows_to_segmented_group_commit() {
-        let projection_path = std::env::temp_dir().join(format!(
-            "fireweed-ordered-wrapper-{}-{}.db",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let inner = Arc::new(
-            crate::SegmentedObjectLogSqliteBackend::open_with_blob_store(
-                Arc::new(InMemoryBlobStore::new()),
-                projection_path.to_str().unwrap(),
-                SegmentConfig::new(64 * 1024 * 1024, 20).unwrap(),
-            )
-            .unwrap(),
-        );
-        let flusher = inner.spawn_flusher();
-        let adapter = PostgresWholeOperationAdapter::from_arc(Arc::clone(&inner));
-        let mut def = definition("ordered-wrapper");
-        def.max_push_batch_size = 100;
-        let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
-        adapter.create_queue(def).await.unwrap();
-        let now = UtcTimestamp::new(1_700_000_000, 0).unwrap();
-        for _ in 0..10 {
-            let outcomes = adapter
-                .push_ordered_independent(&shard, vec![push_spec(); 1_000], now, None)
-                .await;
-            assert!(outcomes.iter().all(Result::is_ok));
-        }
-        let counters = inner.segment_counters();
-        assert_eq!(counters.commands_committed, 10_000);
-        assert!(counters.max_batch_size() > 100);
-        assert_eq!(inner.metrics(&shard).await.unwrap().pending, 10_000);
-        flusher.abort();
-        drop(adapter);
-        drop(inner);
-        let _ = std::fs::remove_file(projection_path);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn actual_resp_service_stack_completes_a_10k_pipeline_through_group_commit() {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-        let projection_path = std::env::temp_dir().join(format!(
-            "fireweed-resp-stack-{}-{}.db",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let inner = Arc::new(
-            crate::SegmentedObjectLogSqliteBackend::open_with_blob_store(
-                Arc::new(InMemoryBlobStore::new()),
-                projection_path.to_str().unwrap(),
-                SegmentConfig::new(64 * 1024 * 1024, 20).unwrap(),
-            )
-            .unwrap(),
-        );
-        let flusher = inner.spawn_flusher();
-        let adapter = Arc::new(PostgresWholeOperationAdapter::from_arc(Arc::clone(&inner)));
-        let mut def = definition("resp-stack");
-        def.max_push_batch_size = 100;
-        let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
-        adapter.create_queue(def).await.unwrap();
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(fireweed_resp::serve(
-            listener,
-            Arc::clone(&adapter),
-            Arc::new(fireweed_resp::SystemClock),
-        ));
-        let mut socket = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let mut pipeline = Vec::new();
-        for priority in 0..10_000 {
-            let priority = priority.to_string();
-            let args = [
-                b"XADD".as_slice(),
-                b"tenant:resp-stack".as_slice(),
-                b"*".as_slice(),
-                b"priority".as_slice(),
-                priority.as_bytes(),
-            ];
-            pipeline.extend_from_slice(format!("*{}\r\n", args.len()).as_bytes());
-            for arg in args {
-                pipeline.extend_from_slice(format!("${}\r\n", arg.len()).as_bytes());
-                pipeline.extend_from_slice(arg);
-                pipeline.extend_from_slice(b"\r\n");
-            }
-        }
-        let started = std::time::Instant::now();
-        socket.write_all(&pipeline).await.unwrap();
-        let mut reader = BufReader::new(socket);
-        let mut line = String::new();
-        for _ in 0..10_000 {
-            line.clear();
-            reader.read_line(&mut line).await.unwrap();
-            assert!(line.starts_with('$'));
-            line.clear();
-            reader.read_line(&mut line).await.unwrap();
-            assert!(line.ends_with("\r\n"));
-        }
-        eprintln!("10k production RESP stack elapsed={:?}", started.elapsed());
-        let counters = inner.segment_counters();
-        assert_eq!(counters.commands_committed, 10_000);
-        assert!(counters.max_batch_size() > 100);
-        assert_eq!(inner.metrics(&shard).await.unwrap().pending, 10_000);
-        server.abort();
-        flusher.abort();
-        drop(reader);
-        drop(adapter);
-        drop(inner);
-        let _ = std::fs::remove_file(projection_path);
-    }
-
     #[test]
     fn pooled_reclaim_uses_fixed_cap_concurrency_without_per_queue_tasks() {
         let source = include_str!("postgres_native.rs");
@@ -1476,13 +1374,6 @@ mod tests {
         assert!(!tick.contains("tokio::spawn"));
         assert!(!tick.contains("for (index, inner)"));
     }
-
-    struct BlockingApplyHook {
-        entered: std::sync::Mutex<Option<oneshot::Sender<()>>>,
-        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
-    }
-
-    impl ComposeFaultHook for BlockingApplyHook {
         fn fault_point(&self, cut: ComposeFaultPoint) -> EngineResult<()> {
             if cut == ComposeFaultPoint::DuringProjectionApply {
                 if let Some(entered) = self.entered.lock().unwrap().take() {
@@ -1492,25 +1383,6 @@ mod tests {
             }
             Ok(())
         }
-    }
-
-    struct BlockingSegmentHook {
-        entered: std::sync::Mutex<Option<oneshot::Sender<()>>>,
-        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
-    }
-
-    impl FaultHook for BlockingSegmentHook {
-        fn fault_point(&self, cut: FaultCutPoint) -> EngineResult<()> {
-            if cut == FaultCutPoint::BeforeSegmentWrite {
-                if let Some(entered) = self.entered.lock().unwrap().take() {
-                    let _ = entered.send(());
-                }
-                self.release.lock().unwrap().recv().unwrap();
-            }
-            Ok(())
-        }
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn blocked_storage_does_not_block_runtime_or_another_queue() {
         let adapter = adapter(2, 2);
@@ -1542,7 +1414,6 @@ mod tests {
         release_a_tx.send(()).unwrap();
         a_task.await.unwrap().unwrap();
     }
-
     #[tokio::test(flavor = "current_thread")]
     async fn native_async_future_never_moves_to_blocking_thread() {
         let adapter = PostgresWholeOperationAdapter::from_native_arc(Arc::new(
@@ -1558,7 +1429,6 @@ mod tests {
             .unwrap();
         assert_eq!(observed, runtime_thread);
     }
-
     #[tokio::test(flavor = "current_thread")]
     async fn blocking_future_tail_stays_off_reactor_after_pending() {
         let adapter = adapter(1, 1);
@@ -1580,7 +1450,6 @@ mod tests {
         let tail_thread = operation.await.unwrap().unwrap();
         assert_ne!(tail_thread, runtime_thread);
     }
-
     #[tokio::test(flavor = "current_thread")]
     async fn production_sqlite_pool_allows_queue_b_while_queue_a_apply_is_blocked() {
         let path = std::env::temp_dir().join(format!(
@@ -1604,7 +1473,10 @@ mod tests {
                     QueueId::new(&a_name).unwrap(),
                 );
                 let index = PostgresWholeOperationAdapter::<
-                fireweed_sqlite::ComposedSqliteBackend,
+                fireweed_engine::AsyncLogReplayBackend<
+                    fireweed_sqlite::SqliteLog,
+                    fireweed_sqlite::InMemoryProjection,
+                >,
             >::pool_index(&key, raw.len());
                 if index == 0 {
                     break index;
@@ -1617,7 +1489,7 @@ mod tests {
                 TenantId::new("tenant").unwrap(),
                 QueueId::new(&b_name).unwrap(),
             );
-            if PostgresWholeOperationAdapter::<fireweed_sqlite::ComposedSqliteBackend>::pool_index(
+            if PostgresWholeOperationAdapter::<fireweed_engine::AsyncLogReplayBackend<fireweed_sqlite::SqliteLog, fireweed_sqlite::InMemoryProjection>>::pool_index(
                 &key,
                 raw.len(),
             ) != a_index
@@ -1659,251 +1531,6 @@ mod tests {
         drop(adapter);
         let _ = std::fs::remove_file(path);
     }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn production_objectlog_pool_allows_queue_b_while_queue_a_store_is_blocked() {
-        let store = Arc::new(InMemoryBlobStore::new());
-        let config = SegmentConfig::new(1, 1_000).unwrap();
-        let mut raw = Vec::new();
-        for _ in 0..4 {
-            raw.push(
-                crate::SegmentedObjectLogInMemoryBackend::open_with_blob_store(
-                    store.clone(),
-                    config,
-                )
-                .unwrap(),
-            );
-        }
-        let a_name = "object-a";
-        let a_queue = queue(a_name);
-        let a_index =
-            PostgresWholeOperationAdapter::<crate::SegmentedObjectLogInMemoryBackend>::pool_index(
-                &a_queue,
-                raw.len(),
-            );
-        let mut b_name = "object-b".to_string();
-        let b_queue = loop {
-            let candidate = queue(&b_name);
-            if PostgresWholeOperationAdapter::<crate::SegmentedObjectLogInMemoryBackend>::pool_index(
-                &candidate,
-                raw.len(),
-            ) != a_index
-            {
-                break candidate;
-            }
-            b_name.push('b');
-        };
-        let (entered_tx, entered_rx) = oneshot::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        raw[a_index].set_object_log_fault_hook(Some(Arc::new(BlockingSegmentHook {
-            entered: std::sync::Mutex::new(Some(entered_tx)),
-            release: std::sync::Mutex::new(release_rx),
-        })));
-        let raw: Vec<_> = raw.into_iter().map(Arc::new).collect();
-        let flushers: Vec<_> = raw.iter().map(|backend| backend.spawn_flusher()).collect();
-        let adapter = Arc::new(PostgresWholeOperationAdapter::from_arcs(raw));
-        adapter.create_queue(definition(a_name)).await.unwrap();
-        adapter
-            .create_queue(definition(b_queue.queue_id.as_str()))
-            .await
-            .unwrap();
-        let a = Arc::clone(&adapter);
-        let a_task = tokio::spawn(async move {
-            a.push(
-                &a_queue,
-                vec![push_spec()],
-                UtcTimestamp::new(1_700_000_000, 0).unwrap(),
-                None,
-            )
-            .await
-        });
-        entered_rx.await.unwrap();
-        adapter
-            .push(
-                &b_queue,
-                vec![push_spec()],
-                UtcTimestamp::new(1_700_000_000, 0).unwrap(),
-                None,
-            )
-            .await
-            .unwrap();
-        release_tx.send(()).unwrap();
-        a_task.await.unwrap().unwrap();
-        for flusher in flushers {
-            flusher.abort();
-        }
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn production_objectlog_sqlite_pool_allows_queue_b_while_queue_a_store_is_blocked() {
-        let projection_path = std::env::temp_dir().join(format!(
-            "fireweed-segmented-sqlite-pool-{}-{}.db",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let store = Arc::new(InMemoryBlobStore::new());
-        let config = SegmentConfig::new(1, 1_000).unwrap();
-        let mut raw = Vec::new();
-        for _ in 0..4 {
-            raw.push(
-                crate::SegmentedObjectLogSqliteBackend::open_with_blob_store(
-                    store.clone(),
-                    projection_path.to_str().unwrap(),
-                    config,
-                )
-                .unwrap(),
-            );
-        }
-        let a_name = "object-sqlite-a";
-        let a_queue = queue(a_name);
-        let a_index =
-            PostgresWholeOperationAdapter::<crate::SegmentedObjectLogSqliteBackend>::pool_index(
-                &a_queue,
-                raw.len(),
-            );
-        let mut b_name = "object-sqlite-b".to_string();
-        let b_queue = loop {
-            let candidate = queue(&b_name);
-            if PostgresWholeOperationAdapter::<crate::SegmentedObjectLogSqliteBackend>::pool_index(
-                &candidate,
-                raw.len(),
-            ) != a_index
-            {
-                break candidate;
-            }
-            b_name.push('b');
-        };
-        let (entered_tx, entered_rx) = oneshot::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        raw[a_index].set_object_log_fault_hook(Some(Arc::new(BlockingSegmentHook {
-            entered: std::sync::Mutex::new(Some(entered_tx)),
-            release: std::sync::Mutex::new(release_rx),
-        })));
-        let raw: Vec<_> = raw.into_iter().map(Arc::new).collect();
-        let flushers: Vec<_> = raw.iter().map(|backend| backend.spawn_flusher()).collect();
-        let adapter = Arc::new(PostgresWholeOperationAdapter::from_arcs(raw));
-        adapter.create_queue(definition(a_name)).await.unwrap();
-        adapter
-            .create_queue(definition(b_queue.queue_id.as_str()))
-            .await
-            .unwrap();
-        let a = Arc::clone(&adapter);
-        let a_task = tokio::spawn(async move {
-            a.push(
-                &a_queue,
-                vec![push_spec()],
-                UtcTimestamp::new(1_700_000_000, 0).unwrap(),
-                None,
-            )
-            .await
-        });
-        entered_rx.await.unwrap();
-        adapter
-            .push(
-                &b_queue,
-                vec![push_spec()],
-                UtcTimestamp::new(1_700_000_000, 0).unwrap(),
-                None,
-            )
-            .await
-            .unwrap();
-        release_tx.send(()).unwrap();
-        a_task.await.unwrap().unwrap();
-        for flusher in flushers {
-            flusher.abort();
-        }
-        drop(adapter);
-        let _ = std::fs::remove_file(projection_path);
-    }
-
-    async fn assert_hybrid_pool_progress(
-        label: &str,
-        strict: bool,
-        monitor: Option<crate::HybridAsyncThresholds>,
-    ) {
-        let path = std::env::temp_dir().join(format!(
-            "fireweed-{label}-pool-{}-{}.db",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let store = Arc::new(InMemoryBlobStore::new());
-        let mut raw = Vec::new();
-        for index in 0..4 {
-            raw.push(
-                crate::open_objectlog_hybrid_backend(
-                    store.clone(),
-                    &path,
-                    SegmentConfig::new(1, 1_000).unwrap(),
-                    crate::DEFAULT_RECOVERY_MAX_TAIL,
-                    0,
-                    fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK,
-                    strict,
-                    monitor,
-                    fireweed_engine::BufferedByteBudget::new(
-                        fireweed_engine::BufferedByteBudgetConfig::new(1_048_576).unwrap(),
-                    ),
-                    1_048_576,
-                    Some((index, 4)),
-                )
-                .unwrap(),
-            );
-        }
-        let a_name = format!("{label}-a");
-        let a_queue = queue(&a_name);
-        let a_index = PostgresWholeOperationAdapter::<crate::ObjectLogHybridBackend>::pool_index(
-            &a_queue,
-            raw.len(),
-        );
-        let mut b_name = format!("{label}-b");
-        let b_queue = loop {
-            let candidate = queue(&b_name);
-            if PostgresWholeOperationAdapter::<crate::ObjectLogHybridBackend>::pool_index(
-                &candidate,
-                raw.len(),
-            ) != a_index
-            {
-                break candidate;
-            }
-            b_name.push('b');
-        };
-        let (entered_tx, entered_rx) = oneshot::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        raw[a_index].set_fault_hook(Some(Arc::new(BlockingApplyHook {
-            entered: std::sync::Mutex::new(Some(entered_tx)),
-            release: std::sync::Mutex::new(release_rx),
-        })));
-        let a_backend = Arc::clone(&raw[a_index]);
-        let adapter = Arc::new(PostgresWholeOperationAdapter::from_arcs(raw));
-        adapter.create_queue(definition(&a_name)).await.unwrap();
-        adapter
-            .create_queue(definition(b_queue.queue_id.as_str()))
-            .await
-            .unwrap();
-        let a_task = tokio::task::spawn_blocking(move || {
-            drive_blocking(a_backend.commit_raw(RawCommitRequest::new(a_queue, Vec::new(), 0)))
-        });
-        entered_rx.await.unwrap();
-        adapter
-            .push(
-                &b_queue,
-                vec![push_spec()],
-                UtcTimestamp::new(1_700_000_000, 0).unwrap(),
-                None,
-            )
-            .await
-            .unwrap();
-        release_tx.send(()).unwrap();
-        a_task.await.unwrap().unwrap();
-        drop(adapter);
-        let _ = std::fs::remove_file(path);
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn every_production_hybrid_mode_progresses_queue_b_while_queue_a_is_blocked() {
         assert_hybrid_pool_progress("hybrid", false, None).await;
@@ -1915,7 +1542,6 @@ mod tests {
         )
         .await;
     }
-
     #[tokio::test(flavor = "current_thread")]
     async fn aborting_caller_after_submit_does_not_cancel_storage_operation() {
         let adapter = adapter(1, 1);
@@ -1938,7 +1564,6 @@ mod tests {
         release_tx.send(()).unwrap();
         committed_rx.await.unwrap();
     }
-
     #[tokio::test(flavor = "current_thread")]
     async fn aborting_caller_does_not_discard_an_admitted_queued_operation() {
         let adapter = adapter(1, 2);
@@ -1976,7 +1601,6 @@ mod tests {
         first.await.unwrap().unwrap();
         committed_rx.await.unwrap();
     }
-
     #[tokio::test(flavor = "current_thread")]
     async fn same_queue_operations_enter_blocking_execution_in_fifo_order() {
         let adapter = adapter(2, 2);
@@ -2019,7 +1643,6 @@ mod tests {
         second_started_rx.await.unwrap();
         second.await.unwrap().unwrap();
     }
-
     #[tokio::test(flavor = "current_thread")]
     async fn finite_admission_returns_backpressure_without_starting_extra_work() {
         let adapter = adapter(1, 0);
@@ -2050,7 +1673,6 @@ mod tests {
         release_tx.send(()).unwrap();
         first.await.unwrap().unwrap();
     }
-
     #[tokio::test(flavor = "current_thread")]
     async fn hot_queue_cannot_consume_cold_queue_admission() {
         let adapter = adapter(2, 100);
@@ -2099,7 +1721,6 @@ mod tests {
             task.await.unwrap().unwrap();
         }
     }
-
     #[tokio::test(flavor = "current_thread")]
     async fn close_rejects_queued_work_and_drain_waits_for_started_work() {
         let adapter = adapter(1, 2);

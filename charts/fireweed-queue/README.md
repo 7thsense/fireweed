@@ -58,11 +58,13 @@ family, and `memory` for an in-process projection.
 ### Wiring honesty
 
 Unsupported or not-yet-verified log×projection cells fail loudly at startup
-instead of silent downgrade. Postgres log/projection paths require a binary
-built with the `postgres` cargo feature (`--features postgres`, or
-`--features postgres,tls` for native-tls). The default release image does
-**not** build that feature, so selecting `postgres` against the stock image
-fails at startup with a message naming the required feature build.
+instead of silent downgrade. The stock service binary ships the full public
+log×projection matrix (including postgres); selecting a cell is
+`storage.log.backend` / `storage.projection.backend` (or the matching
+`FIREWEED_*` injection) only — no rebuild. Lakebase / cloud postgres with
+`sslmode=require` still needs a `tls`-built image
+(`docker build --build-arg CARGO_FEATURES=tls ...`); a non-tls image fails
+closed on TLS-requiring DSNs (no plaintext downgrade).
 
 ### Databricks Lakebase (postgres over TLS)
 

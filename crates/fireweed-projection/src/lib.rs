@@ -4790,7 +4790,8 @@ mod tests {
     };
     use fireweed_engine::{
         AdvanceInstanceFenceCommand, ChangeRecordSink, ClaimCommand, ClaimCompatibility, ClaimPort,
-        ClaimRequest, CohortClaimCommand, CommandChecksum, CommandId, ComposedBackend,
+        AsyncLogReplayBackend, ClaimRequest, CohortClaimCommand, CommandChecksum, CommandId,
+        assemble_async_log_replay,
         ControlPlaneStore, FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort,
         InProcessControlPlane, LogStore, PauseQueueCommand, ProjectionStore, PurgeItemsCommand,
         PushCommand, PushPort, PushSpec, QueueKey, QueueMetrics, ReassignLeaseCommand,
@@ -4940,7 +4941,7 @@ mod tests {
         }
     }
 
-    type ObservedBackend = ComposedBackend<ObservedLog, InMemoryProjection, InProcessControlPlane>;
+    type ObservedBackend = AsyncLogReplayBackend<ObservedLog, InMemoryProjection>;
 
     fn shard() -> QueueKey {
         QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
@@ -5143,11 +5144,12 @@ mod tests {
     }
 
     fn observed_backend() -> ObservedBackend {
-        ComposedBackend::new(
+        assemble_async_log_replay(
             ObservedLog::default(),
             InMemoryProjection::new(),
-            InProcessControlPlane::new(),
+            0,
         )
+        .expect("assemble observed backend")
     }
 
     fn create_observed_queue_with_definition(

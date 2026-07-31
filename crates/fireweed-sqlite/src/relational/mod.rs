@@ -1,7 +1,7 @@
 //! # Relational projection family (sqlite) — BQ-11a
 //!
 //! A second rebuildable projection family for sqlite (ADR-008 / TD-001 relational class), distinct from
-//! the log-replay [`crate::ComposedSqliteBackend`]. Here the `fireweed_items` SQL table holds the durable
+//! the log-replay [`crate::AsyncLogReplayBackend<SqliteLog, InMemoryProjection>`]. Here the `fireweed_items` SQL table holds the durable
 //! projection cache (TD-002 columns): every lifecycle command is applied as SQL INSERT/UPDATE/DELETE
 //! against `fireweed_items` inside the unit of work, and reads (eligibility, peek, pending, metrics) are
 //! SQL queries over it. There is **no** shared in-memory [`fireweed_projection::ProjectionData`] and **no**
@@ -47,7 +47,7 @@
 //! the request replay record, while any other tokenless in-flight lease is reclaimed by the epoch owner),
 //! which is why the relational-reconnect conformance scenario asserts only pending-item state. BQ-11d
 
-use fireweed_engine::{ComposedBackend, EngineResult, InProcessControlPlane};
+use fireweed_engine::{AsyncLogReplayBackend, EngineResult, assemble_async_log_replay};
 
 mod apply;
 mod backend;
@@ -73,30 +73,24 @@ pub(crate) use query::*;
 pub(crate) use recovery::*;
 pub use unified::*;
 
-/// The composed unified sqlite-relational backend (ADR-012 P1b-ii):
-/// `ComposedBackend<SqliteRelational, SqliteRelational, InProcessControlPlane>` — one relational store on
-/// both the log and projection axes, so append+apply commit as one transaction. Capability-equivalent to
-/// the monolithic [`SqliteRelationalBackend`] on the CORE conformance class.
-pub type ComposedSqliteRelationalBackend =
-    ComposedBackend<SqliteRelational, SqliteRelational, InProcessControlPlane>;
-
 /// Assemble a unified sqlite-relational composition over an ephemeral `:memory:` store. Both axes are clones
-/// of the SAME store (shared connection), so the orthogonal `commit_locked` drives one durable transaction.
-pub fn composed_sqlite_relational_in_memory() -> EngineResult<ComposedSqliteRelationalBackend> {
+/// of the SAME store (shared connection / handle), so the async log-replay product drives one relational
+/// store on log + projection. Capability-equivalent to the monolithic [`SqliteRelationalBackend`] on the
+/// CORE conformance class.
+pub fn composed_sqlite_relational_in_memory()
+-> EngineResult<AsyncLogReplayBackend<SqliteRelational, SqliteRelational>> {
     let store = SqliteRelational::in_memory()?;
-    Ok(ComposedBackend::new(
-        store.clone(),
-        store,
-        InProcessControlPlane::new(),
-    ))
+    assemble_async_log_replay(store.clone(), store, 0)
 }
 
 /// Assemble a unified sqlite-relational composition over a DURABLE store at `path`. Runs recovery-on-open
 /// (ADR-012 P2): the durable relational cursor provides the replay start, while recovery repopulates the
 /// in-process control plane from the durable `queues` catalog and re-seeds the id-mint counters.
-pub fn composed_sqlite_relational(path: &str) -> EngineResult<ComposedSqliteRelationalBackend> {
+pub fn composed_sqlite_relational(
+    path: &str,
+) -> EngineResult<AsyncLogReplayBackend<SqliteRelational, SqliteRelational>> {
     let store = SqliteRelational::open(path)?;
-    ComposedBackend::new(store.clone(), store, InProcessControlPlane::new()).recover()
+    assemble_async_log_replay(store.clone(), store, 0)?.recover()
 }
 
 #[cfg(test)]

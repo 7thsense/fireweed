@@ -1,38 +1,26 @@
 #![forbid(unsafe_code)]
 //! # fireweed-memory
 //!
-//! In-memory reference backend (atomic durability class), assembled as the orthogonal product
-//! `MemoryLog × InMemoryProjection × InProcessControlPlane` by the one generic
-//! [`fireweed_engine::ComposedBackend`] (ADR-012). All apply/eligibility/lease/metrics logic lives in
-//! [`fireweed_projection`] and the orchestration lives once in [`fireweed_engine::ComposedBackend`]; this crate
-//! only assembles the axes and provides the test-only [`ManualClock`]/[`SeqIdGen`] helpers (memory-specific
-//! and not expressible through the ports).
+//! In-memory reference backend (atomic durability class).
+//!
+//! **Program B:** product composition is the generic
+//! [`fireweed_engine::AsyncLogReplayBackend`] over [`MemoryLog`] ×
+//! [`InMemoryProjection`]. Use [`composed_memory_backend`] to open; type call
+//! sites against the generic product or port traits — not a family product alias.
+
+mod async_backend;
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use fireweed_core::{ItemId, UtcTimestamp};
-use fireweed_engine::{Clock, CommandId, ComposedBackend, IdGen, InProcessControlPlane};
-use fireweed_projection::{InMemoryProjection, MemoryLog};
+use fireweed_engine::{AsyncLogReplayBackend, Clock, CommandId, IdGen};
 
-// ---------------------------------------------------------------------------
-// Composed memory backend (ADR-012)
-//
-// The memory backend expressed as the orthogonal product `MemoryLog × InMemoryProjection ×
-// InProcessControlPlane`, assembled by the one generic `ComposedBackend`. The shared TD-001 conformance
-// suite runs against it (see `tests`).
-// ---------------------------------------------------------------------------
+pub use async_backend::async_composed_memory_backend;
+pub use fireweed_projection::{InMemoryProjection, MemoryLog};
 
-/// The composed memory backend: `ComposedBackend<MemoryLog, InMemoryProjection, InProcessControlPlane>`.
-pub type ComposedMemoryBackend =
-    ComposedBackend<MemoryLog, InMemoryProjection, InProcessControlPlane>;
-
-/// Assemble a fresh composed memory backend from one of each axis.
-pub fn composed_memory_backend() -> ComposedMemoryBackend {
-    ComposedBackend::new(
-        MemoryLog::new(),
-        InMemoryProjection::new(),
-        InProcessControlPlane::new(),
-    )
+/// Assemble a fresh memory backend (async log-replay product).
+pub fn composed_memory_backend() -> AsyncLogReplayBackend<MemoryLog, InMemoryProjection> {
+    async_composed_memory_backend()
 }
 
 // ---------------------------------------------------------------------------

@@ -83,8 +83,51 @@ SS_N=5000 python run_e2e.py --suite ss
 | `ss:actions` | executable actions |
 | `ss:scheduled` | scheduled_actions (due / reschedule) |
 
+| ID | Title |
+|----|--------|
+| `SS01_black_box` | Multi-queue jobs/scheduled/actions smoke + soft latency bars |
+| `SS02_lifecycle` | **Parameterized lifecycle framework** (same loop for any scale) |
+
 Evidence: `target/python-resp-ss/<timestamp>/`.
 
+### Lifecycle framework (`lib/workflow.py`)
+
+Reusable RESP-only loop — **identical shape** for smoke and scale demos:
+
+```text
+for cycle in 1..y:
+    insert N records
+    mutate floor(N / x) of them
+    get status
+then:
+    claim batches of size Z, complete + status, until queue empty
+```
+
+| Knob | Env | Meaning |
+|------|-----|---------|
+| **N** | `WF_N` / `SS_N` | Inserts per cycle |
+| **x** | `WF_MUTATE_DIVISOR` / `SS_X` | Mutate `N/x` keys (default `2` → half) |
+| **y** | `WF_CYCLES` / `SS_Y` | Insert/mutate/status iterations |
+| **Z** | `WF_CLAIM_CHUNK` / `SS_Z` | Claim chunk size (bootstrap often caps at **100**) |
+| pipeline | `WF_PIPELINE` | XADD pipeline batch |
+| queue | `WF_QUEUE` | Stream key (SS02 default `ss:actions`) |
+
+```sh
+# Smoke: 5k insert, mutate half, 1 cycle, drain Z=100
+WF_N=5000 WF_MUTATE_DIVISOR=2 WF_CYCLES=1 WF_CLAIM_CHUNK=100 \
+  python run_e2e.py --suite ss --scenario SS02_lifecycle
+
+# Multi-cycle demo: 2k × 3 cycles, mutate 1/4, mid-drain status every 5 chunks
+WF_N=2000 SS_X=4 SS_Y=3 SS_Z=100 WF_STATUS_EVERY_CHUNKS=5 \
+  python run_e2e.py --suite ss --scenario SS02_lifecycle
+
+# Scale observation (still the same workflow)
+WF_N=100000 WF_CYCLES=1 WF_CLAIM_CHUNK=100 \
+  python run_e2e.py --suite ss --scenario SS02_lifecycle
+```
+
+Primitives (`insert_records`, `mutate_records`, `status_snapshot`, `drain_queue`,
+`run_lifecycle`) live in `lib/workflow.py` so perf/SS scenarios can share one path.
 ## Run performance e2e
 
 ```sh
@@ -139,8 +182,10 @@ examples/python-resp/
   run_e2e.py / run_perf.py
   harness/          # runner, capture, context
   lib/resp.py       # thin helpers (not a full SDK)
+  lib/workflow.py   # parameterized insert/mutate/status × y + drain Z
   scenarios/        # functional (docs + e2e)
   scenarios/perf/   # performance e2e
+  scenarios/ss/     # Seventh Sense black box + lifecycle
   scripts/start_dev_service.sh
 ```
 

@@ -13,7 +13,8 @@ use fireweed_core::{
     PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, QueueIndex, RecurrencePolicy,
     RetryPolicy, TenantId,
 };
-use fireweed_memory::{ComposedMemoryBackend, ManualClock, composed_memory_backend};
+use fireweed_engine::AsyncLogReplayBackend;
+use fireweed_memory::{InMemoryProjection, ManualClock, MemoryLog, composed_memory_backend};
 use fireweed_sqlite::SqliteRelationalBackend;
 use serde_json::{Value, json};
 
@@ -126,7 +127,7 @@ fn key(parts: &[&str]) -> Vec<Vec<u8>> {
     parts.iter().map(|p| p.as_bytes().to_vec()).collect()
 }
 
-async fn new_fireweed() -> RuntimeCore<ComposedMemoryBackend> {
+async fn new_fireweed() -> RuntimeCore<AsyncLogReplayBackend<MemoryLog, InMemoryProjection>> {
     let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
     let fireweed = RuntimeCore::new(backend, clock);

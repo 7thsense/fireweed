@@ -15,10 +15,10 @@ WORKDIR /build
 # target/, VCS, and execution evidence stay out.
 COPY . .
 
-# Optional cargo features for the service binary. The default image ships no extra features; pass
-# `--build-arg CARGO_FEATURES=tls` (or `postgres,tls`) to build the Lakebase / cloud-postgres TLS runtime:
+# Optional extra cargo features. The default service build already includes the full public
+# log×projection matrix (including postgres) via fireweed-server defaults — cell selection is
+# runtime env only. Pass `tls` for Lakebase / cloud-postgres native-tls:
 #   docker build --build-arg CARGO_FEATURES=tls -t fireweed-service:tls .
-# The `tls` feature implies `postgres`, so it wires `Backend::PostgresNative` over native-tls.
 ARG CARGO_FEATURES=""
 
 RUN cargo build --release -p fireweed-release --bin fireweed-verify-ledger \
@@ -43,10 +43,10 @@ COPY --from=builder /build/target/release/fireweed-verify-ledger /usr/local/bin/
 
 USER fireweed
 
-# Default runtime configuration; override per deployment via Helm values.
+# Default runtime configuration (public axes); override per deployment via Helm values.
 ENV FIREWEED_LISTEN_ADDR=0.0.0.0:8080 \
-    FIREWEED_LOG_BACKEND=objectlog \
-    FIREWEED_PROJECTION_BACKEND=inmemory
+    FIREWEED_LOG_BACKEND=filesystem \
+    FIREWEED_PROJECTION_BACKEND=memory
 
 # RESP service listens here.
 EXPOSE 8080

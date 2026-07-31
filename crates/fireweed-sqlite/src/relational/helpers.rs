@@ -1112,7 +1112,7 @@ pub(crate) fn maintain_typed_indexes_on_insert(
     t: &str,
     q: &str,
     typed_indexes: &[QueueIndex],
-    items: &[PushItem],
+    items: &[&PushItem],
 ) -> EngineResult<()> {
     if typed_indexes.is_empty() {
         return Ok(());
@@ -1225,9 +1225,9 @@ pub(crate) fn observe_push_for_claim_scan(
     claim_scan_hints: &mut HashMap<QueueKey, i64>,
     claim_scan_default_fifo: &mut HashMap<QueueKey, bool>,
     shard: &QueueKey,
-    items: &[PushItem],
+    items: &[&PushItem],
 ) {
-    if items.iter().all(is_fifo_claim_scan_item) {
+    if items.iter().copied().all(is_fifo_claim_scan_item) {
         claim_scan_default_fifo.entry(shard.clone()).or_insert(true);
     } else {
         reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);

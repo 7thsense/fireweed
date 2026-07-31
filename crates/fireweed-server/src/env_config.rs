@@ -224,7 +224,9 @@ fn parse_control_plane(
 
 /// The group-commit segment configuration for the segmented object-log families.
 fn segment_config(env: &BTreeMap<String, String>) -> Result<SegmentConfig, ConfigError> {
-    let target_bytes = parse_usize(env, "FIREWEED_SEGMENT_TARGET_BYTES", 262_144);
+    // Match the RESP coalescing window (`PIPELINE_XADD_BYTE_LIMIT` = 1 MiB) so one client pipeline of
+    // up to 1000 XADDs can force-seal as a single segment rather than mid-batch size seals at 256 KiB.
+    let target_bytes = parse_usize(env, "FIREWEED_SEGMENT_TARGET_BYTES", 1024 * 1024);
     let max_latency_ms = parse_u64(env, "FIREWEED_SEGMENT_MAX_LATENCY_MS", 20);
     SegmentConfig::new(target_bytes, max_latency_ms)
         .map_err(|e| ConfigError::new(format!("invalid segment configuration: {e}")))

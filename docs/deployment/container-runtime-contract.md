@@ -95,13 +95,13 @@ The container injection map accepts **only** public product axis names:
 
 Defaults are `filesystem` × `memory`. Legacy product spellings and demoted
 projection paths are hard-rejected by the env adapter (no long-lived aliases).
-`postgres` + projection cells are wired through the blocking-safe
-`PostgresNativeBackend` wrapper when the binary is built with the `postgres`
-cargo feature (`--features postgres`, or `--features postgres,tls` for
-native-tls). The default release image does **not** build that feature, so in
-the shipped image `postgres` still fails at startup with an explicit message
-pointing at the required feature build. Other combinations fail at startup with
-an explicit unsupported-storage message.
+The stock `fireweed-service` binary ships the full public matrix at runtime
+(including postgres log/projection via the blocking-safe
+`PostgresNativeBackend`); selecting a cell is injection only — no rebuild.
+Lakebase / cloud postgres with `sslmode=require` still requires a `tls`-built
+image (`--features tls`); a non-tls binary fails closed on TLS-requiring DSNs
+(no plaintext downgrade). Unsupported pairings fail at startup with an explicit
+unsupported-storage message.
 
 `filesystem`/`s3` (object-log) cells with a local durable projection treat the
 object log as command authority; the local projection is rebuilt from committed

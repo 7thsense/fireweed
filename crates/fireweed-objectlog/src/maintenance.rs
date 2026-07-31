@@ -1,8 +1,10 @@
 //! Object-log adapter types for the engine-owned maintenance policy.
 //!
-//! These types carry bounded discovery/effect evidence across the segmented-store seam. Retention selection
-//! itself lives in `fireweed-engine::compose::plan_retention`; this module deliberately does not define a second
-//! policy or executor.
+//! These types carry bounded discovery/effect evidence across the object-store maintenance seam.
+//! Retention selection itself lives in `fireweed-engine::compose::plan_retention`; this module
+//! deliberately does not define a second policy or executor.
+
+#![allow(dead_code)] // report builders used by retention adapters not yet rewired to LogEngine
 
 use std::collections::BTreeMap;
 use std::num::{NonZeroU64, NonZeroUsize};

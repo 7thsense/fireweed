@@ -9,7 +9,7 @@ use crate::fjord_topic_name;
 use bytes::{Bytes, BytesMut};
 use fireweed_core::{QueueDefinition, UtcTimestamp};
 use fireweed_engine::{
-    BoundedBlockingExecutor, ChangeRecordSink, ComposedBackend, ControlPlane, ControlPlaneStore,
+    AsyncLogReplayBackend, BoundedBlockingExecutor, ChangeRecordSink, ControlPlaneStore,
     EngineError, EngineResult, LogStore, ProjectionStore, QueueKey,
 };
 use heimq_broker::storage::LogBackend;
@@ -110,11 +110,10 @@ pub trait ChangeRecordEmissionBackend {
     }
 }
 
-impl<L, P, C> ChangeRecordEmissionBackend for ComposedBackend<L, P, C>
+impl<L, P> ChangeRecordEmissionBackend for AsyncLogReplayBackend<L, P>
 where
-    L: LogStore,
-    P: ProjectionStore,
-    C: ControlPlane,
+    L: LogStore + Send + 'static,
+    P: ProjectionStore + Send + 'static,
 {
     fn emit_change_record_tail<S: ChangeRecordSink + ?Sized>(
         &self,
@@ -124,7 +123,7 @@ where
         emitted_at: UtcTimestamp,
         source_owner_id: Option<fireweed_core::OwnerId>,
     ) -> EngineResult<usize> {
-        ComposedBackend::emit_change_record_tail(
+        AsyncLogReplayBackend::emit_change_record_tail(
             self,
             shard,
             sink,
@@ -136,6 +135,26 @@ where
 
     fn supports_change_record_emission_cursor(&self) -> bool {
         self.with_log(|log| log.supports_emission_cursor())
+    }
+}
+
+/// LogEngine hybrid product: emission cursor not yet on [`ObjectLogEngineStore`]. Fail closed.
+impl ChangeRecordEmissionBackend for fireweed_objectlog::AsyncObjectLogHybridBackend {
+    fn emit_change_record_tail<S: ChangeRecordSink + ?Sized>(
+        &self,
+        _shard: &QueueKey,
+        _sink: &S,
+        _limit: usize,
+        _emitted_at: UtcTimestamp,
+        _source_owner_id: Option<fireweed_core::OwnerId>,
+    ) -> EngineResult<usize> {
+        Err(EngineError::Invalid(
+            "change record emission cursor is not yet implemented on ObjectLogEngineStore hybrid product",
+        ))
+    }
+
+    fn supports_change_record_emission_cursor(&self) -> bool {
+        false
     }
 }
 

@@ -18,7 +18,8 @@ use fireweed_engine::{
     EngineError, FenceLeaseCommand, PayloadUpdate, ProjectionRead, QueueCommand, QueueKey,
     RawCommitRequest, UpdateFieldsPort,
 };
-use fireweed_memory::{ComposedMemoryBackend, ManualClock, composed_memory_backend};
+use fireweed_engine::AsyncLogReplayBackend;
+use fireweed_memory::{InMemoryProjection, ManualClock, MemoryLog, composed_memory_backend};
 use fireweed_resp::{RespBackend, SystemClock, serve};
 use redis::Value;
 use redis::streams::StreamReadReply;
@@ -28,7 +29,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 /// return an off-the-shelf async Redis connection plus the backend handle (for operator-side setup).
 async fn setup() -> (
     redis::aio::MultiplexedConnection,
-    Arc<ComposedMemoryBackend>,
+    Arc<AsyncLogReplayBackend<MemoryLog, InMemoryProjection>>,
 ) {
     let backend = Arc::new(composed_memory_backend());
     backend.create_queue(qdef()).await.unwrap();
@@ -55,7 +56,7 @@ fn shard() -> QueueKey {
 
 /// Operator-fence a leased item directly on the backend (no RESP operator surface yet), so the e2e can
 /// prove a fenced holder's XACK is refused with `-ERR fireweed stale_lease`.
-async fn fence(backend: &ComposedMemoryBackend, id: &str) {
+async fn fence(backend: &AsyncLogReplayBackend<MemoryLog, InMemoryProjection>, id: &str) {
     let item = ItemId::new(id).unwrap();
     let env = CommandEnvelope {
         command_id: CommandId::new("fence"),
@@ -595,12 +596,12 @@ async fn malformed_bulk_terminator_closes_after_valid_prefix_without_running_suf
 }
 
 struct LyingClaimedViewBackend {
-    inner: Arc<fireweed_memory::ComposedMemoryBackend>,
+    inner: Arc<AsyncLogReplayBackend<fireweed_memory::MemoryLog, fireweed_memory::InMemoryProjection>>,
     push_batch_sizes: Mutex<Vec<usize>>,
 }
 
 impl LyingClaimedViewBackend {
-    fn new(inner: fireweed_memory::ComposedMemoryBackend) -> Self {
+    fn new(inner: AsyncLogReplayBackend<fireweed_memory::MemoryLog, fireweed_memory::InMemoryProjection>) -> Self {
         Self {
             inner: Arc::new(inner),
             push_batch_sizes: Mutex::new(Vec::new()),

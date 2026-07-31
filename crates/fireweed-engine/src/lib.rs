@@ -11,6 +11,7 @@ mod async_cohort_lifecycle;
 mod async_commit;
 mod async_composed;
 mod async_lifecycle_planner;
+mod async_log_replay_product;
 mod async_push_planner;
 mod async_reclaim_planner;
 mod async_store;
@@ -44,11 +45,11 @@ pub use async_cohort_lifecycle::{
     ProjectionCohortLifecyclePlanner,
 };
 pub use async_commit::{
-    AsyncCommitStrategy, CommitStrategy, CommitStrategyKind, DispatchError, InvalidCommitStrategy,
-    KeyedQueueGate, OwnedTask, OwnedTaskDispatcher, OwnedTaskFactory, PreparedAsyncCommitStrategy,
-    QueueGateAcquire, QueueGateError, QueueGatePermit, SeparateReplayCommit,
-    SeparateReplayCommitter, TaskOutcome, TaskOutcomeError, TaskOutcomeSender, UnifiedAtomicCommit,
-    UnifiedAtomicCommitter, task_outcome_channel,
+    AsyncCommitStrategy, CommitStrategy, CommitStrategyKind, DispatchError, InlineOwnedTaskDispatcher,
+    InvalidCommitStrategy, KeyedQueueGate, OwnedTask, OwnedTaskDispatcher, OwnedTaskFactory,
+    PreparedAsyncCommitStrategy, QueueGateAcquire, QueueGateError, QueueGatePermit,
+    SeparateReplayCommit, SeparateReplayCommitter, TaskOutcome, TaskOutcomeError, TaskOutcomeSender,
+    UnifiedAtomicCommit, UnifiedAtomicCommitter, task_outcome_channel,
 };
 pub use async_composed::{
     AsyncClaimError, AsyncClaimPlan, AsyncClaimPlanner, AsyncClaimPostCommitStage,
@@ -59,6 +60,10 @@ pub use async_composed::{
     NoAsyncPushPlanner, NoAsyncReclaimPlanner, PushFingerprint, RenewTarget,
 };
 pub use async_lifecycle_planner::ProjectionLifecyclePlanner;
+pub use async_log_replay_product::{
+    AsyncLogReplayBackend, AtomicLogReplayCommitter, SeqIdGen, assemble_async_log_replay,
+    assemble_async_log_replay_from_parts,
+};
 pub use async_push_planner::ProjectionPushPlanner;
 pub use async_reclaim_planner::{
     AsyncReclaimPlan, AsyncReclaimPlanner, AsyncReclaimRequest, ProjectionReclaimPlanner,
@@ -77,15 +82,19 @@ pub use claim_validation::{
     ClaimCompatibility, ClaimUnit, GroupBatching, require_item_level_claim,
     validate_claim_compatibility,
 };
+// Product composition is `AsyncLogReplayBackend` / `assemble_async_log_replay`
+// (and async family factories). Sync dual-stack `ComposedBackend` was deleted.
 pub use compose::{
     BatchUpdateSnapshotItem, BoundedMutationPlan, BoundedMutationUpdate, ComposeFaultHook,
-    ComposeFaultPoint, ComposedBackend, ControlPlane, DefinitionCursor, DefinitionPage,
-    DetachedLogMaintenance, DetachedRetentionOutcome, DetachedRetentionRequest,
-    DetachedTrimWatermark, ExpiredLeaseCursor, ExpiredLeasePage, InProcessControlPlane,
-    ItemMutationPlan, LogLineageIdentity, LogStore, ProjectionStore, RecoveryStart,
-    RichClaimSelection, definition_page_from_sorted_rows, definition_page_from_storage_rows,
-    item_mutation_fingerprint, max_position, push_items_fingerprint_sha256,
-    push_specs_fingerprint_sha256, queue_worker_partition, resolve_recovery_start,
+    ComposeFaultPoint, ControlPlane, DefinitionCursor, DefinitionPage, DetachedLogMaintenance,
+    DetachedRetentionOutcome, DetachedRetentionRequest, DetachedTrimWatermark, ExpiredLeaseCursor,
+    ExpiredLeasePage, InProcessControlPlane, ItemMutationPlan, LogLineageIdentity, LogStore,
+    ProjectionStore, RecoveryStart, RichClaimSelection, commit_body_hash,
+    definition_page_from_sorted_rows, definition_page_from_storage_rows,
+    item_mutation_fingerprint, max_position, outcome_entry_from_recovery, outcomes_from_recovery,
+    push_items_fingerprint_sha256, push_specs_fingerprint_sha256, queue_worker_partition,
+    recovery_from_outcome_entry, request_expires_at, resolve_recovery_start,
+    validate_gate_command_definition, validate_gate_key_sets,
 };
 pub use control_plane::{
     AcquireOutcome, ControlPlaneConfig, InMemoryControlPlane, LeaseRenewal, LeaseRenewalOutcome,

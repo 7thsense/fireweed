@@ -42,7 +42,7 @@ rskafka = { version = "0.6", default-features = false, optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }
 # The shared production queue-control-plane implementation. This dependency is unconditional because an
 # object-log deployment can use Postgres for ownership even when neither its log nor projection is Postgres.
-# Postgres log/projection selection remains gated by the `postgres` feature below.
+# Postgres log/projection wiring is default-on via the `postgres` feature (full public matrix at runtime).
 fireweed-postgres = { path = "../fireweed-postgres" }
 bytes = "1"
 serde_json = "1"
@@ -51,7 +51,11 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "ma
 tokio-util = { version = "0.7" }
 futures = "0.3"
 [features]
-default = ["env-config"]
+# Stock fireweed-service ships the full public StorageConfig matrix (log × projection)
+# at runtime: memory|sqlite|postgres|filesystem|s3 × memory|sqlite|postgres.
+# Selecting a cell is FIREWEED_LOG_BACKEND / FIREWEED_PROJECTION_BACKEND only — no rebuild.
+# `tls` stays opt-in (native-tls / OpenSSL for Lakebase and cloud postgres DSNs).
+default = ["env-config", "postgres"]
 # The OPTIONAL env-var populator: `Config::from_env(&BTreeMap)` + `ConfigError`, the single place that maps
 # the documented `FIREWEED_*`/`DATABRICKS_*` env NAMES onto the typed `Config`. Default-on so the `fireweed-service`
 # bin builds; a pure-library embedder can `default-features = false` to drop ALL env-name knowledge — the core
@@ -59,6 +63,8 @@ default = ["env-config"]
 # is pure over a caller-supplied map; the only process-env read, `std::env::vars()`, lives in the bin's `main`).
 env-config = []
 # Wire `Backend::PostgresNative` (the sync postgres adapter behind the blocking-safe wrapper).
+# Default-on for the service binary so postgres log/projection cells are runtime-selectable.
+# Library embedders of fireweed-server may still `default-features = false` and omit this feature.
 postgres = []
 # Connect the postgres adapter over native-tls (Lakebase / cloud postgres). Implies `postgres`.
 tls = ["postgres", "fireweed-postgres/tls"]

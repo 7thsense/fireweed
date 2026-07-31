@@ -128,6 +128,33 @@ Directory: `target/python-resp-ss/<UTC>/`
 | `summary.json` | Topology env, `SS_N`, phase timings, percentiles, pass/fail |
 | `SS01_black_box.json` / `.log` | Scenario detail + transcript |
 
+## Parameterized lifecycle framework
+
+Shared implementation: `examples/python-resp/lib/workflow.py`  
+Scenario driver: `SS02_lifecycle` (suite `ss`)
+
+Same RESP loop for smoke and scale — only knobs change:
+
+```text
+for cycle in 1..y:
+    insert N
+    mutate floor(N / x)     # re-XADD same client_item_key
+    status                  # XLEN / XINFO / XPENDING + sample FW.HGETALL
+then:
+    claim Z → XACK → status  (repeat until XLEN == 0 or timeout)
+```
+
+| Symbol | Env | Default smoke | Role |
+|--------|-----|---------------|------|
+| **N** | `WF_N` / `SS_N` | 5_000 | Records inserted per cycle |
+| **x** | `WF_MUTATE_DIVISOR` / `SS_X` | 2 | Mutate `N/x` per cycle |
+| **y** | `WF_CYCLES` / `SS_Y` | 1 | Insert/mutate/status repetitions |
+| **Z** | `WF_CLAIM_CHUNK` / `SS_Z` | 100 | Claim chunk (bootstrap may cap) |
+
+`SS01_black_box` remains the multi-queue narrative (jobs + scheduled + actions)
+with soft latency bars. `SS02_lifecycle` is the **scale dial**: run the same
+workflow at N=5k, 100k, or 1M without rewriting the client loop.
+
 ## Commands
 
 ```sh
@@ -139,13 +166,16 @@ FIREWEED_BOOTSTRAP_QUEUES=ss:jobs,ss:actions,ss:scheduled \
 cd examples/python-resp
 SS_N=5000 python run_e2e.py --suite ss
 
+# Lifecycle framework only (N, x, y, Z)
+WF_N=5000 WF_MUTATE_DIVISOR=2 WF_CYCLES=2 WF_CLAIM_CHUNK=100 \
+  python run_e2e.py --suite ss --scenario SS02_lifecycle
+
 # Larger capacity observation (still RESP black box)
 SS_N=100000 python run_e2e.py --suite ss
 
 # Strict latency (only on a known quiet topology)
 SS_STRICT=1 SS_N=5000 python run_e2e.py --suite ss
 ```
-
 ## Relationship to TP-002
 
 | TP-002 concern | This profile |
@@ -162,4 +192,6 @@ SS_STRICT=1 SS_N=5000 python run_e2e.py --suite ss
 1. Doc checked in (this file).  
 2. `examples/python-resp` suite `ss` runs against bootstrap queues above.  
 3. Smoke `SS_N=5000` green on in-memory service.  
-4. README points operators at the suite and RESP gaps.
+4. README points operators at the suite and RESP gaps.  
+5. Parameterized lifecycle framework (`lib/workflow.py` + `SS02`) exercises
+   insert N → mutate N/x → status × y → drain Z until empty.

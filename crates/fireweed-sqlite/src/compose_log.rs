@@ -2,7 +2,7 @@
 //!
 //! [`SqliteLog`] is a [`fireweed_engine::LogStore`] whose command log + epoch + high-water + snapshots are
 //! durable rows in sqlite. It backs the composed sqlite backend
-//! ([`crate::ComposedSqliteBackend`] = `ComposedBackend<SqliteLog, InMemoryProjection,
+//! ([`crate::AsyncLogReplayBackend<SqliteLog, InMemoryProjection>`] = `ComposedBackend<SqliteLog, InMemoryProjection,
 //! InProcessControlPlane>`), which runs the shared TD-001 suite.
 //!
 //! Unlike the monolith, the epoch lives in this LOG axis (a `log_epochs` table), not in a `queues` table —

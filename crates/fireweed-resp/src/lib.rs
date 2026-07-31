@@ -489,11 +489,16 @@ fn encoded_command_len(args: &[Vec<u8>]) -> usize {
 /// Select complete, compatible XADD frames from the bytes Tokio has already buffered. A semantic,
 /// malformed, or partial boundary is left untouched for the ordinary command path, which preserves
 /// its normal ordered reply and makes cancellation safe.
+///
+/// `keyed` must match the first command of the window: keyless XADDs batch via
+/// [`PushPort::push_ordered_independent`]; keyed XADDs (with `client_item_key`) batch via
+/// [`UpsertPort::replace_if_pending_ordered_independent`]. Mixing keyed and keyless ends the window.
 fn buffered_xadd_window(
     buf: &[u8],
     shard: &QueueKey,
     max_commands: usize,
     max_bytes: usize,
+    keyed: bool,
 ) -> (Vec<Vec<Vec<u8>>>, usize) {
     let mut commands = Vec::new();
     let mut consumed = 0;
@@ -507,7 +512,8 @@ fn buffered_xadd_window(
         let Ok(parsed) = parse_xadd(&args) else {
             break;
         };
-        if !arg_eq(&args[0], "XADD") || parsed.shard != *shard || parsed.client_item_key.is_some() {
+        let has_key = parsed.client_item_key.is_some();
+        if !arg_eq(&args[0], "XADD") || parsed.shard != *shard || has_key != keyed {
             break;
         }
         consumed += frame_bytes;
@@ -653,25 +659,65 @@ async fn handle_conn<B: RespBackend, H: RespHooks>(
             continue;
         }
         let mut commands = vec![args];
-        let first = parse_xadd(&commands[0])
+        let first_xadd = parse_xadd(&commands[0])
             .ok()
-            .filter(|parsed| arg_eq(&commands[0][0], "XADD") && parsed.client_item_key.is_none());
-        if let Some(parsed) = &first {
-            let first_bytes = encoded_command_len(&commands[0]);
-            let (extra, consumed) = buffered_xadd_window(
-                reader.buffer(),
-                &parsed.shard,
-                PIPELINE_XADD_COMMAND_LIMIT - 1,
-                PIPELINE_XADD_BYTE_LIMIT.saturating_sub(first_bytes),
-            );
-            reader.consume(consumed);
-            commands.extend(extra);
+            .filter(|_| arg_eq(&commands[0][0], "XADD"));
+        if let Some(parsed) = &first_xadd {
+            let keyed = parsed.client_item_key.is_some();
+            let mut budget_cmds = PIPELINE_XADD_COMMAND_LIMIT - 1;
+            let mut budget_bytes =
+                PIPELINE_XADD_BYTE_LIMIT.saturating_sub(encoded_command_len(&commands[0]));
+            // Coalesce an already-sent redis-py pipeline into one ordered-independent batch.
+            // Never block indefinitely: a lone XADD client is waiting on our reply.
+            let deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_millis(5);
+            while budget_cmds > 0 && budget_bytes > 0 {
+                let (extra, consumed) = buffered_xadd_window(
+                    reader.buffer(),
+                    &parsed.shard,
+                    budget_cmds,
+                    budget_bytes,
+                    keyed,
+                );
+                if !extra.is_empty() {
+                    reader.consume(consumed);
+                    budget_cmds -= extra.len();
+                    budget_bytes = budget_bytes.saturating_sub(consumed);
+                    commands.extend(extra);
+                    continue;
+                }
+                // Nothing complete in the buffer. If bytes remain they are a partial frame — stop.
+                if !reader.buffer().is_empty() {
+                    break;
+                }
+                // Buffer empty: briefly try to pull more of the pipeline from the kernel.
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(1),
+                    reader.fill_buf(),
+                )
+                .await
+                {
+                    Ok(Ok(buf)) if !buf.is_empty() => continue,
+                    _ => break,
+                }
+            }
+            let replies = if keyed {
+                dispatch_keyed_xadd_batch(&backend, &hooks, &state, &commands).await
+            } else {
+                dispatch_simple_xadd_batch(&backend, &hooks, &state, &commands).await
+            };
+            let mut buf = Vec::new();
+            for reply in replies {
+                encode(&reply, &mut buf);
+            }
+            wr.write_all(&buf).await?;
+            wr.flush().await?;
+            continue;
         }
-        let replies = if first.is_some() {
-            dispatch_simple_xadd_batch(&backend, &hooks, &state, &commands).await
-        } else {
-            vec![dispatch(&backend, &hooks, &state, &commands[0]).await]
-        };
+        let replies = vec![dispatch(&backend, &hooks, &state, &commands[0]).await];
         let mut buf = Vec::new();
         for reply in replies {
             encode(&reply, &mut buf);
@@ -766,6 +812,54 @@ async fn dispatch_simple_xadd_batch_at<B: PushPort, H: RespHooks>(
         expected_epoch,
     )
     .await
+}
+
+async fn dispatch_keyed_xadd_batch<B: RespBackend, H: RespHooks>(
+    backend: &Arc<B>,
+    hooks: &Arc<H>,
+    state: &Arc<ServerState>,
+    commands: &[Vec<Vec<u8>>],
+) -> Vec<Resp> {
+    dispatch_keyed_xadd_batch_at(backend.as_ref(), hooks.as_ref(), state.now(), commands).await
+}
+
+async fn dispatch_keyed_xadd_batch_at<B: UpsertPort, H: RespHooks>(
+    backend: &B,
+    hooks: &H,
+    now: UtcTimestamp,
+    commands: &[Vec<Vec<u8>>],
+) -> Vec<Resp> {
+    let parsed: Vec<_> = commands
+        .iter()
+        .map(|args| parse_xadd(args).expect("buffered keyed XADD window contains parsed commands"))
+        .collect();
+    let shard = parsed[0].shard.clone();
+    let expected_epoch = match xadd_admission(hooks, &commands[0], &shard, now).await {
+        Ok(epoch) => epoch,
+        Err(reply) => return vec![reply; commands.len()],
+    };
+    // Attach client_item_key onto each PushSpec for the ordered-independent upsert path.
+    let specs: Vec<PushSpec> = parsed
+        .into_iter()
+        .map(|p| {
+            let mut spec = p.spec;
+            spec.client_item_key = p.client_item_key;
+            spec
+        })
+        .collect();
+    backend
+        .replace_if_pending_ordered_independent(&shard, specs, now, expected_epoch)
+        .await
+        .into_iter()
+        .map(|outcome| match outcome {
+            Ok(UpsertOutcome::Inserted { item_id })
+            | Ok(UpsertOutcome::Replaced {
+                new_item_id: item_id,
+                ..
+            }) => Resp::Bulk(item_id.to_string().into_bytes()),
+            Err(error) => err_reply(&error),
+        })
+        .collect()
 }
 
 async fn dispatch<B: RespBackend, H: RespHooks>(
@@ -2042,31 +2136,50 @@ mod tests {
         let upsert = command(&[b"XADD", b"tenant:q", b"*", b"client_item_key", b"key"]);
         let non_xadd = command(&[b"PING"]);
 
+        // Keyless window stops at queue change, keyed XADD, or non-XADD.
         for boundary in [&other_queue, &upsert, &non_xadd] {
             let first = encode_command(&compatible);
             let mut bytes = first.clone();
             bytes.extend_from_slice(&encode_command(boundary));
-            let (commands, consumed) = buffered_xadd_window(&bytes, &shard, 100, usize::MAX);
+            let (commands, consumed) =
+                buffered_xadd_window(&bytes, &shard, 100, usize::MAX, false);
             assert_eq!(commands, vec![compatible.clone()]);
             assert_eq!(consumed, first.len(), "boundary must remain unconsumed");
         }
 
+        // Keyed window co-batches other keyed XADDs on the same queue.
+        let upsert2 = command(&[b"XADD", b"tenant:q", b"*", b"client_item_key", b"key2"]);
+        let mut keyed_pair = encode_command(&upsert);
+        keyed_pair.extend_from_slice(&encode_command(&upsert2));
+        let (commands, consumed) =
+            buffered_xadd_window(&keyed_pair, &shard, 100, usize::MAX, true);
+        assert_eq!(commands.len(), 2);
+        assert_eq!(consumed, keyed_pair.len());
+
+        // Keyed window stops at a keyless XADD (mode boundary).
+        let mut keyed_then_plain = encode_command(&upsert);
+        keyed_then_plain.extend_from_slice(&encode_command(&compatible));
+        let (commands, consumed) =
+            buffered_xadd_window(&keyed_then_plain, &shard, 100, usize::MAX, true);
+        assert_eq!(commands, vec![upsert.clone()]);
+        assert_eq!(consumed, encode_command(&upsert).len());
+
         let full = encode_command(&compatible);
         let partial = &full[..full.len() - 1];
-        let (commands, consumed) = buffered_xadd_window(partial, &shard, 100, usize::MAX);
+        let (commands, consumed) = buffered_xadd_window(partial, &shard, 100, usize::MAX, false);
         assert!(commands.is_empty());
         assert_eq!(consumed, 0, "partial frame must remain unconsumed");
 
         let mut two = full.clone();
         two.extend_from_slice(&full);
-        let (commands, consumed) = buffered_xadd_window(&two, &shard, 100, full.len());
+        let (commands, consumed) = buffered_xadd_window(&two, &shard, 100, full.len(), false);
         assert_eq!(commands.len(), 1);
         assert_eq!(
             consumed,
             full.len(),
             "raw RESP framing counts toward the byte cap"
         );
-        let (commands, _) = buffered_xadd_window(&two, &shard, 1, usize::MAX);
+        let (commands, _) = buffered_xadd_window(&two, &shard, 1, usize::MAX, false);
         assert_eq!(commands.len(), 1, "command count bounds the window");
     }
 
@@ -2158,7 +2271,7 @@ mod tests {
                 .flat_map(|args| encode_command(args))
                 .collect();
             let (parsed, consumed) =
-                buffered_xadd_window(&bytes, &shard, count, PIPELINE_XADD_BYTE_LIMIT);
+                buffered_xadd_window(&bytes, &shard, count, PIPELINE_XADD_BYTE_LIMIT, false);
             assert_eq!(parsed.len(), count);
             assert_eq!(consumed, bytes.len());
             let specs = parsed

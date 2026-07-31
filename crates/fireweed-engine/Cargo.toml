@@ -22,9 +22,10 @@ serde = { version = "1", features = ["derive"] }
 # Deterministic body fingerprint for the composed backend's request-id idempotency (ADR-012). Pure
 # serialization, no I/O — mirrors the monolithic memory/sqlite backends.
 serde_json = "1"
+# Owned-task inline dispatcher (tests + in-process async composition) drives factories to completion.
+futures = "0.3"
 
 [dev-dependencies]
-futures = "0.3"
 fireweed-conformance = { path = "../fireweed-conformance" }
 fireweed-projection = { path = "../fireweed-projection" }
 serde_json = "1"

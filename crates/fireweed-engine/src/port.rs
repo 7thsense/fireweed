@@ -846,8 +846,10 @@ impl From<PushBatchOutcome> for Vec<ItemId> {
 }
 
 /// Pending-item replacement, executed in the **same unit of work as claim** so upsert and claim on
-/// one item mutually exclude (TD-007 §2.3). Atomic class only; on eventual-apply the engine returns
-/// `EngineError::Unavailable` without calling this port.
+/// one item mutually exclude (TD-007 §2.3). Required for RESP `XADD` with `client_item_key`.
+/// Group-commit / ack-after-seal backends may implement
+/// [`replace_if_pending_ordered_independent`](UpsertPort::replace_if_pending_ordered_independent)
+/// so a pipelined batch co-buffers into one seal (otherwise each scalar upsert waits alone).
 #[doc(hidden)]
 pub trait UpsertPort: Send + Sync {
     /// Upsert on `client_item_key`. The backend ASSIGNS the new item id from its own command sequence
@@ -868,6 +870,54 @@ pub trait UpsertPort: Send + Sync {
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send;
+
+    /// Bounded pipelined upserts: each `PushSpec` **must** carry `client_item_key`. Default is sequential
+    /// [`replace_if_pending`](Self::replace_if_pending). Group-commit backends override to enqueue every
+    /// command before awaiting durability so N items share segment seals.
+    fn replace_if_pending_ordered_independent(
+        &self,
+        shard: &QueueKey,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = Vec<EngineResult<UpsertOutcome>>> + Send {
+        async move {
+            if items.len() > MAX_ORDERED_INDEPENDENT_PUSH_ITEMS {
+                return vec![
+                    Err(EngineError::Invalid(
+                        "ordered independent upsert exceeds bounded item limit",
+                    ));
+                    items.len()
+                ];
+            }
+            let mut outcomes = Vec::with_capacity(items.len());
+            for item in items {
+                let Some(key) = item.client_item_key.as_ref() else {
+                    outcomes.push(Err(EngineError::Invalid(
+                        "ordered independent upsert requires client_item_key on every item",
+                    )));
+                    continue;
+                };
+                outcomes.push(
+                    self.replace_if_pending(
+                        shard,
+                        key,
+                        item.priority,
+                        item.group_key,
+                        item.not_before,
+                        item.payload,
+                        item.fields,
+                        item.metadata,
+                        item.entity,
+                        now,
+                        expected_epoch,
+                    )
+                    .await,
+                );
+            }
+            outcomes
+        }
+    }
 }
 
 /// A new-item spec for [`PushPort`]. The backend assigns the `item_id` (unique + restart-safe via its

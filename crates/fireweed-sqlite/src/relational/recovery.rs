@@ -7,8 +7,8 @@ use fireweed_core::{
 };
 use fireweed_engine::{
     BatchUpdateResponse, CommandEnvelope, CommandPosition, CreateQueueOutcome, EngineError,
-    EngineResult, QueueCommand, QueueCounters, QueueKey, RequestOutcome, compile_entity_schema,
-    push_items_fingerprint_sha256,
+    EngineResult, PushItem, QueueCommand, QueueCounters, QueueKey, RequestOutcome,
+    compile_entity_schema, push_items_fingerprint_sha256,
 };
 use fireweed_projection::{ProjectionImage, ProjectionImageItem};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -915,6 +915,11 @@ pub(crate) fn apply_committed_sql(
 /// Batched analogue of [`apply_committed_sql`]: apply many already-durable commands in ONE transaction,
 /// reading each queue's cursor once and advancing it once at the end (group-commit apply). Already-applied
 /// positions (`sequence < next_seq`) are skipped idempotently; an out-of-order position is a hard gap error.
+///
+/// Consecutive `QueueCommand::Push` envelopes on the same queue with contiguous sequences are **coalesced**
+/// into one multi-row [`insert_item_specs`] call (the shape `insert_items` was built for). This is pure
+/// projection-side amortization: log granularity and per-command outcomes are unchanged. Non-Push commands
+/// still take the per-command [`apply_command_sql`] path.
 pub(crate) fn apply_committed_batch_sql(
     g: &mut Inner,
     positions: &[CommandPosition],
@@ -941,7 +946,11 @@ pub(crate) fn apply_committed_batch_sql(
     // read once and written once per queue across the whole batch.
     let mut next_seq: HashMap<QueueKey, i64> = HashMap::new();
     let mut max_epoch: HashMap<QueueKey, i64> = HashMap::new();
-    for (pos, env) in positions.iter().zip(envelopes) {
+
+    let mut i = 0usize;
+    while i < positions.len() {
+        let pos = &positions[i];
+        let env = &envelopes[i];
         let (t, q) = parts(&pos.queue);
         let cursor = match next_seq.get(&pos.queue) {
             Some(&n) => n,
@@ -961,6 +970,7 @@ pub(crate) fn apply_committed_batch_sql(
         let incoming = pos.sequence as i64;
         if incoming < cursor {
             // Already applied (idempotent replay of a prefix the projection has already absorbed).
+            i += 1;
             continue;
         }
         if incoming > cursor {
@@ -970,6 +980,75 @@ pub(crate) fn apply_committed_batch_sql(
                 pos.queue.queue_id.as_str()
             )));
         }
+
+        // Coalesce consecutive Push commands on this queue with contiguous sequences into one multi-row
+        // insert. Skips already-applied positions mid-run (idempotent replay).
+        if matches!(env.command, QueueCommand::Push(_)) {
+            let shard = pos.queue.clone();
+            let mut run_end = i;
+            let mut expected = incoming;
+            while run_end < positions.len() {
+                let p = &positions[run_end];
+                let e = &envelopes[run_end];
+                if p.queue != shard {
+                    break;
+                }
+                if !matches!(e.command, QueueCommand::Push(_)) {
+                    break;
+                }
+                let seq_i = p.sequence as i64;
+                if seq_i < expected {
+                    // Already applied prefix inside a larger segment replay — skip past it.
+                    run_end += 1;
+                    continue;
+                }
+                if seq_i > expected {
+                    break;
+                }
+                expected = seq_i
+                    .checked_add(1)
+                    .ok_or_else(|| EngineError::Storage("command sequence overflow".into()))?;
+                run_end += 1;
+            }
+
+            apply_push_run_sql(
+                &tx,
+                queues,
+                grouped_shards,
+                claim_scan_hints,
+                claim_scan_default_fifo,
+                &shard,
+                &positions[i..run_end],
+                &envelopes[i..run_end],
+                cursor,
+            )?;
+
+            // Advance cursors for every non-skipped position in the run.
+            let mut exp = cursor;
+            for (p, e) in positions[i..run_end]
+                .iter()
+                .zip(envelopes[i..run_end].iter())
+            {
+                let seq_i = p.sequence as i64;
+                if seq_i < exp {
+                    continue;
+                }
+                debug_assert_eq!(seq_i, exp);
+                persist_request_outcome_sql(&tx, queues, &p.queue, e, p)?;
+                exp = seq_i
+                    .checked_add(1)
+                    .ok_or_else(|| EngineError::Storage("command sequence overflow".into()))?;
+                let ep = p.backend_epoch as i64;
+                let slot = max_epoch.entry(p.queue.clone()).or_insert(ep);
+                if ep > *slot {
+                    *slot = ep;
+                }
+            }
+            next_seq.insert(shard, exp);
+            i = run_end;
+            continue;
+        }
+
         apply_command_sql(
             &tx,
             queues,
@@ -993,6 +1072,7 @@ pub(crate) fn apply_committed_batch_sql(
         if e > *slot {
             *slot = e;
         }
+        i += 1;
     }
     for (queue, &next) in &next_seq {
         let (t, q) = parts(queue);
@@ -1007,5 +1087,72 @@ pub(crate) fn apply_committed_batch_sql(
     }
     st(tx.commit())?;
     apply_token_ops(live_tokens, live_tokens_by_consumer, token_ops);
+    Ok(())
+}
+
+/// Apply a contiguous run of already-validated `Push` envelopes as one multi-row insert + once-per-run
+/// high-water / claim-scan / group-summary maintenance. Positions with `sequence < cursor` are skipped
+/// (idempotent). Caller advances the relational cursor and request-outcome rows.
+fn apply_push_run_sql(
+    tx: &Transaction<'_>,
+    queues: &HashMap<QueueKey, QueueDefinition>,
+    grouped_shards: &mut HashSet<QueueKey>,
+    claim_scan_hints: &mut HashMap<QueueKey, i64>,
+    claim_scan_default_fifo: &mut HashMap<QueueKey, bool>,
+    shard: &QueueKey,
+    positions: &[CommandPosition],
+    envelopes: &[CommandEnvelope],
+    cursor: i64,
+) -> EngineResult<()> {
+    debug_assert_eq!(positions.len(), envelopes.len());
+    let model = queues
+        .get(shard)
+        .map(|d| d.priority_model)
+        .ok_or(EngineError::NotFound)?;
+
+    let mut specs: Vec<InsertItemSpec<'_>> = Vec::new();
+    let mut minted_ids: Vec<ItemId> = Vec::new();
+    let mut groups: HashSet<GroupKey> = HashSet::new();
+    let mut last_now: Option<UtcTimestamp> = None;
+
+    for (pos, env) in positions.iter().zip(envelopes.iter()) {
+        if (pos.sequence as i64) < cursor {
+            continue;
+        }
+        let QueueCommand::Push(c) = &env.command else {
+            return Err(EngineError::Storage(
+                "apply_push_run_sql: non-Push envelope in Push run".into(),
+            ));
+        };
+        last_now = Some(env.created_at);
+        for item in &c.items {
+            specs.push(InsertItemSpec {
+                item,
+                command_seq: pos.sequence,
+                now: env.created_at,
+            });
+            minted_ids.push(item.item_id);
+            if let Some(g) = &item.group_key {
+                groups.insert(g.clone());
+            }
+        }
+    }
+
+    if specs.is_empty() {
+        return Ok(());
+    }
+
+    insert_item_specs(tx, queues, &model, shard, &specs)?;
+    advance_id_high_water_sql(tx, shard, &minted_ids)?;
+    let item_refs: Vec<&PushItem> = specs.iter().map(|s| s.item).collect();
+    observe_push_for_claim_scan(claim_scan_hints, claim_scan_default_fifo, shard, &item_refs);
+    if !groups.is_empty() {
+        let now = last_now.ok_or_else(|| {
+            EngineError::Storage("apply_push_run_sql: group refresh without timestamps".into())
+        })?;
+        grouped_shards.insert(shard.clone());
+        let group_list: Vec<GroupKey> = groups.into_iter().collect();
+        refresh_group_summaries(tx, shard, &group_list, now)?;
+    }
     Ok(())
 }

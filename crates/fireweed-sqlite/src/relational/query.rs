@@ -1408,6 +1408,59 @@ pub(crate) fn lookup_active_by_key(
         .transpose()
 }
 
+/// Batch form of [`lookup_active_by_key`]: one (or few chunked) SQL round-trips for a whole keyed
+/// XADD pipeline. Returns `client_item_key → (item_id, lifecycle_state)` for every live hit.
+/// Keys with no live row are omitted. Chunks at 400 to stay under SQLite's variable limit.
+pub(crate) fn lookup_active_by_keys(
+    conn: &Connection,
+    shard: &QueueKey,
+    keys: &[ClientItemKey],
+) -> EngineResult<HashMap<String, (ItemId, ItemState)>> {
+    if keys.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let (t, q) = parts(shard);
+    let mut out = HashMap::with_capacity(keys.len().min(1024));
+    // Leave headroom under SQLITE_MAX_VARIABLE_NUMBER (default 999): 2 fixed + N keys.
+    const CHUNK: usize = 400;
+    for chunk in keys.chunks(CHUNK) {
+        let mut sql = String::from(
+            "SELECT client_item_key, item_id, lifecycle_state FROM fireweed_items \
+             WHERE tenant_id=?1 AND queue_id=?2 AND superseded=0 AND client_item_key IN (",
+        );
+        for i in 0..chunk.len() {
+            if i > 0 {
+                sql.push(',');
+            }
+            // ?3, ?4, ...
+            sql.push('?');
+            sql.push_str(&(i + 3).to_string());
+        }
+        sql.push(')');
+        let mut stmt = st(conn.prepare(&sql))?;
+        let mut bind: Vec<Value> = Vec::with_capacity(2 + chunk.len());
+        bind.push(Value::Text(t.clone()));
+        bind.push(Value::Text(q.clone()));
+        for key in chunk {
+            bind.push(Value::Text(key.as_str().to_owned()));
+        }
+        let rows = st(stmt.query_map(params_from_iter(bind), |row| {
+            let key: String = row.get(0)?;
+            let id: String = row.get(1)?;
+            let state: String = row.get(2)?;
+            Ok((key, id, state))
+        }))?;
+        for row in rows {
+            let (key, id, state) = st(row)?;
+            let item_id =
+                ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?;
+            let item_state = parse_state(&state)?;
+            out.insert(key, (item_id, item_state));
+        }
+    }
+    Ok(out)
+}
+
 /// Lifecycle state of `id` (any superseded/terminal flavor), or `None` if absent.
 pub(crate) fn item_state_sql(
     conn: &Connection,

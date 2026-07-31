@@ -1,10 +1,38 @@
 //! Runtime-neutral asynchronous storage axes.
 //!
-//! These traits are the additive migration surface for the first async [`crate::ComposedBackend`]
-//! conversion. They intentionally cover the initial shard, append/replay, projection-apply, basic claim,
-//! rich relational claim selection, and control-plane paths only. Retention, snapshots, group commit,
-//! indexes, and repair operations remain on the legacy axes until the slice that migrates each behavior
-//! and its tests.
+//! # Dual-stack collapse (program B)
+//!
+//! Sync [`crate::LogStore`] / [`crate::ProjectionStore`] remain axis traits under in-process bridges;
+//! product composition is [`crate::AsyncLogReplayBackend`]. Legacy sync `ComposedBackend` was removed.
+//! deletion. These async traits + [`crate::AsyncComposedBackend`] are the sole remaining composition
+//! polarity. Until Gates B pass, product code may still use the sync stack; **no new sync features**.
+//!
+//! ## B1 parity inventory (exit: product cells expressible on async alone)
+//!
+//! Compared to sync `LogStore` (~38 methods), `AsyncLogStore` still needs product coverage for:
+//! - `is_durable_log`
+//! - `append_serialized` (admission-boundary encoding)
+//! - definition persistence / `recover_definitions_page` / `persist_definition` / `create_or_read_definition`
+//! - retention: `retention_floor`, `advance_retention_floor`, `max_trimmable_seq_before`,
+//!   `expire_segments_through_bounded`, branch pin / `gc_orphaned_branches_bounded`
+//! - maintenance: `maintenance_owner_epoch`, `supports_objectlog_maintenance`, `detached_maintenance`
+//! - emission cursor: `emission_cursor`, `supports_emission_cursor`, `set_emission_cursor`, `current_position`
+//! - group-commit facet: `supports_group_commit`, `gc_enqueue*`, `gc_seal`, `gc_flush_due`,
+//!   `gc_advance_high_water`, `gc_max_latency_ms`
+//!
+//! Compared to sync `ProjectionStore` (~73 methods), `AsyncProjectionStore` still needs coverage for
+//! (non-exhaustive): live reads used by product ports (`peek`/`pending`/`metrics`/… via composition),
+//! `apply`/`apply_live_owned` variants already partial, index validate/query, batch update + item mutation
+//! plans, recovery poison/backpressure/lineage, `install_recovery_shard`, flush_deferred, gates support
+//! surface already partial, commit_transition / side records, bounded mutation, etc.
+//!
+//! Compared to sync `ComposedBackend` product ports, `AsyncComposedBackend` still needs planners/ops for:
+//! upsert, update_fields, reschedule, reassign (beyond cohort), full ProjectionRead surface on adapters,
+//! IndexQueryPort, SnapshotStore, CommitTransitionPort, BatchUpdatePort, HotProjectionQueryPort, recover
+//! on open parity, change-record emission hooks.
+//!
+//! Temporary bridges (`InProcessLogStore` / `BlockingLogStore` over sync `LogStore`) exist only until
+//! each backend implements async axes natively; object-log must not use BlockingLogStore after program A.
 //!
 //! Every request value is owned. Shared receivers allow independent queue/connection work to progress
 //! without requiring a process-global mutable store borrow; implementations provide their own per-queue or
@@ -210,15 +238,31 @@ impl<T: Send + 'static> Future for BlockingTaskFuture<T> {
 pub struct InProcessLogStore<S> {
     store: Arc<Mutex<S>>,
     durability_class: DurabilityClass,
+    durable_log: bool,
 }
 
 impl<S: LogStore> InProcessLogStore<S> {
     pub fn new(store: S) -> Self {
         let durability_class = store.durability_class();
+        let durable_log = store.is_durable_log();
         Self {
             store: Arc::new(Mutex::new(store)),
             durability_class,
+            durable_log,
         }
+    }
+
+    /// Run a synchronous read against the underlying log (for product-port adapters during dual-stack
+    /// collapse). Must not be held across an await.
+    pub fn with_store<R>(&self, f: impl FnOnce(&S) -> R) -> R {
+        let store = self.store.lock().expect("immediate log store mutex poisoned");
+        f(&*store)
+    }
+
+    /// Run a synchronous mutation against the underlying log. Must not be held across an await.
+    pub fn with_store_mut<R>(&self, f: impl FnOnce(&mut S) -> R) -> R {
+        let mut store = self.store.lock().expect("immediate log store mutex poisoned");
+        f(&mut *store)
     }
 }
 
@@ -236,6 +280,24 @@ impl<S: ProjectionStore> InProcessProjectionStore<S> {
             supports_gates,
         }
     }
+
+    /// Run a synchronous read against the underlying projection. Must not be held across an await.
+    pub fn with_store<R>(&self, f: impl FnOnce(&S) -> R) -> R {
+        let store = self
+            .store
+            .lock()
+            .expect("immediate projection store mutex poisoned");
+        f(&*store)
+    }
+
+    /// Run a synchronous mutation against the underlying projection. Must not be held across an await.
+    pub fn with_store_mut<R>(&self, f: impl FnOnce(&mut S) -> R) -> R {
+        let mut store = self
+            .store
+            .lock()
+            .expect("immediate projection store mutex poisoned");
+        f(&mut *store)
+    }
 }
 
 /// Bounded blocking adapter for a synchronous log store.
@@ -243,15 +305,18 @@ pub struct BlockingLogStore<S> {
     store: Arc<Mutex<S>>,
     executor: BoundedBlockingExecutor,
     durability_class: DurabilityClass,
+    durable_log: bool,
 }
 
 impl<S: LogStore> BlockingLogStore<S> {
     pub fn new(store: S, max_in_flight: usize) -> EngineResult<Self> {
         let durability_class = store.durability_class();
+        let durable_log = store.is_durable_log();
         Ok(Self {
             store: Arc::new(Mutex::new(store)),
             executor: BoundedBlockingExecutor::new(max_in_flight)?,
             durability_class,
+            durable_log,
         })
     }
 
@@ -398,6 +463,13 @@ pub struct FinalizeLeaseMember {
 pub trait AsyncLogStore: Send + Sync {
     /// Immutable after construction; implementations must not acquire an async lock here.
     fn durability_class(&self) -> DurabilityClass;
+
+    /// Whether this log retains commands across process death (ADR-013 Class A).
+    ///
+    /// Default `true`. In-process / Class B logs return `false`.
+    fn is_durable_log(&self) -> bool {
+        true
+    }
 
     fn ensure_shard(
         &self,
@@ -741,6 +813,10 @@ where
         self.durability_class
     }
 
+    fn is_durable_log(&self) -> bool {
+        self.durable_log
+    }
+
     fn ensure_shard(&self, shard: QueueKey) -> impl Future<Output = EngineResult<()>> + Send {
         let result = self
             .store
@@ -926,6 +1002,111 @@ where
         std::future::ready(result)
     }
 
+    fn renew_validate(
+        &self,
+        shard: QueueKey,
+        targets: Vec<RenewTarget>,
+        _now: UtcTimestamp,
+    ) -> impl Future<Output = EngineResult<()>> + Send {
+        let ids = targets.iter().map(|t| t.item_id).collect::<Vec<_>>();
+        let result = self
+            .store
+            .lock()
+            .expect("immediate projection store mutex poisoned")
+            .renew_validate(&shard, &ids);
+        std::future::ready(result)
+    }
+
+    fn finalize_validate(
+        &self,
+        shard: QueueKey,
+        targets: Vec<FinalizeTarget>,
+        _now: UtcTimestamp,
+        default_max_attempts: u32,
+    ) -> impl Future<Output = EngineResult<Vec<FinalizeLeaseMember>>> + Send {
+        let result = (|| {
+            let store = self
+                .store
+                .lock()
+                .expect("immediate projection store mutex poisoned");
+            // Match sync composition: lease-state validation only (no token/version gate here).
+            let outcomes = targets
+                .iter()
+                .map(|t| crate::FinalizeOutcome {
+                    item_id: t.item_id,
+                    kind: t.kind,
+                    applied_state: None,
+                    not_before: t.not_before,
+                })
+                .collect::<Vec<_>>();
+            store.finalize_validate(&shard, &outcomes)?;
+            let ids = targets.iter().map(|t| t.item_id).collect::<Vec<_>>();
+            let claimed = store.render_claimed(&shard, &ids)?;
+            if claimed.len() != targets.len() {
+                return Err(EngineError::StaleLease);
+            }
+            claimed
+                .into_iter()
+                .map(|item| {
+                    Ok(FinalizeLeaseMember {
+                        item_id: item.item_id,
+                        attempt_count: item.attempt_count,
+                        max_attempts: default_max_attempts,
+                    })
+                })
+                .collect()
+        })();
+        std::future::ready(result)
+    }
+
+    fn purge_validate(
+        &self,
+        shard: QueueKey,
+        ids: Vec<ItemId>,
+        force: bool,
+    ) -> impl Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        use crate::validate_purge_force;
+        let result = (|| {
+            let store = self
+                .store
+                .lock()
+                .expect("immediate projection store mutex poisoned");
+            let mut present = Vec::new();
+            for id in &ids {
+                if present.contains(id) {
+                    continue;
+                }
+                if let Some(state) = store.item_state(&shard, id)? {
+                    validate_purge_force(state == ItemState::Leased, force)?;
+                    present.push(*id);
+                }
+            }
+            Ok(present)
+        })();
+        std::future::ready(result)
+    }
+
+    fn expired_leases(
+        &self,
+        shard: QueueKey,
+        now: UtcTimestamp,
+        max: usize,
+    ) -> impl Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let result = (|| {
+            let store = self
+                .store
+                .lock()
+                .expect("immediate projection store mutex poisoned");
+            let mut ids = store.expired_leases(&shard, now)?;
+            ids.sort();
+            if max > 0 && ids.len() > max {
+                ids.truncate(max);
+            }
+            Ok(ids)
+        })();
+        std::future::ready(result)
+    }
+
     fn apply_live(
         &self,
         positions: Vec<CommandPosition>,
@@ -1066,6 +1247,10 @@ where
 {
     fn durability_class(&self) -> DurabilityClass {
         self.durability_class
+    }
+
+    fn is_durable_log(&self) -> bool {
+        self.durable_log
     }
 
     fn ensure_shard(&self, shard: QueueKey) -> impl Future<Output = EngineResult<()>> + Send {

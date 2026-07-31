@@ -15,7 +15,8 @@ use fireweed_core::{
     RecurrencePolicy, RetryPolicy, TenantId,
 };
 use fireweed_engine::QueueKey;
-use fireweed_memory::{ComposedMemoryBackend, ManualClock, composed_memory_backend};
+use fireweed_engine::AsyncLogReplayBackend;
+use fireweed_memory::{InMemoryProjection, ManualClock, MemoryLog, composed_memory_backend};
 use serde_json::json;
 
 fn qkey() -> QueueKey {
@@ -70,7 +71,7 @@ fn typed_def() -> QueueDefinition {
     }
 }
 
-fn make() -> RuntimeCore<ComposedMemoryBackend> {
+fn make() -> RuntimeCore<AsyncLogReplayBackend<MemoryLog, InMemoryProjection>> {
     RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),

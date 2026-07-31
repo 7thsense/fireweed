@@ -1,17 +1,18 @@
 use fireweed_conformance::{qdef, qkey};
 use fireweed_engine::{
-    ComposedBackend, ControlPlaneStore, HistoricalProjectionRead, InProcessControlPlane,
-    ProjectionRead, ProjectionStore, PushPort, PushSpec,
+    ControlPlaneStore, HistoricalProjectionRead, ProjectionRead, ProjectionStore, PushPort,
+    PushSpec, assemble_async_log_replay,
 };
 use fireweed_projection::{InMemoryProjection, MemoryLog};
 
 #[test]
 fn read_as_of_reconstructs_prior_state() {
-    let backend = ComposedBackend::new(
+    let backend = assemble_async_log_replay(
         MemoryLog::new(),
         InMemoryProjection::new(),
-        InProcessControlPlane::new(),
-    );
+        0,
+    )
+    .expect("assemble");
     let shard = qkey();
 
     futures::executor::block_on(backend.create_queue(qdef())).unwrap();

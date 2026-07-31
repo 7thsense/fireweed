@@ -345,6 +345,55 @@ pub trait OwnedTaskDispatcher: Send + Sync {
     fn drain(&self) -> TaskOutcome<()>;
 }
 
+/// In-process dispatcher: each accepted factory runs on a dedicated thread via
+/// [`futures::executor::block_on`]. Suitable for tests and CPU-only axes (memory) where a full tokio
+/// pool is unnecessary. Production server paths that need reactor integration use
+/// `TokioTaskDispatcher` in `fireweed-server`.
+#[derive(Default)]
+pub struct InlineOwnedTaskDispatcher {
+    closed: std::sync::atomic::AtomicBool,
+}
+
+impl InlineOwnedTaskDispatcher {
+    /// Create an open dispatcher.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl OwnedTaskDispatcher for InlineOwnedTaskDispatcher {
+    fn submit<T: Send + 'static>(
+        &self,
+        factory: OwnedTaskFactory<T>,
+    ) -> Result<TaskOutcome<T>, DispatchError> {
+        if self
+            .closed
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(DispatchError::Closed);
+        }
+        let (sender, outcome) = task_outcome_channel();
+        std::thread::spawn(move || sender.send(futures::executor::block_on(factory())));
+        Ok(outcome)
+    }
+
+    fn close(&self) {
+        self.closed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn drain(&self) -> TaskOutcome<()> {
+        let (sender, outcome) = task_outcome_channel();
+        sender.send(());
+        outcome
+    }
+}
+
 /// Keyed admission failure before work is submitted to an owned-task dispatcher.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueGateError {

@@ -947,6 +947,16 @@ impl SqliteProjectionStore {
     pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().expect("projection store poisoned")
     }
+
+    /// Batch live-key probe for pipelined keyed XADD (insert/mutate). One SQL round-trip per
+    /// ~400 keys instead of one query per item.
+    pub fn lookup_active_by_keys(
+        &self,
+        shard: &QueueKey,
+        keys: &[ClientItemKey],
+    ) -> EngineResult<std::collections::HashMap<String, (ItemId, ItemState)>> {
+        lookup_active_by_keys(&self.lock().conn, shard, keys)
+    }
 }
 
 impl ProjectionStore for SqliteProjectionStore {

@@ -180,6 +180,15 @@ pub(crate) fn opt_blob(v: Option<Vec<u8>>) -> Value {
     v.map_or(Value::Null, Value::Blob)
 }
 
+/// One item row to materialize, carrying the durable command sequence and wall time of the Push (or
+/// ReplacePending) that minted it. Group-commit apply coalesces many single-item Push envelopes into one
+/// multi-row insert while preserving per-command `last_command_sequence` and timestamps.
+pub(crate) struct InsertItemSpec<'a> {
+    pub item: &'a PushItem,
+    pub command_seq: u64,
+    pub now: UtcTimestamp,
+}
+
 /// Batch-insert all `items` of a Push (or the single ReplacePending replacement) as set-based statements:
 /// chunked multi-row INSERTs into `fireweed_items`, `fireweed_item_gates`, and `fireweed_cohorts` — replacing the
 /// former per-item `insert_item` (N+ round-trips → a handful, chunked to the bound-variable limit). Column
@@ -197,9 +206,30 @@ pub(crate) fn insert_items(
     if items.is_empty() {
         return Ok(());
     }
+    let specs: Vec<InsertItemSpec<'_>> = items
+        .iter()
+        .map(|item| InsertItemSpec {
+            item,
+            command_seq: seq,
+            now,
+        })
+        .collect();
+    insert_item_specs(tx, queues, model, shard, &specs)
+}
+
+/// Like [`insert_items`], but each row may carry its own command sequence and timestamp (coalesced Push
+/// envelopes from `apply_committed_batch_sql`).
+pub(crate) fn insert_item_specs(
+    tx: &Transaction<'_>,
+    queues: &HashMap<QueueKey, QueueDefinition>,
+    model: &PriorityModel,
+    shard: &QueueKey,
+    specs: &[InsertItemSpec<'_>],
+) -> EngineResult<()> {
+    if specs.is_empty() {
+        return Ok(());
+    }
     let (t, q) = parts(shard);
-    let now_n = ts_nanos(now);
-    let seqi = seq as i64;
     // Bulk-allocate the stable FIFO positions in one read+advance (was a read+UPDATE per item).
     let base_seq: i64 = st(tx.query_row(
         "SELECT next_item_seq FROM relational_cursor WHERE tenant=?1 AND queue=?2",
@@ -208,18 +238,27 @@ pub(crate) fn insert_items(
     ))?;
     st(tx.execute(
         "UPDATE relational_cursor SET next_item_seq=?3 WHERE tenant=?1 AND queue=?2",
-        params![t, q, base_seq + items.len() as i64],
+        params![t, q, base_seq + specs.len() as i64],
     ))?;
     let typed_indexes = queues
         .get(shard)
         .map(|d| d.typed_indexes.as_slice())
         .unwrap_or(&[]);
-    if typed_indexes.is_empty() && items.iter().all(is_default_empty_push_item) {
-        insert_default_empty_items(tx, &t, &q, items, seqi, now_n, base_seq)?;
+    let items_only: Vec<&PushItem> = specs.iter().map(|s| s.item).collect();
+    // Fast path: homogeneous default-empty rows with a single wall clock (common internal benches).
+    let first_now = specs[0].now;
+    let homogeneous_now = specs.iter().all(|s| s.now == first_now);
+    if typed_indexes.is_empty()
+        && homogeneous_now
+        && items_only.iter().all(|item| is_default_empty_push_item(item))
+    {
+        insert_default_empty_item_specs(tx, &t, &q, specs, base_seq)?;
         return Ok(());
     }
-    let mut rows: Vec<Vec<Value>> = Vec::with_capacity(items.len());
-    for (i, item) in items.iter().enumerate() {
+    let mut rows: Vec<Vec<Value>> = Vec::with_capacity(specs.len());
+    for (i, spec) in specs.iter().enumerate() {
+        let item = spec.item;
+        let now_n = ts_nanos(spec.now);
         let not_before = ts_nanos_opt(item.not_before);
         rows.push(vec![
             Value::Text(t.clone()),
@@ -236,7 +275,7 @@ pub(crate) fn insert_items(
             Value::Text(fields_to_json(&item.fields)?),
             Value::Text(metadata_to_json(&item.metadata)?),
             opt_text(item.entity_document.as_ref().map(to_json).transpose()?),
-            Value::Integer(seqi),
+            Value::Integer(spec.command_seq as i64),
             Value::Integer(now_n),
             Value::Integer(now_n),
             Value::Integer(item.max_attempts as i64),
@@ -254,13 +293,22 @@ pub(crate) fn insert_items(
               item_version,lease_token_hash,lease_expires_at,worker_id,last_command_sequence,created_at,\
               updated_at,terminal_at,terminal_command_epoch,fenced,superseded,max_attempts,created_seq) VALUES {values}"
         );
+        // prepare_cached: chunk lengths are stable (full SQLITE_BATCH or a fixed remainder per batch size),
+        // so statement compile cost is paid once per distinct SQL shape rather than once per chunk execute.
+        let mut stmt = st(tx.prepare_cached(&sql))?;
         let flat = chunk.iter().flatten();
-        st(tx.execute(&sql, params_from_iter(flat)))?;
+        st(stmt.execute(params_from_iter(flat)))?;
     }
-    insert_gates(tx, &t, &q, items)?;
-    upsert_cohorts(tx, queues, shard, &t, &q, items, now_n)?;
+    insert_gates(tx, &t, &q, &items_only)?;
+    // Cohort id stamping uses wall time; for a coalesced run use the latest now in the run.
+    let cohort_now_n = specs
+        .iter()
+        .map(|s| ts_nanos(s.now))
+        .max()
+        .unwrap_or_else(|| ts_nanos(first_now));
+    upsert_cohorts(tx, queues, shard, &t, &q, &items_only, cohort_now_n)?;
     // ADR-011: typed secondary index maintenance.
-    maintain_typed_indexes_on_insert(tx, &t, &q, typed_indexes, items)?;
+    maintain_typed_indexes_on_insert(tx, &t, &q, typed_indexes, &items_only)?;
     Ok(())
 }
 
@@ -277,17 +325,15 @@ pub(crate) fn is_default_empty_push_item(item: &PushItem) -> bool {
         && item.entity_document.is_none()
 }
 
-pub(crate) fn insert_default_empty_items(
+pub(crate) fn insert_default_empty_item_specs(
     tx: &Transaction<'_>,
     t: &str,
     q: &str,
-    items: &[PushItem],
-    seqi: i64,
-    now_n: i64,
+    specs: &[InsertItemSpec<'_>],
     base_seq: i64,
 ) -> EngineResult<()> {
     const ROW_PH: &str = "(?,?,?,?,'Pending',NULL,X'01',NULL,?,NULL,NULL,NULL,'{}','{}',NULL,0,1,NULL,NULL,NULL,?,?,?,NULL,NULL,0,0,?,?)";
-    for (chunk_idx, chunk) in items.chunks(SQLITE_BATCH).enumerate() {
+    for (chunk_idx, chunk) in specs.chunks(SQLITE_BATCH).enumerate() {
         let values = vec![ROW_PH; chunk.len()].join(",");
         let sql = format!(
             "INSERT INTO fireweed_items \
@@ -298,20 +344,22 @@ pub(crate) fn insert_default_empty_items(
         );
         let mut params = Vec::with_capacity(chunk.len() * 10);
         let offset = chunk_idx * SQLITE_BATCH;
-        for (i, item) in chunk.iter().enumerate() {
+        for (i, spec) in chunk.iter().enumerate() {
+            let now_n = ts_nanos(spec.now);
             params.push(Value::Text(t.to_string()));
             params.push(Value::Text(q.to_string()));
-            let item_id = item.item_id.to_string();
+            let item_id = spec.item.item_id.to_string();
             params.push(Value::Text(item_id.clone()));
             params.push(Value::Text(item_id));
             params.push(Value::Integer(now_n));
-            params.push(Value::Integer(seqi));
+            params.push(Value::Integer(spec.command_seq as i64));
             params.push(Value::Integer(now_n));
             params.push(Value::Integer(now_n));
-            params.push(Value::Integer(item.max_attempts as i64));
+            params.push(Value::Integer(spec.item.max_attempts as i64));
             params.push(Value::Integer(base_seq + offset as i64 + i as i64));
         }
-        st(tx.execute(&sql, params_from_iter(params.iter())))?;
+        let mut stmt = st(tx.prepare_cached(&sql))?;
+        st(stmt.execute(params_from_iter(params.iter())))?;
     }
     Ok(())
 }
@@ -322,7 +370,7 @@ pub(crate) fn insert_gates(
     tx: &Transaction<'_>,
     t: &str,
     q: &str,
-    items: &[PushItem],
+    items: &[&PushItem],
 ) -> EngineResult<()> {
     let mut pairs: Vec<(String, String)> = Vec::new();
     for item in items {
@@ -350,7 +398,8 @@ pub(crate) fn insert_gates(
             p.push(Value::Text(id.clone()));
             p.push(Value::Text(g.clone()));
         }
-        st(tx.execute(&sql, params_from_iter(p.iter())))?;
+        let mut stmt = st(tx.prepare_cached(&sql))?;
+        st(stmt.execute(params_from_iter(p.iter())))?;
     }
     Ok(())
 }
@@ -394,7 +443,7 @@ pub(crate) fn upsert_cohorts(
     shard: &QueueKey,
     t: &str,
     q: &str,
-    items: &[PushItem],
+    items: &[&PushItem],
     now_n: i64,
 ) -> EngineResult<()> {
     let mut cohorts: BTreeMap<String, (i64, i64)> = BTreeMap::new();
@@ -846,7 +895,13 @@ pub(crate) fn apply_command_sql(
             insert_items(tx, queues, &model, shard, &c.items, seq, now)?;
             let minted_ids: Vec<ItemId> = c.items.iter().map(|item| item.item_id).collect();
             advance_id_high_water_sql(tx, shard, &minted_ids)?;
-            observe_push_for_claim_scan(claim_scan_hints, claim_scan_default_fifo, shard, &c.items);
+            let item_refs: Vec<&PushItem> = c.items.iter().collect();
+            observe_push_for_claim_scan(
+                claim_scan_hints,
+                claim_scan_default_fifo,
+                shard,
+                &item_refs,
+            );
             let groups: HashSet<GroupKey> = c
                 .items
                 .iter()

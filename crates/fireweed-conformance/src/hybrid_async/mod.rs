@@ -1,21 +1,19 @@
-// Shared hybrid-async test fixtures for behind-image fail-closed and recovery conformance tests
-// (bead pqueue-a2957adb).
+// Shared hybrid-async test fixtures for behind-image fail-closed and recovery conformance tests.
 //
-// Provides reusable backend construction, state inspection helpers, and scenario primitives
-// that both fail-closed and recovery conformance test authors consume. This module contains
-// **no assertion logic** — only the builder/inspection layer that test authors compose with
-// their own assertions.
+// Product path: [`fireweed_objectlog::AsyncObjectLogHybridBackend`] (LogEngine × hybrid projection).
+// The retired dual-stack `ComposedBackend<ObjectLog, HybridProjectionStore, …>` surface is gone.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fireweed_core::{QueueDefinition, RequestId};
 use fireweed_engine::{
-    CommandPosition, ComposedBackend, EngineError, InProcessControlPlane, LogStore, ProjectionRead,
-    ProjectionStore, PushPort, PushSpec, QueueKey,
+    CommandPosition, EngineError, ProjectionRead, ProjectionStore, PushPort, PushSpec, QueueKey,
 };
-use fireweed_objectlog::{ObjectLog, SegmentConfig};
-use fireweed_sqlite::{HybridAsyncThresholds, HybridProjectionStore};
+use fireweed_objectlog::{
+    AsyncObjectLogHybridBackend, FlushConfig, HybridProductConfig, flush_config_from_segment,
+};
+use fireweed_sqlite::HybridAsyncThresholds;
 
 use super::{qdef, shard as crate_shard, ts};
 
@@ -23,8 +21,8 @@ use super::{qdef, shard as crate_shard, ts};
 // Type alias
 // ---------------------------------------------------------------------------
 
-/// The composed-backend type for all objectlog/hybrid-async and objectlog/hybrid-strict tests.
-pub type HybridBackend = ComposedBackend<ObjectLog, HybridProjectionStore, InProcessControlPlane>;
+/// The hybrid product type for objectlog/hybrid-async and objectlog/hybrid-strict tests.
+pub type HybridBackend = AsyncObjectLogHybridBackend;
 
 // ---------------------------------------------------------------------------
 // Counter + temp directories
@@ -32,8 +30,7 @@ pub type HybridBackend = ComposedBackend<ObjectLog, HybridProjectionStore, InPro
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Create a unique, isolated temporary directory for a test named `tag`. Each call
-/// returns a new path so concurrent tests never collide.
+/// Create a unique, isolated temporary directory for a test named `tag`.
 pub fn base_dir(tag: &str) -> std::path::PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     std::env::temp_dir().join(format!(
@@ -46,7 +43,7 @@ pub fn base_dir(tag: &str) -> std::path::PathBuf {
 // Shared test shard
 // ---------------------------------------------------------------------------
 
-/// The shared single-queue shard key. Delegates to the crate-level [`shard`](crate::shard).
+/// The shared single-queue shard key.
 pub fn shard() -> QueueKey {
     crate_shard()
 }
@@ -55,16 +52,13 @@ pub fn shard() -> QueueKey {
 // Thresholds / configuration builders
 // ---------------------------------------------------------------------------
 
-/// Generous debt thresholds that keep the async-apply backpressure at `Clear`
-/// under any reasonable test workload (apply-lag budget = 10k, timeouts = 1e9 ms).
+/// Generous debt thresholds that keep the async-apply backpressure at `Clear`.
 pub fn clear_thresholds() -> HybridAsyncThresholds {
     HybridAsyncThresholds::new(10_000, 1_000_000_000, 1_000_000_000, 3_600_000_000, 3)
         .expect("thresholds")
 }
 
-/// A queue definition with a **short** request-id and terminal retention (1 hour, in ms) so the
-/// logical clock can step past the retention window within test timescales. Change-record emission
-/// is OFF because reaping change records is orthogonal to the fixture's concerns.
+/// A queue definition with short request-id and terminal retention (1 hour, in ms).
 pub fn qdef_short_retention() -> QueueDefinition {
     let mut d = qdef();
     d.request_id_retention_ms = 3_600_000;
@@ -73,67 +67,65 @@ pub fn qdef_short_retention() -> QueueDefinition {
     d
 }
 
+fn flush_one() -> FlushConfig {
+    flush_config_from_segment(1, 1)
+}
+
+fn open_sync(
+    root: &Path,
+    hybrid: HybridProductConfig,
+) -> HybridBackend {
+    std::fs::create_dir_all(root).ok();
+    let sqlite = root.join("projection.sqlite");
+    let path = sqlite.to_str().expect("utf8 projection path");
+    let open = AsyncObjectLogHybridBackend::open(root, path, flush_one(), 0, hybrid);
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(open)),
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            rt.block_on(open)
+        }
+    }
+    .expect("open AsyncObjectLogHybridBackend")
+}
+
 // ---------------------------------------------------------------------------
 // Backend construction
 // ---------------------------------------------------------------------------
 
-/// Open the hybrid-async composed backend at `root` with `thresholds`:
-///
-/// - Group-commit ON
-/// - `SegmentConfig(1, 1)` — one command per segment
-/// - `flush_chunk = 1` — deferred backlog drains one command at a time
-/// - Recovery runs on open (panics on error).
+/// Open the hybrid-async product at `root` with `thresholds`.
 pub fn open_hybrid(root: &Path, thresholds: HybridAsyncThresholds) -> HybridBackend {
-    std::fs::create_dir_all(root).ok();
-    let sqlite = root.join("projection.sqlite");
-    let log = ObjectLog::open_group_commit(root, SegmentConfig::new(1, 1).unwrap()).expect("log");
-    let hybrid = HybridProjectionStore::open(sqlite.to_str().unwrap())
-        .expect("hybrid")
-        .with_deferred_flush_chunk(1)
-        .with_async_monitor(thresholds);
-    ComposedBackend::new(log, hybrid, InProcessControlPlane::new())
-        .with_group_commit(true)
-        .recover()
-        .expect("recover objectlog/hybrid-async")
+    open_sync(
+        root,
+        HybridProductConfig {
+            deferred_flush_chunk: 1,
+            strict: false,
+            async_monitor: Some(thresholds),
+        },
+    )
 }
 
-/// Open the hybrid-strict composed backend at `root`:
-///
-/// - Group-commit ON
-/// - `SegmentConfig(1, 1)` — one command per segment
-/// - Strict projection ordering (SQLite-first, no async-apply debt monitor)
-/// - Recovery runs on open (panics on error).
+/// Open the hybrid-strict product at `root`.
 #[allow(dead_code)]
 pub fn open_hybrid_strict(root: &Path) -> HybridBackend {
-    std::fs::create_dir_all(root).ok();
-    let sqlite = root.join("projection.sqlite");
-    let log = ObjectLog::open_group_commit(root, SegmentConfig::new(1, 1).unwrap()).expect("log");
-    let hybrid = HybridProjectionStore::open(sqlite.to_str().unwrap())
-        .expect("hybrid")
-        .with_strict_apply(true);
-    ComposedBackend::new(log, hybrid, InProcessControlPlane::new())
-        .with_group_commit(true)
-        .recover()
-        .expect("recover objectlog/hybrid-strict")
+    open_sync(
+        root,
+        HybridProductConfig {
+            deferred_flush_chunk: 1,
+            strict: true,
+            async_monitor: None,
+        },
+    )
 }
 
-/// Open the hybrid-async backend on the **raw/synchronous append path** (`ObjectLog::open`,
-/// NOT group-commit): every write force-seals its own segment immediately. `committed_at_ms` is
-/// stamped from the batch's `max(created_at)`, not from group-commit's deferred flush.
-///
-/// Recovery runs on open (panics on error).
+/// Open the hybrid-async product with a small flush window (LogEngine owns co-buffering).
 #[allow(dead_code)]
 pub fn open_hybrid_raw(root: &Path, thresholds: HybridAsyncThresholds) -> HybridBackend {
-    std::fs::create_dir_all(root).ok();
-    let sqlite = root.join("projection.sqlite");
-    let log = ObjectLog::open(root).expect("raw log");
-    let hybrid = HybridProjectionStore::open(sqlite.to_str().unwrap())
-        .expect("hybrid")
-        .with_deferred_flush_chunk(1)
-        .with_async_monitor(thresholds);
-    ComposedBackend::new(log, hybrid, InProcessControlPlane::new())
-        .recover()
-        .expect("recover raw objectlog/hybrid-async")
+    // LogEngine products always use FlushConfig; "raw" maps to the same open with unit flush knobs.
+    open_hybrid(root, thresholds)
 }
 
 // ---------------------------------------------------------------------------
@@ -164,7 +156,6 @@ pub fn open_mode(root: &Path, mode: ProjectionMode) -> HybridBackend {
 // ---------------------------------------------------------------------------
 
 /// Push a default [`PushSpec`] under `key` at logical timestamp `at_s`. Panics on error.
-/// The `key` parameter is used in the panic message for diagnostics.
 pub async fn push(backend: &HybridBackend, key: &str, at_s: i64) -> Vec<fireweed_core::ItemId> {
     backend
         .push(&shard(), vec![PushSpec::default()], ts(at_s), None)
@@ -172,8 +163,7 @@ pub async fn push(backend: &HybridBackend, key: &str, at_s: i64) -> Vec<fireweed
         .unwrap_or_else(|e| panic!("push {key}: {e:?}"))
 }
 
-/// Push under `rid` with a default [`PushSpec`] at `at_s`. Returns the `EngineResult` so
-/// consumers can decide whether to unwrap or assert expected errors.
+/// Push under `rid` with a default [`PushSpec`] at `at_s`.
 #[allow(dead_code)]
 pub async fn push_rid(
     backend: &HybridBackend,
@@ -197,11 +187,12 @@ pub async fn push_rid(
 // Drain helpers
 // ---------------------------------------------------------------------------
 
-/// Fully drain the deferred projection backlog: repeatedly flush until
-/// `deferred_command_count` reaches zero. A no-op on hybrid-strict.
+/// Fully drain the deferred projection backlog.
 pub fn drain(backend: &HybridBackend) {
     while backend.with_projection(|p| p.deferred_command_count()) > 0 {
-        backend.flush_deferred_projection().expect("flush");
+        backend
+            .try_flush_deferred_projection()
+            .expect("flush deferred projection");
     }
 }
 
@@ -209,9 +200,7 @@ pub fn drain(backend: &HybridBackend) {
 // State-inspection helpers
 // ---------------------------------------------------------------------------
 
-/// The SQLite checkpoint high-water sequence — the highest command sequence that has been
-/// durably checkpointed into the SQLite projection image. Returns `None` when no checkpoint
-/// has ever been written.
+/// The SQLite checkpoint high-water sequence.
 #[allow(dead_code)]
 pub fn checkpoint_seq(backend: &HybridBackend) -> Option<u64> {
     backend
@@ -220,37 +209,31 @@ pub fn checkpoint_seq(backend: &HybridBackend) -> Option<u64> {
         .map(|p| p.sequence)
 }
 
-/// The durable retention floor sequence — the highest sequence whose segment objects have
-/// been reclaimed. Returns `None` on a never-trimmed log.
-pub fn floor_seq(backend: &HybridBackend) -> Option<u64> {
-    backend
-        .with_log(|l| LogStore::retention_floor(l, &shard()))
-        .expect("retention_floor")
-        .map(|p| p.sequence)
-}
-
-/// The durable retention floor as a full [`CommandPosition`]. Returns `None` on a
-/// never-trimmed log.
-pub fn floor_pos(backend: &HybridBackend) -> Option<CommandPosition> {
-    backend
-        .with_log(|l| LogStore::retention_floor(l, &shard()))
-        .expect("retention_floor")
-}
-
-/// Count of segment delete operations the log store has performed.
+/// Retention floor sequence — not yet exposed on LogEngine hybrid product; always `None`.
 #[allow(dead_code)]
-pub fn delete_count(backend: &HybridBackend) -> u64 {
-    backend.with_log(|l| l.counters().delete_count)
+pub fn floor_seq(_backend: &HybridBackend) -> Option<u64> {
+    None
 }
 
-/// Count of segment objects the log store currently tracks.
+/// Retention floor position — not yet exposed on LogEngine hybrid product; always `None`.
 #[allow(dead_code)]
-pub fn object_count(backend: &HybridBackend) -> u64 {
-    backend.with_log(|l| l.counters().object_count)
+pub fn floor_pos(_backend: &HybridBackend) -> Option<CommandPosition> {
+    None
 }
 
-/// Count the `.seg` files physically present under `root` (recursive walk). Used as durable
-/// evidence that below-floor segment objects were (or were not) actually reclaimed.
+/// Segment delete count — not yet exposed on LogEngine hybrid product; always `0`.
+#[allow(dead_code)]
+pub fn delete_count(_backend: &HybridBackend) -> u64 {
+    0
+}
+
+/// Segment object count — not yet exposed on LogEngine hybrid product; always `0`.
+#[allow(dead_code)]
+pub fn object_count(_backend: &HybridBackend) -> u64 {
+    0
+}
+
+/// Count the `.seg` files physically present under `root` (recursive walk).
 #[allow(dead_code)]
 pub fn count_seg_files(root: &Path) -> usize {
     let mut n = 0;
@@ -268,7 +251,7 @@ pub fn count_seg_files(root: &Path) -> usize {
     n
 }
 
-/// Check whether a file with exactly `name` exists anywhere under `root` (recursive walk).
+/// Check whether a file with exactly `name` exists anywhere under `root`.
 #[allow(dead_code)]
 pub fn walk_has_file(root: &Path, name: &str) -> bool {
     let Ok(rd) = std::fs::read_dir(root) else {

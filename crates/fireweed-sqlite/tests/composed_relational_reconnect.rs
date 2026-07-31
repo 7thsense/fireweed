@@ -31,7 +31,9 @@ fn db_path() -> String {
         .to_string()
 }
 
-fn make() -> fireweed_sqlite::ComposedSqliteRelationalBackend {
+fn make()
+-> fireweed_engine::AsyncLogReplayBackend<fireweed_sqlite::SqliteRelational, fireweed_sqlite::SqliteRelational>
+{
     let p = db_path();
     CLEANED.with(|c| {
         if !c.get() {

@@ -11,6 +11,7 @@
 use fireweed_conformance::{qdef, shard, ts};
 use fireweed_core::{GateKeyPolicy, GroupKey, ItemId, PriorityValue, QueueId, RequestId, TenantId};
 use fireweed_engine::{
+use fireweed_engine::AsyncLogReplayBackend;
     Backend, ChangeRecordSink, ClaimPort, ControlPlaneStore, DiscoveryGranularity, DiscoveryPort,
     EngineError, LogStore, ProjectionRead, PushPort, PushSpec, SetGatesCommand, SetGatesPort,
 };
@@ -33,7 +34,7 @@ fn db_path() -> String {
         .to_string()
 }
 
-fn make() -> fireweed_sqlite::ComposedSqliteBackend {
+fn make() -> AsyncLogReplayBackend<fireweed_sqlite::SqliteLog, fireweed_sqlite::InMemoryProjection> {
     let p = db_path();
     CLEANED.with(|c| {
         if !c.get() {

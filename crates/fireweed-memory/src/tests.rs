@@ -10,8 +10,7 @@ use super::*;
 use fireweed_conformance::ts;
 use std::sync::{Arc, Barrier};
 
-// The full shared backend-conformance suite (16 port-level scenarios) against the composed memory backend
-// (`ComposedBackend<MemoryLog, InMemoryProjection, InProcessControlPlane>`).
+// Shared backend-conformance suite against the canonical async memory backend.
 fireweed_conformance::conformance_suite!(composed_memory_backend);
 
 #[tokio::test]
@@ -142,7 +141,7 @@ mod composed_capability_parity {
         FinalizeKind, InstanceFence, LogRead, ProjectionRead, PushPort, PushSpec, QueueCommand,
         ReschedulePort, ScheduleUpdate, SetGatesCommand, SetGatesPort, SideRecord,
     };
-    pub(super) async fn seeded_commit_transition_memory_backend() -> crate::ComposedMemoryBackend {
+    pub(super) async fn seeded_commit_transition_memory_backend() -> AsyncLogReplayBackend<MemoryLog, InMemoryProjection> {
         let b = composed_memory_backend();
         b.create_queue(qdef()).await.unwrap();
         b.push(&shard(), vec![PushSpec::default()], ts(0), None)

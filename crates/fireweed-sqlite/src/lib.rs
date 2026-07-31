@@ -8,79 +8,63 @@
 //! re-implementation) via [`fireweed_projection`]; this crate owns only the durable sqlite persistence axes:
 //! the [`SqliteLog`] command-log and the derived relational [`SqliteProjectionStore`].
 
+mod async_log_replay;
 mod async_projection;
 mod compose_log;
 mod relational;
+pub use async_log_replay::{
+    async_composed_sqlite_backend, async_composed_sqlite_backend_in_memory, from_sqlite_log,
+};
 pub use async_projection::{AsyncSqliteProjectionStore, DEFAULT_ASYNC_PROJECTION_MAILBOX_CAPACITY};
 pub use compose_log::SqliteLog;
+pub use fireweed_projection::InMemoryProjection;
 pub use relational::{
-    BackpressureLevel, CheckpointLineage, CheckpointProgress, ComposedSqliteRelationalBackend,
-    DEFAULT_DEFERRED_FLUSH_CHUNK, HybridAsyncDebt, HybridAsyncMetrics, HybridAsyncMonitor,
-    HybridAsyncThresholds, HybridFaultCutPoint, HybridFaultHook, HybridProjectionStore,
-    SqliteCheckpointStore, SqliteProjectionStore, SqliteRelational, SqliteRelationalBackend,
-    WalCheckpointStats, composed_sqlite_relational, composed_sqlite_relational_in_memory,
+    BackpressureLevel, CheckpointLineage, CheckpointProgress, DEFAULT_DEFERRED_FLUSH_CHUNK,
+    HybridAsyncDebt, HybridAsyncMetrics, HybridAsyncMonitor, HybridAsyncThresholds,
+    HybridFaultCutPoint, HybridFaultHook, HybridProjectionStore, SqliteCheckpointStore,
+    SqliteProjectionStore, SqliteRelational, SqliteRelationalBackend, WalCheckpointStats,
+    composed_sqlite_relational, composed_sqlite_relational_in_memory,
 };
 
-use fireweed_engine::{ComposedBackend, EngineResult, InProcessControlPlane};
-use fireweed_projection::InMemoryProjection;
-
-/// The composed sqlite backend (ADR-012): the durable sqlite command LOG re-expressed as the orthogonal
-/// product `SqliteLog × InMemoryProjection × InProcessControlPlane`, assembled by the one generic
-/// `ComposedBackend`. The in-memory log-replay family: a durable command log + an in-memory projection.
-pub type ComposedSqliteBackend =
-    ComposedBackend<SqliteLog, InMemoryProjection, InProcessControlPlane>;
+use fireweed_engine::{AsyncLogReplayBackend, EngineResult, assemble_async_log_replay};
 
 /// Assemble a composed sqlite backend over an ephemeral `:memory:` durable log.
-pub fn composed_sqlite_backend_in_memory() -> EngineResult<ComposedSqliteBackend> {
-    Ok(ComposedBackend::new(
-        SqliteLog::in_memory()?,
-        InMemoryProjection::new(),
-        InProcessControlPlane::new(),
-    ))
+pub fn composed_sqlite_backend_in_memory()
+-> EngineResult<AsyncLogReplayBackend<SqliteLog, InMemoryProjection>> {
+    async_composed_sqlite_backend_in_memory()
 }
 
 /// Assemble a composed sqlite backend over a DURABLE sqlite command log at `path` — the composition root
 /// wires this. Runs recovery-on-open (ADR-012 P2): a reopen rebuilds the in-memory projection by replaying
 /// the durable log.
-pub fn composed_sqlite_backend(path: &str) -> EngineResult<ComposedSqliteBackend> {
-    ComposedBackend::new(
-        SqliteLog::open(path)?,
-        InMemoryProjection::new(),
-        InProcessControlPlane::new(),
-    )
-    .recover()
+pub fn composed_sqlite_backend(
+    path: &str,
+) -> EngineResult<AsyncLogReplayBackend<SqliteLog, InMemoryProjection>> {
+    async_composed_sqlite_backend(path)
 }
 
-/// Assemble and recover exactly one fixed-pool worker partition. Affinity is installed before recovery,
-/// so opening an N-member server pool performs one aggregate rebuild rather than N full rebuilds.
+/// Assemble and recover exactly one fixed-pool worker partition.
+///
+/// Worker partitioning for async composition currently opens a full recovered backend (affinity is
+/// applied at the composition-root pool layer). Partitioned recovery optimization remains a follow-on.
 pub fn composed_sqlite_backend_for_worker(
     path: &str,
-    index: usize,
-    partitions: usize,
-) -> EngineResult<ComposedSqliteBackend> {
-    ComposedBackend::new(
-        SqliteLog::open(path)?,
-        InMemoryProjection::new(),
-        InProcessControlPlane::new(),
-    )
-    .recover_worker_partition(index, partitions)
+    _index: usize,
+    _partitions: usize,
+) -> EngineResult<AsyncLogReplayBackend<SqliteLog, InMemoryProjection>> {
+    async_composed_sqlite_backend(path)
 }
 
-/// The composed sqlite-LOG + sqlite-PROJECTION backend (ADR-012 P1b-ii, Part B): a durable sqlite command
-/// LOG ([`SqliteLog`]) paired with the DERIVED relational SQL projection ([`SqliteProjectionStore`]) instead
-/// of the in-memory projection. Atomic durability class (the log axis), so it runs the full
-/// `core_suite!(@atomic)` — the projection family that stubs secondary indexes.
-pub type ComposedSqliteLogSqliteProjectionBackend =
-    ComposedBackend<SqliteLog, SqliteProjectionStore, InProcessControlPlane>;
-
 /// Assemble a composed sqlite-LOG + sqlite-PROJECTION backend over ephemeral `:memory:` stores.
+///
+/// Product ports live on [`AsyncLogReplayBackend`] (ADR-012 / async log-replay product).
 pub fn composed_sqlite_log_sqlite_projection_in_memory()
--> EngineResult<ComposedSqliteLogSqliteProjectionBackend> {
-    Ok(ComposedBackend::new(
+-> EngineResult<AsyncLogReplayBackend<SqliteLog, SqliteProjectionStore>> {
+    assemble_async_log_replay(
         SqliteLog::in_memory()?,
         SqliteProjectionStore::in_memory()?,
-        InProcessControlPlane::new(),
-    ))
+        0,
+    )
 }
 
 /// Assemble a composed sqlite-LOG + sqlite-PROJECTION backend over DURABLE stores (the log at `log_path`,
@@ -89,11 +73,11 @@ pub fn composed_sqlite_log_sqlite_projection_in_memory()
 pub fn composed_sqlite_log_sqlite_projection(
     log_path: &str,
     projection_path: &str,
-) -> EngineResult<ComposedSqliteLogSqliteProjectionBackend> {
-    ComposedBackend::new(
+) -> EngineResult<AsyncLogReplayBackend<SqliteLog, SqliteProjectionStore>> {
+    assemble_async_log_replay(
         SqliteLog::open(log_path)?,
         SqliteProjectionStore::open(projection_path)?,
-        InProcessControlPlane::new(),
-    )
+        0,
+    )?
     .recover()
 }

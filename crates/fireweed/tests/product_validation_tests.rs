@@ -34,7 +34,8 @@ use fireweed_core::{
     UtcTimestamp,
 };
 use fireweed_engine::QueueKey;
-use fireweed_memory::{ComposedMemoryBackend, ManualClock, composed_memory_backend};
+use fireweed_engine::AsyncLogReplayBackend;
+use fireweed_memory::{InMemoryProjection, ManualClock, MemoryLog, composed_memory_backend};
 use fireweed_objectlog::composed_objectlog_backend;
 use fireweed_sqlite::{
     SqliteRelationalBackend, composed_sqlite_backend, composed_sqlite_relational_in_memory,
@@ -46,7 +47,7 @@ use fireweed_sqlite::{
 
 /// A fresh in-memory single-node deployment + a manual clock (so a workflow can advance wall-clock time
 /// deterministically). Returns the handle and the clock.
-fn deployment() -> (RuntimeCore<ComposedMemoryBackend>, Arc<ManualClock>) {
+fn deployment() -> (RuntimeCore<AsyncLogReplayBackend<MemoryLog, InMemoryProjection>>, Arc<ManualClock>) {
     let clock = Arc::new(ManualClock::at(0));
     let fireweed = RuntimeCore::new(Arc::new(composed_memory_backend()), clock.clone());
     (fireweed, clock)
@@ -329,7 +330,7 @@ async fn downstream_pacing_non_goal_e2e() {
 
 /// Drain `q` fully in `batch`-sized claims (ack each), returning the claimed priorities in delivery order.
 async fn drain_priorities(
-    fireweed: &RuntimeCore<ComposedMemoryBackend>,
+    fireweed: &RuntimeCore<AsyncLogReplayBackend<MemoryLog, InMemoryProjection>>,
     q: &QueueKey,
     batch: usize,
 ) -> Vec<i64> {

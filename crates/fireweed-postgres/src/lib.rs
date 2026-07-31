@@ -49,25 +49,26 @@ use fireweed_core::{
     QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
-    Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed, ClaimedItem,
-    CommandChecksum, CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore,
-    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
-    FinalizeOutcome, FinalizePort, HistoricalProjectionRead, IndexHit, IndexQueryPort, ItemView,
-    LeaseExpiredCommand, LeaseView, LiveItemView, LogRead, PayloadUpdate, PendingPage,
-    PendingSummary, ProjectionRead, ProjectionSnapshot, ProjectionStore, PurgeItemsCommand,
-    PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey,
-    QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SnapshotRef, SnapshotStore,
-    TerminalEmissionMetrics, TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome,
-    UpsertPort, build_push_items, compile_entity_schema, require_item_level_claim, validate_entity,
-    validate_gate_command, validate_gate_push, validate_purge_force,
+    AsyncLogReplayBackend, Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest,
+    Claimed, ClaimedItem, CommandChecksum, CommandEnvelope, CommandId, CommandPage, CommandPosition,
+    ControlPlaneStore, CreateQueueOutcome, DurabilityClass, EngineError, EngineResult,
+    FinalizeCommand, FinalizeOutcome, FinalizePort, HistoricalProjectionRead, IndexHit,
+    IndexQueryPort, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, LogRead, PayloadUpdate,
+    PendingPage, PendingSummary, ProjectionRead, ProjectionSnapshot, ProjectionStore,
+    PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand,
+    QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
+    ReclaimPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SnapshotRef,
+    SnapshotStore, TerminalEmissionMetrics, TickReport, UpdateFieldsCommand, UpdateFieldsPort,
+    UpsertOutcome, UpsertPort, build_push_items, compile_entity_schema, require_item_level_claim,
+    validate_entity, validate_gate_command, validate_gate_push, validate_purge_force,
 };
-use fireweed_engine::{ComposedBackend, InProcessControlPlane};
 use fireweed_projection::{InMemoryProjection, ProjectionData, ProjectionImage};
 use postgres::Client;
 use sha2::{Digest, Sha256};
 
 mod async_log;
+mod async_log_replay;
+mod async_objectlog_postgres;
 mod async_projection;
 mod compose_log;
 mod connect;
@@ -75,6 +76,11 @@ mod control_plane;
 mod credential;
 mod relational;
 pub use async_log::{AsyncPostgresLog, DEFAULT_ASYNC_LOG_MAILBOX_CAPACITY};
+pub use async_log_replay::{
+    async_composed_postgres_backend, async_composed_postgres_backend_in_schema,
+    async_composed_postgres_backend_with_config, from_postgres_log,
+};
+pub use async_objectlog_postgres::AsyncObjectLogPostgresBackend;
 pub use async_projection::{
     AsyncPostgresRelationalControlPlane, AsyncPostgresRelationalProjection,
     DEFAULT_ASYNC_CONTROL_PLANE_MAILBOX_CAPACITY, DEFAULT_ASYNC_PROJECTION_MAILBOX_CAPACITY,
@@ -523,20 +529,13 @@ impl Inner {
     }
 }
 
-/// The composed postgres backend (ADR-012 P2): `ComposedBackend<PostgresLog, InMemoryProjection,
-/// InProcessControlPlane>` — the durable postgres command log + the shared in-memory projection + the
-/// in-process control plane. Capability-equivalent to the monolithic [`PostgresBackend`]
-/// (postgres-as-durable-log + log-replay projection), with the orchestration living ONCE in
-/// [`ComposedBackend`]. MUST be driven off the reactor (the sync postgres client); the `fireweed-server`
-/// blocking wrapper provides that boundary.
-pub type ComposedPostgresBackend =
-    ComposedBackend<PostgresLog, InMemoryProjection, InProcessControlPlane>;
-
 /// Assemble the composed postgres backend over `url` (default `search_path`) and run recovery-on-open
-/// (ADR-012 P2): replay the durable log into the fresh in-memory projection so a reopen recovers identically
-/// to the monolith. The credential-provider-aware form is [`composed_postgres_backend_with_config`].
-pub fn composed_postgres_backend(url: &str) -> EngineResult<ComposedPostgresBackend> {
-    composed_postgres_backend_with_config(PostgresConnectConfig::new(url))
+/// (ADR-012 P2). Returns the generic [`AsyncLogReplayBackend`] product; type call sites against that
+/// (or port traits), not a family product alias.
+pub fn composed_postgres_backend(
+    url: &str,
+) -> EngineResult<AsyncLogReplayBackend<PostgresLog, fireweed_projection::InMemoryProjection>> {
+    async_composed_postgres_backend(url)
 }
 
 /// Assemble the composed postgres backend from a fully-built [`PostgresConnectConfig`] (the
@@ -544,21 +543,18 @@ pub fn composed_postgres_backend(url: &str) -> EngineResult<ComposedPostgresBack
 /// recovery-on-open.
 pub fn composed_postgres_backend_with_config(
     config: PostgresConnectConfig,
-) -> EngineResult<ComposedPostgresBackend> {
-    let log = PostgresLog::connect_with_config(config)?;
-    ComposedBackend::new(log, InMemoryProjection::new(), InProcessControlPlane::new()).recover()
+) -> EngineResult<AsyncLogReplayBackend<PostgresLog, fireweed_projection::InMemoryProjection>> {
+    async_composed_postgres_backend_with_config(config)
 }
 
-/// Assemble and recover one member of a fixed server pool. Queue affinity is part of construction, before
-/// the durable catalog is replayed, so each shard is recovered by exactly one connection.
+/// Assemble and recover one member of a fixed server pool. Partition affinity is applied at the
+/// composition-root pool layer; each open still recovers the durable catalog fully for now.
 pub fn composed_postgres_backend_for_worker_with_config(
     config: PostgresConnectConfig,
-    index: usize,
-    partitions: usize,
-) -> EngineResult<ComposedPostgresBackend> {
-    let log = PostgresLog::connect_with_config(config)?;
-    ComposedBackend::new(log, InMemoryProjection::new(), InProcessControlPlane::new())
-        .recover_worker_partition(index, partitions)
+    _index: usize,
+    _partitions: usize,
+) -> EngineResult<AsyncLogReplayBackend<PostgresLog, fireweed_projection::InMemoryProjection>> {
+    async_composed_postgres_backend_with_config(config)
 }
 
 /// Assemble the composed postgres backend isolated in `schema` (`CREATE SCHEMA IF NOT EXISTS` + `SET
@@ -567,9 +563,8 @@ pub fn composed_postgres_backend_for_worker_with_config(
 pub fn composed_postgres_backend_in_schema(
     url: &str,
     schema: &str,
-) -> EngineResult<ComposedPostgresBackend> {
-    let log = PostgresLog::connect_in_schema(url, schema)?;
-    ComposedBackend::new(log, InMemoryProjection::new(), InProcessControlPlane::new()).recover()
+) -> EngineResult<AsyncLogReplayBackend<PostgresLog, fireweed_projection::InMemoryProjection>> {
+    async_composed_postgres_backend_in_schema(url, schema)
 }
 
 /// Postgres-backed atomic-class backend.

@@ -10,6 +10,7 @@
 //!   `Backend::PostgresNative`, drives push/claim/ack over RESP with a stock Redis client, asserts it works.
 #![cfg(feature = "postgres")]
 
+use fireweed_engine::AsyncLogReplayBackend;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -193,9 +194,9 @@ fn fireweed_postgres_url_is_authoritative() {
 #[test]
 fn blocking_backend_pool_constructor_compiles_for_composed_postgres_backend() {
     let _ctor: fn(
-        Vec<Arc<fireweed_postgres::ComposedPostgresBackend>>,
+        Vec<Arc<AsyncLogReplayBackend<fireweed_postgres::PostgresLog, fireweed_projection::InMemoryProjection>>>,
     ) -> fireweed_server::PostgresWholeOperationAdapter<
-        fireweed_postgres::ComposedPostgresBackend,
+        AsyncLogReplayBackend<fireweed_postgres::PostgresLog, fireweed_projection::InMemoryProjection>,
     > = fireweed_server::PostgresWholeOperationAdapter::from_arcs;
 }
 

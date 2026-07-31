@@ -7,7 +7,8 @@
 //! its own never-reused libtest thread) get isolated files — no cross-scenario pollution under the default
 //! parallel test runner.
 
-use fireweed_sqlite::{ComposedSqliteBackend, composed_sqlite_backend};
+use fireweed_engine::AsyncLogReplayBackend;
+use fireweed_sqlite::{InMemoryProjection, SqliteLog, composed_sqlite_backend};
 use std::cell::Cell;
 
 thread_local! {
@@ -27,7 +28,7 @@ fn db_path() -> String {
 
 /// Reopen the SAME database file across a scenario's calls; clean it once (the first `make()` on this
 /// thread) so the first session starts empty and the second reopens its committed state.
-fn make() -> ComposedSqliteBackend {
+fn make() -> AsyncLogReplayBackend<SqliteLog, InMemoryProjection> {
     let p = db_path();
     CLEANED.with(|c| {
         if !c.get() {

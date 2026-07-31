@@ -12,14 +12,13 @@ use fireweed_core::{
 };
 use fireweed_engine::{
     ChangeRecord, ChangeRecordKind, ChangeRecordSink, ClaimPort, ClaimRequest, Clock,
-    ComposedBackend, ControlPlaneConfig, ControlPlaneStore, EngineError, FinalizeKind,
+    ControlPlaneConfig, ControlPlaneStore, EngineError, FinalizeKind,
     FinalizeOutcome, FinalizePort, InMemoryControlPlane, InProcessControlPlane, LogStore,
     ProjectionRead, PushPort, PushSpec, QueueControlPlane, QueueKey, ReclaimDriver,
 };
 #[cfg(feature = "turso-projection")]
 use fireweed_engine::{ReassignLeasePort, RenewLeasePort};
 use fireweed_memory::{ManualClock, composed_memory_backend};
-use fireweed_objectlog::ObjectLog;
 #[cfg(feature = "turso-projection")]
 use fireweed_objectlog::segmented::LocalFsBlobStore;
 use fireweed_resp::{RespHooks, RouteDecision, SystemClock, serve_with_shutdown_and_hooks};
@@ -163,19 +162,28 @@ fn tmp_runtime_paths(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
 fn open_direct_objectlog_hybrid(
     root: &std::path::Path,
     projection: &std::path::Path,
-) -> ComposedBackend<ObjectLog, HybridProjectionStore, InProcessControlPlane> {
-    ComposedBackend::new(
-        ObjectLog::open_group_commit(
-            root,
-            fireweed_server::SegmentConfig::new(1024 * 1024, 5).unwrap(),
-        )
-        .expect("open object log"),
-        HybridProjectionStore::open(projection.to_str().expect("utf8 projection path"))
-            .expect("open hybrid projection"),
-        InProcessControlPlane::new(),
-    )
-    .with_group_commit(true)
-    .recover()
+) -> fireweed_objectlog::AsyncObjectLogHybridBackend {
+    use fireweed_objectlog::{
+        AsyncObjectLogHybridBackend, HybridProductConfig, flush_config_from_segment,
+    };
+    let hybrid = HybridProductConfig {
+        deferred_flush_chunk: fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK,
+        strict: false,
+        async_monitor: None,
+    };
+    let flush = flush_config_from_segment(1024 * 1024, 5);
+    let path = projection.to_str().expect("utf8 projection path");
+    let open = AsyncObjectLogHybridBackend::open(root, path, flush, 0, hybrid);
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(open)),
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            rt.block_on(open)
+        }
+    }
     .expect("recover objectlog/hybrid")
 }
 

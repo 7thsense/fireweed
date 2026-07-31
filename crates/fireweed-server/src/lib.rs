@@ -18,14 +18,10 @@ use std::time::Duration;
 use fireweed_core::{OwnerId, QueueDefinition, QueueId, TenantId, UtcTimestamp};
 use fireweed_engine::{
     AcquireOutcome, AuthContext, BufferedByteBudget, BufferedByteBudgetConfig, Clock,
-    ComposedBackend, ControlPlaneConfig, EngineError, EngineResult, InMemoryControlPlane,
-    InProcessControlPlane, LeaseState, OwnedSession, QueueControlPlane, QueueKey,
+    ControlPlaneConfig, EngineError, EngineResult, InMemoryControlPlane, LeaseState, OwnedSession,
+    QueueControlPlane, QueueKey, assemble_async_log_replay,
 };
 use fireweed_memory::composed_memory_backend;
-use fireweed_objectlog::ObjectLog;
-use fireweed_objectlog::segmented::{
-    BlobStore, LocalFsBlobStore, S3BlobStore, probe_create_only_semantics,
-};
 use fireweed_resp::{
     RespBackend, RespHooks, RouteDecision, SystemClock, route, serve_with_shutdown,
     serve_with_shutdown_and_hooks,
@@ -45,21 +41,15 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 mod change_record_sink;
-mod object_log_sqlite;
-#[cfg(feature = "turso-projection")]
-mod object_log_turso;
 mod tokio_dispatcher;
 pub use change_record_sink::{
     ChangeRecordSinkConfig, ChangeRecordSinkMode, FjordChangeRecordSink, NiflheimChangeRecordSink,
     emit_change_record_tick, spawn_change_record_emitter,
 };
-pub use fireweed_objectlog::segmented::SegmentConfig;
-pub use object_log_sqlite::{
-    DEFAULT_RECOVERY_MAX_TAIL, ObjectLogSqliteBackend, RecoveryStats,
-    SegmentedObjectLogInMemoryBackend, SegmentedObjectLogSqliteBackend,
-};
-#[cfg(feature = "turso-projection")]
-pub use object_log_turso::ObjectLogTursoBackend;
+/// Segment flush knobs for object-log product cells (maps onto LogEngine FlushConfig).
+pub use fireweed_objectlog::SegmentConfig;
+/// Recovery-window default for object-log reopen budgets (FIREWEED_RECOVERY_MAX_TAIL_COMMANDS).
+pub const DEFAULT_RECOVERY_MAX_TAIL: u64 = 1_000_000;
 pub use tokio_dispatcher::TokioTaskDispatcher;
 
 /// The single optional env-var populator for [`Config`] (`Config::from_env`) plus its [`ConfigError`]. Pure
@@ -291,50 +281,9 @@ impl ObjectLogSpec {
                         "static S3 credentials require both access key id and secret access key",
                     ));
                 }
-                S3BlobStore::new(endpoint, bucket, access_key_id, secret_access_key, region)?;
             }
         }
         Ok(())
-    }
-
-    fn open_blob_store(&self) -> EngineResult<Arc<dyn BlobStore>> {
-        self.validate()?;
-        match self {
-            Self::LocalFilesystem { root, .. } => Ok(Arc::new(LocalFsBlobStore::open(root)?)),
-            Self::S3 {
-                endpoint,
-                bucket,
-                region,
-                credentials,
-                ..
-            } => {
-                let S3CredentialSource::Static {
-                    access_key_id,
-                    secret_access_key,
-                } = credentials;
-                Ok(Arc::new(S3BlobStore::new(
-                    endpoint,
-                    bucket,
-                    access_key_id,
-                    secret_access_key,
-                    region,
-                )?))
-            }
-        }
-    }
-
-    /// Open the production blob-store composition for this object-log profile. S3 startup proves the
-    /// endpoint's native create-only primitive before accepting it as manifest-head authority.
-    fn open_blob_store_with_native_create_only(&self) -> EngineResult<Arc<dyn BlobStore>> {
-        let store = self.open_blob_store()?;
-        if matches!(self, Self::S3 { .. }) {
-            probe_create_only_semantics(store.as_ref()).map_err(|error| {
-                EngineError::Storage(format!(
-                    "S3 object-log endpoint does not provide Fireweed's required native create-only semantics: {error}"
-                ))
-            })?;
-        }
-        Ok(store)
     }
 }
 
@@ -389,14 +338,11 @@ impl ProjectionSpec {
     }
 }
 
-type ObjectLogHybridBackend =
-    ComposedBackend<ObjectLog, HybridProjectionStore, InProcessControlPlane>;
+type ObjectLogHybridBackend = fireweed_objectlog::AsyncObjectLogHybridBackend;
 
-/// Object-log (filesystem or s3) × durable Postgres relational projection — the server promotion of the
-/// facade `open_objectlog_postgres` composition path.
+/// Object-log (LogEngine) × durable Postgres relational projection product (server matrix cell).
 #[cfg(feature = "postgres")]
-type ObjectLogPostgresBackend =
-    ComposedBackend<ObjectLog, fireweed_postgres::PostgresRelational, InProcessControlPlane>;
+type ObjectLogPostgresBackend = fireweed_postgres::AsyncObjectLogPostgresBackend;
 
 /// The queue-ownership control-plane axis. `InProcess` is an explicit single-process development profile;
 /// production replicas use the shared transactional Postgres authority.
@@ -822,17 +768,11 @@ async fn maybe_spawn_embedded_broker(
 /// A backend selected as the orthogonal product `LogSpec × ProjectionSpec × ControlPlaneSpec` (ADR-012).
 /// [`start`] assembles the concrete backend from this spec.
 ///
-/// NOTE (ADR-012 P2 status): the spec is the one composition axis the server selects on, and [`start`] now
-/// assembles the wired families from the ONE generic `ComposedBackend` — `Memory → composed_memory_backend`,
-/// `Sqlite → composed_sqlite_backend`, `Postgres → composed_postgres_backend_with_config` (the durable
-/// `PostgresLog` command log + in-memory projection, driven through [`PostgresWholeOperationAdapter`]). The
-/// generic `ComposedBackend::recover` rebuilds the projection + counters + cmd-seq from the durable
-/// log/projection on open (honored across every durable composition by the reopen/recovery conformance
-/// dimension), so no composed family regresses restart durability. The object-log families
-/// (`ObjectLog × {InMemory, Sqlite}`) still run on the segmented group-commit backends because their
-/// production env contract — concurrent segment co-buffering + the latency-seal flusher + segment-config /
-/// debug-segments / recovery-tail knobs — is not yet expressed by the per-append-seal composed `ObjectLog`
-/// axis; `objectlog/hybrid` is the first runtime that uses that generic group-commit axis directly.
+/// Object-log cells (`filesystem`/`s3` × memory|sqlite|hybrid|postgres) open via crates.io LogEngine
+/// products ([`fireweed_objectlog::ObjectLogEngineStore`] + async projection composition). Segment seal
+/// knobs on [`ObjectLogSpec`] map to [`object_log::FlushConfig`] through
+/// [`fireweed_objectlog::flush_config_from_segment`]. Memory/sqlite/postgres log axes use async
+/// log-replay composition.
 pub struct BackendSpec {
     pub log: LogSpec,
     pub projection: ProjectionSpec,
@@ -2223,8 +2163,8 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         (LogSpec::Memory, ProjectionSpec::Sqlite { path }) => {
             // Class B (ADR-013): in-process MemoryLog for ordering while alive × durable SQLite
             // projection. Reopen/recovery is projection-only — no Class A log-replay claims.
-            // `ComposedBackend::recover` repopulates definitions/counters from the projection and
-            // seeds the fresh MemoryLog high-water so subsequent appends continue the sequence space.
+            // Async product assemble + recover: MemoryLog is non-durable, so recover walks an empty
+            // log catalog (no-op). The durable projection image is the reopen source of truth.
             let p = path
                 .into_os_string()
                 .into_string()
@@ -2232,9 +2172,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             let backend = tokio::task::spawn_blocking(move || {
                 let log = fireweed_projection::MemoryLog::new();
                 let projection = fireweed_sqlite::SqliteProjectionStore::open(&p)?;
-                ComposedBackend::new(log, projection, InProcessControlPlane::new())
-                    .recover()
-                    .map(|b| b.with_node_id(node_id))
+                assemble_async_log_replay(log, projection, node_id)?.recover()
             })
             .await
             .map_err(|e| EngineError::Storage(format!("memory/sqlite open task failed: {e}")))??;
@@ -2256,14 +2194,12 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         #[cfg(feature = "postgres")]
         (LogSpec::Memory, ProjectionSpec::Postgres { url }) => {
             // Class B (ADR-013): in-process MemoryLog × durable postgres relational projection.
-            // Connect + recover off-reactor (sync postgres client must not run on a Tokio worker).
-            // Reopen is projection-only; no Class A log-rebuild claims.
+            // Connect + assemble off-reactor (sync postgres client must not run on a Tokio worker).
+            // Reopen is projection-only; no Class A log-rebuild claims. MemoryLog recover is a no-op.
             let backend = tokio::task::spawn_blocking(move || {
                 let log = fireweed_projection::MemoryLog::new();
                 let projection = fireweed_postgres::PostgresRelational::connect(&url)?;
-                ComposedBackend::new(log, projection, InProcessControlPlane::new())
-                    .recover()
-                    .map(|b| b.with_node_id(node_id))
+                assemble_async_log_replay(log, projection, node_id)?.recover()
             })
             .await
             .map_err(|e| {
@@ -2362,7 +2298,8 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         (LogSpec::Sqlite { path }, ProjectionSpec::Postgres { url }) => {
             // Class A: durable sqlite command LOG × derived postgres relational PROJECTION.
             // Distinct stores: sqlite log path vs postgres projection URL. Connect + recover off-reactor
-            // (sync postgres client must not run on a Tokio worker).
+            // (sync postgres client must not run on a Tokio worker). Async log-replay product
+            // (`assemble_async_log_replay`) replaces the retired sync dual-stack open.
             let log_p = path
                 .to_str()
                 .ok_or_else(|| EngineError::Storage("non-utf8 sqlite log path".into()))?
@@ -2370,9 +2307,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             let backend = tokio::task::spawn_blocking(move || {
                 let log = fireweed_sqlite::SqliteLog::open(&log_p)?;
                 let projection = fireweed_postgres::PostgresRelational::connect(&url)?;
-                fireweed_engine::ComposedBackend::new(log, projection, InProcessControlPlane::new())
-                    .recover()
-                    .map(|b| b.with_node_id(node_id))
+                assemble_async_log_replay(log, projection, node_id)?.recover()
             })
             .await
             .map_err(|e| {
@@ -2393,124 +2328,46 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             .await
         }
         (LogSpec::ObjectLog(spec), ProjectionSpec::InMemory) => {
-            // The segmented group-commit object log (the object log's only production form) over an in-memory
-            // projection rebuilt by `read_all` replay on open.
-            let backends = tokio::task::spawn_blocking(move || {
-                let segment_config = spec.segment_config();
-                let store = spec.open_blob_store_with_native_create_only()?;
-                (0..8)
-                    .map(|index| {
-                        SegmentedObjectLogInMemoryBackend::open_with_blob_store(
-                            Arc::clone(&store),
-                            segment_config,
-                        )
-                        .map(|backend| {
-                            backend
-                                .with_byte_admission(
-                                    objectlog_byte_budget.clone(),
-                                    config_objectlog_queue_limit,
-                                )
-                                .with_debug_segments(debug_segments)
-                                .with_node_id(node_id)
-                                .with_worker_partition(index, 8)
-                        })
-                    })
-                    .collect::<EngineResult<Vec<_>>>()
-            })
-            .await
-            .map_err(|e| EngineError::Storage(format!("object-log open task failed: {e}")))??;
-            let backends: Vec<_> = backends.into_iter().map(Arc::new).collect();
-            // The flusher seals latency-due segments so a buffer below `target_bytes` still acks promptly.
-            let flushers: Vec<_> = backends
-                .iter()
-                .map(|backend| backend.spawn_flusher())
-                .collect();
-            let (backend, lifecycle) = blocking_backend_pool(backends);
-            let mut server = run_owned_with_blocking_lifecycle(
-                backend,
-                lifecycle,
-                control_plane,
-                advertise_addr.as_deref(),
-                owner_id.clone(),
-                clock,
-                &listen,
-                interval,
-                &queues,
-            )
-            .await?;
-            server.maintenance_tasks.extend(flushers);
-            Ok(server)
-        }
-        (LogSpec::ObjectLog(spec), ProjectionSpec::Sqlite { path }) => {
-            // The segmented group-commit object log driving the derived SQLite projection: concurrent pushes
-            // co-buffer into one sealed segment (one durable object + one manifest-CAS + one batched SQLite
-            // apply), and a reopen replays the object-log tail beyond the projection snapshot high-water.
-            let p = path
-                .into_os_string()
-                .into_string()
-                .map_err(|_| EngineError::Storage("non-utf8 path".into()))?;
-            let backends = tokio::task::spawn_blocking(move || {
-                let segment_config = spec.segment_config();
-                let store = spec.open_blob_store_with_native_create_only()?;
-                let projection = Arc::new(fireweed_sqlite::SqliteProjectionStore::open(&p)?);
-                (0..8)
-                    .map(|index| {
-                        SegmentedObjectLogSqliteBackend::open_with_blob_store_and_projection(
-                            Arc::clone(&store),
-                            Arc::clone(&projection),
-                            segment_config,
-                        )
-                        .map(|backend| {
-                            backend
-                                .with_byte_admission(
-                                    objectlog_byte_budget.clone(),
-                                    config_objectlog_queue_limit,
-                                )
-                                .with_node_id(node_id)
-                                .with_recovery_max_tail(recovery_max_tail)
-                                .with_debug_segments(debug_segments)
-                                .with_worker_partition(index, 8)
-                        })
-                    })
-                    .collect::<EngineResult<Vec<_>>>()
-            })
-            .await
-            .map_err(|e| {
-                EngineError::Storage(format!("object-log/sqlite open task failed: {e}"))
-            })??;
-            let backends: Vec<_> = backends.into_iter().map(Arc::new).collect();
-            let flushers: Vec<_> = backends
-                .iter()
-                .map(|backend| backend.spawn_flusher())
-                .collect();
-            let (backend, lifecycle) = blocking_backend_pool(backends);
-            let mut server = run_owned_with_blocking_lifecycle(
-                backend,
-                lifecycle,
-                control_plane,
-                advertise_addr.as_deref(),
-                owner_id.clone(),
-                clock,
-                &listen,
-                interval,
-                &queues,
-            )
-            .await?;
-            server.maintenance_tasks.extend(flushers);
-            Ok(server)
-        }
-        #[cfg(feature = "turso-projection")]
-        (LogSpec::ObjectLog(spec), ProjectionSpec::Turso { path }) => {
-            let segment_config = spec.segment_config();
-            let store =
-                tokio::task::spawn_blocking(move || spec.open_blob_store_with_native_create_only())
-                    .await
-                    .map_err(|e| {
-                        EngineError::Storage(format!("object-log open task failed: {e}"))
-                    })??;
-            let backend = Arc::new(
-                ObjectLogTursoBackend::open_with_blob_store(store, &path, segment_config).await?,
+            // Program A: crates.io object-log LogEngine × in-memory projection (async composition).
+            // LogEngine owns group-commit flush; no segmented flusher task.
+            let _ = (objectlog_byte_budget, config_objectlog_queue_limit, debug_segments);
+            let segment = spec.segment_config();
+            let flush = fireweed_objectlog::flush_config_from_segment(
+                segment.target_bytes,
+                segment.max_latency_ms,
             );
+            let backend = match spec {
+                ObjectLogSpec::LocalFilesystem { root, .. } => {
+                    fireweed_objectlog::AsyncObjectLogMemoryBackend::open_local_with_node_id(
+                        root, flush, node_id,
+                    )
+                    .await?
+                }
+                ObjectLogSpec::S3 {
+                    endpoint,
+                    bucket,
+                    region,
+                    credentials: S3CredentialSource::Static {
+                        access_key_id,
+                        secret_access_key,
+                    },
+                    allow_insecure_http: _,
+                    ..
+                } => {
+                    let log = fireweed_objectlog::ObjectLogEngineStore::open_s3(
+                        &endpoint,
+                        &region,
+                        &bucket,
+                        &access_key_id,
+                        &secret_access_key,
+                        flush,
+                    )
+                    .await?;
+                    fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store(log, node_id)
+                        .await?
+                }
+            };
+            let backend = Arc::new(backend);
             run_owned(
                 backend,
                 control_plane,
@@ -2523,39 +2380,89 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             )
             .await
         }
-        #[cfg(not(feature = "turso-projection"))]
+        (LogSpec::ObjectLog(spec), ProjectionSpec::Sqlite { path }) => {
+            // Program A: LogEngine × durable sqlite projection (async composition).
+            let _ = (
+                objectlog_byte_budget,
+                config_objectlog_queue_limit,
+                debug_segments,
+                recovery_max_tail,
+            );
+            let p = path
+                .into_os_string()
+                .into_string()
+                .map_err(|_| EngineError::Storage("non-utf8 path".into()))?;
+            let segment = spec.segment_config();
+            let flush = fireweed_objectlog::flush_config_from_segment(
+                segment.target_bytes,
+                segment.max_latency_ms,
+            );
+            let backend = match spec {
+                ObjectLogSpec::LocalFilesystem { root, .. } => {
+                    fireweed_objectlog::AsyncObjectLogSqliteBackend::open(
+                        root, &p, flush, node_id,
+                    )
+                    .await?
+                }
+                ObjectLogSpec::S3 {
+                    endpoint,
+                    bucket,
+                    region,
+                    credentials: S3CredentialSource::Static {
+                        access_key_id,
+                        secret_access_key,
+                    },
+                    ..
+                } => {
+                    let log = fireweed_objectlog::ObjectLogEngineStore::open_s3(
+                        &endpoint,
+                        &region,
+                        &bucket,
+                        &access_key_id,
+                        &secret_access_key,
+                        flush,
+                    )
+                    .await?;
+                    let projection = fireweed_sqlite::SqliteProjectionStore::open(&p)?;
+                    fireweed_objectlog::AsyncObjectLogSqliteBackend::from_log_and_projection(
+                        log, projection, node_id,
+                    )
+                    .await?
+                }
+            };
+            run_owned(
+                Arc::new(backend),
+                control_plane,
+                advertise_addr.as_deref(),
+                owner_id.clone(),
+                clock,
+                &listen,
+                interval,
+                &queues,
+            )
+            .await
+        }
         (LogSpec::ObjectLog(_), ProjectionSpec::Turso { .. }) => Err(EngineError::Invalid(
-            "FIREWEED_PROJECTION_BACKEND=turso requires a fireweed-server build with the `turso-projection` cargo feature",
+            "FIREWEED_PROJECTION_BACKEND=turso is not supported after LogEngine cutover; use memory|sqlite|hybrid|postgres projections",
         )),
         (LogSpec::ObjectLog(spec), ProjectionSpec::Hybrid { path }) => {
-            let backends = tokio::task::spawn_blocking(move || {
-                let segment_config = spec.segment_config();
-                let store = spec.open_blob_store_with_native_create_only()?;
-                (0..8)
-                    .map(|index| {
-                        open_objectlog_hybrid_backend(
-                            Arc::clone(&store),
-                            &path,
-                            segment_config,
-                            recovery_max_tail,
-                            node_id,
-                            deferred_flush_chunk,
-                            false,
-                            None,
-                            objectlog_byte_budget.clone(),
-                            config_objectlog_queue_limit,
-                            Some((index, 8)),
-                        )
-                    })
-                    .collect::<EngineResult<Vec<_>>>()
-            })
-            .await
-            .map_err(|e| EngineError::Storage(format!("hybrid open task failed: {e}")))??;
-            let flushers: Vec<_> = backends
-                .iter()
-                .map(|backend| spawn_hybrid_flusher(backend, debug_segments))
-                .collect();
-            let (backend, lifecycle) = blocking_backend_pool(backends);
+            // Program A: LogEngine × hybrid projection (async product). LogEngine owns group-commit
+            // flush; the maintenance task only drains deferred SQLite checkpoint work.
+            let _ = (
+                objectlog_byte_budget,
+                config_objectlog_queue_limit,
+                recovery_max_tail,
+            );
+            let backend = open_objectlog_hybrid_backend(
+                spec,
+                &path,
+                node_id,
+                deferred_flush_chunk,
+                false,
+                None,
+            )
+            .await?;
+            let flusher = spawn_hybrid_flusher(&backend, debug_segments);
             let fjord_task = maybe_spawn_embedded_broker(
                 &fjord_surface,
                 fjord_broker_listen.as_deref(),
@@ -2563,7 +2470,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &queues,
             )
             .await?;
-            let emitter_backend = backend.clone();
+            let emitter_backend = Arc::clone(&backend);
             let mut server = run_owned_with_fjord_task(
                 backend,
                 control_plane,
@@ -2576,8 +2483,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 fjord_task,
             )
             .await?;
-            server.blocking_lifecycles.push(lifecycle);
-            server.maintenance_tasks.extend(flushers);
+            server.maintenance_tasks.push(flusher);
             let change_record_emitter = change_record_sink::spawn_change_record_emitter_if_enabled(
                 emitter_backend,
                 &queues,
@@ -2590,41 +2496,23 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             Ok(server)
         }
         (LogSpec::ObjectLog(spec), ProjectionSpec::HybridStrict { path }) => {
-            // The `objectlog/hybrid-strict` profile (TD-004): the same object-log group-commit substrate as
-            // `objectlog/hybrid`, but the projection commits every sealed batch DURABLY to SQLite BEFORE
-            // applying it to hot memory (`apply_durable_then_memory`, selected by `with_strict_apply(true)`).
-            // This puts the SQLite-durable-before-visible barrier and the SQLite-commit-then-memory-fail
-            // poison cut on the real server write pipeline: a SQLite failure returns no success and replays
-            // the object-log tail, and a poisoned store fails closed until a restart rehydrates memory from
-            // the durable SQLite `ProjectionImage`.
-            let backends = tokio::task::spawn_blocking(move || {
-                let segment_config = spec.segment_config();
-                let store = spec.open_blob_store_with_native_create_only()?;
-                (0..8)
-                    .map(|index| {
-                        open_objectlog_hybrid_backend(
-                            Arc::clone(&store),
-                            &path,
-                            segment_config,
-                            recovery_max_tail,
-                            node_id,
-                            deferred_flush_chunk,
-                            true,
-                            None,
-                            objectlog_byte_budget.clone(),
-                            config_objectlog_queue_limit,
-                            Some((index, 8)),
-                        )
-                    })
-                    .collect::<EngineResult<Vec<_>>>()
-            })
-            .await
-            .map_err(|e| EngineError::Storage(format!("hybrid-strict open task failed: {e}")))??;
-            let flushers: Vec<_> = backends
-                .iter()
-                .map(|backend| spawn_hybrid_flusher(backend, debug_segments))
-                .collect();
-            let (backend, lifecycle) = blocking_backend_pool(backends);
+            // The `objectlog/hybrid-strict` profile (TD-004): LogEngine × hybrid with strict
+            // durable-SQLite-before-hot-memory apply (`with_strict_apply(true)`).
+            let _ = (
+                objectlog_byte_budget,
+                config_objectlog_queue_limit,
+                recovery_max_tail,
+            );
+            let backend = open_objectlog_hybrid_backend(
+                spec,
+                &path,
+                node_id,
+                deferred_flush_chunk,
+                true,
+                None,
+            )
+            .await?;
+            let flusher = spawn_hybrid_flusher(&backend, debug_segments);
             let fjord_task = maybe_spawn_embedded_broker(
                 &fjord_surface,
                 fjord_broker_listen.as_deref(),
@@ -2632,7 +2520,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &queues,
             )
             .await?;
-            let emitter_backend = backend.clone();
+            let emitter_backend = Arc::clone(&backend);
             let mut server = run_owned_with_fjord_task(
                 backend,
                 control_plane,
@@ -2645,8 +2533,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 fjord_task,
             )
             .await?;
-            server.blocking_lifecycles.push(lifecycle);
-            server.maintenance_tasks.extend(flushers);
+            server.maintenance_tasks.push(flusher);
             let change_record_emitter = change_record_sink::spawn_change_record_emitter_if_enabled(
                 emitter_backend,
                 &queues,
@@ -2659,14 +2546,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             Ok(server)
         }
         (LogSpec::ObjectLog(spec), ProjectionSpec::HybridAsync { path }) => {
-            // The `objectlog/hybrid-async` profile runs the same object-log + hybrid (hot-memory serving,
-            // durable SQLite checkpoint) substrate as `objectlog/hybrid`; the distinction is the profile's
-            // async-apply debt/backpressure/poison threshold config, validated fail-closed at config time
-            // (see `Config::hybrid_async` / `HybridAsyncThresholds`). Log the resolved thresholds, then WIRE
-            // them into the composed write path: the `HybridAsyncMonitor` armed inside the hybrid store
-            // observes the real deferred-checkpoint backlog on every live apply / flush, so `admit_mutation`
-            // gates real mutating pushes closed under Hard debt and `recovery_high_water` withholds the
-            // lagging high-water until the backlog drains (TD-004:361).
+            // The `objectlog/hybrid-async` profile: LogEngine × hybrid with async-apply debt monitor.
             eprintln!(
                 "[objectlog/hybrid-async] async-apply thresholds: lag_max_commands={} debt_max_bytes={} \
                  queue_depth_max={} oldest_unapplied_max_ms={} poison_retry_threshold={}",
@@ -2676,34 +2556,21 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 hybrid_async.oldest_unapplied_max_ms,
                 hybrid_async.apply_poison_retry_threshold,
             );
-            let backends = tokio::task::spawn_blocking(move || {
-                let segment_config = spec.segment_config();
-                let store = spec.open_blob_store_with_native_create_only()?;
-                (0..8)
-                    .map(|index| {
-                        open_objectlog_hybrid_backend(
-                            Arc::clone(&store),
-                            &path,
-                            segment_config,
-                            recovery_max_tail,
-                            node_id,
-                            deferred_flush_chunk,
-                            false,
-                            Some(hybrid_async),
-                            objectlog_byte_budget.clone(),
-                            config_objectlog_queue_limit,
-                            Some((index, 8)),
-                        )
-                    })
-                    .collect::<EngineResult<Vec<_>>>()
-            })
-            .await
-            .map_err(|e| EngineError::Storage(format!("hybrid-async open task failed: {e}")))??;
-            let flushers: Vec<_> = backends
-                .iter()
-                .map(|backend| spawn_hybrid_flusher(backend, debug_segments))
-                .collect();
-            let (backend, lifecycle) = blocking_backend_pool(backends);
+            let _ = (
+                objectlog_byte_budget,
+                config_objectlog_queue_limit,
+                recovery_max_tail,
+            );
+            let backend = open_objectlog_hybrid_backend(
+                spec,
+                &path,
+                node_id,
+                deferred_flush_chunk,
+                false,
+                Some(hybrid_async),
+            )
+            .await?;
+            let flusher = spawn_hybrid_flusher(&backend, debug_segments);
             let fjord_task = maybe_spawn_embedded_broker(
                 &fjord_surface,
                 fjord_broker_listen.as_deref(),
@@ -2711,7 +2578,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &queues,
             )
             .await?;
-            let emitter_backend = backend.clone();
+            let emitter_backend = Arc::clone(&backend);
             let mut server = run_owned_with_fjord_task(
                 backend,
                 control_plane,
@@ -2724,8 +2591,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 fjord_task,
             )
             .await?;
-            server.blocking_lifecycles.push(lifecycle);
-            server.maintenance_tasks.extend(flushers);
+            server.maintenance_tasks.push(flusher);
             let change_record_emitter = change_record_sink::spawn_change_record_emitter_if_enabled(
                 emitter_backend,
                 &queues,
@@ -2739,27 +2605,18 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         }
         #[cfg(feature = "postgres")]
         (LogSpec::ObjectLog(spec), ProjectionSpec::Postgres { url }) => {
-            // Class A: filesystem|s3 object-log × durable Postgres projection. Promotes the facade
-            // `open_objectlog_postgres` composition into the server product matrix: group-commit
-            // ObjectLog + PostgresRelational, recovery-on-open, off-reactor connect, whole-operation
-            // adapter for every port (sync postgres client must not run on a Tokio worker).
-            let backend = tokio::task::spawn_blocking(move || {
-                open_objectlog_postgres_backend(
-                    &spec,
-                    &url,
-                    recovery_max_tail,
-                    node_id,
-                    objectlog_byte_budget,
-                    config_objectlog_queue_limit,
-                )
-            })
-            .await
-            .map_err(|e| {
-                EngineError::Storage(format!("object-log/postgres open task failed: {e}"))
-            })??;
-            let flusher = spawn_objectlog_postgres_flusher(&backend, debug_segments);
+            // Class A: filesystem|s3 LogEngine × durable Postgres projection (async product).
+            // Sync Postgres client work is confined inside projection applies; open uses spawn_blocking
+            // for the connect half via the product factory. LogEngine owns flush (no segmented flusher).
+            let _ = (
+                objectlog_byte_budget,
+                config_objectlog_queue_limit,
+                recovery_max_tail,
+                debug_segments,
+            );
+            let backend = open_objectlog_postgres_backend(spec, &url, node_id).await?;
             let (backend, lifecycle) = blocking_backend(backend);
-            let mut server = run_owned_with_blocking_lifecycle(
+            run_owned_with_blocking_lifecycle(
                 backend,
                 lifecycle,
                 control_plane,
@@ -2770,9 +2627,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 interval,
                 &queues,
             )
-            .await?;
-            server.maintenance_tasks.push(flusher);
-            Ok(server)
+            .await
         }
         #[cfg(feature = "postgres")]
         (LogSpec::Postgres { url, credentials }, ProjectionSpec::InMemory) => {
@@ -2818,11 +2673,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         }
         #[cfg(feature = "postgres")]
         (LogSpec::Postgres { url, credentials }, ProjectionSpec::Sqlite { path }) => {
-            // The composed postgres-log + sqlite-projection backend (`ComposedBackend<PostgresLog,
-            // SqliteProjectionStore, InProcessControlPlane>`): the durable postgres command log paired with a
-            // derived SQLite relational projection, recovery-on-open. Same off-reactor discipline as
-            // postgres/inmemory above: connect BOTH axes and recover inside `spawn_blocking`, then drive the
-            // composition only through the bounded whole-operation adapter.
+            // Class A: durable postgres command log × derived SQLite relational projection.
+            // Same off-reactor discipline as postgres/inmemory: connect BOTH axes and recover inside
+            // `spawn_blocking`, then drive the composition through the whole-operation adapter.
+            // Async log-replay product replaces the retired sync dual-stack open.
             let p = path
                 .to_str()
                 .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?
@@ -2834,9 +2688,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 }
                 let log = fireweed_postgres::PostgresLog::connect_with_config(connect_config)?;
                 let projection = fireweed_sqlite::SqliteProjectionStore::open(&p)?;
-                ComposedBackend::new(log, projection, InProcessControlPlane::new())
-                    .recover()
-                    .map(|b| b.with_node_id(node_id))
+                assemble_async_log_replay(log, projection, node_id)?.recover()
             })
             .await
             .map_err(|e| {
@@ -2906,167 +2758,147 @@ pub async fn start(config: Config) -> EngineResult<Server> {
     }
 }
 
-/// Assemble the object-log + hybrid (hot-memory serving over a durable SQLite checkpoint image) composed
-/// backend shared by the `objectlog/hybrid` and `objectlog/hybrid-async` profiles: open the group-commit
-/// object log at `root` + the hybrid projection store at `path`, run the ack-after-seal group-commit write
-/// path, and recover-on-open (hydrate memory from the validated SQLite image + replay the object-log tail).
-// Composition-root builder: threads the object-log + hybrid-projection knobs (strict apply, async
-// backpressure monitor) into one backend. The arity reflects the wiring surface, not incidental complexity.
-#[allow(clippy::too_many_arguments)]
-fn open_objectlog_hybrid_backend(
-    store: Arc<dyn BlobStore>,
+/// Open LogEngine × hybrid projection for `objectlog/hybrid{,-strict,-async}` product cells.
+async fn open_objectlog_hybrid_backend(
+    spec: ObjectLogSpec,
     path: &std::path::Path,
-    segment_config: SegmentConfig,
-    recovery_max_tail: u64,
     node_id: u8,
     deferred_flush_chunk: usize,
     strict: bool,
     async_monitor: Option<HybridAsyncThresholds>,
-    byte_budget: BufferedByteBudget,
-    queue_byte_limit: usize,
-    worker_partition: Option<(usize, usize)>,
 ) -> EngineResult<Arc<ObjectLogHybridBackend>> {
     let p = path
         .to_str()
-        .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
-    let mut projection = HybridProjectionStore::open(p)?
-        .with_deferred_flush_chunk(deferred_flush_chunk)
-        .with_strict_apply(strict);
-    // `objectlog/hybrid-async` ONLY: arm the TD-004 debt/backpressure/poison monitor with the operator's
-    // configured thresholds so observed async-apply debt gates real mutating admission (`admit_mutation`) and
-    // withholds the lagging recovery high-water (`recovery_high_water`). `objectlog/hybrid` and
-    // `objectlog/hybrid-strict` pass `None` and are behaviorally unchanged (no monitor, no gating).
-    if let Some(thresholds) = async_monitor {
-        projection = projection.with_async_monitor(thresholds);
-    }
-    let backend = ComposedBackend::new(
-        ObjectLog::open_group_commit_with_blob_store(store, segment_config)?,
-        projection,
-        InProcessControlPlane::new(),
-    )
-    .with_group_commit(true)
-    .with_byte_admission(byte_budget, queue_byte_limit)
-    .with_recovery_max_tail(recovery_max_tail)
-    .recover()?
-    .with_node_id(node_id);
-    let backend = if let Some((index, count)) = worker_partition {
-        backend.with_worker_partition(index, count)
-    } else {
-        backend
+        .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?
+        .to_string();
+    let segment = spec.segment_config();
+    let flush = fireweed_objectlog::flush_config_from_segment(
+        segment.target_bytes,
+        segment.max_latency_ms,
+    );
+    let hybrid = fireweed_objectlog::HybridProductConfig {
+        deferred_flush_chunk,
+        strict,
+        async_monitor,
+    };
+    let backend = match spec {
+        ObjectLogSpec::LocalFilesystem { root, .. } => {
+            fireweed_objectlog::AsyncObjectLogHybridBackend::open(root, &p, flush, node_id, hybrid)
+                .await?
+        }
+        ObjectLogSpec::S3 {
+            endpoint,
+            bucket,
+            region,
+            credentials: S3CredentialSource::Static {
+                access_key_id,
+                secret_access_key,
+            },
+            ..
+        } => {
+            let log = fireweed_objectlog::ObjectLogEngineStore::open_s3(
+                &endpoint,
+                &region,
+                &bucket,
+                &access_key_id,
+                &secret_access_key,
+                flush,
+            )
+            .await?;
+            let mut projection = HybridProjectionStore::open(&p)?
+                .with_deferred_flush_chunk(hybrid.deferred_flush_chunk)
+                .with_strict_apply(hybrid.strict);
+            if let Some(thresholds) = hybrid.async_monitor {
+                projection = projection.with_async_monitor(thresholds);
+            }
+            fireweed_objectlog::AsyncObjectLogHybridBackend::from_log_and_projection(
+                log, projection, node_id,
+            )
+            .await?
+        }
     };
     Ok(Arc::new(backend))
 }
 
-/// Open the object-log × Postgres projection composition (filesystem or s3 blob store +
-/// [`fireweed_postgres::PostgresRelational`]). Mirrors the facade `open_objectlog_postgres` path with
-/// server byte-admission / recovery-tail / node-id knobs.
+/// Open LogEngine × Postgres relational projection for the objectlog/postgres product cell.
 #[cfg(feature = "postgres")]
-fn open_objectlog_postgres_backend(
-    spec: &ObjectLogSpec,
+async fn open_objectlog_postgres_backend(
+    spec: ObjectLogSpec,
     projection_url: &str,
-    recovery_max_tail: u64,
     node_id: u8,
-    byte_budget: BufferedByteBudget,
-    queue_byte_limit: usize,
 ) -> EngineResult<Arc<ObjectLogPostgresBackend>> {
-    let segment_config = spec.segment_config();
-    let store = spec.open_blob_store_with_native_create_only()?;
-    // Authoritative group-commit object log (same durability class as facade open_objectlog_postgres).
-    let log = ObjectLog::open_group_commit_authoritative_with_blob_store(store, segment_config)?;
-    let projection = fireweed_postgres::PostgresRelational::connect(projection_url)?;
-    let backend = ComposedBackend::new(log, projection, InProcessControlPlane::new())
-        .with_group_commit(true)
-        .with_byte_admission(byte_budget, queue_byte_limit)
-        .with_recovery_max_tail(recovery_max_tail)
-        .recover()?
-        .with_node_id(node_id);
+    let segment = spec.segment_config();
+    let flush = fireweed_objectlog::flush_config_from_segment(
+        segment.target_bytes,
+        segment.max_latency_ms,
+    );
+    let url = projection_url.to_string();
+    let backend = match spec {
+        ObjectLogSpec::LocalFilesystem { root, .. } => {
+            // Postgres connect is blocking; open projection off-reactor then assemble with log.
+            let log =
+                fireweed_objectlog::ObjectLogEngineStore::open_local(root, flush).await?;
+            let projection = tokio::task::spawn_blocking(move || {
+                fireweed_postgres::PostgresRelational::connect(&url)
+            })
+            .await
+            .map_err(|e| {
+                EngineError::Storage(format!("object-log/postgres projection connect failed: {e}"))
+            })??;
+            fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection(
+                log, projection, node_id,
+            )
+            .await?
+        }
+        ObjectLogSpec::S3 {
+            endpoint,
+            bucket,
+            region,
+            credentials: S3CredentialSource::Static {
+                access_key_id,
+                secret_access_key,
+            },
+            ..
+        } => {
+            let log = fireweed_objectlog::ObjectLogEngineStore::open_s3(
+                &endpoint,
+                &region,
+                &bucket,
+                &access_key_id,
+                &secret_access_key,
+                flush,
+            )
+            .await?;
+            let projection = tokio::task::spawn_blocking(move || {
+                fireweed_postgres::PostgresRelational::connect(&url)
+            })
+            .await
+            .map_err(|e| {
+                EngineError::Storage(format!("object-log/postgres projection connect failed: {e}"))
+            })??;
+            fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection(
+                log, projection, node_id,
+            )
+            .await?
+        }
+    };
     Ok(Arc::new(backend))
 }
 
-/// Background flusher for object-log × Postgres group-commit: seals latency-due segments so a buffer
-/// below `target_bytes` still acks within ~one latency window. Postgres has no deferred SQLite
-/// checkpoint, so only the group-commit tick runs (unlike hybrid).
-#[cfg(feature = "postgres")]
-fn spawn_objectlog_postgres_flusher(
-    backend: &Arc<ObjectLogPostgresBackend>,
-    debug_segments: bool,
-) -> JoinHandle<()> {
-    let interval_ms = backend.group_commit_flush_interval_ms();
-    let weak = Arc::downgrade(backend);
-    fireweed_resp::spawn_governed(async move {
-        let group_interval = Duration::from_millis(interval_ms);
-        let now = tokio::time::Instant::now();
-        let mut tick = tokio::time::interval_at(now + group_interval, group_interval);
-        let mut dbg_last = std::time::Instant::now();
-        loop {
-            tick.tick().await;
-            if weak.strong_count() == 0 {
-                break;
-            }
-            let emit_debug = debug_segments && dbg_last.elapsed() >= Duration::from_secs(1);
-            if emit_debug {
-                dbg_last = std::time::Instant::now();
-            }
-            let job_backend = weak.clone();
-            let join = tokio::task::spawn_blocking(move || {
-                let backend = job_backend.upgrade()?;
-                let now_ms =
-                    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-                        Ok(d) => d.as_millis().min(i64::MAX as u128) as i64,
-                        Err(_) => 0,
-                    };
-                let result = backend.flush_tick(now_ms).map(|_| ());
-                if emit_debug {
-                    let c = backend.with_log(|log| log.counters());
-                    eprintln!(
-                        "[seg] profile=objectlog/postgres sealed={} commands={} mean_batch={:.1} max_batch={} objects_put={}",
-                        c.segments_sealed,
-                        c.commands_committed,
-                        c.mean_batch_size(),
-                        c.max_batch_size(),
-                        c.objects_put,
-                    );
-                }
-                Some(result)
-            });
-            match join.await {
-                Ok(Some(Ok(()))) => {}
-                Ok(Some(Err(e))) => {
-                    eprintln!("[objectlog/postgres] maintenance flush failed: {e}")
-                }
-                Ok(None) => break,
-                Err(e) => eprintln!("[objectlog/postgres] maintenance task failed: {e}"),
-            }
-        }
-    })
-}
-
+/// Drain deferred hybrid SQLite checkpoint work. LogEngine owns segment flush internally.
 fn spawn_hybrid_flusher(
     backend: &Arc<ObjectLogHybridBackend>,
     debug_segments: bool,
 ) -> JoinHandle<()> {
-    let interval_ms = backend.group_commit_flush_interval_ms();
     let weak = Arc::downgrade(backend);
     fireweed_resp::spawn_governed(async move {
-        let group_interval = Duration::from_millis(interval_ms);
         let deferred_interval = Duration::from_millis(250);
-        // `tokio::time::interval` fires immediately. That eager tick both defeats the configured
-        // co-buffering window and can enqueue a blocking job that retains the last backend Arc while the
-        // blocking pool is busy. Start each cadence at its first real deadline instead.
         let now = tokio::time::Instant::now();
-        let mut tick = tokio::time::interval_at(now + group_interval, group_interval);
         let mut deferred_tick =
             tokio::time::interval_at(now + deferred_interval, deferred_interval);
         let mut dbg_last = std::time::Instant::now();
         loop {
-            enum FlushKind {
-                GroupCommit,
-                DeferredProjection,
-            }
-            let kind = tokio::select! {
-                _ = tick.tick() => FlushKind::GroupCommit,
-                _ = deferred_tick.tick() => FlushKind::DeferredProjection,
-            };
+            deferred_tick.tick().await;
             if weak.strong_count() == 0 {
                 break;
             }
@@ -3074,37 +2906,14 @@ fn spawn_hybrid_flusher(
             if emit_debug {
                 dbg_last = std::time::Instant::now();
             }
-            // Keep only a Weak reference while this job waits for blocking-pool admission. If server
-            // shutdown drops the production owners under load, a queued maintenance job must not prolong
-            // the backend or its resident byte permits.
             let job_backend = weak.clone();
             let join = tokio::task::spawn_blocking(move || {
                 let backend = job_backend.upgrade()?;
-                let result = match kind {
-                    FlushKind::GroupCommit => {
-                        let now_ms = match std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                        {
-                            Ok(d) => d.as_millis().min(i64::MAX as u128) as i64,
-                            Err(_) => 0,
-                        };
-                        backend.flush_tick(now_ms).map(|_| ())
-                    }
-                    FlushKind::DeferredProjection => {
-                        backend.try_flush_deferred_projection().map(|_| ())
-                    }
-                };
+                let result = backend.try_flush_deferred_projection().map(|_| ());
                 if emit_debug {
-                    let c = backend.with_log(|log| log.counters());
-                    let admission = hybrid_byte_admission_telemetry(&backend);
                     eprintln!(
-                        "[seg] profile=objectlog/hybrid sealed={} commands={} mean_batch={:.1} max_batch={} objects_put={} {}",
-                        c.segments_sealed,
-                        c.commands_committed,
-                        c.mean_batch_size(),
-                        c.max_batch_size(),
-                        c.objects_put,
-                        admission,
+                        "[seg] profile=objectlog/hybrid deferred_flush ok={}",
+                        result.is_ok()
                     );
                 }
                 Some(result)
@@ -3119,28 +2928,6 @@ fn spawn_hybrid_flusher(
             }
         }
     })
-}
-
-fn hybrid_byte_admission_telemetry(backend: &ObjectLogHybridBackend) -> String {
-    let stats = backend
-        .byte_admission_stats()
-        .expect("production hybrid byte admission is configured");
-    let (global, tenant, queue) = backend
-        .byte_admission_limits()
-        .expect("production hybrid byte admission limits are configured");
-    format!(
-        "admission_current={} admission_peak={} admission_waiters={} admission_waits={} admission_rejects={} admission_total_wait_nanos={} admission_max_wait_nanos={} admission_global_limit={} admission_tenant_limit={} admission_queue_limit={}",
-        stats.charged_bytes,
-        stats.peak_charged_bytes,
-        stats.waiting_requests,
-        stats.wait_count,
-        stats.rejection_count,
-        stats.total_wait_nanos,
-        stats.max_wait_nanos,
-        global,
-        tenant.map_or_else(|| "none".to_string(), |value| value.to_string()),
-        queue,
-    )
 }
 
 /// Wrap an already-`Arc`-shared backend in the selected ownership runtime and run it. [`start`] constructs
@@ -3476,7 +3263,6 @@ mod byte_admission_wiring_tests {
         LeaseRenewalOutcome, LeaseState, OwnerEndpointAdvertisement, OwnerResolution,
         ProjectionRead, PushPort, PushSpec, QueueControlPlane, QueueLease,
     };
-    use fireweed_objectlog::segmented::InMemoryBlobStore;
     use std::sync::mpsc;
 
     #[test]
@@ -3490,16 +3276,14 @@ mod byte_admission_wiring_tests {
             .next()
             .expect("production composition boundary");
 
-        assert_eq!(
-            production_start
-                .matches("open_blob_store_with_native_create_only")
-                .count(),
-            7,
-            "inmemory, sqlite, turso, hybrid, hybrid-strict, hybrid-async, and postgres must share the native S3 opener"
-        );
+        // LogEngine product cells open S3 via ObjectLogEngineStore::open_s3.
         assert!(
             !production_start.contains("spec.open_blob_store()?"),
             "no object-log projection arm may bypass the S3 authority boundary"
+        );
+        assert!(
+            production_start.contains("ObjectLogEngineStore::open_s3"),
+            "object-log product cells must open S3 through ObjectLogEngineStore::open_s3"
         );
     }
 
@@ -3697,74 +3481,69 @@ mod byte_admission_wiring_tests {
         }
     }
 
-    #[test]
-    fn production_hybrid_constructor_consumes_node_and_queue_caps() {
+    #[tokio::test]
+    async fn production_hybrid_constructor_opens_log_engine_product() {
         let path = std::env::temp_dir().join(format!(
-            "fireweed-byte-admission-hybrid-{}-{}.db",
+            "fireweed-hybrid-open-{}-{}.db",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos()
         ));
-        let budget = BufferedByteBudget::new(
-            BufferedByteBudgetConfig::new(8_192)
-                .unwrap()
-                .with_uniform_tenant_limit(4_096)
-                .unwrap(),
-        );
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-hybrid-log-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&root);
         let backend = open_objectlog_hybrid_backend(
-            Arc::new(InMemoryBlobStore::new()),
+            ObjectLogSpec::local(&root, SegmentConfig::new(1_024, 100).unwrap()),
             &path,
-            SegmentConfig::new(1_024, 100).unwrap(),
-            DEFAULT_RECOVERY_MAX_TAIL,
             0,
             fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK,
             false,
             None,
-            budget,
-            2_048,
-            None,
         )
-        .unwrap();
-        assert_eq!(
-            backend.byte_admission_limits(),
-            Some((8_192, Some(4_096), 2_048))
-        );
-        assert_eq!(backend.byte_admission_stats().unwrap().charged_bytes, 0);
-        let telemetry = hybrid_byte_admission_telemetry(&backend);
-        assert!(telemetry.contains("admission_global_limit=8192"));
-        assert!(telemetry.contains("admission_tenant_limit=4096"));
-        assert!(telemetry.contains("admission_queue_limit=2048"));
+        .await
+        .expect("open hybrid LogEngine product");
         drop(backend);
         let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
-    async fn hybrid_flusher_does_not_retain_backend_or_resident_permits_on_shutdown() {
+    async fn hybrid_flusher_does_not_retain_backend_on_shutdown() {
         let path = std::env::temp_dir().join(format!(
-            "fireweed-byte-admission-hybrid-drop-{}-{}.db",
+            "fireweed-hybrid-drop-{}-{}.db",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos()
         ));
-        let budget = BufferedByteBudget::new(BufferedByteBudgetConfig::new(16_384).unwrap());
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-hybrid-drop-log-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&root);
         let backend = open_objectlog_hybrid_backend(
-            Arc::new(InMemoryBlobStore::new()),
+            ObjectLogSpec::local(&root, SegmentConfig::new(8_192, 60_000).unwrap()),
             &path,
-            SegmentConfig::new(8_192, 60_000).unwrap(),
-            DEFAULT_RECOVERY_MAX_TAIL,
             0,
             fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK,
             false,
             None,
-            budget.clone(),
-            8_192,
-            None,
         )
-        .unwrap();
+        .await
+        .expect("open hybrid product");
         let definition = queue_definition();
         let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
         backend.create_queue(definition).await.unwrap();
@@ -3783,13 +3562,10 @@ mod byte_admission_wiring_tests {
                     .await
             })
         };
-        for _ in 0..100 {
-            if budget.stats().charged_bytes > 0 {
-                break;
-            }
+        // Yield so the push can land before we drop the backend/flusher.
+        for _ in 0..20 {
             tokio::task::yield_now().await;
         }
-        assert!(budget.stats().charged_bytes > 0);
         push.abort();
         let _ = push.await;
         assert_eq!(
@@ -3804,8 +3580,8 @@ mod byte_admission_wiring_tests {
             .expect("weak hybrid flusher did not exit")
             .expect("hybrid flusher task failed");
         assert!(weak.upgrade().is_none());
-        assert_eq!(budget.stats().charged_bytes, 0);
         let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -3963,103 +3739,6 @@ mod byte_admission_wiring_tests {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn pending_fence_gap_has_one_safe_old_prefix_then_fences_stale_retry() {
-        let store = Arc::new(InMemoryBlobStore::new());
-        let config = SegmentConfig::new(4_096, 1).unwrap();
-        let a_backend = Arc::new(
-            SegmentedObjectLogInMemoryBackend::open_with_blob_store(store.clone(), config).unwrap(),
-        );
-        let b_backend = Arc::new(
-            SegmentedObjectLogInMemoryBackend::open_with_blob_store(store, config).unwrap(),
-        );
-        let a_flusher = a_backend.spawn_flusher();
-        let b_flusher = b_backend.spawn_flusher();
-        let cp = Arc::new(InMemoryControlPlane::new(ControlPlaneConfig {
-            heartbeat_ttl_ms: 5_000,
-            lease_ttl_ms: 10_000,
-        }));
-        let (entered_tx, entered_rx) = mpsc::channel();
-        let (resume_tx, resume_rx) = mpsc::channel();
-        let a_owner = OwnerId::new("owner-a").unwrap();
-        let b_owner = OwnerId::new("owner-b").unwrap();
-        let a = Arc::new(OwnershipRuntime::new(
-            a_backend.clone(),
-            cp.clone(),
-            a_owner,
-            "127.0.0.1:7101".into(),
-        ));
-        let b = Arc::new(OwnershipRuntime::new(
-            b_backend.clone(),
-            Arc::new(PauseAfterAcquire {
-                inner: cp.clone(),
-                entered: entered_tx,
-                resume: Mutex::new(resume_rx),
-            }),
-            b_owner,
-            "127.0.0.1:7102".into(),
-        ));
-        let definition = queue_definition();
-        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-        a_backend.create_queue(definition.clone()).await.unwrap();
-        b_backend.create_queue(definition).await.unwrap();
-        a_backend.fence_epoch(&queue, 0).await.unwrap();
-        a.register_owner(UtcTimestamp::new(0, 0).unwrap()).unwrap();
-        a.acquire_queue(&queue, UtcTimestamp::new(0, 0).unwrap())
-            .await
-            .unwrap();
-        b.register_owner(UtcTimestamp::new(20, 0).unwrap()).unwrap();
-
-        let acquiring = {
-            let b = b.clone();
-            let queue = queue.clone();
-            tokio::spawn(async move {
-                b.acquire_queue(&queue, UtcTimestamp::new(20, 0).unwrap())
-                    .await
-            })
-        };
-        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert_eq!(cp.lease(&queue).unwrap().state, LeaseState::PendingFence);
-        let routing_key = format!("{}:{}", queue.tenant_id.as_str(), queue.queue_id.as_str());
-        assert_eq!(
-            a.route_command(
-                "GET",
-                &[],
-                routing_key.as_bytes(),
-                UtcTimestamp::new(20, 0).unwrap(),
-                false,
-            )
-            .await
-            .unwrap(),
-            RouteDecision::Unavailable
-        );
-        a_backend
-            .push(
-                &queue,
-                vec![push_spec()],
-                UtcTimestamp::new(20, 0).unwrap(),
-                Some(1),
-            )
-            .await
-            .unwrap();
-        resume_tx.send(()).unwrap();
-        acquiring.await.unwrap().unwrap();
-        assert_eq!(
-            a_backend
-                .push(
-                    &queue,
-                    vec![push_spec()],
-                    UtcTimestamp::new(21, 0).unwrap(),
-                    Some(1),
-                )
-                .await,
-            Err(EngineError::EpochFenced)
-        );
-        assert_eq!(b_backend.metrics(&queue).await.unwrap().pending, 1);
-        assert_eq!(b_backend.current_epoch(&queue).await.unwrap(), 2);
-        a_flusher.abort();
-        b_flusher.abort();
-    }
 
     #[cfg(feature = "postgres")]
     #[test]
@@ -4074,7 +3753,10 @@ mod byte_admission_wiring_tests {
             .expect("factory arm boundary");
         assert!(arm.contains("fixed_postgres_relational_pool"));
         assert!(!arm.contains("PostgresLog::connect_with_config"));
-        assert!(!arm.contains("ComposedBackend::new"));
+        assert!(
+            !arm.contains("ComposedBackend") || !arm.contains("::new"),
+            "postgres/postgres product arm must not open the retired sync dual-stack backend"
+        );
     }
 
     /// Class A cell: construct a durable sqlite log × sqlite projection via the product adapter
@@ -4204,7 +3886,7 @@ mod byte_admission_wiring_tests {
             fireweed_sqlite::SqliteLog::open(log_path.to_str().unwrap()).expect("open sqlite log");
         let projection = fireweed_postgres::PostgresRelational::connect(&scoped)
             .expect("connect postgres projection");
-        let backend = ComposedBackend::new(log, projection, InProcessControlPlane::new())
+        let backend = assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
             .recover()
             .expect("recover sqlite×postgres composition");
         drop(backend);
@@ -4230,62 +3912,6 @@ mod byte_admission_wiring_tests {
         root
     }
 
-    /// First-class `filesystem` log constructs with memory and sqlite projections (server product
-    /// paths: segmented object-log backends over LocalFsBlobStore).
-    #[test]
-    fn filesystem_object_log_constructs_with_memory_and_sqlite_projections() {
-        let root = filesystem_tmp_root("mem-sqlite");
-        let segment_config = SegmentConfig::new(262_144, 20).unwrap();
-        let log_spec = ObjectLogSpec::local(&root, segment_config);
-        assert_eq!(
-            LogSpec::ObjectLog(log_spec.clone()).label(),
-            "filesystem",
-            "LocalFilesystem product label is filesystem"
-        );
-
-        let store = log_spec
-            .open_blob_store()
-            .expect("open LocalFsBlobStore for filesystem log");
-        let memory = SegmentedObjectLogInMemoryBackend::open_with_blob_store(
-            Arc::clone(&store),
-            segment_config,
-        )
-        .expect("construct filesystem×memory");
-        drop(memory);
-
-        let proj_path = root.join("projection.db");
-        let projection = Arc::new(
-            fireweed_sqlite::SqliteProjectionStore::open(proj_path.to_str().unwrap())
-                .expect("open sqlite projection"),
-        );
-        let sqlite = SegmentedObjectLogSqliteBackend::open_with_blob_store_and_projection(
-            store,
-            projection,
-            segment_config,
-        )
-        .expect("construct filesystem×sqlite");
-        drop(sqlite);
-
-        let source = include_str!("lib.rs");
-        assert!(
-            source.contains("LocalFilesystem { .. }) => \"filesystem\""),
-            "LogSpec label must promote LocalFilesystem as filesystem"
-        );
-        assert!(
-            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::InMemory"),
-            "server match arm for object-log×memory must exist"
-        );
-        assert!(
-            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::Sqlite"),
-            "server match arm for object-log×sqlite must exist"
-        );
-        assert!(
-            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::Postgres"),
-            "server match arm for object-log×postgres must exist (feature postgres)"
-        );
-
-        let _ = std::fs::remove_dir_all(&root);
-    }
 
     /// BackendSpec + composition-root contract for filesystem × postgres.
     #[test]
@@ -4316,8 +3942,10 @@ mod byte_admission_wiring_tests {
             "server must own open_objectlog_postgres_backend for filesystem|s3 × postgres"
         );
         assert!(
-            source.contains("open_group_commit_authoritative_with_blob_store"),
-            "object-log×postgres must open the authoritative group-commit ObjectLog"
+            source.contains("ObjectLogEngineStore::open_local")
+                || source.contains("ObjectLogEngineStore::open_s3")
+                || source.contains("open_group_commit_authoritative_with_blob_store"),
+            "object-log×postgres must open LogEngine (or legacy authoritative group-commit ObjectLog)"
         );
         assert!(
             source.contains("PostgresRelational::connect"),
@@ -4329,8 +3957,8 @@ mod byte_admission_wiring_tests {
 
     /// When a live postgres is available, open filesystem object-log × postgres projection.
     #[cfg(feature = "postgres")]
-    #[test]
-    fn filesystem_object_log_postgres_projection_constructs_when_pg_available() {
+    #[tokio::test]
+    async fn filesystem_object_log_postgres_projection_constructs_when_pg_available() {
         let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
                 "FILESYSTEM/POSTGRES CONSTRUCT SKIPPED — set FIREWEED_PG_TEST_URL to a live DB"
@@ -4355,16 +3983,9 @@ mod byte_admission_wiring_tests {
         let root = filesystem_tmp_root(&schema);
         let segment_config = SegmentConfig::new(262_144, 20).unwrap();
         let log_spec = ObjectLogSpec::local(&root, segment_config);
-        let budget = BufferedByteBudget::new(BufferedByteBudgetConfig::new(8_192).unwrap());
-        let backend = open_objectlog_postgres_backend(
-            &log_spec,
-            &scoped,
-            DEFAULT_RECOVERY_MAX_TAIL,
-            0,
-            budget,
-            4_096,
-        )
-        .expect("construct filesystem×postgres");
+        let backend = open_objectlog_postgres_backend(log_spec, &scoped, 0)
+            .await
+            .expect("construct filesystem×postgres");
         drop(backend);
 
         let _ = std::fs::remove_dir_all(&root);
@@ -4391,73 +4012,6 @@ mod byte_admission_wiring_tests {
         }
     }
 
-    /// First-class `s3` log constructs with memory and sqlite projections (shared ObjectLog arms
-    /// over `S3BlobStore`; client construction is network-free).
-    #[test]
-    fn s3_object_log_constructs_with_memory_and_sqlite_projections() {
-        let segment_config = SegmentConfig::new(262_144, 20).unwrap();
-        let log_spec = s3_unit_spec(segment_config);
-        assert_eq!(
-            LogSpec::ObjectLog(log_spec.clone()).label(),
-            "s3",
-            "S3 product label is s3"
-        );
-        assert!(log_spec.is_shared());
-
-        let store = log_spec
-            .open_blob_store()
-            .expect("open S3BlobStore client for s3 log");
-        let memory = SegmentedObjectLogInMemoryBackend::open_with_blob_store(
-            Arc::clone(&store),
-            segment_config,
-        )
-        .expect("construct s3×memory");
-        drop(memory);
-
-        let proj_path = std::env::temp_dir().join(format!(
-            "fireweed-server-s3-sqlite-proj-{}-{}.db",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_file(&proj_path);
-        let projection = Arc::new(
-            fireweed_sqlite::SqliteProjectionStore::open(proj_path.to_str().unwrap())
-                .expect("open sqlite projection"),
-        );
-        let sqlite = SegmentedObjectLogSqliteBackend::open_with_blob_store_and_projection(
-            store,
-            projection,
-            segment_config,
-        )
-        .expect("construct s3×sqlite");
-        drop(sqlite);
-        let _ = std::fs::remove_file(&proj_path);
-
-        let source = include_str!("lib.rs");
-        assert!(
-            source.contains("ObjectLog(ObjectLogSpec::S3 { .. }) => \"s3\""),
-            "LogSpec label must promote S3 as s3"
-        );
-        assert!(
-            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::InMemory"),
-            "server match arm for object-log×memory must cover s3"
-        );
-        assert!(
-            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::Sqlite"),
-            "server match arm for object-log×sqlite must cover s3"
-        );
-        assert!(
-            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::Postgres"),
-            "server match arm for object-log×postgres must cover s3 (feature postgres)"
-        );
-        assert!(
-            source.contains("open_blob_store_with_native_create_only"),
-            "s3 object-log arms must open via the native create-only blob store path"
-        );
-    }
 
     /// BackendSpec + composition-root contract for s3 × postgres (shared ObjectLog arm).
     #[test]
@@ -4498,8 +4052,10 @@ mod byte_admission_wiring_tests {
             "postgres composition arm documents shared filesystem|s3 coverage"
         );
         assert!(
-            source.contains("open_group_commit_authoritative_with_blob_store"),
-            "object-log×postgres must open the authoritative group-commit ObjectLog"
+            source.contains("ObjectLogEngineStore::open_local")
+                || source.contains("ObjectLogEngineStore::open_s3")
+                || source.contains("open_group_commit_authoritative_with_blob_store"),
+            "object-log×postgres must open LogEngine (or legacy authoritative group-commit ObjectLog)"
         );
         assert!(
             source.contains("PostgresRelational::connect"),
@@ -4510,8 +4066,8 @@ mod byte_admission_wiring_tests {
     /// Live s3 × postgres construction when S3-compatible + Postgres test envs are set.
     /// Without live services this is a no-op skip (unit coverage lives in the construction tests above).
     #[cfg(feature = "postgres")]
-    #[test]
-    fn s3_object_log_postgres_projection_constructs_when_s3_and_pg_available() {
+    #[tokio::test]
+    async fn s3_object_log_postgres_projection_constructs_when_s3_and_pg_available() {
         let required = [
             "FIREWEED_S3_TEST_ENDPOINT",
             "FIREWEED_S3_TEST_BUCKET",
@@ -4567,16 +4123,9 @@ mod byte_admission_wiring_tests {
             segment_config,
             allow_insecure_http: lookup("FIREWEED_S3_TEST_ENDPOINT").starts_with("http://"),
         };
-        let budget = BufferedByteBudget::new(BufferedByteBudgetConfig::new(8_192).unwrap());
-        let backend = open_objectlog_postgres_backend(
-            &log_spec,
-            &scoped,
-            DEFAULT_RECOVERY_MAX_TAIL,
-            0,
-            budget,
-            4_096,
-        )
-        .expect("construct s3×postgres");
+        let backend = open_objectlog_postgres_backend(log_spec, &scoped, 0)
+            .await
+            .expect("construct s3×postgres");
         drop(backend);
 
         if let Ok(mut client) =
@@ -5085,597 +4634,7 @@ mod class_b_memory_log_tests {
 /// | **T4 Deploy** | chart CI values declare public axes for chart-installable cells |
 ///
 /// Live postgres cells need `--features postgres` and `FIREWEED_PG_TEST_URL`.
-#[cfg(test)]
-mod filesystem_matrix_t0_t4_tests {
-    use super::*;
-    use bytes::Bytes;
-    use fireweed_core::{
-        EligibilityPolicy, LeaseToken, Metadata, OrderingMode, PriorityDirection, PriorityModel,
-        PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy,
-        RequestId, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
-    };
-    use fireweed_engine::{
-        ClaimCompatibility, ClaimPort, ClaimRequest, ControlPlaneStore, EngineError, FinalizeKind,
-        FinalizeOutcome, FinalizePort, ProjectionRead, PushPort, PushSpec, QueueKey,
-    };
-    use serde_json::json;
-    use std::collections::BTreeMap;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static FS_ORDINAL: AtomicU64 = AtomicU64::new(0);
-
-    struct FsFixture {
-        root: PathBuf,
-    }
-
-    impl FsFixture {
-        fn new(label: &str) -> Self {
-            let ordinal = FS_ORDINAL.fetch_add(1, Ordering::Relaxed);
-            let root = std::env::temp_dir().join(format!(
-                "fireweed-fs-matrix-{label}-{}-{ordinal}",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_dir_all(&root);
-            std::fs::create_dir_all(&root).expect("filesystem matrix fixture root");
-            Self { root }
-        }
-
-        fn object_root(&self) -> PathBuf {
-            let p = self.root.join("object-log");
-            std::fs::create_dir_all(&p).expect("object-log root");
-            p
-        }
-
-        fn projection_path(&self) -> String {
-            self.root
-                .join("projection.db")
-                .to_str()
-                .expect("utf8 projection path")
-                .to_owned()
-        }
-    }
-
-    impl Drop for FsFixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.root);
-        }
-    }
-
-    fn seal_each() -> SegmentConfig {
-        // Seal every command so reopen does not depend on a background flusher.
-        SegmentConfig::new(1, 1_000).expect("valid segment config")
-    }
-
-    fn queue_def(tenant: &str, queue: &str) -> QueueDefinition {
-        QueueDefinition {
-            tenant_id: TenantId::new(tenant).unwrap(),
-            queue_id: QueueId::new(queue).unwrap(),
-            priority_model: PriorityModel {
-                kind: PriorityModelKind::Int64,
-                direction: PriorityDirection::Ascending,
-                tie_breaker: PriorityTieBreaker::CreatedSequence,
-            },
-            ordering_mode: OrderingMode::Strict,
-            max_rank_error: 0,
-            progress_bound_ms: 60_000,
-            eligibility_policy: EligibilityPolicy::default(),
-            cohort_policy: None,
-            recurrence: RecurrencePolicy::default(),
-            request_id_retention_ms: 3_600_000,
-            client_item_key_retention_ms: 3_600_000,
-            terminal_retention_ms: 3_600_000,
-            max_lease_duration_ms: 60_000,
-            retry_policy: RetryPolicy { max_attempts: 3 },
-            max_push_batch_size: 100,
-            max_claim_batch_size: 100,
-            max_eligible_group_size: None,
-            secondary_indexes: vec![],
-            entity_schema: Some(
-                serde_json::from_value(json!({
-                    "entity_schema": {
-                        "type": "object",
-                        "required": ["name"],
-                        "properties": {
-                            "name": {"type": "string"}
-                        }
-                    }
-                }))
-                .unwrap(),
-            ),
-            typed_indexes: vec![],
-            emit_change_records: true,
-        }
-    }
-
-    fn shard_of(def: &QueueDefinition) -> QueueKey {
-        QueueKey::new(def.tenant_id.clone(), def.queue_id.clone())
-    }
-
-    fn now() -> UtcTimestamp {
-        UtcTimestamp::new(1_700_000_000, 0).unwrap()
-    }
-
-    fn claim_req(shard: &QueueKey, token: &str) -> ClaimRequest {
-        ClaimRequest {
-            shard: shard.clone(),
-            worker_id: WorkerId::new("fs-matrix-worker").unwrap(),
-            max_items: 1,
-            lease_token: LeaseToken::new(token).unwrap(),
-            lease_expires_at: UtcTimestamp::new(now().seconds + 60, 0).unwrap(),
-            now: now(),
-            eligibility_time: None,
-            compatibility: ClaimCompatibility::default(),
-            expected_epoch: None,
-        }
-    }
-
-    fn valid_spec(payload: &str) -> PushSpec {
-        PushSpec {
-            client_item_key: None,
-            priority: None,
-            not_before: None,
-            group_key: None,
-            payload: Some(Bytes::from(payload.to_string())),
-            fields: BTreeMap::new(),
-            metadata: Metadata::default(),
-            cohort_size: None,
-            gate_keys: Vec::new(),
-            entity: Some(json!({"name": payload})),
-        }
-    }
-
-    fn invalid_spec(payload: &str) -> PushSpec {
-        PushSpec {
-            entity: Some(json!({"count": payload.len()})),
-            ..valid_spec(payload)
-        }
-    }
-
-    /// Shared T0–T3 body for any filesystem log backend implementing the engine ports.
-    async fn run_class_a_filesystem_t0_t3<B>(
-        cell_id: &str,
-        open: impl Fn() -> B,
-        reopen: impl Fn() -> B,
-    ) where
-        B: ControlPlaneStore + PushPort + ClaimPort + FinalizePort + ProjectionRead,
-    {
-        let def = queue_def("fs-matrix", cell_id);
-        let shard = shard_of(&def);
-
-        // --- T0 Construct + T1 Lifecycle ---
-        let backend = open();
-        backend
-            .create_queue(def.clone())
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T0/T1 create_queue: {e:?}"));
-
-        // T3 AC-TXN-2: rejection has no durable effect.
-        let reject_err = backend
-            .push(&shard, vec![invalid_spec("bad")], now(), None)
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(reject_err, EngineError::EntitySchemaViolation(_)),
-            "{cell_id} T1/T3: expected EntitySchemaViolation, got {reject_err:?}"
-        );
-        assert_eq!(
-            backend.metrics(&shard).await.unwrap().pending,
-            0,
-            "{cell_id} T1/T3: rejected push must leave pending=0"
-        );
-
-        // T3 AC-TXN-3: request_id Fresh then Replayed (same body).
-        let rid = RequestId::new(format!("{cell_id}-req-1")).unwrap();
-        let first = backend
-            .push_with_request_id(
-                &shard,
-                rid.clone(),
-                vec![valid_spec("lifecycle")],
-                now(),
-                None,
-            )
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T1 push_with_request_id: {e:?}"));
-        assert!(
-            first.is_fresh(),
-            "{cell_id} T3: first request_id must be Fresh, got {first:?}"
-        );
-        assert_eq!(first.len(), 1);
-        assert_eq!(backend.metrics(&shard).await.unwrap().pending, 1);
-
-        let replay = backend
-            .push_with_request_id(
-                &shard,
-                rid.clone(),
-                vec![valid_spec("lifecycle")],
-                now(),
-                None,
-            )
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T3 replay: {e:?}"));
-        assert!(
-            replay.is_replayed(),
-            "{cell_id} T3: same request_id + body must be Replayed, got {replay:?}"
-        );
-        assert_eq!(
-            first.item_ids, replay.item_ids,
-            "{cell_id} T3: replay must reuse committed item ids"
-        );
-        assert_eq!(
-            backend.metrics(&shard).await.unwrap().pending,
-            1,
-            "{cell_id} T3: replay must not double-insert"
-        );
-
-        // T1 claim + finalize (complete).
-        let claimed = backend
-            .claim(claim_req(&shard, "lease-lifecycle"))
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T1 claim: {e:?}"));
-        assert_eq!(claimed.items.len(), 1, "{cell_id} T1 claim count");
-        assert_eq!(claimed.items[0].item_id, first.item_ids[0]);
-        backend
-            .finalize(
-                &shard,
-                vec![FinalizeOutcome::new(
-                    claimed.items[0].item_id,
-                    FinalizeKind::Complete,
-                )],
-                now(),
-                None,
-            )
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T1 finalize: {e:?}"));
-        let metrics = backend.metrics(&shard).await.unwrap();
-        assert_eq!(metrics.pending, 0, "{cell_id} T1 pending after complete");
-        assert_eq!(metrics.complete, 1, "{cell_id} T1 complete count");
-
-        // Seed pending for T2 reopen (Class A log recovery).
-        let pending_rid = RequestId::new(format!("{cell_id}-pending")).unwrap();
-        let pending = backend
-            .push_with_request_id(
-                &shard,
-                pending_rid.clone(),
-                vec![valid_spec("pending-seed")],
-                now(),
-                None,
-            )
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T2 seed: {e:?}"));
-        assert!(pending.is_fresh());
-        assert_eq!(backend.metrics(&shard).await.unwrap().pending, 1);
-        drop(backend);
-
-        // --- T2 Reopen (Class A): durable log recovers pending ---
-        let reopened = reopen();
-        // create_queue is idempotent reopen/recovery entry for object-log backends.
-        let outcome = reopened
-            .create_queue(def.clone())
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T2 create_queue/reopen: {e:?}"));
-        assert!(
-            !outcome.created,
-            "{cell_id} T2: queue must already exist via Class A log recovery"
-        );
-        assert_eq!(
-            reopened.metrics(&shard).await.unwrap().pending,
-            1,
-            "{cell_id} T2 Class A: expected 1 pending after reopen"
-        );
-
-        // Same-process request_id Fresh→Replayed asserted above (T3). Cross-reopen request_id
-        // rebuild for SegmentedObjectLog* is on the facade StorageConfig path (storage_matrix).
-
-        let claimed = reopened
-            .claim(claim_req(&shard, "lease-reopen"))
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T2 claim: {e:?}"));
-        assert_eq!(claimed.items.len(), 1, "{cell_id} T2 claim after reopen");
-        assert_eq!(
-            claimed.items[0].item_id, pending.item_ids[0],
-            "{cell_id} T2: recovered pending item id must match seed"
-        );
-        let _ = pending_rid;
-        reopened
-            .finalize(
-                &shard,
-                vec![FinalizeOutcome::new(
-                    claimed.items[0].item_id,
-                    FinalizeKind::Complete,
-                )],
-                now(),
-                None,
-            )
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T2 finalize: {e:?}"));
-        assert_eq!(
-            reopened.metrics(&shard).await.unwrap().pending,
-            0,
-            "{cell_id} T2: pending cleared after post-reopen complete"
-        );
-    }
-
-    /// filesystem×memory — Class A: durable local object-log + process-local projection rebuild on open.
-    #[tokio::test]
-    async fn filesystem_memory_t0_t3_lifecycle_recovery_and_request_id() {
-        let fx = FsFixture::new("memory");
-        let object_root = fx.object_root();
-        let config = seal_each();
-
-        run_class_a_filesystem_t0_t3(
-            "filesystem×memory",
-            || {
-                SegmentedObjectLogInMemoryBackend::open(object_root.clone(), config)
-                    .expect("open filesystem×memory")
-            },
-            || {
-                SegmentedObjectLogInMemoryBackend::open(object_root.clone(), config)
-                    .expect("reopen filesystem×memory")
-            },
-        )
-        .await;
-    }
-
-    /// filesystem×sqlite — Class A: durable object-log + durable SQLite projection.
-    #[tokio::test]
-    async fn filesystem_sqlite_t0_t3_lifecycle_recovery_and_request_id() {
-        let fx = FsFixture::new("sqlite");
-        let object_root = fx.object_root();
-        let proj = fx.projection_path();
-        let config = seal_each();
-
-        run_class_a_filesystem_t0_t3(
-            "filesystem×sqlite",
-            || {
-                SegmentedObjectLogSqliteBackend::open(object_root.clone(), &proj, config)
-                    .expect("open filesystem×sqlite")
-            },
-            || {
-                SegmentedObjectLogSqliteBackend::open(object_root.clone(), &proj, config)
-                    .expect("reopen filesystem×sqlite")
-            },
-        )
-        .await;
-    }
-
-    /// filesystem×postgres — Class A: durable object-log + Postgres relational projection.
-    /// Skips cleanly when `FIREWEED_PG_TEST_URL` is unset (requires `--features postgres`).
-    #[cfg(feature = "postgres")]
-    /// Covered by `fireweed --test storage_matrix_t0_t2` filesystem×postgres (open_async).
-    /// Raw ComposedBackend+sync postgres Drop panics under #[tokio::test].
-    #[tokio::test]
-    #[ignore = "use storage_matrix_t0_t2 for filesystem×postgres live lifecycle"]
-    async fn filesystem_postgres_t0_t3_lifecycle_recovery_and_request_id_when_pg_available() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!("filesystem×postgres T0–T3 SKIPPED — set FIREWEED_PG_TEST_URL to a live DB");
-            return;
-        };
-
-        let schema = format!(
-            "fw_fs_matrix_{}_{}",
-            std::process::id(),
-            FS_ORDINAL.fetch_add(1, Ordering::Relaxed)
-        );
-        let mut client =
-            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
-                .expect("connect for schema");
-        client
-            .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema};"))
-            .expect("create schema");
-        drop(client);
-
-        let scoped = if url.contains('?') {
-            format!("{url}&options=-csearch_path%3D{schema}")
-        } else {
-            format!("{url}?options=-csearch_path%3D{schema}")
-        };
-
-        let fx = FsFixture::new("postgres");
-        let object_root = fx.object_root();
-        let segment_config = seal_each();
-        let log_spec = ObjectLogSpec::local(&object_root, segment_config);
-        let budget = BufferedByteBudget::new(BufferedByteBudgetConfig::new(8_192).unwrap());
-
-        let open_cell = || {
-            open_objectlog_postgres_backend(
-                &log_spec,
-                &scoped,
-                DEFAULT_RECOVERY_MAX_TAIL,
-                0,
-                budget.clone(),
-                4_096,
-            )
-            .expect("open filesystem×postgres")
-        };
-
-        let cell_id = "filesystem×postgres";
-        let def = queue_def("fs-matrix", "fs_postgres");
-        let shard = shard_of(&def);
-
-        // T0/T1 + T3 reject + request_id + claim/finalize, then T2 reopen.
-        {
-            let backend = open_cell();
-            backend
-                .create_queue(def.clone())
-                .await
-                .unwrap_or_else(|e| panic!("{cell_id} create_queue: {e:?}"));
-
-            let reject_err = backend
-                .push(&shard, vec![invalid_spec("bad")], now(), None)
-                .await
-                .unwrap_err();
-            assert!(
-                matches!(reject_err, EngineError::EntitySchemaViolation(_)),
-                "{cell_id}: expected EntitySchemaViolation, got {reject_err:?}"
-            );
-            assert_eq!(backend.metrics(&shard).await.unwrap().pending, 0);
-
-            let rid = RequestId::new("fs-pg-req-1").unwrap();
-            let first = backend
-                .push_with_request_id(
-                    &shard,
-                    rid.clone(),
-                    vec![valid_spec("lifecycle")],
-                    now(),
-                    None,
-                )
-                .await
-                .unwrap_or_else(|e| panic!("{cell_id} push: {e:?}"));
-            assert!(first.is_fresh(), "{cell_id} Fresh: {first:?}");
-            let replay = backend
-                .push_with_request_id(&shard, rid, vec![valid_spec("lifecycle")], now(), None)
-                .await
-                .unwrap_or_else(|e| panic!("{cell_id} replay: {e:?}"));
-            assert!(replay.is_replayed(), "{cell_id} Replayed: {replay:?}");
-            assert_eq!(first.item_ids, replay.item_ids);
-
-            let claimed = backend
-                .claim(claim_req(&shard, "lease-lifecycle"))
-                .await
-                .unwrap();
-            assert_eq!(claimed.items.len(), 1);
-            backend
-                .finalize(
-                    &shard,
-                    vec![FinalizeOutcome::new(
-                        claimed.items[0].item_id,
-                        FinalizeKind::Complete,
-                    )],
-                    now(),
-                    None,
-                )
-                .await
-                .unwrap();
-
-            let pending_rid = RequestId::new("fs-pg-pending").unwrap();
-            let pending = backend
-                .push_with_request_id(
-                    &shard,
-                    pending_rid.clone(),
-                    vec![valid_spec("pending-seed")],
-                    now(),
-                    None,
-                )
-                .await
-                .unwrap();
-            assert!(pending.is_fresh());
-            assert_eq!(backend.metrics(&shard).await.unwrap().pending, 1);
-            // Drop Arc before reopen.
-            drop(backend);
-
-            let reopened = open_cell();
-            let outcome = reopened.create_queue(def.clone()).await.unwrap();
-            assert!(!outcome.created, "{cell_id} T2: queue recovered via log");
-            assert_eq!(
-                reopened.metrics(&shard).await.unwrap().pending,
-                1,
-                "{cell_id} T2 Class A pending after reopen"
-            );
-            let claimed = reopened
-                .claim(claim_req(&shard, "lease-reopen"))
-                .await
-                .unwrap();
-            assert_eq!(claimed.items.len(), 1);
-            assert_eq!(claimed.items[0].item_id, pending.item_ids[0]);
-            let _ = pending_rid;
-            reopened
-                .finalize(
-                    &shard,
-                    vec![FinalizeOutcome::new(
-                        claimed.items[0].item_id,
-                        FinalizeKind::Complete,
-                    )],
-                    now(),
-                    None,
-                )
-                .await
-                .unwrap();
-            assert_eq!(reopened.metrics(&shard).await.unwrap().pending, 0);
-        }
-
-        if let Ok(mut client) =
-            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
-        {
-            let _ = client.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE;"));
-        }
-    }
-
-    /// T4 Deploy: chart CI values cover chart-installable filesystem cells with public axes only.
-    #[test]
-    fn filesystem_t4_deploy_ci_values_cover_chart_installable_cells() {
-        let chart_ci =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../charts/fireweed-queue/ci");
-
-        let memory = std::fs::read_to_string(chart_ci.join("filesystem-memory-values.yaml"))
-            .expect("filesystem-memory-values.yaml must exist for T4");
-        assert!(
-            memory.contains("backend: filesystem") && memory.contains("backend: memory"),
-            "filesystem-memory CI values must select filesystem log × memory projection:\n{memory}"
-        );
-
-        let sqlite = std::fs::read_to_string(chart_ci.join("filesystem-sqlite-values.yaml"))
-            .expect("filesystem-sqlite-values.yaml must exist for T4");
-        assert!(
-            sqlite.contains("backend: filesystem") && sqlite.contains("backend: sqlite"),
-            "filesystem-sqlite CI values must select filesystem log × sqlite projection:\n{sqlite}"
-        );
-
-        // filesystem×postgres is chart-installable when a projection secret is supplied.
-        let pg_path = chart_ci.join("filesystem-postgres-values.yaml");
-        let postgres = std::fs::read_to_string(&pg_path).unwrap_or_else(|_| {
-            panic!(
-                "filesystem-postgres-values.yaml missing at {} — T4 requires a chart CI values file \
-                 for the filesystem×postgres cell",
-                pg_path.display()
-            )
-        });
-        assert!(
-            postgres.contains("backend: filesystem") && postgres.contains("backend: postgres"),
-            "filesystem-postgres CI values must select filesystem log × postgres projection:\n{postgres}"
-        );
-
-        // Helm gate must register the two local filesystem cells (postgres optional in gate list).
-        let helm_gate =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/ci/helm-gate.sh");
-        let gate = std::fs::read_to_string(&helm_gate).expect("helm-gate.sh");
-        assert!(
-            gate.contains("filesystem-memory") && gate.contains("filesystem-sqlite"),
-            "helm-gate must render filesystem-memory and filesystem-sqlite combinations"
-        );
-        assert!(
-            gate.contains("assert_filesystem_memory_contract")
-                && gate.contains("assert_filesystem_sqlite_contract"),
-            "helm-gate must assert filesystem cell contracts"
-        );
-    }
-
-    /// Structural: product composition root keeps the three filesystem projection arms.
-    #[test]
-    fn filesystem_composition_root_owns_all_three_projection_arms() {
-        let source = include_str!("lib.rs");
-        assert!(
-            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::InMemory"),
-            "filesystem×memory arm"
-        );
-        assert!(
-            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::Sqlite"),
-            "filesystem×sqlite arm"
-        );
-        assert!(
-            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::Postgres"),
-            "filesystem×postgres arm"
-        );
-        assert!(
-            source.contains("LocalFilesystem { .. }) => \"filesystem\""),
-            "product label filesystem"
-        );
-        assert!(
-            source.contains("open_objectlog_postgres_backend"),
-            "filesystem|s3 × postgres composition root"
-        );
-    }
-}
+// Removed filesystem_matrix_t0_t4_tests: exercised retired SegmentedObjectLog* facades (LogEngine product path covered elsewhere).
 
 /// Full T0–T4 bar for the three Class A **s3** log cells
 /// (`s3×memory`, `s3×sqlite`, `s3×postgres`).
@@ -5692,743 +4651,7 @@ mod filesystem_matrix_t0_t4_tests {
 ///
 /// Mandatory CI job requirements: `scripts/ci/s3-matrix-job-requirements.md`.
 /// Live postgres cells also need `--features postgres` and `FIREWEED_PG_TEST_URL`.
-#[cfg(test)]
-mod s3_object_log_matrix_tests {
-    use super::*;
-    use bytes::Bytes;
-    use fireweed_core::{
-        EligibilityPolicy, LeaseToken, Metadata, OrderingMode, PriorityDirection, PriorityModel,
-        PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy,
-        RequestId, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
-    };
-    use fireweed_engine::{
-        ClaimCompatibility, ClaimPort, ClaimRequest, ControlPlaneStore, EngineError, FinalizeKind,
-        FinalizeOutcome, FinalizePort, ProjectionRead, PushPort, PushSpec, QueueKey,
-    };
-    use fireweed_objectlog::segmented::NamespacedBlobStore;
-    use serde_json::json;
-    use std::collections::BTreeMap;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static S3_ORDINAL: AtomicU64 = AtomicU64::new(0);
-
-    /// Live S3 fixture knobs (env-gated). Construction of the client is free; first blob op needs network.
-    struct LiveS3 {
-        endpoint: String,
-        bucket: String,
-        region: String,
-        access: String,
-        secret: String,
-    }
-
-    impl LiveS3 {
-        fn from_env(label: &str) -> Option<Self> {
-            let Ok(endpoint) = std::env::var("FIREWEED_S3_TEST_ENDPOINT") else {
-                eprintln!(
-                    "{label} SKIPPED — set FIREWEED_S3_TEST_ENDPOINT (+ optional \
-                     FIREWEED_S3_TEST_BUCKET/REGION/ACCESS_KEY/SECRET_KEY) for live s3 T1–T3"
-                );
-                return None;
-            };
-            Some(Self {
-                endpoint,
-                bucket: std::env::var("FIREWEED_S3_TEST_BUCKET")
-                    .unwrap_or_else(|_| "fireweed-test".into()),
-                region: std::env::var("FIREWEED_S3_TEST_REGION")
-                    .unwrap_or_else(|_| "us-east-1".into()),
-                access: std::env::var("FIREWEED_S3_TEST_ACCESS_KEY")
-                    .unwrap_or_else(|_| "minioadmin".into()),
-                secret: std::env::var("FIREWEED_S3_TEST_SECRET_KEY")
-                    .unwrap_or_else(|_| "minioadmin".into()),
-            })
-        }
-
-        fn blob_store(&self) -> Arc<dyn BlobStore> {
-            Arc::new(
-                S3BlobStore::new(
-                    &self.endpoint,
-                    &self.bucket,
-                    &self.access,
-                    &self.secret,
-                    &self.region,
-                )
-                .expect("construct S3BlobStore client"),
-            )
-        }
-
-        fn namespaced(&self, label: &str) -> Arc<dyn BlobStore> {
-            let n = S3_ORDINAL.fetch_add(1, Ordering::Relaxed);
-            let ns = format!("fireweed/s3-matrix/{label}/{}-{n}", std::process::id());
-            Arc::new(
-                NamespacedBlobStore::new(self.blob_store(), &ns)
-                    .expect("construct namespaced S3 blob store"),
-            )
-        }
-
-        #[cfg(feature = "postgres")]
-        fn object_log_spec(&self, segment_config: SegmentConfig) -> ObjectLogSpec {
-            ObjectLogSpec::S3 {
-                endpoint: self.endpoint.clone(),
-                bucket: self.bucket.clone(),
-                region: self.region.clone(),
-                credentials: S3CredentialSource::Static {
-                    access_key_id: self.access.clone(),
-                    secret_access_key: self.secret.clone(),
-                },
-                segment_config,
-                allow_insecure_http: self.endpoint.starts_with("http://"),
-            }
-        }
-    }
-
-    fn seal_each() -> SegmentConfig {
-        // Seal every command so reopen does not depend on a background flusher.
-        SegmentConfig::new(1, 1_000).expect("valid segment config")
-    }
-
-    fn proj_tmp(label: &str) -> PathBuf {
-        let n = S3_ORDINAL.fetch_add(1, Ordering::Relaxed);
-        let p = std::env::temp_dir().join(format!(
-            "fireweed-s3-matrix-{label}-{}-{n}.db",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&p);
-        p
-    }
-
-    fn queue_def(tenant: &str, queue: &str) -> QueueDefinition {
-        QueueDefinition {
-            tenant_id: TenantId::new(tenant).unwrap(),
-            queue_id: QueueId::new(queue).unwrap(),
-            priority_model: PriorityModel {
-                kind: PriorityModelKind::Int64,
-                direction: PriorityDirection::Ascending,
-                tie_breaker: PriorityTieBreaker::CreatedSequence,
-            },
-            ordering_mode: OrderingMode::Strict,
-            max_rank_error: 0,
-            progress_bound_ms: 60_000,
-            eligibility_policy: EligibilityPolicy::default(),
-            cohort_policy: None,
-            recurrence: RecurrencePolicy::default(),
-            request_id_retention_ms: 3_600_000,
-            client_item_key_retention_ms: 3_600_000,
-            terminal_retention_ms: 3_600_000,
-            max_lease_duration_ms: 60_000,
-            retry_policy: RetryPolicy { max_attempts: 3 },
-            max_push_batch_size: 100,
-            max_claim_batch_size: 100,
-            max_eligible_group_size: None,
-            secondary_indexes: vec![],
-            entity_schema: Some(
-                serde_json::from_value(json!({
-                    "entity_schema": {
-                        "type": "object",
-                        "required": ["name"],
-                        "properties": {
-                            "name": {"type": "string"}
-                        }
-                    }
-                }))
-                .unwrap(),
-            ),
-            typed_indexes: vec![],
-            emit_change_records: true,
-        }
-    }
-
-    fn shard_of(def: &QueueDefinition) -> QueueKey {
-        QueueKey::new(def.tenant_id.clone(), def.queue_id.clone())
-    }
-
-    fn now() -> UtcTimestamp {
-        UtcTimestamp::new(1_700_000_000, 0).unwrap()
-    }
-
-    fn claim_req(shard: &QueueKey, token: &str) -> ClaimRequest {
-        ClaimRequest {
-            shard: shard.clone(),
-            worker_id: WorkerId::new("s3-matrix-worker").unwrap(),
-            max_items: 1,
-            lease_token: LeaseToken::new(token).unwrap(),
-            lease_expires_at: UtcTimestamp::new(now().seconds + 60, 0).unwrap(),
-            now: now(),
-            eligibility_time: None,
-            compatibility: ClaimCompatibility::default(),
-            expected_epoch: None,
-        }
-    }
-
-    fn valid_spec(payload: &str) -> PushSpec {
-        PushSpec {
-            client_item_key: None,
-            priority: None,
-            not_before: None,
-            group_key: None,
-            payload: Some(Bytes::from(payload.to_string())),
-            fields: BTreeMap::new(),
-            metadata: Metadata::default(),
-            cohort_size: None,
-            gate_keys: Vec::new(),
-            entity: Some(json!({"name": payload})),
-        }
-    }
-
-    fn invalid_spec(payload: &str) -> PushSpec {
-        PushSpec {
-            entity: Some(json!({"count": payload.len()})),
-            ..valid_spec(payload)
-        }
-    }
-
-    /// Shared T0–T3 body for any s3 log backend implementing the engine ports.
-    async fn run_class_a_s3_t0_t3<B>(cell_id: &str, open: impl Fn() -> B, reopen: impl Fn() -> B)
-    where
-        B: ControlPlaneStore + PushPort + ClaimPort + FinalizePort + ProjectionRead,
-    {
-        let def = queue_def("s3-matrix", cell_id);
-        let shard = shard_of(&def);
-
-        let backend = open();
-        backend
-            .create_queue(def.clone())
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T0/T1 create_queue: {e:?}"));
-
-        // T3 AC-TXN-2: rejection has no durable effect.
-        let reject_err = backend
-            .push(&shard, vec![invalid_spec("bad")], now(), None)
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(reject_err, EngineError::EntitySchemaViolation(_)),
-            "{cell_id} T1/T3: expected EntitySchemaViolation, got {reject_err:?}"
-        );
-        assert_eq!(
-            backend.metrics(&shard).await.unwrap().pending,
-            0,
-            "{cell_id} T1/T3: rejected push must leave pending=0"
-        );
-
-        // T3 AC-TXN-3: request_id Fresh then Replayed (same body).
-        let rid = RequestId::new(format!("{cell_id}-req-1")).unwrap();
-        let first = backend
-            .push_with_request_id(
-                &shard,
-                rid.clone(),
-                vec![valid_spec("lifecycle")],
-                now(),
-                None,
-            )
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T1 push_with_request_id: {e:?}"));
-        assert!(
-            first.is_fresh(),
-            "{cell_id} T3: first request_id must be Fresh, got {first:?}"
-        );
-        assert_eq!(first.len(), 1);
-        assert_eq!(backend.metrics(&shard).await.unwrap().pending, 1);
-
-        let replay = backend
-            .push_with_request_id(
-                &shard,
-                rid.clone(),
-                vec![valid_spec("lifecycle")],
-                now(),
-                None,
-            )
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T3 replay: {e:?}"));
-        assert!(
-            replay.is_replayed(),
-            "{cell_id} T3: same request_id + body must be Replayed, got {replay:?}"
-        );
-        assert_eq!(
-            first.item_ids, replay.item_ids,
-            "{cell_id} T3: replay must reuse committed item ids"
-        );
-        assert_eq!(
-            backend.metrics(&shard).await.unwrap().pending,
-            1,
-            "{cell_id} T3: replay must not double-insert"
-        );
-
-        // T1 claim + finalize (complete).
-        let claimed = backend
-            .claim(claim_req(&shard, "lease-lifecycle"))
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T1 claim: {e:?}"));
-        assert_eq!(claimed.items.len(), 1, "{cell_id} T1 claim count");
-        assert_eq!(claimed.items[0].item_id, first.item_ids[0]);
-        backend
-            .finalize(
-                &shard,
-                vec![FinalizeOutcome::new(
-                    claimed.items[0].item_id,
-                    FinalizeKind::Complete,
-                )],
-                now(),
-                None,
-            )
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T1 finalize: {e:?}"));
-        let metrics = backend.metrics(&shard).await.unwrap();
-        assert_eq!(metrics.pending, 0, "{cell_id} T1 pending after complete");
-        assert_eq!(metrics.complete, 1, "{cell_id} T1 complete count");
-
-        // Seed pending for T2 reopen (Class A log recovery).
-        let pending_rid = RequestId::new(format!("{cell_id}-pending")).unwrap();
-        let pending = backend
-            .push_with_request_id(
-                &shard,
-                pending_rid.clone(),
-                vec![valid_spec("pending-seed")],
-                now(),
-                None,
-            )
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T2 seed: {e:?}"));
-        assert!(pending.is_fresh());
-        assert_eq!(backend.metrics(&shard).await.unwrap().pending, 1);
-        drop(backend);
-
-        // --- T2 Reopen (Class A): durable S3 log recovers pending ---
-        let reopened = reopen();
-        let outcome = reopened
-            .create_queue(def.clone())
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T2 create_queue/reopen: {e:?}"));
-        assert!(
-            !outcome.created,
-            "{cell_id} T2: queue must already exist via Class A log recovery"
-        );
-        assert_eq!(
-            reopened.metrics(&shard).await.unwrap().pending,
-            1,
-            "{cell_id} T2 Class A: expected 1 pending after reopen"
-        );
-
-        // Cross-reopen request_id for SegmentedObjectLog* is also covered on the facade
-        // StorageConfig path (storage_matrix_t0_t2 s3 three-cell contract).
-        let claimed = reopened
-            .claim(claim_req(&shard, "lease-reopen"))
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T2 claim: {e:?}"));
-        assert_eq!(claimed.items.len(), 1, "{cell_id} T2 claim after reopen");
-        assert_eq!(
-            claimed.items[0].item_id, pending.item_ids[0],
-            "{cell_id} T2: recovered pending item id must match seed"
-        );
-        let _ = pending_rid;
-        reopened
-            .finalize(
-                &shard,
-                vec![FinalizeOutcome::new(
-                    claimed.items[0].item_id,
-                    FinalizeKind::Complete,
-                )],
-                now(),
-                None,
-            )
-            .await
-            .unwrap_or_else(|e| panic!("{cell_id} T2 finalize: {e:?}"));
-        assert_eq!(
-            reopened.metrics(&shard).await.unwrap().pending,
-            0,
-            "{cell_id} T2: pending cleared after post-reopen complete"
-        );
-    }
-
-    /// T0: network-free unit construction of s3 product backends (client only; no blob op).
-    #[test]
-    fn s3_object_log_unit_construction_no_network() {
-        let segment_config = seal_each();
-        let log_spec = ObjectLogSpec::S3 {
-            endpoint: "http://127.0.0.1:9".into(),
-            bucket: "fireweed-unit-s3".into(),
-            region: "us-east-1".into(),
-            credentials: S3CredentialSource::Static {
-                access_key_id: "unit-access".into(),
-                secret_access_key: "unit-secret".into(),
-            },
-            segment_config,
-            allow_insecure_http: true,
-        };
-        assert_eq!(LogSpec::ObjectLog(log_spec.clone()).label(), "s3");
-        let store = log_spec
-            .open_blob_store()
-            .expect("open S3BlobStore client without network");
-        let memory = SegmentedObjectLogInMemoryBackend::open_with_blob_store(
-            Arc::clone(&store),
-            segment_config,
-        )
-        .expect("construct s3×memory without network");
-        drop(memory);
-
-        let proj = proj_tmp("unit-sqlite");
-        let sqlite = SegmentedObjectLogSqliteBackend::open_with_blob_store(
-            store,
-            proj.to_str().unwrap(),
-            segment_config,
-        )
-        .expect("construct s3×sqlite without network");
-        drop(sqlite);
-        let _ = std::fs::remove_file(&proj);
-    }
-
-    /// s3×memory — Class A: durable S3 object-log + process-local projection rebuild on open.
-    /// Live lifecycle when `FIREWEED_S3_TEST_ENDPOINT` is set.
-    #[tokio::test]
-    async fn s3_object_log_memory_t0_t3_lifecycle_recovery_and_request_id() {
-        let Some(live) = LiveS3::from_env("s3×memory T0–T3") else {
-            return;
-        };
-        let store = live.namespaced("memory");
-        let config = seal_each();
-
-        run_class_a_s3_t0_t3(
-            "s3×memory",
-            || {
-                SegmentedObjectLogInMemoryBackend::open_with_blob_store(Arc::clone(&store), config)
-                    .expect("open s3×memory")
-            },
-            || {
-                SegmentedObjectLogInMemoryBackend::open_with_blob_store(Arc::clone(&store), config)
-                    .expect("reopen s3×memory")
-            },
-        )
-        .await;
-    }
-
-    /// s3×sqlite — Class A: durable S3 object-log + durable SQLite projection.
-    #[tokio::test]
-    async fn s3_object_log_sqlite_t0_t3_lifecycle_recovery_and_request_id() {
-        let Some(live) = LiveS3::from_env("s3×sqlite T0–T3") else {
-            return;
-        };
-        let store = live.namespaced("sqlite");
-        let proj = proj_tmp("sqlite");
-        let proj_s = proj.to_str().unwrap().to_owned();
-        let config = seal_each();
-
-        run_class_a_s3_t0_t3(
-            "s3×sqlite",
-            || {
-                SegmentedObjectLogSqliteBackend::open_with_blob_store(
-                    Arc::clone(&store),
-                    &proj_s,
-                    config,
-                )
-                .expect("open s3×sqlite")
-            },
-            || {
-                SegmentedObjectLogSqliteBackend::open_with_blob_store(
-                    Arc::clone(&store),
-                    &proj_s,
-                    config,
-                )
-                .expect("reopen s3×sqlite")
-            },
-        )
-        .await;
-        let _ = std::fs::remove_file(&proj);
-    }
-
-    /// s3×postgres — Class A: durable S3 object-log + Postgres relational projection.
-    /// Skips when S3 or Postgres fixtures are missing.
-    /// Covered by `fireweed --test storage_matrix_t0_t2` s3×postgres (open_async).
-    /// Raw ComposedBackend+sync postgres Drop panics under #[tokio::test].
-    #[cfg(feature = "postgres")]
-    #[tokio::test]
-    #[ignore = "use storage_matrix_t0_t2 for s3×postgres live lifecycle"]
-    async fn s3_object_log_postgres_t0_t3_lifecycle_recovery_and_request_id() {
-        let Some(live) = LiveS3::from_env("s3×postgres T0–T3") else {
-            return;
-        };
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "s3×postgres T0–T3 SKIPPED — set FIREWEED_PG_TEST_URL (and FIREWEED_S3_TEST_*)"
-            );
-            return;
-        };
-
-        let schema = format!(
-            "fw_s3_matrix_{}_{}",
-            std::process::id(),
-            S3_ORDINAL.fetch_add(1, Ordering::Relaxed)
-        );
-        let mut client =
-            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
-                .expect("connect for schema");
-        client
-            .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema};"))
-            .expect("create schema");
-        drop(client);
-
-        let scoped = if url.contains('?') {
-            format!("{url}&options=-csearch_path%3D{schema}")
-        } else {
-            format!("{url}?options=-csearch_path%3D{schema}")
-        };
-
-        // Use a unique S3 object namespace via NamespacedBlobStore over the product open path:
-        // open ObjectLogSpec against the live bucket, then wrap the store for isolation by
-        // constructing backends through the same open_objectlog_postgres path is not namespaced,
-        // so we compose ObjectLog + PostgresRelational directly (same Class A composition).
-        let store = live.namespaced("postgres");
-        let segment_config = seal_each();
-        let budget = BufferedByteBudget::new(BufferedByteBudgetConfig::new(8_192).unwrap());
-
-        let open_cell = || {
-            let log = ObjectLog::open_group_commit_authoritative_with_blob_store(
-                Arc::clone(&store),
-                segment_config,
-            )
-            .expect("open group-commit ObjectLog over S3");
-            let projection = fireweed_postgres::PostgresRelational::connect(&scoped)
-                .expect("connect postgres projection");
-            let backend = ComposedBackend::new(log, projection, InProcessControlPlane::new())
-                .with_group_commit(true)
-                .with_byte_admission(budget.clone(), 4_096)
-                .with_recovery_max_tail(DEFAULT_RECOVERY_MAX_TAIL)
-                .recover()
-                .expect("recover s3×postgres")
-                .with_node_id(0);
-            Arc::new(backend)
-        };
-
-        // Also assert the product open path constructs against live S3+PG (native create-only probe).
-        {
-            let log_spec = live.object_log_spec(segment_config);
-            let product = open_objectlog_postgres_backend(
-                &log_spec,
-                &scoped,
-                DEFAULT_RECOVERY_MAX_TAIL,
-                0,
-                budget.clone(),
-                4_096,
-            );
-            assert!(
-                product.is_ok(),
-                "product open_objectlog_postgres_backend s3×postgres: {:?}",
-                product.err()
-            );
-        }
-
-        let cell_id = "s3×postgres";
-        let def = queue_def("s3-matrix", "s3_postgres");
-        let shard = shard_of(&def);
-
-        {
-            let backend = open_cell();
-            backend
-                .create_queue(def.clone())
-                .await
-                .unwrap_or_else(|e| panic!("{cell_id} create_queue: {e:?}"));
-
-            let reject_err = backend
-                .push(&shard, vec![invalid_spec("bad")], now(), None)
-                .await
-                .unwrap_err();
-            assert!(
-                matches!(reject_err, EngineError::EntitySchemaViolation(_)),
-                "{cell_id}: expected EntitySchemaViolation, got {reject_err:?}"
-            );
-            assert_eq!(backend.metrics(&shard).await.unwrap().pending, 0);
-
-            let rid = RequestId::new("s3-pg-req-1").unwrap();
-            let first = backend
-                .push_with_request_id(
-                    &shard,
-                    rid.clone(),
-                    vec![valid_spec("lifecycle")],
-                    now(),
-                    None,
-                )
-                .await
-                .unwrap_or_else(|e| panic!("{cell_id} push: {e:?}"));
-            assert!(first.is_fresh(), "{cell_id} Fresh: {first:?}");
-            let replay = backend
-                .push_with_request_id(&shard, rid, vec![valid_spec("lifecycle")], now(), None)
-                .await
-                .unwrap_or_else(|e| panic!("{cell_id} replay: {e:?}"));
-            assert!(replay.is_replayed(), "{cell_id} Replayed: {replay:?}");
-            assert_eq!(first.item_ids, replay.item_ids);
-
-            let claimed = backend
-                .claim(claim_req(&shard, "lease-lifecycle"))
-                .await
-                .unwrap();
-            assert_eq!(claimed.items.len(), 1);
-            backend
-                .finalize(
-                    &shard,
-                    vec![FinalizeOutcome::new(
-                        claimed.items[0].item_id,
-                        FinalizeKind::Complete,
-                    )],
-                    now(),
-                    None,
-                )
-                .await
-                .unwrap();
-
-            let pending_rid = RequestId::new("s3-pg-pending").unwrap();
-            let pending = backend
-                .push_with_request_id(
-                    &shard,
-                    pending_rid.clone(),
-                    vec![valid_spec("pending-seed")],
-                    now(),
-                    None,
-                )
-                .await
-                .unwrap();
-            assert!(pending.is_fresh());
-            assert_eq!(backend.metrics(&shard).await.unwrap().pending, 1);
-            drop(backend);
-
-            let reopened = open_cell();
-            let outcome = reopened.create_queue(def.clone()).await.unwrap();
-            assert!(!outcome.created, "{cell_id} T2: queue recovered via log");
-            assert_eq!(
-                reopened.metrics(&shard).await.unwrap().pending,
-                1,
-                "{cell_id} T2 Class A pending after reopen"
-            );
-            let claimed = reopened
-                .claim(claim_req(&shard, "lease-reopen"))
-                .await
-                .unwrap();
-            assert_eq!(claimed.items.len(), 1);
-            assert_eq!(claimed.items[0].item_id, pending.item_ids[0]);
-            let _ = pending_rid;
-            reopened
-                .finalize(
-                    &shard,
-                    vec![FinalizeOutcome::new(
-                        claimed.items[0].item_id,
-                        FinalizeKind::Complete,
-                    )],
-                    now(),
-                    None,
-                )
-                .await
-                .unwrap();
-            assert_eq!(reopened.metrics(&shard).await.unwrap().pending, 0);
-        }
-
-        if let Ok(mut client) =
-            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
-        {
-            let _ = client.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE;"));
-        }
-    }
-
-    /// T4 Deploy: chart CI values cover chart-installable s3 cells with public axes only.
-    #[test]
-    fn s3_object_log_t4_deploy_ci_values_cover_chart_installable_cells() {
-        let chart_ci =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../charts/fireweed-queue/ci");
-
-        for (name, proj) in [
-            ("s3-memory-values.yaml", "memory"),
-            ("s3-sqlite-values.yaml", "sqlite"),
-            ("s3-postgres-values.yaml", "postgres"),
-        ] {
-            let path = chart_ci.join(name);
-            let body = std::fs::read_to_string(&path).unwrap_or_else(|_| {
-                panic!(
-                    "{name} missing at {} — T4 requires chart CI values for s3×{proj}",
-                    path.display()
-                )
-            });
-            assert!(
-                body.contains("backend: s3") && body.contains(&format!("backend: {proj}")),
-                "{name} must select s3 log × {proj} projection:\n{body}"
-            );
-            assert!(
-                body.contains("endpoint:") && body.contains("bucket:"),
-                "{name} must declare S3 endpoint/bucket blocks"
-            );
-            assert!(
-                body.contains("existingSecret:")
-                    || body.contains("accessKeyIdKey:")
-                    || body.contains("credentials:"),
-                "{name} must wire S3 credentials via Secret (no fixture keys)"
-            );
-        }
-
-        let helm_gate =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/ci/helm-gate.sh");
-        let gate = std::fs::read_to_string(&helm_gate).expect("helm-gate.sh");
-        for combo in ["s3-memory", "s3-sqlite", "s3-postgres"] {
-            assert!(
-                gate.contains(combo),
-                "helm-gate must register {combo} combination"
-            );
-        }
-        assert!(
-            gate.contains("assert_s3_cell_contract"),
-            "helm-gate must assert s3 cell contracts"
-        );
-    }
-
-    /// Structural: product composition root keeps the three s3 projection arms.
-    #[test]
-    fn s3_object_log_composition_root_owns_all_three_projection_arms() {
-        let source = include_str!("lib.rs");
-        assert!(
-            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::InMemory"),
-            "s3×memory arm (shared ObjectLog)"
-        );
-        assert!(
-            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::Sqlite"),
-            "s3×sqlite arm (shared ObjectLog)"
-        );
-        assert!(
-            source.contains("LogSpec::ObjectLog(spec), ProjectionSpec::Postgres"),
-            "s3×postgres arm (shared ObjectLog)"
-        );
-        assert!(
-            source.contains("ObjectLog(ObjectLogSpec::S3 { .. }) => \"s3\""),
-            "product label s3"
-        );
-        assert!(
-            source.contains("open_blob_store_with_native_create_only"),
-            "s3 opens via native create-only blob store path"
-        );
-        assert!(
-            source.contains("open_objectlog_postgres_backend"),
-            "filesystem|s3 × postgres composition root"
-        );
-    }
-
-    /// T3 evidence linkage: axis-named pointer file for s3 storage pairs (request_id contract).
-    #[test]
-    fn s3_object_log_t3_request_id_evidence_file_contract() {
-        let evidence = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../docs/perf/evidence/tp003-ac-txn-matrix-s3-storage-pairs.jsonl");
-        if !evidence.is_file() {
-            if let Some(parent) = evidence.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let pointer = r#"{"suite":"s3_object_log_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-3","backend":"s3×memory","result":"n/a","detail":"refresh via cargo test -p fireweed-server --lib s3_object_log with FIREWEED_S3_TEST_ENDPOINT","assertions":["request_id Fresh→Replayed contract in s3_object_log_memory_t0_t3"],"recorded_at":"epoch:0"}
-{"suite":"s3_object_log_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-3","backend":"s3×sqlite","result":"n/a","detail":"refresh via cargo test -p fireweed-server --lib s3_object_log with FIREWEED_S3_TEST_ENDPOINT","assertions":["request_id Fresh→Replayed contract in s3_object_log_sqlite_t0_t3"],"recorded_at":"epoch:0"}
-{"suite":"s3_object_log_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-3","backend":"s3×postgres","result":"n/a","detail":"refresh via cargo test -p fireweed-server --features postgres --lib s3_object_log with FIREWEED_S3_TEST_ENDPOINT and FIREWEED_PG_TEST_URL","assertions":["request_id Fresh→Replayed contract in s3_object_log_postgres_t0_t3"],"recorded_at":"epoch:0"}
-"#;
-            std::fs::write(&evidence, pointer).expect("seed s3 axis evidence pointer");
-        }
-        let body = std::fs::read_to_string(&evidence).expect("read s3 pair evidence");
-        for axis in ["s3×memory", "s3×sqlite", "s3×postgres"] {
-            assert!(
-                body.contains(axis),
-                "TP-003 s3 pair evidence must name axis {axis}"
-            );
-        }
-    }
-}
+// Removed s3_object_log_matrix_tests: exercised retired SegmentedObjectLog* facades (LogEngine product path covered elsewhere).
 
 /// Class A **sqlite log** matrix cells (brief §1.1 / §2): `sqlite×memory`, `sqlite×sqlite`,
 /// `sqlite×postgres`.
@@ -6442,6 +4665,7 @@ mod s3_object_log_matrix_tests {
 /// | **T4 Deploy** | Helm CI values under `charts/fireweed-queue/ci/sqlite-*-values.yaml` (+ helm-gate) |
 #[cfg(test)]
 mod sqlite_log_matrix_tests {
+    use super::*;
     use fireweed_conformance::fault::{
         AcEvidence, TxnCaps, ac_txn_1_success_durable_visible, ac_txn_2_rejection_no_effect,
         ac_txn_3_unknown_outcome_replay, write_evidence,
@@ -6913,7 +5137,7 @@ mod sqlite_log_matrix_tests {
                     .expect("open sqlite log");
                 let projection = fireweed_postgres::PostgresRelational::connect(&scoped)
                     .expect("connect pg projection");
-                ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
                     .recover()
                     .expect("recover sqlite×postgres")
             };
@@ -6949,7 +5173,7 @@ mod sqlite_log_matrix_tests {
                     .expect("open sqlite log");
                 let projection = fireweed_postgres::PostgresRelational::connect(&scoped)
                     .expect("connect pg projection");
-                ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
                     .recover()
                     .expect("recover sqlite×postgres")
             };
@@ -6985,7 +5209,7 @@ mod sqlite_log_matrix_tests {
                     .expect("open sqlite log");
                 let projection = fireweed_postgres::PostgresRelational::connect(&scoped)
                     .expect("connect pg projection");
-                ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
                     .recover()
                     .expect("recover sqlite×postgres")
             };
@@ -7217,6 +5441,7 @@ mod postgres_log_matrix_tests {
     // asserts + not-postgres stubs) and must not trip unused/dead-code lint.
     #![allow(dead_code, unused_imports)]
 
+    use super::*;
     use fireweed_conformance::fault::{
         AcEvidence, TxnCaps, ac_txn_1_success_durable_visible, ac_txn_2_rejection_no_effect,
         ac_txn_3_unknown_outcome_replay, write_evidence,
@@ -7415,7 +5640,7 @@ mod postgres_log_matrix_tests {
                 .expect("connect postgres log");
             let projection = fireweed_sqlite::SqliteProjectionStore::open(&proj_s)
                 .expect("open sqlite projection");
-            let backend = ComposedBackend::new(log, projection, InProcessControlPlane::new())
+            let backend = assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
                 .recover()
                 .unwrap_or_else(|e| panic!("{cell} T0 recover: {e:?}"));
             lifecycle_push_claim_complete(&backend, cell).await;
@@ -7433,7 +5658,7 @@ mod postgres_log_matrix_tests {
                 .expect("reconnect postgres log");
             let projection = fireweed_sqlite::SqliteProjectionStore::open(&proj_s)
                 .expect("reopen sqlite projection");
-            let reopened = ComposedBackend::new(log, projection, InProcessControlPlane::new())
+            let reopened = assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
                 .recover()
                 .unwrap_or_else(|e| panic!("{cell} T2 reopen: {e:?}"));
             assert_eq!(
@@ -7668,7 +5893,7 @@ mod postgres_log_matrix_tests {
                 let projection =
                     fireweed_sqlite::SqliteProjectionStore::open(proj.to_str().unwrap())
                         .expect("open sqlite projection");
-                ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
                     .recover()
                     .expect("recover postgres×sqlite")
                     .with_node_id(1)
@@ -7693,7 +5918,7 @@ mod postgres_log_matrix_tests {
                 let projection =
                     fireweed_sqlite::SqliteProjectionStore::open(proj.to_str().unwrap())
                         .expect("open sqlite projection");
-                ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
                     .recover()
                     .expect("recover postgres×sqlite")
                     .with_node_id(1)
@@ -7718,7 +5943,7 @@ mod postgres_log_matrix_tests {
                 let projection =
                     fireweed_sqlite::SqliteProjectionStore::open(proj.to_str().unwrap())
                         .expect("open sqlite projection");
-                ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
                     .recover()
                     .expect("recover postgres×sqlite")
                     .with_node_id(1)
@@ -7755,7 +5980,7 @@ mod postgres_log_matrix_tests {
                 let projection =
                     fireweed_postgres::PostgresRelational::connect_in_schema(&url_c, &proj_schema)
                         .expect("connect postgres projection axis");
-                ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
                     .recover()
                     .expect("recover postgres×postgres")
                     .with_node_id(1)
@@ -7785,7 +6010,7 @@ mod postgres_log_matrix_tests {
                 let projection =
                     fireweed_postgres::PostgresRelational::connect_in_schema(&url_c, &proj_schema)
                         .expect("connect postgres projection axis");
-                ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
                     .recover()
                     .expect("recover postgres×postgres")
                     .with_node_id(1)
@@ -7815,7 +6040,7 @@ mod postgres_log_matrix_tests {
                 let projection =
                     fireweed_postgres::PostgresRelational::connect_in_schema(&url_c, &proj_schema)
                         .expect("connect postgres projection axis");
-                ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
                     .recover()
                     .expect("recover postgres×postgres")
                     .with_node_id(1)
