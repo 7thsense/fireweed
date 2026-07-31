@@ -28,5 +28,11 @@ pub use compose_log::{
     open_object_log_engine_local_sync, open_object_log_engine_s3, open_object_log_engine_s3_sync,
 };
 pub use log_engine_store::{ObjectLogEngineStore, flush_config_from_segment};
-pub use object_log::FlushConfig;
+pub use object_log::{BlobStore, FlushConfig, S3BlobStore};
 pub use segment_config::{MAX_SEGMENT_BYTES, SegmentConfig};
+
+/// Compatibility alias for pre-cutover `fireweed_objectlog::segmented::*` imports.
+/// The in-tree segmented FWSG substrate was replaced by crates.io `object_log`.
+pub mod segmented {
+    pub use object_log::{BlobStore, S3BlobStore};
+}

@@ -562,10 +562,8 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
         .expect("FIREWEED_PG_TEST_URL must be set when exercising the postgres projection");
     let allow_insecure_http = endpoint.starts_with("http://");
 
-    S3BlobStore::new(&endpoint, &bucket, &access, &secret, &region)
-        .unwrap()
-        .create_bucket()
-        .unwrap();
+    // crates.io object-log S3BlobStore has no create_bucket helper; the test bucket is operator-owned.
+    let _ = S3BlobStore::new(&endpoint, &region, &bucket, &access, &secret);
 
     let (_, run_nonce) = unique_fixture("public_s3_objectlog_postgres");
     let namespace = format!(

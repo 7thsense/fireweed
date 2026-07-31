@@ -1235,10 +1235,8 @@ fn public_s3_sqlite_delete_and_rebuild() {
     let access = runtime_env("S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into());
     let secret = runtime_env("S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into());
     let region = runtime_env("S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
-    S3BlobStore::new(&endpoint, &bucket, &access, &secret, &region)
-        .unwrap()
-        .create_bucket()
-        .unwrap();
+    // crates.io object-log S3BlobStore has no create_bucket helper; the test bucket is operator-owned.
+    let _ = S3BlobStore::new(&endpoint, &region, &bucket, &access, &secret);
 
     let fixture = std::env::temp_dir().join(format!("fireweed-public-s3-sqlite-{}", nonce()));
     let queue_id = format!("durable-s3-{}", nonce());

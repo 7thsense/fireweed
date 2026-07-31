@@ -1942,7 +1942,8 @@ fn push_body_hash_canonical<T: serde::Serialize>(items: &[T]) -> EngineResult<Bo
     Ok(BodyHash(h.finish()))
 }
 
-fn claim_by_query_body_hash(request: &ClaimByQueryRequest) -> EngineResult<BodyHash> {
+/// Body fingerprint for API-004 ClaimByQuery (request_id excluded). Shared with async log-replay.
+pub fn claim_by_query_body_hash(request: &ClaimByQueryRequest) -> EngineResult<BodyHash> {
     use sha2::{Digest, Sha256};
 
     let mut canonical = request.clone();
@@ -1956,7 +1957,8 @@ fn claim_by_query_body_hash(request: &ClaimByQueryRequest) -> EngineResult<BodyH
     )))
 }
 
-fn batch_update_body_hash(request: &BatchUpdateRequest) -> EngineResult<BodyHash> {
+/// Body fingerprint for API-001 BatchUpdate (request_id excluded). Shared with async log-replay.
+pub fn batch_update_body_hash(request: &BatchUpdateRequest) -> EngineResult<BodyHash> {
     use sha2::{Digest, Sha256};
 
     // `request_id` is the cache key, not part of the logical request body.
@@ -2001,12 +2003,14 @@ fn item_mutation_body_hash(request: &ItemMutationRequest) -> EngineResult<BodyHa
     item_mutation_fingerprint(request).map(BodyHash)
 }
 
-struct PlannedBatchUpdate {
-    outcomes: Vec<BatchUpdateOutcome>,
-    commands: Vec<(usize, UpdateFieldsCommand)>,
+/// Planner output for API-001 BatchUpdate (shared with async log-replay).
+pub struct PlannedBatchUpdate {
+    pub outcomes: Vec<BatchUpdateOutcome>,
+    pub commands: Vec<(usize, UpdateFieldsCommand)>,
 }
 
-fn plan_batch_update(
+/// Plan per-entry BatchUpdate outcomes and UpdateFields commands (shared with async log-replay).
+pub fn plan_batch_update(
     definition: &QueueDefinition,
     supports_gates: bool,
     updates: Vec<crate::port::BatchUpdateEntry>,

@@ -752,6 +752,16 @@ impl Default for ProjectionRecoveryPolicy {
 #[cfg(feature = "postgres")]
 use sha2::{Digest, Sha256};
 
+/// Hex encoding of a namespace string (object-log path segment safety).
+#[cfg(feature = "objectlog")]
+fn object_log_namespace(namespace: &str) -> String {
+    namespace
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// Deterministic, legal Postgres schema name derived from an isolation key.
 /// Used for object-log×postgres and other matrix cells that share a DSN.
 #[cfg(feature = "postgres")]

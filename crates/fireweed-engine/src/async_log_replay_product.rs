@@ -5,34 +5,39 @@
 //! [`InProcessProjectionStore`]. Adapter crates only open axes and call
 //! [`assemble_async_log_replay`] / [`AsyncLogReplayBackend::recover`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use fireweed_core::{
-    BodyHash, ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata,
-    MetricsByQueryRequest, PriorityValue, QueueDefinition, QueueId, QueryCapabilityFlags, RequestId,
-    TenantId, UtcTimestamp,
+    BodyHash, BoundedMutationRequest, BoundedMutationResponse, ClaimByQueryRequest, ClientItemKey,
+    GroupKey, ItemId, ItemState, LeaseToken, Metadata, MetricsByQueryRequest, PriorityValue,
+    QueueDefinition, QueueId, QueryCapabilityFlags, RangeScanRequest, RequestId, TenantId,
+    UtcTimestamp,
 };
 
 use crate::{
     AsOfProjectionStore, AsyncClaimError, AsyncComposedBackend, AsyncControlPlane,
     AsyncLifecycleError, AsyncLogStore, AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError,
-    AsyncPushRequest, AsyncReclaimRequest, Backend, ClaimPort, ClaimRequest, Claimed, CommandChecksum,
-    CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore, CreateQueueOutcome,
-    DurabilityClass, EngineError, EngineResult, FinalizeCommand, FinalizeKind, FinalizeOutcome,
-    FinalizePort, HotProjectionQueryPort, IdGen, IdempotencyDecision, InProcessControlPlane,
-    InProcessLogStore, InProcessProjectionStore, IndexHit, IndexQueryPort, InlineOwnedTaskDispatcher,
-    ItemView, LeaseView, LiveItemView, LogRead, LogStore, OwnedTask, PayloadUpdate, PendingPage,
-    PendingSummary, ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner,
-    ProjectionRead, ProjectionReclaimPlanner, ProjectionSnapshot, ProjectionStore, PurgePort,
-    PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueCounters, QueueIdempotencyCache,
-    QueueKey, QueueMetrics, RawCommitFault, RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand,
-    ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeaseCommand, RenewLeasePort,
-    ReplacePendingCommand, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
-    UnifiedAtomicCommit, UnifiedAtomicCommitter, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome,
-    UpsertPort, compile_entity_schema, validate_api001_reserved_write_fields, validate_entity,
+    AsyncPushRequest, AsyncReclaimRequest, Backend, BatchUpdatePort, BatchUpdateRequest,
+    BatchUpdateResponse, BoundedMutationContext, ClaimByQueryContext, ClaimCommand, ClaimPort,
+    ClaimRequest, Claimed, CommandChecksum, CommandEnvelope, CommandId, CommandPage, CommandPosition,
+    ControlPlaneStore, CreateQueueOutcome, DurabilityClass, EngineError, EngineResult,
+    FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, HotProjectionQueryPort, IdGen,
+    IdempotencyDecision, InProcessControlPlane, InProcessLogStore, InProcessProjectionStore,
+    IndexHit, IndexQueryPort, InlineOwnedTaskDispatcher, ItemView, LeaseView, LiveItemView, LogRead,
+    LogStore, OwnedTask, PayloadUpdate, PendingPage, PendingSummary, ProjectionClaimPlanner,
+    ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner,
+    ProjectionSnapshot, ProjectionStore, PurgePort, PushCommand, PushItem, PushPort, PushSpec,
+    QueueCommand, QueueCounters, QueueIdempotencyCache, QueueKey, QueueMetrics, RawCommitFault,
+    RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
+    ReclaimPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SnapshotRef,
+    SnapshotStore, TerminalEmissionMetrics, TickReport, UnifiedAtomicCommit, UnifiedAtomicCommitter,
+    UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, WriteSideRecordsCommand,
+    batch_update_body_hash, claim_by_query_body_hash, compile_entity_schema,
+    generate_query_lease_token, plan_batch_update, validate_api001_reserved_write_fields,
+    validate_entity,
 };
 
 /// Sequential id generation for async log-replay products.
@@ -387,6 +392,12 @@ type AsyncEngine<L, P> = AsyncComposedBackend<
     ReclaimPlanner<L, P>,
 >;
 
+/// Claim-by-query request-id cache: `(item_ids, lease_token)` while leases remain replayable.
+type ClaimByQueryIdempotency =
+    Mutex<HashMap<QueueKey, QueueIdempotencyCache<(Vec<ItemId>, LeaseToken)>>>;
+/// BatchUpdate request-id cache (API-001 ordered outcomes).
+type BatchUpdateIdempotency = Mutex<HashMap<QueueKey, QueueIdempotencyCache<BatchUpdateResponse>>>;
+
 /// Atomic async log-replay product: full product ports over any log × projection axes.
 pub struct AsyncLogReplayBackend<L, P>
 where
@@ -401,6 +412,8 @@ where
     counters: Arc<QueueCounters>,
     node_id: u8,
     push_idempotency: Arc<PushIdempotency>,
+    claim_by_query_idempotency: Arc<ClaimByQueryIdempotency>,
+    batch_update_idempotency: Arc<BatchUpdateIdempotency>,
     commit_idempotency:
         Arc<Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<crate::EntryRecovery>>>>>,
 }
@@ -418,6 +431,8 @@ where
     let log = Arc::new(InProcessLogStore::new(log));
     let projection = Arc::new(InProcessProjectionStore::new(projection));
     let push_idempotency = Arc::new(Mutex::new(HashMap::new()));
+    let claim_by_query_idempotency = Arc::new(Mutex::new(HashMap::new()));
+    let batch_update_idempotency = Arc::new(Mutex::new(HashMap::new()));
     let commit_idempotency = Arc::new(Mutex::new(HashMap::new()));
     let control = Arc::new(InProcessControlPlane::new());
     let ids = Arc::new(SeqIdGen::default());
@@ -429,6 +444,8 @@ where
         ids,
         counters,
         push_idempotency,
+        claim_by_query_idempotency,
+        batch_update_idempotency,
         commit_idempotency,
         node_id,
     )
@@ -442,6 +459,8 @@ pub fn assemble_async_log_replay_from_parts<L, P>(
     ids: Arc<SeqIdGen>,
     counters: Arc<QueueCounters>,
     push_idempotency: Arc<PushIdempotency>,
+    claim_by_query_idempotency: Arc<ClaimByQueryIdempotency>,
+    batch_update_idempotency: Arc<BatchUpdateIdempotency>,
     commit_idempotency: Arc<
         Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<crate::EntryRecovery>>>>,
     >,
@@ -507,6 +526,8 @@ where
         counters,
         node_id,
         push_idempotency,
+        claim_by_query_idempotency,
+        batch_update_idempotency,
         commit_idempotency,
     })
 }
@@ -525,6 +546,8 @@ where
             self.ids,
             self.counters,
             self.push_idempotency,
+            self.claim_by_query_idempotency,
+            self.batch_update_idempotency,
             self.commit_idempotency,
             node_id,
         )
@@ -611,13 +634,35 @@ where
                 self.projection.with_store_mut(|p| {
                     ProjectionStore::apply_recovery(p, &positions, &commands)
                 })?;
-                // Rebuild request-id caches from durable envelopes (push + commit-transition).
+                // Rebuild request-id caches from durable envelopes (push, claim-by-query,
+                // batch-update, commit-transition).
                 {
                     let mut push_cache = self
                         .push_idempotency
                         .lock()
                         .expect("push idempotency poisoned");
+                    let mut claim_cache = self
+                        .claim_by_query_idempotency
+                        .lock()
+                        .expect("claim_by_query idempotency poisoned");
+                    let mut batch_cache = self
+                        .batch_update_idempotency
+                        .lock()
+                        .expect("batch_update idempotency poisoned");
                     for (_, env) in &page.entries {
+                        // Renew extends active query-claim replay retention (v0.23.3 parity).
+                        if let QueueCommand::RenewLease(renew) = &env.command {
+                            let renewed: HashSet<ItemId> =
+                                renew.item_ids.iter().copied().collect();
+                            claim_cache.entry(shard.clone()).or_default().extend_expiry_matching(
+                                renew.lease_expires_at,
+                                |(item_ids, _)| {
+                                    !item_ids.is_empty()
+                                        && item_ids.iter().all(|item_id| renewed.contains(item_id))
+                                },
+                            );
+                        }
+
                         let Some(request_id) = &env.request_id else {
                             continue;
                         };
@@ -633,6 +678,44 @@ where
                                 request_id.clone(),
                                 fingerprint,
                                 ids,
+                                expires_at,
+                            );
+                        }
+                        if let Some(RequestOutcome::ClaimByQuery {
+                            item_ids,
+                            lease_token,
+                            ..
+                        }) = &env.request_outcome
+                        {
+                            let fingerprint = BodyHash(env.request_fingerprint.unwrap_or(0));
+                            let expires_at = match (&env.command, item_ids.is_empty()) {
+                                (QueueCommand::Claim(claim), false) => {
+                                    request_expires_at(env.created_at, retention_ms)
+                                        .max(claim.lease_expires_at)
+                                }
+                                _ => request_expires_at(env.created_at, retention_ms),
+                            };
+                            claim_cache.entry(shard.clone()).or_default().record(
+                                request_id.clone(),
+                                fingerprint,
+                                (item_ids.clone(), lease_token.clone()),
+                                expires_at,
+                            );
+                        }
+                        if let Some(RequestOutcome::BatchUpdate { response_payload }) =
+                            &env.request_outcome
+                        {
+                            let fingerprint = BodyHash(env.request_fingerprint.unwrap_or(0));
+                            let expires_at =
+                                request_expires_at(env.created_at, retention_ms);
+                            let response: BatchUpdateResponse = serde_json::from_str(
+                                response_payload,
+                            )
+                            .map_err(|e| EngineError::Storage(e.to_string()))?;
+                            batch_cache.entry(shard.clone()).or_default().record(
+                                request_id.clone(),
+                                fingerprint,
+                                response,
                                 expires_at,
                             );
                         }
@@ -773,15 +856,24 @@ where
         envelope: CommandEnvelope,
         expected_epoch: Option<u64>,
     ) -> EngineResult<RawCommitOutcome> {
+        self.commit_envelopes(shard, vec![envelope], expected_epoch)
+            .await
+    }
+
+    async fn commit_envelopes(
+        &self,
+        shard: &QueueKey,
+        envelopes: Vec<CommandEnvelope>,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<RawCommitOutcome> {
         let epoch = self.resolve_epoch(shard, expected_epoch).await?;
         self.engine
-            .submit_commit(RawCommitRequest::new(shard.clone(), vec![envelope], epoch))
+            .submit_commit(RawCommitRequest::new(shard.clone(), envelopes, epoch))
             .await
             .map_err(|error| {
                 EngineError::Storage(format!("async commit submission failed: {error:?}"))
             })?
     }
-
 }
 
 impl<L, P> Backend for AsyncLogReplayBackend<L, P>
@@ -1078,10 +1170,20 @@ where
                     item_ids: item_ids.clone(),
                     lease_expires_at: new_lease_expires_at,
                 }),
-                item_ids,
+                item_ids.clone(),
                 now,
             );
             self.commit_envelope(shard, envelope, expected_epoch).await?;
+            // Keep claim_by_query idempotency replay alive through lease renewals (v0.23.3).
+            let renewed: HashSet<ItemId> = item_ids.into_iter().collect();
+            self.claim_by_query_idempotency
+                .lock()
+                .expect("claim_by_query idempotency poisoned")
+                .entry(shard.clone())
+                .or_default()
+                .extend_expiry_matching(new_lease_expires_at, |(claimed, _)| {
+                    !claimed.is_empty() && claimed.iter().all(|item_id| renewed.contains(item_id))
+                });
             Ok(())
         }
     }
@@ -1699,6 +1801,219 @@ where
             ProjectionStore::declared_bucket_segment(projection, shard, request)
         }))
     }
+
+    fn bounded_mutation(
+        &self,
+        shard: &QueueKey,
+        request: BoundedMutationRequest,
+        context: BoundedMutationContext,
+    ) -> impl std::future::Future<Output = EngineResult<BoundedMutationResponse>> + Send {
+        let shard = shard.clone();
+        async move {
+            let plan = self.projection.with_store(|projection| {
+                ProjectionStore::plan_bounded_mutation(projection, &shard, request)
+            })?;
+            for update in plan.updates {
+                let item_id = update.command.item_id;
+                self.projection.with_store(|projection| {
+                    ProjectionStore::update_fields_validate(
+                        projection,
+                        &shard,
+                        &item_id,
+                        Some(update.expected_item_version),
+                    )?;
+                    ProjectionStore::index_validate_update(
+                        projection,
+                        &shard,
+                        &item_id,
+                        &update.command.field_ops,
+                        update.command.set_entity_document.as_ref(),
+                    )
+                })?;
+                let envelope = self.make_envelope(
+                    QueueCommand::UpdateFields(update.command),
+                    vec![item_id],
+                    context.now,
+                );
+                self.commit_envelope(&shard, envelope, context.expected_epoch)
+                    .await?;
+            }
+            Ok(plan.response)
+        }
+    }
+
+    fn claim_by_query(
+        &self,
+        shard: &QueueKey,
+        request: ClaimByQueryRequest,
+        context: ClaimByQueryContext,
+    ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
+        let shard = shard.clone();
+        async move {
+            use crate::{RequestOutcome, request_expires_at};
+
+            let definition =
+                AsyncControlPlane::queue_definition(self.control.as_ref(), shard.clone()).await?;
+            if request.max_items == 0
+                || u64::from(request.max_items) > definition.max_claim_batch_size
+            {
+                return Err(EngineError::Invalid("invalid claim_by_query max_items"));
+            }
+            if request.lease_duration_ms == 0
+                || request.lease_duration_ms > definition.max_lease_duration_ms
+            {
+                return Err(EngineError::Invalid(
+                    "invalid claim_by_query lease_duration_ms",
+                ));
+            }
+            let request_id = request
+                .request_id
+                .clone()
+                .ok_or(EngineError::Invalid("claim_by_query request_id required"))?;
+            let fingerprint = claim_by_query_body_hash(&request)?;
+            let expires_at =
+                request_expires_at(context.now, definition.request_id_retention_ms);
+
+            match self
+                .claim_by_query_idempotency
+                .lock()
+                .expect("claim_by_query idempotency poisoned")
+                .entry(shard.clone())
+                .or_default()
+                .check_conflict_first(&request_id, fingerprint, context.now)
+            {
+                IdempotencyDecision::Replay((item_ids, lease_token)) => {
+                    let items = self.projection.with_store(|projection| {
+                        ProjectionStore::render_claimed(projection, &shard, &item_ids)
+                    })?;
+                    if items.len() != item_ids.len()
+                        || items
+                            .iter()
+                            .any(|item| item.lease_expires_at <= context.now)
+                    {
+                        return Err(EngineError::RequestExpired);
+                    }
+                    for item in &items {
+                        if item.lease_token.as_ref() != Some(&lease_token) {
+                            return Err(EngineError::RequestExpired);
+                        }
+                    }
+                    return Ok(Claimed {
+                        items,
+                        ..Default::default()
+                    });
+                }
+                IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
+                IdempotencyDecision::Expired => return Err(EngineError::RequestExpired),
+                IdempotencyDecision::Proceed => {}
+            }
+
+            let eligible: HashSet<ItemId> = self
+                .projection
+                .with_store(|projection| {
+                    ProjectionStore::eligible_candidates(
+                        projection,
+                        &shard,
+                        context.eligibility_at(),
+                        usize::MAX,
+                    )
+                })?
+                .into_iter()
+                .collect();
+            let page_size = request.max_items.clamp(1, 1_000);
+            let mut cursor = None;
+            let mut item_ids = Vec::new();
+            while item_ids.len() < request.max_items as usize {
+                let page = self.projection.with_store(|projection| {
+                    ProjectionStore::range_scan(
+                        projection,
+                        &shard,
+                        RangeScanRequest {
+                            index: request.index.clone(),
+                            filters: request.filters.clone(),
+                            order_by: vec![request.order_by.clone()],
+                            page_size,
+                            cursor,
+                        },
+                    )
+                })?;
+                item_ids.extend(
+                    page.rows
+                        .into_iter()
+                        .map(|row| row.item_id)
+                        .filter(|item_id| eligible.contains(item_id)),
+                );
+                item_ids.truncate(request.max_items as usize);
+                cursor = page.next_cursor;
+                if cursor.is_none() {
+                    break;
+                }
+            }
+
+            let lease_expires_at = context.lease_expires_at(request.lease_duration_ms);
+            let (lease_token, claim_item_ids) = if item_ids.is_empty() {
+                (
+                    LeaseToken::new("empty-claim").expect("valid token"),
+                    Vec::new(),
+                )
+            } else {
+                (generate_query_lease_token()?, item_ids.clone())
+            };
+
+            let mut envelope = self.make_envelope(
+                QueueCommand::Claim(ClaimCommand {
+                    item_ids: claim_item_ids.clone(),
+                    lease_token: lease_token.clone(),
+                    lease_expires_at,
+                    worker_id: Some(request.worker_id.clone()),
+                }),
+                claim_item_ids.clone(),
+                context.now,
+            );
+            envelope.request_id = Some(request_id.clone());
+            envelope.request_fingerprint = Some(fingerprint.0);
+            envelope.request_outcome = Some(RequestOutcome::ClaimByQuery {
+                item_ids: claim_item_ids.clone(),
+                lease_token: lease_token.clone(),
+                worker_id: Some(request.worker_id.clone()),
+            });
+            self.commit_envelope(&shard, envelope, context.expected_epoch)
+                .await?;
+
+            let items = if claim_item_ids.is_empty() {
+                Vec::new()
+            } else {
+                self.projection.with_store(|projection| {
+                    ProjectionStore::render_claimed(projection, &shard, &claim_item_ids)
+                })?
+            };
+            debug_assert_eq!(
+                items.len(),
+                claim_item_ids.len(),
+                "every queried claim candidate must render"
+            );
+            let replay_expires_at = if claim_item_ids.is_empty() {
+                expires_at
+            } else {
+                expires_at.max(lease_expires_at)
+            };
+            self.claim_by_query_idempotency
+                .lock()
+                .expect("claim_by_query idempotency poisoned")
+                .entry(shard)
+                .or_default()
+                .record(
+                    request_id,
+                    fingerprint,
+                    (claim_item_ids, lease_token),
+                    replay_expires_at,
+                );
+            Ok(Claimed {
+                items,
+                ..Default::default()
+            })
+        }
+    }
 }
 
 impl<L, P> crate::SetGatesPort for AsyncLogReplayBackend<L, P>
@@ -1924,11 +2239,150 @@ where
     }
 }
 
-impl<L, P> crate::BatchUpdatePort for AsyncLogReplayBackend<L, P>
+impl<L, P> BatchUpdatePort for AsyncLogReplayBackend<L, P>
 where
     L: LogStore + Send + 'static,
     P: ProjectionStore + Send + 'static,
-{}
+{
+    fn batch_update(
+        &self,
+        shard: &QueueKey,
+        request: BatchUpdateRequest,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<BatchUpdateResponse>> + Send {
+        let shard = shard.clone();
+        async move {
+            use crate::{BatchUpdateOutcome, RequestOutcome, request_expires_at};
+
+            if request.updates.is_empty() {
+                return Err(EngineError::Invalid("empty batch update"));
+            }
+            if request.updates.len() > 1_000 {
+                return Err(EngineError::BatchTooLarge);
+            }
+
+            let fingerprint = batch_update_body_hash(&request)?;
+            let definition =
+                AsyncControlPlane::queue_definition(self.control.as_ref(), shard.clone()).await?;
+            let expires_at = request_expires_at(now, definition.request_id_retention_ms);
+            let refs = request
+                .updates
+                .iter()
+                .map(|update| update.item_ref.clone())
+                .collect::<Vec<_>>();
+            let request_id = request.request_id.clone();
+
+            match self
+                .batch_update_idempotency
+                .lock()
+                .expect("batch_update idempotency poisoned")
+                .entry(shard.clone())
+                .or_default()
+                .check(&request_id, fingerprint, now)
+            {
+                IdempotencyDecision::Replay(response) => return Ok(response),
+                IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
+                IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}
+            }
+            if let Some(response) = self.projection.with_store_mut(|p| {
+                ProjectionStore::replay_durable_batch_update(
+                    p,
+                    &shard,
+                    &request_id,
+                    fingerprint.0,
+                    now,
+                )
+            })? {
+                self.batch_update_idempotency
+                    .lock()
+                    .expect("batch_update idempotency poisoned")
+                    .entry(shard.clone())
+                    .or_default()
+                    .record(request_id, fingerprint, response.clone(), expires_at);
+                return Ok(response);
+            }
+
+            let snapshot = self.projection.with_store(|projection| {
+                ProjectionStore::batch_update_snapshot(projection, &shard, &refs)
+            })?;
+            let mut plan = plan_batch_update(
+                &definition,
+                self.supports_gates(),
+                request.updates,
+                snapshot,
+            );
+            let candidate_commands = plan
+                .commands
+                .iter()
+                .map(|(_, command)| command.clone())
+                .collect::<Vec<_>>();
+            let accepted = self.projection.with_store(|projection| {
+                ProjectionStore::batch_update_preflight(projection, &shard, &candidate_commands)
+            })?;
+            if accepted.len() != candidate_commands.len() {
+                return Err(EngineError::Storage(
+                    "batch update preflight returned a mismatched result count".into(),
+                ));
+            }
+            plan.commands = plan
+                .commands
+                .into_iter()
+                .zip(accepted)
+                .filter_map(|((outcome_index, command), accepted)| {
+                    if accepted {
+                        Some((outcome_index, command))
+                    } else {
+                        plan.outcomes[outcome_index] = BatchUpdateOutcome::Invalid;
+                        None
+                    }
+                })
+                .collect();
+
+            let response = BatchUpdateResponse {
+                request_id: request_id.clone(),
+                results: plan.outcomes,
+            };
+            let response_payload = serde_json::to_string(&response)
+                .map_err(|error| EngineError::Storage(error.to_string()))?;
+            let mut envelopes = plan
+                .commands
+                .into_iter()
+                .map(|(_, command)| {
+                    let item_id = command.item_id;
+                    self.make_envelope(
+                        QueueCommand::UpdateFields(command),
+                        vec![item_id],
+                        now,
+                    )
+                })
+                .collect::<Vec<_>>();
+            if envelopes.is_empty() {
+                envelopes.push(self.make_envelope(
+                    QueueCommand::WriteSideRecords(WriteSideRecordsCommand::default()),
+                    Vec::new(),
+                    now,
+                ));
+            }
+            let marker = envelopes
+                .first_mut()
+                .expect("batch update always emits a command or marker");
+            marker.request_id = Some(request_id.clone());
+            marker.request_fingerprint = Some(fingerprint.0);
+            marker.request_outcome = Some(RequestOutcome::BatchUpdate { response_payload });
+
+            self.commit_envelopes(&shard, envelopes, expected_epoch)
+                .await?;
+            self.batch_update_idempotency
+                .lock()
+                .expect("batch_update idempotency poisoned")
+                .entry(shard)
+                .or_default()
+                .record(request_id, fingerprint, response.clone(), expires_at);
+            Ok(response)
+        }
+    }
+}
 
 impl<L, P> crate::ItemMutationPort for AsyncLogReplayBackend<L, P>
 where
