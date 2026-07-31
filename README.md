@@ -135,7 +135,7 @@ fail at startup instead of silently selecting another backend.
   covers images, charts, archives, and checksums.
 - [Operator deploy console](docs/site/deploy/index.html) (also linked from the
   legacy [docs/operator](docs/operator/index.html) shim).
-- [v0.23.3 release notes](docs/releases/v0.23.3.md) describe post-matrix CI
+- [v0.24.0 release notes](docs/releases/v0.24.0.md) describe post-matrix CI
   wiring, quickstart unblock, and clippy/authority hardening.
 - [v0.23.2 release notes](docs/releases/v0.23.2.md) describe the completed
   public 5×3 storage matrix.
