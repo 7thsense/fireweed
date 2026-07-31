@@ -366,7 +366,7 @@ functionality.
 | --- | --- |
 | Queue and ownership | `ownership`, `renew_owned`, `create_queue`, `queue_definition`, `ensure_queue` |
 | Append and replace | `push`, `push_with_request_id`, `push_batch`, `push_batch_with_request_id`, `upsert` |
-| Claim | `claim`, `claim_with`, `claim_response_with`, `claim_at`, `claim_response_at`, `claim_across_queues`, `claim_by_query`, `claim_by_query_at` |
+| Claim | `claim`, `claim_with`, `claim_response_with`, `claim_at`, `claim_response_at`, `claim_across_queues`, `claim_by_query`, `claim_by_query_at`, `claim_by_item_ids` (API-001 `BatchClaimByItemIds`; external-trigger / pre-resolved id set; ordinary leases) |
 | Finalize and commit | `ack`, `complete`, `nack`, `retry`, `release`, `nack_retry_after`, `retry_after`, `commit`, `commit_multi_claim`, `commit_capabilities`, `explain_commit`, `side_record`, `fail` |
 | Read and discovery | `peek`, `current_position`, `discover_active_scopes`, `discover_active_scopes_stamped`, `discover`, `live_item`, `live_items`, `query_index_unique`, `query_index`, `query_index_unique_typed`, `query_index_typed`, `claimed` |
 | Metrics and projection query | `metrics`, `metrics_by_query`, `hot_projection_capabilities`, `range_scan`, `grouped_aggregate`, `declared_bucket_segment` |
@@ -544,6 +544,10 @@ pub async fn upsert(&self, queue: &QueueKey, key: ClientItemKey, item: NewItem) 
 pub async fn claim_with(&self, queue: &QueueKey, max: usize, lease_ms: u64, compatibility: ClaimCompatibility) -> EngineResult<Vec<ClaimedItem>>;
 pub async fn claim_by_query(&self, queue: &QueueKey, request: ClaimByQueryRequest) -> EngineResult<Claimed>;
 pub async fn claim_by_query_at(&self, queue: &QueueKey, request: ClaimByQueryRequest, at: ClaimByQueryAt) -> EngineResult<Claimed>;
+/// API-001 `BatchClaimByItemIds`: lease exactly the caller-supplied item ids
+/// (partial per-id outcomes). Resulting leases are ordinary claim leases
+/// (inspect / lease timeout+reclaim / API-002 force).
+pub async fn claim_by_item_ids(&self, queue: &QueueKey, request: ClaimByItemIdsRequest) -> EngineResult<ClaimByItemIdsResponse>;
 pub async fn ack(&self, queue: &QueueKey, ids: impl IntoIterator<Item = ItemId>) -> EngineResult<()>;
 pub async fn nack(&self, queue: &QueueKey, ids: impl IntoIterator<Item = ItemId>, how: Nack) -> EngineResult<()>;
 pub async fn commit(&self, queue: &QueueKey, request: CommitRequest) -> EngineResult<Vec<EntryOutcome>>;

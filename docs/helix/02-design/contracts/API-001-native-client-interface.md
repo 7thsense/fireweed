@@ -539,6 +539,53 @@ downstream target independently, the per-claim group-batching bound
 (`DiscoverActiveScopes`, g4, which MAY be omitted in embedded single-queue
 deployments). fireweed adds no `rate_policy`, token bucket, or per-claim rate gate.
 
+### Batch Claim By Item Ids
+
+Fireweed is a **state-machine** surface over item lifecycle, not only a
+priority scheduler. When an **external trigger** chooses the work (for example a
+user clicked an email), the caller already knows the `item_id` set. The queue
+MUST NOT re-select by priority or index range for that path.
+
+`BatchClaimByItemIds` is the batch primitive for that path: one durable command
+that attempts to lease exactly the caller-supplied `item_id`s. It is an
+alternate **selection** path into the same claim / lease / renew / finalize
+lifecycle as `BatchClaim` — not a parallel lifecycle and not a substitute for
+default priority claim in ordinary worker loops.
+
+| Element | Type / Shape | Required | Rules | Notes |
+|---------|--------------|----------|-------|-------|
+| `BatchClaimByItemIds` | operation | yes (native library; capability-flagged on backends) | MUST attempt to lease the caller-supplied set of `item_id`s in one durable command. | External-trigger / pre-resolved reserve. |
+| `request_id` | string | yes | Same envelope idempotency as `BatchClaim`. | Claim retry safety. |
+| `worker_id` | string | yes | Same observability identity as `BatchClaim`. | Not an auth principal. |
+| `item_ids[]` | array of `item_id` | yes | MUST be non-empty and no longer than the queue/deployment max claim batch size. Duplicates in the request MUST collapse to a set for leasing (at most one lease attempt per id). | v1 addresses by server `item_id` only — not `client_item_key`, not index tuples. |
+| `lease_duration_ms` | integer | yes | Same bounds and meaning as `BatchClaim.lease_duration_ms`. | Creates the same invisibility window. |
+| selection | rule | yes | The effective claim domain is **exactly** the supplied id set after Eligibility Precedence. The server MUST NOT lease any item whose `item_id` is outside that set. | No range expansion; no priority fill-in. |
+| partial outcomes | rule | yes | For each distinct requested id, the response MUST report either a successful claim (Claimed Item Response Shape) or a per-id non-claim reason. The command MUST claim every currently eligible id in the set and MUST NOT fail the whole batch solely because some ids are not claimable. | Matches batch delivery: take what is claimable now. |
+| per-id non-claim reasons | enum | yes | At least: `not_found`, `not_eligible` (gates / `not_before` / queue pause / other Eligibility Precedence), `leased` (active lease held by any worker), `terminal`. | Stable enough for callers to retry or surface. |
+| response order | rule | yes | Per-id outcomes MUST preserve the first-occurrence order of ids in the request (after collapsing later duplicates). | Deterministic for the caller batch. |
+| claimed item shape | rule | yes | Successfully claimed rows MUST use the same Claimed Item Response Shape as `BatchClaim` (including `lease_token`, `lease_expires_at`, `item_version` bump, attempt charging). | One finalize/renew path. |
+| no full-shard scan | rule | yes | Implementations MUST resolve and lease by `item_id` via point lookup / primary key (or equivalent), not by scanning all eligible candidates of the shard for each id. | Projection MUST index `item_id` for this path. |
+| capability | flag | yes | Backends MUST advertise whether `claim_by_item_ids` is available. When unavailable, the operation MUST fail with structured `capability-unavailable("claim_by_item_ids")`. | Compose and relational families are in-scope for product support. |
+
+**First-class claim lifecycle.** Leases created by `BatchClaimByItemIds` are
+ordinary API-001 leases. They MUST participate in the same control surface as
+priority claims:
+
+| Concern | Contract surface |
+|---------|------------------|
+| Inspect | Live/claimed item reads (`BatchGetLiveItems` / library `claimed` / `live_item`) and API-002 `GetItem` / `ListItems` expose lease holder identity, `lease_expires_at`, and lifecycle state. |
+| Timeout | `lease_expires_at` bounds invisibility; expired leases re-enter eligibility under Eligibility Precedence; `reclaim_expired` (library) and retention/repair paths recover stuck delivery. |
+| Force | API-002 `RepairItems` actions `force_release`, `clear_lease`, `force_retry` / `force_fail` / `force_complete` fence or terminate the lease the same as for any other claim. |
+
+A claim created by id-set selection MUST NOT be a second-class lease that
+bypasses inspect, expiry, reclaim, or operator force.
+
+**Non-goals for this operation:** `client_item_key` or declared-index key sets
+in v1; all-or-nothing atomicity across the whole id set; using this op as the
+default fair worker claim path; weakening Eligibility Precedence for ids in the
+set (an ineligible id is reported, not forced claimable, unless an API-002
+force path is used separately).
+
 ### Eligibility Precedence
 
 This subsection is the single authoritative definition of claim eligibility and
