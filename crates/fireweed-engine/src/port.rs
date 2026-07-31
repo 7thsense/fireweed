@@ -748,6 +748,29 @@ pub struct Claimed {
     pub cohort_id: Option<CohortId>,
 }
 
+/// API-001 `BatchClaimByItemIds` response: successfully claimed items plus per-id dispositions.
+#[derive(Debug, Clone, Default)]
+pub struct ClaimByItemIdsResponse {
+    /// Successfully claimed rows (Claimed Item Response Shape), first-occurrence request order.
+    pub items: Vec<ClaimedItem>,
+    /// One outcome per distinct requested id (first-occurrence order after collapsing duplicates).
+    pub outcomes: Vec<fireweed_core::ClaimByItemIdsOutcome>,
+}
+
+impl PartialEq for ClaimByItemIdsResponse {
+    fn eq(&self, other: &Self) -> bool {
+        self.outcomes == other.outcomes
+            && self.items.len() == other.items.len()
+            && self
+                .items
+                .iter()
+                .zip(other.items.iter())
+                .all(|(a, b)| a.item_id == b.item_id && a.lease_token == b.lease_token)
+    }
+}
+
+impl Eq for ClaimByItemIdsResponse {}
+
 #[derive(Debug, Clone)]
 pub struct CohortLeaseTarget {
     pub cohort_id: CohortId,
@@ -1791,6 +1814,17 @@ pub trait HotProjectionQueryPort: Send + Sync {
         _request: ClaimByQueryRequest,
         _context: ClaimByQueryContext,
     ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+
+    /// API-001 `BatchClaimByItemIds`: lease exactly the caller-supplied `item_id` set with partial
+    /// per-id outcomes. Resulting leases are ordinary claim leases.
+    fn claim_by_item_ids(
+        &self,
+        _shard: &QueueKey,
+        _request: fireweed_core::ClaimByItemIdsRequest,
+        _context: ClaimByQueryContext,
+    ) -> impl std::future::Future<Output = EngineResult<ClaimByItemIdsResponse>> + Send {
         std::future::ready(Err(EngineError::Unavailable))
     }
 }

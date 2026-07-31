@@ -5899,6 +5899,7 @@ impl PostgresRelationalBackend {
                             )?;
                         }
                         RequestOutcome::ClaimByQuery { .. } => {}
+                        RequestOutcome::ClaimByItemIds { .. } => {}
                         RequestOutcome::ItemMutation { .. } => {}
                     }
                 }
@@ -7954,6 +7955,7 @@ impl fireweed_engine::HotProjectionQueryPort for PostgresRelationalBackend {
             bounded_mutation: true,
             claim_by_query: true,
             side_record_query: false,
+            claim_by_item_ids: false,
         }
     }
 
@@ -10205,6 +10207,7 @@ impl ProjectionStore for PostgresRelational {
             bounded_mutation: true,
             claim_by_query: true,
             side_record_query: false,
+            claim_by_item_ids: false,
         }
     }
 

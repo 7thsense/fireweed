@@ -3936,6 +3936,44 @@ impl ProjectionData {
         self.items.get(id).map(|r| r.state)
     }
 
+    /// Point-lookup claim classification for API-001 `BatchClaimByItemIds`.
+    ///
+    /// Resolves via the primary `items` map (`O(1)` per id). MUST NOT scan the eligible-candidate
+    /// index or iterate unrelated pending rows.
+    pub fn classify_claim_by_item_id(
+        &self,
+        id: &ItemId,
+        now: UtcTimestamp,
+    ) -> fireweed_core::ClaimByItemIdClass {
+        use fireweed_core::ClaimByItemIdClass;
+        let Some(rec) = self.items.get(id) else {
+            return ClaimByItemIdClass::NotFound;
+        };
+        if rec.superseded {
+            return ClaimByItemIdClass::NotFound;
+        }
+        if rec.state.is_terminal() {
+            return ClaimByItemIdClass::Terminal;
+        }
+        if rec.state == ItemState::Leased {
+            return ClaimByItemIdClass::Leased;
+        }
+        if rec.state != ItemState::Pending {
+            return ClaimByItemIdClass::NotEligible;
+        }
+        // Base eligibility: queue pause, not_before, gates (Eligibility Precedence).
+        if self.paused {
+            return ClaimByItemIdClass::NotEligible;
+        }
+        if rec.not_before.map(|nb| nb > now).unwrap_or(false) {
+            return ClaimByItemIdClass::NotEligible;
+        }
+        if gate_keys_blocked(&self.blocked_gates, &rec.gate_keys) {
+            return ClaimByItemIdClass::NotEligible;
+        }
+        ClaimByItemIdClass::Claimable
+    }
+
     /// Seed restart item-id counters from this already-materialized projection. Hybrid recovery has just
     /// hydrated memory from SQLite, so this avoids a second full durable-store item scan.
     pub fn observe_item_counters(&self, shard: &QueueKey, counters: &QueueCounters) {

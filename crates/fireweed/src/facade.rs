@@ -82,6 +82,11 @@ trait FireweedDataPlane: Send + Sync {
         request: ClaimByQueryRequest,
         at: ClaimByQueryAt,
     ) -> FacadeFuture<'a, Claimed>;
+    fn claim_by_item_ids<'a>(
+        &'a self,
+        queue: &'a QueueKey,
+        request: ClaimByItemIdsRequest,
+    ) -> FacadeFuture<'a, ClaimByItemIdsResponse>;
     fn ack<'a>(&'a self, queue: &'a QueueKey, ids: Vec<ItemId>) -> FacadeFuture<'a, ()>;
     fn complete<'a>(&'a self, queue: &'a QueueKey, ids: Vec<ItemId>) -> FacadeFuture<'a, ()>;
     fn nack<'a>(&'a self, queue: &'a QueueKey, ids: Vec<ItemId>, how: Nack)
@@ -445,6 +450,13 @@ impl<B: LibBackend + 'static> FireweedDataPlane for RuntimeCore<B> {
         at: ClaimByQueryAt,
     ) -> FacadeFuture<'a, Claimed> {
         Box::pin(RuntimeCore::claim_by_query_at(self, queue, request, at))
+    }
+    fn claim_by_item_ids<'a>(
+        &'a self,
+        queue: &'a QueueKey,
+        request: ClaimByItemIdsRequest,
+    ) -> FacadeFuture<'a, ClaimByItemIdsResponse> {
+        Box::pin(RuntimeCore::claim_by_item_ids(self, queue, request))
     }
     fn ack<'a>(&'a self, queue: &'a QueueKey, ids: Vec<ItemId>) -> FacadeFuture<'a, ()> {
         Box::pin(RuntimeCore::ack(self, queue, ids))
@@ -940,6 +952,16 @@ impl Fireweed {
         at: ClaimByQueryAt,
     ) -> EngineResult<Claimed> {
         self.inner.claim_by_query_at(queue, request, at).await
+    }
+    /// API-001 `BatchClaimByItemIds`: lease exactly the caller-supplied item ids
+    /// (partial per-id outcomes). Resulting leases are ordinary claim leases
+    /// (inspect / lease timeout+reclaim / API-002 force).
+    pub async fn claim_by_item_ids(
+        &self,
+        queue: &QueueKey,
+        request: ClaimByItemIdsRequest,
+    ) -> EngineResult<ClaimByItemIdsResponse> {
+        self.inner.claim_by_item_ids(queue, request).await
     }
     pub async fn ack(
         &self,

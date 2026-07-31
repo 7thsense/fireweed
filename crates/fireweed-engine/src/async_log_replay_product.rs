@@ -11,31 +11,33 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use fireweed_core::{
-    BodyHash, BoundedMutationRequest, BoundedMutationResponse, ClaimByQueryRequest, ClientItemKey,
-    GroupKey, ItemId, ItemState, LeaseToken, Metadata, MetricsByQueryRequest, PriorityValue,
-    QueueDefinition, QueueId, QueryCapabilityFlags, RangeScanRequest, RequestId, TenantId,
-    UtcTimestamp,
+    BodyHash, BoundedMutationRequest, BoundedMutationResponse, ClaimByItemIdClass,
+    ClaimByItemIdsDisposition, ClaimByItemIdsOutcome, ClaimByItemIdsRequest, ClaimByQueryRequest,
+    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, MetricsByQueryRequest,
+    PriorityValue, QueueDefinition, QueueId, QueryCapabilityFlags, RangeScanRequest, RequestId,
+    TenantId, UtcTimestamp,
 };
 
 use crate::{
     AsOfProjectionStore, AsyncClaimError, AsyncComposedBackend, AsyncControlPlane,
     AsyncLifecycleError, AsyncLogStore, AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError,
     AsyncPushRequest, AsyncReclaimRequest, Backend, BatchUpdatePort, BatchUpdateRequest,
-    BatchUpdateResponse, BoundedMutationContext, ClaimByQueryContext, ClaimCommand, ClaimPort,
-    ClaimRequest, Claimed, CommandChecksum, CommandEnvelope, CommandId, CommandPage, CommandPosition,
-    ControlPlaneStore, CreateQueueOutcome, DurabilityClass, EngineError, EngineResult,
-    FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, HotProjectionQueryPort, IdGen,
-    IdempotencyDecision, InProcessControlPlane, InProcessLogStore, InProcessProjectionStore,
-    IndexHit, IndexQueryPort, InlineOwnedTaskDispatcher, ItemView, LeaseView, LiveItemView, LogRead,
-    LogStore, OwnedTask, PayloadUpdate, PendingPage, PendingSummary, ProjectionClaimPlanner,
-    ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner,
-    ProjectionSnapshot, ProjectionStore, PurgePort, PushCommand, PushItem, PushPort, PushSpec,
-    QueueCommand, QueueCounters, QueueIdempotencyCache, QueueKey, QueueMetrics, RawCommitFault,
-    RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
-    ReclaimPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SnapshotRef,
-    SnapshotStore, TerminalEmissionMetrics, TickReport, UnifiedAtomicCommit, UnifiedAtomicCommitter,
-    UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, WriteSideRecordsCommand,
-    batch_update_body_hash, claim_by_query_body_hash, compile_entity_schema,
+    BatchUpdateResponse, BoundedMutationContext, ClaimByItemIdsResponse, ClaimByQueryContext,
+    ClaimCommand, ClaimPort, ClaimRequest, Claimed, CommandChecksum, CommandEnvelope, CommandId,
+    CommandPage, CommandPosition, ControlPlaneStore, CreateQueueOutcome, DurabilityClass,
+    EngineError, EngineResult, FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort,
+    HotProjectionQueryPort, IdGen, IdempotencyDecision, InProcessControlPlane, InProcessLogStore,
+    InProcessProjectionStore, IndexHit, IndexQueryPort, InlineOwnedTaskDispatcher, ItemView,
+    LeaseView, LiveItemView, LogRead, LogStore, OwnedTask, PayloadUpdate, PendingPage,
+    PendingSummary, ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner,
+    ProjectionRead, ProjectionReclaimPlanner, ProjectionSnapshot, ProjectionStore, PurgePort,
+    PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueCounters, QueueIdempotencyCache,
+    QueueKey, QueueMetrics, RawCommitFault, RawCommitOutcome, RawCommitRequest,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeaseCommand,
+    RenewLeasePort, ReplacePendingCommand, SnapshotRef, SnapshotStore, TerminalEmissionMetrics,
+    TickReport, UnifiedAtomicCommit, UnifiedAtomicCommitter, UpdateFieldsCommand, UpdateFieldsPort,
+    UpsertOutcome, UpsertPort, WriteSideRecordsCommand, batch_update_body_hash,
+    claim_by_item_ids_body_hash, claim_by_query_body_hash, compile_entity_schema,
     generate_query_lease_token, plan_batch_update, validate_api001_reserved_write_fields,
     validate_entity,
 };
@@ -395,6 +397,13 @@ type AsyncEngine<L, P> = AsyncComposedBackend<
 /// Claim-by-query request-id cache: `(item_ids, lease_token)` while leases remain replayable.
 type ClaimByQueryIdempotency =
     Mutex<HashMap<QueueKey, QueueIdempotencyCache<(Vec<ItemId>, LeaseToken)>>>;
+/// Claim-by-item-ids request-id cache: claimed ids + token + per-id outcomes while leases remain replayable.
+type ClaimByItemIdsIdempotency = Mutex<
+    HashMap<
+        QueueKey,
+        QueueIdempotencyCache<(Vec<ItemId>, LeaseToken, Vec<ClaimByItemIdsOutcome>)>,
+    >,
+>;
 /// BatchUpdate request-id cache (API-001 ordered outcomes).
 type BatchUpdateIdempotency = Mutex<HashMap<QueueKey, QueueIdempotencyCache<BatchUpdateResponse>>>;
 
@@ -413,6 +422,7 @@ where
     node_id: u8,
     push_idempotency: Arc<PushIdempotency>,
     claim_by_query_idempotency: Arc<ClaimByQueryIdempotency>,
+    claim_by_item_ids_idempotency: Arc<ClaimByItemIdsIdempotency>,
     batch_update_idempotency: Arc<BatchUpdateIdempotency>,
     commit_idempotency:
         Arc<Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<crate::EntryRecovery>>>>>,
@@ -432,6 +442,7 @@ where
     let projection = Arc::new(InProcessProjectionStore::new(projection));
     let push_idempotency = Arc::new(Mutex::new(HashMap::new()));
     let claim_by_query_idempotency = Arc::new(Mutex::new(HashMap::new()));
+    let claim_by_item_ids_idempotency = Arc::new(Mutex::new(HashMap::new()));
     let batch_update_idempotency = Arc::new(Mutex::new(HashMap::new()));
     let commit_idempotency = Arc::new(Mutex::new(HashMap::new()));
     let control = Arc::new(InProcessControlPlane::new());
@@ -445,6 +456,7 @@ where
         counters,
         push_idempotency,
         claim_by_query_idempotency,
+        claim_by_item_ids_idempotency,
         batch_update_idempotency,
         commit_idempotency,
         node_id,
@@ -460,6 +472,7 @@ pub fn assemble_async_log_replay_from_parts<L, P>(
     counters: Arc<QueueCounters>,
     push_idempotency: Arc<PushIdempotency>,
     claim_by_query_idempotency: Arc<ClaimByQueryIdempotency>,
+    claim_by_item_ids_idempotency: Arc<ClaimByItemIdsIdempotency>,
     batch_update_idempotency: Arc<BatchUpdateIdempotency>,
     commit_idempotency: Arc<
         Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<crate::EntryRecovery>>>>,
@@ -527,6 +540,7 @@ where
         node_id,
         push_idempotency,
         claim_by_query_idempotency,
+        claim_by_item_ids_idempotency,
         batch_update_idempotency,
         commit_idempotency,
     })
@@ -547,6 +561,7 @@ where
             self.counters,
             self.push_idempotency,
             self.claim_by_query_idempotency,
+            self.claim_by_item_ids_idempotency,
             self.batch_update_idempotency,
             self.commit_idempotency,
             node_id,
@@ -645,12 +660,16 @@ where
                         .claim_by_query_idempotency
                         .lock()
                         .expect("claim_by_query idempotency poisoned");
+                    let mut claim_by_item_ids_cache = self
+                        .claim_by_item_ids_idempotency
+                        .lock()
+                        .expect("claim_by_item_ids idempotency poisoned");
                     let mut batch_cache = self
                         .batch_update_idempotency
                         .lock()
                         .expect("batch_update idempotency poisoned");
                     for (_, env) in &page.entries {
-                        // Renew extends active query-claim replay retention (v0.23.3 parity).
+                        // Renew extends active query/item-id claim replay retention.
                         if let QueueCommand::RenewLease(renew) = &env.command {
                             let renewed: HashSet<ItemId> =
                                 renew.item_ids.iter().copied().collect();
@@ -661,6 +680,18 @@ where
                                         && item_ids.iter().all(|item_id| renewed.contains(item_id))
                                 },
                             );
+                            claim_by_item_ids_cache
+                                .entry(shard.clone())
+                                .or_default()
+                                .extend_expiry_matching(
+                                    renew.lease_expires_at,
+                                    |(item_ids, _, _)| {
+                                        !item_ids.is_empty()
+                                            && item_ids
+                                                .iter()
+                                                .all(|item_id| renewed.contains(item_id))
+                                    },
+                                );
                         }
 
                         let Some(request_id) = &env.request_id else {
@@ -701,6 +732,35 @@ where
                                 (item_ids.clone(), lease_token.clone()),
                                 expires_at,
                             );
+                        }
+                        if let Some(RequestOutcome::ClaimByItemIds {
+                            claimed_item_ids,
+                            lease_token,
+                            outcomes,
+                            ..
+                        }) = &env.request_outcome
+                        {
+                            let fingerprint = BodyHash(env.request_fingerprint.unwrap_or(0));
+                            let expires_at = match (&env.command, claimed_item_ids.is_empty()) {
+                                (QueueCommand::Claim(claim), false) => {
+                                    request_expires_at(env.created_at, retention_ms)
+                                        .max(claim.lease_expires_at)
+                                }
+                                _ => request_expires_at(env.created_at, retention_ms),
+                            };
+                            claim_by_item_ids_cache
+                                .entry(shard.clone())
+                                .or_default()
+                                .record(
+                                    request_id.clone(),
+                                    fingerprint,
+                                    (
+                                        claimed_item_ids.clone(),
+                                        lease_token.clone(),
+                                        outcomes.clone(),
+                                    ),
+                                    expires_at,
+                                );
                         }
                         if let Some(RequestOutcome::BatchUpdate { response_payload }) =
                             &env.request_outcome
@@ -1174,7 +1234,7 @@ where
                 now,
             );
             self.commit_envelope(shard, envelope, expected_epoch).await?;
-            // Keep claim_by_query idempotency replay alive through lease renewals (v0.23.3).
+            // Keep claim_by_query / claim_by_item_ids idempotency replay alive through lease renewals.
             let renewed: HashSet<ItemId> = item_ids.into_iter().collect();
             self.claim_by_query_idempotency
                 .lock()
@@ -1182,6 +1242,14 @@ where
                 .entry(shard.clone())
                 .or_default()
                 .extend_expiry_matching(new_lease_expires_at, |(claimed, _)| {
+                    !claimed.is_empty() && claimed.iter().all(|item_id| renewed.contains(item_id))
+                });
+            self.claim_by_item_ids_idempotency
+                .lock()
+                .expect("claim_by_item_ids idempotency poisoned")
+                .entry(shard.clone())
+                .or_default()
+                .extend_expiry_matching(new_lease_expires_at, |(claimed, _, _)| {
                     !claimed.is_empty() && claimed.iter().all(|item_id| renewed.contains(item_id))
                 });
             Ok(())
@@ -2012,6 +2080,180 @@ where
                 items,
                 ..Default::default()
             })
+        }
+    }
+
+    fn claim_by_item_ids(
+        &self,
+        shard: &QueueKey,
+        request: ClaimByItemIdsRequest,
+        context: ClaimByQueryContext,
+    ) -> impl std::future::Future<Output = EngineResult<ClaimByItemIdsResponse>> + Send {
+        let shard = shard.clone();
+        async move {
+            use crate::{RequestOutcome, request_expires_at};
+
+            let definition =
+                AsyncControlPlane::queue_definition(self.control.as_ref(), shard.clone()).await?;
+            if request.item_ids.is_empty() {
+                return Err(EngineError::Invalid("claim_by_item_ids item_ids required"));
+            }
+            // Collapse duplicates (first-occurrence order) before validating batch size.
+            let mut seen = HashSet::new();
+            let distinct: Vec<ItemId> = request
+                .item_ids
+                .iter()
+                .copied()
+                .filter(|id| seen.insert(*id))
+                .collect();
+            if u64::try_from(distinct.len()).unwrap_or(u64::MAX) > definition.max_claim_batch_size {
+                return Err(EngineError::Invalid(
+                    "claim_by_item_ids exceeds max_claim_batch_size",
+                ));
+            }
+            if request.lease_duration_ms == 0
+                || request.lease_duration_ms > definition.max_lease_duration_ms
+            {
+                return Err(EngineError::Invalid(
+                    "invalid claim_by_item_ids lease_duration_ms",
+                ));
+            }
+            let request_id = request.request_id.clone();
+            let fingerprint = claim_by_item_ids_body_hash(&request)?;
+            let expires_at =
+                request_expires_at(context.now, definition.request_id_retention_ms);
+
+            match self
+                .claim_by_item_ids_idempotency
+                .lock()
+                .expect("claim_by_item_ids idempotency poisoned")
+                .entry(shard.clone())
+                .or_default()
+                .check_conflict_first(&request_id, fingerprint, context.now)
+            {
+                IdempotencyDecision::Replay((claimed_ids, lease_token, outcomes)) => {
+                    let items = if claimed_ids.is_empty() {
+                        Vec::new()
+                    } else {
+                        self.projection.with_store(|projection| {
+                            ProjectionStore::render_claimed(projection, &shard, &claimed_ids)
+                        })?
+                    };
+                    if items.len() != claimed_ids.len()
+                        || items
+                            .iter()
+                            .any(|item| item.lease_expires_at <= context.now)
+                    {
+                        return Err(EngineError::RequestExpired);
+                    }
+                    for item in &items {
+                        if item.lease_token.as_ref() != Some(&lease_token) {
+                            return Err(EngineError::RequestExpired);
+                        }
+                    }
+                    return Ok(ClaimByItemIdsResponse { items, outcomes });
+                }
+                IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
+                IdempotencyDecision::Expired => return Err(EngineError::RequestExpired),
+                IdempotencyDecision::Proceed => {}
+            }
+
+            let eligibility_at = context.eligibility_at();
+            let mut outcomes = Vec::with_capacity(distinct.len());
+            let mut claimable: Vec<ItemId> = Vec::new();
+            for item_id in &distinct {
+                let class = self.projection.with_store(|projection| {
+                    ProjectionStore::classify_claim_by_item_id(
+                        projection,
+                        &shard,
+                        item_id,
+                        eligibility_at,
+                    )
+                })?;
+                match class {
+                    ClaimByItemIdClass::Claimable => {
+                        claimable.push(*item_id);
+                        outcomes.push(ClaimByItemIdsOutcome {
+                            item_id: *item_id,
+                            disposition: ClaimByItemIdsDisposition::Claimed,
+                        });
+                    }
+                    other => {
+                        outcomes.push(ClaimByItemIdsOutcome {
+                            item_id: *item_id,
+                            disposition: other.into(),
+                        });
+                    }
+                }
+            }
+
+            let lease_expires_at = context.lease_expires_at(request.lease_duration_ms);
+            let (lease_token, claim_item_ids) = if claimable.is_empty() {
+                (
+                    request
+                        .lease_token
+                        .clone()
+                        .unwrap_or_else(|| {
+                            LeaseToken::new("empty-claim-by-item-ids").expect("valid token")
+                        }),
+                    Vec::new(),
+                )
+            } else if let Some(token) = request.lease_token.clone() {
+                (token, claimable)
+            } else {
+                (generate_query_lease_token()?, claimable)
+            };
+
+            let mut envelope = self.make_envelope(
+                QueueCommand::Claim(ClaimCommand {
+                    item_ids: claim_item_ids.clone(),
+                    lease_token: lease_token.clone(),
+                    lease_expires_at,
+                    worker_id: Some(request.worker_id.clone()),
+                }),
+                claim_item_ids.clone(),
+                context.now,
+            );
+            envelope.request_id = Some(request_id.clone());
+            envelope.request_fingerprint = Some(fingerprint.0);
+            envelope.request_outcome = Some(RequestOutcome::ClaimByItemIds {
+                claimed_item_ids: claim_item_ids.clone(),
+                lease_token: lease_token.clone(),
+                outcomes: outcomes.clone(),
+                worker_id: Some(request.worker_id.clone()),
+            });
+            self.commit_envelope(&shard, envelope, context.expected_epoch)
+                .await?;
+
+            let items = if claim_item_ids.is_empty() {
+                Vec::new()
+            } else {
+                self.projection.with_store(|projection| {
+                    ProjectionStore::render_claimed(projection, &shard, &claim_item_ids)
+                })?
+            };
+            debug_assert_eq!(
+                items.len(),
+                claim_item_ids.len(),
+                "every claim_by_item_ids candidate must render"
+            );
+            let replay_expires_at = if claim_item_ids.is_empty() {
+                expires_at
+            } else {
+                expires_at.max(lease_expires_at)
+            };
+            self.claim_by_item_ids_idempotency
+                .lock()
+                .expect("claim_by_item_ids idempotency poisoned")
+                .entry(shard)
+                .or_default()
+                .record(
+                    request_id,
+                    fingerprint,
+                    (claim_item_ids, lease_token, outcomes.clone()),
+                    replay_expires_at,
+                );
+            Ok(ClaimByItemIdsResponse { items, outcomes })
         }
     }
 }

@@ -968,6 +968,7 @@ impl ProjectionStore for SqliteProjectionStore {
             bounded_mutation: true,
             claim_by_query: true,
             side_record_query: false,
+            claim_by_item_ids: false,
         }
     }
 

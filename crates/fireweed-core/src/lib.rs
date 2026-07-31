@@ -26,6 +26,7 @@ pub use domain::{
 };
 pub use query::{
     AggregateGroup, BoundedMutationRequest, BoundedMutationResponse, BucketCount, BucketRule,
+    ClaimByItemIdClass, ClaimByItemIdsDisposition, ClaimByItemIdsOutcome, ClaimByItemIdsRequest,
     ClaimByQueryRequest, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, FilterOp,
     GroupByField, GroupedAggregateRequest, GroupedAggregateResponse, MetricsByQueryRequest,
     MutationOutcome, MutationResult, OrderField, QueryCapabilityFlags, QueryCursor, QueryFilter,

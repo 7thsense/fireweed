@@ -1154,6 +1154,20 @@ pub trait ProjectionStore: Send {
         client_item_key: &ClientItemKey,
     ) -> EngineResult<Option<ItemId>>;
     fn item_state(&self, shard: &QueueKey, id: &ItemId) -> EngineResult<Option<ItemState>>;
+
+    /// Point-lookup claim classification for API-001 `BatchClaimByItemIds`.
+    ///
+    /// Default is unavailable; memory/compose projections override with `O(1)` primary-key lookup.
+    /// Implementations MUST NOT scan all eligible candidates of the shard per id.
+    fn classify_claim_by_item_id(
+        &self,
+        _shard: &QueueKey,
+        _id: &ItemId,
+        _now: UtcTimestamp,
+    ) -> EngineResult<fireweed_core::ClaimByItemIdClass> {
+        Err(EngineError::Unavailable)
+    }
+
     fn item_version(&self, shard: &QueueKey, id: &ItemId) -> EngineResult<Option<u64>>;
 
     /// Resolve every item/key referenced by one API-001 BatchUpdate against one projection snapshot.
@@ -1948,6 +1962,33 @@ pub fn claim_by_query_body_hash(request: &ClaimByQueryRequest) -> EngineResult<B
 
     let mut canonical = request.clone();
     canonical.request_id = None;
+    let bytes = serde_json::to_vec(&canonical).map_err(|e| EngineError::Storage(e.to_string()))?;
+    let digest = Sha256::digest(bytes);
+    Ok(BodyHash(u64::from_be_bytes(
+        digest[..8]
+            .try_into()
+            .expect("SHA-256 prefix is eight bytes"),
+    )))
+}
+
+/// Body fingerprint for API-001 BatchClaimByItemIds (`request_id` excluded).
+pub fn claim_by_item_ids_body_hash(
+    request: &fireweed_core::ClaimByItemIdsRequest,
+) -> EngineResult<BodyHash> {
+    use sha2::{Digest, Sha256};
+
+    // request_id is the cache key; fingerprint covers the logical claim body only.
+    let token = request
+        .lease_token
+        .as_ref()
+        .map(|t| t.as_str())
+        .unwrap_or("");
+    let canonical = (
+        &request.item_ids,
+        request.lease_duration_ms,
+        request.worker_id.as_str(),
+        token,
+    );
     let bytes = serde_json::to_vec(&canonical).map_err(|e| EngineError::Storage(e.to_string()))?;
     let digest = Sha256::digest(bytes);
     Ok(BodyHash(u64::from_be_bytes(

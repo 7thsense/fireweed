@@ -1251,6 +1251,19 @@ where
             inner.claim_by_query(&shard, request, context).await
         })
     }
+
+    fn claim_by_item_ids(
+        &self,
+        shard: &QueueKey,
+        request: fireweed_core::ClaimByItemIdsRequest,
+        context: ClaimByQueryContext,
+    ) -> impl Future<Output = EngineResult<fireweed_engine::ClaimByItemIdsResponse>> + Send {
+        let shard = shard.clone();
+        let inner = self.arc_for(&shard);
+        self.dispatch(shard.clone(), move || async move {
+            inner.claim_by_item_ids(&shard, request, context).await
+        })
+    }
 }
 
 impl<B> HistoricalProjectionRead for PostgresWholeOperationAdapter<B>

@@ -883,6 +883,17 @@ impl<B: super::LibBackend + 'static> HotProjectionQueryPort for BlockingLibBacke
             i.claim_by_query(&q, request, context).await
         })
     }
+    fn claim_by_item_ids(
+        &self,
+        shard: &QueueKey,
+        request: fireweed_core::ClaimByItemIdsRequest,
+        context: ClaimByQueryContext,
+    ) -> impl Future<Output = EngineResult<fireweed_engine::ClaimByItemIdsResponse>> + Send {
+        let q = shard.clone();
+        self.dispatch(q.clone(), move |i| async move {
+            i.claim_by_item_ids(&q, request, context).await
+        })
+    }
 }
 
 impl<B: super::LibBackend + 'static> ControlPlaneStore for BlockingLibBackend<B> {

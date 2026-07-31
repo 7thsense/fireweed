@@ -1131,6 +1131,15 @@ pub enum RequestOutcome {
         #[serde(default)]
         worker_id: Option<WorkerId>,
     },
+    /// Durable replay payload for API-001 BatchClaimByItemIds. Same lease-token replay rules as
+    /// [`Self::ClaimByQuery`]; outcomes carry per-id dispositions for partial batches.
+    ClaimByItemIds {
+        claimed_item_ids: Vec<ItemId>,
+        lease_token: LeaseToken,
+        outcomes: Vec<fireweed_core::ClaimByItemIdsOutcome>,
+        #[serde(default)]
+        worker_id: Option<WorkerId>,
+    },
     /// The full per-entry outcome of a `commit_transition` (committed AND rejected entries), recorded on a
     /// terminal marker envelope so recovery can rebuild the whole `Vec<EntryRecovery>` — not just the
     /// committed, `Finalize`-delimited subset — for a mixed committed+rejected commit (bead pqueue-db60657d).

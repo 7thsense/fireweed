@@ -66,6 +66,7 @@ use fireweed_engine::{
 pub use bytes::Bytes;
 pub use fireweed_core::{
     AggregateGroup, BoundedMutationRequest, BoundedMutationResponse, BucketCount, BucketRule,
+    ClaimByItemIdClass, ClaimByItemIdsDisposition, ClaimByItemIdsOutcome, ClaimByItemIdsRequest,
     ClaimByQueryRequest, ClientItemKey, CohortId, CohortOnIncomplete, CohortPolicy,
     CompoundIndexDef, CompoundIndexField, CreateQueue, CreateQueueError, CreateQueueErrorKind,
     DecimalValue, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, EligibilityPolicy,
@@ -81,17 +82,17 @@ pub use fireweed_core::{
 };
 pub use fireweed_engine::{
     ActiveScope, AddressedMutation, BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateOutcome,
-    BatchUpdateRequest, BatchUpdateResponse, BatchUpdateValue, ClaimCompatibility, ClaimRef,
-    Claimed, ClaimedItem, Clock, CommandPosition, CommitCapabilities, CommitEntryStatus,
-    CommitRecovery, ControlPlaneConfig, CreateQueueOutcome, DiscoveryGranularity, EngineError,
-    EngineResult, EntityEdit, EntityEditOperation, EntityPredicateValue, EntryRecovery,
-    FinalizeKind, GateChange, GateKeyDelta, GroupBatching, IndexHit, InstanceFence,
-    ItemMutationOperation, ItemMutationOutcome, ItemMutationPrecondition, ItemMutationRequest,
-    ItemMutationResponse, ItemMutationResult, ItemMutationReturning, ItemMutationSelectorAggregate,
-    ItemMutationSnapshot, ItemMutationSummary, ItemPatch, ItemPredicate, ItemSelector,
-    ItemSelectorScope, ItemView, LeaseGuard, LifecyclePatch, LiveItemView, PayloadUpdate,
-    PushBatchOutcome, PushDisposition, QueueKey, QueueMetrics, ScheduleUpdate, SelectedMutation,
-    SideRecord, TimestampComparison, UpsertOutcome,
+    BatchUpdateRequest, BatchUpdateResponse, BatchUpdateValue, ClaimByItemIdsResponse,
+    ClaimCompatibility, ClaimRef, Claimed, ClaimedItem, Clock, CommandPosition, CommitCapabilities,
+    CommitEntryStatus, CommitRecovery, ControlPlaneConfig, CreateQueueOutcome,
+    DiscoveryGranularity, EngineError, EngineResult, EntityEdit, EntityEditOperation,
+    EntityPredicateValue, EntryRecovery, FinalizeKind, GateChange, GateKeyDelta, GroupBatching,
+    IndexHit, InstanceFence, ItemMutationOperation, ItemMutationOutcome, ItemMutationPrecondition,
+    ItemMutationRequest, ItemMutationResponse, ItemMutationResult, ItemMutationReturning,
+    ItemMutationSelectorAggregate, ItemMutationSnapshot, ItemMutationSummary, ItemPatch,
+    ItemPredicate, ItemSelector, ItemSelectorScope, ItemView, LeaseGuard, LifecyclePatch,
+    LiveItemView, PayloadUpdate, PushBatchOutcome, PushDisposition, QueueKey, QueueMetrics,
+    ScheduleUpdate, SelectedMutation, SideRecord, TimestampComparison, UpsertOutcome,
 };
 
 /// An active-scope result stamped with the exact queue and granularity used for discovery.
@@ -4499,6 +4500,35 @@ impl<B: LibBackend> RuntimeCore<B> {
             .await;
         self.note(queue, result)
     }
+
+    /// API-001 `BatchClaimByItemIds`: lease exactly the caller-supplied `item_id` set with partial
+    /// per-id outcomes. Resulting leases are ordinary claim leases (inspect / timeout+reclaim /
+    /// API-002 force). Returns [`EngineError::Unavailable`] when the backend does not implement
+    /// `claim_by_item_ids` — see [`Fireweed::hot_projection_capabilities`].
+    pub async fn claim_by_item_ids(
+        &self,
+        queue: &QueueKey,
+        request: ClaimByItemIdsRequest,
+    ) -> EngineResult<ClaimByItemIdsResponse> {
+        if self.is_draining(queue) {
+            return Err(EngineError::Unavailable);
+        }
+        let now = self.clock.now();
+        let expected_epoch = self.session_epoch_at(queue, now).await?;
+        let result = self
+            .backend
+            .claim_by_item_ids(
+                queue,
+                request,
+                fireweed_engine::ClaimByQueryContext {
+                    now,
+                    eligibility_time: None,
+                    expected_epoch,
+                },
+            )
+            .await;
+        self.note(queue, result)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5865,6 +5895,80 @@ mod tests {
         assert_eq!(claimed.items[0].lease_expires_at, ts(1_030));
         assert_eq!(claimed.items[0].item_version, 2);
         assert_eq!(claimed.items[0].item_id, pushed[0]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn claim_by_item_ids_claims_and_finalizes_over_memory() -> EngineResult<()> {
+        use fireweed_core::{
+            ClaimByItemIdsDisposition, ClaimByItemIdsRequest, RequestId, WorkerId,
+        };
+
+        let backend = Arc::new(fireweed_memory::composed_memory_backend());
+        let fireweed = RuntimeCore::new(backend, Arc::new(SystemClock));
+        fireweed.create_queue(query_definition()).await?;
+        let shard = fireweed_engine::QueueKey::new(
+            TenantId::new("t1").unwrap(),
+            QueueId::new("q1").unwrap(),
+        );
+        let pushed = fireweed
+            .push_batch(
+                &shard,
+                vec![
+                    NewItem {
+                        priority: Some(PriorityValue::Int64(1)),
+                        ..Default::default()
+                    },
+                    NewItem {
+                        priority: Some(PriorityValue::Int64(2)),
+                        ..Default::default()
+                    },
+                ],
+            )
+            .await?;
+        let target = pushed[0];
+        let other = pushed[1];
+
+        let resp = fireweed
+            .claim_by_item_ids(
+                &shard,
+                ClaimByItemIdsRequest {
+                    item_ids: vec![target],
+                    lease_duration_ms: 5_000,
+                    worker_id: WorkerId::new("facade-worker").unwrap(),
+                    request_id: RequestId::new("facade-cbi-1").unwrap(),
+                    lease_token: None,
+                },
+            )
+            .await?;
+        assert_eq!(resp.items.len(), 1);
+        assert_eq!(resp.items[0].item_id, target);
+        assert_eq!(
+            resp.outcomes[0].disposition,
+            ClaimByItemIdsDisposition::Claimed
+        );
+        // Outside the requested set remains pending.
+        assert_eq!(fireweed.metrics(&shard).await?.pending, 1);
+        assert_eq!(fireweed.metrics(&shard).await?.leased, 1);
+
+        fireweed.ack(&shard, [target]).await?;
+        assert_eq!(fireweed.metrics(&shard).await?.complete, 1);
+
+        // other never leased by the id-set claim
+        let still = fireweed
+            .claim_by_item_ids(
+                &shard,
+                ClaimByItemIdsRequest {
+                    item_ids: vec![other],
+                    lease_duration_ms: 5_000,
+                    worker_id: WorkerId::new("facade-worker").unwrap(),
+                    request_id: RequestId::new("facade-cbi-2").unwrap(),
+                    lease_token: None,
+                },
+            )
+            .await?;
+        assert_eq!(still.items.len(), 1);
+        assert_eq!(still.items[0].item_id, other);
         Ok(())
     }
 

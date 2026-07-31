@@ -452,6 +452,7 @@ impl ProjectionStore for InMemoryProjection {
             bounded_mutation: true,
             claim_by_query: true,
             side_record_query: false,
+            claim_by_item_ids: true,
         }
     }
 
@@ -550,6 +551,15 @@ impl ProjectionStore for InMemoryProjection {
 
     fn item_state(&self, shard: &QueueKey, id: &ItemId) -> EngineResult<Option<ItemState>> {
         Ok(self.get(shard)?.item_state(id))
+    }
+
+    fn classify_claim_by_item_id(
+        &self,
+        shard: &QueueKey,
+        id: &ItemId,
+        now: UtcTimestamp,
+    ) -> EngineResult<fireweed_core::ClaimByItemIdClass> {
+        Ok(self.get(shard)?.classify_claim_by_item_id(id, now))
     }
 
     fn item_version(&self, shard: &QueueKey, id: &ItemId) -> EngineResult<Option<u64>> {

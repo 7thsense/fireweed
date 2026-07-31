@@ -898,20 +898,28 @@ async fn assert_claim_due_scheduled_actions_by_query_on_backend<B: LibBackend>(
 #[tokio::test]
 async fn backend_capability_advertising_is_explicit() {
     let q = qkey();
-    let expected = fireweed::QueryCapabilityFlags {
+    let memory_expected = fireweed::QueryCapabilityFlags {
         range_scan: true,
         grouped_aggregate: true,
         declared_bucket_segment: true,
         bounded_mutation: true,
         claim_by_query: true,
         side_record_query: false,
+        // Memory/compose product implements API-001 BatchClaimByItemIds.
+        claim_by_item_ids: true,
+    };
+    // Relational sqlite still advertises the five paired hot-query flags; claim_by_item_ids lands
+    // with the relational implement path (compose memory is the product path for this epic).
+    let sqlite_expected = fireweed::QueryCapabilityFlags {
+        claim_by_item_ids: false,
+        ..memory_expected
     };
 
     let memory = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
-    assert_eq!(memory.hot_projection_capabilities(&q), expected);
+    assert_eq!(memory.hot_projection_capabilities(&q), memory_expected);
     assert!(
         memory
             .hot_projection_capabilities(&q)
@@ -932,7 +940,7 @@ async fn backend_capability_advertising_is_explicit() {
         Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
         Arc::new(ManualClock::at(0)),
     );
-    assert_eq!(sqlite.hot_projection_capabilities(&q), expected);
+    assert_eq!(sqlite.hot_projection_capabilities(&q), sqlite_expected);
     assert!(
         sqlite
             .hot_projection_capabilities(&q)

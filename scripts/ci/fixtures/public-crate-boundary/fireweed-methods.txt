@@ -5,6 +5,7 @@ capabilities
 claim
 claim_across_queues
 claim_at
+claim_by_item_ids
 claim_by_query
 claim_by_query_at
 claim_response_at

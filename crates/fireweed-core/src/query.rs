@@ -341,6 +341,68 @@ pub struct ClaimByQueryRequest {
     pub request_id: Option<RequestId>,
 }
 
+/// API-001 `BatchClaimByItemIds`: lease exactly the caller-supplied `item_id` set (external-trigger /
+/// pre-resolved reserve). One durable command; partial per-id outcomes; never leases outside the set.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ClaimByItemIdsRequest {
+    /// Distinct ids after collapse are leased at most once; request order of first occurrence is preserved
+    /// for outcomes. MUST be non-empty and no longer than the queue max claim batch size.
+    pub item_ids: Vec<ItemId>,
+    pub lease_duration_ms: u64,
+    pub worker_id: WorkerId,
+    /// Required envelope idempotency key (same rules as `BatchClaim` / `claim_by_query`).
+    pub request_id: RequestId,
+    /// Optional caller-supplied lease token. When `None`, the server mints an unguessable token
+    /// (library default). RESP `XCLAIM` sets this to the consumer name so the lease identity matches
+    /// the Redis consumer (TD-006: consumer **is** the lease token).
+    #[serde(default)]
+    pub lease_token: Option<crate::LeaseToken>,
+}
+
+/// Pre-mutation point-lookup classification of one `item_id` for `claim_by_item_ids`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimByItemIdClass {
+    /// Pending, not superseded, due, gates open, queue not paused — may be leased.
+    Claimable,
+    NotFound,
+    /// Gates / `not_before` / queue pause / other Eligibility Precedence exclusion.
+    NotEligible,
+    /// Active lease held by any worker.
+    Leased,
+    Terminal,
+}
+
+/// Per-id disposition in a `ClaimByItemIds` response (API-001 partial outcomes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimByItemIdsDisposition {
+    Claimed,
+    NotFound,
+    NotEligible,
+    Leased,
+    Terminal,
+}
+
+impl From<ClaimByItemIdClass> for ClaimByItemIdsDisposition {
+    fn from(class: ClaimByItemIdClass) -> Self {
+        match class {
+            ClaimByItemIdClass::Claimable => ClaimByItemIdsDisposition::Claimed,
+            ClaimByItemIdClass::NotFound => ClaimByItemIdsDisposition::NotFound,
+            ClaimByItemIdClass::NotEligible => ClaimByItemIdsDisposition::NotEligible,
+            ClaimByItemIdClass::Leased => ClaimByItemIdsDisposition::Leased,
+            ClaimByItemIdClass::Terminal => ClaimByItemIdsDisposition::Terminal,
+        }
+    }
+}
+
+/// One per-id outcome for API-001 `BatchClaimByItemIds` (order = first-occurrence request order).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClaimByItemIdsOutcome {
+    pub item_id: ItemId,
+    pub disposition: ClaimByItemIdsDisposition,
+}
+
 /// Advertised hot-projection query capabilities for a queue/backend (API-004 Query Capability Names).
 /// Every flag defaults to `false` — the safe default for a backend that has not implemented this
 /// contract, so a consumer rejects unsupported capabilities before use rather than the backend
@@ -350,7 +412,7 @@ pub struct ClaimByQueryRequest {
 /// `bounded_mutation`, or `claim_by_query` MUST advertise all five together (API-004: this contract
 /// does not define a partial-capability backend for those five). `side_record_query` is independently
 /// gated and is deferred beyond epic pqueue-45e13e4d for every backend — no backend in this epic may
-/// set it `true`.
+/// set it `true`. `claim_by_item_ids` (API-001 BatchClaimByItemIds) is independently gated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct QueryCapabilityFlags {
     pub range_scan: bool,
@@ -360,6 +422,10 @@ pub struct QueryCapabilityFlags {
     pub claim_by_query: bool,
     /// Deferred beyond epic pqueue-45e13e4d (API-004 Side/Projection Records). MUST remain `false`.
     pub side_record_query: bool,
+    /// API-001 `BatchClaimByItemIds` / library `claim_by_item_ids`. Independent of the five paired
+    /// hot-query capabilities.
+    #[serde(default)]
+    pub claim_by_item_ids: bool,
 }
 
 impl QueryCapabilityFlags {
@@ -394,6 +460,7 @@ mod core_domain_tests_hot_projection_query_types {
         assert!(!flags.bounded_mutation);
         assert!(!flags.claim_by_query);
         assert!(!flags.side_record_query);
+        assert!(!flags.claim_by_item_ids);
         assert!(flags.paired_capabilities_consistent());
     }
 
