@@ -138,6 +138,10 @@ Correctness and progress requirements for the facade execution path:
    owned commit work, or whole-transaction offload confined to the adapter,
    with per-queue serialization preserved and cross-queue progress
    demonstrated under the existing conformance / heartbeat gates.
+   Per-cell residual inventory (which matrix cells still wrap
+   `BlockingLibBackend`, whether inner product poll would block a Tokio
+   worker, and exit criteria): 
+   [async-runtime-blocking-matrix-inventory](../../04-build/async-runtime-blocking-matrix-inventory.md).
 
 ### Construction
 
