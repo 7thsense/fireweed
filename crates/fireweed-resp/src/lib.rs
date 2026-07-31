@@ -14,14 +14,14 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use fireweed_core::{
-    ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, MetadataValue, PriorityValue, QueueId,
-    TenantId, UtcTimestamp, WorkerId,
+    ClaimByItemIdsRequest, ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, MetadataValue,
+    PriorityValue, QueueId, RequestId, TenantId, UtcTimestamp, WorkerId,
 };
 use fireweed_engine::{
-    ClaimPort, ClaimRequest, ClaimedItem, Clock, ControlPlaneStore, EngineError, EngineResult,
-    FinalizeKind, FinalizeOutcome, FinalizePort, LiveItemView, ProjectionRead, PurgePort, PushPort,
-    PushSpec, QueueKey, ReassignLeasePort, ReclaimDriver, RenewLeasePort, UpsertOutcome,
-    UpsertPort,
+    ClaimByQueryContext, ClaimPort, ClaimRequest, ClaimedItem, Clock, ControlPlaneStore,
+    EngineError, EngineResult, FinalizeKind, FinalizeOutcome, FinalizePort, HotProjectionQueryPort,
+    LiveItemView, ProjectionRead, PurgePort, PushPort, PushSpec, QueueKey, ReassignLeasePort,
+    ReclaimDriver, RenewLeasePort, UpsertOutcome, UpsertPort,
 };
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
@@ -160,6 +160,7 @@ pub trait RespBackend:
     + ReclaimDriver
     + ControlPlaneStore
     + ProjectionRead
+    + HotProjectionQueryPort
     + Send
     + Sync
     + 'static
@@ -176,6 +177,7 @@ impl<T> RespBackend for T where
         + ReclaimDriver
         + ControlPlaneStore
         + ProjectionRead
+        + HotProjectionQueryPort
         + Send
         + Sync
         + 'static
@@ -1714,25 +1716,19 @@ async fn xautoclaim<B: RespBackend, H: RespHooks>(
 }
 
 /// `XCLAIM key group consumer min-idle-time id [id ...] [IDLE ms] [TIME ms] [RETRYCOUNT n] [FORCE]
-/// [JUSTID] [LASTID id]` — transfer ownership of specific in-flight (leased) entries to `consumer`.
+/// [JUSTID] [LASTID id]` — batch claim-by-identity (TD-006 §3).
 ///
-/// fireweed semantics (TD-006 §3): the **consumer name IS the lease token** (the identity `XPENDING`
-/// reports). So per id:
-/// - `consumer` == the id's CURRENT lease token → **renew** (extend the lease, [`RenewLeasePort`], NO
-///   attempt charge — §3 flavor #7, a worker re-affirming its own claim).
-/// - `consumer` != the current token (or a different worker) → **reassign** ([`ReassignLeasePort`]):
-///   swap the token to `consumer` and charge exactly one delivery (TD-006:129).
+/// fireweed semantics: the **consumer name IS the lease token** (what `XPENDING` reports). Per id:
+/// - **Base-eligible pending** (not leased) → **first delivery** via API-001 `BatchClaimByItemIds`
+///   / library `claim_by_item_ids` (attempt charge +1).
+/// - `consumer` == the id's CURRENT lease token → **renew** ([`RenewLeasePort`], NO attempt charge).
+/// - Leased by another consumer → **reassign** ([`ReassignLeasePort`], attempt charge +1).
+/// - Not claimable (missing / terminal / not eligible) → **omit** from the reply (Redis shape).
 ///
-/// Divergences: **`min-idle-time` is ignored** (fireweed gates by lease expiry, like `XAUTOCLAIM`); the
-/// `IDLE`/`TIME`/`RETRYCOUNT`/`FORCE`/`LASTID` options are accepted and ignored (the lease deadline is
-/// reset to the queue's `max_lease_duration`). Repeated ids are de-duplicated (Redis treats them
-/// idempotently; without this a duplicated id would charge the delivery count twice). A mixed batch
-/// (some ids self-owned, some not) issues a renew AND a reassign — these are two separate commits and
-/// NOT atomic with each other: each is individually all-or-nothing + pre-validated, but if the first
-/// disposition commits and the second then rejects (e.g. an id was fenced/reclaimed between the snapshot
-/// and the commit), the client gets the error yet the first disposition's effects are already durable
-/// (PARTIAL EFFECTS POSSIBLE on a mixed-batch error). Reply: the claimed entries
-/// (`[id, [field value …]]`), or just the ids with `JUSTID`.
+/// Divergences: **`min-idle-time` is ignored**; `IDLE`/`TIME`/`RETRYCOUNT`/`FORCE`/`LASTID` are
+/// accepted and ignored (lease deadline = queue `max_lease_duration_ms`). Repeated ids are
+/// de-duplicated. Mixed dispositions are separate durable commits (not one multi-disposition txn).
+/// Reply: successfully claimed/renewed/reassigned entries in request order, or just ids with `JUSTID`.
 async fn xclaim<B: RespBackend, H: RespHooks>(
     backend: &Arc<B>,
     hooks: &Arc<H>,
@@ -1776,8 +1772,8 @@ async fn xclaim<B: RespBackend, H: RespHooks>(
         Err(_) => return Resp::Error("ERR fireweed invalid".into()),
     };
 
-    // Partition by CURRENT owner: ids already owned by `consumer` → renew; the rest → reassign. An id that
-    // is not currently leased has no owner, so it falls to reassign and is rejected by reassign_validate.
+    // Partition: same-consumer renew | other-consumer reassign | not currently leased → first-delivery
+    // candidates (BatchClaimByItemIds). Non-claimable ids are omitted from the reply after the claim.
     let leases = match backend.pending_by_ids(&shard, &ids).await {
         Ok(l) => l,
         Err(e) => return err_reply(&e),
@@ -1788,12 +1784,12 @@ async fn xclaim<B: RespBackend, H: RespHooks>(
         .collect();
     let mut renew_ids: Vec<ItemId> = Vec::new();
     let mut reassign_ids: Vec<ItemId> = Vec::new();
+    let mut first_delivery_ids: Vec<ItemId> = Vec::new();
     for id in &ids {
-        let current = leases_by_id.get(id).copied();
-        if current == Some(consumer.as_str()) {
-            renew_ids.push(*id);
-        } else {
-            reassign_ids.push(*id);
+        match leases_by_id.get(id).copied() {
+            Some(current) if current == consumer.as_str() => renew_ids.push(*id),
+            Some(_) => reassign_ids.push(*id),
+            None => first_delivery_ids.push(*id),
         }
     }
 
@@ -1804,6 +1800,9 @@ async fn xclaim<B: RespBackend, H: RespHooks>(
     };
     let new_expiry = add_millis(now, lease_ms);
 
+    // Track which ids successfully transferred for the Redis-shaped reply (omit non-claimable).
+    let mut success_ids: Vec<ItemId> = Vec::new();
+
     let renew_epoch = if renew_ids.is_empty() {
         None
     } else {
@@ -1812,13 +1811,66 @@ async fn xclaim<B: RespBackend, H: RespHooks>(
             Err(e) => return err_reply(&e),
         }
     };
-    if !renew_ids.is_empty()
-        && let Err(e) = backend
-            .renew(&shard, renew_ids, new_expiry, now, renew_epoch)
+    if !renew_ids.is_empty() {
+        if let Err(e) = backend
+            .renew(&shard, renew_ids.clone(), new_expiry, now, renew_epoch)
             .await
-    {
-        return err_reply(&e);
+        {
+            return err_reply(&e);
+        }
+        success_ids.extend(renew_ids.iter().copied());
     }
+
+    // First delivery is new-claim traffic (drain: not in-flight renew).
+    let first_epoch = if first_delivery_ids.is_empty() {
+        None
+    } else {
+        match hooks.expected_epoch_for_write(&shard, now, true).await {
+            Ok(epoch) => epoch,
+            Err(e) => return err_reply(&e),
+        }
+    };
+    if !first_delivery_ids.is_empty() {
+        // Stock XCLAIM has no request_id; mint a unique one per command for the library path.
+        // Consumer name IS the lease token (TD-006) — pass it through so first delivery does not
+        // mint a different token (and so subsequent self-XCLAIM renews match).
+        let rid = format!(
+            "xclaim-{}-{}",
+            now.seconds,
+            state.ids.fetch_add(1, Ordering::Relaxed)
+        );
+        let request = ClaimByItemIdsRequest {
+            item_ids: first_delivery_ids,
+            lease_duration_ms: lease_ms,
+            worker_id: match WorkerId::new(consumer.clone()) {
+                Ok(w) => w,
+                Err(_) => WorkerId::new("xclaim").expect("valid worker"),
+            },
+            request_id: match RequestId::new(rid) {
+                Ok(r) => r,
+                Err(_) => return Resp::Error("ERR fireweed invalid".into()),
+            },
+            lease_token: Some(consumer_token.clone()),
+        };
+        match backend
+            .claim_by_item_ids(
+                &shard,
+                request,
+                ClaimByQueryContext {
+                    now,
+                    eligibility_time: None,
+                    expected_epoch: first_epoch,
+                },
+            )
+            .await
+        {
+            Ok(resp) => {
+                success_ids.extend(resp.items.iter().map(|item| item.item_id));
+            }
+            Err(e) => return err_reply(&e),
+        }
+    }
+
     let reassign_epoch = if reassign_ids.is_empty() {
         None
     } else {
@@ -1827,30 +1879,52 @@ async fn xclaim<B: RespBackend, H: RespHooks>(
             Err(e) => return err_reply(&e),
         }
     };
-    if !reassign_ids.is_empty()
-        && let Err(e) = backend
+    if !reassign_ids.is_empty() {
+        if let Err(e) = backend
             .reassign(
                 &shard,
-                reassign_ids,
+                reassign_ids.clone(),
                 consumer_token,
                 new_expiry,
                 now,
                 reassign_epoch,
             )
             .await
-    {
-        return err_reply(&e);
+        {
+            return err_reply(&e);
+        }
+        success_ids.extend(reassign_ids.iter().copied());
     }
+
+    // Preserve request order among successful ids (Redis XCLAIM reply shape).
+    let success_set: std::collections::HashSet<ItemId> = success_ids.iter().copied().collect();
+    let ordered: Vec<ItemId> = ids
+        .into_iter()
+        .filter(|id| success_set.contains(id))
+        .collect();
 
     if justid {
         return Resp::Array(
-            ids.iter()
+            ordered
+                .iter()
                 .map(|id| Resp::Bulk(id.to_string().into_bytes()))
                 .collect(),
         );
     }
-    match backend.claimed_view(&shard, &ids).await {
-        Ok(items) => Resp::Array(items.iter().map(claimed_to_entry).collect()),
+    if ordered.is_empty() {
+        return Resp::Array(Vec::new());
+    }
+    match backend.claimed_view(&shard, &ordered).await {
+        Ok(items) => {
+            // claimed_view may not preserve order; re-order to request order.
+            let by_id: std::collections::HashMap<_, _> =
+                items.into_iter().map(|item| (item.item_id, item)).collect();
+            let entries: Vec<Resp> = ordered
+                .iter()
+                .filter_map(|id| by_id.get(id).map(claimed_to_entry))
+                .collect();
+            Resp::Array(entries)
+        }
         Err(e) => err_reply(&e),
     }
 }

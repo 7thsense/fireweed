@@ -901,6 +901,26 @@ impl fireweed_engine::ProjectionRead for LyingClaimedViewBackend {
     }
 }
 
+impl fireweed_engine::HotProjectionQueryPort for LyingClaimedViewBackend {
+    fn hot_projection_capabilities(
+        &self,
+        shard: &fireweed_engine::QueueKey,
+    ) -> fireweed_core::QueryCapabilityFlags {
+        self.inner.hot_projection_capabilities(shard)
+    }
+
+    fn claim_by_item_ids(
+        &self,
+        shard: &fireweed_engine::QueueKey,
+        request: fireweed_core::ClaimByItemIdsRequest,
+        context: fireweed_engine::ClaimByQueryContext,
+    ) -> impl std::future::Future<
+        Output = fireweed_engine::EngineResult<fireweed_engine::ClaimByItemIdsResponse>,
+    > + Send {
+        self.inner.claim_by_item_ids(shard, request, context)
+    }
+}
+
 fn assert_claimed_entry_parity(entry: &redis::streams::StreamId, claimed: &ClaimedItem) {
     let item_id = claimed.item_id.to_string();
     assert_eq!(
@@ -1776,6 +1796,122 @@ async fn xclaim_self_renews_no_charge_cross_consumer_reclaims_with_attempt_bump(
         attempts_before + 1,
         "a duplicated id charges exactly ONE delivery, not one per copy"
     );
+}
+
+/// TD-006 §3 first-delivery disposition: XCLAIM of pending eligible entry ids reserves them via
+/// BatchClaimByItemIds without a prior XREADGROUP `>`. Non-claimable ids in the same command are
+/// omitted (Redis shape), not fatal to successful peers. XACK then succeeds for the claimed entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xclaim_first_delivery_pending_ids_without_xreadgroup() {
+    let (mut con, _backend) = setup().await;
+
+    let id_a: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("priority")
+        .arg(1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let id_b: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("priority")
+        .arg(2)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    // First delivery: XCLAIM pending ids with consumer as lease token.
+    let claimed: Vec<String> = redis::cmd("XCLAIM")
+        .arg("t1:q1")
+        .arg("g")
+        .arg("external-trigger")
+        .arg(0)
+        .arg(&id_a)
+        .arg(&id_b)
+        .arg("999999999") // valid ItemId shape, not present in the queue
+        .arg("JUSTID")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(
+        claimed,
+        vec![id_a.clone(), id_b.clone()],
+        "pending eligible ids first-deliver; missing id is omitted"
+    );
+
+    let pend: Vec<(String, String, i64, i64)> = redis::cmd("XPENDING")
+        .arg("t1:q1")
+        .arg("g")
+        .arg("-")
+        .arg("+")
+        .arg(10)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(pend.len(), 2);
+    for row in &pend {
+        assert_eq!(
+            row.1, "external-trigger",
+            "consumer name is the lease token"
+        );
+        assert_eq!(row.3, 1, "first delivery charges attempt_count = 1");
+    }
+
+    // XACK succeeds without prior XREADGROUP.
+    let acked: i64 = redis::cmd("XACK")
+        .arg("t1:q1")
+        .arg("g")
+        .arg(&id_a)
+        .arg(&id_b)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(acked, 2);
+
+    // Self-renew still works on a freshly first-delivered lease (new item).
+    let id_c: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("priority")
+        .arg(3)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let _: Vec<String> = redis::cmd("XCLAIM")
+        .arg("t1:q1")
+        .arg("g")
+        .arg("holder")
+        .arg(0)
+        .arg(&id_c)
+        .arg("JUSTID")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let renewed: Vec<String> = redis::cmd("XCLAIM")
+        .arg("t1:q1")
+        .arg("g")
+        .arg("holder")
+        .arg(0)
+        .arg(&id_c)
+        .arg("JUSTID")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(renewed, vec![id_c.clone()]);
+    let pend_c: Vec<(String, String, i64, i64)> = redis::cmd("XPENDING")
+        .arg("t1:q1")
+        .arg("g")
+        .arg("-")
+        .arg("+")
+        .arg(10)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let row = pend_c.iter().find(|r| r.0 == id_c).expect("id_c pending");
+    assert_eq!(row.1, "holder");
+    assert_eq!(row.3, 1, "self-renew after first-delivery does not re-charge");
 }
 
 /// XLEN / XDEL / XINFO over the stock client (owed-item E.2 / Chunk 6b). XLEN counts LIVE entries
