@@ -145,6 +145,18 @@ impl SqliteLog {
     }
 
     fn from_conn(conn: Connection) -> EngineResult<Self> {
+        // WAL + synchronous=FULL: this connection is the authoritative command log
+        // (TD-005). FULL fsyncs the WAL on every commit so a returned append survives
+        // process crash and power loss. Do NOT copy the projection open path
+        // (relational/recovery.rs), which uses NORMAL because that SQLite is
+        // rebuildable from an object-log authority. busy_timeout avoids spurious
+        // SQLITE_BUSY under concurrent readers/checkpoints. PRAGMAs no-op safely on
+        // :memory: (journal_mode stays memory).
+        st(conn.execute_batch(
+            "PRAGMA journal_mode=WAL;\
+             PRAGMA synchronous=FULL;\
+             PRAGMA busy_timeout=5000;",
+        ))?;
         st(conn.execute_batch(SCHEMA))?;
         Ok(Self { conn })
     }
@@ -852,5 +864,46 @@ mod batching_tests {
         );
         drop(reopened);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn durable_open_sets_wal_full_and_busy_timeout() {
+        let path = std::env::temp_dir().join(format!(
+            "fireweed-sqlite-log-pragmas-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let path_str = path.to_str().unwrap();
+        let log = SqliteLog::open(path_str).unwrap();
+        let journal: String = log
+            .conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        let synchronous: i64 = log
+            .conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        let busy_timeout: i64 = log
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal.to_ascii_lowercase(), "wal");
+        // SQLite: 0=OFF, 1=NORMAL, 2=FULL, 3=EXTRA
+        assert_eq!(synchronous, 2, "authoritative log must keep synchronous=FULL");
+        assert_eq!(busy_timeout, 5000);
+        drop(log);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{path_str}-wal"));
+        let _ = std::fs::remove_file(format!("{path_str}-shm"));
+    }
+
+    #[test]
+    fn in_memory_open_survives_pragma_setup() {
+        let mut log = SqliteLog::in_memory().unwrap();
+        let shard = qkey();
+        log.ensure_shard(&shard).unwrap();
+        let epoch = log.acquire_epoch(&shard).unwrap();
+        let positions = log.append(&shard, &commands(0, 1), epoch).unwrap();
+        assert_eq!(positions.len(), 1);
     }
 }
