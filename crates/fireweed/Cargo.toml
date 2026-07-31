@@ -44,7 +44,8 @@ fireweed-objectlog = { path = "../fireweed-objectlog", optional = true }
 fireweed-postgres = { path = "../fireweed-postgres", optional = true }
 # Composition-root only: Class B MemoryLog pairings and object-log × memory projection assembly.
 fireweed-projection = { path = "../fireweed-projection", optional = true }
-tokio = { version = "1", features = ["rt"], optional = true }
+# Optional: pulled by `objectlog` / `postgres`. Workers need `rt` + I/O drivers for LogEngine.
+tokio = { version = "1", features = ["rt", "time", "fs", "io-util", "net", "sync"], optional = true }
 
 [features]
 # Default pulls the embeddable adapters so `cargo build`/`cargo test` behave as before; a consumer who
@@ -53,7 +54,8 @@ tokio = { version = "1", features = ["rt"], optional = true }
 default = ["memory", "sqlite", "objectlog"]
 memory = ["dep:fireweed-memory", "dep:fireweed-projection"]
 sqlite = ["dep:fireweed-sqlite"]
-objectlog = ["dep:fireweed-objectlog", "dep:fireweed-projection"]
+# objectlog pulls tokio so BlockingLibBackend workers host a reactor for LogEngine I/O.
+objectlog = ["dep:fireweed-objectlog", "dep:fireweed-projection", "dep:tokio"]
 postgres = ["dep:fireweed-postgres", "dep:tokio"]
 
 [dev-dependencies]

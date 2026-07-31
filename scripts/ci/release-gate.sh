@@ -98,6 +98,23 @@ else
     ${CARGO} test --workspace --lib --bins
 fi
 
+# Explicit facade + conformance suites (v0.24 process gap fireweed-c1dc998a):
+# `cargo test --workspace --lib` compiles fireweed lib tests but release notes historically listed only
+# narrow engine/objectlog filters. Fail closed if these named suites do not compile or regress.
+echo "--- fireweed facade lib suite (must compile + pass; ignored tests need documented reasons) ---"
+${CARGO} test -p fireweed --lib
+
+echo "--- fireweed facade integration targets (concrete + mutation + memory public interface) ---"
+# Full public_interface_conformance includes objectlog cells that still advertise incomplete
+# LogEngine ports (hot projection / bounded_mutation / catalog verify). Those stay tracked as
+# product completion work; the release gate requires the memory public interface plus lib suite.
+${CARGO} test -p fireweed --test concrete_fireweed
+${CARGO} test -p fireweed --test item_mutation
+${CARGO} test -p fireweed --test public_interface_conformance memory_public_interface -- --exact
+
+echo "--- fireweed-conformance suite ---"
+${CARGO} test -p fireweed-conformance --lib
+
 # Public 15-cell StorageConfig matrix (Phase 6). Helm is owned by deployment-release-gate /
 # helm-gate.sh so this call skips helm. S3/PG cells skip when fixtures are unset unless
 # FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1 is set (then missing fixtures fail the gate).

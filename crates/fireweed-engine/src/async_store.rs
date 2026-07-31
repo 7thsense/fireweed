@@ -52,21 +52,22 @@
 //! `std::sync::MutexGuard` or borrowed blocking transaction across an `.await`, and must not offload
 //! individual statements belonging to the same transaction.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use fireweed_core::{
-    ItemId, ItemState, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
+    BodyHash, ItemId, ItemState, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
 };
 
 use crate::{
     ClaimCompatibility, ClaimUnit, ClaimedItem, CommandEnvelope, CommandPage, CommandPosition,
     ControlPlane, CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeTarget,
     IdempotencyDecision, LogStore, ProjectionSnapshot, ProjectionStore, PushFingerprint, PushItem,
-    QueueKey, RenewTarget, RichClaimSelection, SnapshotRef,
+    QueueCommand, QueueIdempotencyCache, QueueKey, RenewTarget, RichClaimSelection, SnapshotRef,
+    request_expires_at,
 };
 
 /// An owned blocking operation over one store instance.
@@ -266,10 +267,15 @@ impl<S: LogStore> InProcessLogStore<S> {
     }
 }
 
+/// Default retention when recording push request-ids from apply envelopes without a queue definition.
+const IN_PROCESS_PUSH_IDEM_RETENTION_MS: u64 = 86_400_000;
+
 /// Shared in-process adapter for CPU-only projections whose operations complete without suspension.
 pub struct InProcessProjectionStore<S> {
     store: Arc<Mutex<S>>,
     supports_gates: bool,
+    /// Per-shard push request-id cache (parity with `AsyncLogReplayBackend` / sync composition).
+    push_idempotency: Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>>,
 }
 
 impl<S: ProjectionStore> InProcessProjectionStore<S> {
@@ -278,6 +284,7 @@ impl<S: ProjectionStore> InProcessProjectionStore<S> {
         Self {
             store: Arc::new(Mutex::new(store)),
             supports_gates,
+            push_idempotency: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1002,6 +1009,26 @@ where
         std::future::ready(result)
     }
 
+    fn push_idempotency(
+        &self,
+        shard: QueueKey,
+        request_id: RequestId,
+        fingerprint: PushFingerprint,
+        now: UtcTimestamp,
+    ) -> impl Future<Output = EngineResult<IdempotencyDecision<Vec<ItemId>>>> + Send {
+        let result = {
+            let guard = self
+                .push_idempotency
+                .lock()
+                .expect("push idempotency mutex poisoned");
+            Ok(guard
+                .get(&shard)
+                .map(|c| c.check(&request_id, fingerprint.legacy_body_hash, now))
+                .unwrap_or(IdempotencyDecision::Proceed))
+        };
+        std::future::ready(result)
+    }
+
     fn renew_validate(
         &self,
         shard: QueueKey,
@@ -1112,11 +1139,43 @@ where
         positions: Vec<CommandPosition>,
         commands: Vec<CommandEnvelope>,
     ) -> impl Future<Output = EngineResult<()>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate projection store mutex poisoned")
-            .apply_live_owned(positions, commands);
+        let result = (|| {
+            // Shard identity is on each envelope's commit context via positions; use command
+            // metadata when recording push request-ids after a successful apply.
+            let queue = positions.first().map(|p| p.queue.clone());
+            self.store
+                .lock()
+                .expect("immediate projection store mutex poisoned")
+                .apply_live_owned(positions, commands.clone())?;
+            if let Some(queue) = queue {
+                let mut cache = self
+                    .push_idempotency
+                    .lock()
+                    .expect("push idempotency mutex poisoned");
+                for env in &commands {
+                    let Some(request_id) = env.request_id.clone() else {
+                        continue;
+                    };
+                    let QueueCommand::Push(_) = &env.command else {
+                        continue;
+                    };
+                    let fingerprint = BodyHash(env.request_fingerprint.unwrap_or(0));
+                    let expires_at =
+                        request_expires_at(env.created_at, IN_PROCESS_PUSH_IDEM_RETENTION_MS);
+                    let ids = match &env.request_outcome {
+                        Some(crate::RequestOutcome::Push { item_ids }) => item_ids.clone(),
+                        _ => env.item_ids.clone(),
+                    };
+                    cache.entry(queue.clone()).or_default().record(
+                        request_id,
+                        fingerprint,
+                        ids,
+                        expires_at,
+                    );
+                }
+            }
+            Ok(())
+        })();
         std::future::ready(result)
     }
 

@@ -127,6 +127,8 @@ where
             AsyncProjectionStore::apply_live(projection.as_ref(), positions.clone(), commands.clone())
                 .await?;
             // Record push request-id outcomes after a successful atomic apply (sync composition parity).
+            // Expiry must honor the queue's request_id_retention_ms (not a hardcoded window).
+            let retention_ms = definition.request_id_retention_ms;
             let mut cache = push_idempotency
                 .lock()
                 .expect("push idempotency mutex poisoned");
@@ -138,11 +140,7 @@ where
                     continue;
                 };
                 let fingerprint = BodyHash(env.request_fingerprint.unwrap_or(0));
-                let expires_at = UtcTimestamp::new(
-                    env.created_at.seconds.saturating_add(60),
-                    env.created_at.nanoseconds,
-                )
-                .unwrap_or(env.created_at);
+                let expires_at = crate::request_expires_at(env.created_at, retention_ms);
                 let ids = match &env.request_outcome {
                     Some(crate::RequestOutcome::Push { item_ids }) => item_ids.clone(),
                     _ => env.item_ids.clone(),

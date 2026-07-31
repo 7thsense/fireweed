@@ -16,7 +16,7 @@ use fireweed_engine::{
     AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError, AsyncPushRequest, AsyncRenewRequest,
     Backend, ClaimPort, ClaimRequest, Claimed, CommandChecksum, CommandEnvelope, ControlPlaneStore,
     CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeOutcome, FinalizePort,
-    FinalizeTarget, IdGen, InProcessControlPlane, InlineOwnedTaskDispatcher, OwnedTask,
+    FinalizeTarget, IdGen, InProcessControlPlane, OwnedTask,
     ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead,
     ProjectionStore, PurgePort, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey,
     RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
@@ -131,7 +131,7 @@ type ReclaimPlanner = fireweed_engine::ProjectionReclaimPlanner<
 >;
 type AsyncEngine = AsyncComposedBackend<
     Strategy,
-    InlineOwnedTaskDispatcher,
+    crate::ObjectLogTaskDispatcher,
     ClaimPlanner,
     PushPlanner,
     LifecyclePlanner,
@@ -230,7 +230,7 @@ impl AsyncObjectLogMemoryBackend {
         );
         let engine = AsyncComposedBackend::new_with_planners(
             strategy,
-            InlineOwnedTaskDispatcher::new(),
+            crate::ObjectLogTaskDispatcher::new(),
             claim,
             push,
             1024,

@@ -6,8 +6,12 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use fireweed_engine::{EngineError, EngineResult};
+use fireweed_engine::{
+    DispatchError, EngineError, EngineResult, OwnedTaskDispatcher, OwnedTaskFactory, TaskOutcome,
+    task_outcome_channel,
+};
 use object_log::{BlobStore, S3BlobStore};
 
 use crate::ObjectLogEngineStore;
@@ -21,49 +25,122 @@ use crate::flush_config_from_segment;
 /// [`crate::AsyncObjectLogMemoryBackend`] (program A).
 pub type ComposedObjectLogBackend = AsyncObjectLogMemoryBackend;
 
-/// Drive a LogEngine open future from a sync facade boundary.
+/// Process-wide multi-thread Tokio runtime for object-log open and subsequent I/O.
 ///
-/// Flavor-safe bridge: never uses [`tokio::task::block_in_place`] (which panics on
-/// current-thread runtimes, including every default `#[tokio::test]`). When a Tokio
-/// handle of any flavor is already present, the future runs on a dedicated OS thread
-/// with a private current-thread runtime. When no runtime is present, a private
-/// current-thread runtime is built on the calling thread.
+/// LogEngine background work (flush, blob I/O) is runtime-bound. Opening on a throwaway
+/// current-thread runtime then dropping it left products with dead background tasks, so later
+/// ops failed closed (`Unavailable`). One long-lived multi-thread runtime hosts open + all
+/// later `block_on` traffic (including the library BlockingLibBackend workers) and the
+/// [`ObjectLogTaskDispatcher`] that owns typed queue operations.
+fn objectlog_shared_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("fireweed-objectlog")
+            .build()
+            .expect("fireweed objectlog shared tokio runtime")
+    })
+}
+
+/// Owned-task dispatcher that drives factories on [`objectlog_shared_runtime`].
+///
+/// Replaces [`fireweed_engine::InlineOwnedTaskDispatcher`] for LogEngine products: the inline
+/// dispatcher uses `futures::executor::block_on` on a bare OS thread, which has no Tokio reactor
+/// and cannot complete `tokio::fs` / LogEngine I/O.
+#[derive(Default)]
+pub struct ObjectLogTaskDispatcher {
+    closed: AtomicBool,
+}
+
+impl ObjectLogTaskDispatcher {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl OwnedTaskDispatcher for ObjectLogTaskDispatcher {
+    fn submit<T: Send + 'static>(
+        &self,
+        factory: OwnedTaskFactory<T>,
+    ) -> Result<TaskOutcome<T>, DispatchError> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(DispatchError::Closed);
+        }
+        let (sender, outcome) = task_outcome_channel();
+        // Spawn on the shared multi-thread runtime so LogEngine I/O has a reactor and stays
+        // on the same runtime that opened the store.
+        objectlog_shared_runtime().spawn(async move {
+            sender.send(factory().await);
+        });
+        Ok(outcome)
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    fn drain(&self) -> TaskOutcome<()> {
+        let (sender, outcome) = task_outcome_channel();
+        // Best-effort: resolve immediately. Accepted tasks complete independently on the runtime.
+        sender.send(());
+        outcome
+    }
+}
+
+/// Drive a future on the process-wide object-log runtime (open + durable ops).
+///
+/// Flavor-safe: never uses [`tokio::task::block_in_place`]. When a Tokio handle is already
+/// present (including default `#[tokio::test]` current-thread), the future is run on a
+/// dedicated OS thread calling into the shared multi-thread runtime so we never nest
+/// `block_on` on the caller's runtime. When no handle is present, the shared runtime is
+/// used directly from the calling thread.
 ///
 /// All sync objectlog open paths (`composed_objectlog_backend`,
 /// `open_object_log_engine_*_sync`, and facade `open_objectlog` /
-/// `open_objectlog_sqlite` via this helper) inherit this behavior.
+/// `open_objectlog_sqlite` via this helper) inherit this behavior. Library I/O workers
+/// should also drive LogEngine futures through [`block_on_objectlog_future`].
 pub fn block_on_objectlog<F, T>(fut: F) -> EngineResult<T>
 where
     F: Future<Output = EngineResult<T>> + Send,
     T: Send,
 {
     match tokio::runtime::Handle::try_current() {
-        Ok(_) => {
-            // Dedicated thread + private runtime: safe under current-thread and multi-thread.
-            // `thread::scope` keeps non-'static futures (e.g. open helpers that borrow locals) valid.
-            std::thread::scope(|s| {
-                s.spawn(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .map_err(|e| {
-                            EngineError::Storage(format!("tokio runtime for objectlog open: {e}"))
-                        })?;
-                    rt.block_on(fut)
-                })
+        Ok(_) => std::thread::scope(|s| {
+            s.spawn(move || objectlog_shared_runtime().block_on(fut))
                 .join()
                 .map_err(|_| EngineError::Storage("objectlog open thread panicked".into()))?
+        }),
+        Err(_) => objectlog_shared_runtime().block_on(fut),
+    }
+}
+
+/// Drive any `Send` future on the process-wide object-log runtime.
+///
+/// Used by the library BlockingLibBackend so open and ops share one reactor and LogEngine
+/// background tasks stay alive for the process lifetime.
+pub fn block_on_objectlog_future<F, T>(fut: F) -> T
+where
+    F: Future<Output = T> + Send,
+    T: Send,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(_) => {
+            // Dedicated thread keeps non-'static borrows valid via thread::scope and avoids
+            // nesting block_on on the caller's (possibly current-thread) runtime.
+            std::thread::scope(|s| {
+                s.spawn(move || objectlog_shared_runtime().block_on(fut))
+                    .join()
+                    .unwrap_or_else(|_| {
+                        panic!("fireweed objectlog runtime thread panicked");
+                    })
             })
         }
-        Err(_) => {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| {
-                    EngineError::Storage(format!("tokio runtime for objectlog open: {e}"))
-                })?;
-            rt.block_on(fut)
-        }
+        Err(_) => objectlog_shared_runtime().block_on(fut),
     }
 }
 

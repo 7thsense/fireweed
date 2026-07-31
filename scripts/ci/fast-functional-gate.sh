@@ -19,4 +19,9 @@ rustup run 1.92.0 cargo test --locked -p fireweed \
 rustup run 1.92.0 cargo test --locked -p fireweed \
     --test public_interface_conformance memory_public_interface -- --exact
 
+# Facade lib suite must compile (v0.24 process gap fireweed-c1dc998a). Ignored tests are
+# allowed only with an explicit #[ignore = "..."] reason on the incomplete product surface.
+echo "--- fireweed facade lib suite ---"
+rustup run 1.92.0 cargo test --locked -p fireweed --lib
+
 echo "fast functional gate passed"

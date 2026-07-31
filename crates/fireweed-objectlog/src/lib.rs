@@ -23,9 +23,10 @@ pub use async_product::{
 pub use async_product_hybrid::{AsyncObjectLogHybridBackend, HybridProductConfig};
 pub use async_product_sqlite::AsyncObjectLogSqliteBackend;
 pub use compose_log::{
-    ComposedObjectLogBackend, block_on_objectlog, composed_objectlog_backend,
-    composed_objectlog_backend_group_commit, open_object_log_engine_local,
-    open_object_log_engine_local_sync, open_object_log_engine_s3, open_object_log_engine_s3_sync,
+    ComposedObjectLogBackend, ObjectLogTaskDispatcher, block_on_objectlog,
+    block_on_objectlog_future, composed_objectlog_backend, composed_objectlog_backend_group_commit,
+    open_object_log_engine_local, open_object_log_engine_local_sync, open_object_log_engine_s3,
+    open_object_log_engine_s3_sync,
 };
 pub use log_engine_store::{ObjectLogEngineStore, flush_config_from_segment};
 pub use object_log::{BlobStore, FlushConfig, S3BlobStore};

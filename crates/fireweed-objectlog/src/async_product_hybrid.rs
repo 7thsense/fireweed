@@ -16,7 +16,7 @@ use fireweed_engine::{
     Backend, ClaimPort, ClaimRequest, Claimed, CommandChecksum, CommandEnvelope, ControlPlaneStore,
     CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeOutcome, FinalizePort,
     FinalizeTarget, IdGen, InProcessControlPlane, InProcessProjectionStore,
-    InlineOwnedTaskDispatcher, OwnedTask, ProjectionClaimPlanner, ProjectionLifecyclePlanner,
+    OwnedTask, ProjectionClaimPlanner, ProjectionLifecyclePlanner,
     ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner, ProjectionStore, PurgePort,
     PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, RawCommitOutcome, RawCommitRequest,
     ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort, RenewTarget,
@@ -86,7 +86,7 @@ impl SeparateReplayCommitter for Committer {
 type Strategy = SeparateReplayCommit<Committer>;
 type Engine = AsyncComposedBackend<
     Strategy,
-    InlineOwnedTaskDispatcher,
+    crate::ObjectLogTaskDispatcher,
     ProjectionClaimPlanner<InProcessControlPlane, ObjectLogEngineStore, Proj, SeqIdGen>,
     ProjectionPushPlanner<InProcessControlPlane, ObjectLogEngineStore, Proj, SeqIdGen>,
     ProjectionLifecyclePlanner<InProcessControlPlane, ObjectLogEngineStore, Proj, SeqIdGen>,
@@ -214,7 +214,7 @@ impl AsyncObjectLogHybridBackend {
         );
         let engine = AsyncComposedBackend::new_with_planners(
             strategy,
-            InlineOwnedTaskDispatcher::new(),
+            crate::ObjectLogTaskDispatcher::new(),
             claim,
             push,
             1024,

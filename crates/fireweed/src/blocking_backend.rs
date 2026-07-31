@@ -22,6 +22,37 @@ const DEFAULT_PENDING_PER_WORKER: usize = 64;
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
+/// Drain jobs on a dedicated OS worker.
+///
+/// Each job is catch_unwind'd so a single panic cannot permanently disconnect the shared pool.
+/// Async work is driven via [`block_on_worker`] (Tokio reactor when `objectlog` is enabled).
+fn run_blocking_worker(receiver: mpsc::Receiver<Job>) {
+    while let Ok(job) = receiver.recv() {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+    }
+}
+
+/// Drive a complete port future on a library I/O worker thread.
+///
+/// Object-log products use Tokio-backed I/O (`tokio::fs`, LogEngine). `futures::executor::block_on`
+/// does **not** drive the Tokio reactor, so opens/ops hang or fail closed. With the `objectlog`
+/// feature each worker thread owns a private current-thread runtime and uses it to `block_on`.
+fn block_on_worker<T>(future: impl Future<Output = T> + Send) -> T
+where
+    T: Send,
+{
+    #[cfg(feature = "objectlog")]
+    {
+        // Same process-wide multi-thread runtime used to open LogEngine products so background
+        // flush/I/O tasks and subsequent ops share one reactor for the process lifetime.
+        fireweed_objectlog::block_on_objectlog_future(future)
+    }
+    #[cfg(not(feature = "objectlog"))]
+    {
+        futures::executor::block_on(future)
+    }
+}
+
 struct WorkerPool {
     senders: Mutex<Option<WorkerSenders>>,
     _workers: Mutex<Option<Vec<JoinHandle<()>>>>,
@@ -101,11 +132,8 @@ impl WorkerPool {
             let (sender, receiver) = mpsc::sync_channel::<Job>(pending_per_worker);
             let worker = match std::thread::Builder::new()
                 .name(format!("fireweed-library-io-{index}"))
-                .spawn(move || {
-                    while let Ok(job) = receiver.recv() {
-                        job();
-                    }
-                }) {
+                .spawn(move || run_blocking_worker(receiver))
+            {
                 Ok(worker) => worker,
                 Err(error) => {
                     drop(data_senders);
@@ -123,11 +151,8 @@ impl WorkerPool {
             let (sender, receiver) = mpsc::sync_channel::<Job>(pending_per_worker);
             let coordination_worker = match std::thread::Builder::new()
                 .name("fireweed-library-coordination".into())
-                .spawn(move || {
-                    while let Ok(job) = receiver.recv() {
-                        job();
-                    }
-                }) {
+                .spawn(move || run_blocking_worker(receiver))
+            {
                 Ok(worker) => worker,
                 Err(error) => {
                     drop(data_senders);
@@ -287,9 +312,7 @@ impl<B: super::LibBackend + 'static> BlockingLibBackend<B> {
         let inner = Arc::clone(self.inner.as_ref().expect("blocking backend is active"));
         let pool = Arc::clone(&self.pool);
         let worker = Self::worker(&queue, pool.worker_count());
-        pool.submit_data(worker, move || {
-            futures::executor::block_on(operation(inner))
-        })
+        pool.submit_data(worker, move || block_on_worker(operation(inner)))
     }
 
     fn global_queue(seed: impl Into<String>) -> QueueKey {
