@@ -1867,6 +1867,9 @@ async fn xclaim<B: RespBackend, H: RespHooks>(
             Ok(resp) => {
                 success_ids.extend(resp.items.iter().map(|item| item.item_id));
             }
+            // Capability or product missing claim_by_item_ids: omit pending ids (Redis
+            // XCLAIM shape) rather than failing the whole command after any renews.
+            Err(EngineError::Unavailable) => {}
             Err(e) => return err_reply(&e),
         }
     }

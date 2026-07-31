@@ -115,6 +115,13 @@ ${CARGO} test -p fireweed --test public_interface_conformance memory_public_inte
 echo "--- fireweed-conformance suite ---"
 ${CARGO} test -p fireweed-conformance --lib
 
+# v0.25 headline proofs: integration targets are NOT covered by --workspace --lib --bins
+# on GitHub release jobs. Fail closed if these regress (P0 eligibility, claim-by-id, RESP).
+echo "--- claim_by_item_ids + eligibility recovery + RESP XCLAIM first-delivery ---"
+${CARGO} test -p fireweed-engine --test claim_by_item_ids
+${CARGO} test -p fireweed-sqlite --test eligibility_index_recovery
+${CARGO} test -p fireweed-resp --test e2e xclaim_first_delivery_pending_ids
+
 # Public 15-cell StorageConfig matrix (Phase 6). Helm is owned by deployment-release-gate /
 # helm-gate.sh so this call skips helm. S3/PG cells skip when fixtures are unset unless
 # FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1 is set (then missing fixtures fail the gate).
