@@ -586,6 +586,15 @@ default fair worker claim path; weakening Eligibility Precedence for ids in the
 set (an ineligible id is reported, not forced claimable, unless an API-002
 force path is used separately).
 
+**RESP stock binding (ADR-007 / TD-006).** On the Redis Streams–compatible
+worker face, this operation is **`XCLAIM`** first-delivery disposition: when the
+caller supplies entry ids that are currently base-eligible pending (not leased),
+the RESP adapter MUST batch those ids through `BatchClaimByItemIds`, using the
+RESP `consumer` name as the lease token. Same-consumer and cross-consumer PEL
+paths of `XCLAIM` remain renew/reassign. Non-claimable ids are omitted from the
+stock reply (Redis shape); structured per-id reasons stay library-only. See
+TD-006 §3 `XCLAIM`.
+
 ### Eligibility Precedence
 
 This subsection is the single authoritative definition of claim eligibility and

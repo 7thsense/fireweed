@@ -181,6 +181,7 @@ Rules:
   eligibility.
 - Returned entries include fireweed reserved reply fields. Stock clients ignore fields they do not use.
 - Filtered claim, whole-cohort claim, explicit gate fences, and request-id claim replay are library-only.
+  **Claim-by-identity of pending eligible ids is not library-only** — it is stock `XCLAIM` (see below).
 
 ### `XACK`
 
@@ -196,23 +197,45 @@ Rules:
 
 ### `XCLAIM` and `XAUTOCLAIM`
 
-Reclaim expired work.
+`XCLAIM key group consumer min-idle-time id [id ...] [JUSTID] …` is the **stock Redis-compatible
+batch claim-by-identity** command. Fireweed entry ids are API-001 `item_id` values. The RESP
+`consumer` name **is** the lease token (what `XPENDING` reports).
+
+Per requested id, fireweed applies one of three dispositions (partitioned in one handler; each
+disposition is its own durable commit — a mixed batch is **not** one atomic multi-disposition
+transaction):
+
+| Current state of `item_id` | Disposition | Engine mapping | Attempt charge |
+|----------------------------|-------------|----------------|----------------|
+| **Base-eligible pending** (not leased, passes Eligibility Precedence) | **First delivery** | API-001 `BatchClaimByItemIds` for that id set (batch the pending subset together) | +1 (first delivery) |
+| Leased, lease token **==** `consumer` | **Renew** | `BatchRenewLeases` / renew port | none |
+| Leased, lease token **!=** `consumer` (or expired-idle reassign path) | **Reassign** | reassign / reclaim ownership to `consumer` | +1 (re-delivery) |
+| Not found, terminal, not eligible, or not claimable under Eligibility Precedence | **Omit** | no durable mutation for that id | n/a |
 
 Rules:
 
-- Reclaim pagination is entry-id ordered, matching the cursor shape of Redis Streams.
-- Priority governs delivery through `XREADGROUP`, not cursor pagination through `XAUTOCLAIM`.
-- `attempt_count` = the number of times the item was **delivered** (handed to a worker via a claim). A
-  timed reclaim (`ReclaimDriver`/`XAUTOCLAIM` returning an expired lease to pending) is NOT a delivery and
-  does **not** charge; the subsequent re-delivery charges the one attempt. So a reclaim+redeliver cycle
-  bumps `attempt_count` by exactly one. This is the same single counter the API-001 claimed-item shape
-  returns as `attempt_count`: `retry_policy.max_attempts` bounds it, and a (library-only) `rearm` resets
-  it to 0 for the next cycle.
-- Same-consumer `XCLAIM` is treated as a lease renew and does not charge an attempt.
-- Cross-consumer `XCLAIM` reclaims ownership to the new consumer and charges one attempt (the re-lease is
-  the delivery).
-- The engine-owned `ReclaimDriver` is still required so quiet queues make lease/progress transitions
-  without depending on client-driven `XAUTOCLAIM` traffic.
+- **Pending first delivery is in-scope stock RESP**, not library-only. External-trigger clients that
+  already know entry ids (for example after `XRANGE` / `FW.*` / out-of-band correlation) MUST be able
+  to reserve them with `XCLAIM` without a priority `XREADGROUP >` step. This is the RESP binding of
+  API-001 `BatchClaimByItemIds`.
+- Successfully claimed / renewed / reassigned ids appear in the reply in request order (after
+  de-duplicating repeated ids in the command). Non-claimable ids are **omitted** from the reply array
+  (Redis Streams `XCLAIM` shape: only transferred entries are returned). There is no per-id error
+  array on the stock path; library `claim_by_item_ids` remains the full partial-outcome surface.
+- `JUSTID` returns only ids, same as Redis.
+- **`min-idle-time` is ignored** for fireweed (gates use lease expiry / eligibility, not Redis idle
+  clocks). `IDLE` / `TIME` / `RETRYCOUNT` / `FORCE` / `LASTID` are accepted and ignored unless a later
+  minor documents a mapping; lease deadlines use the queue's `max_lease_duration_ms`.
+- Reclaim pagination for **`XAUTOCLAIM`** remains entry-id ordered, matching Redis Streams cursors.
+- Priority governs **new unfiltered** delivery through `XREADGROUP >`, not id-addressed `XCLAIM`.
+- `attempt_count` = deliveries handed to a worker. Timed reclaim (`ReclaimDriver` / idle expiry back
+  to pending) does **not** charge; the subsequent re-delivery charges one. Same-consumer renew does
+  not charge. First-delivery `XCLAIM` and cross-consumer reassign charge one each.
+- The engine-owned `ReclaimDriver` remains required so quiet queues advance lease/progress without
+  depending on client `XAUTOCLAIM` traffic.
+- **Drain / ownership:** first-delivery and cross-consumer `XCLAIM` are **new claim** traffic (must
+  not start on a draining owner). Same-consumer renew is in-flight and continues on the draining
+  owner. Mixed batches split accordingly (existing drain runtime partition).
 
 ### `XPENDING`, `XLEN`, `XINFO`, `XDEL`
 
@@ -253,14 +276,18 @@ the corresponding position. System fields and user fields are addressable by nam
 
 These API-001/API-002 capabilities are intentionally not exposed over launch RESP:
 
-- filtered claim (`same_group_key`, exact `group_key`, metadata predicates);
+- filtered claim (`same_group_key`, exact `group_key`, metadata predicates) — **not** the same as
+  claim-by-identity; id-addressed first delivery is stock `XCLAIM`;
 - whole-group and whole-cohort lifecycle handles beyond default item-mode delivery;
-- explicit lease duration renewals;
+- explicit lease duration renewals beyond the queue max applied on `XCLAIM`/renew;
 - finalize dispositions other than `complete`: `fail`, `retry`, `release`, `rearm`;
 - queue create/configure, mutable priority updates, gate mutation, pause/resume;
 - rich metrics, active scopes, queue admin state beyond live item reads, operation list/status/cancel;
 - operator repair, redrive, force purge, archive, and retention operations;
-- request-id replay semantics for commands where stock Redis has no request-id slot.
+- request-id replay semantics for commands where stock Redis has no request-id slot (stock `XCLAIM`
+  first delivery has no `request_id`; library `claim_by_item_ids` retains full idempotency);
+- structured per-id non-claim reasons from `BatchClaimByItemIds` (stock path **omits** non-claimable
+  ids; use the library for full partial-outcome enums).
 
 The library is not a fallback for an incomplete RESP contract. It is the designed full-power control
 interface. The RESP launch contract is the stock worker hot path.
@@ -272,12 +299,14 @@ interface. The RESP launch contract is the stock worker hot path.
 | Push append | pass (`XADD`) | pass |
 | Pending-item replacement | pass on atomic backends (`XADD` with `client_item_key`); pass on `objectlog/hybrid-strict` and `objectlog/hybrid-async` once TD-004 proves deterministic apply-time re-validation with ack-after-apply | pass |
 | Claim item, unfiltered | pass (`XREADGROUP >`) | pass |
+| Claim by identity (pending eligible ids) | pass (`XCLAIM` first-delivery disposition → API-001 `BatchClaimByItemIds`) | pass (`claim_by_item_ids`, full per-id outcomes) |
 | Claim filtered by group or metadata | library-only-intentional | pass |
 | Claim whole group or whole cohort | library-only-intentional | pass |
+| Renew lease (same consumer) | pass (`XCLAIM` self) | pass |
 | Renew lease with explicit duration | library-only-intentional | pass |
 | Complete | pass (`XACK`) | pass |
 | Fail/retry/release/rearm | library-only-intentional | pass |
-| Reclaim expired | pass (`XCLAIM`/`XAUTOCLAIM`) | pass |
+| Reclaim / reassign leased | pass (`XCLAIM` cross-consumer; `XAUTOCLAIM` idle) | pass |
 | Pending/depth inspection | pass (`XPENDING`/`XLEN`/`XINFO`) | pass |
 | Live item multi-get by `client_item_key` | pass (`FW.MGET`) | pass |
 | Live item field reads | pass (`FW.HGETALL`/`FW.HMGET`) | pass |
