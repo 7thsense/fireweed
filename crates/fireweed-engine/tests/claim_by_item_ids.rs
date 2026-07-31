@@ -226,6 +226,8 @@ fn claim_by_item_ids_point_lookup_cost_independent_of_unrelated_pending() {
 
 #[test]
 fn claim_by_item_ids_lease_is_first_class_inspect_reclaim_fence() {
+    // fireweed-cad0ab40: leases from claim_by_item_ids are ordinary API-001 leases —
+    // inspect (claimed_view), timeout/reclaim_expired, and force fence → StaleLease.
     futures::executor::block_on(async {
         let b = backend();
         b.create_queue(qdef()).await.unwrap();
