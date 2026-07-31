@@ -21,13 +21,40 @@ use crate::flush_config_from_segment;
 /// [`crate::AsyncObjectLogMemoryBackend`] (program A).
 pub type ComposedObjectLogBackend = AsyncObjectLogMemoryBackend;
 
-/// Drive a LogEngine open future from a sync facade boundary (private runtime or block_in_place).
+/// Drive a LogEngine open future from a sync facade boundary.
+///
+/// Flavor-safe bridge: never uses [`tokio::task::block_in_place`] (which panics on
+/// current-thread runtimes, including every default `#[tokio::test]`). When a Tokio
+/// handle of any flavor is already present, the future runs on a dedicated OS thread
+/// with a private current-thread runtime. When no runtime is present, a private
+/// current-thread runtime is built on the calling thread.
+///
+/// All sync objectlog open paths (`composed_objectlog_backend`,
+/// `open_object_log_engine_*_sync`, and facade `open_objectlog` /
+/// `open_objectlog_sqlite` via this helper) inherit this behavior.
 pub fn block_on_objectlog<F, T>(fut: F) -> EngineResult<T>
 where
-    F: Future<Output = EngineResult<T>>,
+    F: Future<Output = EngineResult<T>> + Send,
+    T: Send,
 {
     match tokio::runtime::Handle::try_current() {
-        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
+        Ok(_) => {
+            // Dedicated thread + private runtime: safe under current-thread and multi-thread.
+            // `thread::scope` keeps non-'static futures (e.g. open helpers that borrow locals) valid.
+            std::thread::scope(|s| {
+                s.spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|e| {
+                            EngineError::Storage(format!("tokio runtime for objectlog open: {e}"))
+                        })?;
+                    rt.block_on(fut)
+                })
+                .join()
+                .map_err(|_| EngineError::Storage("objectlog open thread panicked".into()))?
+            })
+        }
         Err(_) => {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -150,8 +177,8 @@ fn sanitize_namespace(namespace: &str) -> String {
 /// Assemble the product object-log backend rooted at `root` (LogEngine × in-memory projection).
 ///
 /// Prefer the native-async [`crate::composed_objectlog_memory_async`] when already on a Tokio runtime.
-/// This sync entry point builds a private current-thread runtime when none is available, or uses
-/// `block_in_place` + `Handle::block_on` when one is.
+/// This sync entry point uses [`block_on_objectlog`] (dedicated thread + private runtime when a
+/// Tokio handle is present), so it is safe under current-thread and multi-thread runtimes.
 pub fn composed_objectlog_backend(
     root: impl Into<PathBuf>,
 ) -> EngineResult<ComposedObjectLogBackend> {
@@ -180,4 +207,28 @@ fn open_async_objectlog_product_sync(
         target_bytes,
         max_latency_ms,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// AC: sync objectlog open under default `#[tokio::test]` (current-thread) must not panic.
+    #[tokio::test]
+    async fn composed_objectlog_backend_opens_under_current_thread_runtime() {
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-objlog-ct-open-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temp root");
+        let backend = composed_objectlog_backend(&root)
+            .expect("open objectlog product under current-thread runtime");
+        drop(backend);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
