@@ -666,6 +666,12 @@ where
                     None => break,
                 }
             }
+            // Seed mint counters past every item id materialised by recovery so a post-reopen
+            // push/upsert never re-mints a live id (would corrupt the eligibility index via
+            // insert_pending overwrite — fireweed-6e38e2b4).
+            self.projection.with_store(|p| {
+                ProjectionStore::restore_counters(p, &shard, &self.counters)
+            })?;
         }
         Ok(self)
     }
@@ -847,8 +853,17 @@ where
                     return Err(EngineError::QueueDefinitionConflict);
                 }
             }
-            // Ensure projection exists; if this handle is late to an already-created durable queue,
-            // replay the log tail so the serving image catches commands committed before create.
+            // Ensure projection exists; if this handle is late to an already-created durable
+            // queue (no local serving image yet), replay the log tail so the serving image
+            // catches commands committed before create.
+            //
+            // Replay ONLY when the projection shard is missing (`needs_replay`). An
+            // idempotent re-create (`!outcome.created`) against a live image must not re-apply
+            // the durable log: `apply_recovery` defaults to plain `apply`, so replaying Push
+            // (including commit_transition lifecycle items) would insert a second eligibility
+            // index row per item_id (stale created_seq) and make ClaimPort::claim fail with
+            // Invalid("invalid async claim plan") after select_item_claim returns duplicates
+            // (fireweed-6e38e2b4 / snorri v0.24 regression).
             let needs_replay = self
                 .projection
                 .with_store(|p| ProjectionStore::metrics(p, &shard).is_err());
@@ -857,7 +872,7 @@ where
                 outcome.definition.clone(),
             )
             .await?;
-            if needs_replay || !outcome.created {
+            if needs_replay {
                 let mut from = None;
                 loop {
                     let page = self.log.with_store(|log| {
@@ -878,6 +893,11 @@ where
                         None => break,
                     }
                 }
+                // Late-join create_queue replayed into an empty image — seed mint counters
+                // the same way recover() does after full-log rebuild.
+                self.projection.with_store(|p| {
+                    ProjectionStore::restore_counters(p, &shard, &self.counters)
+                })?;
             }
             Ok(outcome)
         }

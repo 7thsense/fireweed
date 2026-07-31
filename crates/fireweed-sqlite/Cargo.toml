@@ -59,3 +59,7 @@ path = "tests/sqlite_projection_tests.rs"
 [[test]]
 name = "cross_family_parity"
 path = "tests/cross_family_parity.rs"
+
+[[test]]
+name = "eligibility_index_recovery"
+path = "tests/eligibility_index_recovery.rs"

@@ -1949,6 +1949,17 @@ impl ProjectionData {
             terminal_at: None,
             terminal_position: None,
         };
+        // If this item_id is already materialised (corrupt re-mint after recovery without
+        // counter reseed, or a double-apply), drop any prior eligibility row before insert so
+        // the index cannot hold two keys for one id (fireweed-6e38e2b4).
+        if let Some(old) = self.items.get(&rec.item_id)
+            && old.state == ItemState::Pending
+            && !old.superseded
+            && !gate_keys_blocked(&self.blocked_gates, &old.gate_keys)
+        {
+            self.eligible
+                .remove(EligibilityIndex::token(old, &self.priority_model));
+        }
         if !gate_keys_blocked(&self.blocked_gates, &rec.gate_keys) {
             self.eligible
                 .insert(&rec, &self.items, &self.priority_model);

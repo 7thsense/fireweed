@@ -751,6 +751,16 @@ impl ProjectionStore for InMemoryProjection {
     //    (side records + instance fences + lease-token/version commit validation), lifted verbatim from
     //    `ProjectionData`, so the composed memory backend reaches capability parity with `MemoryBackend`.
 
+    /// After full-log recovery into an empty in-memory image, seed mint counters past every
+    /// materialised item id so a post-reopen push never re-mints a live id (fireweed-6e38e2b4).
+    fn restore_counters(
+        &self,
+        shard: &QueueKey,
+        counters: &QueueCounters,
+    ) -> EngineResult<()> {
+        self.observe_item_counters(shard, counters)
+    }
+
     fn supports_commit_transition(&self) -> bool {
         true
     }

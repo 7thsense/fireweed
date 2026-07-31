@@ -1127,3 +1127,136 @@ async fn commit_transition_shared_scenario_runs_against_composed_memory() {
     commit_transition_writes_side_records_enqueues_lifecycle_finalizes_and_survives_reopen(make)
         .await;
 }
+
+/// fireweed-6e38e2b4: after commit_transition enqueues lifecycle items (and after an idempotent
+/// re-create_queue — the snorri claim_lifecycle path), eligible_candidates must return unique
+/// item ids so ClaimPort::claim does not fail with Invalid("invalid async claim plan").
+///
+/// Root cause was create_queue re-applying the durable log onto a live projection whenever
+/// `!outcome.created`, double-inserting eligibility rows for lifecycle Push items.
+#[tokio::test]
+async fn claim_after_commit_transition_lifecycle_keeps_unique_eligible_candidates() {
+    use std::collections::HashSet;
+
+    use fireweed_conformance::{claim_req, qdef, shard, ts};
+    use fireweed_core::{PriorityValue, RequestId};
+    use fireweed_engine::{
+        ClaimPort, ClaimRef, CommitEntryOutcome, CommitTransition, CommitTransitionEntry,
+        CommitTransitionPort, ControlPlaneStore, FinalizeKind, ProjectionStore, PushPort, PushSpec,
+        ReschedulePort, ScheduleUpdate,
+    };
+
+    let b = composed_memory_backend();
+    b.create_queue(qdef()).await.unwrap();
+
+    // Seed one input item (rich priority + not_before like snorri lifecycle records), claim it,
+    // then commit_transition with several lifecycle continuations.
+    b.push(
+        &shard(),
+        vec![PushSpec {
+            priority: Some(PriorityValue::Int64(10)),
+            ..Default::default()
+        }],
+        ts(0),
+        None,
+    )
+    .await
+    .unwrap();
+    let claimed = b.claim(claim_req(1, 60, 0)).await.unwrap();
+    let c = &claimed.items[0];
+    let claim_ref = ClaimRef {
+        item_id: c.item_id,
+        lease_token: c.lease_token.clone().expect("lease token"),
+        lease_expires_at: c.lease_expires_at,
+        item_version: c.item_version,
+    };
+
+    let outcomes = b
+        .commit_transition(
+            &shard(),
+            CommitTransition {
+                request_id: Some(RequestId::new("txn-lifecycle-unique-elig").unwrap()),
+                entries: vec![CommitTransitionEntry {
+                    claim_ref,
+                    additional_claim_refs: Vec::new(),
+                    finalize: FinalizeKind::Complete,
+                    side_records: Vec::new(),
+                    lifecycle_items: vec![
+                        PushSpec {
+                            priority: Some(PriorityValue::Int64(5)),
+                            not_before: Some(ts(5)),
+                            ..Default::default()
+                        },
+                        PushSpec {
+                            priority: Some(PriorityValue::Int64(6)),
+                            not_before: Some(ts(6)),
+                            ..Default::default()
+                        },
+                        PushSpec {
+                            priority: Some(PriorityValue::Int64(7)),
+                            not_before: None,
+                            ..Default::default()
+                        },
+                    ],
+                    instance_fence: None,
+                }],
+            },
+            ts(2),
+            None,
+        )
+        .await
+        .unwrap();
+    let lifecycle_ids = match &outcomes[0] {
+        CommitEntryOutcome::Committed { lifecycle_item_ids } => lifecycle_item_ids.clone(),
+        other => panic!("expected committed transition, got {other:?}"),
+    };
+    assert_eq!(lifecycle_ids.len(), 3);
+
+    // Reschedule one lifecycle item (snorri reschedule path) — must re-key eligibility cleanly.
+    let v = b
+        .with_projection(|p| ProjectionStore::item_version(p, &shard(), &lifecycle_ids[0]))
+        .unwrap()
+        .expect("lifecycle item version");
+    b.reschedule(
+        &shard(),
+        lifecycle_ids[0],
+        ScheduleUpdate::Set(Some(PriorityValue::Int64(50))),
+        ScheduleUpdate::Set(Some(ts(50))),
+        Some(v),
+        ts(3),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Snorri claim_lifecycle_records always re-calls create_queue before claiming. This must not
+    // re-apply the durable log onto the live image (the pre-fix double-apply path).
+    let recreate = b.create_queue(qdef()).await.unwrap();
+    assert!(
+        !recreate.created,
+        "second create_queue must be an idempotent create-or-read"
+    );
+
+    let candidates = b
+        .with_projection(|p| ProjectionStore::eligible_candidates(p, &shard(), ts(100), 10_000))
+        .unwrap();
+    let unique: HashSet<_> = candidates.iter().copied().collect();
+    assert_eq!(
+        unique.len(),
+        candidates.len(),
+        "eligible_candidates must not contain duplicate item ids after commit-envelope lifecycle \
+         create/reschedule + idempotent create_queue; got {candidates:?}"
+    );
+    assert_eq!(
+        unique.len(),
+        3,
+        "exactly the three lifecycle items should be eligible; got {candidates:?}"
+    );
+
+    // Plain claim must succeed (validate_claim_plan rejects duplicate plan ids).
+    // lease_expires_at (200) must be after operational now (100); eligibility uses now as well.
+    let claimed = b.claim(claim_req(10, 200, 100)).await.unwrap();
+    assert_eq!(claimed.items.len(), 3);
+    let claimed_ids: HashSet<_> = claimed.items.iter().map(|i| i.item_id).collect();
+    assert_eq!(claimed_ids.len(), 3);
+}
