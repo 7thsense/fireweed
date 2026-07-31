@@ -156,5 +156,8 @@ ready-future shims, and composition-root blocking wrappers are removed only afte
 
 - `docs/helix/02-design/technical-designs/TD-001-storage-architecture-backend-contracts.md`
 - `docs/helix/02-design/adr/ADR-012-orthogonal-log-projection-composition.md`
+- `docs/helix/02-design/contracts/API-005-fireweed-rust-facade.md` — public
+  `Fireweed` product path: native-async end-state; `BlockingLibBackend` is a
+  residual facade bridge, not architecture.
 - `crates/fireweed-engine/src/port.rs`
 - `crates/fireweed-engine/src/compose.rs`

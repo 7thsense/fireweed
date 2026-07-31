@@ -150,5 +150,8 @@ async stores await their drivers inside the owned task.
 - `docs/helix/02-design/adr/ADR-015-full-async-storage-boundaries.md`
 - `docs/helix/02-design/technical-designs/TD-001-storage-architecture-backend-contracts.md`
 - `docs/helix/02-design/technical-designs/TD-010-object-log-turso-projection.md`
+- `docs/helix/02-design/contracts/API-005-fireweed-rust-facade.md` — binds
+  queue-local serialization and cross-queue progress to the single public
+  `Fireweed` type; process-wide blocking dispatch is not the product model.
 - `crates/fireweed-engine/src/async_store.rs`
 - `crates/fireweed-engine/src/commit.rs`

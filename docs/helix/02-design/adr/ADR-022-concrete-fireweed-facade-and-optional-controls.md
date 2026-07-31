@@ -60,6 +60,15 @@ first-party code. Runtime erasure occurs above the storage ports through a
 private, object-safe adapter over the high-level queue operations. The storage
 ports themselves remain non-object-safe and are not redesigned for this work.
 
+**Product execution path (see API-005).** The long-term product path is native
+async composition under ADR-015 / ADR-017: one concrete `Fireweed` with async
+methods, per-queue serialization for correctness, and cross-queue progress.
+`BlockingLibBackend` (or any process-wide blocking worker pool used as a
+facade bridge) is not the end-state architecture. v0.24 product composition is
+async-only while the facade may still bridge; residual work is removing that
+bridge after adapters are runtime-safe. Dual public types and re-exporting
+`fireweed-engine` async modules as the embedder surface remain non-goals.
+
 ### Optional controls describe optional authority, not ordinary projection use
 
 Memory, SQLite, and object-log profiles all use projections to serve queue
@@ -184,7 +193,8 @@ boundary and does not override a practice recorded in
 - `docs/helix/00-discover/public-preview-boundary.md` — supported profile and
   publishability boundary.
 - `docs/helix/02-design/contracts/API-005-fireweed-rust-facade.md` — exact Rust
-  binding contract.
+  binding contract, including native-async product path and concurrency
+  semantics.
 - `docs/helix/03-test/test-plans/TP-004-fireweed-facade-and-snorri-acceptance.md`
   — executable acceptance gates.
 - `../snorri/crates/snorri-fireweed/src/lib.rs` — acceptance-client inventory.

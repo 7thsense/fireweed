@@ -11,10 +11,10 @@ ddx:
 # API-005: Fireweed Rust facade
 
 **Type**: Rust binding contract
-**Version**: v0.21
+**Version**: v0.24
 **Status**: accepted
-**Related**: API-001, API-004, ADR-009, ADR-012, ADR-022, ADR-023, TP-004,
-orthogonal-storage-matrix-brief
+**Related**: API-001, API-004, ADR-009, ADR-012, ADR-015, ADR-017, ADR-022,
+ADR-023, TP-004, orthogonal-storage-matrix-brief
 
 ## Purpose
 
@@ -28,10 +28,16 @@ queue semantics.
 - In scope: the supported Rust root type, constructors, configuration names
   (including full-matrix `StorageConfig`), inherent queue methods, runtime
   construction facts, projection maintenance, export closure, compatibility,
-  and structured errors.
+  structured errors, and the product execution / concurrency model for that
+  facade (native-async composition path).
 - Out of scope: storage-port object safety, backend algorithms, RESP bindings,
-  new queue semantics, and the backend-neutral historical query component.
+  new queue semantics, the backend-neutral historical query component, dual
+  public facade types, and re-exporting `fireweed-engine` async modules as
+  the embedder surface.
 - Owning crate: `fireweed`.
+- Non-goals: a second public root type (sync vs async facades); exposing
+  engine composition modules (`AsyncComposedBackend`, async store traits,
+  dispatch internals) as the supported embedder API.
 
 ## Normative surface
 
@@ -49,6 +55,12 @@ impl Fireweed {
 lifecycle ownership are private. It is `Send + Sync`; callers may place it in
 an `Arc`. Clone semantics are not required for v0.21.
 
+**One concrete public type.** The supported embedder surface is a single
+`Fireweed` whose queue and maintenance operations are async methods (see the
+Snorri acceptance signatures and the method inventory below). There is no
+second public handle for "native async" versus "bridged" execution; product
+work removes internal bridges without splitting the type graph.
+
 The crate root requires downstream users to name only `Fireweed` and public
 Fireweed DTOs. It must not require `LibBackend`, `EmbeddedHandle`, a concrete
 backend, a composition-specific wrapper, or an internal workspace crate.
@@ -64,6 +76,68 @@ configuration getter. Queue-scoped capability values describe execution
 characteristics of functionality that remains available on every supported
 composition; callers use `projection_control()` only when maintenance
 authority exists.
+
+### Product execution model (native async)
+
+The product execution **end-state** is **native async composition**: storage
+and engine paths await drivers under ADR-015 / ADR-017 so the public
+`Fireweed` methods compose on the host runtime without a process-wide
+blocking bridge as architecture.
+
+| Concern | Normative position |
+| --- | --- |
+| Public root | One concrete `Fireweed` with async methods |
+| Product composition | Native-async / async-only composition (v0.24 product paths) |
+| `BlockingLibBackend` | Residual facade bridge only — **not** the product concurrency model or end-state architecture |
+| Process-wide blocking worker pool | **Not** the product concurrency model; may exist only as a temporary offload for non-native adapters |
+
+**v0.24 reality vs end-state.** As of v0.24, product **composition** is
+async-only (sync dual-stack product backends removed; log × projection cells
+assemble on async products). The public facade **still bridges today** where
+constructors wrap composed backends through `BlockingLibBackend` (or
+equivalent process-wide blocking dispatch) so inherent async methods can call
+legacy / not-yet-runtime-safe seams. That bridge is transitional. Residual
+work is **removing the facade blocking bridge** after adapters are
+runtime-safe under ADR-015 (no reactor stall; whole-transaction offload only
+where the store is inherently blocking) and ADR-017 (owned-task dispatch,
+queue-local gates). Embedders MUST NOT treat `BlockingLibBackend` as a
+supported public type or as the long-term execution architecture.
+
+This contract does **not** re-export `fireweed-engine` async modules as the
+embedder surface. Engine composition types remain internal implementation
+detail behind `Fireweed` / `StorageConfig` construction.
+
+### Concurrency semantics
+
+Correctness and progress requirements for the facade execution path:
+
+1. **Per-queue serialization (required for correctness).** Mutations that
+   share a queue remain ordered through a queue-local gate (or equivalent)
+   across validation, planning, commit, projection visibility, and
+   replay-outcome recording. Concurrent calls on the same queue must not
+   interleave claim planning or commit application in ways that violate
+   API-001 atomicity, fencing, or idempotency. See ADR-017.
+
+2. **Cross-queue progress (required).** Unrelated queues MUST be able to
+   make progress while one queue is busy or waiting on I/O. The product
+   concurrency model is **not** a process-wide blocking worker pool that
+   serializes all facade operations, and it is **not** a process-global
+   storage lock held across awaited I/O (ADR-015, ADR-017).
+
+3. **Adapter-local offload vs product model.** A blocking store adapter may
+   still execute one complete begin/apply/commit unit on a bounded blocking
+   executor or storage actor *below* the async port (ADR-015). That offload
+   is an adapter concern for stores without native async drivers. It does
+   not redefine the public concurrency model as process-wide blocking
+   dispatch, and it is not a substitute for native-async composition where
+   drivers can be awaited directly.
+
+4. **Bridge removal criterion.** The facade may drop `BlockingLibBackend`
+   (and any process-wide pool used only to paper over sync seams) once every
+   supported composition path is runtime-safe: native-async await inside
+   owned commit work, or whole-transaction offload confined to the adapter,
+   with per-queue serialization preserved and cross-queue progress
+   demonstrated under the existing conformance / heartbeat gates.
 
 ### Construction
 
@@ -572,7 +646,12 @@ pub async fn declared_bucket_segment(&self, queue: &QueueKey, request: DeclaredB
 ## Precedence and compatibility
 
 - API-001 and API-004 govern queue semantics. API-005 governs Rust ownership,
-  names, signatures, construction, and export closure.
+  names, signatures, construction, export closure, and the product execution
+  model for the public facade (native-async end-state; concurrency semantics).
+- ADR-015 and ADR-017 govern async storage boundaries, per-queue gates, and
+  owned-task dispatch. API-005 binds those decisions to the single public
+  `Fireweed` type and forbids treating `BlockingLibBackend` as the product
+  end-state architecture.
 - `orthogonal-storage-matrix-brief` governs the public log × projection matrix
   and durability classes; API-005 is the Rust binding of that construction
   model via `StorageConfig`.
@@ -587,6 +666,9 @@ pub async fn declared_bucket_segment(&self, queue: &QueueKey, request: DeclaredB
 - Convenience constructors and `ObjectLogRuntimeConfig` remain compatible
   subset surfaces; full-matrix cells that those conveniences do not cover are
   opened through `StorageConfig` / `open` / `open_async`.
+- Removing the residual facade blocking bridge is compatible for embedders that
+  already use only public `Fireweed` async methods; it must not introduce a
+  second public root type.
 
 ## Error semantics
 
@@ -624,6 +706,15 @@ implementation strategy. It is not part of this contract.
 ## Validation checklist
 
 - [ ] `Fireweed` is concrete, `Send + Sync`, and sufficient behind `Arc`.
+- [ ] Product execution end-state is native async composition; one public
+      `Fireweed` with async methods; `BlockingLibBackend` is not the end-state
+      architecture.
+- [ ] Concurrency semantics document per-queue serialization vs cross-queue
+      progress; process-wide blocking worker pool is not the product model.
+- [ ] v0.24 async-only composition vs residual facade bridge is stated; residual
+      work is bridge removal after adapters are runtime-safe.
+- [ ] Non-goals exclude dual public types and re-exporting `fireweed-engine`
+      async modules as the embedder surface.
 - [ ] `StorageConfig` / `LogConfig` / `ProjectionStoreConfig` document the full
       5×3 matrix; filesystem and s3 are first-class logs; no profile SKU model.
 - [ ] Durability Class A vs Class B is documented (memory log = Class B).
