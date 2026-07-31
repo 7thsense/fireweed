@@ -3939,7 +3939,9 @@ impl ProjectionData {
     /// Point-lookup claim classification for API-001 `BatchClaimByItemIds`.
     ///
     /// Resolves via the primary `items` map (`O(1)` per id). MUST NOT scan the eligible-candidate
-    /// index or iterate unrelated pending rows.
+    /// index or iterate unrelated pending rows. Regression: engine test
+    /// `claim_by_item_ids_point_lookup_cost_independent_of_unrelated_pending` would fail if this
+    /// path devolved into a full-shard eligible scan (fireweed-0ef12e8c).
     pub fn classify_claim_by_item_id(
         &self,
         id: &ItemId,
