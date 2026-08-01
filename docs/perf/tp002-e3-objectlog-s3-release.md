@@ -1,6 +1,24 @@
 # TP-002 E3 — live object-log projection matrix over S3-compatible storage
 
-**Status:** PREPARED; the exact 10M recovery proof is now encoded in the E3 test harness, but a new release run is still required to stamp a PASS artifact.
+**Status:** PREPARED (LogEngine product surface); the exact 10M recovery proof harness
+compiles and the offline AC validators pass, but a new release-profile live MinIO/S3 run is still
+required to stamp a PASS artifact.
+
+### LogEngine port (fireweed-3aaa3ebc)
+
+The E3 harness no longer uses the retired FWSG `SegmentedObjectLog*` facades. It opens:
+
+- `ObjectLogEngineStore::open_s3` + `AsyncObjectLogMemoryBackend` (genesis replay)
+- `ObjectLogEngineStore::open_s3` + `AsyncObjectLogSqliteBackend` (snapshot high-water + tail)
+
+Product open records `RecoveryStats` (`start_seq`, `tail_replayed`, `snapshot_used`, page/resource
+counters). SQLite recovery resumes from `recovery_high_water`; in-memory always genesis-replays.
+The SQLite crash tail uses `RawCommitFault::AfterAppendBeforeApply` (append durable, apply suppressed).
+
+**Residual before PASS:** run the governed 10M release shape under `FIREWEED_PERF_ENV=1` via
+`scripts/perf/tp002-e3-minio.sh` / `tp002-e3-s3.sh`. Store PUT/GET/LIST cost linkage is best-effort under
+object-log 0.2 `MediaOpStats` (not a full per-op recorder). Segment seal-trigger counters are approximated
+from push-command accounting for evidence continuity until LogEngine exposes seal-class telemetry.
 
 The 2026-07-16 run is retained only as
 `docs/perf/evidence/tp002-e3-objectlog-minio-historical-invalid.jsonl`. It is invalid under the current

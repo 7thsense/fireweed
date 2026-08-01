@@ -36,6 +36,7 @@ use crate::port_surface::{
     PreparedBatchUpdate, PreparedClaimByItemIds, PreparedClaimByQuery, PreparedUpsert,
     new_batch_update_idempotency, new_claim_by_item_ids_idempotency, new_claim_by_query_idempotency,
 };
+use crate::recovery_stats::{RecoveryStats, RecoveryStatsMap, replay_log_into_projection};
 
 /// Sequential id generation for object-log async products.
 #[derive(Default)]
@@ -160,6 +161,7 @@ pub struct AsyncObjectLogMemoryBackend {
     batch_update_idempotency: BatchUpdateIdempotency,
     claim_by_query_idempotency: ClaimByQueryIdempotency,
     claim_by_item_ids_idempotency: ClaimByItemIdsIdempotency,
+    recovery_stats: RecoveryStatsMap,
 }
 
 impl AsyncObjectLogMemoryBackend {
@@ -200,6 +202,22 @@ impl AsyncObjectLogMemoryBackend {
     /// Borrow the in-memory projection axis (lifecycle / diagnostics).
     pub fn with_projection<R>(&self, f: impl FnOnce(&InMemoryProjection) -> R) -> R {
         self.projection.with_store(f)
+    }
+
+    /// Production recovery telemetry captured at open / first create_queue for `shard`.
+    pub fn recovery_stats(&self, shard: &QueueKey) -> Option<RecoveryStats> {
+        self.recovery_stats.get(shard)
+    }
+
+    /// Bounded page of authoritative pending order (E3 recovery fingerprint path).
+    pub fn recovery_order_page(
+        &self,
+        shard: &QueueKey,
+        after: Option<ItemId>,
+        limit: usize,
+    ) -> EngineResult<Vec<fireweed_engine::ItemView>> {
+        self.projection
+            .with_store(|store| store.peek_page(shard, after, limit))
     }
 
     async fn from_log(log: Arc<ObjectLogEngineStore>, node_id: u8) -> EngineResult<Self> {
@@ -253,27 +271,21 @@ impl AsyncObjectLogMemoryBackend {
         .with_lifecycle_planner(lifecycle)
         .with_reclaim_planner(reclaim);
 
+        let recovery_stats = RecoveryStatsMap::new();
         let definitions = AsyncLogStore::recover_definitions(log.as_ref()).await?;
         for definition in definitions {
             let _ = AsyncControlPlane::create_queue(control.as_ref(), definition.clone()).await;
             AsyncProjectionStore::ensure_shard(projection.as_ref(), definition.clone()).await?;
             let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-            let mut from = None;
-            loop {
-                let page = AsyncLogStore::read_from(log.as_ref(), shard.clone(), from.clone(), 256)
-                    .await?;
-                if page.entries.is_empty() {
-                    break;
-                }
-                let positions: Vec<_> = page.entries.iter().map(|(p, _)| p.clone()).collect();
-                let commands: Vec<_> = page.entries.iter().map(|(_, e)| e.clone()).collect();
-                AsyncProjectionStore::apply_recovery(projection.as_ref(), positions, commands)
-                    .await?;
-                match page.next {
-                    Some(next) => from = Some(next),
-                    None => break,
-                }
-            }
+            // Ephemeral in-memory projection: exact genesis replay of the durable log.
+            let stats = replay_log_into_projection(
+                log.as_ref(),
+                projection.as_ref(),
+                &shard,
+                false,
+            )
+            .await?;
+            recovery_stats.insert(shard, stats);
         }
         Ok(Self {
             engine,
@@ -287,6 +299,7 @@ impl AsyncObjectLogMemoryBackend {
             batch_update_idempotency,
             claim_by_query_idempotency,
             claim_by_item_ids_idempotency,
+            recovery_stats,
         })
     }
 
@@ -404,9 +417,20 @@ impl ControlPlaneStore for AsyncObjectLogMemoryBackend {
     ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
         async move {
             let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-            AsyncLogStore::ensure_shard(self.log.as_ref(), shard).await?;
+            self.log.register_definition(definition.clone()).await?;
+            AsyncLogStore::ensure_shard(self.log.as_ref(), shard.clone()).await?;
             AsyncProjectionStore::ensure_shard(self.projection.as_ref(), definition.clone())
                 .await?;
+            if self.recovery_stats.get(&shard).is_none() {
+                let stats = replay_log_into_projection(
+                    self.log.as_ref(),
+                    self.projection.as_ref(),
+                    &shard,
+                    false,
+                )
+                .await?;
+                self.recovery_stats.insert(shard, stats);
+            }
             AsyncControlPlane::create_queue(self.control.as_ref(), definition).await
         }
     }

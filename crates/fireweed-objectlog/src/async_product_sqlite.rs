@@ -37,6 +37,7 @@ use crate::port_surface::{
     PreparedBatchUpdate, PreparedClaimByItemIds, PreparedClaimByQuery, PreparedUpsert,
     new_batch_update_idempotency, new_claim_by_item_ids_idempotency, new_claim_by_query_idempotency,
 };
+use crate::recovery_stats::{RecoveryStats, RecoveryStatsMap, replay_log_into_projection};
 
 type Proj = InProcessProjectionStore<SqliteProjectionStore>;
 
@@ -116,6 +117,7 @@ pub struct AsyncObjectLogSqliteBackend {
     batch_update_idempotency: BatchUpdateIdempotency,
     claim_by_query_idempotency: ClaimByQueryIdempotency,
     claim_by_item_ids_idempotency: ClaimByItemIdsIdempotency,
+    recovery_stats: RecoveryStatsMap,
 }
 
 impl AsyncObjectLogSqliteBackend {
@@ -207,27 +209,21 @@ impl AsyncObjectLogSqliteBackend {
         .with_lifecycle_planner(lifecycle)
         .with_reclaim_planner(reclaim);
 
+        let recovery_stats = RecoveryStatsMap::new();
         let definitions = AsyncLogStore::recover_definitions(log.as_ref()).await?;
         for definition in definitions {
             let _ = AsyncControlPlane::create_queue(control.as_ref(), definition.clone()).await;
             AsyncProjectionStore::ensure_shard(projection.as_ref(), definition.clone()).await?;
             let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-            let mut from = None;
-            loop {
-                let page = AsyncLogStore::read_from(log.as_ref(), shard.clone(), from.clone(), 256)
-                    .await?;
-                if page.entries.is_empty() {
-                    break;
-                }
-                let positions: Vec<_> = page.entries.iter().map(|(p, _)| p.clone()).collect();
-                let commands: Vec<_> = page.entries.iter().map(|(_, e)| e.clone()).collect();
-                AsyncProjectionStore::apply_recovery(projection.as_ref(), positions, commands)
-                    .await?;
-                match page.next {
-                    Some(next) => from = Some(next),
-                    None => break,
-                }
-            }
+            // Durable SQLite projection: snapshot high-water + bounded tail replay.
+            let stats = replay_log_into_projection(
+                log.as_ref(),
+                projection.as_ref(),
+                &shard,
+                true,
+            )
+            .await?;
+            recovery_stats.insert(shard, stats);
         }
         Ok(Self {
             engine,
@@ -241,6 +237,7 @@ impl AsyncObjectLogSqliteBackend {
             batch_update_idempotency,
             claim_by_query_idempotency,
             claim_by_item_ids_idempotency,
+            recovery_stats,
         })
     }
 
@@ -355,9 +352,22 @@ impl ControlPlaneStore for AsyncObjectLogSqliteBackend {
     ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
         async move {
             let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-            AsyncLogStore::ensure_shard(self.log.as_ref(), shard).await?;
+            // Persist definition so reopen can discover and recover this shard.
+            self.log.register_definition(definition.clone()).await?;
+            AsyncLogStore::ensure_shard(self.log.as_ref(), shard.clone()).await?;
             AsyncProjectionStore::ensure_shard(self.projection.as_ref(), definition.clone())
                 .await?;
+            // Recover any durable tail not yet applied (first create is a no-op tail).
+            if self.recovery_stats.get(&shard).is_none() {
+                let stats = replay_log_into_projection(
+                    self.log.as_ref(),
+                    self.projection.as_ref(),
+                    &shard,
+                    true,
+                )
+                .await?;
+                self.recovery_stats.insert(shard, stats);
+            }
             AsyncControlPlane::create_queue(self.control.as_ref(), definition).await
         }
     }
@@ -1316,6 +1326,22 @@ impl AsyncObjectLogSqliteBackend {
     /// Mutably borrow the projection axis (lifecycle rebuild / delete).
     pub fn with_projection_mut<R>(&self, f: impl FnOnce(&mut SqliteProjectionStore) -> R) -> R {
         self.projection.with_store_mut(f)
+    }
+
+    /// Production recovery telemetry captured at open / first create_queue for `shard`.
+    pub fn recovery_stats(&self, shard: &QueueKey) -> Option<RecoveryStats> {
+        self.recovery_stats.get(shard)
+    }
+
+    /// Bounded page of authoritative pending order (E3 recovery fingerprint path).
+    pub fn recovery_order_page(
+        &self,
+        shard: &QueueKey,
+        after: Option<ItemId>,
+        limit: usize,
+    ) -> EngineResult<Vec<fireweed_engine::ItemView>> {
+        self.projection
+            .with_store(|p| p.peek_page(shard, after, limit))
     }
 }
 

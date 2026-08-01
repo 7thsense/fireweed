@@ -174,6 +174,19 @@ impl InMemoryProjection {
         Self::default()
     }
 
+    /// Bounded page of authoritative pending order after an optional cursor item.
+    ///
+    /// Used by recovery fingerprint paths (TP-002 E3) that must page the full live
+    /// order without materializing the entire resident set in one call.
+    pub fn peek_page(
+        &self,
+        shard: &QueueKey,
+        after: Option<ItemId>,
+        limit: usize,
+    ) -> EngineResult<Vec<ItemView>> {
+        Ok(self.get(shard)?.peek_page(after, limit))
+    }
+
     /// Replace one in-memory shard with a fully materialized projection image.
     pub fn hydrate_shard(
         &mut self,

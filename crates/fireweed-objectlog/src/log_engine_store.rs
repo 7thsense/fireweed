@@ -210,6 +210,25 @@ impl<S: Sequencer<Meta = ()>> ObjectLogEngineStore<S> {
         self.put_json(&self.epoch_key(shard), &EpochDoc { epoch })
             .await
     }
+
+    /// Persist a queue definition into the durable catalog (survives reopen).
+    ///
+    /// Product `create_queue` paths call this so projection recovery can discover
+    /// shards without requiring a separate CreateQueue log envelope.
+    pub async fn register_definition(&self, definition: QueueDefinition) -> EngineResult<()> {
+        let doc = {
+            let mut catalog = self.catalog.lock().expect("catalog");
+            if let Some(existing) = catalog.definitions.iter_mut().find(|d| {
+                d.tenant_id == definition.tenant_id && d.queue_id == definition.queue_id
+            }) {
+                *existing = definition;
+            } else {
+                catalog.definitions.push(definition);
+            }
+            catalog.clone()
+        };
+        self.put_json(&self.catalog_key(), &doc).await
+    }
 }
 
 /// Map env-style segment knobs onto object-log flush config (names unchanged at product edge).

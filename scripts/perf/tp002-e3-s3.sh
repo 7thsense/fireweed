@@ -181,6 +181,8 @@ env \
   FIREWEED_S3_TEST_BUCKET="$FIREWEED_S3_TEST_BUCKET" \
   FIREWEED_S3_TEST_ACCESS_KEY="$FIREWEED_S3_TEST_ACCESS_KEY" \
   FIREWEED_S3_TEST_SECRET_KEY="$FIREWEED_S3_TEST_SECRET_KEY" \
+  # LogEngine products (AsyncObjectLogMemory/Sqlite over ObjectLogEngineStore::open_s3).
+  # Requires a clean worktree and the release resident shape enforced above.
   cargo test -p fireweed-server --release --test performance_object_log_e3_live_tests \
     performance_object_log_e3_live_tests -- --nocapture
 TEST_STATUS=$?
