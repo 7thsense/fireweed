@@ -275,6 +275,23 @@ fn shared_worker_pool() -> EngineResult<Arc<WorkerPool>> {
     }
 }
 
+/// Executor over the process-wide library I/O pool **without** wrapping a product backend.
+///
+/// Used for projection lifecycle / control-plane offload on compositions whose ports already
+/// run natively async (object-log LogEngine products). Prefer this over
+/// [`BlockingLibBackend`] when the open path must not install the process-wide port bridge
+/// (fireweed-8a023735 / API-005).
+#[cfg(any(
+    all(feature = "objectlog", feature = "postgres"),
+    all(feature = "objectlog", feature = "sqlite"),
+    test
+))]
+pub(crate) fn shared_executor() -> EngineResult<OwnedBlockingExecutor> {
+    Ok(OwnedBlockingExecutor {
+        pool: shared_worker_pool()?,
+    })
+}
+
 /// Complete, bounded blocking boundary for the library's full backend surface.
 pub(crate) struct BlockingLibBackend<B: super::LibBackend + 'static> {
     inner: Option<Arc<B>>,
@@ -289,6 +306,9 @@ impl<B: super::LibBackend + 'static> BlockingLibBackend<B> {
         })
     }
 
+    /// Shared pool handle for control-plane / lifecycle offload (not the product port bridge).
+    /// Object-log product opens use [`shared_executor`] instead of wrapping ports in this type.
+    #[allow(dead_code)] // Used by postgres coordinated open and tests; default-feature product paths may not call it.
     pub(crate) fn executor(&self) -> OwnedBlockingExecutor {
         OwnedBlockingExecutor {
             pool: Arc::clone(&self.pool),

@@ -5020,7 +5020,13 @@ fn open_objectlog_memory_projection(
     let backend = fireweed_objectlog::block_on_objectlog(
         fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store(log, 0),
     )?;
-    wrap_blocking_backend(Arc::new(backend), clock)
+    // Intentionally NOT wrapped in process-wide BlockingLibBackend — LogEngine ports are
+    // driven via ObjectLogTaskDispatcher on the process-wide multi-thread runtime
+    // (fireweed-8a023735 / API-005 native-async path).
+    Ok(Fireweed::from_runtime(RuntimeCore::new(
+        Arc::new(backend),
+        clock,
+    )))
 }
 
 /// Open a **sole-owner**, in-memory Fireweed handle (atomic durability class) — the zero-setup path.
@@ -5113,16 +5119,18 @@ pub fn open_sqlite_relational(path: &str, clock: Arc<dyn Clock>) -> EngineResult
 /// Open a **sole-owner**, object-log Fireweed handle rooted at `root`, using the shared composed engine
 /// with an in-memory projection rebuilt from the authoritative log. Requires the `objectlog` feature
 /// (default).
+///
+/// Product ports run natively async (LogEngine + `ObjectLogTaskDispatcher` on the process-wide
+/// multi-thread object-log runtime). Construction uses [`fireweed_objectlog::block_on_objectlog`],
+/// which is current-thread safe and does not install process-wide `BlockingLibBackend`.
 #[cfg(feature = "objectlog")]
 pub fn open_objectlog(
     root: impl Into<std::path::PathBuf>,
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed> {
+    // Intentionally NOT wrapped in process-wide BlockingLibBackend (fireweed-8a023735).
     let backend = Arc::new(fireweed_objectlog::composed_objectlog_backend(root)?);
-    Ok(Fireweed::from_runtime(RuntimeCore::new(
-        Arc::new(blocking_backend::BlockingLibBackend::new(backend)?),
-        clock,
-    )))
+    Ok(Fireweed::from_runtime(RuntimeCore::new(backend, clock)))
 }
 
 /// Open an authoritative object log with a disposable PostgreSQL projection behind the public Fireweed
@@ -5185,7 +5193,7 @@ pub async fn open_objectlog_postgres_async(
 fn open_objectlog_postgres_blocking(
     config: ComposedStorageConfig,
     clock: Arc<dyn Clock>,
-) -> EngineResult<ComposedRuntime<blocking_backend::BlockingLibBackend<ObjectLogPostgresBackend>>> {
+) -> EngineResult<ComposedRuntime<ObjectLogPostgresBackend>> {
     config.validate()?;
     if config.response_barrier != CommitResponseBarrier::Strict {
         return Err(EngineError::Unavailable);
@@ -5214,8 +5222,10 @@ fn open_objectlog_postgres_blocking(
     )?;
     let flush_interval = 50_u64;
     let backend = Arc::new(backend);
-    let blocking_backend = blocking_backend::BlockingLibBackend::new(Arc::clone(&backend))?;
-    let lifecycle_executor = blocking_backend.executor();
+    // Ports: native-async LogEngine path (no process-wide BlockingLibBackend).
+    // Lifecycle verify/delete/rebuild still offloads sync postgres projection work via
+    // the shared executor only (not a full product port bridge) — fireweed-8a023735.
+    let lifecycle_executor = blocking_backend::shared_executor()?;
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let weak_backend = Arc::downgrade(&backend);
     let thread_stop = Arc::clone(&stop);
@@ -5244,7 +5254,7 @@ fn open_objectlog_postgres_blocking(
         }),
     };
     Ok(ComposedRuntime {
-        runtime: RuntimeCore::new(Arc::new(blocking_backend), clock),
+        runtime: RuntimeCore::new(backend, clock),
         lifecycle,
     })
 }
@@ -5299,8 +5309,10 @@ pub(crate) fn open_composed_sqlite(
     )?;
     let flush_interval = 50_u64;
     let backend = Arc::new(backend);
-    let blocking_backend = blocking_backend::BlockingLibBackend::new(Arc::clone(&backend))?;
-    let lifecycle_executor = blocking_backend.executor();
+    // Ports: native-async LogEngine path (no process-wide BlockingLibBackend).
+    // Lifecycle verify/delete/rebuild still offloads sync SQLite projection work via
+    // the shared executor only (not a full product port bridge) — fireweed-8a023735.
+    let lifecycle_executor = blocking_backend::shared_executor()?;
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let weak_backend = Arc::downgrade(&backend);
     let thread_stop = Arc::clone(&stop);
@@ -5330,7 +5342,7 @@ pub(crate) fn open_composed_sqlite(
         }),
     };
     Ok(ComposedRuntime {
-        runtime: RuntimeCore::new(Arc::new(blocking_backend), clock),
+        runtime: RuntimeCore::new(backend, clock),
         lifecycle,
     }
     .into_fireweed())
@@ -5523,8 +5535,9 @@ mod tests {
     };
 
     use super::{
-        ClaimByQueryAt, ClaimRef, CommitEntry, CommitRequest, EntryOutcome, FinalizeKind, NewItem,
-        RuntimeCore, StorageConfig, SystemClock, apply_owned_renewal_outcomes, open, open_async,
+        ClaimByQueryAt, ClaimRef, CommitEntry, CommitRequest, EntryOutcome, FinalizeKind, LogConfig,
+        NewItem, ProjectionStoreConfig, RecoveryPolicy, ResponseBarrier, RuntimeCore,
+        SegmentConfig, StorageConfig, SystemClock, apply_owned_renewal_outcomes, open, open_async,
     };
     use crate::EngineResult;
     use fireweed_engine::{
@@ -5632,6 +5645,282 @@ mod tests {
             )
             .await?;
         assert!(matches!(outcomes.as_slice(), [EntryOutcome::Committed { .. }]));
+        Ok(())
+    }
+
+    /// Public filesystem object-log × memory open drives LogEngine products without
+    /// process-wide BlockingLibBackend. Proves claim+commit on a current-thread Tokio
+    /// runtime (fireweed-8a023735): open must not panic with block_in_place / nested
+    /// runtime errors, and the facade path is the product surface Snorri depends on.
+    #[cfg(feature = "objectlog")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_open_objectlog_filesystem_memory_claim_and_commit_on_current_thread()
+    -> EngineResult<()> {
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-ol-mem-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("object-log root");
+
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        let fireweed = open(
+            StorageConfig {
+                log: LogConfig::Filesystem {
+                    root: root.clone(),
+                },
+                projection: ProjectionStoreConfig::Memory,
+                control_plane: None,
+                authority: None,
+                response_barrier: ResponseBarrier::Strict,
+                segments: SegmentConfig {
+                    target_bytes: 1024 * 1024,
+                    max_latency_ms: 5,
+                },
+                namespace: "default".to_owned(),
+                recovery: RecoveryPolicy::default(),
+            },
+            Arc::clone(&clock),
+        )?;
+        let definition = query_definition();
+        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+
+        fireweed.create_queue(definition).await?;
+        let item_id = fireweed
+            .push(
+                &queue,
+                NewItem {
+                    priority: Some(PriorityValue::Int64(1)),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        let claimed = fireweed.claim(&queue, 1, 30_000).await?;
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].item_id, item_id);
+
+        let outcomes = fireweed
+            .commit(
+                &queue,
+                CommitRequest {
+                    request_id: None,
+                    entries: vec![CommitEntry {
+                        claim_ref: ClaimRef {
+                            item_id: claimed[0].item_id,
+                            lease_token: claimed[0]
+                                .lease_token
+                                .clone()
+                                .expect("lease token on claimed item"),
+                            lease_expires_at: claimed[0].lease_expires_at,
+                            item_version: claimed[0].item_version,
+                        },
+                        finalize: FinalizeKind::Complete,
+                        side_records: vec![],
+                        lifecycle_items: vec![],
+                        instance_fence: None,
+                    }],
+                },
+            )
+            .await?;
+        assert_eq!(outcomes.len(), 1);
+        assert!(
+            matches!(outcomes[0], EntryOutcome::Committed { .. }),
+            "expected Committed, got {:?}",
+            outcomes[0]
+        );
+        assert_eq!(fireweed.metrics(&queue).await?.complete, 1);
+        assert_eq!(fireweed.metrics(&queue).await?.leased, 0);
+
+        drop(fireweed);
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// Same cell via [`open_objectlog`] convenience constructor (filesystem×memory sugar).
+    #[cfg(feature = "objectlog")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_open_objectlog_helper_claim_and_commit_on_current_thread() -> EngineResult<()> {
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-ol-helper-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("object-log root");
+
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        let fireweed = super::open_objectlog(&root, clock)?;
+        let definition = query_definition();
+        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+
+        fireweed.create_queue(definition).await?;
+        fireweed.push(&queue, NewItem::default()).await?;
+        let claimed = fireweed.claim(&queue, 1, 30_000).await?;
+        assert_eq!(claimed.len(), 1);
+
+        let outcomes = fireweed
+            .commit(
+                &queue,
+                CommitRequest {
+                    request_id: None,
+                    entries: vec![CommitEntry {
+                        claim_ref: ClaimRef {
+                            item_id: claimed[0].item_id,
+                            lease_token: claimed[0]
+                                .lease_token
+                                .clone()
+                                .expect("lease token on claimed item"),
+                            lease_expires_at: claimed[0].lease_expires_at,
+                            item_version: claimed[0].item_version,
+                        },
+                        finalize: FinalizeKind::Complete,
+                        side_records: vec![],
+                        lifecycle_items: vec![],
+                        instance_fence: None,
+                    }],
+                },
+            )
+            .await?;
+        assert!(matches!(
+            outcomes.as_slice(),
+            [EntryOutcome::Committed { .. }]
+        ));
+
+        drop(fireweed);
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// Filesystem object-log × sqlite Strict: no process-wide BlockingLibBackend on open;
+    /// claim+commit on current-thread runtime (fireweed-8a023735).
+    #[cfg(all(feature = "objectlog", feature = "sqlite"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_open_objectlog_filesystem_sqlite_claim_and_commit_on_current_thread()
+    -> EngineResult<()> {
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-ol-sqlite-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("object-log root");
+        let proj = root.join("projection.db");
+
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        let fireweed = open(
+            StorageConfig {
+                log: LogConfig::Filesystem {
+                    root: root.join("log"),
+                },
+                projection: ProjectionStoreConfig::Sqlite { path: proj },
+                control_plane: None,
+                authority: None,
+                response_barrier: ResponseBarrier::Strict,
+                segments: SegmentConfig {
+                    target_bytes: 1024 * 1024,
+                    max_latency_ms: 5,
+                },
+                namespace: "default".to_owned(),
+                recovery: RecoveryPolicy::default(),
+            },
+            clock,
+        )?;
+        let definition = query_definition();
+        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+
+        fireweed.create_queue(definition).await?;
+        fireweed.push(&queue, NewItem::default()).await?;
+        let claimed = fireweed.claim(&queue, 1, 30_000).await?;
+        assert_eq!(claimed.len(), 1);
+
+        let outcomes = fireweed
+            .commit(
+                &queue,
+                CommitRequest {
+                    request_id: None,
+                    entries: vec![CommitEntry {
+                        claim_ref: ClaimRef {
+                            item_id: claimed[0].item_id,
+                            lease_token: claimed[0]
+                                .lease_token
+                                .clone()
+                                .expect("lease token on claimed item"),
+                            lease_expires_at: claimed[0].lease_expires_at,
+                            item_version: claimed[0].item_version,
+                        },
+                        finalize: FinalizeKind::Complete,
+                        side_records: vec![],
+                        lifecycle_items: vec![],
+                        instance_fence: None,
+                    }],
+                },
+            )
+            .await?;
+        assert!(matches!(
+            outcomes.as_slice(),
+            [EntryOutcome::Committed { .. }]
+        ));
+        assert_eq!(fireweed.metrics(&queue).await?.complete, 1);
+
+        drop(fireweed);
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// `open_async` for filesystem×memory must not panic under current-thread Tokio
+    /// (block_on_objectlog uses a dedicated thread when a handle is present).
+    #[cfg(feature = "objectlog")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_open_async_objectlog_filesystem_memory_on_current_thread() -> EngineResult<()> {
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-ol-async-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("object-log root");
+
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        let fireweed = open_async(
+            StorageConfig {
+                log: LogConfig::Filesystem { root: root.clone() },
+                projection: ProjectionStoreConfig::Memory,
+                control_plane: None,
+                authority: None,
+                response_barrier: ResponseBarrier::Strict,
+                segments: SegmentConfig {
+                    target_bytes: 1024 * 1024,
+                    max_latency_ms: 5,
+                },
+                namespace: "default".to_owned(),
+                recovery: RecoveryPolicy::default(),
+            },
+            clock,
+        )
+        .await?;
+        let definition = query_definition();
+        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        fireweed.create_queue(definition).await?;
+        fireweed.push(&queue, NewItem::default()).await?;
+        let claimed = fireweed.claim(&queue, 1, 30_000).await?;
+        assert_eq!(claimed.len(), 1);
+
+        drop(fireweed);
+        let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }
 
