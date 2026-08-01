@@ -3038,9 +3038,8 @@ dependencies = [
 
 [[package]]
 name = "object-log"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6b2f6fcc801f44e15544d62f35281434377c1301f9f9b859e0cdc018b686dbe"
+version = "0.3.1"
+source = "git+https://github.com/7thsense/object-log.git?tag=v0.3.1#dcd37c0e7de3afa26e671245faf41ee513c984ec"
 dependencies = [
  "async-trait",
  "aws-sdk-s3",
@@ -4303,7 +4302,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",

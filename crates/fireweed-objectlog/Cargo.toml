@@ -16,7 +16,7 @@ fireweed-engine = { path = "../fireweed-engine" }
 fireweed-projection = { path = "../fireweed-projection" }
 fireweed-sqlite = { path = "../fireweed-sqlite" }
 # crates.io object-log (program A substrate). Native async LogEngine.
-object-log = { version = "0.2", features = ["s3"] }
+object-log = { version = "0.3.1", git = "https://github.com/7thsense/object-log.git", tag = "v0.3.1", features = ["s3"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

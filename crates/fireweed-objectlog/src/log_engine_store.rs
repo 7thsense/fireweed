@@ -583,4 +583,91 @@ mod tests {
         assert_eq!(page.entries[0].0, positions[0]);
         assert_eq!(page.entries[0].1.command_id, env.command_id);
     }
+
+    /// fireweed-481d3e43: reopen must not overwrite sealed data objects (object-log v0.3.1).
+    /// Large multi-command frames (~20KiB) are the snorri transition-commit shape.
+    #[tokio::test]
+    async fn local_log_reopen_preserves_large_batches_across_process_boundary() {
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-olog-reopen-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let def = qdef();
+        let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        let flush = FlushConfig {
+            linger: std::time::Duration::ZERO,
+            ..FlushConfig::default()
+        };
+
+        // Generation 1: large side-record-like pause batches (inflate command_id payload).
+        {
+            let log = ObjectLogEngineStore::open_local(&root, flush)
+                .await
+                .unwrap();
+            log.register_definition(def.clone()).await.unwrap();
+            log.ensure_shard(shard.clone()).await.unwrap();
+            let epoch = log.acquire_epoch(shard.clone()).await.unwrap();
+            let big = "X".repeat(20_000);
+            let env = CommandEnvelope {
+                command_id: CommandId::new(big),
+                request_id: None,
+                request_fingerprint: None,
+                request_outcome: None,
+                item_ids: Vec::new(),
+                command: QueueCommand::PauseQueue(Default::default()),
+                checksum: CommandChecksum(0),
+                created_at: UtcTimestamp::new(1, 0).unwrap(),
+            };
+            log.append(shard.clone(), vec![env], epoch)
+                .await
+                .expect("gen1 append");
+            drop(log);
+        }
+
+        // Generation 2: reopen and append again; both generations must parse.
+        {
+            let log = ObjectLogEngineStore::open_local(&root, flush)
+                .await
+                .unwrap();
+            log.ensure_shard(shard.clone()).await.unwrap();
+            let epoch = log.current_epoch(shard.clone()).await.unwrap();
+            let env = CommandEnvelope {
+                command_id: CommandId::new("gen2"),
+                request_id: None,
+                request_fingerprint: None,
+                request_outcome: None,
+                item_ids: Vec::new(),
+                command: QueueCommand::PauseQueue(Default::default()),
+                checksum: CommandChecksum(0),
+                created_at: UtcTimestamp::new(2, 0).unwrap(),
+            };
+            log.append(shard.clone(), vec![env], epoch)
+                .await
+                .expect("gen2 append must not clobber gen1 objects");
+            let mut from = None;
+            let mut n = 0usize;
+            loop {
+                let page = log
+                    .read_from(shard.clone(), from.clone(), 64)
+                    .await
+                    .expect("reopen recovery must parse sealed batches");
+                n += page.entries.len();
+                match page.next {
+                    Some(next) if !page.entries.is_empty() => from = Some(next),
+                    _ => break,
+                }
+            }
+            assert!(n >= 2, "expected both generations, got {n}");
+            drop(log);
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
