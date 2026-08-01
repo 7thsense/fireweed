@@ -34,7 +34,8 @@ fn db_path() -> String {
         .to_string()
 }
 
-fn make() -> AsyncLogReplayBackend<fireweed_sqlite::SqliteLog, fireweed_sqlite::InMemoryProjection> {
+fn make() -> AsyncLogReplayBackend<fireweed_sqlite::SqliteLog, fireweed_sqlite::InMemoryProjection>
+{
     let p = db_path();
     CLEANED.with(|c| {
         if !c.get() {

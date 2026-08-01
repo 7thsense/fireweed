@@ -38,5 +38,11 @@ pub fn from_sqlite_log(
 ) -> EngineResult<AsyncLogReplayBackend<SqliteLog, InMemoryProjection>> {
     // offload_log=true: rusqlite whole-ops on private bounded executor.
     // offload_projection=false: InMemoryProjection is CPU-only ready-future safe.
-    assemble_async_log_replay_with_axis_offload(log, InMemoryProjection::new(), node_id, true, false)
+    assemble_async_log_replay_with_axis_offload(
+        log,
+        InMemoryProjection::new(),
+        node_id,
+        true,
+        false,
+    )
 }

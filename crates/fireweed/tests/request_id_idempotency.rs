@@ -439,10 +439,7 @@ async fn changed_body_request_id_conflicts_across_sqlite_async_reopen() {
         .push_batch_with_request_id(&q, rid.clone(), original)
         .await
         .unwrap();
-    assert!(
-        replay.is_replayed(),
-        "same body after reopen must Replayed"
-    );
+    assert!(replay.is_replayed(), "same body after reopen must Replayed");
     assert_eq!(replay.item_ids, first_ids);
     assert_eq!(
         reopened

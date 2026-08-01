@@ -137,7 +137,12 @@ async fn claim_with_metadata_equals_filters_over_memory() {
         .unwrap();
 
     let claimed = fireweed
-        .claim_with(&q, 10, 30_000, metadata_equals_compatibility("group-a", "east"))
+        .claim_with(
+            &q,
+            10,
+            30_000,
+            metadata_equals_compatibility("group-a", "east"),
+        )
         .await
         .expect("metadata_equals claim must not be Unavailable on memory");
     assert_eq!(
