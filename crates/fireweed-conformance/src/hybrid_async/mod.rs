@@ -71,10 +71,7 @@ fn flush_one() -> FlushConfig {
     flush_config_from_segment(1, 1)
 }
 
-fn open_sync(
-    root: &Path,
-    hybrid: HybridProductConfig,
-) -> HybridBackend {
+fn open_sync(root: &Path, hybrid: HybridProductConfig) -> HybridBackend {
     std::fs::create_dir_all(root).ok();
     let sqlite = root.join("projection.sqlite");
     let path = sqlite.to_str().expect("utf8 projection path");

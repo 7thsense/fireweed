@@ -15,9 +15,9 @@ use std::time::Duration;
 use fireweed_conformance::fault::{CutPoint, durable_command_count, inject_commit, spec};
 use fireweed_conformance::{envelope, item, qdef, qkey, shard, ts};
 use fireweed_engine::{
-    AsyncLogReplayBackend, Backend, CommandPosition, ControlPlaneStore, DurabilityClass, EngineError,
-    EngineResult, LogStore, ProjectionRead, ProjectionSnapshot, PushCommand, QueueCommand,
-    RawCommitFault, RawCommitOutcome, RawCommitRequest,
+    AsyncLogReplayBackend, Backend, CommandPosition, ControlPlaneStore, DurabilityClass,
+    EngineError, EngineResult, LogStore, ProjectionRead, ProjectionSnapshot, PushCommand,
+    QueueCommand, RawCommitFault, RawCommitOutcome, RawCommitRequest,
 };
 use fireweed_objectlog::{
     AsyncObjectLogHybridBackend, FlushConfig, HybridProductConfig, flush_config_from_segment,
@@ -105,7 +105,9 @@ fn unique_dir(tag: &str) -> std::path::PathBuf {
 
 // --- durable factories (stable location => drop+reopen recovers the same state) ---
 
-fn sqlite_log_factory() -> impl Fn() -> AsyncLogReplayBackend<fireweed_sqlite::SqliteLog, fireweed_sqlite::InMemoryProjection> {
+fn sqlite_log_factory()
+-> impl Fn() -> AsyncLogReplayBackend<fireweed_sqlite::SqliteLog, fireweed_sqlite::InMemoryProjection>
+{
     let path = unique_dir("sqlite").with_extension("db");
     let path = path.to_str().unwrap().to_string();
     move || fireweed_sqlite::composed_sqlite_backend(&path).expect("open composed sqlite-log")
