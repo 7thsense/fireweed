@@ -699,7 +699,6 @@ async fn upsert_dedups_on_client_item_key_over_memory() {
 }
 
 #[tokio::test]
-#[ignore = "objectlog LogEngine product stubs UpsertPort as Unavailable (Eventual product; not yet wired)"]
 async fn composed_objectlog_supports_atomic_upsert() {
     use fireweed_objectlog::composed_objectlog_backend;
     let root = std::env::temp_dir().join(format!("fireweed-facade-objlog-{}", std::process::id()));
@@ -724,6 +723,114 @@ async fn composed_objectlog_supports_atomic_upsert() {
         other => panic!("second upsert must replace, got {other:?}"),
     }
     assert_eq!(fireweed.metrics(&q).await.unwrap().pending, 1);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// AC fireweed-dd6cbcde: upsert → claim → commit_transition on objectlog × sqlite under Strict.
+#[tokio::test]
+#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+async fn objectlog_sqlite_strict_upsert_claim_commit_transition() {
+    use fireweed::{
+        EntryOutcome, ObjectLogAuthority, ObjectLogRuntimeConfig, ObjectLogStorage,
+        ProjectionConfig, RecoveryAction, RecoveryPolicy, ResponseBarrier, SegmentConfig,
+        SideRecord,
+    };
+
+    let root = std::env::temp_dir().join(format!(
+        "fireweed-facade-objlog-sqlite-strict-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let config = ObjectLogRuntimeConfig {
+        object_log: ObjectLogStorage::Local {
+            root: root.join("object-log"),
+        },
+        authority: ObjectLogAuthority::NativeConditionalWrite,
+        projection: ProjectionConfig::Sqlite {
+            path: root.join("projection.sqlite"),
+        },
+        response_barrier: ResponseBarrier::Strict,
+        segments: SegmentConfig::new(262_144, 20).unwrap(),
+        namespace: "upsert-claim-commit".into(),
+        recovery: RecoveryPolicy {
+            incompatible_projection: RecoveryAction::RebuildProjection,
+            verify_checksums: true,
+            max_tail_commands: 1_000_000,
+        },
+    };
+    let fireweed =
+        fireweed::open_objectlog_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap();
+    let q = qkey();
+    fireweed.create_queue(qdef()).await.unwrap();
+
+    let caps = fireweed.commit_capabilities(&q).unwrap();
+    assert!(
+        caps.atomic_transition_commit,
+        "Strict objectlog×sqlite must advertise atomic commit"
+    );
+
+    let key = ClientItemKey::new("work-1").unwrap();
+    let upserted = fireweed.upsert(&q, key, at(10)).await.unwrap();
+    let item_id = match upserted {
+        fireweed_engine::UpsertOutcome::Inserted { item_id } => item_id,
+        other => panic!("expected insert, got {other:?}"),
+    };
+
+    let claimed = fireweed.claim(&q, 1, 30_000).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].item_id, item_id);
+    let claim = &claimed[0];
+    let claim_ref = ClaimRef {
+        item_id: claim.item_id,
+        lease_token: claim
+            .lease_token
+            .clone()
+            .expect("claimed item carries a lease token"),
+        lease_expires_at: claim.lease_expires_at,
+        item_version: claim.item_version,
+    };
+
+    let outcomes = fireweed
+        .commit(
+            &q,
+            CommitRequest {
+                request_id: Some(RequestId::new("txn-1").unwrap()),
+                entries: vec![CommitEntry {
+                    claim_ref,
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![SideRecord {
+                        key: b"state/run-1".to_vec(),
+                        payload: Bytes::copy_from_slice(b"done"),
+                    }],
+                    lifecycle_items: vec![],
+                    instance_fence: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcomes.len(), 1);
+    assert!(matches!(&outcomes[0], EntryOutcome::Committed { .. }));
+    assert_eq!(
+        fireweed
+            .side_record(&q, b"state/run-1")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(b"done".as_slice())
+    );
+    let metrics = fireweed.metrics(&q).await.unwrap();
+    assert_eq!(
+        (metrics.pending, metrics.leased, metrics.complete),
+        (0, 0, 1)
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -1062,7 +1169,6 @@ async fn api001_reservation_policy_is_recorded_or_enforced() {
 }
 
 #[tokio::test]
-#[ignore = "objectlog LogEngine product stubs UpdateFieldsPort as Unavailable (not yet wired on AsyncObjectLog*Backend)"]
 async fn composed_objectlog_supports_read_your_write_field_mutation() {
     use fireweed_objectlog::composed_objectlog_backend;
     let root =

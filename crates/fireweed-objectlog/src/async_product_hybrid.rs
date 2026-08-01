@@ -34,6 +34,11 @@ use crate::commit_surface::{
     self, CommitIdempotency, durability_for_strict, eventual_commit_capabilities,
     new_commit_idempotency, strict_commit_capabilities,
 };
+use crate::port_surface::{
+    self, BatchUpdateIdempotency, ClaimByItemIdsIdempotency, ClaimByQueryIdempotency,
+    PreparedBatchUpdate, PreparedClaimByItemIds, PreparedClaimByQuery, PreparedUpsert,
+    new_batch_update_idempotency, new_claim_by_item_ids_idempotency, new_claim_by_query_idempotency,
+};
 
 type Proj = InProcessProjectionStore<HybridProjectionStore>;
 
@@ -112,6 +117,9 @@ pub struct AsyncObjectLogHybridBackend {
     /// True when `HybridProjectionStore::is_strict()` (public `ResponseBarrier::Strict`).
     authoritative: bool,
     commit_idempotency: CommitIdempotency,
+    batch_update_idempotency: BatchUpdateIdempotency,
+    claim_by_query_idempotency: ClaimByQueryIdempotency,
+    claim_by_item_ids_idempotency: ClaimByItemIdsIdempotency,
 }
 
 /// Open knobs for the hybrid projection axis (strict apply, deferred-flush chunk, async monitor).
@@ -194,6 +202,9 @@ impl AsyncObjectLogHybridBackend {
         let ids = Arc::new(SeqIdGen::default());
         let counters = Arc::new(QueueCounters::default());
         let commit_idempotency = new_commit_idempotency();
+        let batch_update_idempotency = new_batch_update_idempotency();
+        let claim_by_query_idempotency = new_claim_by_query_idempotency();
+        let claim_by_item_ids_idempotency = new_claim_by_item_ids_idempotency();
         let committer = Committer {
             log: Arc::clone(&log),
             projection: Arc::clone(&projection),
@@ -268,7 +279,40 @@ impl AsyncObjectLogHybridBackend {
             node_id,
             authoritative,
             commit_idempotency,
+            batch_update_idempotency,
+            claim_by_query_idempotency,
+            claim_by_item_ids_idempotency,
         })
+    }
+
+    async fn resolve_epoch(
+        &self,
+        shard: &QueueKey,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<u64> {
+        let epoch = AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?;
+        if expected_epoch.is_some_and(|expected| expected != epoch) {
+            return Err(EngineError::EpochFenced);
+        }
+        Ok(epoch)
+    }
+
+    async fn submit_envelopes(
+        &self,
+        shard: &QueueKey,
+        envelopes: Vec<CommandEnvelope>,
+        epoch: u64,
+    ) -> EngineResult<()> {
+        if envelopes.is_empty() {
+            return Ok(());
+        }
+        self.engine
+            .submit_commit(RawCommitRequest::new(shard.clone(), envelopes, epoch))
+            .await
+            .map_err(|error| {
+                EngineError::Storage(format!("async product port submission failed: {error:?}"))
+            })??;
+        Ok(())
     }
 
     fn map_claim(error: AsyncClaimError) -> EngineError {
@@ -601,19 +645,44 @@ impl PurgePort for AsyncObjectLogHybridBackend {
 impl UpsertPort for AsyncObjectLogHybridBackend {
     fn replace_if_pending(
         &self,
-        _shard: &QueueKey,
-        _client_item_key: &ClientItemKey,
-        _priority: Option<PriorityValue>,
-        _group_key: Option<GroupKey>,
-        _not_before: Option<UtcTimestamp>,
-        _payload: Option<Bytes>,
-        _fields: std::collections::BTreeMap<String, Bytes>,
-        _metadata: Metadata,
-        _entity: Option<serde_json::Value>,
-        _now: UtcTimestamp,
-        _expected_epoch: Option<u64>,
+        shard: &QueueKey,
+        client_item_key: &ClientItemKey,
+        priority: Option<PriorityValue>,
+        group_key: Option<GroupKey>,
+        not_before: Option<UtcTimestamp>,
+        payload: Option<Bytes>,
+        fields: std::collections::BTreeMap<String, Bytes>,
+        metadata: Metadata,
+        entity: Option<serde_json::Value>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
-        std::future::ready(Err(EngineError::Unavailable))
+        let client_item_key = client_item_key.clone();
+        let shard = shard.clone();
+        async move {
+            let epoch = self.resolve_epoch(&shard, expected_epoch).await?;
+            let PreparedUpsert { envelopes, outcome } = port_surface::prepare_upsert(
+                self.projection.as_ref(),
+                self.control.as_ref(),
+                self.ids.as_ref(),
+                self.counters.as_ref(),
+                self.node_id,
+                epoch,
+                &shard,
+                client_item_key,
+                priority,
+                group_key,
+                not_before,
+                payload,
+                fields,
+                metadata,
+                entity,
+                now,
+            )
+            .await?;
+            self.submit_envelopes(&shard, envelopes, epoch).await?;
+            Ok(outcome)
+        }
     }
 }
 
@@ -795,20 +864,38 @@ impl ProjectionRead for AsyncObjectLogHybridBackend {
     }
 }
 
-// LibBackend / facade ports: defaults where available; explicit Unavailable for required methods.
+// LibBackend / facade ports: full product surface (parity with AsyncLogReplayBackend).
 impl fireweed_engine::UpdateFieldsPort for AsyncObjectLogHybridBackend {
     fn update_fields(
         &self,
-        _shard: &QueueKey,
-        _item_id: ItemId,
-        _field_ops: std::collections::BTreeMap<String, Option<Bytes>>,
-        _payload: fireweed_engine::PayloadUpdate,
-        _entity: Option<serde_json::Value>,
-        _expected_item_version: Option<u64>,
-        _now: UtcTimestamp,
-        _expected_epoch: Option<u64>,
+        shard: &QueueKey,
+        item_id: ItemId,
+        field_ops: std::collections::BTreeMap<String, Option<Bytes>>,
+        payload: fireweed_engine::PayloadUpdate,
+        entity: Option<serde_json::Value>,
+        expected_item_version: Option<u64>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
-        std::future::ready(Err(EngineError::Unavailable))
+        let shard = shard.clone();
+        async move {
+            let epoch = self.resolve_epoch(&shard, expected_epoch).await?;
+            let envelope = port_surface::prepare_update_fields(
+                self.projection.as_ref(),
+                self.control.as_ref(),
+                self.ids.as_ref(),
+                &shard,
+                item_id,
+                field_ops,
+                payload,
+                entity,
+                expected_item_version,
+                now,
+            )
+            .await?;
+            self.submit_envelopes(&shard, vec![envelope], epoch).await?;
+            port_surface::item_version_after(self.projection.as_ref(), &shard, item_id)
+        }
     }
 }
 impl fireweed_engine::CommitTransitionPort for AsyncObjectLogHybridBackend {
@@ -910,7 +997,53 @@ impl fireweed_engine::RecoveryReadPort for AsyncObjectLogHybridBackend {
     }
 }
 
-impl fireweed_engine::BatchUpdatePort for AsyncObjectLogHybridBackend {}
+impl fireweed_engine::BatchUpdatePort for AsyncObjectLogHybridBackend {
+    fn batch_update(
+        &self,
+        shard: &QueueKey,
+        request: fireweed_engine::BatchUpdateRequest,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::BatchUpdateResponse>> + Send
+    {
+        let shard = shard.clone();
+        async move {
+            let epoch = self.resolve_epoch(&shard, expected_epoch).await?;
+            match port_surface::prepare_batch_update(
+                self.projection.as_ref(),
+                self.control.as_ref(),
+                self.ids.as_ref(),
+                &self.batch_update_idempotency,
+                self.supports_gates(),
+                &shard,
+                request,
+                now,
+            )
+            .await?
+            {
+                PreparedBatchUpdate::Replay(response) => Ok(response),
+                PreparedBatchUpdate::Proceed {
+                    envelopes,
+                    response,
+                    request_id,
+                    fingerprint,
+                    expires_at,
+                } => {
+                    self.submit_envelopes(&shard, envelopes, epoch).await?;
+                    port_surface::record_batch_update_idempotency(
+                        &self.batch_update_idempotency,
+                        &shard,
+                        request_id,
+                        fingerprint,
+                        response.clone(),
+                        expires_at,
+                    );
+                    Ok(response)
+                }
+            }
+        }
+    }
+}
 impl fireweed_engine::ItemMutationPort for AsyncObjectLogHybridBackend {
     fn mutate_items(
         &self,
@@ -922,30 +1055,288 @@ impl fireweed_engine::ItemMutationPort for AsyncObjectLogHybridBackend {
         std::future::ready(Err(EngineError::Unavailable))
     }
 }
-impl fireweed_engine::SetGatesPort for AsyncObjectLogHybridBackend {}
-impl fireweed_engine::ReschedulePort for AsyncObjectLogHybridBackend {}
-impl fireweed_engine::DiscoveryPort for AsyncObjectLogHybridBackend {}
+impl fireweed_engine::SetGatesPort for AsyncObjectLogHybridBackend {
+    fn set_gates(
+        &self,
+        shard: &QueueKey,
+        command: fireweed_engine::SetGatesCommand,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let shard = shard.clone();
+        async move {
+            let epoch = self.resolve_epoch(&shard, expected_epoch).await?;
+            let envelope = port_surface::make_envelope(
+                self.ids.as_ref(),
+                QueueCommand::SetGates(command),
+                Vec::new(),
+                now,
+            );
+            self.submit_envelopes(&shard, vec![envelope], epoch).await
+        }
+    }
+}
+impl fireweed_engine::ReschedulePort for AsyncObjectLogHybridBackend {
+    fn reschedule(
+        &self,
+        shard: &QueueKey,
+        item_id: ItemId,
+        set_priority: fireweed_engine::ScheduleUpdate<PriorityValue>,
+        set_not_before: fireweed_engine::ScheduleUpdate<UtcTimestamp>,
+        expected_item_version: Option<u64>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        let shard = shard.clone();
+        async move {
+            let epoch = self.resolve_epoch(&shard, expected_epoch).await?;
+            let envelope = port_surface::prepare_reschedule(
+                self.projection.as_ref(),
+                self.ids.as_ref(),
+                &shard,
+                item_id,
+                set_priority,
+                set_not_before,
+                expected_item_version,
+                now,
+            )?;
+            self.submit_envelopes(&shard, vec![envelope], epoch).await?;
+            port_surface::item_version_after(self.projection.as_ref(), &shard, item_id)
+        }
+    }
+}
+impl fireweed_engine::DiscoveryPort for AsyncObjectLogHybridBackend {
+    fn discover_active_scopes(
+        &self,
+        shard: &QueueKey,
+        granularity: fireweed_engine::DiscoveryGranularity,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<
+        Output = EngineResult<Vec<fireweed_engine::ActiveScope>>,
+    > + Send {
+        std::future::ready(self.projection.with_store(|p| {
+            ProjectionStore::discover_active_scopes(p, shard, granularity, now)
+        }))
+    }
+}
 impl fireweed_engine::IndexQueryPort for AsyncObjectLogHybridBackend {
     fn index_get_unique(
         &self,
-        _shard: &QueueKey,
-        _index: &str,
-        _key: &[Vec<u8>],
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
     ) -> impl std::future::Future<Output = EngineResult<Option<fireweed_engine::IndexHit>>> + Send
     {
-        std::future::ready(Err(EngineError::Unavailable))
+        std::future::ready(port_surface::index_get_unique(
+            self.projection.as_ref(),
+            shard,
+            index,
+            key,
+        ))
     }
     fn index_lookup(
         &self,
-        _shard: &QueueKey,
-        _index: &str,
-        _key: &[Vec<u8>],
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
     ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::IndexHit>>> + Send
     {
-        std::future::ready(Err(EngineError::Unavailable))
+        std::future::ready(port_surface::index_lookup(
+            self.projection.as_ref(),
+            shard,
+            index,
+            key,
+        ))
     }
 }
-impl fireweed_engine::HotProjectionQueryPort for AsyncObjectLogHybridBackend {}
+impl fireweed_engine::HotProjectionQueryPort for AsyncObjectLogHybridBackend {
+    fn hot_projection_capabilities(
+        &self,
+        shard: &QueueKey,
+    ) -> fireweed_core::QueryCapabilityFlags {
+        port_surface::hot_projection_capabilities(self.projection.as_ref(), shard)
+    }
+
+    fn range_scan(
+        &self,
+        shard: &QueueKey,
+        request: fireweed_core::RangeScanRequest,
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_core::RangeScanResponse>> + Send
+    {
+        std::future::ready(port_surface::range_scan(
+            self.projection.as_ref(),
+            shard,
+            request,
+        ))
+    }
+
+    fn grouped_aggregate(
+        &self,
+        shard: &QueueKey,
+        request: fireweed_core::GroupedAggregateRequest,
+    ) -> impl std::future::Future<
+        Output = EngineResult<fireweed_core::GroupedAggregateResponse>,
+    > + Send {
+        std::future::ready(port_surface::grouped_aggregate(
+            self.projection.as_ref(),
+            shard,
+            request,
+        ))
+    }
+
+    fn metrics_by_query(
+        &self,
+        shard: &QueueKey,
+        request: fireweed_core::MetricsByQueryRequest,
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::QueueMetrics>> + Send {
+        std::future::ready(port_surface::metrics_by_query(
+            self.projection.as_ref(),
+            shard,
+            request,
+        ))
+    }
+
+    fn declared_bucket_segment(
+        &self,
+        shard: &QueueKey,
+        request: fireweed_core::DeclaredBucketSegmentRequest,
+    ) -> impl std::future::Future<
+        Output = EngineResult<fireweed_core::DeclaredBucketSegmentResponse>,
+    > + Send {
+        std::future::ready(port_surface::declared_bucket_segment(
+            self.projection.as_ref(),
+            shard,
+            request,
+        ))
+    }
+
+    fn bounded_mutation(
+        &self,
+        shard: &QueueKey,
+        request: fireweed_core::BoundedMutationRequest,
+        context: fireweed_engine::BoundedMutationContext,
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_core::BoundedMutationResponse>> + Send
+    {
+        let shard = shard.clone();
+        async move {
+            let epoch = self.resolve_epoch(&shard, context.expected_epoch).await?;
+            let prepared = port_surface::prepare_bounded_mutation(
+                self.projection.as_ref(),
+                self.ids.as_ref(),
+                &shard,
+                request,
+                context,
+            )?;
+            for (envelope, _, _) in prepared.envelopes {
+                self.submit_envelopes(&shard, vec![envelope], epoch).await?;
+            }
+            Ok(prepared.response)
+        }
+    }
+
+    fn claim_by_query(
+        &self,
+        shard: &QueueKey,
+        request: fireweed_core::ClaimByQueryRequest,
+        context: fireweed_engine::ClaimByQueryContext,
+    ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
+        let shard = shard.clone();
+        async move {
+            let epoch = self.resolve_epoch(&shard, context.expected_epoch).await?;
+            match port_surface::prepare_claim_by_query(
+                self.projection.as_ref(),
+                self.control.as_ref(),
+                self.ids.as_ref(),
+                &self.claim_by_query_idempotency,
+                &shard,
+                request,
+                context,
+            )
+            .await?
+            {
+                PreparedClaimByQuery::Replay(claimed) => Ok(claimed),
+                PreparedClaimByQuery::Proceed {
+                    envelope,
+                    item_ids,
+                    lease_token,
+                    request_id,
+                    fingerprint,
+                    replay_expires_at,
+                } => {
+                    self.submit_envelopes(&shard, vec![envelope], epoch).await?;
+                    let items =
+                        port_surface::render_claimed(self.projection.as_ref(), &shard, &item_ids)?;
+                    port_surface::record_claim_by_query_idempotency(
+                        &self.claim_by_query_idempotency,
+                        &shard,
+                        request_id,
+                        fingerprint,
+                        item_ids,
+                        lease_token,
+                        replay_expires_at,
+                    );
+                    Ok(Claimed {
+                        items,
+                        ..Default::default()
+                    })
+                }
+            }
+        }
+    }
+
+    fn claim_by_item_ids(
+        &self,
+        shard: &QueueKey,
+        request: fireweed_core::ClaimByItemIdsRequest,
+        context: fireweed_engine::ClaimByQueryContext,
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::ClaimByItemIdsResponse>> + Send
+    {
+        let shard = shard.clone();
+        async move {
+            let epoch = self.resolve_epoch(&shard, context.expected_epoch).await?;
+            match port_surface::prepare_claim_by_item_ids(
+                self.projection.as_ref(),
+                self.control.as_ref(),
+                self.ids.as_ref(),
+                &self.claim_by_item_ids_idempotency,
+                &shard,
+                request,
+                context,
+            )
+            .await?
+            {
+                PreparedClaimByItemIds::Replay(response) => Ok(response),
+                PreparedClaimByItemIds::Proceed {
+                    envelope,
+                    claim_item_ids,
+                    lease_token,
+                    outcomes,
+                    request_id,
+                    fingerprint,
+                    replay_expires_at,
+                } => {
+                    self.submit_envelopes(&shard, vec![envelope], epoch).await?;
+                    let items = port_surface::render_claimed(
+                        self.projection.as_ref(),
+                        &shard,
+                        &claim_item_ids,
+                    )?;
+                    port_surface::record_claim_by_item_ids_idempotency(
+                        &self.claim_by_item_ids_idempotency,
+                        &shard,
+                        request_id,
+                        fingerprint,
+                        claim_item_ids,
+                        lease_token,
+                        outcomes.clone(),
+                        replay_expires_at,
+                    );
+                    Ok(fireweed_engine::ClaimByItemIdsResponse { items, outcomes })
+                }
+            }
+        }
+    }
+}
 impl fireweed_engine::HistoricalProjectionRead for AsyncObjectLogHybridBackend {
     type AsOfProjection = fireweed_projection::InMemoryProjection;
     fn current_position(

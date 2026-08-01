@@ -16,6 +16,7 @@ pub mod compose_log;
 mod log_engine_store;
 pub mod maintenance;
 pub mod object_store_observability;
+mod port_surface;
 mod segment_config;
 pub mod storage_generation;
 

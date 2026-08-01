@@ -26,10 +26,11 @@
 //! plans, recovery poison/backpressure/lineage, `install_recovery_shard`, flush_deferred, gates support
 //! surface already partial, commit_transition / side records, bounded mutation, etc.
 //!
-//! Compared to sync `ComposedBackend` product ports, `AsyncComposedBackend` still needs planners/ops for:
-//! upsert, update_fields, reschedule, reassign (beyond cohort), full ProjectionRead surface on adapters,
-//! IndexQueryPort, SnapshotStore, CommitTransitionPort, BatchUpdatePort, HotProjectionQueryPort, recover
-//! on open parity, change-record emission hooks.
+//! Compared to sync `ComposedBackend` product ports, `AsyncComposedBackend` / product adapters still need
+//! planners/ops for: reschedule, reassign (beyond cohort), SnapshotStore, ItemMutationPort on objectlog,
+//! recover on open parity, change-record emission hooks. Objectlog products (fireweed-dd6cbcde) now wire
+//! upsert, update_fields, CommitTransitionPort (Strict), BatchUpdatePort, HotProjectionQueryPort, and
+//! IndexQueryPort via `fireweed_objectlog::port_surface` (parity with `AsyncLogReplayBackend`).
 //!
 //! Temporary bridges (`InProcessLogStore` / `BlockingLogStore` over sync `LogStore`) exist only until
 //! each backend implements async axes natively; object-log must not use BlockingLogStore after program A.
