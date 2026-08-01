@@ -9,20 +9,25 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use fireweed_core::{
-    ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, PriorityValue, QueueDefinition,
-    RequestId, TenantId, UtcTimestamp,
+    BodyHash, ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, PriorityValue,
+    QueueDefinition, RequestId, TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
     AsyncClaimError, AsyncCommitStrategy, AsyncComposedBackend, AsyncControlPlane,
     AsyncFinalizeRequest, AsyncLogStore, AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError,
-    AsyncPushRequest, AsyncRenewRequest, Backend, ClaimPort, ClaimRequest, Claimed, CommandChecksum,
-    CommandEnvelope, ControlPlaneStore, CreateQueueOutcome, DurabilityClass, EngineError,
-    EngineResult, FinalizeOutcome, FinalizePort, FinalizeTarget, IdGen, InProcessControlPlane,
+    AsyncPushRequest, AsyncRenewRequest, Backend, ClaimPort, ClaimRef, ClaimRequest, Claimed,
+    CommandChecksum, CommandEnvelope, CommandPage, CommandPosition, CommitEntryStatus,
+    CommitOutcomeEntry, CommitTransitionEntry, ControlPlane, ControlPlaneStore, CreateQueueOutcome,
+    DurabilityClass, EngineError, EngineResult, EntryRecovery, FinalizeCommand, FinalizeKind,
+    FinalizeOutcome, FinalizePort, FinalizeTarget, IdGen, InProcessControlPlane, LogRead,
     OwnedTask, ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner,
-    ProjectionRead, ProjectionStore, PurgePort, PushPort, PushSpec, QueueCommand, QueueCounters,
-    QueueKey, RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort,
-    ReclaimDriver, ReclaimPort, RenewLeasePort, RenewTarget, SeparateReplayCommit,
-    SeparateReplayCommitter, TickReport, UpsertOutcome, UpsertPort,
+    ProjectionRead, ProjectionStore, PurgePort, PushCommand, PushPort, PushSpec, QueueCommand,
+    QueueCounters, QueueKey, RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand,
+    ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort, RenewTarget,
+    RequestIdReplayProbe, RequestOutcome, SeparateReplayCommit, SeparateReplayCommitter,
+    TickReport, UpsertOutcome, UpsertPort, WriteSideRecordsCommand, build_push_items,
+    commit_body_hash, compile_entity_schema, outcome_entry_from_recovery, push_body_hash,
+    validate_distinct_commit_claims, validate_entity, validate_gate_push,
 };
 use fireweed_projection::{AsyncInMemoryProjection, InMemoryProjection};
 use object_log::FlushConfig;
@@ -34,7 +39,8 @@ use crate::commit_surface::{
 use crate::port_surface::{
     self, BatchUpdateIdempotency, ClaimByItemIdsIdempotency, ClaimByQueryIdempotency,
     PreparedBatchUpdate, PreparedClaimByItemIds, PreparedClaimByQuery, PreparedUpsert,
-    new_batch_update_idempotency, new_claim_by_item_ids_idempotency, new_claim_by_query_idempotency,
+    new_batch_update_idempotency, new_claim_by_item_ids_idempotency,
+    new_claim_by_query_idempotency,
 };
 use crate::recovery_stats::{RecoveryStats, RecoveryStatsMap, replay_log_into_projection};
 
@@ -278,13 +284,9 @@ impl AsyncObjectLogMemoryBackend {
             AsyncProjectionStore::ensure_shard(projection.as_ref(), definition.clone()).await?;
             let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             // Ephemeral in-memory projection: exact genesis replay of the durable log.
-            let stats = replay_log_into_projection(
-                log.as_ref(),
-                projection.as_ref(),
-                &shard,
-                false,
-            )
-            .await?;
+            let stats =
+                replay_log_into_projection(log.as_ref(), projection.as_ref(), &shard, false)
+                    .await?;
             recovery_stats.insert(shard, stats);
         }
         Ok(Self {
@@ -999,12 +1001,13 @@ impl fireweed_engine::DiscoveryPort for AsyncObjectLogMemoryBackend {
         shard: &QueueKey,
         granularity: fireweed_engine::DiscoveryGranularity,
         now: UtcTimestamp,
-    ) -> impl std::future::Future<
-        Output = EngineResult<Vec<fireweed_engine::ActiveScope>>,
-    > + Send {
-        std::future::ready(self.projection.with_store(|p| {
-            ProjectionStore::discover_active_scopes(p, shard, granularity, now)
-        }))
+    ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::ActiveScope>>> + Send
+    {
+        std::future::ready(
+            self.projection.with_store(|p| {
+                ProjectionStore::discover_active_scopes(p, shard, granularity, now)
+            }),
+        )
     }
 }
 impl fireweed_engine::IndexQueryPort for AsyncObjectLogMemoryBackend {
@@ -1038,10 +1041,7 @@ impl fireweed_engine::IndexQueryPort for AsyncObjectLogMemoryBackend {
     }
 }
 impl fireweed_engine::HotProjectionQueryPort for AsyncObjectLogMemoryBackend {
-    fn hot_projection_capabilities(
-        &self,
-        shard: &QueueKey,
-    ) -> fireweed_core::QueryCapabilityFlags {
+    fn hot_projection_capabilities(&self, shard: &QueueKey) -> fireweed_core::QueryCapabilityFlags {
         port_surface::hot_projection_capabilities(self.projection.as_ref(), shard)
     }
 
@@ -1062,9 +1062,8 @@ impl fireweed_engine::HotProjectionQueryPort for AsyncObjectLogMemoryBackend {
         &self,
         shard: &QueueKey,
         request: fireweed_core::GroupedAggregateRequest,
-    ) -> impl std::future::Future<
-        Output = EngineResult<fireweed_core::GroupedAggregateResponse>,
-    > + Send {
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_core::GroupedAggregateResponse>> + Send
+    {
         std::future::ready(port_surface::grouped_aggregate(
             self.projection.as_ref(),
             shard,
@@ -1389,6 +1388,227 @@ impl ProjectionRead for AsyncObjectLogMemoryBackend {
                 emission_cursor.as_ref(),
             )
         }))
+    }
+}
+
+impl LogRead for AsyncObjectLogMemoryBackend {
+    fn read_from(
+        &self,
+        shard: &QueueKey,
+        from: Option<CommandPosition>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<CommandPage>> + Send {
+        AsyncLogStore::read_from(self.log.as_ref(), shard.clone(), from, limit)
+    }
+}
+
+/// Harness probe for AC-TXN-3 mid-pipeline request_id cuts (append→apply window).
+impl RequestIdReplayProbe for AsyncObjectLogMemoryBackend {
+    fn build_request_id_push_envelope(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<(CommandEnvelope, Vec<ItemId>)> {
+        let supports_gates = self.projection.with_store(|p| p.supports_gates());
+        validate_gate_push(supports_gates, &items)?;
+        let fingerprint = push_body_hash(&items)?;
+        let def = ControlPlane::queue_definition(self.control.as_ref(), shard)?;
+        if items.is_empty() {
+            return Err(EngineError::Invalid("push requires at least one item"));
+        }
+        let schema = def
+            .entity_schema
+            .as_ref()
+            .and_then(|esd| esd.entity_schema.as_ref())
+            .map(compile_entity_schema)
+            .transpose()?;
+        for item in &items {
+            validate_entity(schema.as_ref(), item.entity.as_ref())?;
+        }
+        let max_attempts = def.retry_policy.max_attempts;
+        let epoch = expected_epoch.unwrap_or_else(|| {
+            crate::block_on_objectlog(AsyncLogStore::current_epoch(
+                self.log.as_ref(),
+                shard.clone(),
+            ))
+            .unwrap_or(0)
+        });
+        let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
+        let (push_items, ids) =
+            build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
+        self.projection
+            .with_store(|p| p.index_validate_push(shard, &push_items))?;
+        let env = CommandEnvelope {
+            command_id: self.ids.next_command_id(),
+            request_id: Some(request_id),
+            request_fingerprint: Some(fingerprint.0),
+            request_outcome: Some(RequestOutcome::Push {
+                item_ids: ids.clone(),
+            }),
+            item_ids: ids.clone(),
+            command: QueueCommand::Push(PushCommand { items: push_items }),
+            checksum: CommandChecksum(0),
+            created_at: now,
+        };
+        Ok((env, ids))
+    }
+
+    fn build_request_id_commit_envelope(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        claim_ref: ClaimRef,
+        finalize: FinalizeKind,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<(CommandEnvelope, BodyHash)> {
+        let entry = CommitTransitionEntry {
+            claim_ref: claim_ref.clone(),
+            additional_claim_refs: Vec::new(),
+            finalize,
+            side_records: Vec::new(),
+            lifecycle_items: Vec::new(),
+            instance_fence: None,
+        };
+        let fingerprint = commit_body_hash(std::slice::from_ref(&entry))?;
+        let item_id = claim_ref.item_id;
+        let _ = expected_epoch;
+        let supports = self
+            .projection
+            .with_store(|p| p.supports_commit_transition());
+        if !supports {
+            return Err(EngineError::Unavailable);
+        }
+        self.projection
+            .with_store(|p| p.commit_validate(shard, std::slice::from_ref(&claim_ref), now))?;
+        let env = CommandEnvelope {
+            command_id: self.ids.next_command_id(),
+            request_id: Some(request_id),
+            request_fingerprint: Some(fingerprint.0),
+            request_outcome: None,
+            item_ids: vec![item_id],
+            command: QueueCommand::Finalize(FinalizeCommand {
+                outcomes: vec![FinalizeOutcome::new(item_id, finalize)],
+            }),
+            checksum: CommandChecksum(0),
+            created_at: now,
+        };
+        Ok((env, fingerprint))
+    }
+
+    fn build_request_id_commit_envelopes(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        entries: Vec<CommitTransitionEntry>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<(Vec<CommandEnvelope>, BodyHash)> {
+        let fingerprint = commit_body_hash(&entries)?;
+        let _ = expected_epoch;
+        let supports = self
+            .projection
+            .with_store(|p| p.supports_commit_transition());
+        if !supports {
+            return Err(EngineError::Unavailable);
+        }
+        let commit_fingerprint = fingerprint.0;
+        let mut envelopes: Vec<CommandEnvelope> = Vec::new();
+        let mut recovery: Vec<EntryRecovery> = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if !entry.side_records.is_empty()
+                || !entry.lifecycle_items.is_empty()
+                || entry.instance_fence.is_some()
+            {
+                return Err(EngineError::Invalid(
+                    "build_request_id_commit_envelopes: finalize-only entries",
+                ));
+            }
+            let claim_ref = entry.claim_ref;
+            let consumed_input_id = claim_ref.item_id;
+            let additional_claim_refs = entry.additional_claim_refs;
+            let additional_consumed_input_ids = additional_claim_refs
+                .iter()
+                .map(|claim| claim.item_id)
+                .collect::<Vec<_>>();
+            let mut claim_refs = Vec::with_capacity(1 + additional_claim_refs.len());
+            claim_refs.push(claim_ref);
+            claim_refs.extend(additional_claim_refs);
+            if let Err(error) = validate_distinct_commit_claims(&claim_refs[0], &claim_refs[1..]) {
+                recovery.push(EntryRecovery {
+                    consumed_input_id,
+                    additional_consumed_input_ids,
+                    instance: None,
+                    side_record_keys: Vec::new(),
+                    lifecycle_item_ids: Vec::new(),
+                    status: CommitEntryStatus::Rejected(error),
+                });
+                continue;
+            }
+            match self
+                .projection
+                .with_store(|p| p.commit_validate(shard, &claim_refs, now))
+            {
+                Ok(()) => {
+                    envelopes.push(CommandEnvelope {
+                        command_id: self.ids.next_command_id(),
+                        request_id: Some(request_id.clone()),
+                        request_fingerprint: Some(commit_fingerprint),
+                        request_outcome: None,
+                        item_ids: claim_refs.iter().map(|claim| claim.item_id).collect(),
+                        command: QueueCommand::Finalize(FinalizeCommand {
+                            outcomes: claim_refs
+                                .iter()
+                                .map(|claim| FinalizeOutcome::new(claim.item_id, entry.finalize))
+                                .collect(),
+                        }),
+                        checksum: CommandChecksum(0),
+                        created_at: now,
+                    });
+                    recovery.push(EntryRecovery {
+                        consumed_input_id,
+                        additional_consumed_input_ids,
+                        instance: None,
+                        side_record_keys: Vec::new(),
+                        lifecycle_item_ids: Vec::new(),
+                        status: CommitEntryStatus::Committed,
+                    });
+                }
+                Err(error) => recovery.push(EntryRecovery {
+                    consumed_input_id,
+                    additional_consumed_input_ids,
+                    instance: None,
+                    side_record_keys: Vec::new(),
+                    lifecycle_item_ids: Vec::new(),
+                    status: CommitEntryStatus::Rejected(error),
+                }),
+            }
+        }
+        let has_rejected = recovery
+            .iter()
+            .any(|r| matches!(r.status, CommitEntryStatus::Rejected(_)));
+        if has_rejected {
+            let outcome_entries: Vec<CommitOutcomeEntry> =
+                recovery.iter().map(outcome_entry_from_recovery).collect();
+            envelopes.push(CommandEnvelope {
+                command_id: self.ids.next_command_id(),
+                request_id: Some(request_id),
+                request_fingerprint: Some(commit_fingerprint),
+                request_outcome: Some(RequestOutcome::CommitTransition {
+                    entries: outcome_entries,
+                }),
+                item_ids: Vec::new(),
+                command: QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                    records: Vec::new(),
+                }),
+                checksum: CommandChecksum(0),
+                created_at: now,
+            });
+        }
+        Ok((envelopes, fingerprint))
     }
 }
 

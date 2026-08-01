@@ -14,7 +14,7 @@ use fireweed_core::{
     BodyHash, BoundedMutationRequest, BoundedMutationResponse, ClaimByItemIdClass,
     ClaimByItemIdsDisposition, ClaimByItemIdsOutcome, ClaimByItemIdsRequest, ClaimByQueryRequest,
     ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, MetricsByQueryRequest,
-    PriorityValue, QueueDefinition, QueueId, QueryCapabilityFlags, RangeScanRequest, RequestId,
+    PriorityValue, QueryCapabilityFlags, QueueDefinition, QueueId, RangeScanRequest, RequestId,
     TenantId, UtcTimestamp,
 };
 
@@ -23,23 +23,25 @@ use crate::{
     AsyncControlPlane, AsyncLifecycleError, AsyncLogStore, AsyncProjectionStore, AsyncPurgeRequest,
     AsyncPushError, AsyncPushRequest, AsyncReclaimRequest, Backend, BatchUpdatePort,
     BatchUpdateRequest, BatchUpdateResponse, BoundedMutationContext, ClaimByItemIdsResponse,
-    ClaimByQueryContext, ClaimCommand, ClaimPort, ClaimRequest, Claimed, CommandChecksum,
-    CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore, CreateQueueOutcome,
-    DurabilityClass, EngineError, EngineResult, FinalizeCommand, FinalizeKind, FinalizeOutcome,
-    FinalizePort, HotProjectionQueryPort, IdGen, IdempotencyDecision, InProcessControlPlane,
-    InProcessLogStore, InProcessProjectionStore, IndexHit, IndexQueryPort,
+    ClaimByQueryContext, ClaimCommand, ClaimPort, ClaimRef, ClaimRequest, Claimed, CommandChecksum,
+    CommandEnvelope, CommandId, CommandPage, CommandPosition, CommitEntryStatus,
+    CommitOutcomeEntry, CommitTransitionEntry, ControlPlane, ControlPlaneStore, CreateQueueOutcome,
+    DurabilityClass, EngineError, EngineResult, EntryRecovery, FinalizeCommand, FinalizeKind,
+    FinalizeOutcome, FinalizePort, HotProjectionQueryPort, IdGen, IdempotencyDecision,
+    InProcessControlPlane, InProcessLogStore, InProcessProjectionStore, IndexHit, IndexQueryPort,
     InlineOwnedTaskDispatcher, ItemView, LeaseView, LiveItemView, LogRead, LogStore, OwnedTask,
     PayloadUpdate, PendingPage, PendingSummary, ProjectionClaimPlanner, ProjectionLifecyclePlanner,
     ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner, ProjectionSnapshot,
     ProjectionStore, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand,
     QueueCounters, QueueIdempotencyCache, QueueKey, QueueMetrics, RawCommitFault, RawCommitOutcome,
     RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SnapshotRef, SnapshotStore,
-    TerminalEmissionMetrics, TickReport, UnifiedAtomicCommit, UnifiedAtomicCommitter,
-    UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, WriteSideRecordsCommand,
-    batch_update_body_hash, claim_by_item_ids_body_hash, claim_by_query_body_hash,
-    compile_entity_schema, generate_query_lease_token, plan_batch_update,
-    validate_api001_reserved_write_fields, validate_entity,
+    RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, RequestIdReplayProbe, RequestOutcome,
+    SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport, UnifiedAtomicCommit,
+    UnifiedAtomicCommitter, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    WriteSideRecordsCommand, batch_update_body_hash, build_push_items, claim_by_item_ids_body_hash,
+    claim_by_query_body_hash, commit_body_hash, compile_entity_schema, generate_query_lease_token,
+    outcome_entry_from_recovery, plan_batch_update, validate_api001_reserved_write_fields,
+    validate_entity, validate_gate_push,
 };
 
 /// Resolve the push request-id body fingerprint for ledger record/rebuild.
@@ -139,8 +141,12 @@ where
             if matches!(fault, RawCommitFault::AfterAppendBeforeApply) {
                 return Ok(RawCommitOutcome::appended(positions));
             }
-            AsyncProjectionStore::apply_live(projection.as_ref(), positions.clone(), commands.clone())
-                .await?;
+            AsyncProjectionStore::apply_live(
+                projection.as_ref(),
+                positions.clone(),
+                commands.clone(),
+            )
+            .await?;
             // Record push request-id outcomes after a successful atomic apply (sync composition parity).
             // Expiry must honor the queue's request_id_retention_ms (not a hardcoded window).
             let retention_ms = definition.request_id_retention_ms;
@@ -250,9 +256,8 @@ where
         targets: Vec<crate::FinalizeTarget>,
         now: UtcTimestamp,
         default_max_attempts: u32,
-    ) -> impl std::future::Future<
-        Output = EngineResult<Vec<crate::FinalizeLeaseMember>>,
-    > + Send {
+    ) -> impl std::future::Future<Output = EngineResult<Vec<crate::FinalizeLeaseMember>>> + Send
+    {
         AsyncProjectionStore::finalize_validate(
             self.inner.as_ref(),
             shard,
@@ -322,8 +327,7 @@ where
         compatibility: crate::ClaimCompatibility,
         now: UtcTimestamp,
         max_items: usize,
-    ) -> impl std::future::Future<Output = EngineResult<crate::RichClaimSelection>> + Send
-    {
+    ) -> impl std::future::Future<Output = EngineResult<crate::RichClaimSelection>> + Send {
         AsyncProjectionStore::select_rich_claim(
             self.inner.as_ref(),
             shard,
@@ -338,8 +342,7 @@ where
         &self,
         shard: QueueKey,
         ids: Vec<ItemId>,
-    ) -> impl std::future::Future<Output = EngineResult<Vec<crate::ClaimedItem>>> + Send
-    {
+    ) -> impl std::future::Future<Output = EngineResult<Vec<crate::ClaimedItem>>> + Send {
         AsyncProjectionStore::render_claimed(self.inner.as_ref(), shard, ids)
     }
 
@@ -412,10 +415,7 @@ type ClaimByQueryIdempotency =
     Mutex<HashMap<QueueKey, QueueIdempotencyCache<(Vec<ItemId>, LeaseToken)>>>;
 /// Claim-by-item-ids request-id cache: claimed ids + token + per-id outcomes while leases remain replayable.
 type ClaimByItemIdsIdempotency = Mutex<
-    HashMap<
-        QueueKey,
-        QueueIdempotencyCache<(Vec<ItemId>, LeaseToken, Vec<ClaimByItemIdsOutcome>)>,
-    >,
+    HashMap<QueueKey, QueueIdempotencyCache<(Vec<ItemId>, LeaseToken, Vec<ClaimByItemIdsOutcome>)>>,
 >;
 /// BatchUpdate request-id cache (API-001 ordered outcomes).
 type BatchUpdateIdempotency = Mutex<HashMap<QueueKey, QueueIdempotencyCache<BatchUpdateResponse>>>;
@@ -617,7 +617,6 @@ where
         .expect("rebuild with_node_id")
     }
 
-
     /// Observability/test seam: run `f` against the log under its mutex.
     pub fn with_log<R>(&self, f: impl FnOnce(&L) -> R) -> R {
         self.log.with_store(f)
@@ -661,9 +660,8 @@ where
         sink.emit(shard, &records)?;
         if let Some((position, _)) = page.entries.last() {
             let position = position.clone();
-            self.log.with_store_mut(|log| {
-                LogStore::set_emission_cursor(log, shard, position)
-            })?;
+            self.log
+                .with_store_mut(|log| LogStore::set_emission_cursor(log, shard, position))?;
         }
         Ok(records.len())
     }
@@ -681,18 +679,15 @@ where
             .with_store(|log| LogStore::recover_definitions(log))?;
         for definition in definitions {
             let retention_ms = definition.request_id_retention_ms;
-            let shard = QueueKey::new(
-                definition.tenant_id.clone(),
-                definition.queue_id.clone(),
-            );
+            let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             let _ = ControlPlane::create_queue(self.control.as_ref(), definition.clone());
             self.projection
                 .with_store_mut(|p| ProjectionStore::ensure_shard(p, &definition))?;
             let mut from = None;
             loop {
-                let page = self.log.with_store(|log| {
-                    LogStore::read_from(log, &shard, from.clone(), 256)
-                })?;
+                let page = self
+                    .log
+                    .with_store(|log| LogStore::read_from(log, &shard, from.clone(), 256))?;
                 if page.entries.is_empty() {
                     break;
                 }
@@ -723,15 +718,14 @@ where
                     for (_, env) in &page.entries {
                         // Renew extends active query/item-id claim replay retention.
                         if let QueueCommand::RenewLease(renew) = &env.command {
-                            let renewed: HashSet<ItemId> =
-                                renew.item_ids.iter().copied().collect();
-                            claim_cache.entry(shard.clone()).or_default().extend_expiry_matching(
-                                renew.lease_expires_at,
-                                |(item_ids, _)| {
+                            let renewed: HashSet<ItemId> = renew.item_ids.iter().copied().collect();
+                            claim_cache
+                                .entry(shard.clone())
+                                .or_default()
+                                .extend_expiry_matching(renew.lease_expires_at, |(item_ids, _)| {
                                     !item_ids.is_empty()
                                         && item_ids.iter().all(|item_id| renewed.contains(item_id))
-                                },
-                            );
+                                });
                             claim_by_item_ids_cache
                                 .entry(shard.clone())
                                 .or_default()
@@ -751,8 +745,7 @@ where
                         };
                         if let QueueCommand::Push(_) = &env.command {
                             let fingerprint = push_envelope_body_hash(env)?;
-                            let expires_at =
-                                request_expires_at(env.created_at, retention_ms);
+                            let expires_at = request_expires_at(env.created_at, retention_ms);
                             let ids = match &env.request_outcome {
                                 Some(RequestOutcome::Push { item_ids }) => item_ids.clone(),
                                 _ => env.item_ids.clone(),
@@ -818,12 +811,10 @@ where
                             &env.request_outcome
                         {
                             let fingerprint = BodyHash(env.request_fingerprint.unwrap_or(0));
-                            let expires_at =
-                                request_expires_at(env.created_at, retention_ms);
-                            let response: BatchUpdateResponse = serde_json::from_str(
-                                response_payload,
-                            )
-                            .map_err(|e| EngineError::Storage(e.to_string()))?;
+                            let expires_at = request_expires_at(env.created_at, retention_ms);
+                            let response: BatchUpdateResponse =
+                                serde_json::from_str(response_payload)
+                                    .map_err(|e| EngineError::Storage(e.to_string()))?;
                             batch_cache.entry(shard.clone()).or_default().record(
                                 request_id.clone(),
                                 fingerprint,
@@ -835,8 +826,7 @@ where
                             &env.request_outcome
                         {
                             let fingerprint = BodyHash(env.request_fingerprint.unwrap_or(0));
-                            let expires_at =
-                                request_expires_at(env.created_at, retention_ms);
+                            let expires_at = request_expires_at(env.created_at, retention_ms);
                             let recovery = entries
                                 .iter()
                                 .cloned()
@@ -847,12 +837,7 @@ where
                                 .expect("commit idempotency poisoned")
                                 .entry(shard.clone())
                                 .or_default()
-                                .record(
-                                    request_id.clone(),
-                                    fingerprint,
-                                    recovery,
-                                    expires_at,
-                                );
+                                .record(request_id.clone(), fingerprint, recovery, expires_at);
                         }
                     }
                 }
@@ -864,9 +849,8 @@ where
             // Seed mint counters past every item id materialised by recovery so a post-reopen
             // push/upsert never re-mints a live id (would corrupt the eligibility index via
             // insert_pending overwrite — fireweed-6e38e2b4).
-            self.projection.with_store(|p| {
-                ProjectionStore::restore_counters(p, &shard, &self.counters)
-            })?;
+            self.projection
+                .with_store(|p| ProjectionStore::restore_counters(p, &shard, &self.counters))?;
         }
         Ok(self)
     }
@@ -1100,10 +1084,8 @@ where
                     if page.entries.is_empty() {
                         break;
                     }
-                    let positions: Vec<_> =
-                        page.entries.iter().map(|(p, _)| p.clone()).collect();
-                    let commands: Vec<_> =
-                        page.entries.iter().map(|(_, e)| e.clone()).collect();
+                    let positions: Vec<_> = page.entries.iter().map(|(p, _)| p.clone()).collect();
+                    let commands: Vec<_> = page.entries.iter().map(|(_, e)| e.clone()).collect();
                     AsyncProjectionStore::apply_recovery(
                         self.projection.as_ref(),
                         positions,
@@ -1125,12 +1107,9 @@ where
                             };
                             if let QueueCommand::Push(_) = &env.command {
                                 let fingerprint = push_envelope_body_hash(env)?;
-                                let expires_at =
-                                    request_expires_at(env.created_at, retention_ms);
+                                let expires_at = request_expires_at(env.created_at, retention_ms);
                                 let ids = match &env.request_outcome {
-                                    Some(RequestOutcome::Push { item_ids }) => {
-                                        item_ids.clone()
-                                    }
+                                    Some(RequestOutcome::Push { item_ids }) => item_ids.clone(),
                                     _ => env.item_ids.clone(),
                                 };
                                 push_cache.entry(shard.clone()).or_default().record(
@@ -1243,8 +1222,7 @@ where
         items: Vec<PushSpec>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
-    ) -> impl std::future::Future<Output = EngineResult<crate::PushBatchOutcome>> + Send
-    {
+    ) -> impl std::future::Future<Output = EngineResult<crate::PushBatchOutcome>> + Send {
         async move {
             self.engine
                 .push(AsyncPushRequest {
@@ -1314,7 +1292,8 @@ where
                 item_ids,
                 now,
             );
-            self.commit_envelope(shard, envelope, expected_epoch).await?;
+            self.commit_envelope(shard, envelope, expected_epoch)
+                .await?;
             Ok(())
         }
     }
@@ -1338,9 +1317,7 @@ where
                 .run_with_store({
                     let shard = shard.clone();
                     let item_ids = item_ids.clone();
-                    move |projection| {
-                        ProjectionStore::renew_validate(projection, &shard, &item_ids)
-                    }
+                    move |projection| ProjectionStore::renew_validate(projection, &shard, &item_ids)
                 })
                 .await?;
             let envelope = self.make_envelope(
@@ -1351,7 +1328,8 @@ where
                 item_ids.clone(),
                 now,
             );
-            self.commit_envelope(shard, envelope, expected_epoch).await?;
+            self.commit_envelope(shard, envelope, expected_epoch)
+                .await?;
             // Keep claim_by_query / claim_by_item_ids idempotency replay alive through lease renewals.
             let renewed: HashSet<ItemId> = item_ids.into_iter().collect();
             self.claim_by_query_idempotency
@@ -1408,7 +1386,8 @@ where
                 item_ids,
                 now,
             );
-            self.commit_envelope(shard, envelope, expected_epoch).await?;
+            self.commit_envelope(shard, envelope, expected_epoch)
+                .await?;
             Ok(())
         }
     }
@@ -1463,8 +1442,8 @@ where
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
         let client_item_key = client_item_key.clone();
         async move {
-            let def = AsyncControlPlane::queue_definition(self.control.as_ref(), shard.clone())
-                .await?;
+            let def =
+                AsyncControlPlane::queue_definition(self.control.as_ref(), shard.clone()).await?;
             let schema = def
                 .entity_schema
                 .as_ref()
@@ -1491,44 +1470,47 @@ where
                 entity_document: entity,
             };
 
-            let plan = self.projection.with_store(|projection| -> EngineResult<_> {
-                let existing = ProjectionStore::lookup_by_key(projection, shard, &client_item_key)?;
-                match existing {
-                    None => {
-                        ProjectionStore::index_validate(
-                            projection,
-                            shard,
-                            &item.item_id,
-                            &item.fields,
-                            item.entity_document.as_ref(),
-                            None,
-                        )?;
-                        Ok(UpsertPlan::Insert(item))
-                    }
-                    Some(existing_id) => {
-                        let state = ProjectionStore::item_state(projection, shard, &existing_id)?
-                            .ok_or(EngineError::NotFound)?;
-                        match state {
-                            ItemState::Pending => {
-                                ProjectionStore::index_validate_replace(
-                                    projection,
-                                    shard,
-                                    &existing_id,
-                                    &item,
-                                )?;
-                                Ok(UpsertPlan::Replace {
-                                    existing_id,
-                                    item,
-                                })
+            let plan = self
+                .projection
+                .with_store(|projection| -> EngineResult<_> {
+                    let existing =
+                        ProjectionStore::lookup_by_key(projection, shard, &client_item_key)?;
+                    match existing {
+                        None => {
+                            ProjectionStore::index_validate(
+                                projection,
+                                shard,
+                                &item.item_id,
+                                &item.fields,
+                                item.entity_document.as_ref(),
+                                None,
+                            )?;
+                            Ok(UpsertPlan::Insert(item))
+                        }
+                        Some(existing_id) => {
+                            let state =
+                                ProjectionStore::item_state(projection, shard, &existing_id)?
+                                    .ok_or(EngineError::NotFound)?;
+                            match state {
+                                ItemState::Pending => {
+                                    ProjectionStore::index_validate_replace(
+                                        projection,
+                                        shard,
+                                        &existing_id,
+                                        &item,
+                                    )?;
+                                    Ok(UpsertPlan::Replace { existing_id, item })
+                                }
+                                ItemState::Leased => {
+                                    Err(EngineError::Invalid("collision with claimed item"))
+                                }
+                                ItemState::Complete | ItemState::Failed => {
+                                    Err(EngineError::Terminal)
+                                }
                             }
-                            ItemState::Leased => {
-                                Err(EngineError::Invalid("collision with claimed item"))
-                            }
-                            ItemState::Complete | ItemState::Failed => Err(EngineError::Terminal),
                         }
                     }
-                }
-            })?;
+                })?;
 
             match plan {
                 UpsertPlan::Insert(item) => {
@@ -1565,10 +1547,7 @@ where
 
 enum UpsertPlan {
     Insert(PushItem),
-    Replace {
-        existing_id: ItemId,
-        item: PushItem,
-    },
+    Replace { existing_id: ItemId, item: PushItem },
 }
 
 impl<L, P> UpdateFieldsPort for AsyncLogReplayBackend<L, P>
@@ -1589,8 +1568,8 @@ where
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         async move {
             validate_api001_reserved_write_fields(&field_ops)?;
-            let def = AsyncControlPlane::queue_definition(self.control.as_ref(), shard.clone())
-                .await?;
+            let def =
+                AsyncControlPlane::queue_definition(self.control.as_ref(), shard.clone()).await?;
             let schema = def
                 .entity_schema
                 .as_ref()
@@ -1629,12 +1608,12 @@ where
                 vec![item_id],
                 now,
             );
-            self.commit_envelope(shard, envelope, expected_epoch).await?;
-            self.projection
-                .with_store(|projection| {
-                    ProjectionStore::item_version(projection, shard, &item_id)?
-                        .ok_or(EngineError::NotFound)
-                })
+            self.commit_envelope(shard, envelope, expected_epoch)
+                .await?;
+            self.projection.with_store(|projection| {
+                ProjectionStore::item_version(projection, shard, &item_id)?
+                    .ok_or(EngineError::NotFound)
+            })
         }
     }
 }
@@ -1824,8 +1803,7 @@ where
         &self,
         shard: &QueueKey,
         ids: &[ItemId],
-    ) -> impl std::future::Future<Output = EngineResult<Vec<crate::ClaimedItem>>> + Send
-    {
+    ) -> impl std::future::Future<Output = EngineResult<Vec<crate::ClaimedItem>>> + Send {
         let projection = Arc::clone(&self.projection);
         let shard = shard.clone();
         let ids = ids.to_vec();
@@ -1906,6 +1884,222 @@ where
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<CommandPage>> + Send {
         AsyncLogStore::read_from(self.log.as_ref(), shard.clone(), from, limit)
+    }
+}
+
+/// Harness-only probe so AC-TXN-3 can strike the append→apply window with a real request_id.
+/// Mirrors the retired sync `ComposedBackend` probe against the async log-replay product.
+impl<L, P> RequestIdReplayProbe for AsyncLogReplayBackend<L, P>
+where
+    L: LogStore + Send + 'static,
+    P: ProjectionStore + Send + 'static,
+{
+    fn build_request_id_push_envelope(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<(CommandEnvelope, Vec<ItemId>)> {
+        let supports_gates = self.projection.with_store(|p| p.supports_gates());
+        validate_gate_push(supports_gates, &items)?;
+        let fingerprint = crate::compose::push_body_hash(&items)?;
+        let def = ControlPlane::queue_definition(self.control.as_ref(), shard)?;
+        crate::async_composed::validate_push_shape(&def, &items)?;
+        let schema = def
+            .entity_schema
+            .as_ref()
+            .and_then(|esd| esd.entity_schema.as_ref())
+            .map(compile_entity_schema)
+            .transpose()?;
+        for item in &items {
+            validate_entity(schema.as_ref(), item.entity.as_ref())?;
+        }
+        let max_attempts = def.retry_policy.max_attempts;
+        let epoch = match expected_epoch {
+            Some(epoch) => epoch,
+            None => self
+                .log
+                .with_store(|log| LogStore::current_epoch(log, shard))?,
+        };
+        let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
+        let (push_items, ids) =
+            build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
+        self.projection
+            .with_store(|p| p.index_validate_push(shard, &push_items))?;
+        let env = CommandEnvelope {
+            command_id: self.ids.next_command_id(),
+            request_id: Some(request_id),
+            request_fingerprint: Some(fingerprint.0),
+            request_outcome: Some(RequestOutcome::Push {
+                item_ids: ids.clone(),
+            }),
+            item_ids: ids.clone(),
+            command: QueueCommand::Push(PushCommand { items: push_items }),
+            checksum: CommandChecksum(0),
+            created_at: now,
+        };
+        Ok((env, ids))
+    }
+
+    fn build_request_id_commit_envelope(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        claim_ref: ClaimRef,
+        finalize: FinalizeKind,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<(CommandEnvelope, BodyHash)> {
+        let entry = CommitTransitionEntry {
+            claim_ref: claim_ref.clone(),
+            additional_claim_refs: Vec::new(),
+            finalize,
+            side_records: Vec::new(),
+            lifecycle_items: Vec::new(),
+            instance_fence: None,
+        };
+        let fingerprint = commit_body_hash(std::slice::from_ref(&entry))?;
+        let item_id = claim_ref.item_id;
+        let _ = expected_epoch;
+        let supports = self
+            .projection
+            .with_store(|p| p.supports_commit_transition());
+        if !supports {
+            return Err(EngineError::Unavailable);
+        }
+        self.projection
+            .with_store(|p| p.commit_validate(shard, std::slice::from_ref(&claim_ref), now))?;
+        let env = CommandEnvelope {
+            command_id: self.ids.next_command_id(),
+            request_id: Some(request_id),
+            request_fingerprint: Some(fingerprint.0),
+            request_outcome: None,
+            item_ids: vec![item_id],
+            command: QueueCommand::Finalize(FinalizeCommand {
+                outcomes: vec![FinalizeOutcome::new(item_id, finalize)],
+            }),
+            checksum: CommandChecksum(0),
+            created_at: now,
+        };
+        Ok((env, fingerprint))
+    }
+
+    fn build_request_id_commit_envelopes(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        entries: Vec<CommitTransitionEntry>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<(Vec<CommandEnvelope>, BodyHash)> {
+        let fingerprint = commit_body_hash(&entries)?;
+        let _ = expected_epoch;
+        let supports = self
+            .projection
+            .with_store(|p| p.supports_commit_transition());
+        if !supports {
+            return Err(EngineError::Unavailable);
+        }
+        let commit_fingerprint = fingerprint.0;
+        let mut envelopes: Vec<CommandEnvelope> = Vec::new();
+        let mut recovery: Vec<EntryRecovery> = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if !entry.side_records.is_empty()
+                || !entry.lifecycle_items.is_empty()
+                || entry.instance_fence.is_some()
+            {
+                return Err(EngineError::Invalid(
+                    "build_request_id_commit_envelopes: finalize-only entries",
+                ));
+            }
+            let claim_ref = entry.claim_ref;
+            let consumed_input_id = claim_ref.item_id;
+            let additional_claim_refs = entry.additional_claim_refs;
+            let additional_consumed_input_ids = additional_claim_refs
+                .iter()
+                .map(|claim| claim.item_id)
+                .collect::<Vec<_>>();
+            let mut claim_refs = Vec::with_capacity(1 + additional_claim_refs.len());
+            claim_refs.push(claim_ref);
+            claim_refs.extend(additional_claim_refs);
+            if let Err(error) =
+                crate::port::validate_distinct_commit_claims(&claim_refs[0], &claim_refs[1..])
+            {
+                recovery.push(EntryRecovery {
+                    consumed_input_id,
+                    additional_consumed_input_ids,
+                    instance: None,
+                    side_record_keys: Vec::new(),
+                    lifecycle_item_ids: Vec::new(),
+                    status: crate::CommitEntryStatus::Rejected(error),
+                });
+                continue;
+            }
+            match self
+                .projection
+                .with_store(|p| p.commit_validate(shard, &claim_refs, now))
+            {
+                Ok(()) => {
+                    envelopes.push(CommandEnvelope {
+                        command_id: self.ids.next_command_id(),
+                        request_id: Some(request_id.clone()),
+                        request_fingerprint: Some(commit_fingerprint),
+                        request_outcome: None,
+                        item_ids: claim_refs.iter().map(|claim| claim.item_id).collect(),
+                        command: QueueCommand::Finalize(FinalizeCommand {
+                            outcomes: claim_refs
+                                .iter()
+                                .map(|claim| FinalizeOutcome::new(claim.item_id, entry.finalize))
+                                .collect(),
+                        }),
+                        checksum: CommandChecksum(0),
+                        created_at: now,
+                    });
+                    recovery.push(EntryRecovery {
+                        consumed_input_id,
+                        additional_consumed_input_ids,
+                        instance: None,
+                        side_record_keys: Vec::new(),
+                        lifecycle_item_ids: Vec::new(),
+                        status: CommitEntryStatus::Committed,
+                    });
+                }
+                Err(error) => recovery.push(EntryRecovery {
+                    consumed_input_id,
+                    additional_consumed_input_ids,
+                    instance: None,
+                    side_record_keys: Vec::new(),
+                    lifecycle_item_ids: Vec::new(),
+                    status: CommitEntryStatus::Rejected(error),
+                }),
+            }
+        }
+        // Emit the terminal marker whenever the commit has ≥1 rejected entry (mixed or all-rejected),
+        // matching commit_transition so recovery rebuilds the full per-entry vec.
+        let has_rejected = recovery
+            .iter()
+            .any(|r| matches!(r.status, CommitEntryStatus::Rejected(_)));
+        if has_rejected {
+            let outcome_entries: Vec<CommitOutcomeEntry> =
+                recovery.iter().map(outcome_entry_from_recovery).collect();
+            envelopes.push(CommandEnvelope {
+                command_id: self.ids.next_command_id(),
+                request_id: Some(request_id),
+                request_fingerprint: Some(commit_fingerprint),
+                request_outcome: Some(RequestOutcome::CommitTransition {
+                    entries: outcome_entries,
+                }),
+                item_ids: Vec::new(),
+                command: QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                    records: Vec::new(),
+                }),
+                checksum: CommandChecksum(0),
+                created_at: now,
+            });
+        }
+        Ok((envelopes, fingerprint))
     }
 }
 
@@ -2039,9 +2233,8 @@ where
         &self,
         shard: &QueueKey,
         request: fireweed_core::GroupedAggregateRequest,
-    ) -> impl std::future::Future<
-        Output = EngineResult<fireweed_core::GroupedAggregateResponse>,
-    > + Send {
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_core::GroupedAggregateResponse>> + Send
+    {
         {
             let projection = Arc::clone(&self.projection);
             let shard = shard.clone();
@@ -2162,8 +2355,7 @@ where
                 .clone()
                 .ok_or(EngineError::Invalid("claim_by_query request_id required"))?;
             let fingerprint = claim_by_query_body_hash(&request)?;
-            let expires_at =
-                request_expires_at(context.now, definition.request_id_retention_ms);
+            let expires_at = request_expires_at(context.now, definition.request_id_retention_ms);
 
             match self
                 .claim_by_query_idempotency
@@ -2343,8 +2535,7 @@ where
             }
             let request_id = request.request_id.clone();
             let fingerprint = claim_by_item_ids_body_hash(&request)?;
-            let expires_at =
-                request_expires_at(context.now, definition.request_id_retention_ms);
+            let expires_at = request_expires_at(context.now, definition.request_id_retention_ms);
 
             match self
                 .claim_by_item_ids_idempotency
@@ -2413,12 +2604,9 @@ where
             let lease_expires_at = context.lease_expires_at(request.lease_duration_ms);
             let (lease_token, claim_item_ids) = if claimable.is_empty() {
                 (
-                    request
-                        .lease_token
-                        .clone()
-                        .unwrap_or_else(|| {
-                            LeaseToken::new("empty-claim-by-item-ids").expect("valid token")
-                        }),
+                    request.lease_token.clone().unwrap_or_else(|| {
+                        LeaseToken::new("empty-claim-by-item-ids").expect("valid token")
+                    }),
                     Vec::new(),
                 )
             } else if let Some(token) = request.lease_token.clone() {
@@ -2495,7 +2683,8 @@ where
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         async move {
             let envelope = self.make_envelope(QueueCommand::SetGates(command), Vec::new(), now);
-            self.commit_envelope(shard, envelope, expected_epoch).await?;
+            self.commit_envelope(shard, envelope, expected_epoch)
+                .await?;
             Ok(())
         }
     }
@@ -2541,7 +2730,8 @@ where
                 vec![item_id],
                 now,
             );
-            self.commit_envelope(shard, envelope, expected_epoch).await?;
+            self.commit_envelope(shard, envelope, expected_epoch)
+                .await?;
             self.projection.with_store(|projection| {
                 ProjectionStore::item_version(projection, shard, &item_id)?
                     .ok_or(EngineError::NotFound)
@@ -2560,9 +2750,7 @@ where
         shard: &QueueKey,
         granularity: crate::DiscoveryGranularity,
         now: UtcTimestamp,
-    ) -> impl std::future::Future<
-        Output = EngineResult<Vec<crate::ActiveScope>>,
-    > + Send {
+    ) -> impl std::future::Future<Output = EngineResult<Vec<crate::ActiveScope>>> + Send {
         std::future::ready(self.projection.with_store(|projection| {
             ProjectionStore::discover_active_scopes(projection, shard, granularity, now)
         }))
@@ -2578,9 +2766,7 @@ where
         &self,
         shard: &QueueKey,
         request_id: RequestId,
-    ) -> impl std::future::Future<
-        Output = EngineResult<Option<crate::CommitRecovery>>,
-    > + Send {
+    ) -> impl std::future::Future<Output = EngineResult<Option<crate::CommitRecovery>>> + Send {
         let cache = Arc::clone(&self.commit_idempotency);
         let projection = Arc::clone(&self.projection);
         let shard = shard.clone();
@@ -2596,9 +2782,8 @@ where
                     entries: recovery,
                 }));
             }
-            let durable = projection.with_store(|p| {
-                ProjectionStore::read_durable_commit(p, &shard, &request_id)
-            })?;
+            let durable = projection
+                .with_store(|p| ProjectionStore::read_durable_commit(p, &shard, &request_id))?;
             Ok(durable.map(|entries| crate::CommitRecovery {
                 request_id,
                 entries: entries
@@ -2669,13 +2854,12 @@ where
                 Some(r) => Some(AsyncLogStore::read_snapshot(log.as_ref(), r.clone()).await?),
                 None => None,
             };
-            let mut as_of = projection.with_store(|p| {
-                AsOfProjectionStore::reconstruct_as_of(p, &definition, snapshot)
-            })?;
+            let mut as_of = projection
+                .with_store(|p| AsOfProjectionStore::reconstruct_as_of(p, &definition, snapshot))?;
             let mut from = snapshot_ref.map(|s| s.position);
             loop {
-                let page =
-                    AsyncLogStore::read_from(log.as_ref(), shard.clone(), from.clone(), 256).await?;
+                let page = AsyncLogStore::read_from(log.as_ref(), shard.clone(), from.clone(), 256)
+                    .await?;
                 if page.entries.is_empty() {
                     break;
                 }
@@ -2815,11 +2999,7 @@ where
                 .into_iter()
                 .map(|(_, command)| {
                     let item_id = command.item_id;
-                    self.make_envelope(
-                        QueueCommand::UpdateFields(command),
-                        vec![item_id],
-                        now,
-                    )
+                    self.make_envelope(QueueCommand::UpdateFields(command), vec![item_id], now)
                 })
                 .collect::<Vec<_>>();
             if envelopes.is_empty() {
@@ -2859,9 +3039,7 @@ where
         shard: &QueueKey,
         request: crate::ItemMutationRequest,
         expected_epoch: Option<u64>,
-    ) -> impl std::future::Future<
-        Output = EngineResult<crate::ItemMutationResponse>,
-    > + Send {
+    ) -> impl std::future::Future<Output = EngineResult<crate::ItemMutationResponse>> + Send {
         let shard = shard.clone();
         async move {
             use crate::{RequestOutcome, item_mutation_fingerprint};
@@ -2887,13 +3065,9 @@ where
                 .log
                 .with_store(|l| crate::LogStore::retention_floor(l, &shard))?;
             loop {
-                let page = AsyncLogStore::read_from(
-                    self.log.as_ref(),
-                    shard.clone(),
-                    from.clone(),
-                    256,
-                )
-                .await?;
+                let page =
+                    AsyncLogStore::read_from(self.log.as_ref(), shard.clone(), from.clone(), 256)
+                        .await?;
                 for (position, envelope) in &page.entries {
                     if envelope.request_id.as_ref() != Some(&request_id) {
                         continue;
@@ -2918,9 +3092,9 @@ where
                 }
             }
 
-            let mut plan = self.projection.with_store_mut(|p| {
-                ProjectionStore::plan_item_mutation(p, &shard, &request)
-            })?;
+            let mut plan = self
+                .projection
+                .with_store_mut(|p| ProjectionStore::plan_item_mutation(p, &shard, &request))?;
             if request.dry_run {
                 return Ok(plan.response);
             }
@@ -2935,7 +3109,8 @@ where
             envelope.request_id = Some(request_id);
             envelope.request_fingerprint = Some(fingerprint.0);
             envelope.request_outcome = Some(RequestOutcome::ItemMutation { response_payload });
-            self.commit_envelope(&shard, envelope, expected_epoch).await?;
+            self.commit_envelope(&shard, envelope, expected_epoch)
+                .await?;
             plan.response.position = Some(
                 AsyncLogStore::high_water(self.log.as_ref(), shard.clone())
                     .await?
@@ -2957,9 +3132,8 @@ where
         transition: crate::CommitTransition,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
-    ) -> impl std::future::Future<
-        Output = EngineResult<Vec<crate::CommitEntryOutcome>>,
-    > + Send {
+    ) -> impl std::future::Future<Output = EngineResult<Vec<crate::CommitEntryOutcome>>> + Send
+    {
         let shard = shard.clone();
         async move {
             use crate::{
@@ -2993,13 +3167,13 @@ where
                         .commit_idempotency
                         .lock()
                         .expect("commit idempotency poisoned");
-                    cache
-                        .get(&shard)
-                        .map(|c| c.check(rid, fingerprint, now))
+                    cache.get(&shard).map(|c| c.check(rid, fingerprint, now))
                 };
                 if let Some(decision) = cached {
                     match decision {
-                        IdempotencyDecision::Replay(recovery) if recovery.len() == entries.len() => {
+                        IdempotencyDecision::Replay(recovery)
+                            if recovery.len() == entries.len() =>
+                        {
                             return Ok(outcomes_from_recovery(&recovery));
                         }
                         IdempotencyDecision::Conflict => {
@@ -3016,9 +3190,7 @@ where
                         let shard = shard.clone();
                         let rid = rid.clone();
                         let fp = fingerprint.0;
-                        move |p| {
-                            ProjectionStore::replay_durable_commit(p, &shard, &rid, fp, now)
-                        }
+                        move |p| ProjectionStore::replay_durable_commit(p, &shard, &rid, fp, now)
                     })
                     .await?
                 {
@@ -3054,8 +3226,7 @@ where
             self.engine
                 .submit_operation(shard.clone(), move || {
                     Box::pin(async move {
-                        let mut recovery: Vec<EntryRecovery> =
-                            Vec::with_capacity(entries.len());
+                        let mut recovery: Vec<EntryRecovery> = Vec::with_capacity(entries.len());
                         let mut committed_envelopes: Vec<CommandEnvelope> = Vec::new();
                         let mut finalized_in_commit: HashSet<ItemId> = HashSet::new();
                         let mut staged_fences: HashMap<Vec<u8>, u64> = HashMap::new();
@@ -3089,10 +3260,9 @@ where
                                 status: CommitEntryStatus::Rejected(e),
                             };
 
-                            if let Err(error) = validate_distinct_commit_claims(
-                                &claim_refs[0],
-                                &claim_refs[1..],
-                            ) {
+                            if let Err(error) =
+                                validate_distinct_commit_claims(&claim_refs[0], &claim_refs[1..])
+                            {
                                 recovery.push(reject(error));
                                 continue;
                             }
@@ -3109,7 +3279,10 @@ where
                                     let claim_refs = claim_refs.clone();
                                     move |p| {
                                         ProjectionStore::commit_validate(
-                                            p, &shard, &claim_refs, now,
+                                            p,
+                                            &shard,
+                                            &claim_refs,
+                                            now,
                                         )
                                     }
                                 })
@@ -3186,11 +3359,8 @@ where
                                     recovery.push(reject(e));
                                     continue;
                                 }
-                                let counter_base = counters.reserve(
-                                    &shard,
-                                    epoch,
-                                    lifecycle_items.len() as u32,
-                                );
+                                let counter_base =
+                                    counters.reserve(&shard, epoch, lifecycle_items.len() as u32);
                                 let (push_items, push_ids) = build_push_items(
                                     lifecycle_items,
                                     epoch,
@@ -3261,11 +3431,9 @@ where
                                     entries: outcome_entries,
                                 }),
                                 item_ids: Vec::new(),
-                                command: QueueCommand::WriteSideRecords(
-                                    WriteSideRecordsCommand {
-                                        records: Vec::new(),
-                                    },
-                                ),
+                                command: QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                                    records: Vec::new(),
+                                }),
                                 checksum: CommandChecksum(0),
                                 created_at: now,
                             });
@@ -3301,4 +3469,3 @@ where
         }
     }
 }
-

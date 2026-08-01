@@ -1723,7 +1723,6 @@ impl crate::AsyncControlPlane for InProcessControlPlane {
     }
 }
 
-
 pub const DEFAULT_RECOVERY_MAX_TAIL: u64 = 1_000_000;
 const RECOVERY_READ_PAGE_LIMIT: usize = 8_192;
 
@@ -1788,7 +1787,6 @@ pub fn queue_worker_partition(queue: &QueueKey, partitions: usize) -> usize {
     (hasher.finish() as usize) % partitions
 }
 
-
 // ---------------------------------------------------------------------------
 // Sync dual-stack ComposedBackend deleted (program B Gates B). Product
 // composition is AsyncLogReplayBackend / assemble_async_log_replay. This module
@@ -1808,7 +1806,7 @@ pub fn request_expires_at(now: UtcTimestamp, retention_ms: u64) -> UtcTimestamp 
 
 /// Stable body fingerprint for request-id conflict detection (non-cryptographic hash over the serialized
 /// push specs — determinism + collision-safety, not cryptographic strength).
-pub(crate) fn push_body_hash(items: &[PushSpec]) -> EngineResult<BodyHash> {
+pub fn push_body_hash(items: &[PushSpec]) -> EngineResult<BodyHash> {
     #[derive(serde::Serialize)]
     struct CanonicalPushSpec<'a> {
         client_item_key: Option<&'a ClientItemKey>,
