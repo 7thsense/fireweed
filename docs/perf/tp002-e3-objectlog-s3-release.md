@@ -129,6 +129,35 @@ prior 8 GiB topology with MinIO HTTP 507 (`XMinioStorageFull`) before evidence c
 capacity correction does not constrain another S3-compatible provider topology, add a host-speed gate, or
 make a durability claim.
 
+
+## Durable local operator path (Kind-free MinIO)
+
+Use the already-provisioned (or freshly created) 16 GiB tmpfs MinIO container and the
+in-tree MinIO safety adapter. The durable launcher survives SSH disconnects:
+
+```bash
+# worktree must be clean
+git status --porcelain   # empty
+
+# ensure MinIO 16g tmpfs exists (creates fireweed-e3-minio-16g if missing)
+scripts/perf/run-e3-minio-durable.sh
+# → prints pid, log path under target/e3-runs/<rev>-<run-id>/
+
+tail -F target/e3-runs/*/runner.log
+```
+
+Adapter: `scripts/perf/e3-minio-provider-adapter.sh` (dockerized `minio/mc` on the
+MinIO container bridge network). Identity: `minio-local-control-plane`.
+
+## Durable density path (Kind)
+
+```bash
+# worktree must be clean; uses CLUSTER=fireweed-density by default
+scripts/perf/run-density-kind-durable.sh
+tail -F target/density-runs/*/runner.log
+```
+
+
 ## Historical local topology and hardware
 
 - One local Rust test process drove one MinIO container over live HTTP/S3 at its bridge IP.
