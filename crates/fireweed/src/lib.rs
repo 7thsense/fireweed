@@ -5558,9 +5558,10 @@ mod tests {
     };
 
     use super::{
-        ClaimByQueryAt, ClaimRef, CommitEntry, CommitRequest, EntryOutcome, FinalizeKind, LogConfig,
-        NewItem, ProjectionStoreConfig, RecoveryPolicy, ResponseBarrier, RuntimeCore,
-        SegmentConfig, StorageConfig, SystemClock, apply_owned_renewal_outcomes, open, open_async,
+        ClaimByQueryAt, ClaimRef, CommitEntry, CommitRequest, EntryOutcome, FinalizeKind,
+        LogConfig, NewItem, ProjectionStoreConfig, RecoveryPolicy, RequestId, ResponseBarrier,
+        RuntimeCore, SegmentConfig, StorageConfig, SystemClock, apply_owned_renewal_outcomes, open,
+        open_async,
     };
     #[cfg(feature = "postgres")]
     use super::{ConfigSecret, PostgresMode, open_postgres_async};
@@ -5569,6 +5570,16 @@ mod tests {
         Clock, EngineError, InMemoryControlPlane, LeaseRenewalOutcome, LeaseState, OwnedSession,
         QueueControlPlane, QueueKey, QueueLease,
     };
+
+    /// Frozen wall clock (snorri AdapterClock shape) for lease/claim timing tests.
+    struct FrozenClock {
+        seconds: i64,
+    }
+    impl Clock for FrozenClock {
+        fn now(&self) -> UtcTimestamp {
+            UtcTimestamp::new(self.seconds, 0).expect("valid timestamp")
+        }
+    }
 
     /// Live postgres URL for env-gated facade proofs. Accepts either project name
     /// (`FIREWEED_PG_TEST_URL`) or legacy (`PQUEUE_PG_TEST_URL`).
@@ -5856,9 +5867,7 @@ mod tests {
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let fireweed = open(
             StorageConfig {
-                log: LogConfig::Filesystem {
-                    root: root.clone(),
-                },
+                log: LogConfig::Filesystem { root: root.clone() },
                 projection: ProjectionStoreConfig::Memory,
                 control_plane: None,
                 authority: None,
@@ -6064,6 +6073,120 @@ mod tests {
         Ok(())
     }
 
+    /// fireweed-2ad3a030 / snorri: object-log × sqlite Strict claim_by_query → commit must
+    /// not reject the just-issued ClaimRef as a stale lease (hybrid product path).
+    #[cfg(all(feature = "objectlog", feature = "sqlite"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_open_objectlog_sqlite_claim_by_query_then_commit() -> EngineResult<()> {
+        use fireweed_core::{
+            ClaimByQueryRequest, FilterOp, OrderField, QueryFilter, SortDirection, TypedValue,
+            WorkerId,
+        };
+
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-ol-sqlite-cbq-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("object-log root");
+        let proj = root.join("projection.db");
+
+        // Snorri's AdapterClock freezes at t=1s — exercise the same frozen-clock shape.
+        let clock: Arc<dyn Clock> = Arc::new(FrozenClock { seconds: 1 });
+        let fireweed = open(
+            StorageConfig {
+                log: LogConfig::Filesystem {
+                    root: root.join("log"),
+                },
+                projection: ProjectionStoreConfig::Sqlite { path: proj },
+                control_plane: None,
+                authority: None,
+                response_barrier: ResponseBarrier::Strict,
+                segments: SegmentConfig {
+                    target_bytes: 1024 * 1024,
+                    max_latency_ms: 5,
+                },
+                namespace: "default".to_owned(),
+                recovery: RecoveryPolicy::default(),
+            },
+            clock,
+        )?;
+        let definition = query_definition();
+        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        fireweed.create_queue(definition).await?;
+        fireweed
+            .push(
+                &queue,
+                NewItem {
+                    entity: Some(serde_json::json!({"rank": 1})),
+                    ..NewItem::default()
+                },
+            )
+            .await?;
+        let claimed = fireweed
+            .claim_by_query(
+                &queue,
+                ClaimByQueryRequest {
+                    index: Some("by_rank".into()),
+                    filters: vec![QueryFilter {
+                        field: "rank".into(),
+                        op: FilterOp::Gte,
+                        value: TypedValue::Integer(0),
+                    }],
+                    order_by: OrderField {
+                        field: "rank".into(),
+                        direction: SortDirection::Ascending,
+                    },
+                    max_items: 1,
+                    lease_duration_ms: 60_000,
+                    worker_id: WorkerId::new("snorri-transition").unwrap(),
+                    request_id: Some(RequestId::new("rid-cbq-commit").unwrap()),
+                },
+            )
+            .await?;
+        assert_eq!(claimed.items.len(), 1, "claim_by_query must lease the row");
+        let item = &claimed.items[0];
+        // Snorri calls create_queue again immediately before commit; hybrid must not rehydrate
+        // from SQLite and drop the process-local lease cleartext.
+        fireweed.create_queue(query_definition()).await?;
+        let outcomes = fireweed
+            .commit(
+                &queue,
+                CommitRequest {
+                    request_id: Some(RequestId::new("txn-cbq-1").unwrap()),
+                    entries: vec![CommitEntry {
+                        claim_ref: ClaimRef {
+                            item_id: item.item_id,
+                            lease_token: item
+                                .lease_token
+                                .clone()
+                                .expect("lease token on claimed item"),
+                            lease_expires_at: item.lease_expires_at,
+                            item_version: item.item_version,
+                        },
+                        finalize: FinalizeKind::Complete,
+                        side_records: vec![],
+                        lifecycle_items: vec![],
+                        instance_fence: None,
+                    }],
+                },
+            )
+            .await?;
+        assert!(
+            matches!(outcomes.as_slice(), [EntryOutcome::Committed { .. }]),
+            "claim_by_query ClaimRef must commit under Strict hybrid, got {outcomes:?}"
+        );
+        assert_eq!(fireweed.metrics(&queue).await?.complete, 1);
+
+        drop(fireweed);
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
     /// `open_async` for filesystem×memory must not panic under current-thread Tokio
     /// (block_on_objectlog uses a dedicated thread when a handle is present).
     #[cfg(feature = "objectlog")]
@@ -6201,7 +6324,8 @@ mod tests {
                 .as_nanos()
         );
         let log_path = std::env::temp_dir().join(format!("fireweed-sqlite-ss-log-{stamp}.sqlite"));
-        let proj_path = std::env::temp_dir().join(format!("fireweed-sqlite-ss-proj-{stamp}.sqlite"));
+        let proj_path =
+            std::env::temp_dir().join(format!("fireweed-sqlite-ss-proj-{stamp}.sqlite"));
         let _ = std::fs::remove_file(&log_path);
         let _ = std::fs::remove_file(&proj_path);
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
@@ -6248,7 +6372,10 @@ mod tests {
                 },
             )
             .await?;
-        assert!(matches!(outcomes.as_slice(), [EntryOutcome::Committed { .. }]));
+        assert!(matches!(
+            outcomes.as_slice(),
+            [EntryOutcome::Committed { .. }]
+        ));
         assert_eq!(fireweed.metrics(&queue).await?.complete, 1);
         let _ = std::fs::remove_file(&log_path);
         let _ = std::fs::remove_file(&proj_path);
@@ -6312,7 +6439,10 @@ mod tests {
                 },
             )
             .await?;
-        assert!(matches!(outcomes.as_slice(), [EntryOutcome::Committed { .. }]));
+        assert!(matches!(
+            outcomes.as_slice(),
+            [EntryOutcome::Committed { .. }]
+        ));
         let _ = std::fs::remove_file(&log_path);
         Ok(())
     }

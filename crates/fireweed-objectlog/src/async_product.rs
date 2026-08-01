@@ -1095,46 +1095,73 @@ impl fireweed_engine::HotProjectionQueryPort for AsyncObjectLogMemoryBackend {
         context: fireweed_engine::ClaimByQueryContext,
     ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
         let shard = shard.clone();
+        // fireweed-2ad3a030: prepare + append under one queue permit (snorri claim_by_query path).
         async move {
             let epoch = self.resolve_epoch(&shard, context.expected_epoch).await?;
-            match port_surface::prepare_claim_by_query(
-                self.projection.as_ref(),
-                self.control.as_ref(),
-                self.ids.as_ref(),
-                &self.claim_by_query_idempotency,
-                &shard,
-                request,
-                context,
-            )
-            .await?
-            {
-                PreparedClaimByQuery::Replay(claimed) => Ok(claimed),
-                PreparedClaimByQuery::Proceed {
-                    envelope,
-                    item_ids,
-                    lease_token,
-                    request_id,
-                    fingerprint,
-                    replay_expires_at,
-                } => {
-                    self.submit_envelopes(&shard, vec![envelope], epoch).await?;
-                    let items =
-                        port_surface::render_claimed(self.projection.as_ref(), &shard, &item_ids)?;
-                    port_surface::record_claim_by_query_idempotency(
-                        &self.claim_by_query_idempotency,
-                        &shard,
-                        request_id,
-                        fingerprint,
-                        item_ids,
-                        lease_token,
-                        replay_expires_at,
-                    );
-                    Ok(Claimed {
-                        items,
-                        ..Default::default()
+            let projection = Arc::clone(&self.projection);
+            let control = Arc::clone(&self.control);
+            let ids = Arc::clone(&self.ids);
+            let claim_by_query_idempotency = Arc::clone(&self.claim_by_query_idempotency);
+            let strategy = self.engine.commit_strategy();
+            let queue = shard.clone();
+            self.engine
+                .submit_operation(queue, move || {
+                    Box::pin(async move {
+                        match port_surface::prepare_claim_by_query(
+                            projection.as_ref(),
+                            control.as_ref(),
+                            ids.as_ref(),
+                            &claim_by_query_idempotency,
+                            &shard,
+                            request,
+                            context,
+                        )
+                        .await?
+                        {
+                            PreparedClaimByQuery::Replay(claimed) => Ok(claimed),
+                            PreparedClaimByQuery::Proceed {
+                                envelope,
+                                item_ids,
+                                lease_token,
+                                request_id,
+                                fingerprint,
+                                replay_expires_at,
+                            } => {
+                                strategy
+                                    .commit(RawCommitRequest::new(
+                                        shard.clone(),
+                                        vec![envelope],
+                                        epoch,
+                                    ))
+                                    .await?;
+                                let items = port_surface::render_claimed(
+                                    projection.as_ref(),
+                                    &shard,
+                                    &item_ids,
+                                )?;
+                                port_surface::record_claim_by_query_idempotency(
+                                    &claim_by_query_idempotency,
+                                    &shard,
+                                    request_id,
+                                    fingerprint,
+                                    item_ids,
+                                    lease_token,
+                                    replay_expires_at,
+                                );
+                                Ok(Claimed {
+                                    items,
+                                    ..Default::default()
+                                })
+                            }
+                        }
                     })
-                }
-            }
+                })
+                .await
+                .map_err(|error| {
+                    EngineError::Storage(format!(
+                        "async claim_by_query submission failed: {error:?}"
+                    ))
+                })?
         }
     }
 

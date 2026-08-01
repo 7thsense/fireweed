@@ -710,7 +710,15 @@ impl SqliteProjectionStore {
     /// Export the durable SQLite projection rows for `shard` as a typed in-memory projection image.
     pub fn export_projection_image(&self, shard: &QueueKey) -> EngineResult<ProjectionImage> {
         let g = self.inner.lock().expect("projection store poisoned");
-        export_projection_image_sql(&g.conn, shard)
+        // Durable rows carry only lease hashes; overlay process-local cleartext so hybrid
+        // rehydrate / recovery images retain claim authority (fireweed-2ad3a030).
+        let mut image = export_projection_image_sql(&g.conn, shard)?;
+        if let Some(tokens) = g.live_tokens.get(shard) {
+            for item in &mut image.items {
+                item.lease_token = tokens.get(&item.item_id).cloned();
+            }
+        }
+        Ok(image)
     }
 
     fn projection_data(&self, shard: &QueueKey) -> EngineResult<ProjectionData> {

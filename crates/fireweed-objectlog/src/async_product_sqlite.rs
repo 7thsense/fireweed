@@ -1156,46 +1156,74 @@ impl fireweed_engine::HotProjectionQueryPort for AsyncObjectLogSqliteBackend {
         context: fireweed_engine::ClaimByQueryContext,
     ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
         let shard = shard.clone();
+        // fireweed-2ad3a030 / snorri: claim_by_query → commit_transition must observe the
+        // post-apply lease under the same serialized view as prepare (parity with claim_by_item_ids).
         async move {
             let epoch = self.resolve_epoch(&shard, context.expected_epoch).await?;
-            match port_surface::prepare_claim_by_query(
-                self.projection.as_ref(),
-                self.control.as_ref(),
-                self.ids.as_ref(),
-                &self.claim_by_query_idempotency,
-                &shard,
-                request,
-                context,
-            )
-            .await?
-            {
-                PreparedClaimByQuery::Replay(claimed) => Ok(claimed),
-                PreparedClaimByQuery::Proceed {
-                    envelope,
-                    item_ids,
-                    lease_token,
-                    request_id,
-                    fingerprint,
-                    replay_expires_at,
-                } => {
-                    self.submit_envelopes(&shard, vec![envelope], epoch).await?;
-                    let items =
-                        port_surface::render_claimed(self.projection.as_ref(), &shard, &item_ids)?;
-                    port_surface::record_claim_by_query_idempotency(
-                        &self.claim_by_query_idempotency,
-                        &shard,
-                        request_id,
-                        fingerprint,
-                        item_ids,
-                        lease_token,
-                        replay_expires_at,
-                    );
-                    Ok(Claimed {
-                        items,
-                        ..Default::default()
+            let projection = Arc::clone(&self.projection);
+            let control = Arc::clone(&self.control);
+            let ids = Arc::clone(&self.ids);
+            let claim_by_query_idempotency = Arc::clone(&self.claim_by_query_idempotency);
+            let strategy = self.engine.commit_strategy();
+            let queue = shard.clone();
+            self.engine
+                .submit_operation(queue, move || {
+                    Box::pin(async move {
+                        match port_surface::prepare_claim_by_query(
+                            projection.as_ref(),
+                            control.as_ref(),
+                            ids.as_ref(),
+                            &claim_by_query_idempotency,
+                            &shard,
+                            request,
+                            context,
+                        )
+                        .await?
+                        {
+                            PreparedClaimByQuery::Replay(claimed) => Ok(claimed),
+                            PreparedClaimByQuery::Proceed {
+                                envelope,
+                                item_ids,
+                                lease_token,
+                                request_id,
+                                fingerprint,
+                                replay_expires_at,
+                            } => {
+                                strategy
+                                    .commit(RawCommitRequest::new(
+                                        shard.clone(),
+                                        vec![envelope],
+                                        epoch,
+                                    ))
+                                    .await?;
+                                let items = port_surface::render_claimed(
+                                    projection.as_ref(),
+                                    &shard,
+                                    &item_ids,
+                                )?;
+                                port_surface::record_claim_by_query_idempotency(
+                                    &claim_by_query_idempotency,
+                                    &shard,
+                                    request_id,
+                                    fingerprint,
+                                    item_ids,
+                                    lease_token,
+                                    replay_expires_at,
+                                );
+                                Ok(Claimed {
+                                    items,
+                                    ..Default::default()
+                                })
+                            }
+                        }
                     })
-                }
-            }
+                })
+                .await
+                .map_err(|error| {
+                    EngineError::Storage(format!(
+                        "async claim_by_query submission failed: {error:?}"
+                    ))
+                })?
         }
     }
 
@@ -1514,6 +1542,103 @@ mod tests {
             .unwrap();
         let metrics = backend.metrics(&shard).await.unwrap();
         assert_eq!(metrics.leased, 0);
+    }
+
+    /// fireweed-2ad3a030: snorri path is claim_by_query then commit_transition with ClaimRef.
+    #[tokio::test]
+    async fn claim_by_query_then_immediate_commit_transition_succeeds() {
+        use fireweed_core::{
+            ClaimByQueryRequest, FilterOp, IndexDeclaration, IndexDef, IndexType, OrderField,
+            QueryFilter, QueueIndex, SortDirection, TypedValue, WorkerId,
+        };
+        use fireweed_engine::{ClaimByQueryContext, HotProjectionQueryPort};
+
+        let backend = open_backend().await;
+        let mut def = qdef();
+        def.typed_indexes = vec![QueueIndex {
+            name: "by_rank".into(),
+            declaration: IndexDeclaration::Single(IndexDef {
+                field: "rank".into(),
+                index_type: IndexType::Integer,
+                unique: false,
+            }),
+        }];
+        let shard = fireweed_engine::QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        backend.create_queue(def).await.unwrap();
+        backend
+            .push(
+                &shard,
+                vec![PushSpec {
+                    payload: Some(bytes::Bytes::from_static(b"payload")),
+                    entity: Some(serde_json::json!({"rank": 1})),
+                    ..PushSpec::default()
+                }],
+                UtcTimestamp::new(1, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        let claimed = backend
+            .claim_by_query(
+                &shard,
+                ClaimByQueryRequest {
+                    index: Some("by_rank".into()),
+                    filters: vec![QueryFilter {
+                        field: "rank".into(),
+                        op: FilterOp::Gte,
+                        value: TypedValue::Integer(0),
+                    }],
+                    order_by: OrderField {
+                        field: "rank".into(),
+                        direction: SortDirection::Ascending,
+                    },
+                    max_items: 1,
+                    lease_duration_ms: 60_000,
+                    worker_id: WorkerId::new("worker").unwrap(),
+                    request_id: Some(fireweed_core::RequestId::new("rid-query").unwrap()),
+                },
+                ClaimByQueryContext {
+                    now: UtcTimestamp::new(2, 0).unwrap(),
+                    eligibility_time: None,
+                    expected_epoch: None,
+                },
+            )
+            .await
+            .expect("claim_by_query");
+        assert_eq!(claimed.items.len(), 1);
+        let item = &claimed.items[0];
+        let token = item.lease_token.clone().expect("lease token");
+        let outcomes = backend
+            .commit_transition(
+                &shard,
+                CommitTransition {
+                    request_id: None,
+                    entries: vec![CommitTransitionEntry {
+                        claim_ref: ClaimRef {
+                            item_id: item.item_id,
+                            lease_token: token,
+                            lease_expires_at: item.lease_expires_at,
+                            item_version: item.item_version,
+                        },
+                        additional_claim_refs: Vec::new(),
+                        finalize: FinalizeKind::Complete,
+                        side_records: Vec::new(),
+                        lifecycle_items: Vec::new(),
+                        instance_fence: None,
+                    }],
+                },
+                UtcTimestamp::new(3, 0).unwrap(),
+                None,
+            )
+            .await
+            .expect("claim_by_query ClaimRef must commit_transition");
+        assert!(matches!(
+            outcomes.as_slice(),
+            [CommitEntryOutcome::Committed { .. }]
+        ));
+        let metrics = backend.metrics(&shard).await.unwrap();
+        assert_eq!(metrics.leased, 0);
+        assert!(metrics.complete >= 1);
     }
 
     /// fireweed-c8e0a7a5: claim then immediate Strict commit_transition must not see a stale lease.

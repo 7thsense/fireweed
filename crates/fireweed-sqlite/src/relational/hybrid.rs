@@ -645,8 +645,16 @@ impl ProjectionStore for HybridProjectionStore {
 
     fn ensure_shard(&mut self, definition: &QueueDefinition) -> EngineResult<()> {
         self.check_healthy()?;
-        self.ensure_async_monitor(&Self::shard_for(definition));
+        let shard = Self::shard_for(definition);
+        self.ensure_async_monitor(&shard);
         self.sqlite.create_queue_projection(definition.clone())?;
+        // fireweed-2ad3a030: create_queue is idempotent. Re-exporting SQLite into hot memory on every
+        // ensure would drop process-local lease cleartext (SQLite stores only lease_token_hash). Snorri
+        // (and other adapters) call create_queue before claim and again before commit; the second call
+        // must not wipe the lease that claim just applied.
+        if self.hydrated.contains(&shard) {
+            return Ok(());
+        }
         self.hydrate_from_sqlite(definition)
     }
 
