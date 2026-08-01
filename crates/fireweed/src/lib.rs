@@ -4723,12 +4723,17 @@ fn open_memory_log_cell(
             #[cfg(all(feature = "memory", feature = "sqlite"))]
             {
                 let _ = namespace;
-                use fireweed_engine::assemble_async_log_replay;
+                // Memory log is non-blocking; sqlite projection axis uses adapter-local offload
+                // (assemble_async_log_replay_with_axis_offload, fireweed-db4405b6).
+                use fireweed_engine::assemble_async_log_replay_with_axis_offload;
                 let path = path_utf8(&path)?;
                 let log = fireweed_projection::MemoryLog::new();
                 let projection = fireweed_sqlite::SqliteProjectionStore::open(path)?;
-                let backend = Arc::new(assemble_async_log_replay(log, projection, 0)?.recover()?);
-                wrap_blocking_backend(backend, clock)
+                let backend = Arc::new(
+                    assemble_async_log_replay_with_axis_offload(log, projection, 0, false, true)?
+                        .recover()?,
+                );
+                Ok(Fireweed::from_runtime(RuntimeCore::new(backend, clock)))
             }
             #[cfg(not(all(feature = "memory", feature = "sqlite")))]
             {
@@ -5124,11 +5129,10 @@ pub fn open_sqlite_postgres_projection(
 /// [`open_sqlite_sqlite_projection`] matrix cell.
 #[cfg(feature = "sqlite")]
 pub fn open_sqlite_relational(path: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
+    // Unified relational SQLite already implements async product ports; do not install
+    // process-wide BlockingLibBackend (fireweed-db4405b6 residual cleanup).
     let backend = Arc::new(fireweed_sqlite::composed_sqlite_relational(path)?);
-    Ok(Fireweed::from_runtime(RuntimeCore::new(
-        Arc::new(blocking_backend::BlockingLibBackend::new(backend)?),
-        clock,
-    )))
+    Ok(Fireweed::from_runtime(RuntimeCore::new(backend, clock)))
 }
 
 /// Open a **sole-owner**, object-log Fireweed handle rooted at `root`, using the shared composed engine
@@ -5554,11 +5558,12 @@ mod tests {
     };
 
     use super::{
-        ClaimByQueryAt, ClaimRef, CommitEntry, CommitRequest, ConfigSecret, EntryOutcome,
-        FinalizeKind, LogConfig, NewItem, PostgresMode, ProjectionStoreConfig, RecoveryPolicy,
-        ResponseBarrier, RuntimeCore, SegmentConfig, StorageConfig, SystemClock,
-        apply_owned_renewal_outcomes, open, open_async, open_postgres_async,
+        ClaimByQueryAt, ClaimRef, CommitEntry, CommitRequest, EntryOutcome, FinalizeKind, LogConfig,
+        NewItem, ProjectionStoreConfig, RecoveryPolicy, ResponseBarrier, RuntimeCore,
+        SegmentConfig, StorageConfig, SystemClock, apply_owned_renewal_outcomes, open, open_async,
     };
+    #[cfg(feature = "postgres")]
+    use super::{ConfigSecret, PostgresMode, open_postgres_async};
     use crate::EngineResult;
     use fireweed_engine::{
         Clock, EngineError, InMemoryControlPlane, LeaseRenewalOutcome, LeaseState, OwnedSession,
