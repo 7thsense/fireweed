@@ -149,7 +149,8 @@ set +e
 # target was retired with the FWSG cutover. Prefer a live re-emitter when present; otherwise
 # seed from repository-held governed TP-003 evidence so the E3 contract builder still has a
 # transaction artifact. Full recovery/load still runs below via performance_object_log_e3_live_tests.
-if cargo test -p fireweed-conformance --release --test external_transaction_contract_matrix_tests \
+# LogEngine E3 matrix emitter (pqueue-802be88f). Prefer live 48-row profile×bound×AC emission.
+if cargo test -p fireweed-conformance --release --test e3_governed_transaction_evidence_matrix \
   e3_governed_transaction_evidence_matrix -- --list >/dev/null 2>&1; then
   env \
     FIREWEED_E3_SOURCE_REVISION="$SOURCE_REVISION" \
@@ -157,8 +158,8 @@ if cargo test -p fireweed-conformance --release --test external_transaction_cont
     FIREWEED_E3_COMPOSITION_FINGERPRINT="$COMPOSITION_FINGERPRINT" \
     FIREWEED_E3_RECORDED_AT="$FIREWEED_E3_RECORDED_AT" \
     FIREWEED_E3_TRANSACTION_EVIDENCE_OUT="$FIREWEED_E3_TRANSACTION_EVIDENCE_OUT" \
-    cargo test -p fireweed-conformance --release --test external_transaction_contract_matrix_tests \
-      e3_governed_transaction_evidence_matrix -- --nocapture
+    cargo test -p fireweed-conformance --release --test e3_governed_transaction_evidence_matrix \
+      e3_governed_transaction_evidence_matrix -- --nocapture --test-threads=1
   TXN_STATUS=$?
   if [ "$TXN_STATUS" -ne 0 ]; then
     set -e
@@ -166,7 +167,7 @@ if cargo test -p fireweed-conformance --release --test external_transaction_cont
   fi
 else
   set -e
-  echo "E3 note: external_transaction_contract_matrix_tests unavailable; seeding transaction evidence from docs/perf/evidence" >&2
+  echo "E3 note: e3_governed_transaction_evidence_matrix unavailable; seeding from docs/perf/evidence" >&2
   if [[ ! -s "$REPO_ROOT/docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl" ]]; then
     fail "no transaction evidence source available for E3 contract"
   fi

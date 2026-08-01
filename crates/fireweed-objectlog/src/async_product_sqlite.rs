@@ -1301,6 +1301,84 @@ impl fireweed_engine::HistoricalProjectionRead for AsyncObjectLogSqliteBackend {
     }
 }
 
+impl fireweed_engine::LogRead for AsyncObjectLogSqliteBackend {
+    fn read_from(
+        &self,
+        shard: &QueueKey,
+        from: Option<fireweed_engine::CommandPosition>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::CommandPage>> + Send {
+        crate::request_id_probe::read_from_log(self.log.as_ref(), shard.clone(), from, limit)
+    }
+}
+
+impl fireweed_engine::RequestIdReplayProbe for AsyncObjectLogSqliteBackend {
+    fn build_request_id_push_envelope(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<(CommandEnvelope, Vec<ItemId>)> {
+        crate::request_id_probe::probe_axes(
+            &self.log,
+            &self.projection,
+            &self.control,
+            &self.ids,
+            &self.counters,
+            self.node_id,
+        )
+        .build_request_id_push_envelope(shard, request_id, items, now, expected_epoch)
+    }
+
+    fn build_request_id_commit_envelope(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        claim_ref: fireweed_engine::ClaimRef,
+        finalize: fireweed_engine::FinalizeKind,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<(CommandEnvelope, fireweed_core::BodyHash)> {
+        crate::request_id_probe::probe_axes(
+            &self.log,
+            &self.projection,
+            &self.control,
+            &self.ids,
+            &self.counters,
+            self.node_id,
+        )
+        .build_request_id_commit_envelope(
+            shard,
+            request_id,
+            claim_ref,
+            finalize,
+            now,
+            expected_epoch,
+        )
+    }
+
+    fn build_request_id_commit_envelopes(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        entries: Vec<fireweed_engine::CommitTransitionEntry>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<(Vec<CommandEnvelope>, fireweed_core::BodyHash)> {
+        crate::request_id_probe::probe_axes(
+            &self.log,
+            &self.projection,
+            &self.control,
+            &self.ids,
+            &self.counters,
+            self.node_id,
+        )
+        .build_request_id_commit_envelopes(shard, request_id, entries, now, expected_epoch)
+    }
+}
+
 impl AsyncObjectLogSqliteBackend {
     /// Borrow the authoritative log axis (lifecycle / diagnostics).
     pub fn with_log<R>(&self, f: impl FnOnce(&ObjectLogEngineStore) -> R) -> R {

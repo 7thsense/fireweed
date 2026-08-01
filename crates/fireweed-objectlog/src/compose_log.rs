@@ -308,4 +308,27 @@ mod tests {
         drop(backend);
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_local_memory_product_empty_root() {
+        let root = std::env::temp_dir().join(format!(
+            "fw-open-local-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let flush = object_log::FlushConfig {
+            linger: std::time::Duration::ZERO,
+            ..object_log::FlushConfig::default()
+        };
+        let b = crate::AsyncObjectLogMemoryBackend::open_local(&root, flush)
+            .await
+            .expect("open_local empty");
+        drop(b);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

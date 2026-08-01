@@ -18,6 +18,7 @@ pub mod maintenance;
 pub mod object_store_observability;
 mod port_surface;
 mod recovery_stats;
+mod request_id_probe;
 mod segment_config;
 pub mod storage_generation;
 
