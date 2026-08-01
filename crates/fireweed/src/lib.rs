@@ -5042,13 +5042,14 @@ pub fn open_memory(clock: Arc<dyn Clock>) -> Fireweed {
 /// projection rebuilt from that log at `path`. Requires the `sqlite` feature (default).
 ///
 /// Matrix cell: `log=sqlite` × `projection=memory` (Class A log-replay).
+///
+/// Intentionally **not** wrapped in process-wide [`blocking_backend::BlockingLibBackend`]: the
+/// sqlite log axis offloads rusqlite through adapter-local bounded workers
+/// (`assemble_async_log_replay_with_axis_offload`, fireweed-db4405b6 / API-005).
 #[cfg(feature = "sqlite")]
 pub fn open_sqlite(path: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
     let backend = Arc::new(fireweed_sqlite::composed_sqlite_backend(path)?);
-    Ok(Fireweed::from_runtime(RuntimeCore::new(
-        Arc::new(blocking_backend::BlockingLibBackend::new(backend)?),
-        clock,
-    )))
+    Ok(Fireweed::from_runtime(RuntimeCore::new(backend, clock)))
 }
 
 /// Open a **sole-owner** Fireweed handle with a durable sqlite command log at `log_path` and a
@@ -5056,6 +5057,8 @@ pub fn open_sqlite(path: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> 
 ///
 /// Matrix cell: `log=sqlite` × `projection=sqlite`. Recovery-on-open replays only the log tail
 /// beyond the projection high-water. Requires the `sqlite` feature (default).
+///
+/// Both axes use adapter-local offload; no process-wide BlockingLibBackend (fireweed-db4405b6).
 #[cfg(feature = "sqlite")]
 pub fn open_sqlite_sqlite_projection(
     log_path: &str,
@@ -5071,10 +5074,7 @@ pub fn open_sqlite_sqlite_projection(
         log_path,
         projection_path,
     )?);
-    Ok(Fireweed::from_runtime(RuntimeCore::new(
-        Arc::new(blocking_backend::BlockingLibBackend::new(backend)?),
-        clock,
-    )))
+    Ok(Fireweed::from_runtime(RuntimeCore::new(backend, clock)))
 }
 
 /// Open a **sole-owner** Fireweed handle with a durable sqlite command log at `log_path` and a
@@ -5921,6 +5921,213 @@ mod tests {
 
         drop(fireweed);
         let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// Public sqlite×memory open drives AsyncLogReplay without process-wide
+    /// BlockingLibBackend. Rusqlite is adapter-local offload only (fireweed-db4405b6).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_open_sqlite_memory_claim_and_commit_on_current_thread() -> EngineResult<()> {
+        let log_path = std::env::temp_dir().join(format!(
+            "fireweed-sqlite-mem-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&log_path);
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        let fireweed = open(
+            StorageConfig {
+                log: LogConfig::Sqlite {
+                    path: log_path.clone(),
+                },
+                projection: ProjectionStoreConfig::Memory,
+                ..StorageConfig::memory()
+            },
+            Arc::clone(&clock),
+        )?;
+        let definition = query_definition();
+        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+
+        fireweed.create_queue(definition).await?;
+        let item_id = fireweed
+            .push(
+                &queue,
+                NewItem {
+                    priority: Some(PriorityValue::Int64(1)),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        let claimed = fireweed.claim(&queue, 1, 30_000).await?;
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].item_id, item_id);
+
+        let outcomes = fireweed
+            .commit(
+                &queue,
+                CommitRequest {
+                    request_id: None,
+                    entries: vec![CommitEntry {
+                        claim_ref: ClaimRef {
+                            item_id: claimed[0].item_id,
+                            lease_token: claimed[0]
+                                .lease_token
+                                .clone()
+                                .expect("lease token on claimed item"),
+                            lease_expires_at: claimed[0].lease_expires_at,
+                            item_version: claimed[0].item_version,
+                        },
+                        finalize: FinalizeKind::Complete,
+                        side_records: vec![],
+                        lifecycle_items: vec![],
+                        instance_fence: None,
+                    }],
+                },
+            )
+            .await?;
+        assert!(
+            matches!(outcomes[0], EntryOutcome::Committed { .. }),
+            "expected Committed, got {:?}",
+            outcomes[0]
+        );
+        assert_eq!(fireweed.metrics(&queue).await?.complete, 1);
+        assert_eq!(fireweed.metrics(&queue).await?.leased, 0);
+        let _ = std::fs::remove_file(&log_path);
+        Ok(())
+    }
+
+    /// Public sqlite×sqlite open without process-wide BlockingLibBackend; both axes
+    /// offload rusqlite adapter-locally (fireweed-db4405b6).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_open_sqlite_sqlite_claim_and_commit_on_current_thread() -> EngineResult<()> {
+        let stamp = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let log_path = std::env::temp_dir().join(format!("fireweed-sqlite-ss-log-{stamp}.sqlite"));
+        let proj_path = std::env::temp_dir().join(format!("fireweed-sqlite-ss-proj-{stamp}.sqlite"));
+        let _ = std::fs::remove_file(&log_path);
+        let _ = std::fs::remove_file(&proj_path);
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        let fireweed = open(
+            StorageConfig {
+                log: LogConfig::Sqlite {
+                    path: log_path.clone(),
+                },
+                projection: ProjectionStoreConfig::Sqlite {
+                    path: proj_path.clone(),
+                },
+                ..StorageConfig::memory()
+            },
+            Arc::clone(&clock),
+        )?;
+        let definition = query_definition();
+        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+
+        fireweed.create_queue(definition).await?;
+        fireweed.push(&queue, NewItem::default()).await?;
+        let claimed = fireweed.claim(&queue, 1, 30_000).await?;
+        assert_eq!(claimed.len(), 1);
+
+        let outcomes = fireweed
+            .commit(
+                &queue,
+                CommitRequest {
+                    request_id: None,
+                    entries: vec![CommitEntry {
+                        claim_ref: ClaimRef {
+                            item_id: claimed[0].item_id,
+                            lease_token: claimed[0]
+                                .lease_token
+                                .clone()
+                                .expect("lease token on claimed item"),
+                            lease_expires_at: claimed[0].lease_expires_at,
+                            item_version: claimed[0].item_version,
+                        },
+                        finalize: FinalizeKind::Complete,
+                        side_records: vec![],
+                        lifecycle_items: vec![],
+                        instance_fence: None,
+                    }],
+                },
+            )
+            .await?;
+        assert!(matches!(outcomes.as_slice(), [EntryOutcome::Committed { .. }]));
+        assert_eq!(fireweed.metrics(&queue).await?.complete, 1);
+        let _ = std::fs::remove_file(&log_path);
+        let _ = std::fs::remove_file(&proj_path);
+        Ok(())
+    }
+
+    /// open_async sqlite×memory stays current-thread safe (no block_in_place / BLB).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_open_async_sqlite_memory_claim_and_commit_on_current_thread() -> EngineResult<()>
+    {
+        let log_path = std::env::temp_dir().join(format!(
+            "fireweed-sqlite-async-mem-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&log_path);
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        let fireweed = open_async(
+            StorageConfig {
+                log: LogConfig::Sqlite {
+                    path: log_path.clone(),
+                },
+                projection: ProjectionStoreConfig::Memory,
+                ..StorageConfig::memory()
+            },
+            clock,
+        )
+        .await?;
+        let definition = query_definition();
+        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+
+        fireweed.create_queue(definition).await?;
+        fireweed.push(&queue, NewItem::default()).await?;
+        let claimed = fireweed.claim(&queue, 1, 30_000).await?;
+        assert_eq!(claimed.len(), 1);
+
+        let outcomes = fireweed
+            .commit(
+                &queue,
+                CommitRequest {
+                    request_id: None,
+                    entries: vec![CommitEntry {
+                        claim_ref: ClaimRef {
+                            item_id: claimed[0].item_id,
+                            lease_token: claimed[0]
+                                .lease_token
+                                .clone()
+                                .expect("lease token on claimed item"),
+                            lease_expires_at: claimed[0].lease_expires_at,
+                            item_version: claimed[0].item_version,
+                        },
+                        finalize: FinalizeKind::Complete,
+                        side_records: vec![],
+                        lifecycle_items: vec![],
+                        instance_fence: None,
+                    }],
+                },
+            )
+            .await?;
+        assert!(matches!(outcomes.as_slice(), [EntryOutcome::Committed { .. }]));
+        let _ = std::fs::remove_file(&log_path);
         Ok(())
     }
 

@@ -235,12 +235,21 @@ impl<T: Send + 'static> Future for BlockingTaskFuture<T> {
     }
 }
 
-/// Shared in-process adapter for CPU-only log stores whose operations complete without suspension.
+/// Shared adapter for a synchronous log store.
+///
+/// By default operations complete on the polling thread (CPU-only / memory axes). When constructed
+/// with [`Self::new_with_blocking_offload`], each whole store operation runs on a private
+/// [`BoundedBlockingExecutor`] so rusqlite/disk work never stalls a Tokio worker (adapter-local
+/// offload — not process-wide `BlockingLibBackend`).
 pub struct InProcessLogStore<S> {
     store: Arc<Mutex<S>>,
+    executor: Option<BoundedBlockingExecutor>,
     durability_class: DurabilityClass,
     durable_log: bool,
 }
+
+/// Default in-flight bound for adapter-local durable log offload (serialized by the store mutex).
+pub const DEFAULT_BLOCKING_AXIS_IN_FLIGHT: usize = 32;
 
 impl<S: LogStore> InProcessLogStore<S> {
     pub fn new(store: S) -> Self {
@@ -248,34 +257,108 @@ impl<S: LogStore> InProcessLogStore<S> {
         let durable_log = store.is_durable_log();
         Self {
             store: Arc::new(Mutex::new(store)),
+            executor: None,
             durability_class,
             durable_log,
         }
     }
 
-    /// Run a synchronous read against the underlying log (for product-port adapters during dual-stack
-    /// collapse). Must not be held across an await.
+    /// Same as [`Self::new`] but every async axis op and [`Self::run_with_store`] offloads through a
+    /// private bounded blocking executor (spawned OS threads). Use for durable blocking stores
+    /// (sqlite) so product ports are non-blocking-under-poll without process-wide BLB.
+    pub fn new_with_blocking_offload(store: S, max_in_flight: usize) -> EngineResult<Self> {
+        let durability_class = store.durability_class();
+        let durable_log = store.is_durable_log();
+        Ok(Self {
+            store: Arc::new(Mutex::new(store)),
+            executor: Some(BoundedBlockingExecutor::new(max_in_flight)?),
+            durability_class,
+            durable_log,
+        })
+    }
+
+    /// Run a synchronous read against the underlying log (open/recover/tests). Blocks the caller;
+    /// prefer [`Self::run_with_store`] on async product paths when offload is configured.
     pub fn with_store<R>(&self, f: impl FnOnce(&S) -> R) -> R {
         let store = self.store.lock().expect("immediate log store mutex poisoned");
         f(&*store)
     }
 
-    /// Run a synchronous mutation against the underlying log. Must not be held across an await.
+    /// Run a synchronous mutation against the underlying log. Blocks the caller.
     pub fn with_store_mut<R>(&self, f: impl FnOnce(&mut S) -> R) -> R {
         let mut store = self.store.lock().expect("immediate log store mutex poisoned");
         f(&mut *store)
+    }
+
+    /// Async read against the underlying log. Offloads when constructed with blocking offload.
+    pub fn run_with_store<T, F>(
+        &self,
+        operation: F,
+    ) -> impl Future<Output = EngineResult<T>> + Send + 'static
+    where
+        S: Send + 'static,
+        T: Send + 'static,
+        F: FnOnce(&S) -> EngineResult<T> + Send + 'static,
+    {
+        let store = Arc::clone(&self.store);
+        let executor = self.executor.clone();
+        async move {
+            if let Some(executor) = executor {
+                executor
+                    .execute(move || {
+                        let store = store.lock().expect("immediate log store mutex poisoned");
+                        operation(&*store)
+                    })
+                    .await
+            } else {
+                let store = store.lock().expect("immediate log store mutex poisoned");
+                operation(&*store)
+            }
+        }
+    }
+
+    /// Async mutation against the underlying log. Offloads when constructed with blocking offload.
+    pub fn run_with_store_mut<T, F>(
+        &self,
+        operation: F,
+    ) -> impl Future<Output = EngineResult<T>> + Send + 'static
+    where
+        S: Send + 'static,
+        T: Send + 'static,
+        F: FnOnce(&mut S) -> EngineResult<T> + Send + 'static,
+    {
+        let store = Arc::clone(&self.store);
+        let executor = self.executor.clone();
+        async move {
+            if let Some(executor) = executor {
+                executor
+                    .execute(move || {
+                        let mut store = store.lock().expect("immediate log store mutex poisoned");
+                        operation(&mut *store)
+                    })
+                    .await
+            } else {
+                let mut store = store.lock().expect("immediate log store mutex poisoned");
+                operation(&mut *store)
+            }
+        }
     }
 }
 
 /// Default retention when recording push request-ids from apply envelopes without a queue definition.
 const IN_PROCESS_PUSH_IDEM_RETENTION_MS: u64 = 86_400_000;
 
-/// Shared in-process adapter for CPU-only projections whose operations complete without suspension.
+/// Shared adapter for a synchronous projection store.
+///
+/// Default construction keeps operations on the polling thread (memory axes).
+/// [`Self::new_with_blocking_offload`] routes whole operations through a private
+/// [`BoundedBlockingExecutor`] for durable blocking projections (sqlite).
 pub struct InProcessProjectionStore<S> {
     store: Arc<Mutex<S>>,
+    executor: Option<BoundedBlockingExecutor>,
     supports_gates: bool,
     /// Per-shard push request-id cache (parity with `AsyncLogReplayBackend` / sync composition).
-    push_idempotency: Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>>,
+    push_idempotency: Arc<Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>>>,
 }
 
 impl<S: ProjectionStore> InProcessProjectionStore<S> {
@@ -283,12 +366,24 @@ impl<S: ProjectionStore> InProcessProjectionStore<S> {
         let supports_gates = store.supports_gates();
         Self {
             store: Arc::new(Mutex::new(store)),
+            executor: None,
             supports_gates,
-            push_idempotency: Mutex::new(HashMap::new()),
+            push_idempotency: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Run a synchronous read against the underlying projection. Must not be held across an await.
+    /// Durable / blocking projection axis: adapter-local whole-op offload.
+    pub fn new_with_blocking_offload(store: S, max_in_flight: usize) -> EngineResult<Self> {
+        let supports_gates = store.supports_gates();
+        Ok(Self {
+            store: Arc::new(Mutex::new(store)),
+            executor: Some(BoundedBlockingExecutor::new(max_in_flight)?),
+            supports_gates,
+            push_idempotency: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    /// Synchronous read (open/recover/tests). Blocks the caller.
     pub fn with_store<R>(&self, f: impl FnOnce(&S) -> R) -> R {
         let store = self
             .store
@@ -297,13 +392,75 @@ impl<S: ProjectionStore> InProcessProjectionStore<S> {
         f(&*store)
     }
 
-    /// Run a synchronous mutation against the underlying projection. Must not be held across an await.
+    /// Synchronous mutation. Blocks the caller.
     pub fn with_store_mut<R>(&self, f: impl FnOnce(&mut S) -> R) -> R {
         let mut store = self
             .store
             .lock()
             .expect("immediate projection store mutex poisoned");
         f(&mut *store)
+    }
+
+    /// Async read; offloads when constructed with blocking offload.
+    pub fn run_with_store<T, F>(
+        &self,
+        operation: F,
+    ) -> impl Future<Output = EngineResult<T>> + Send + 'static
+    where
+        S: Send + 'static,
+        T: Send + 'static,
+        F: FnOnce(&S) -> EngineResult<T> + Send + 'static,
+    {
+        let store = Arc::clone(&self.store);
+        let executor = self.executor.clone();
+        async move {
+            if let Some(executor) = executor {
+                executor
+                    .execute(move || {
+                        let store = store
+                            .lock()
+                            .expect("immediate projection store mutex poisoned");
+                        operation(&*store)
+                    })
+                    .await
+            } else {
+                let store = store
+                    .lock()
+                    .expect("immediate projection store mutex poisoned");
+                operation(&*store)
+            }
+        }
+    }
+
+    /// Async mutation; offloads when constructed with blocking offload.
+    pub fn run_with_store_mut<T, F>(
+        &self,
+        operation: F,
+    ) -> impl Future<Output = EngineResult<T>> + Send + 'static
+    where
+        S: Send + 'static,
+        T: Send + 'static,
+        F: FnOnce(&mut S) -> EngineResult<T> + Send + 'static,
+    {
+        let store = Arc::clone(&self.store);
+        let executor = self.executor.clone();
+        async move {
+            if let Some(executor) = executor {
+                executor
+                    .execute(move || {
+                        let mut store = store
+                            .lock()
+                            .expect("immediate projection store mutex poisoned");
+                        operation(&mut *store)
+                    })
+                    .await
+            } else {
+                let mut store = store
+                    .lock()
+                    .expect("immediate projection store mutex poisoned");
+                operation(&mut *store)
+            }
+        }
     }
 }
 
@@ -814,7 +971,7 @@ pub trait AsyncControlPlane: Send + Sync {
 
 impl<S> AsyncLogStore for InProcessLogStore<S>
 where
-    S: LogStore + Send,
+    S: LogStore + Send + 'static,
 {
     fn durability_class(&self) -> DurabilityClass {
         self.durability_class
@@ -825,30 +982,15 @@ where
     }
 
     fn ensure_shard(&self, shard: QueueKey) -> impl Future<Output = EngineResult<()>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate log store mutex poisoned")
-            .ensure_shard(&shard);
-        std::future::ready(result)
+        self.run_with_store_mut(move |store| store.ensure_shard(&shard))
     }
 
     fn current_epoch(&self, shard: QueueKey) -> impl Future<Output = EngineResult<u64>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate log store mutex poisoned")
-            .current_epoch(&shard);
-        std::future::ready(result)
+        self.run_with_store(move |store| store.current_epoch(&shard))
     }
 
     fn acquire_epoch(&self, shard: QueueKey) -> impl Future<Output = EngineResult<u64>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate log store mutex poisoned")
-            .acquire_epoch(&shard);
-        std::future::ready(result)
+        self.run_with_store_mut(move |store| store.acquire_epoch(&shard))
     }
 
     fn append(
@@ -857,12 +999,7 @@ where
         commands: Vec<CommandEnvelope>,
         expected_epoch: u64,
     ) -> impl Future<Output = EngineResult<Vec<CommandPosition>>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate log store mutex poisoned")
-            .append(&shard, &commands, expected_epoch);
-        std::future::ready(result)
+        self.run_with_store_mut(move |store| store.append(&shard, &commands, expected_epoch))
     }
 
     fn read_from(
@@ -871,24 +1008,14 @@ where
         from: Option<CommandPosition>,
         limit: usize,
     ) -> impl Future<Output = EngineResult<CommandPage>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate log store mutex poisoned")
-            .read_from(&shard, from, limit);
-        std::future::ready(result)
+        self.run_with_store(move |store| store.read_from(&shard, from, limit))
     }
 
     fn high_water(
         &self,
         shard: QueueKey,
     ) -> impl Future<Output = EngineResult<Option<CommandPosition>>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate log store mutex poisoned")
-            .high_water(&shard);
-        std::future::ready(result)
+        self.run_with_store(move |store| store.high_water(&shard))
     }
 
     fn set_high_water(
@@ -896,12 +1023,7 @@ where
         shard: QueueKey,
         position: CommandPosition,
     ) -> impl Future<Output = EngineResult<()>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate log store mutex poisoned")
-            .set_high_water(&shard, position);
-        std::future::ready(result)
+        self.run_with_store_mut(move |store| store.set_high_water(&shard, position))
     }
 
     fn write_snapshot(
@@ -910,53 +1032,33 @@ where
         position: CommandPosition,
         snapshot: ProjectionSnapshot,
     ) -> impl Future<Output = EngineResult<SnapshotRef>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate log store mutex poisoned")
-            .write_snapshot(&shard, position, snapshot);
-        std::future::ready(result)
+        self.run_with_store_mut(move |store| store.write_snapshot(&shard, position, snapshot))
     }
 
     fn latest_snapshot(
         &self,
         shard: QueueKey,
     ) -> impl Future<Output = EngineResult<Option<SnapshotRef>>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate log store mutex poisoned")
-            .latest_snapshot(&shard);
-        std::future::ready(result)
+        self.run_with_store(move |store| store.latest_snapshot(&shard))
     }
 
     fn read_snapshot(
         &self,
         snapshot_ref: SnapshotRef,
     ) -> impl Future<Output = EngineResult<ProjectionSnapshot>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate log store mutex poisoned")
-            .read_snapshot(&snapshot_ref);
-        std::future::ready(result)
+        self.run_with_store(move |store| store.read_snapshot(&snapshot_ref))
     }
 
     fn recover_definitions(
         &self,
     ) -> impl Future<Output = EngineResult<Vec<QueueDefinition>>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate log store mutex poisoned")
-            .recover_definitions();
-        std::future::ready(result)
+        self.run_with_store(move |store| store.recover_definitions())
     }
 }
 
 impl<S> AsyncProjectionStore for InProcessProjectionStore<S>
 where
-    S: ProjectionStore + Send,
+    S: ProjectionStore + Send + 'static,
 {
     fn supports_gates(&self) -> bool {
         self.supports_gates
@@ -966,21 +1068,11 @@ where
         &self,
         definition: QueueDefinition,
     ) -> impl Future<Output = EngineResult<()>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate projection store mutex poisoned")
-            .ensure_shard(&definition);
-        std::future::ready(result)
+        self.run_with_store_mut(move |store| store.ensure_shard(&definition))
     }
 
     fn admit_mutation(&self, shard: QueueKey) -> impl Future<Output = EngineResult<()>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate projection store mutex poisoned")
-            .admit_mutation(&shard);
-        std::future::ready(result)
+        self.run_with_store_mut(move |store| store.admit_mutation(&shard))
     }
 
     fn validate_push(
@@ -989,24 +1081,14 @@ where
         items: Vec<PushItem>,
         _now: UtcTimestamp,
     ) -> impl Future<Output = EngineResult<()>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate projection store mutex poisoned")
-            .index_validate_push(&shard, &items);
-        std::future::ready(result)
+        self.run_with_store(move |store| store.index_validate_push(&shard, &items))
     }
 
     fn pause_blocks_intake(
         &self,
         shard: QueueKey,
     ) -> impl Future<Output = EngineResult<bool>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate projection store mutex poisoned")
-            .pause_blocks_intake(&shard);
-        std::future::ready(result)
+        self.run_with_store(move |store| store.pause_blocks_intake(&shard))
     }
 
     fn push_idempotency(
@@ -1036,12 +1118,7 @@ where
         _now: UtcTimestamp,
     ) -> impl Future<Output = EngineResult<()>> + Send {
         let ids = targets.iter().map(|t| t.item_id).collect::<Vec<_>>();
-        let result = self
-            .store
-            .lock()
-            .expect("immediate projection store mutex poisoned")
-            .renew_validate(&shard, &ids);
-        std::future::ready(result)
+        self.run_with_store(move |store| store.renew_validate(&shard, &ids))
     }
 
     fn finalize_validate(
@@ -1051,12 +1128,7 @@ where
         _now: UtcTimestamp,
         default_max_attempts: u32,
     ) -> impl Future<Output = EngineResult<Vec<FinalizeLeaseMember>>> + Send {
-        let result = (|| {
-            let store = self
-                .store
-                .lock()
-                .expect("immediate projection store mutex poisoned");
-            // Match sync composition: lease-state validation only (no token/version gate here).
+        self.run_with_store(move |store| {
             let outcomes = targets
                 .iter()
                 .map(|t| crate::FinalizeOutcome {
@@ -1082,8 +1154,7 @@ where
                     })
                 })
                 .collect()
-        })();
-        std::future::ready(result)
+        })
     }
 
     fn purge_validate(
@@ -1093,11 +1164,7 @@ where
         force: bool,
     ) -> impl Future<Output = EngineResult<Vec<ItemId>>> + Send {
         use crate::validate_purge_force;
-        let result = (|| {
-            let store = self
-                .store
-                .lock()
-                .expect("immediate projection store mutex poisoned");
+        self.run_with_store(move |store| {
             let mut present = Vec::new();
             for id in &ids {
                 if present.contains(id) {
@@ -1109,8 +1176,7 @@ where
                 }
             }
             Ok(present)
-        })();
-        std::future::ready(result)
+        })
     }
 
     fn expired_leases(
@@ -1119,19 +1185,14 @@ where
         now: UtcTimestamp,
         max: usize,
     ) -> impl Future<Output = EngineResult<Vec<ItemId>>> + Send {
-        let result = (|| {
-            let store = self
-                .store
-                .lock()
-                .expect("immediate projection store mutex poisoned");
+        self.run_with_store(move |store| {
             let mut ids = store.expired_leases(&shard, now)?;
             ids.sort();
             if max > 0 && ids.len() > max {
                 ids.truncate(max);
             }
             Ok(ids)
-        })();
-        std::future::ready(result)
+        })
     }
 
     fn apply_live(
@@ -1139,17 +1200,25 @@ where
         positions: Vec<CommandPosition>,
         commands: Vec<CommandEnvelope>,
     ) -> impl Future<Output = EngineResult<()>> + Send {
-        let result = (|| {
-            // Shard identity is on each envelope's commit context via positions; use command
-            // metadata when recording push request-ids after a successful apply.
+        let push_idempotency = Arc::clone(&self.push_idempotency);
+        let store = Arc::clone(&self.store);
+        let executor = self.executor.clone();
+        async move {
             let queue = positions.first().map(|p| p.queue.clone());
-            self.store
-                .lock()
-                .expect("immediate projection store mutex poisoned")
-                .apply_live_owned(positions, commands.clone())?;
+            let apply = move || {
+                let mut store = store
+                    .lock()
+                    .expect("immediate projection store mutex poisoned");
+                store.apply_live_owned(positions, commands.clone())?;
+                Ok(commands)
+            };
+            let commands = if let Some(executor) = executor {
+                executor.execute(apply).await?
+            } else {
+                apply()?
+            };
             if let Some(queue) = queue {
-                let mut cache = self
-                    .push_idempotency
+                let mut cache = push_idempotency
                     .lock()
                     .expect("push idempotency mutex poisoned");
                 for env in &commands {
@@ -1175,8 +1244,7 @@ where
                 }
             }
             Ok(())
-        })();
-        std::future::ready(result)
+        }
     }
 
     fn apply_recovery(
@@ -1184,12 +1252,7 @@ where
         positions: Vec<CommandPosition>,
         commands: Vec<CommandEnvelope>,
     ) -> impl Future<Output = EngineResult<()>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate projection store mutex poisoned")
-            .apply_recovery(&positions, &commands);
-        std::future::ready(result)
+        self.run_with_store_mut(move |store| store.apply_recovery(&positions, &commands))
     }
 
     fn eligible_candidates(
@@ -1198,12 +1261,7 @@ where
         now: UtcTimestamp,
         max: usize,
     ) -> impl Future<Output = EngineResult<Vec<ItemId>>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate projection store mutex poisoned")
-            .eligible_candidates(&shard, now, max);
-        std::future::ready(result)
+        self.run_with_store(move |store| store.eligible_candidates(&shard, now, max))
     }
 
     fn select_item_claim(
@@ -1213,12 +1271,9 @@ where
         now: UtcTimestamp,
         max: usize,
     ) -> impl Future<Output = EngineResult<Vec<ItemId>>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate projection store mutex poisoned")
-            .select_item_claim(&shard, &compatibility, now, max);
-        std::future::ready(result)
+        self.run_with_store(move |store| {
+            store.select_item_claim(&shard, &compatibility, now, max)
+        })
     }
 
     fn select_rich_claim(
@@ -1229,12 +1284,9 @@ where
         now: UtcTimestamp,
         max_items: usize,
     ) -> impl Future<Output = EngineResult<RichClaimSelection>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate projection store mutex poisoned")
-            .select_rich_claim(&shard, unit, &compatibility, now, max_items);
-        std::future::ready(result)
+        self.run_with_store(move |store| {
+            store.select_rich_claim(&shard, unit, &compatibility, now, max_items)
+        })
     }
 
     fn render_claimed(
@@ -1242,12 +1294,7 @@ where
         shard: QueueKey,
         ids: Vec<ItemId>,
     ) -> impl Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate projection store mutex poisoned")
-            .render_claimed(&shard, &ids);
-        std::future::ready(result)
+        self.run_with_store(move |store| store.render_claimed(&shard, &ids))
     }
 
     fn item_state(
@@ -1255,12 +1302,7 @@ where
         shard: QueueKey,
         id: ItemId,
     ) -> impl Future<Output = EngineResult<Option<ItemState>>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate projection store mutex poisoned")
-            .item_state(&shard, &id);
-        std::future::ready(result)
+        self.run_with_store(move |store| store.item_state(&shard, &id))
     }
 
     fn item_version(
@@ -1268,35 +1310,20 @@ where
         shard: QueueKey,
         id: ItemId,
     ) -> impl Future<Output = EngineResult<Option<u64>>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate projection store mutex poisoned")
-            .item_version(&shard, &id);
-        std::future::ready(result)
+        self.run_with_store(move |store| store.item_version(&shard, &id))
     }
 
     fn recovery_high_water(
         &self,
         shard: QueueKey,
     ) -> impl Future<Output = EngineResult<Option<CommandPosition>>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate projection store mutex poisoned")
-            .recovery_high_water(&shard);
-        std::future::ready(result)
+        self.run_with_store(move |store| store.recovery_high_water(&shard))
     }
 
     fn recover_definitions(
         &self,
     ) -> impl Future<Output = EngineResult<Vec<QueueDefinition>>> + Send {
-        let result = self
-            .store
-            .lock()
-            .expect("immediate projection store mutex poisoned")
-            .recover_definitions();
-        std::future::ready(result)
+        self.run_with_store(move |store| store.recover_definitions())
     }
 }
 

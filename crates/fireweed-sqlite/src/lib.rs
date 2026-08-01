@@ -26,7 +26,9 @@ pub use relational::{
     composed_sqlite_relational, composed_sqlite_relational_in_memory,
 };
 
-use fireweed_engine::{AsyncLogReplayBackend, EngineResult, assemble_async_log_replay};
+use fireweed_engine::{
+    AsyncLogReplayBackend, EngineResult, assemble_async_log_replay_with_axis_offload,
+};
 
 /// Assemble a composed sqlite backend over an ephemeral `:memory:` durable log.
 pub fn composed_sqlite_backend_in_memory()
@@ -37,6 +39,8 @@ pub fn composed_sqlite_backend_in_memory()
 /// Assemble a composed sqlite backend over a DURABLE sqlite command log at `path` — the composition root
 /// wires this. Runs recovery-on-open (ADR-012 P2): a reopen rebuilds the in-memory projection by replaying
 /// the durable log.
+///
+/// Adapter-local log offload only (no process-wide BlockingLibBackend).
 pub fn composed_sqlite_backend(
     path: &str,
 ) -> EngineResult<AsyncLogReplayBackend<SqliteLog, InMemoryProjection>> {
@@ -58,26 +62,33 @@ pub fn composed_sqlite_backend_for_worker(
 /// Assemble a composed sqlite-LOG + sqlite-PROJECTION backend over ephemeral `:memory:` stores.
 ///
 /// Product ports live on [`AsyncLogReplayBackend`] (ADR-012 / async log-replay product).
+/// Both axes offload rusqlite whole-ops on private bounded executors.
 pub fn composed_sqlite_log_sqlite_projection_in_memory()
 -> EngineResult<AsyncLogReplayBackend<SqliteLog, SqliteProjectionStore>> {
-    assemble_async_log_replay(
+    assemble_async_log_replay_with_axis_offload(
         SqliteLog::in_memory()?,
         SqliteProjectionStore::in_memory()?,
         0,
+        true,
+        true,
     )
 }
 
 /// Assemble a composed sqlite-LOG + sqlite-PROJECTION backend over DURABLE stores (the log at `log_path`,
 /// the derived projection at `projection_path`). Runs recovery-on-open (ADR-012 P2): a reopen replays only
 /// the durable log tail beyond the persisted projection high-water (snapshot-tail recovery).
+///
+/// Both axes use adapter-local blocking offload (not process-wide BlockingLibBackend).
 pub fn composed_sqlite_log_sqlite_projection(
     log_path: &str,
     projection_path: &str,
 ) -> EngineResult<AsyncLogReplayBackend<SqliteLog, SqliteProjectionStore>> {
-    assemble_async_log_replay(
+    assemble_async_log_replay_with_axis_offload(
         SqliteLog::open(log_path)?,
         SqliteProjectionStore::open(projection_path)?,
         0,
+        true,
+        true,
     )?
     .recover()
 }

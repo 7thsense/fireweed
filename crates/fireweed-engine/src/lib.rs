@@ -62,7 +62,7 @@ pub use async_composed::{
 pub use async_lifecycle_planner::ProjectionLifecyclePlanner;
 pub use async_log_replay_product::{
     AsyncLogReplayBackend, AtomicLogReplayCommitter, SeqIdGen, assemble_async_log_replay,
-    assemble_async_log_replay_from_parts,
+    assemble_async_log_replay_from_parts, assemble_async_log_replay_with_axis_offload,
 };
 pub use async_push_planner::ProjectionPushPlanner;
 pub use async_reclaim_planner::{
@@ -70,8 +70,9 @@ pub use async_reclaim_planner::{
 };
 pub use async_store::{
     AsyncControlPlane, AsyncLogStore, AsyncProjectionStore, BlockingControlPlane, BlockingLogStore,
-    BlockingProjectionStore, BlockingStoreOperation, BoundedBlockingExecutor, FinalizeLeaseMember,
-    InProcessLogStore, InProcessProjectionStore,
+    BlockingProjectionStore, BlockingStoreOperation, BoundedBlockingExecutor,
+    DEFAULT_BLOCKING_AXIS_IN_FLIGHT, FinalizeLeaseMember, InProcessLogStore,
+    InProcessProjectionStore,
 };
 pub use auth::{AuthContext, RedactedLeaseToken, hash_lease_token};
 pub use byte_admission::{

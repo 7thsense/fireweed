@@ -427,6 +427,9 @@ where
 }
 
 /// Assemble a fresh async log-replay product over the given axes (no recovery).
+///
+/// Axes use in-process ready futures (CPU-only / memory). Prefer
+/// [`assemble_async_log_replay_with_axis_offload`] for durable blocking stores (sqlite).
 pub fn assemble_async_log_replay<L, P>(
     log: L,
     projection: P,
@@ -436,8 +439,40 @@ where
     L: LogStore + Send + 'static,
     P: ProjectionStore + Send + 'static,
 {
-    let log = Arc::new(InProcessLogStore::new(log));
-    let projection = Arc::new(InProcessProjectionStore::new(projection));
+    assemble_async_log_replay_with_axis_offload(log, projection, node_id, false, false)
+}
+
+/// Assemble log-replay with optional adapter-local blocking offload per axis.
+///
+/// When `offload_log` / `offload_projection` is true, that axis runs whole operations on a private
+/// [`crate::BoundedBlockingExecutor`] (not process-wide `BlockingLibBackend`). Use for rusqlite
+/// product cells so public Fireweed ports are non-blocking-under-poll.
+pub fn assemble_async_log_replay_with_axis_offload<L, P>(
+    log: L,
+    projection: P,
+    node_id: u8,
+    offload_log: bool,
+    offload_projection: bool,
+) -> EngineResult<AsyncLogReplayBackend<L, P>>
+where
+    L: LogStore + Send + 'static,
+    P: ProjectionStore + Send + 'static,
+{
+    use crate::{DEFAULT_BLOCKING_AXIS_IN_FLIGHT, InProcessLogStore, InProcessProjectionStore};
+
+    let log = Arc::new(if offload_log {
+        InProcessLogStore::new_with_blocking_offload(log, DEFAULT_BLOCKING_AXIS_IN_FLIGHT)?
+    } else {
+        InProcessLogStore::new(log)
+    });
+    let projection = Arc::new(if offload_projection {
+        InProcessProjectionStore::new_with_blocking_offload(
+            projection,
+            DEFAULT_BLOCKING_AXIS_IN_FLIGHT,
+        )?
+    } else {
+        InProcessProjectionStore::new(projection)
+    });
     let push_idempotency = Arc::new(Mutex::new(HashMap::new()));
     let claim_by_query_idempotency = Arc::new(Mutex::new(HashMap::new()));
     let claim_by_item_ids_idempotency = Arc::new(Mutex::new(HashMap::new()));
@@ -619,6 +654,10 @@ where
     }
 
     /// Replay the durable log into the in-memory projection and control plane (ADR-012 recovery-on-open).
+    ///
+    /// When the log has no durable catalog (Class B memory log) but the projection does, queue
+    /// definitions are recovered from the projection so reopen can serve claim/metrics without a
+    /// re-`create_queue` (memory×sqlite / memory×postgres Class B durable projection cells).
     pub fn recover(self) -> EngineResult<Self> {
         use crate::{ControlPlane, LogStore, RequestOutcome, request_expires_at};
 
@@ -990,9 +1029,14 @@ where
             let mut outcome = ControlPlane::create_queue(self.control.as_ref(), definition)?;
             AsyncLogStore::ensure_shard(self.log.as_ref(), shard.clone()).await?;
             // Durable catalog so reopen / second handle can recover without re-create_queue.
-            if let Some(durable) = self.log.with_store_mut(|log| {
-                LogStore::create_or_read_definition(log, &outcome.definition)
-            })? {
+            if let Some(durable) = self
+                .log
+                .run_with_store_mut({
+                    let definition = outcome.definition.clone();
+                    move |log| LogStore::create_or_read_definition(log, &definition)
+                })
+                .await?
+            {
                 let matches = durable.definition == outcome.definition;
                 ControlPlane::cache_authoritative_definition(
                     self.control.as_ref(),
@@ -1016,7 +1060,11 @@ where
             // (fireweed-6e38e2b4 / snorri v0.24 regression).
             let needs_replay = self
                 .projection
-                .with_store(|p| ProjectionStore::metrics(p, &shard).is_err());
+                .run_with_store({
+                    let shard = shard.clone();
+                    move |p| Ok(ProjectionStore::metrics(p, &shard).is_err())
+                })
+                .await?;
             AsyncProjectionStore::ensure_shard(
                 self.projection.as_ref(),
                 outcome.definition.clone(),
@@ -1027,9 +1075,13 @@ where
                 let retention_ms = outcome.definition.request_id_retention_ms;
                 let mut from = None;
                 loop {
-                    let page = self.log.with_store(|log| {
-                        LogStore::read_from(log, &shard, from.clone(), 256)
-                    })?;
+                    let page = AsyncLogStore::read_from(
+                        self.log.as_ref(),
+                        shard.clone(),
+                        from.clone(),
+                        256,
+                    )
+                    .await?;
                     if page.entries.is_empty() {
                         break;
                     }
@@ -1037,9 +1089,12 @@ where
                         page.entries.iter().map(|(p, _)| p.clone()).collect();
                     let commands: Vec<_> =
                         page.entries.iter().map(|(_, e)| e.clone()).collect();
-                    self.projection.with_store_mut(|p| {
-                        ProjectionStore::apply_recovery(p, &positions, &commands)
-                    })?;
+                    AsyncProjectionStore::apply_recovery(
+                        self.projection.as_ref(),
+                        positions,
+                        commands,
+                    )
+                    .await?;
                     // Rebuild push request-id ledger from durable envelopes (parity with
                     // recover()). Without this, late-join create_queue materializes items but
                     // leaves retained push idempotency empty — same-request_id conflict/replay
@@ -1080,9 +1135,13 @@ where
                 }
                 // Late-join create_queue replayed into an empty image — seed mint counters
                 // the same way recover() does after full-log rebuild.
-                self.projection.with_store(|p| {
-                    ProjectionStore::restore_counters(p, &shard, &self.counters)
-                })?;
+                self.projection
+                    .run_with_store({
+                        let shard = shard.clone();
+                        let counters = Arc::clone(&self.counters);
+                        move |p| ProjectionStore::restore_counters(p, &shard, &counters)
+                    })
+                    .await?;
             }
             Ok(outcome)
         }
@@ -1214,9 +1273,15 @@ where
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         // Match sync ComposedBackend: lease-state validate then append Finalize (no token pre-gate).
         async move {
-            self.projection.with_store(|projection| {
-                ProjectionStore::finalize_validate(projection, shard, &outcomes)
-            })?;
+            self.projection
+                .run_with_store({
+                    let shard = shard.clone();
+                    let outcomes = outcomes.clone();
+                    move |projection| {
+                        ProjectionStore::finalize_validate(projection, &shard, &outcomes)
+                    }
+                })
+                .await?;
             let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id).collect();
             let outcomes = outcomes
                 .into_iter()
@@ -1255,9 +1320,15 @@ where
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         async move {
-            self.projection.with_store(|projection| {
-                ProjectionStore::renew_validate(projection, shard, &item_ids)
-            })?;
+            self.projection
+                .run_with_store({
+                    let shard = shard.clone();
+                    let item_ids = item_ids.clone();
+                    move |projection| {
+                        ProjectionStore::renew_validate(projection, &shard, &item_ids)
+                    }
+                })
+                .await?;
             let envelope = self.make_envelope(
                 QueueCommand::RenewLease(RenewLeaseCommand {
                     item_ids: item_ids.clone(),
@@ -1305,9 +1376,15 @@ where
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         async move {
-            self.projection.with_store(|projection| {
-                ProjectionStore::reassign_validate(projection, shard, &item_ids)
-            })?;
+            self.projection
+                .run_with_store({
+                    let shard = shard.clone();
+                    let item_ids = item_ids.clone();
+                    move |projection| {
+                        ProjectionStore::reassign_validate(projection, &shard, &item_ids)
+                    }
+                })
+                .await?;
             let envelope = self.make_envelope(
                 QueueCommand::ReassignLease(ReassignLeaseCommand {
                     item_ids: item_ids.clone(),
@@ -1615,9 +1692,15 @@ where
         now: UtcTimestamp,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
-        std::future::ready(self.projection.with_store(|projection| {
-            ProjectionStore::select_eligible(projection, shard, now, limit)
-        }))
+        let projection = Arc::clone(&self.projection);
+        let shard = shard.clone();
+        async move {
+            projection
+                .run_with_store(move |projection| {
+                    ProjectionStore::select_eligible(projection, &shard, now, limit)
+                })
+                .await
+        }
     }
 
     fn peek(
@@ -1625,30 +1708,41 @@ where
         shard: &QueueKey,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemView>>> + Send {
-        std::future::ready(
-            self.projection
-                .with_store(|projection| ProjectionStore::peek(projection, shard, limit)),
-        )
+        let projection = Arc::clone(&self.projection);
+        let shard = shard.clone();
+        async move {
+            projection
+                .run_with_store(move |projection| ProjectionStore::peek(projection, &shard, limit))
+                .await
+        }
     }
 
     fn pending(
         &self,
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
-        std::future::ready(
-            self.projection
-                .with_store(|projection| ProjectionStore::pending(projection, shard)),
-        )
+        let projection = Arc::clone(&self.projection);
+        let shard = shard.clone();
+        async move {
+            projection
+                .run_with_store(move |projection| ProjectionStore::pending(projection, &shard))
+                .await
+        }
     }
 
     fn pending_summary(
         &self,
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<PendingSummary>> + Send {
-        std::future::ready(
-            self.projection
-                .with_store(|projection| ProjectionStore::pending_summary(projection, shard)),
-        )
+        let projection = Arc::clone(&self.projection);
+        let shard = shard.clone();
+        async move {
+            projection
+                .run_with_store(move |projection| {
+                    ProjectionStore::pending_summary(projection, &shard)
+                })
+                .await
+        }
     }
 
     fn pending_page(
@@ -1657,9 +1751,15 @@ where
         start: Option<ItemId>,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<PendingPage>> + Send {
-        std::future::ready(self.projection.with_store(|projection| {
-            ProjectionStore::pending_page(projection, shard, start, limit)
-        }))
+        let projection = Arc::clone(&self.projection);
+        let shard = shard.clone();
+        async move {
+            projection
+                .run_with_store(move |projection| {
+                    ProjectionStore::pending_page(projection, &shard, start, limit)
+                })
+                .await
+        }
     }
 
     fn pending_range(
@@ -1670,17 +1770,23 @@ where
         consumer: Option<&LeaseToken>,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        let projection = Arc::clone(&self.projection);
+        let shard = shard.clone();
         let consumer = consumer.cloned();
-        std::future::ready(self.projection.with_store(|projection| {
-            ProjectionStore::pending_range(
-                projection,
-                shard,
-                start,
-                end,
-                consumer.as_ref(),
-                limit,
-            )
-        }))
+        async move {
+            projection
+                .run_with_store(move |projection| {
+                    ProjectionStore::pending_range(
+                        projection,
+                        &shard,
+                        start,
+                        end,
+                        consumer.as_ref(),
+                        limit,
+                    )
+                })
+                .await
+        }
     }
 
     fn pending_by_ids(
@@ -1688,10 +1794,16 @@ where
         shard: &QueueKey,
         ids: &[ItemId],
     ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        let projection = Arc::clone(&self.projection);
+        let shard = shard.clone();
         let ids = ids.to_vec();
-        std::future::ready(self.projection.with_store(|projection| {
-            ProjectionStore::pending_by_ids(projection, shard, &ids)
-        }))
+        async move {
+            projection
+                .run_with_store(move |projection| {
+                    ProjectionStore::pending_by_ids(projection, &shard, &ids)
+                })
+                .await
+        }
     }
 
     fn claimed_view(
@@ -1700,10 +1812,16 @@ where
         ids: &[ItemId],
     ) -> impl std::future::Future<Output = EngineResult<Vec<crate::ClaimedItem>>> + Send
     {
+        let projection = Arc::clone(&self.projection);
+        let shard = shard.clone();
         let ids = ids.to_vec();
-        std::future::ready(self.projection.with_store(|projection| {
-            ProjectionStore::render_claimed(projection, shard, &ids)
-        }))
+        async move {
+            projection
+                .run_with_store(move |projection| {
+                    ProjectionStore::render_claimed(projection, &shard, &ids)
+                })
+                .await
+        }
     }
 
     fn live_items(
@@ -1711,20 +1829,29 @@ where
         shard: &QueueKey,
         keys: &[ClientItemKey],
     ) -> impl std::future::Future<Output = EngineResult<Vec<Option<LiveItemView>>>> + Send {
+        let projection = Arc::clone(&self.projection);
+        let shard = shard.clone();
         let keys = keys.to_vec();
-        std::future::ready(self.projection.with_store(|projection| {
-            ProjectionStore::live_items(projection, shard, &keys)
-        }))
+        async move {
+            projection
+                .run_with_store(move |projection| {
+                    ProjectionStore::live_items(projection, &shard, &keys)
+                })
+                .await
+        }
     }
 
     fn metrics(
         &self,
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<QueueMetrics>> + Send {
-        std::future::ready(
-            self.projection
-                .with_store(|projection| ProjectionStore::metrics(projection, shard)),
-        )
+        let projection = Arc::clone(&self.projection);
+        let shard = shard.clone();
+        async move {
+            projection
+                .run_with_store(move |projection| ProjectionStore::metrics(projection, &shard))
+                .await
+        }
     }
 
     fn terminal_emission_metrics(
@@ -1734,16 +1861,22 @@ where
         emit_change_records: bool,
         emission_cursor: Option<&CommandPosition>,
     ) -> impl std::future::Future<Output = EngineResult<TerminalEmissionMetrics>> + Send {
+        let projection = Arc::clone(&self.projection);
+        let shard = shard.clone();
         let emission_cursor = emission_cursor.cloned();
-        std::future::ready(self.projection.with_store(|projection| {
-            ProjectionStore::terminal_emission_metrics(
-                projection,
-                shard,
-                now,
-                emit_change_records,
-                emission_cursor.as_ref(),
-            )
-        }))
+        async move {
+            projection
+                .run_with_store(move |projection| {
+                    ProjectionStore::terminal_emission_metrics(
+                        projection,
+                        &shard,
+                        now,
+                        emit_change_records,
+                        emission_cursor.as_ref(),
+                    )
+                })
+                .await
+        }
     }
 }
 
@@ -1826,11 +1959,17 @@ where
         index: &str,
         key: &[Vec<u8>],
     ) -> impl std::future::Future<Output = EngineResult<Option<IndexHit>>> + Send {
+        let projection = Arc::clone(&self.projection);
+        let shard = shard.clone();
         let index = index.to_string();
         let key = key.to_vec();
-        std::future::ready(self.projection.with_store(|projection| {
-            ProjectionStore::index_get_unique(projection, shard, &index, &key)
-        }))
+        async move {
+            projection
+                .run_with_store(move |projection| {
+                    ProjectionStore::index_get_unique(projection, &shard, &index, &key)
+                })
+                .await
+        }
     }
 
     fn index_lookup(
@@ -1839,11 +1978,17 @@ where
         index: &str,
         key: &[Vec<u8>],
     ) -> impl std::future::Future<Output = EngineResult<Vec<IndexHit>>> + Send {
+        let projection = Arc::clone(&self.projection);
+        let shard = shard.clone();
         let index = index.to_string();
         let key = key.to_vec();
-        std::future::ready(self.projection.with_store(|projection| {
-            ProjectionStore::index_lookup(projection, shard, &index, &key)
-        }))
+        async move {
+            projection
+                .run_with_store(move |projection| {
+                    ProjectionStore::index_lookup(projection, &shard, &index, &key)
+                })
+                .await
+        }
     }
 }
 
@@ -1863,10 +2008,17 @@ where
         request: fireweed_core::RangeScanRequest,
     ) -> impl std::future::Future<Output = EngineResult<fireweed_core::RangeScanResponse>> + Send
     {
-        std::future::ready(
-            self.projection
-                .with_store(|projection| ProjectionStore::range_scan(projection, shard, request)),
-        )
+        {
+            let projection = Arc::clone(&self.projection);
+            let shard = shard.clone();
+            async move {
+                projection
+                    .run_with_store(move |projection| {
+                        ProjectionStore::range_scan(projection, &shard, request)
+                    })
+                    .await
+            }
+        }
     }
 
     fn grouped_aggregate(
@@ -1876,9 +2028,17 @@ where
     ) -> impl std::future::Future<
         Output = EngineResult<fireweed_core::GroupedAggregateResponse>,
     > + Send {
-        std::future::ready(self.projection.with_store(|projection| {
-            ProjectionStore::grouped_aggregate(projection, shard, request)
-        }))
+        {
+            let projection = Arc::clone(&self.projection);
+            let shard = shard.clone();
+            async move {
+                projection
+                    .run_with_store(move |projection| {
+                        ProjectionStore::grouped_aggregate(projection, &shard, request)
+                    })
+                    .await
+            }
+        }
     }
 
     fn metrics_by_query(
@@ -1886,9 +2046,17 @@ where
         shard: &QueueKey,
         request: MetricsByQueryRequest,
     ) -> impl std::future::Future<Output = EngineResult<QueueMetrics>> + Send {
-        std::future::ready(self.projection.with_store(|projection| {
-            ProjectionStore::metrics_by_query(projection, shard, request)
-        }))
+        {
+            let projection = Arc::clone(&self.projection);
+            let shard = shard.clone();
+            async move {
+                projection
+                    .run_with_store(move |projection| {
+                        ProjectionStore::metrics_by_query(projection, &shard, request)
+                    })
+                    .await
+            }
+        }
     }
 
     fn declared_bucket_segment(
@@ -1898,9 +2066,17 @@ where
     ) -> impl std::future::Future<
         Output = EngineResult<fireweed_core::DeclaredBucketSegmentResponse>,
     > + Send {
-        std::future::ready(self.projection.with_store(|projection| {
-            ProjectionStore::declared_bucket_segment(projection, shard, request)
-        }))
+        {
+            let projection = Arc::clone(&self.projection);
+            let shard = shard.clone();
+            async move {
+                projection
+                    .run_with_store(move |projection| {
+                        ProjectionStore::declared_bucket_segment(projection, &shard, request)
+                    })
+                    .await
+            }
+        }
     }
 
     fn bounded_mutation(
@@ -2820,9 +2996,18 @@ where
                         | IdempotencyDecision::Expired => {}
                     }
                 }
-                if let Some(entries) = self.projection.with_store_mut(|p| {
-                    ProjectionStore::replay_durable_commit(p, &shard, rid, fingerprint.0, now)
-                })? {
+                if let Some(entries) = self
+                    .projection
+                    .run_with_store_mut({
+                        let shard = shard.clone();
+                        let rid = rid.clone();
+                        let fp = fingerprint.0;
+                        move |p| {
+                            ProjectionStore::replay_durable_commit(p, &shard, &rid, fp, now)
+                        }
+                    })
+                    .await?
+                {
                     let recovery = entries
                         .into_iter()
                         .map(crate::recovery_from_outcome_entry)
@@ -2889,9 +3074,15 @@ where
                     recovery.push(reject(EngineError::Terminal));
                     continue;
                 }
-                if let Err(e) = self.projection.with_store(|p| {
-                    ProjectionStore::commit_validate(p, &shard, &claim_refs, now)
-                }) {
+                if let Err(e) = self
+                    .projection
+                    .run_with_store({
+                        let shard = shard.clone();
+                        let claim_refs = claim_refs.clone();
+                        move |p| ProjectionStore::commit_validate(p, &shard, &claim_refs, now)
+                    })
+                    .await
+                {
                     recovery.push(reject(e));
                     continue;
                 }
@@ -2900,9 +3091,12 @@ where
                         Some(v) => *v,
                         None => self
                             .projection
-                            .with_store(|p| {
-                                ProjectionStore::instance_fence(p, &shard, &fence.instance_key)
-                            })?
+                            .run_with_store({
+                                let shard = shard.clone();
+                                let key = fence.instance_key.clone();
+                                move |p| ProjectionStore::instance_fence(p, &shard, &key)
+                            })
+                            .await?
                             .unwrap_or(0),
                     };
                     if let Err(e) = validate_instance_fence(stored, fence) {
@@ -2971,9 +3165,15 @@ where
                     );
                     let mut candidate = committed_pushes.clone();
                     candidate.extend(push_items.iter().cloned());
-                    if let Err(e) = self.projection.with_store(|p| {
-                        ProjectionStore::index_validate_push(p, &shard, &candidate)
-                    }) {
+                    if let Err(e) = self
+                        .projection
+                        .run_with_store({
+                            let shard = shard.clone();
+                            let candidate = candidate.clone();
+                            move |p| ProjectionStore::index_validate_push(p, &shard, &candidate)
+                        })
+                        .await
+                    {
                         recovery.push(reject(e));
                         continue;
                     }
