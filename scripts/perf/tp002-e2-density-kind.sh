@@ -120,8 +120,9 @@ spec:
           imagePullPolicy: Never
           ports: [ { containerPort: 8080 } ]
           env:
-            # `filesystem` is the public local durable object-log selection. `objectlog` was a
+            # filesystem is the public local durable object-log selection. objectlog was a
             # retired internal spelling and fails closed in the server's public configuration parser.
+            # (Do not use shell backticks in this unquoted heredoc — they run as command substitutions.)
             - { name: FIREWEED_LOG_BACKEND, value: filesystem }
             # Keep the governed E2 identity exact. FIREWEED_OBJECT_LOG_MODE is a retired pseudo-axis and
             # is intentionally absent; setting it would falsely imply that it selects behavior.
