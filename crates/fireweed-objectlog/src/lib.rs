@@ -17,6 +17,7 @@ mod log_engine_store;
 pub mod maintenance;
 pub mod object_store_observability;
 mod segment_config;
+pub mod storage_generation;
 
 pub use async_product::{AsyncObjectLogMemoryBackend, SeqIdGen, composed_objectlog_memory_async};
 pub use async_product_hybrid::{AsyncObjectLogHybridBackend, HybridProductConfig};
@@ -36,6 +37,10 @@ pub use compose_log::{
 pub use log_engine_store::{ObjectLogEngineStore, flush_config_from_segment};
 pub use object_log::{BlobStore, FlushConfig, S3BlobStore};
 pub use segment_config::{MAX_SEGMENT_BYTES, SegmentConfig};
+pub use storage_generation::{
+    FWSG_SEGMENT_MAGIC, INCOMPATIBLE_OBJECT_LOG_GENERATION, MIXED_OBJECT_LOG_GENERATION,
+    STORAGE_GENERATION_DOC, is_incompatible_generation_error,
+};
 
 /// Compatibility alias for pre-cutover `fireweed_objectlog::segmented::*` imports.
 /// The in-tree segmented FWSG substrate was replaced by crates.io `object_log`.

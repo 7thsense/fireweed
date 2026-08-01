@@ -301,6 +301,13 @@ before changing axes. Rolling upgrades within an S3 multi-replica deployment
 must retain compatible S3 configuration, Postgres schema, Secret keys, and
 fencing/lease settings until every replica runs the new image.
 
+**Object-log storage generation (v0.24.0+):** the retired in-tree FWSG segment
+layout is not readable by LogEngine. Opening an old- or mixed-generation
+prefix fails closed with a stable `INCOMPATIBLE_OBJECT_LOG_GENERATION` /
+`MIXED_OBJECT_LOG_GENERATION` storage error. Migrate by regenerating under a
+fresh root or S3 namespace — see
+[../operator/object-log-storage-generation.md](../operator/object-log-storage-generation.md).
+
 The PostgreSQL control-plane DSN also provides the atomic create-only
 publication authority for S3 implementations that do not provide that primitive
 themselves. With an in-process control plane, startup probes the S3 endpoint's

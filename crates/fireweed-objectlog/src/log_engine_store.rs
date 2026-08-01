@@ -109,13 +109,26 @@ impl ObjectLogEngineStore<ManifestSequencer> {
     }
 
     /// Open over an existing blob store (local, memory, or S3) with durable manifest sequencing.
+    ///
+    /// Fails closed with a stable [`EngineError::Storage`] message containing
+    /// [`crate::INCOMPATIBLE_OBJECT_LOG_GENERATION`] (or
+    /// [`crate::MIXED_OBJECT_LOG_GENERATION`]) when the blob namespace still holds
+    /// retired FWSG segment/manifest layout. See
+    /// `docs/operator/object-log-storage-generation.md`.
     pub async fn open_with_blob(
         blob: Arc<dyn BlobStore>,
         data_prefix: impl Into<String>,
         meta_prefix: impl Into<String>,
         flush: FlushConfig,
     ) -> EngineResult<Self> {
+        let data_prefix = data_prefix.into();
         let meta_prefix = meta_prefix.into();
+        crate::storage_generation::reject_incompatible_storage_generation(
+            &blob,
+            &data_prefix,
+            &meta_prefix,
+        )
+        .await?;
         let sequencer =
             ManifestSequencer::open(Arc::clone(&blob), format!("{meta_prefix}manifest/"))
                 .await
