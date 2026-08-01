@@ -7,12 +7,8 @@ use fireweed_projection::{InMemoryProjection, MemoryLog};
 
 #[test]
 fn read_as_of_reconstructs_prior_state() {
-    let backend = assemble_async_log_replay(
-        MemoryLog::new(),
-        InMemoryProjection::new(),
-        0,
-    )
-    .expect("assemble");
+    let backend = assemble_async_log_replay(MemoryLog::new(), InMemoryProjection::new(), 0)
+        .expect("assemble");
     let shard = qkey();
 
     futures::executor::block_on(backend.create_queue(qdef())).unwrap();

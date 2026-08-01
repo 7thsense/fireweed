@@ -281,13 +281,19 @@ impl<S: LogStore> InProcessLogStore<S> {
     /// Run a synchronous read against the underlying log (open/recover/tests). Blocks the caller;
     /// prefer [`Self::run_with_store`] on async product paths when offload is configured.
     pub fn with_store<R>(&self, f: impl FnOnce(&S) -> R) -> R {
-        let store = self.store.lock().expect("immediate log store mutex poisoned");
+        let store = self
+            .store
+            .lock()
+            .expect("immediate log store mutex poisoned");
         f(&*store)
     }
 
     /// Run a synchronous mutation against the underlying log. Blocks the caller.
     pub fn with_store_mut<R>(&self, f: impl FnOnce(&mut S) -> R) -> R {
-        let mut store = self.store.lock().expect("immediate log store mutex poisoned");
+        let mut store = self
+            .store
+            .lock()
+            .expect("immediate log store mutex poisoned");
         f(&mut *store)
     }
 
@@ -1277,9 +1283,7 @@ where
         now: UtcTimestamp,
         max: usize,
     ) -> impl Future<Output = EngineResult<Vec<ItemId>>> + Send {
-        self.run_with_store(move |store| {
-            store.select_item_claim(&shard, &compatibility, now, max)
-        })
+        self.run_with_store(move |store| store.select_item_claim(&shard, &compatibility, now, max))
     }
 
     fn select_rich_claim(

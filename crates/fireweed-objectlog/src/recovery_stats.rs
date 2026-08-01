@@ -114,7 +114,8 @@ where
 
     let mut from: Option<CommandPosition> = None;
     if use_projection_high_water {
-        if let Some(hw) = AsyncProjectionStore::recovery_high_water(projection, shard.clone()).await?
+        if let Some(hw) =
+            AsyncProjectionStore::recovery_high_water(projection, shard.clone()).await?
         {
             stats.snapshot_used = true;
             // High-water is the last applied position; stats.start_seq is the exclusive count
@@ -126,24 +127,22 @@ where
 
     let mut tail_replayed = 0u64;
     loop {
-        let page =
-            AsyncLogStore::read_from(log, shard.clone(), from.clone(), page_limit).await?;
+        let page = AsyncLogStore::read_from(log, shard.clone(), from.clone(), page_limit).await?;
         if page.entries.is_empty() {
             break;
         }
         let page_len = page.entries.len() as u64;
-        stats.peak_replay_commands_buffered =
-            stats.peak_replay_commands_buffered.max(page_len);
+        stats.peak_replay_commands_buffered = stats.peak_replay_commands_buffered.max(page_len);
         // Each read_from is one logical segment/page fetch from the log engine.
         stats.recovery_segment_gets = stats.recovery_segment_gets.saturating_add(1);
         stats.peak_manifest_objects_buffered = stats
             .peak_manifest_objects_buffered
             .max(1)
             .min(stats.manifest_object_page_limit);
-        stats.recovery_index_entries_visited =
-            stats.recovery_index_entries_visited.saturating_add(page_len);
-        stats.recovery_index_node_visits =
-            stats.recovery_index_node_visits.saturating_add(1);
+        stats.recovery_index_entries_visited = stats
+            .recovery_index_entries_visited
+            .saturating_add(page_len);
+        stats.recovery_index_node_visits = stats.recovery_index_node_visits.saturating_add(1);
 
         let positions: Vec<_> = page.entries.iter().map(|(p, _)| p.clone()).collect();
         let commands: Vec<_> = page.entries.iter().map(|(_, e)| e.clone()).collect();

@@ -24,8 +24,7 @@ pub const MIXED_OBJECT_LOG_GENERATION: &str = "MIXED_OBJECT_LOG_GENERATION";
 pub const FWSG_SEGMENT_MAGIC: &[u8; 4] = b"FWSG";
 
 /// Operator-facing documentation path (relative to repo root).
-pub const STORAGE_GENERATION_DOC: &str =
-    "docs/operator/object-log-storage-generation.md";
+pub const STORAGE_GENERATION_DOC: &str = "docs/operator/object-log-storage-generation.md";
 
 /// True when `err` is the documented incompatible / mixed generation open error.
 pub fn is_incompatible_generation_error(err: &EngineError) -> bool {
@@ -186,20 +185,10 @@ async fn has_log_engine_keys(
     data_prefix: &str,
     meta_prefix: &str,
 ) -> EngineResult<bool> {
-    if !blob
-        .list(meta_prefix)
-        .await
-        .map_err(store_err)?
-        .is_empty()
-    {
+    if !blob.list(meta_prefix).await.map_err(store_err)?.is_empty() {
         return Ok(true);
     }
-    if !blob
-        .list(data_prefix)
-        .await
-        .map_err(store_err)?
-        .is_empty()
-    {
+    if !blob.list(data_prefix).await.map_err(store_err)?.is_empty() {
         return Ok(true);
     }
     Ok(false)
@@ -237,7 +226,9 @@ mod tests {
         assert!(key_looks_like_fwsg(
             "t/7465/q/71/seg_candidates/e00000000000000000001/i00000000000000000000/s00000000000000000000-abcd.seg"
         ));
-        assert!(key_looks_like_fwsg("t/aa/q/bb/manifest_head/00000000000000000001"));
+        assert!(key_looks_like_fwsg(
+            "t/aa/q/bb/manifest_head/00000000000000000001"
+        ));
         assert!(key_looks_like_fwsg("ns/t/aa/q/bb/authority_protocol_v1"));
         assert!(!key_looks_like_fwsg("fwmeta/catalog.json"));
         assert!(!key_looks_like_fwsg("fwlog/part-0"));
@@ -263,8 +254,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let blob: Arc<dyn BlobStore> = Arc::new(LocalBlobStore::new(&dir));
-        let key =
-            "t/7465/q/71/seg_candidates/e00000000000000000001/i00000000000000000000/s00000000000000000000-deadbeef.seg";
+        let key = "t/7465/q/71/seg_candidates/e00000000000000000001/i00000000000000000000/s00000000000000000000-deadbeef.seg";
         let mut body = FWSG_SEGMENT_MAGIC.to_vec();
         body.extend_from_slice(&[2u8, 0, 0, 0, 0, 0, 0, 0, 0]); // version + padding
         blob.put(key, bytes::Bytes::from(body)).await.unwrap();
@@ -330,10 +320,7 @@ mod tests {
             .expect_err("mixed generation must fail");
         match &err {
             EngineError::Storage(msg) => {
-                assert!(
-                    msg.contains(MIXED_OBJECT_LOG_GENERATION),
-                    "msg={msg}"
-                );
+                assert!(msg.contains(MIXED_OBJECT_LOG_GENERATION), "msg={msg}");
             }
             other => panic!("expected Storage error, got {other:?}"),
         }

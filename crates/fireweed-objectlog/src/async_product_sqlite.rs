@@ -14,15 +14,15 @@ use fireweed_core::{
 use fireweed_engine::{
     AsyncClaimError, AsyncCommitStrategy, AsyncComposedBackend, AsyncControlPlane,
     AsyncFinalizeRequest, AsyncLogStore, AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError,
-    AsyncPushRequest, AsyncRenewRequest, Backend, ClaimPort, ClaimRequest, Claimed, CommandChecksum,
-    CommandEnvelope, ControlPlaneStore, CreateQueueOutcome, DurabilityClass, EngineError,
-    EngineResult, FinalizeOutcome, FinalizePort, FinalizeTarget, IdGen, InProcessControlPlane,
-    InProcessProjectionStore, OwnedTask, ProjectionClaimPlanner, ProjectionLifecyclePlanner,
-    ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner, ProjectionStore, PurgePort,
-    PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, RawCommitOutcome, RawCommitRequest,
-    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort,
-    RenewTarget, SeparateReplayCommit, SeparateReplayCommitter, TickReport, UpsertOutcome,
-    UpsertPort,
+    AsyncPushRequest, AsyncRenewRequest, Backend, ClaimPort, ClaimRequest, Claimed,
+    CommandChecksum, CommandEnvelope, ControlPlaneStore, CreateQueueOutcome, DurabilityClass,
+    EngineError, EngineResult, FinalizeOutcome, FinalizePort, FinalizeTarget, IdGen,
+    InProcessControlPlane, InProcessProjectionStore, OwnedTask, ProjectionClaimPlanner,
+    ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner,
+    ProjectionStore, PurgePort, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey,
+    RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
+    ReclaimPort, RenewLeasePort, RenewTarget, SeparateReplayCommit, SeparateReplayCommitter,
+    TickReport, UpsertOutcome, UpsertPort,
 };
 use fireweed_sqlite::SqliteProjectionStore;
 use object_log::FlushConfig;
@@ -35,7 +35,8 @@ use crate::commit_surface::{
 use crate::port_surface::{
     self, BatchUpdateIdempotency, ClaimByItemIdsIdempotency, ClaimByQueryIdempotency,
     PreparedBatchUpdate, PreparedClaimByItemIds, PreparedClaimByQuery, PreparedUpsert,
-    new_batch_update_idempotency, new_claim_by_item_ids_idempotency, new_claim_by_query_idempotency,
+    new_batch_update_idempotency, new_claim_by_item_ids_idempotency,
+    new_claim_by_query_idempotency,
 };
 use crate::recovery_stats::{RecoveryStats, RecoveryStatsMap, replay_log_into_projection};
 
@@ -216,13 +217,8 @@ impl AsyncObjectLogSqliteBackend {
             AsyncProjectionStore::ensure_shard(projection.as_ref(), definition.clone()).await?;
             let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             // Durable SQLite projection: snapshot high-water + bounded tail replay.
-            let stats = replay_log_into_projection(
-                log.as_ref(),
-                projection.as_ref(),
-                &shard,
-                true,
-            )
-            .await?;
+            let stats =
+                replay_log_into_projection(log.as_ref(), projection.as_ref(), &shard, true).await?;
             recovery_stats.insert(shard, stats);
         }
         Ok(Self {
@@ -1062,12 +1058,13 @@ impl fireweed_engine::DiscoveryPort for AsyncObjectLogSqliteBackend {
         shard: &QueueKey,
         granularity: fireweed_engine::DiscoveryGranularity,
         now: UtcTimestamp,
-    ) -> impl std::future::Future<
-        Output = EngineResult<Vec<fireweed_engine::ActiveScope>>,
-    > + Send {
-        std::future::ready(self.projection.with_store(|p| {
-            ProjectionStore::discover_active_scopes(p, shard, granularity, now)
-        }))
+    ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::ActiveScope>>> + Send
+    {
+        std::future::ready(
+            self.projection.with_store(|p| {
+                ProjectionStore::discover_active_scopes(p, shard, granularity, now)
+            }),
+        )
     }
 }
 impl fireweed_engine::IndexQueryPort for AsyncObjectLogSqliteBackend {
@@ -1101,10 +1098,7 @@ impl fireweed_engine::IndexQueryPort for AsyncObjectLogSqliteBackend {
     }
 }
 impl fireweed_engine::HotProjectionQueryPort for AsyncObjectLogSqliteBackend {
-    fn hot_projection_capabilities(
-        &self,
-        shard: &QueueKey,
-    ) -> fireweed_core::QueryCapabilityFlags {
+    fn hot_projection_capabilities(&self, shard: &QueueKey) -> fireweed_core::QueryCapabilityFlags {
         port_surface::hot_projection_capabilities(self.projection.as_ref(), shard)
     }
 
@@ -1125,9 +1119,8 @@ impl fireweed_engine::HotProjectionQueryPort for AsyncObjectLogSqliteBackend {
         &self,
         shard: &QueueKey,
         request: fireweed_core::GroupedAggregateRequest,
-    ) -> impl std::future::Future<
-        Output = EngineResult<fireweed_core::GroupedAggregateResponse>,
-    > + Send {
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_core::GroupedAggregateResponse>> + Send
+    {
         std::future::ready(port_surface::grouped_aggregate(
             self.projection.as_ref(),
             shard,
@@ -1355,10 +1348,10 @@ mod tests {
         RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
     };
     use fireweed_engine::{
-        ClaimCompatibility, ClaimPort, ClaimRef, ClaimRequest, CommitEntryOutcome, CommitTransition,
-        CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore, EngineError, FinalizeKind,
-        FinalizeOutcome, FinalizePort, InstanceFence, ProjectionRead, ProjectionStore, PushPort,
-        PushSpec, RecoveryReadPort, SideRecord,
+        ClaimCompatibility, ClaimPort, ClaimRef, ClaimRequest, CommitEntryOutcome,
+        CommitTransition, CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore,
+        EngineError, FinalizeKind, FinalizeOutcome, FinalizePort, InstanceFence, ProjectionRead,
+        ProjectionStore, PushPort, PushSpec, RecoveryReadPort, SideRecord,
     };
     use object_log::FlushConfig;
 

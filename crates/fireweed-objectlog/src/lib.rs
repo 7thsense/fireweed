@@ -24,10 +24,6 @@ pub mod storage_generation;
 pub use async_product::{AsyncObjectLogMemoryBackend, SeqIdGen, composed_objectlog_memory_async};
 pub use async_product_hybrid::{AsyncObjectLogHybridBackend, HybridProductConfig};
 pub use async_product_sqlite::AsyncObjectLogSqliteBackend;
-pub use recovery_stats::{
-    RECOVERY_COMMAND_PAGE_LIMIT, RECOVERY_MANIFEST_OBJECT_PAGE_LIMIT, RecoveryStats,
-    RecoveryStatsMap, replay_log_into_projection,
-};
 pub use commit_surface::{
     CommitIdempotency, PreparedCommitTransition, durability_for_strict,
     eventual_commit_capabilities, explain_commit_if_authoritative,
@@ -42,6 +38,10 @@ pub use compose_log::{
 };
 pub use log_engine_store::{ObjectLogEngineStore, flush_config_from_segment};
 pub use object_log::{BlobStore, FlushConfig, S3BlobStore};
+pub use recovery_stats::{
+    RECOVERY_COMMAND_PAGE_LIMIT, RECOVERY_MANIFEST_OBJECT_PAGE_LIMIT, RecoveryStats,
+    RecoveryStatsMap, replay_log_into_projection,
+};
 pub use segment_config::{MAX_SEGMENT_BYTES, SegmentConfig};
 pub use storage_generation::{
     FWSG_SEGMENT_MAGIC, INCOMPATIBLE_OBJECT_LOG_GENERATION, MIXED_OBJECT_LOG_GENERATION,

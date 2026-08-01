@@ -71,11 +71,7 @@ fn claim_by_item_ids_partial_outcomes_and_never_leases_outside_set() {
         let ids = b
             .push(
                 &shard(),
-                vec![
-                    push_spec("a", 10),
-                    push_spec("b", 20),
-                    push_spec("c", 30),
-                ],
+                vec![push_spec("a", 10), push_spec("b", 20), push_spec("c", 30)],
                 ts(0),
                 None,
             )
@@ -115,11 +111,7 @@ fn claim_by_item_ids_partial_outcomes_and_never_leases_outside_set() {
         let mixed = b
             .claim_by_item_ids(
                 &shard(),
-                claim_req(
-                    vec![id_a, id_b, id_c, missing, id_a],
-                    "r-mixed",
-                    1_000,
-                ),
+                claim_req(vec![id_a, id_b, id_c, missing, id_a], "r-mixed", 1_000),
                 ctx(30),
             )
             .await
@@ -292,9 +284,7 @@ fn claim_by_item_ids_lease_is_first_class_inspect_reclaim_fence() {
             request_fingerprint: None,
             request_outcome: None,
             item_ids: vec![id],
-            command: QueueCommand::FenceLease(FenceLeaseCommand {
-                item_ids: vec![id],
-            }),
+            command: QueueCommand::FenceLease(FenceLeaseCommand { item_ids: vec![id] }),
             checksum: CommandChecksum(0),
             created_at: ts(230),
         };
@@ -338,8 +328,7 @@ fn claim_by_item_ids_idempotent_replay() {
         let second = b.claim_by_item_ids(&shard(), req, ctx(10)).await.unwrap();
         assert_eq!(second.items.len(), 1);
         assert_eq!(
-            first.items[0].lease_token,
-            second.items[0].lease_token,
+            first.items[0].lease_token, second.items[0].lease_token,
             "same-body request_id replay returns same lease token"
         );
         assert_eq!(b.metrics(&shard()).await.unwrap().leased, 1);

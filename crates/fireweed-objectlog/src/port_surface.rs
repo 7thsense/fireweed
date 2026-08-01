@@ -14,8 +14,8 @@ use fireweed_core::{
     ClaimByItemIdsDisposition, ClaimByItemIdsOutcome, ClaimByItemIdsRequest, ClaimByQueryRequest,
     ClientItemKey, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, GroupKey,
     GroupedAggregateRequest, GroupedAggregateResponse, ItemId, ItemState, LeaseToken, Metadata,
-    MetricsByQueryRequest, PriorityValue, QueryCapabilityFlags, RangeScanRequest, RangeScanResponse,
-    RequestId, UtcTimestamp,
+    MetricsByQueryRequest, PriorityValue, QueryCapabilityFlags, RangeScanRequest,
+    RangeScanResponse, RequestId, UtcTimestamp,
 };
 use fireweed_engine::{
     AsyncControlPlane, BatchUpdateOutcome, BatchUpdateRequest, BatchUpdateResponse,
@@ -23,8 +23,8 @@ use fireweed_engine::{
     ClaimedItem, CommandChecksum, CommandEnvelope, EngineError, EngineResult, IdGen,
     IdempotencyDecision, InProcessControlPlane, InProcessProjectionStore, IndexHit, PayloadUpdate,
     ProjectionStore, PushCommand, PushItem, QueueCommand, QueueCounters, QueueIdempotencyCache,
-    QueueKey, QueueMetrics, ReplacePendingCommand, RequestOutcome, UpdateFieldsCommand, UpsertOutcome,
-    batch_update_body_hash, claim_by_item_ids_body_hash, claim_by_query_body_hash,
+    QueueKey, QueueMetrics, ReplacePendingCommand, RequestOutcome, UpdateFieldsCommand,
+    UpsertOutcome, batch_update_body_hash, claim_by_item_ids_body_hash, claim_by_query_body_hash,
     compile_entity_schema, generate_query_lease_token, plan_batch_update, request_expires_at,
     validate_entity,
 };
@@ -81,10 +81,7 @@ pub fn make_envelope(
 
 enum UpsertPlan {
     Insert(PushItem),
-    Replace {
-        existing_id: ItemId,
-        item: PushItem,
-    },
+    Replace { existing_id: ItemId, item: PushItem },
 }
 
 /// Plan + envelope for a single upsert (`replace_if_pending`).
@@ -166,10 +163,7 @@ where
                             &existing_id,
                             &item,
                         )?;
-                        Ok(UpsertPlan::Replace {
-                            existing_id,
-                            item,
-                        })
+                        Ok(UpsertPlan::Replace { existing_id, item })
                     }
                     ItemState::Leased => Err(EngineError::Invalid("collision with claimed item")),
                     ItemState::Complete | ItemState::Failed => Err(EngineError::Terminal),
@@ -283,8 +277,9 @@ where
         return Ok(PreparedBatchUpdate::Replay(response));
     }
 
-    let snapshot =
-        projection.with_store(|projection| ProjectionStore::batch_update_snapshot(projection, shard, &refs))?;
+    let snapshot = projection.with_store(|projection| {
+        ProjectionStore::batch_update_snapshot(projection, shard, &refs)
+    })?;
     let mut plan = plan_batch_update(&definition, supports_gates, request.updates, snapshot);
     let candidate_commands = plan
         .commands
@@ -324,12 +319,7 @@ where
         .into_iter()
         .map(|(_, command)| {
             let item_id = command.item_id;
-            make_envelope(
-                ids,
-                QueueCommand::UpdateFields(command),
-                vec![item_id],
-                now,
-            )
+            make_envelope(ids, QueueCommand::UpdateFields(command), vec![item_id], now)
         })
         .collect::<Vec<_>>();
     if envelopes.is_empty() {
@@ -548,8 +538,8 @@ where
         .check_conflict_first(&request_id, fingerprint, context.now)
     {
         IdempotencyDecision::Replay((item_ids, lease_token)) => {
-            let items = projection
-                .with_store(|p| ProjectionStore::render_claimed(p, shard, &item_ids))?;
+            let items =
+                projection.with_store(|p| ProjectionStore::render_claimed(p, shard, &item_ids))?;
             if items.len() != item_ids.len()
                 || items
                     .iter()
@@ -892,7 +882,7 @@ pub async fn prepare_update_fields<P>(
 where
     P: ProjectionStore + Send + 'static,
 {
-use fireweed_engine::validate_api001_reserved_write_fields;
+    use fireweed_engine::validate_api001_reserved_write_fields;
     validate_api001_reserved_write_fields(&field_ops)?;
     let def = AsyncControlPlane::queue_definition(control, shard.clone()).await?;
     let schema = def
@@ -924,7 +914,6 @@ use fireweed_engine::validate_api001_reserved_write_fields;
         now,
     ))
 }
-
 
 /// Plan a reschedule (priority/not_before) UpdateFields envelope.
 pub fn prepare_reschedule<P>(

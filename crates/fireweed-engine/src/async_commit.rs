@@ -366,10 +366,7 @@ impl OwnedTaskDispatcher for InlineOwnedTaskDispatcher {
         &self,
         factory: OwnedTaskFactory<T>,
     ) -> Result<TaskOutcome<T>, DispatchError> {
-        if self
-            .closed
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(DispatchError::Closed);
         }
         let (sender, outcome) = task_outcome_channel();
@@ -378,13 +375,11 @@ impl OwnedTaskDispatcher for InlineOwnedTaskDispatcher {
     }
 
     fn close(&self) {
-        self.closed
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn is_closed(&self) -> bool {
-        self.closed
-            .load(std::sync::atomic::Ordering::SeqCst)
+        self.closed.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn drain(&self) -> TaskOutcome<()> {
