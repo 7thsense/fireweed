@@ -44,16 +44,19 @@ esac
 
 RUN_ID=${FIREWEED_E3_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-local}
 REV=$(git rev-parse --short=12 HEAD)
-EVIDENCE_DIR=${FIREWEED_E3_EVIDENCE_DIR:-$REPO_ROOT/target/e3-runs/${REV}-${RUN_ID}}
-mkdir -p "$REPO_ROOT/target/e3-runs"
+# Governed wrapper requires EVIDENCE_DIR to be empty; keep runner bookkeeping
+# in the parent run dir so launch.env / logs do not fail the emptiness check.
+RUN_DIR=${FIREWEED_E3_RUN_DIR:-$REPO_ROOT/target/e3-runs/${REV}-${RUN_ID}}
+EVIDENCE_DIR=${FIREWEED_E3_EVIDENCE_DIR:-$RUN_DIR/evidence}
+mkdir -p "$REPO_ROOT/target/e3-runs" "$RUN_DIR"
 if [ -e "$EVIDENCE_DIR" ] && [ -n "$(find "$EVIDENCE_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
   echo "evidence dir not empty: $EVIDENCE_DIR" >&2
   exit 2
 fi
 mkdir -p "$EVIDENCE_DIR"
 
-LOG="$EVIDENCE_DIR/runner.log"
-PID_FILE="$EVIDENCE_DIR/runner.pid"
+LOG="$RUN_DIR/runner.log"
+PID_FILE="$RUN_DIR/runner.pid"
 
 export FIREWEED_S3_TEST_ENDPOINT="http://${MINIO_IP}:9000"
 export FIREWEED_S3_TEST_REGION=${FIREWEED_S3_TEST_REGION:-us-east-1}
@@ -80,13 +83,14 @@ export FIREWEED_E3_ACK_CONCURRENCY=384
 export FIREWEED_E3_LOAD_CONCURRENCY=8
 export FIREWEED_RECOVERY_MAX_TAIL_COMMANDS=1000000
 
-cat >"$EVIDENCE_DIR/launch.env" <<EOF
+cat >"$RUN_DIR/launch.env" <<EOF
 # non-secret launch record
 endpoint=$FIREWEED_S3_TEST_ENDPOINT
 bucket=$FIREWEED_S3_TEST_BUCKET
 run_id=$RUN_ID
 revision=$(git rev-parse HEAD)
 minio_container=$MINIO_CONTAINER
+evidence_dir=$EVIDENCE_DIR
 started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 
@@ -94,10 +98,6 @@ echo "launching E3 into $EVIDENCE_DIR (log: $LOG)" >&2
 nohup bash -c "
   set -euo pipefail
   cd '$REPO_ROOT'
-  # shellcheck disable=SC1091
-  set -a
-  source '$EVIDENCE_DIR/launch.env' || true
-  set +a
   export FIREWEED_S3_TEST_ENDPOINT='$FIREWEED_S3_TEST_ENDPOINT'
   export FIREWEED_S3_TEST_REGION='$FIREWEED_S3_TEST_REGION'
   export FIREWEED_S3_TEST_BUCKET='$FIREWEED_S3_TEST_BUCKET'
@@ -127,6 +127,6 @@ nohup bash -c "
   exit \$status
 " >"$LOG" 2>&1 &
 echo $! >"$PID_FILE"
-echo "pid=$(cat "$PID_FILE") log=$LOG evidence=$EVIDENCE_DIR"
+echo "pid=$(cat "$PID_FILE") log=$LOG evidence=$EVIDENCE_DIR run_dir=$RUN_DIR"
 echo "monitor: tail -F $LOG"
 echo "status:  kill -0 \$(cat $PID_FILE) && echo running || echo exited"
