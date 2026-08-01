@@ -39,6 +39,7 @@ use crate::port_surface::{
     new_batch_update_idempotency, new_claim_by_item_ids_idempotency,
     new_claim_by_query_idempotency,
 };
+use crate::recovery_stats::rebuild_process_idempotency_from_log;
 
 type Proj = InProcessProjectionStore<HybridProjectionStore>;
 
@@ -278,6 +279,17 @@ impl AsyncObjectLogHybridBackend {
                     None => break,
                 }
             }
+            // Process-local request-id maps are not part of the hybrid snapshot; rebuild from log.
+            rebuild_process_idempotency_from_log(
+                log.as_ref(),
+                &shard,
+                definition.request_id_retention_ms,
+                &commit_idempotency,
+                &batch_update_idempotency,
+                &claim_by_query_idempotency,
+                &claim_by_item_ids_idempotency,
+            )
+            .await?;
         }
         Ok(Self {
             engine,

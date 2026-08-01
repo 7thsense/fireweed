@@ -682,6 +682,55 @@ pub(crate) enum TokenOp {
     Clear(QueueKey, ItemId),
 }
 
+/// Collect process-local lease cleartext ops from a command without mutating durable SQL.
+///
+/// Used when replaying a prefix the projection has already absorbed (`incoming < cursor`):
+/// durable rows keep only `lease_token_hash`, so reopen must rehydrate [`Inner::live_tokens`]
+/// from the authoritative log or render_claimed / renew after kill returns `StaleLease`.
+pub(crate) fn collect_token_ops_from_command(
+    token_ops: &mut Vec<TokenOp>,
+    shard: &QueueKey,
+    command: &QueueCommand,
+) {
+    match command {
+        QueueCommand::Claim(c) => {
+            for id in &c.item_ids {
+                token_ops.push(TokenOp::Set(shard.clone(), *id, c.lease_token.clone()));
+            }
+        }
+        QueueCommand::CohortClaim(c) => {
+            for id in &c.item_ids {
+                token_ops.push(TokenOp::Set(shard.clone(), *id, c.lease_token.clone()));
+            }
+        }
+        QueueCommand::ReassignLease(c) => {
+            for id in &c.item_ids {
+                token_ops.push(TokenOp::Set(shard.clone(), *id, c.lease_token.clone()));
+            }
+        }
+        QueueCommand::Finalize(c) => {
+            for outcome in &c.outcomes {
+                token_ops.push(TokenOp::Clear(shard.clone(), outcome.item_id));
+            }
+        }
+        QueueCommand::PurgeItems(c) => {
+            for id in &c.item_ids {
+                token_ops.push(TokenOp::Clear(shard.clone(), *id));
+            }
+        }
+        QueueCommand::LeaseExpired(c) => {
+            for id in &c.item_ids {
+                token_ops.push(TokenOp::Clear(shard.clone(), *id));
+            }
+        }
+        QueueCommand::ReplacePending(c) => {
+            // Replace supersedes the prior item; clear any prior lease cleartext.
+            token_ops.push(TokenOp::Clear(shard.clone(), c.superseded_item_id));
+        }
+        _ => {}
+    }
+}
+
 pub(crate) fn apply_token_ops(
     live_tokens: &mut HashMap<QueueKey, BTreeMap<ItemId, LeaseToken>>,
     by_consumer: &mut HashMap<QueueKey, HashMap<LeaseToken, BTreeSet<ItemId>>>,

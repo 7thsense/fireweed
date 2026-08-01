@@ -600,6 +600,31 @@ impl SqliteProjectionStore {
         create_queue_sql(&mut g, definition)
     }
 
+    /// Rehydrate process-local lease cleartext from already-applied command envelopes.
+    ///
+    /// Durable SQLite rows store only `lease_token_hash`. After snapshot-tail open the high-water
+    /// path never re-applies historical Claim/Reassign commands, so `live_tokens` would stay empty
+    /// and item-id renew/finalize would fail closed with `StaleLease`. Callers that keep cleartext
+    /// on an authoritative log (object-log products) must rehydrate from that log after open.
+    pub fn rehydrate_lease_cleartext(
+        &self,
+        shard: &QueueKey,
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        let mut g = self.inner.lock().expect("projection store poisoned");
+        let mut token_ops = Vec::new();
+        for env in commands {
+            collect_token_ops_from_command(&mut token_ops, shard, &env.command);
+        }
+        let Inner {
+            live_tokens,
+            live_tokens_by_consumer,
+            ..
+        } = &mut *g;
+        apply_token_ops(live_tokens, live_tokens_by_consumer, token_ops);
+        Ok(())
+    }
+
     /// Apply one already-durable command at its externally assigned log position.
     pub fn apply_committed(
         &self,

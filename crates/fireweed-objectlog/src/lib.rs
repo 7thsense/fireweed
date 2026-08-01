@@ -41,7 +41,7 @@ pub use log_engine_store::{ObjectLogEngineStore, flush_config_from_segment};
 pub use object_log::{BlobStore, FlushConfig, S3BlobStore};
 pub use recovery_stats::{
     RECOVERY_COMMAND_PAGE_LIMIT, RECOVERY_MANIFEST_OBJECT_PAGE_LIMIT, RecoveryStats,
-    RecoveryStatsMap, replay_log_into_projection,
+    RecoveryStatsMap, rebuild_process_idempotency_from_log, replay_log_into_projection,
 };
 pub use segment_config::{MAX_SEGMENT_BYTES, SegmentConfig};
 pub use storage_generation::{

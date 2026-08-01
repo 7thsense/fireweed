@@ -969,7 +969,10 @@ pub(crate) fn apply_committed_batch_sql(
         };
         let incoming = pos.sequence as i64;
         if incoming < cursor {
-            // Already applied (idempotent replay of a prefix the projection has already absorbed).
+            // Already applied to durable SQL. Still rebuild process-local lease cleartext:
+            // SQLite stores only lease_token_hash, so high-water / idempotent reopen would
+            // otherwise leave live_tokens empty and renew/finalize_by_id returns StaleLease.
+            collect_token_ops_from_command(&mut token_ops, &pos.queue, &env.command);
             i += 1;
             continue;
         }

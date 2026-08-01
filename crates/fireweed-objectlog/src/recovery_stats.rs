@@ -3,11 +3,19 @@
 //! Captured during product open when the durable log is replayed into a projection.
 //! Field names match the TP-002 E3 evidence contract (`recovery_*` ledger keys).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
+use fireweed_core::{BodyHash, ItemId};
 use fireweed_engine::{
-    AsyncLogStore, AsyncProjectionStore, CommandPosition, EngineResult, QueueKey,
+    AsyncLogStore, AsyncProjectionStore, BatchUpdateResponse, CommandPosition, EngineError,
+    EngineResult, QueueCommand, QueueKey, RequestOutcome, recovery_from_outcome_entry,
+    request_expires_at,
+};
+
+use crate::commit_surface::CommitIdempotency;
+use crate::port_surface::{
+    BatchUpdateIdempotency, ClaimByItemIdsIdempotency, ClaimByQueryIdempotency,
 };
 
 /// Default command page size used by product recovery loops.
@@ -172,6 +180,161 @@ where
         stats.recovery_segment_gets = 0;
     }
     Ok(stats)
+}
+
+/// Rebuild process-local request-id caches from durable log markers after product open.
+///
+/// Projection apply restores item/lease state, but commit / batch-update / claim-by-*
+/// idempotency lives in in-process maps (`retained_commit_idempotency` and peers). Those
+/// maps must be rehydrated from `RequestOutcome::*` envelopes so a post-reopen retry of an
+/// already-committed `request_id` replays instead of re-executing (AC-TXN-3).
+///
+/// Always genesis-scans the log for markers — independent of projection high-water — because
+/// the markers are not stored in the projection snapshot.
+pub async fn rebuild_process_idempotency_from_log<L>(
+    log: &L,
+    shard: &QueueKey,
+    retention_ms: u64,
+    commit_idempotency: &CommitIdempotency,
+    batch_update_idempotency: &BatchUpdateIdempotency,
+    claim_by_query_idempotency: &ClaimByQueryIdempotency,
+    claim_by_item_ids_idempotency: &ClaimByItemIdsIdempotency,
+) -> EngineResult<()>
+where
+    L: AsyncLogStore + ?Sized,
+{
+    let page_limit = RECOVERY_COMMAND_PAGE_LIMIT as usize;
+    let mut from = None;
+    loop {
+        let page = AsyncLogStore::read_from(log, shard.clone(), from.clone(), page_limit).await?;
+        if page.entries.is_empty() {
+            break;
+        }
+        {
+            let mut commit_cache = commit_idempotency
+                .lock()
+                .expect("commit idempotency poisoned");
+            let mut batch_cache = batch_update_idempotency
+                .lock()
+                .expect("batch_update idempotency poisoned");
+            let mut claim_cache = claim_by_query_idempotency
+                .lock()
+                .expect("claim_by_query idempotency poisoned");
+            let mut claim_by_item_ids_cache = claim_by_item_ids_idempotency
+                .lock()
+                .expect("claim_by_item_ids idempotency poisoned");
+
+            for (_, env) in &page.entries {
+                // Renew extends active query/item-id claim replay retention (parity with
+                // AsyncLogReplayBackend recovery).
+                if let QueueCommand::RenewLease(renew) = &env.command {
+                    let renewed: HashSet<ItemId> = renew.item_ids.iter().copied().collect();
+                    claim_cache
+                        .entry(shard.clone())
+                        .or_default()
+                        .extend_expiry_matching(renew.lease_expires_at, |(item_ids, _)| {
+                            !item_ids.is_empty()
+                                && item_ids.iter().all(|item_id| renewed.contains(item_id))
+                        });
+                    claim_by_item_ids_cache.entry(shard.clone()).or_default().extend_expiry_matching(
+                        renew.lease_expires_at,
+                        |(item_ids, _, _)| {
+                            !item_ids.is_empty()
+                                && item_ids.iter().all(|item_id| renewed.contains(item_id))
+                        },
+                    );
+                }
+
+                let Some(request_id) = &env.request_id else {
+                    continue;
+                };
+
+                if let Some(RequestOutcome::ClaimByQuery {
+                    item_ids,
+                    lease_token,
+                    ..
+                }) = &env.request_outcome
+                {
+                    let fingerprint = BodyHash(env.request_fingerprint.unwrap_or(0));
+                    let expires_at = match (&env.command, item_ids.is_empty()) {
+                        (QueueCommand::Claim(claim), false) => {
+                            request_expires_at(env.created_at, retention_ms)
+                                .max(claim.lease_expires_at)
+                        }
+                        _ => request_expires_at(env.created_at, retention_ms),
+                    };
+                    claim_cache.entry(shard.clone()).or_default().record(
+                        request_id.clone(),
+                        fingerprint,
+                        (item_ids.clone(), lease_token.clone()),
+                        expires_at,
+                    );
+                }
+                if let Some(RequestOutcome::ClaimByItemIds {
+                    claimed_item_ids,
+                    lease_token,
+                    outcomes,
+                    ..
+                }) = &env.request_outcome
+                {
+                    let fingerprint = BodyHash(env.request_fingerprint.unwrap_or(0));
+                    let expires_at = match (&env.command, claimed_item_ids.is_empty()) {
+                        (QueueCommand::Claim(claim), false) => {
+                            request_expires_at(env.created_at, retention_ms)
+                                .max(claim.lease_expires_at)
+                        }
+                        _ => request_expires_at(env.created_at, retention_ms),
+                    };
+                    claim_by_item_ids_cache
+                        .entry(shard.clone())
+                        .or_default()
+                        .record(
+                            request_id.clone(),
+                            fingerprint,
+                            (
+                                claimed_item_ids.clone(),
+                                lease_token.clone(),
+                                outcomes.clone(),
+                            ),
+                            expires_at,
+                        );
+                }
+                if let Some(RequestOutcome::BatchUpdate { response_payload }) = &env.request_outcome
+                {
+                    let fingerprint = BodyHash(env.request_fingerprint.unwrap_or(0));
+                    let expires_at = request_expires_at(env.created_at, retention_ms);
+                    let response: BatchUpdateResponse = serde_json::from_str(response_payload)
+                        .map_err(|e| EngineError::Storage(e.to_string()))?;
+                    batch_cache.entry(shard.clone()).or_default().record(
+                        request_id.clone(),
+                        fingerprint,
+                        response,
+                        expires_at,
+                    );
+                }
+                if let Some(RequestOutcome::CommitTransition { entries }) = &env.request_outcome {
+                    let fingerprint = BodyHash(env.request_fingerprint.unwrap_or(0));
+                    let expires_at = request_expires_at(env.created_at, retention_ms);
+                    let recovery = entries
+                        .iter()
+                        .cloned()
+                        .map(recovery_from_outcome_entry)
+                        .collect::<Vec<_>>();
+                    commit_cache.entry(shard.clone()).or_default().record(
+                        request_id.clone(),
+                        fingerprint,
+                        recovery,
+                        expires_at,
+                    );
+                }
+            }
+        }
+        match page.next {
+            Some(next) => from = Some(next),
+            None => break,
+        }
+    }
+    Ok(())
 }
 
 /// Thread-safe map of per-shard recovery telemetry from the last product open.

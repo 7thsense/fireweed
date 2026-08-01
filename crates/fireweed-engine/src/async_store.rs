@@ -399,6 +399,47 @@ impl<S: ProjectionStore> InProcessProjectionStore<S> {
         f(&*store)
     }
 
+    /// Rebuild process-local push request-id maps from durable log envelopes.
+    ///
+    /// Snapshot-tail open only runs [`AsyncProjectionStore::apply_recovery`] on the tail, so
+    /// historical `Push` markers never re-enter that path. Callers that keep request-id
+    /// authority on a separate log must rehydrate after open so lost-response retries replay.
+    pub fn rehydrate_push_idempotency(
+        &self,
+        shard: &QueueKey,
+        commands: &[CommandEnvelope],
+        retention_ms: u64,
+    ) -> EngineResult<()> {
+        let mut cache = self
+            .push_idempotency
+            .lock()
+            .expect("push idempotency mutex poisoned");
+        for env in commands {
+            let Some(request_id) = env.request_id.clone() else {
+                continue;
+            };
+            let QueueCommand::Push(push) = &env.command else {
+                continue;
+            };
+            let fingerprint = match env.request_fingerprint {
+                Some(fp) => BodyHash(fp),
+                None => crate::compose::push_item_body_hash(&push.items)?,
+            };
+            let expires_at = request_expires_at(env.created_at, retention_ms);
+            let ids = match &env.request_outcome {
+                Some(crate::RequestOutcome::Push { item_ids }) => item_ids.clone(),
+                _ => env.item_ids.clone(),
+            };
+            cache.entry(shard.clone()).or_default().record(
+                request_id,
+                fingerprint,
+                ids,
+                expires_at,
+            );
+        }
+        Ok(())
+    }
+
     /// Synchronous mutation. Blocks the caller.
     pub fn with_store_mut<R>(&self, f: impl FnOnce(&mut S) -> R) -> R {
         let mut store = self
@@ -1264,7 +1305,56 @@ where
         positions: Vec<CommandPosition>,
         commands: Vec<CommandEnvelope>,
     ) -> impl Future<Output = EngineResult<()>> + Send {
-        self.run_with_store_mut(move |store| store.apply_recovery(&positions, &commands))
+        // Mirror apply_live: durable recovery must rebuild process-local push request-id
+        // maps so a post-reopen retry replays instead of re-executing (AC-TXN-3 mid-pipeline).
+        let push_idempotency = Arc::clone(&self.push_idempotency);
+        let store = Arc::clone(&self.store);
+        let executor = self.executor.clone();
+        async move {
+            let queue = positions.first().map(|p| p.queue.clone());
+            let apply = move || {
+                let mut store = store
+                    .lock()
+                    .expect("immediate projection store mutex poisoned");
+                store.apply_recovery(&positions, &commands)?;
+                Ok(commands)
+            };
+            let commands = if let Some(executor) = executor {
+                executor.execute(apply).await?
+            } else {
+                apply()?
+            };
+            if let Some(queue) = queue {
+                let mut cache = push_idempotency
+                    .lock()
+                    .expect("push idempotency mutex poisoned");
+                for env in &commands {
+                    let Some(request_id) = env.request_id.clone() else {
+                        continue;
+                    };
+                    let QueueCommand::Push(push) = &env.command else {
+                        continue;
+                    };
+                    let fingerprint = match env.request_fingerprint {
+                        Some(fp) => BodyHash(fp),
+                        None => crate::compose::push_item_body_hash(&push.items)?,
+                    };
+                    let expires_at =
+                        request_expires_at(env.created_at, IN_PROCESS_PUSH_IDEM_RETENTION_MS);
+                    let ids = match &env.request_outcome {
+                        Some(crate::RequestOutcome::Push { item_ids }) => item_ids.clone(),
+                        _ => env.item_ids.clone(),
+                    };
+                    cache.entry(queue.clone()).or_default().record(
+                        request_id,
+                        fingerprint,
+                        ids,
+                        expires_at,
+                    );
+                }
+            }
+            Ok(())
+        }
     }
 
     fn eligible_candidates(

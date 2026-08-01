@@ -37,7 +37,10 @@ use crate::port_surface::{
     new_batch_update_idempotency, new_claim_by_item_ids_idempotency,
     new_claim_by_query_idempotency,
 };
-use crate::recovery_stats::{RecoveryStats, RecoveryStatsMap, replay_log_into_projection};
+use crate::recovery_stats::{
+    RecoveryStats, RecoveryStatsMap, rebuild_process_idempotency_from_log,
+    replay_log_into_projection,
+};
 
 type Proj = InProcessProjectionStore<SqliteProjectionStore>;
 
@@ -218,7 +221,51 @@ impl AsyncObjectLogSqliteBackend {
             // Durable SQLite projection: snapshot high-water + bounded tail replay.
             let stats =
                 replay_log_into_projection(log.as_ref(), projection.as_ref(), &shard, true).await?;
-            recovery_stats.insert(shard, stats);
+            recovery_stats.insert(shard.clone(), stats);
+            projection
+                .with_store(|p| ProjectionStore::restore_counters(p, &shard, counters.as_ref()))?;
+            // Process-local request-id maps are not part of the SQLite snapshot; rebuild from log.
+            rebuild_process_idempotency_from_log(
+                log.as_ref(),
+                &shard,
+                definition.request_id_retention_ms,
+                &commit_idempotency,
+                &batch_update_idempotency,
+                &claim_by_query_idempotency,
+                &claim_by_item_ids_idempotency,
+            )
+            .await?;
+            // High-water open never re-applies historical commands into process-local caches:
+            // lease cleartext (hashes only in SQLite) and push request-id maps on the wrapper.
+            {
+                let mut from = None;
+                let mut envelopes = Vec::new();
+                loop {
+                    let page = AsyncLogStore::read_from(
+                        log.as_ref(),
+                        shard.clone(),
+                        from.clone(),
+                        256,
+                    )
+                    .await?;
+                    if page.entries.is_empty() {
+                        break;
+                    }
+                    for (_, env) in page.entries {
+                        envelopes.push(env);
+                    }
+                    match page.next {
+                        Some(next) => from = Some(next),
+                        None => break,
+                    }
+                }
+                projection.with_store(|p| p.rehydrate_lease_cleartext(&shard, &envelopes))?;
+                projection.rehydrate_push_idempotency(
+                    &shard,
+                    &envelopes,
+                    definition.request_id_retention_ms,
+                )?;
+            }
         }
         Ok(Self {
             engine,

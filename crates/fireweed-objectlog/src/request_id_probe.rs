@@ -226,27 +226,26 @@ where
                 }),
             }
         }
-        let has_rejected = recovery
-            .iter()
-            .any(|r| matches!(r.status, CommitEntryStatus::Rejected(_)));
-        if has_rejected {
-            let outcome_entries: Vec<CommitOutcomeEntry> =
-                recovery.iter().map(outcome_entry_from_recovery).collect();
-            envelopes.push(CommandEnvelope {
-                command_id: self.ids.next_command_id(),
-                request_id: Some(request_id),
-                request_fingerprint: Some(commit_fingerprint),
-                request_outcome: Some(RequestOutcome::CommitTransition {
-                    entries: outcome_entries,
-                }),
-                item_ids: Vec::new(),
-                command: QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
-                    records: Vec::new(),
-                }),
-                checksum: CommandChecksum(0),
-                created_at: now,
-            });
-        }
+        // Always stamp a CommitTransition marker when request_id is present — parity with
+        // prepare_commit_transition. Success-only batches previously omitted the marker, so
+        // AfterAppendBeforeApply mid-pipeline recovery could not rebuild commit_idempotency
+        // and a post-reopen retry re-executed as Rejected(Terminal).
+        let outcome_entries: Vec<CommitOutcomeEntry> =
+            recovery.iter().map(outcome_entry_from_recovery).collect();
+        envelopes.push(CommandEnvelope {
+            command_id: self.ids.next_command_id(),
+            request_id: Some(request_id),
+            request_fingerprint: Some(commit_fingerprint),
+            request_outcome: Some(RequestOutcome::CommitTransition {
+                entries: outcome_entries,
+            }),
+            item_ids: Vec::new(),
+            command: QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                records: Vec::new(),
+            }),
+            checksum: CommandChecksum(0),
+            created_at: now,
+        });
         Ok((envelopes, fingerprint))
     }
 }

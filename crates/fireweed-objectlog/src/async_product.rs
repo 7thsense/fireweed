@@ -38,7 +38,10 @@ use crate::port_surface::{
     new_batch_update_idempotency, new_claim_by_item_ids_idempotency,
     new_claim_by_query_idempotency,
 };
-use crate::recovery_stats::{RecoveryStats, RecoveryStatsMap, replay_log_into_projection};
+use crate::recovery_stats::{
+    RecoveryStats, RecoveryStatsMap, rebuild_process_idempotency_from_log,
+    replay_log_into_projection,
+};
 
 /// Sequential id generation for object-log async products.
 #[derive(Default)]
@@ -283,7 +286,21 @@ impl AsyncObjectLogMemoryBackend {
             let stats =
                 replay_log_into_projection(log.as_ref(), projection.as_ref(), &shard, false)
                     .await?;
-            recovery_stats.insert(shard, stats);
+            recovery_stats.insert(shard.clone(), stats);
+            // Seed id mints past recovered item ids (parity with AsyncLogReplayBackend).
+            projection
+                .with_store(|p| ProjectionStore::restore_counters(p, &shard, counters.as_ref()))?;
+            // Process-local request-id maps are not part of the projection; rebuild from markers.
+            rebuild_process_idempotency_from_log(
+                log.as_ref(),
+                &shard,
+                definition.request_id_retention_ms,
+                &commit_idempotency,
+                &batch_update_idempotency,
+                &claim_by_query_idempotency,
+                &claim_by_item_ids_idempotency,
+            )
+            .await?;
         }
         Ok(Self {
             engine,

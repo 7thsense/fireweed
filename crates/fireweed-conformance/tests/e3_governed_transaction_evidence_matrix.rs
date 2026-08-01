@@ -56,21 +56,25 @@ fn open_memory_product(root: &std::path::Path) -> AsyncObjectLogMemoryBackend {
 }
 
 /// Force-seal control root (Strict response-after-apply product).
+/// Per-tag subdirs keep AC scenarios isolated while same-tag reopen shares durable state.
 fn objectlog_force_seal_factory(bound_ms: u64) -> impl Fn(&str) -> AsyncObjectLogMemoryBackend {
     let _ = bound_ms;
     let root = unique_root("mem-force");
     move |tag: &str| {
-        let _ = tag;
-        open_memory_product(&root)
+        let run = root.join(tag);
+        let _ = std::fs::create_dir_all(&run);
+        open_memory_product(&run)
     }
 }
 
 /// Bound-cell factory: durable local LogEngine × memory projection (reopen-safe).
+/// Per-tag subdirs keep AC scenarios isolated while same-tag reopen shares durable state.
 fn objectlog_group_commit_factory(bound_ms: u64) -> impl Fn(&str) -> AsyncObjectLogMemoryBackend {
     let root = unique_root(&format!("mem-gc-{bound_ms}"));
     move |tag: &str| {
-        let _ = tag;
-        open_memory_product(&root)
+        let run = root.join(tag);
+        let _ = std::fs::create_dir_all(&run);
+        open_memory_product(&run)
     }
 }
 

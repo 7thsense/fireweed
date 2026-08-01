@@ -241,10 +241,13 @@ pub async fn ac_txn_1_success_durable_visible<B: ConformanceCore + LogRead + Set
     );
 
     // --- BatchClaim then kill/reopen and assert the item is durably Leased.
+    // Lease absolute times stay within qdef().max_lease_duration_ms (60s): claim expires at 50 with
+    // now=10 (40s), renew extends to 75 with now=20 (55s). Tick at 60 is past the original 50 and
+    // before the renewed 75 so it proves the extended deadline survived reopen.
     let leased_id = {
         let b = make("txn1");
         let claimed = b
-            .claim(claim_req(1, 500, 10))
+            .claim(claim_req(1, 50, 10))
             .await
             .map_err(|e| format!("claim: {e:?}"))?;
         ensure!(claimed.items.len() == 1, "claim leased one item");
@@ -266,25 +269,25 @@ pub async fn ac_txn_1_success_durable_visible<B: ConformanceCore + LogRead + Set
     }
     asserts.push("BatchClaim lease durable after kill/reopen".into());
 
-    // --- BatchRenewLeases (extend the deadline 500 -> 900) then kill/reopen and prove the RENEWED
-    // deadline survived: a reclaim tick at 600 (past the original 500, before the renewed 900) must NOT
+    // --- BatchRenewLeases (extend the deadline 50 -> 75) then kill/reopen and prove the RENEWED
+    // deadline survived: a reclaim tick at 60 (past the original 50, before the renewed 75) must NOT
     // reclaim the lease. This checkpoint runs BEFORE the finalize, so the renew effect cannot be masked.
     {
         let b = make("txn1");
-        b.renew(&shard(), vec![leased_id], ts(900), ts(20), None)
+        b.renew(&shard(), vec![leased_id], ts(75), ts(20), None)
             .await
             .map_err(|e| format!("renew: {e:?}"))?;
     }
     {
         let b = make("txn1");
-        b.tick(ts(600)).await.map_err(|e| format!("tick: {e:?}"))?;
+        b.tick(ts(60)).await.map_err(|e| format!("tick: {e:?}"))?;
         let m = b
             .metrics(&qkey())
             .await
             .map_err(|e| format!("metrics: {e:?}"))?;
         ensure!(
             (m.pending, m.leased) == (1, 1),
-            "BatchRenewLeases deadline lost after kill/reopen: a tick at 600 reclaimed the lease that renew extended to 900; got pending={} leased={}",
+            "BatchRenewLeases deadline lost after kill/reopen: a tick at 60 reclaimed the lease that renew extended to 75; got pending={} leased={}",
             m.pending,
             m.leased
         );
@@ -297,7 +300,7 @@ pub async fn ac_txn_1_success_durable_visible<B: ConformanceCore + LogRead + Set
         b.finalize(
             &shard(),
             vec![FinalizeOutcome::new(leased_id, FinalizeKind::Complete)],
-            ts(650),
+            ts(65),
             None,
         )
         .await
@@ -318,7 +321,7 @@ pub async fn ac_txn_1_success_durable_visible<B: ConformanceCore + LogRead + Set
         );
         // The surviving pending sibling is still claimable (0 read-after-success gaps).
         let claimed = b
-            .claim(claim_req(1, 1500, 700))
+            .claim(claim_req(1, 150, 70))
             .await
             .map_err(|e| format!("claim: {e:?}"))?;
         ensure!(
@@ -594,7 +597,10 @@ pub async fn ac_txn_2_rejection_no_effect<B: ConformanceCore + LogRead>(
 
     let before = durable_command_count(&a).await?;
 
-    // (a) per-item invalid: finalize a pending (non-leased) item → Invalid, appends nothing.
+    // (a) per-item invalid: finalize a pending (non-leased) item → structured rejection, appends nothing.
+    // Classic projection finalize_validate returns Invalid("item is not leased"); the async item-id
+    // path resolves leases via render_claimed first and maps missing/pending cleartext to StaleLease.
+    // Both are structured rejections with zero durable effect (proven by the command-count check).
     ensure!(
         matches!(
             a.finalize(
@@ -604,7 +610,7 @@ pub async fn ac_txn_2_rejection_no_effect<B: ConformanceCore + LogRead>(
                 None,
             )
             .await,
-            Err(EngineError::Invalid(_))
+            Err(EngineError::Invalid(_)) | Err(EngineError::StaleLease)
         ),
         "finalize of a pending item must be a structured rejection"
     );
@@ -913,9 +919,11 @@ pub async fn ac_txn_2_stale_lease_conflict<B: ConformanceCore + LogRead>(
         "finalize of an operator-fenced lease must be StaleLease"
     );
     // Renew the fenced lease -> StaleLease, appends nothing.
+    // Keep renewal duration within qdef().max_lease_duration_ms (60s) so validation reaches
+    // the lease/fence check rather than failing closed on Invalid("invalid lease renewal duration").
     ensure!(
         matches!(
-            a.renew(&shard(), vec![victim], ts(3000), ts(21), None)
+            a.renew(&shard(), vec![victim], ts(70), ts(21), None)
                 .await,
             Err(EngineError::StaleLease)
         ),
@@ -1776,8 +1784,9 @@ pub async fn ac_txn_3_commit_transition_request_id<
             instance_fence: None,
         }],
     };
-    // Build the EXACT durable request_id-bearing commit envelope commit_transition would append.
-    let (mut envelopes, _fp) = a
+    // Build the EXACT durable envelopes commit_transition would append: finalize batch +
+    // request_id CommitTransition marker (marker carries the replay outcome for recovery).
+    let (envelopes, _fp) = a
         .build_request_id_commit_envelopes(
             &shard(),
             rid_mid.clone(),
@@ -1787,27 +1796,42 @@ pub async fn ac_txn_3_commit_transition_request_id<
         )
         .map_err(|e| format!("build_request_id_commit_envelopes: {e:?}"))?;
     ensure!(
-        envelopes.len() == 1,
-        "multi-claim finalize-only entry must build one atomic envelope"
+        envelopes.len() >= 2,
+        "finalize-only entry must build finalize envelope(s) plus a CommitTransition marker"
     );
-    let env = envelopes.remove(0);
     ensure!(
-        env.request_id.as_ref() == Some(&rid_mid) && env.request_fingerprint.is_some(),
-        "the mid-pipeline commit envelope must carry the request_id AND the whole-body fingerprint (else the cut is not request_id-bearing)"
+        envelopes.iter().any(|env| {
+            env.request_id.as_ref() == Some(&rid_mid)
+                && env.request_fingerprint.is_some()
+                && matches!(
+                    env.request_outcome,
+                    Some(fireweed_engine::RequestOutcome::CommitTransition { .. })
+                )
+        }),
+        "the mid-pipeline batch must carry a request_id CommitTransition marker (else recovery cannot rebuild commit_idempotency)"
     );
     let before = durable_command_count(&a).await?;
-    let pos = inject_commit(&a, env, CutPoint::AfterAppendBeforeApply)
+    let epoch = a
+        .current_epoch(&shard())
         .await
-        .map_err(|e| format!("mid AfterAppendBeforeApply inject: {e:?}"))?;
+        .map_err(|e| format!("mid epoch: {e:?}"))?;
+    let pos = a
+        .commit_raw(
+            RawCommitRequest::new(shard(), envelopes, epoch)
+                .with_fault(RawCommitFault::AfterAppendBeforeApply),
+        )
+        .await
+        .map_err(|e| format!("mid AfterAppendBeforeApply inject: {e:?}"))?
+        .into_positions();
     ensure!(
         !pos.is_empty(),
-        "the request_id-bearing commit command must be durable on the log after the append->apply kill"
+        "the request_id-bearing commit batch must be durable on the log after the append->apply kill"
     );
-    // Confirm the DURABLE-but-unapplied log entry actually carries the request_id.
+    // Confirm the DURABLE-but-unapplied batch includes the request_id marker.
     let after = durable_command_count(&a).await?;
     ensure!(
-        after == before + 1,
-        "the mid-pipeline commit append must add exactly one durable command (before={before} after={after})"
+        after > before,
+        "the mid-pipeline commit append must add durable commands (before={before} after={after})"
     );
     drop(a);
     // Reopen: recovery replays the durable tail (finalizing the input) AND rebuilds commit_idempotency from the
