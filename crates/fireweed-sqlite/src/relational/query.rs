@@ -1452,8 +1452,7 @@ pub(crate) fn lookup_active_by_keys(
         }))?;
         for row in rows {
             let (key, id, state) = st(row)?;
-            let item_id =
-                ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?;
+            let item_id = ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?;
             let item_state = parse_state(&state)?;
             out.insert(key, (item_id, item_state));
         }

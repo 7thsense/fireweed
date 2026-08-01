@@ -2,8 +2,8 @@
 //! sqlite backend (`ComposedBackend<SqliteLog, InMemoryProjection, InProcessControlPlane>`). Each scenario
 //! gets a fresh `:memory:` durable log.
 
-use fireweed_sqlite::composed_sqlite_backend_in_memory;
 use fireweed_engine::AsyncLogReplayBackend;
+use fireweed_sqlite::composed_sqlite_backend_in_memory;
 
 fireweed_conformance::conformance_suite!(
     || composed_sqlite_backend_in_memory().expect("open :memory:")
@@ -97,7 +97,8 @@ async fn push_fences_superseded_owner_epoch() {
     assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 1);
 }
 
-async fn seeded_commit_transition_sqlite_backend() -> AsyncLogReplayBackend<fireweed_sqlite::SqliteLog, fireweed_sqlite::InMemoryProjection> {
+async fn seeded_commit_transition_sqlite_backend()
+-> AsyncLogReplayBackend<fireweed_sqlite::SqliteLog, fireweed_sqlite::InMemoryProjection> {
     use bytes::Bytes;
     use fireweed_conformance::{claim_req, qdef, shard, ts};
     use fireweed_core::RequestId;

@@ -843,6 +843,18 @@ pub enum ProjectionConfig {
     Postgres { url: ConfigSecret },
 }
 
+/// When a mutating operation may return success relative to log append and projection apply.
+///
+/// # Object-log (LogEngine) cells
+///
+/// - [`ResponseBarrier::Strict`] (default): **atomic response-after-apply**. Success is returned
+///   only after the authoritative object-log append and the projection apply both complete.
+///   `commit_capabilities` report [`DurabilityClass::Atomic`] and `atomic_transition_commit: true`
+///   (Snorri CONTRACT-003). The composition still uses separate append then apply for crash recovery
+///   (not one substrate transaction); Strict is a response/visibility barrier, not a single-TX claim.
+/// - [`ResponseBarrier::AsyncProjection`]: eventual-apply visibility. Success may return after
+///   hot-projection update with deferred durable checkpoint; `atomic_transition_commit` is false and
+///   durability is [`DurabilityClass::EventualApply`]. `commit_transition` is Unavailable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseBarrier {
     Strict,
@@ -1921,7 +1933,8 @@ impl ObjectLogPostgresLifecycle {
         use fireweed_engine::ProjectionStore;
 
         let definitions = backend.with_log(|log| {
-            backend.with_projection(|projection| validate_objectlog_postgres_catalog(log, projection))
+            backend
+                .with_projection(|projection| validate_objectlog_postgres_catalog(log, projection))
         })?;
         let mut projection_sequence = 0;
         let mut authoritative_sequence = 0;
@@ -1931,8 +1944,7 @@ impl ObjectLogPostgresLifecycle {
             let projected_position = backend.with_projection(|projection| {
                 ProjectionStore::recovery_high_water(projection, &key)
             })?;
-            let authoritative_position =
-                backend.with_log(|log| objectlog_high_water(log, &key))?;
+            let authoritative_position = backend.with_log(|log| objectlog_high_water(log, &key))?;
             compatible &= projected_position == authoritative_position;
             projection_sequence = projection_sequence.max(
                 projected_position
@@ -1959,7 +1971,8 @@ impl ObjectLogPostgresLifecycle {
         use fireweed_engine::ProjectionStore;
 
         let definitions = backend.with_log(|log| {
-            backend.with_projection(|projection| validate_objectlog_postgres_catalog(log, projection))
+            backend
+                .with_projection(|projection| validate_objectlog_postgres_catalog(log, projection))
         })?;
         let mut replay = Vec::new();
         for definition in &definitions {
@@ -1967,10 +1980,11 @@ impl ObjectLogPostgresLifecycle {
             backend.with_projection_mut(|projection| {
                 ProjectionStore::ensure_shard(projection, definition)
             })?;
-            let mut from = backend
-                .with_projection(|projection| projection.recovery_high_water(&key))?;
+            let mut from =
+                backend.with_projection(|projection| projection.recovery_high_water(&key))?;
             loop {
-                let page = backend.with_log(|log| objectlog_read_from(log, &key, from.clone(), 1_024))?;
+                let page =
+                    backend.with_log(|log| objectlog_read_from(log, &key, from.clone(), 1_024))?;
                 replay.extend(page.entries);
                 if replay.len() as u64 > max_tail_commands {
                     return Err(EngineError::Storage(format!(
@@ -4700,9 +4714,7 @@ fn open_memory_log_cell(
                 let path = path_utf8(&path)?;
                 let log = fireweed_projection::MemoryLog::new();
                 let projection = fireweed_sqlite::SqliteProjectionStore::open(path)?;
-                let backend = Arc::new(
-                    assemble_async_log_replay(log, projection, 0)?.recover()?,
-                );
+                let backend = Arc::new(assemble_async_log_replay(log, projection, 0)?.recover()?);
                 wrap_blocking_backend(backend, clock)
             }
             #[cfg(not(all(feature = "memory", feature = "sqlite")))]
@@ -4723,9 +4735,7 @@ fn open_memory_log_cell(
                 let schema = derived_postgres_schema_name(&format!("memory_pg_{namespace}"));
                 let projection =
                     fireweed_postgres::PostgresRelational::connect_in_schema(&url.0.0, &schema)?;
-                let backend = Arc::new(
-                    assemble_async_log_replay(log, projection, 0)?.recover()?,
-                );
+                let backend = Arc::new(assemble_async_log_replay(log, projection, 0)?.recover()?);
                 wrap_blocking_backend(backend, clock)
             }
             #[cfg(not(all(feature = "memory", feature = "postgres")))]
@@ -5076,9 +5086,8 @@ pub fn open_sqlite_postgres_projection(
     let schema = derived_postgres_schema_name(&format!("sqlite_pg_{log_path}"));
     let projection =
         fireweed_postgres::PostgresRelational::connect_in_schema(projection_url, &schema)?;
-    let backend = Arc::new(
-        fireweed_engine::assemble_async_log_replay(log, projection, 0)?.recover()?,
-    );
+    let backend =
+        Arc::new(fireweed_engine::assemble_async_log_replay(log, projection, 0)?.recover()?);
     Ok(Fireweed::from_runtime(RuntimeCore::new(
         Arc::new(blocking_backend::BlockingLibBackend::new(backend)?),
         clock,
@@ -5199,7 +5208,9 @@ fn open_objectlog_postgres_blocking(
         }
     }
     let backend = fireweed_objectlog::block_on_objectlog(
-        fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection(log, projection, 0),
+        fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection(
+            log, projection, 0,
+        ),
     )?;
     let flush_interval = 50_u64;
     let backend = Arc::new(backend);
@@ -5282,7 +5293,9 @@ pub(crate) fn open_composed_sqlite(
         }
     }
     let backend = fireweed_objectlog::block_on_objectlog(
-        fireweed_objectlog::AsyncObjectLogHybridBackend::from_log_and_projection(log, projection, 0),
+        fireweed_objectlog::AsyncObjectLogHybridBackend::from_log_and_projection(
+            log, projection, 0,
+        ),
     )?;
     let flush_interval = 50_u64;
     let backend = Arc::new(backend);

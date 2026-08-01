@@ -6,7 +6,7 @@ use fireweed_core::{
     ClientItemKey, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse,
     GroupedAggregateRequest, GroupedAggregateResponse, ItemId, ItemState, LeaseToken,
     MetricsByQueryRequest, QueryCapabilityFlags, QueueDefinition, RangeScanRequest,
-    RangeScanResponse, UtcTimestamp,
+    RangeScanResponse, RequestId, UtcTimestamp,
 };
 use fireweed_engine::TerminalEmissionMetrics;
 use fireweed_engine::{
@@ -1248,6 +1248,32 @@ impl ProjectionStore for HybridProjectionStore {
     fn side_record(&self, shard: &QueueKey, key: &[u8]) -> EngineResult<Option<Bytes>> {
         self.require_hydrated(shard)?;
         self.memory.side_record(shard, key)
+    }
+
+    /// Prefer durable SQLite retained-commit rows when present (Strict/async checkpoint); fall back to
+    /// the in-process default (None) only when the durable image has nothing for this request_id.
+    fn replay_durable_commit(
+        &mut self,
+        shard: &QueueKey,
+        request_id: &RequestId,
+        fingerprint: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<Option<Vec<fireweed_engine::CommitOutcomeEntry>>> {
+        if let Some(entries) =
+            self.sqlite
+                .replay_durable_commit(shard, request_id, fingerprint, now)?
+        {
+            return Ok(Some(entries));
+        }
+        Ok(None)
+    }
+
+    fn read_durable_commit(
+        &self,
+        shard: &QueueKey,
+        request_id: &RequestId,
+    ) -> EngineResult<Option<Vec<fireweed_engine::CommitOutcomeEntry>>> {
+        self.sqlite.read_durable_commit(shard, request_id)
     }
 
     fn select_eligible(

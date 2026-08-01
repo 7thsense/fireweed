@@ -14,7 +14,6 @@ use std::sync::{Arc, OnceLock};
 
 use fireweed_engine::{EngineError, EngineResult};
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(usize)]
 pub enum BlobOperation {

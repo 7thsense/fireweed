@@ -116,9 +116,10 @@ impl ObjectLogEngineStore<ManifestSequencer> {
         flush: FlushConfig,
     ) -> EngineResult<Self> {
         let meta_prefix = meta_prefix.into();
-        let sequencer = ManifestSequencer::open(Arc::clone(&blob), format!("{meta_prefix}manifest/"))
-            .await
-            .map_err(store_err)?;
+        let sequencer =
+            ManifestSequencer::open(Arc::clone(&blob), format!("{meta_prefix}manifest/"))
+                .await
+                .map_err(store_err)?;
         let engine = LogEngine::new(Arc::clone(&blob), Arc::new(sequencer), flush, data_prefix);
         let store = Self {
             engine,
@@ -156,7 +157,12 @@ impl<S: Sequencer<Meta = ()>> ObjectLogEngineStore<S> {
 
     async fn load_meta(&self) -> EngineResult<()> {
         // Catalog
-        if let Some(bytes) = self.blob.get(&self.catalog_key()).await.map_err(store_err)? {
+        if let Some(bytes) = self
+            .blob
+            .get(&self.catalog_key())
+            .await
+            .map_err(store_err)?
+        {
             let doc: CatalogDoc = serde_json::from_slice(&bytes).map_err(store_err)?;
             *self.catalog.lock().expect("catalog mutex") = doc;
         }
@@ -181,23 +187,16 @@ impl<S: Sequencer<Meta = ()>> ObjectLogEngineStore<S> {
             }
             None => 0,
         };
-        self.epochs
-            .lock()
-            .expect("epochs")
-            .insert(pk, epoch);
+        self.epochs.lock().expect("epochs").insert(pk, epoch);
         Ok(epoch)
     }
 
     async fn store_epoch(&self, shard: &QueueKey, epoch: u64) -> EngineResult<()> {
         let pk = partition_key(shard).0;
-        self.epochs
-            .lock()
-            .expect("epochs")
-            .insert(pk, epoch);
+        self.epochs.lock().expect("epochs").insert(pk, epoch);
         self.put_json(&self.epoch_key(shard), &EpochDoc { epoch })
             .await
     }
-
 }
 
 /// Map env-style segment knobs onto object-log flush config (names unchanged at product edge).
@@ -262,26 +261,25 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
                 return Err(EngineError::EpochFenced);
             }
             // Persist catalog updates from CreateQueue / definition-carrying commands.
-            let catalog_dirty = {
-                let mut catalog = self.catalog.lock().expect("catalog");
-                let mut dirty = false;
-                for env in &commands {
-                    if let fireweed_engine::QueueCommand::CreateQueue(cmd) = &env.command {
-                        let def = cmd.definition.clone();
-                        if let Some(existing) = catalog
-                            .definitions
-                            .iter_mut()
-                            .find(|d| d.tenant_id == def.tenant_id && d.queue_id == def.queue_id)
-                        {
-                            *existing = def;
-                        } else {
-                            catalog.definitions.push(def);
+            let catalog_dirty =
+                {
+                    let mut catalog = self.catalog.lock().expect("catalog");
+                    let mut dirty = false;
+                    for env in &commands {
+                        if let fireweed_engine::QueueCommand::CreateQueue(cmd) = &env.command {
+                            let def = cmd.definition.clone();
+                            if let Some(existing) = catalog.definitions.iter_mut().find(|d| {
+                                d.tenant_id == def.tenant_id && d.queue_id == def.queue_id
+                            }) {
+                                *existing = def;
+                            } else {
+                                catalog.definitions.push(def);
+                            }
+                            dirty = true;
                         }
-                        dirty = true;
                     }
-                }
-                dirty.then(|| catalog.clone())
-            };
+                    dirty.then(|| catalog.clone())
+                };
             if let Some(doc) = catalog_dirty {
                 self.put_json(&self.catalog_key(), &doc).await?;
             }
@@ -304,10 +302,9 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
                 )
                 .await
                 .map_err(store_err)?;
-            let base = outcome
-                .base_offset
-                .ok_or_else(|| EngineError::Storage("sequenced produce missing base_offset".into()))?
-                as u64;
+            let base = outcome.base_offset.ok_or_else(|| {
+                EngineError::Storage("sequenced produce missing base_offset".into())
+            })? as u64;
             let positions: Vec<CommandPosition> = (0..commands.len() as u64)
                 .map(|i| CommandPosition::new(shard.clone(), expected_epoch, base + i))
                 .collect();
@@ -336,7 +333,10 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<CommandPage>> + Send {
         async move {
-            let from_seq = from.as_ref().map(|p| p.sequence.saturating_add(1)).unwrap_or(0);
+            let from_seq = from
+                .as_ref()
+                .map(|p| p.sequence.saturating_add(1))
+                .unwrap_or(0);
             let batches = self
                 .engine
                 .fetch(&partition_key(&shard), from_seq as i64, 4 * 1024 * 1024)
@@ -380,15 +380,20 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
     ) -> impl std::future::Future<Output = EngineResult<Option<CommandPosition>>> + Send {
         async move {
             let pk = partition_key(&shard).0;
-            if let Some(p) = self.high_water.lock().expect("high_water").get(&pk).cloned() {
+            if let Some(p) = self
+                .high_water
+                .lock()
+                .expect("high_water")
+                .get(&pk)
+                .cloned()
+            {
                 return Ok(Some(p));
             }
             let key = self.high_water_key(&shard);
             match self.blob.get(&key).await.map_err(store_err)? {
                 Some(bytes) => {
                     let doc: HighWaterDoc = serde_json::from_slice(&bytes).map_err(store_err)?;
-                    let pos =
-                        CommandPosition::new(shard, doc.backend_epoch, doc.sequence);
+                    let pos = CommandPosition::new(shard, doc.backend_epoch, doc.sequence);
                     self.high_water
                         .lock()
                         .expect("high_water")
@@ -424,14 +429,7 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
     fn recover_definitions(
         &self,
     ) -> impl std::future::Future<Output = EngineResult<Vec<QueueDefinition>>> + Send {
-        async move {
-            Ok(self
-                .catalog
-                .lock()
-                .expect("catalog")
-                .definitions
-                .clone())
-        }
+        async move { Ok(self.catalog.lock().expect("catalog").definitions.clone()) }
     }
 }
 

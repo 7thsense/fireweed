@@ -689,7 +689,6 @@ async fn commit_advances_validates_and_rejects_instance_fence() {
 /// can activate either. Object-log projection visibility is eventual, while its transition batch remains
 /// atomic at the durable log authority.
 #[tokio::test]
-#[ignore = "objectlog commit capabilities incomplete until CommitTransitionPort is wired on LogEngine products"]
 async fn capabilities_advertise_atomic_commit_on_memory_and_objectlog() {
     let fireweed = RuntimeCore::new(
         Arc::new(composed_memory_backend()),

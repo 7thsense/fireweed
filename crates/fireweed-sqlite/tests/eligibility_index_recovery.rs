@@ -1,10 +1,10 @@
-
 //! fireweed-6e38e2b4: reopen recovery must reseed item-id counters and keep the
 //! eligibility index free of duplicate item ids after commit_transition lifecycle
 //! work and post-reopen upserts (the snorri offline-MVP claim path).
 
 use std::collections::{BTreeMap, HashSet};
 
+use fireweed_core::RequestId;
 use fireweed_core::{
     ClientItemKey, LeaseToken, Metadata, MetadataValue, PriorityModel, PriorityValue, UtcTimestamp,
     WorkerId,
@@ -12,10 +12,9 @@ use fireweed_core::{
 use fireweed_engine::{
     ClaimCompatibility, ClaimPort, ClaimRef, ClaimRequest, CommitEntryOutcome, CommitTransition,
     CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore, FinalizeKind, ProjectionStore,
-    PushSpec, UpsertPort, UpsertOutcome,
+    PushSpec, UpsertOutcome, UpsertPort,
 };
 use fireweed_sqlite::composed_sqlite_backend;
-use fireweed_core::RequestId;
 
 fn ts(s: i64) -> UtcTimestamp {
     UtcTimestamp::new(s, 0).unwrap()

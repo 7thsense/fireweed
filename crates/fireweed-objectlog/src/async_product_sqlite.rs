@@ -1,4 +1,8 @@
 //! Async object-log × sqlite projection over crates.io [`object_log::LogEngine`].
+//!
+//! SQLite apply is always durable on the success path, so this product is Strict-equivalent
+//! (atomic response-after-apply) and advertises full commit-transition capabilities
+//! (see [`crate::commit_surface`]).
 
 use std::sync::Arc;
 
@@ -12,11 +16,11 @@ use fireweed_engine::{
     AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError, AsyncPushRequest, AsyncRenewRequest,
     Backend, ClaimPort, ClaimRequest, Claimed, CommandChecksum, CommandEnvelope, ControlPlaneStore,
     CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeOutcome, FinalizePort,
-    FinalizeTarget, IdGen, InProcessControlPlane, InProcessProjectionStore,
-    OwnedTask, ProjectionClaimPlanner, ProjectionLifecyclePlanner,
-    ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner, ProjectionStore, PurgePort,
-    PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, RawCommitOutcome, RawCommitRequest,
-    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort, RenewTarget,
+    FinalizeTarget, IdGen, InProcessControlPlane, InProcessProjectionStore, OwnedTask,
+    ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead,
+    ProjectionReclaimPlanner, ProjectionStore, PurgePort, PushPort, PushSpec, QueueCommand,
+    QueueCounters, QueueKey, RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand,
+    ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort, RenewTarget,
     SeparateReplayCommit, SeparateReplayCommitter, TickReport, UpsertOutcome, UpsertPort,
 };
 use fireweed_sqlite::SqliteProjectionStore;
@@ -24,6 +28,10 @@ use object_log::FlushConfig;
 
 use crate::ObjectLogEngineStore;
 use crate::async_product::SeqIdGen;
+use crate::commit_surface::{
+    self, CommitIdempotency, PreparedCommitTransition, new_commit_idempotency,
+    strict_commit_capabilities,
+};
 
 type Proj = InProcessProjectionStore<SqliteProjectionStore>;
 
@@ -97,6 +105,9 @@ pub struct AsyncObjectLogSqliteBackend {
     projection: Arc<Proj>,
     control: Arc<InProcessControlPlane>,
     ids: Arc<SeqIdGen>,
+    counters: Arc<QueueCounters>,
+    node_id: u8,
+    commit_idempotency: CommitIdempotency,
 }
 
 impl AsyncObjectLogSqliteBackend {
@@ -142,13 +153,13 @@ impl AsyncObjectLogSqliteBackend {
         let control = Arc::new(InProcessControlPlane::new());
         let ids = Arc::new(SeqIdGen::default());
         let counters = Arc::new(QueueCounters::default());
+        let commit_idempotency = new_commit_idempotency();
         let committer = Committer {
             log: Arc::clone(&log),
             projection: Arc::clone(&projection),
         };
-        let strategy =
-            SeparateReplayCommit::for_profile(DurabilityClass::EventualApply, committer)
-                .map_err(|e| EngineError::Storage(e.to_string()))?;
+        let strategy = SeparateReplayCommit::for_profile(DurabilityClass::EventualApply, committer)
+            .map_err(|e| EngineError::Storage(e.to_string()))?;
         let claim = ProjectionClaimPlanner::from_shared(
             Arc::clone(&control),
             Arc::clone(&log),
@@ -160,7 +171,7 @@ impl AsyncObjectLogSqliteBackend {
             Arc::clone(&log),
             Arc::clone(&projection),
             Arc::clone(&ids),
-            counters,
+            Arc::clone(&counters),
             node_id,
         );
         let lifecycle = ProjectionLifecyclePlanner::from_shared(
@@ -192,9 +203,8 @@ impl AsyncObjectLogSqliteBackend {
             let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             let mut from = None;
             loop {
-                let page =
-                    AsyncLogStore::read_from(log.as_ref(), shard.clone(), from.clone(), 256)
-                        .await?;
+                let page = AsyncLogStore::read_from(log.as_ref(), shard.clone(), from.clone(), 256)
+                    .await?;
                 if page.entries.is_empty() {
                     break;
                 }
@@ -214,6 +224,9 @@ impl AsyncObjectLogSqliteBackend {
             projection,
             control,
             ids,
+            counters,
+            node_id,
+            commit_idempotency,
         })
     }
 
@@ -268,23 +281,16 @@ impl AsyncObjectLogSqliteBackend {
 
 impl Backend for AsyncObjectLogSqliteBackend {
     fn durability_class(&self) -> DurabilityClass {
-        DurabilityClass::EventualApply
+        DurabilityClass::Atomic
     }
     fn supports_gates(&self) -> bool {
         self.projection.supports_gates()
     }
     fn commit_capabilities(&self) -> fireweed_engine::CommitCapabilities {
-        fireweed_engine::CommitCapabilities {
-            atomic_transition_commit: false,
-            vectorized_commit: true,
-            lease_validation: true,
-            retained_commit_idempotency: true,
-            non_work_side_records: true,
-            authoritative_recovery_reads: true,
-            delayed_awaits_timers: true,
-            durability_class: DurabilityClass::EventualApply,
-            consistency: "object-log sequenced append then sqlite projection apply (LogEngine)",
-        }
+        // Durable SQLite apply completes before success — Strict-equivalent response-after-apply.
+        strict_commit_capabilities(
+            "Strict: object-log append then durable sqlite projection apply (response-after-apply, LogEngine)",
+        )
     }
     fn commit_raw(
         &self,
@@ -621,7 +627,8 @@ impl ProjectionRead for AsyncObjectLogSqliteBackend {
         &self,
         shard: &QueueKey,
         limit: usize,
-    ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::ItemView>>> + Send {
+    ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::ItemView>>> + Send
+    {
         std::future::ready(
             self.projection
                 .with_store(|p| ProjectionStore::peek(p, shard, limit)),
@@ -630,7 +637,8 @@ impl ProjectionRead for AsyncObjectLogSqliteBackend {
     fn pending(
         &self,
         shard: &QueueKey,
-    ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::LeaseView>>> + Send {
+    ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::LeaseView>>> + Send
+    {
         std::future::ready(
             self.projection
                 .with_store(|p| ProjectionStore::pending(p, shard)),
@@ -639,7 +647,8 @@ impl ProjectionRead for AsyncObjectLogSqliteBackend {
     fn pending_summary(
         &self,
         shard: &QueueKey,
-    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::PendingSummary>> + Send {
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::PendingSummary>> + Send
+    {
         std::future::ready(
             self.projection
                 .with_store(|p| ProjectionStore::pending_summary(p, shard)),
@@ -663,7 +672,8 @@ impl ProjectionRead for AsyncObjectLogSqliteBackend {
         end: Option<ItemId>,
         consumer: Option<&LeaseToken>,
         limit: usize,
-    ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::LeaseView>>> + Send {
+    ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::LeaseView>>> + Send
+    {
         let consumer = consumer.cloned();
         std::future::ready(self.projection.with_store(|p| {
             ProjectionStore::pending_range(p, shard, start, end, consumer.as_ref(), limit)
@@ -673,7 +683,8 @@ impl ProjectionRead for AsyncObjectLogSqliteBackend {
         &self,
         shard: &QueueKey,
         ids: &[ItemId],
-    ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::LeaseView>>> + Send {
+    ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::LeaseView>>> + Send
+    {
         let ids = ids.to_vec();
         std::future::ready(
             self.projection
@@ -684,7 +695,8 @@ impl ProjectionRead for AsyncObjectLogSqliteBackend {
         &self,
         shard: &QueueKey,
         ids: &[ItemId],
-    ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::ClaimedItem>>> + Send {
+    ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::ClaimedItem>>> + Send
+    {
         let ids = ids.to_vec();
         std::future::ready(
             self.projection
@@ -695,8 +707,8 @@ impl ProjectionRead for AsyncObjectLogSqliteBackend {
         &self,
         shard: &QueueKey,
         keys: &[ClientItemKey],
-    ) -> impl std::future::Future<Output = EngineResult<Vec<Option<fireweed_engine::LiveItemView>>>>
-    + Send {
+    ) -> impl std::future::Future<Output = EngineResult<Vec<Option<fireweed_engine::LiveItemView>>>> + Send
+    {
         let keys = keys.to_vec();
         std::future::ready(
             self.projection
@@ -709,8 +721,8 @@ impl ProjectionRead for AsyncObjectLogSqliteBackend {
         now: UtcTimestamp,
         emit_change_records: bool,
         emission_cursor: Option<&fireweed_engine::CommandPosition>,
-    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::TerminalEmissionMetrics>>
-    + Send {
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::TerminalEmissionMetrics>> + Send
+    {
         let emission_cursor = emission_cursor.cloned();
         std::future::ready(self.projection.with_store(|p| {
             ProjectionStore::terminal_emission_metrics(
@@ -740,8 +752,109 @@ impl fireweed_engine::UpdateFieldsPort for AsyncObjectLogSqliteBackend {
         std::future::ready(Err(EngineError::Unavailable))
     }
 }
-impl fireweed_engine::CommitTransitionPort for AsyncObjectLogSqliteBackend {}
-impl fireweed_engine::RecoveryReadPort for AsyncObjectLogSqliteBackend {}
+impl fireweed_engine::CommitTransitionPort for AsyncObjectLogSqliteBackend {
+    fn commit_transition(
+        &self,
+        shard: &QueueKey,
+        transition: fireweed_engine::CommitTransition,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::CommitEntryOutcome>>> + Send
+    {
+        let shard = shard.clone();
+        async move {
+            let epoch = match expected_epoch {
+                Some(epoch) => {
+                    let current =
+                        AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?;
+                    if current != epoch {
+                        return Err(EngineError::EpochFenced);
+                    }
+                    epoch
+                }
+                None => AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?,
+            };
+            match commit_surface::prepare_commit_transition(
+                self.projection.as_ref(),
+                self.control.as_ref(),
+                self.ids.as_ref(),
+                self.counters.as_ref(),
+                self.node_id,
+                &self.commit_idempotency,
+                epoch,
+                &shard,
+                transition,
+                now,
+            )
+            .await?
+            {
+                PreparedCommitTransition::Replay(outcomes) => Ok(outcomes),
+                PreparedCommitTransition::Proceed {
+                    envelopes,
+                    recovery,
+                    request_id,
+                    fingerprint,
+                    retention_ms,
+                } => {
+                    if !envelopes.is_empty() {
+                        self.engine
+                            .submit_commit(RawCommitRequest::new(shard.clone(), envelopes, epoch))
+                            .await
+                            .map_err(|error| {
+                                EngineError::Storage(format!(
+                                    "async commit_transition submission failed: {error:?}"
+                                ))
+                            })??;
+                    }
+                    let outcomes = commit_surface::outcomes_of(&recovery);
+                    if let Some(rid) = request_id {
+                        commit_surface::record_commit_idempotency(
+                            &self.commit_idempotency,
+                            &shard,
+                            rid,
+                            fingerprint,
+                            recovery,
+                            now,
+                            retention_ms,
+                        );
+                    }
+                    Ok(outcomes)
+                }
+            }
+        }
+    }
+}
+
+impl fireweed_engine::RecoveryReadPort for AsyncObjectLogSqliteBackend {
+    fn explain_commit(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+    ) -> impl std::future::Future<Output = EngineResult<Option<fireweed_engine::CommitRecovery>>> + Send
+    {
+        std::future::ready(commit_surface::explain_commit_if_authoritative(
+            true,
+            self.projection.as_ref(),
+            &self.commit_idempotency,
+            shard,
+            request_id,
+        ))
+    }
+
+    fn side_record(
+        &self,
+        shard: &QueueKey,
+        key: &[u8],
+    ) -> impl std::future::Future<Output = EngineResult<Option<Bytes>>> + Send {
+        let key = key.to_vec();
+        std::future::ready(commit_surface::side_record(
+            self.projection.as_ref(),
+            shard,
+            &key,
+        ))
+    }
+}
+
 impl fireweed_engine::BatchUpdatePort for AsyncObjectLogSqliteBackend {}
 impl fireweed_engine::ItemMutationPort for AsyncObjectLogSqliteBackend {
     fn mutate_items(
@@ -763,7 +876,8 @@ impl fireweed_engine::IndexQueryPort for AsyncObjectLogSqliteBackend {
         _shard: &QueueKey,
         _index: &str,
         _key: &[Vec<u8>],
-    ) -> impl std::future::Future<Output = EngineResult<Option<fireweed_engine::IndexHit>>> + Send {
+    ) -> impl std::future::Future<Output = EngineResult<Option<fireweed_engine::IndexHit>>> + Send
+    {
         std::future::ready(Err(EngineError::Unavailable))
     }
     fn index_lookup(
@@ -771,7 +885,8 @@ impl fireweed_engine::IndexQueryPort for AsyncObjectLogSqliteBackend {
         _shard: &QueueKey,
         _index: &str,
         _key: &[Vec<u8>],
-    ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::IndexHit>>> + Send {
+    ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::IndexHit>>> + Send
+    {
         std::future::ready(Err(EngineError::Unavailable))
     }
 }
@@ -781,7 +896,8 @@ impl fireweed_engine::HistoricalProjectionRead for AsyncObjectLogSqliteBackend {
     fn current_position(
         &self,
         _shard: &QueueKey,
-    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::CommandPosition>> + Send {
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::CommandPosition>> + Send
+    {
         std::future::ready(Err(EngineError::Unavailable))
     }
     fn read_as_of<T, F>(

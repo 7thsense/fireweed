@@ -33,8 +33,8 @@ use fireweed_core::{
     QueueDefinition, QueueId, RecurrenceMode, RecurrencePolicy, RetryPolicy, TenantId,
     UtcTimestamp,
 };
-use fireweed_engine::QueueKey;
 use fireweed_engine::AsyncLogReplayBackend;
+use fireweed_engine::QueueKey;
 use fireweed_memory::{InMemoryProjection, ManualClock, MemoryLog, composed_memory_backend};
 use fireweed_objectlog::composed_objectlog_backend;
 use fireweed_sqlite::{
@@ -47,7 +47,10 @@ use fireweed_sqlite::{
 
 /// A fresh in-memory single-node deployment + a manual clock (so a workflow can advance wall-clock time
 /// deterministically). Returns the handle and the clock.
-fn deployment() -> (RuntimeCore<AsyncLogReplayBackend<MemoryLog, InMemoryProjection>>, Arc<ManualClock>) {
+fn deployment() -> (
+    RuntimeCore<AsyncLogReplayBackend<MemoryLog, InMemoryProjection>>,
+    Arc<ManualClock>,
+) {
     let clock = Arc::new(ManualClock::at(0));
     let fireweed = RuntimeCore::new(Arc::new(composed_memory_backend()), clock.clone());
     (fireweed, clock)

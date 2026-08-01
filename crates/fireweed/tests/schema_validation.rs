@@ -14,8 +14,8 @@ use fireweed_core::{
     PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
     RecurrencePolicy, RetryPolicy, TenantId,
 };
-use fireweed_engine::QueueKey;
 use fireweed_engine::AsyncLogReplayBackend;
+use fireweed_engine::QueueKey;
 use fireweed_memory::{InMemoryProjection, ManualClock, MemoryLog, composed_memory_backend};
 use serde_json::json;
 

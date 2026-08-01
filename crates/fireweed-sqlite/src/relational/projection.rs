@@ -1217,6 +1217,86 @@ impl ProjectionStore for SqliteProjectionStore {
         true
     }
 
+    fn replay_durable_commit(
+        &mut self,
+        shard: &QueueKey,
+        request_id: &RequestId,
+        fingerprint: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<Option<Vec<fireweed_engine::CommitOutcomeEntry>>> {
+        let mut g = self.lock();
+        let tx = st(g.conn.transaction())?;
+        let (tenant, queue) = parts(shard);
+        let prior: Option<(Vec<u8>, String, i64)> = st(tx
+            .query_row(
+                "SELECT request_fingerprint,response_payload,expires_at \
+                 FROM fireweed_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+                 AND operation=?3 AND request_id=?4",
+                params![
+                    tenant,
+                    queue,
+                    IDEMPOTENCY_OPERATION_COMMIT,
+                    request_id.as_str()
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional())?;
+        let Some((stored_fingerprint, response_payload, expires_at)) = prior else {
+            st(tx.commit())?;
+            return Ok(None);
+        };
+        if expires_at <= ts_nanos(now) {
+            st(tx.execute(
+                "DELETE FROM fireweed_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+                 AND operation=?3 AND request_id=?4",
+                params![
+                    tenant,
+                    queue,
+                    IDEMPOTENCY_OPERATION_COMMIT,
+                    request_id.as_str()
+                ],
+            ))?;
+            st(tx.commit())?;
+            return Ok(None);
+        }
+        if stored_fingerprint != fingerprint.to_be_bytes() {
+            return Err(EngineError::RequestIdConflict);
+        }
+        let entries = serde_json::from_str(&response_payload)
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        st(tx.commit())?;
+        Ok(Some(entries))
+    }
+
+    fn read_durable_commit(
+        &self,
+        shard: &QueueKey,
+        request_id: &RequestId,
+    ) -> EngineResult<Option<Vec<fireweed_engine::CommitOutcomeEntry>>> {
+        let g = self.lock();
+        let (tenant, queue) = parts(shard);
+        let response_payload: Option<String> = st(g
+            .conn
+            .query_row(
+                "SELECT response_payload FROM fireweed_request_idempotency \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND operation=?3 AND request_id=?4",
+                params![
+                    tenant,
+                    queue,
+                    IDEMPOTENCY_OPERATION_COMMIT,
+                    request_id.as_str()
+                ],
+                |row| row.get(0),
+            )
+            .optional())?;
+        response_payload
+            .map(|payload| {
+                serde_json::from_str(&payload)
+                    .map_err(|error| EngineError::Storage(error.to_string()))
+            })
+            .transpose()
+    }
+
     fn commit_validate(
         &self,
         shard: &QueueKey,

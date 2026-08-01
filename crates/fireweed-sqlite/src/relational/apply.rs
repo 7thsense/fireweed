@@ -250,7 +250,9 @@ pub(crate) fn insert_item_specs(
     let homogeneous_now = specs.iter().all(|s| s.now == first_now);
     if typed_indexes.is_empty()
         && homogeneous_now
-        && items_only.iter().all(|item| is_default_empty_push_item(item))
+        && items_only
+            .iter()
+            .all(|item| is_default_empty_push_item(item))
     {
         insert_default_empty_item_specs(tx, &t, &q, specs, base_seq)?;
         return Ok(());

@@ -11,17 +11,22 @@
 mod async_product;
 mod async_product_hybrid;
 mod async_product_sqlite;
+pub mod commit_surface;
 pub mod compose_log;
 mod log_engine_store;
 pub mod maintenance;
 pub mod object_store_observability;
 mod segment_config;
 
-pub use async_product::{
-    AsyncObjectLogMemoryBackend, SeqIdGen, composed_objectlog_memory_async,
-};
+pub use async_product::{AsyncObjectLogMemoryBackend, SeqIdGen, composed_objectlog_memory_async};
 pub use async_product_hybrid::{AsyncObjectLogHybridBackend, HybridProductConfig};
 pub use async_product_sqlite::AsyncObjectLogSqliteBackend;
+pub use commit_surface::{
+    CommitIdempotency, PreparedCommitTransition, durability_for_strict,
+    eventual_commit_capabilities, explain_commit_if_authoritative, new_commit_idempotency,
+    outcomes_of, prepare_commit_transition, record_commit_idempotency, side_record,
+    strict_commit_capabilities,
+};
 pub use compose_log::{
     ComposedObjectLogBackend, ObjectLogTaskDispatcher, block_on_objectlog,
     block_on_objectlog_future, composed_objectlog_backend, composed_objectlog_backend_group_commit,

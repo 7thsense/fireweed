@@ -889,7 +889,10 @@ mod batching_tests {
             .unwrap();
         assert_eq!(journal.to_ascii_lowercase(), "wal");
         // SQLite: 0=OFF, 1=NORMAL, 2=FULL, 3=EXTRA
-        assert_eq!(synchronous, 2, "authoritative log must keep synchronous=FULL");
+        assert_eq!(
+            synchronous, 2,
+            "authoritative log must keep synchronous=FULL"
+        );
         assert_eq!(busy_timeout, 5000);
         drop(log);
         let _ = std::fs::remove_file(&path);
