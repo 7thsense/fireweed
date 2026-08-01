@@ -76,6 +76,7 @@ mod connect;
 mod control_plane;
 mod credential;
 mod relational;
+mod runtime_safe;
 pub use async_log::{AsyncPostgresLog, DEFAULT_ASYNC_LOG_MAILBOX_CAPACITY};
 pub use async_log_replay::{
     async_composed_postgres_backend, async_composed_postgres_backend_in_schema,
@@ -102,6 +103,7 @@ pub use relational::{
     ComposedPostgresRelationalBackend, MetricsMigrationProgress, PostgresRelational,
     PostgresRelationalBackend, composed_postgres_relational_in_schema,
 };
+pub use runtime_safe::{DEFAULT_RUNTIME_SAFE_IN_FLIGHT, ProductBackend, RuntimeSafeBackend};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS queues (

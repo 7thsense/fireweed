@@ -63,11 +63,19 @@ on the inner product if the process-wide bridge is removed.
 
 | Log \\ Projection | `memory` | `sqlite` | `postgres` |
 |-------------------|----------|----------|------------|
-| **memory** | BLB **no** · BUP **no** | BLB **yes** · BUP **yes** | BLB **yes** · BUP **yes** |
-| **sqlite** | BLB **yes** · BUP **yes** | BLB **yes** · BUP **yes** | BLB **yes** · BUP **yes** |
-| **postgres** | BLB **yes** · BUP **yes** | BLB **yes** · BUP **yes** | BLB **yes** · BUP **yes** |
+| **memory** | BLB **no** · BUP **no** | BLB **yes** · BUP **yes** | BLB **no**† · BUP **yes**† |
+| **sqlite** | BLB **yes** · BUP **yes** | BLB **yes** · BUP **yes** | BLB **no**† · BUP **yes**† |
+| **postgres** | BLB **no**† · BUP **yes**† | BLB **no**† · BUP **yes**† | BLB **no**† · BUP **yes**† |
 | **filesystem** | BLB **yes** · BUP **no\*** | BLB **yes** · BUP **yes** | BLB **yes** · BUP **yes** |
 | **s3** | BLB **yes** · BUP **no\*** | BLB **yes** · BUP **yes** | BLB **yes** · BUP **yes** |
+
+†Postgres product open paths (fireweed-ca319318) use adapter-private
+`RuntimeSafeBackend` (`fireweed-postgres`) instead of process-wide
+`BlockingLibBackend`. Substrate is still sync `postgres::Client` (and sync
+rusqlite when the other axis is sqlite); whole-op offload is owned per handle.
+Desired residual exit: wire `AsyncPostgresLog` /
+`AsyncPostgresRelationalProjection` (and sqlite actors) and drop the whole-op
+wrapper.
 
 \*Object-log × memory product ports are native-async (`ObjectLogEngineStore` +
 `AsyncInMemoryProjection`). Local FS blob paths may still use adapter-local
@@ -75,10 +83,12 @@ on the inner product if the process-wide bridge is removed.
 Product open still wraps BLB. Construction may call `block_on_objectlog`
 (open-time; `open_async` offloads selected cells via `spawn_blocking`).
 
-**Counts:** 15 cells · BLB on open: **14** · already BLB-free: **1**
-(`memory` × `memory`) · BUP residual if BLB removed: **12 yes** · **3 no**
-(`memory`×`memory`, `filesystem`×`memory`, `s3`×`memory` product ports; FS still
-has library-local offload notes).
+**Counts:** 15 cells · process-wide BLB on open: **9** · BLB-free (or
+adapter-private only): **6** (`memory`×`memory`; all five postgres-axis cells
+via `RuntimeSafeBackend`) · BUP residual if process-wide BLB removed: still
+**yes** for durable axes without native actors · **3 no** for product ports
+(`memory`×`memory`, `filesystem`×`memory`, `s3`×`memory`; FS still has
+library-local offload notes).
 
 ---
 
@@ -90,7 +100,7 @@ has library-local offload notes).
 | `open_async` | `lib.rs` | Same composition; when `postgres` feature and cell needs offload (`Postgres` log, `S3`/`Filesystem` log, or `Postgres` projection) **and** a Tokio handle exists → `tokio::task::spawn_blocking(open_validated)`. |
 | Memory log cells | `open_memory_log_cell` | `memory`×`memory`: raw `composed_memory_backend()` (**no** BLB). `memory`×`sqlite`/`postgres`: `assemble_async_log_replay` + `wrap_blocking_backend`. |
 | Sqlite log cells | `open_sqlite_log_cell` → `open_sqlite*` | Always `BlockingLibBackend::new`. |
-| Postgres log cells | `open_postgres_log_cell` → `open_postgres_runtime` / assemble | Always BLB; relational uses `PostgresRelationalBackend`. |
+| Postgres log cells | `open_postgres_log_cell` → `open_postgres_runtime` / assemble | **No process-wide BLB** (fireweed-ca319318): `RuntimeSafeBackend` / `wrap_postgres_runtime_safe`; residual sync client under adapter-private offload. |
 | Object-log cells | `open_object_log_cell` | Memory / sqlite / postgres projection arms; all wrap BLB (postgres via `open_objectlog_postgres_blocking`). |
 
 ---
@@ -122,11 +132,11 @@ has library-local offload notes).
 
 | Field | Value |
 |-------|--------|
-| **Uses BlockingLibBackend today** | **Yes** (`wrap_blocking_backend`) |
-| **Blocking-under-poll** | **Yes** (projection) |
-| **Open path** | `open_memory_log_cell` → `MemoryLog` + `PostgresRelational::connect_in_schema` → `assemble_async_log_replay` → BLB |
-| **Blocking mechanism** | Sync `postgres::Client` on `PostgresRelational` / `ProjectionStore` through `InProcessProjectionStore` (`fireweed-postgres`) |
-| **Exit criterion** | Wire `AsyncPostgresRelationalProjection` (mailbox actor already in-tree) as the projection axis for this cell; drop BLB after actor-backed apply passes conformance + heartbeat. |
+| **Uses BlockingLibBackend today** | **No** (adapter-private `RuntimeSafeBackend`; fireweed-ca319318) |
+| **Blocking-under-poll** | **Yes** on bare product (projection); **no** on public handle (offload) |
+| **Open path** | `open_memory_log_cell` → `MemoryLog` + `PostgresRelational::connect_in_schema` → `assemble_async_log_replay` → `wrap_postgres_runtime_safe` |
+| **Blocking mechanism** | Sync `postgres::Client` on `PostgresRelational` / `ProjectionStore` through `InProcessProjectionStore`; whole-op offload is adapter-owned |
+| **Exit criterion** | Wire `AsyncPostgresRelationalProjection` as the projection axis; drop `RuntimeSafeBackend` after actor-backed apply passes conformance + heartbeat. |
 
 ### 4. `sqlite` × `memory`
 
@@ -153,41 +163,41 @@ has library-local offload notes).
 
 | Field | Value |
 |-------|--------|
-| **Uses BlockingLibBackend today** | **Yes** (`open_sqlite_postgres_projection`) |
-| **Blocking-under-poll** | **Yes** (log + projection) |
-| **Open path** | `SqliteLog::open` + `PostgresRelational::connect_in_schema` → `assemble_async_log_replay` → BLB |
-| **Blocking mechanism** | Sync rusqlite log + sync postgres projection through `InProcess*` |
-| **Exit criterion** | `BlockingLogStore`/`actor` for sqlite log **and** `AsyncPostgresRelationalProjection` for projection; drop BLB when neither axis blocks the reactor. |
+| **Uses BlockingLibBackend today** | **No** (adapter-private `RuntimeSafeBackend`; fireweed-ca319318) |
+| **Blocking-under-poll** | **Yes** on bare product (log + projection); **no** on public handle (offload) |
+| **Open path** | `open_sqlite_postgres_projection` → assemble → `wrap_postgres_runtime_safe` |
+| **Blocking mechanism** | Sync rusqlite log + sync postgres projection through `InProcess*`; whole-op offload is adapter-owned |
+| **Exit criterion** | Actor/`BlockingLogStore` for sqlite log **and** `AsyncPostgresRelationalProjection` for projection; drop `RuntimeSafeBackend` when neither axis blocks the reactor. |
 
 ### 7. `postgres` × `memory`
 
 | Field | Value |
 |-------|--------|
-| **Uses BlockingLibBackend today** | **Yes** (`open_postgres_runtime` LogReplay → BLB) |
-| **Blocking-under-poll** | **Yes** (log) |
-| **Open path** | `composed_postgres_backend*` → `AsyncLogReplayBackend<PostgresLog, InMemoryProjection>` → BLB |
-| **Blocking mechanism** | Sync `postgres::Client` on `PostgresLog` (`compose_log.rs`) via `InProcessLogStore` |
-| **Exit criterion** | Product open must assemble `AsyncPostgresLog` (in-tree actor) instead of bare `PostgresLog` + `InProcessLogStore`; drop BLB after log-replay conformance on single-thread runtime. |
+| **Uses BlockingLibBackend today** | **No** (`open_postgres_runtime` LogReplay → `RuntimeSafeBackend`; fireweed-ca319318) |
+| **Blocking-under-poll** | **Yes** on bare product (log); **no** on public handle (offload) |
+| **Open path** | `composed_postgres_backend*` → `AsyncLogReplayBackend<PostgresLog, InMemoryProjection>` → `RuntimeSafeBackend` |
+| **Blocking mechanism** | Sync `postgres::Client` on `PostgresLog` (`compose_log.rs`) via `InProcessLogStore`; adapter-private whole-op offload |
+| **Exit criterion** | Product open must assemble `AsyncPostgresLog` (in-tree actor) instead of bare `PostgresLog` + `InProcessLogStore`; drop `RuntimeSafeBackend` after log-replay conformance on single-thread runtime. |
 
 ### 8. `postgres` × `sqlite`
 
 | Field | Value |
 |-------|--------|
-| **Uses BlockingLibBackend today** | **Yes** (`open_postgres_log_cell` → `wrap_blocking_backend`) |
-| **Blocking-under-poll** | **Yes** (log + projection) |
-| **Open path** | `PostgresLog` + `SqliteProjectionStore` → `assemble_async_log_replay` → BLB |
-| **Blocking mechanism** | Sync postgres client log + sync rusqlite projection |
-| **Exit criterion** | `AsyncPostgresLog` + `AsyncSqliteProjectionStore` (or equivalent whole-tx offload per axis); drop BLB. |
+| **Uses BlockingLibBackend today** | **No** (`open_postgres_log_cell` → `wrap_postgres_runtime_safe`; fireweed-ca319318) |
+| **Blocking-under-poll** | **Yes** on bare product (log + projection); **no** on public handle (offload) |
+| **Open path** | `PostgresLog` + `SqliteProjectionStore` → assemble → `RuntimeSafeBackend` |
+| **Blocking mechanism** | Sync postgres client log + sync rusqlite projection; whole-op offload is adapter-owned |
+| **Exit criterion** | `AsyncPostgresLog` + `AsyncSqliteProjectionStore` (or equivalent whole-tx offload per axis); drop `RuntimeSafeBackend`. |
 
 ### 9. `postgres` × `postgres`
 
 | Field | Value |
 |-------|--------|
-| **Uses BlockingLibBackend today** | **Yes** (`open_postgres_runtime` Relational → BLB) |
-| **Blocking-under-poll** | **Yes** |
-| **Open path** | Unified `PostgresRelationalBackend` (same URL for log + projection) → BLB |
-| **Blocking mechanism** | Port impls run sync SQL under mutex then `std::future::ready` (e.g. `PushPort::push` in `relational.rs`) — classic blocking-under-poll |
-| **Exit criterion** | Whole-transaction adapter actor / `BlockingLogStore`-style ownership for the unified relational backend **or** native async postgres driver path; drop process-wide BLB; retain per-queue serialization (API-005 / ADR-017). |
+| **Uses BlockingLibBackend today** | **No** (`open_postgres_runtime` Relational → `RuntimeSafeBackend`; fireweed-ca319318) |
+| **Blocking-under-poll** | **Yes** on bare product; **no** on public handle (offload) |
+| **Open path** | Unified `PostgresRelationalBackend` (same URL for log + projection) → `RuntimeSafeBackend` |
+| **Blocking mechanism** | Port impls run sync SQL under mutex then `std::future::ready` — classic blocking-under-poll without offload; public path uses adapter-private whole-op offload |
+| **Exit criterion** | Whole-transaction adapter actor / native async postgres driver path; drop `RuntimeSafeBackend`; retain per-queue serialization (API-005 / ADR-017). |
 
 ### 10. `filesystem` × `memory`
 
@@ -253,13 +263,14 @@ has library-local offload notes).
 
 | Mechanism | Where | Cells affected | Role vs process-wide BLB |
 |-----------|-------|----------------|---------------------------|
-| `BlockingLibBackend` / `shared_worker_pool` | `crates/fireweed/src/blocking_backend.rs` | All except `memory`×`memory` | **Process-wide product bridge** (epic removal target) |
-| `InProcessLogStore` / `InProcessProjectionStore` | `fireweed-engine/src/async_store.rs` | Log-replay durable cells; object-log × sqlite/postgres | Eager ready futures → BUP **yes** |
+| `BlockingLibBackend` / `shared_worker_pool` | `crates/fireweed/src/blocking_backend.rs` | Sqlite log cells; object-log cells | **Process-wide product bridge** (epic removal target; postgres cells cleared fireweed-ca319318) |
+| `RuntimeSafeBackend` | `fireweed-postgres/src/runtime_safe.rs` | All postgres log/projection product opens | **Adapter-private** whole-op offload (temporary residual until actors/native async) |
+| `InProcessLogStore` / `InProcessProjectionStore` | `fireweed-engine/src/async_store.rs` | Log-replay durable cells; object-log × sqlite/postgres | Eager ready futures → BUP **yes** without offload |
 | Sync rusqlite | `fireweed-sqlite` (`SqliteLog`, `SqliteProjectionStore`, `HybridProjectionStore`, relational) | Any cell with sqlite axis | Blocking substrate |
 | Sync `postgres::Client` | `fireweed-postgres` (`PostgresLog`, `PostgresRelational`, relational backend ports) | Any cell with postgres axis (except pure object-log×memory) | Blocking substrate |
 | `block_on_objectlog` | `fireweed-objectlog/src/compose_log.rs` | Object-log open construction | Open-time bridge (dedicated thread when Tokio present); not a substitute for BLB removal on ports |
 | `open_async` + `spawn_blocking` | `lib.rs` `storage_open_needs_blocking_offload` | Postgres log/projection and object-log opens | Construction-only offload |
-| Adapter actors (unused by matrix open) | `AsyncPostgresLog`, `AsyncPostgresRelationalProjection`, `AsyncSqliteProjectionStore` | Candidates for exit criteria | **Desired** adapter-local offload (ADR-015) |
+| Adapter actors (unused by matrix open) | `AsyncPostgresLog`, `AsyncPostgresRelationalProjection`, `AsyncSqliteProjectionStore` | Candidates for exit criteria | **Desired** adapter-local offload (ADR-015); replace `RuntimeSafeBackend` |
 
 ---
 
@@ -267,10 +278,10 @@ has library-local offload notes).
 
 Order is a suggestion for epic decomposition — not a commitment:
 
-1. **Already clear:** `memory` × `memory`.
+1. **Already clear of process-wide BLB:** `memory` × `memory`; all postgres-axis cells (adapter-private residual via `RuntimeSafeBackend`, fireweed-ca319318).
 2. **Drop BLB first candidates:** `filesystem`/`s3` × `memory` (product ports already native-async).
-3. **Swap to in-tree actors:** postgres-axis cells → `AsyncPostgresLog` / `AsyncPostgresRelationalProjection`; sqlite projection cells → `AsyncSqliteProjectionStore`.
-4. **Sqlite log / unified relational:** still need connection-affine whole-tx offload or native async driver; highest residual risk.
+3. **Swap to in-tree actors (postgres residual):** replace `RuntimeSafeBackend` with `AsyncPostgresLog` / `AsyncPostgresRelationalProjection` on product axes.
+4. **Sqlite log / hybrid cells:** still process-wide BLB; connection-affine whole-tx offload or native async driver.
 5. **Global gate (epic AC):** `wrap_blocking_backend` / `BlockingLibBackend::new` absent from product open arms (or test-only); API-005 bridge removal criterion met.
 
 ---
