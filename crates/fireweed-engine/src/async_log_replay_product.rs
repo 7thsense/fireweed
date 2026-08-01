@@ -1023,6 +1023,8 @@ where
             )
             .await?;
             if needs_replay {
+                use crate::{RequestOutcome, request_expires_at};
+                let retention_ms = outcome.definition.request_id_retention_ms;
                 let mut from = None;
                 loop {
                     let page = self.log.with_store(|log| {
@@ -1038,6 +1040,39 @@ where
                     self.projection.with_store_mut(|p| {
                         ProjectionStore::apply_recovery(p, &positions, &commands)
                     })?;
+                    // Rebuild push request-id ledger from durable envelopes (parity with
+                    // recover()). Without this, late-join create_queue materializes items but
+                    // leaves retained push idempotency empty — same-request_id conflict/replay
+                    // after a cold open that only joins via create_queue would Proceed fresh.
+                    {
+                        let mut push_cache = self
+                            .push_idempotency
+                            .lock()
+                            .expect("push idempotency poisoned");
+                        for (_, env) in &page.entries {
+                            let Some(request_id) = &env.request_id else {
+                                continue;
+                            };
+                            if let QueueCommand::Push(_) = &env.command {
+                                let fingerprint =
+                                    BodyHash(env.request_fingerprint.unwrap_or(0));
+                                let expires_at =
+                                    request_expires_at(env.created_at, retention_ms);
+                                let ids = match &env.request_outcome {
+                                    Some(RequestOutcome::Push { item_ids }) => {
+                                        item_ids.clone()
+                                    }
+                                    _ => env.item_ids.clone(),
+                                };
+                                push_cache.entry(shard.clone()).or_default().record(
+                                    request_id.clone(),
+                                    fingerprint,
+                                    ids,
+                                    expires_at,
+                                );
+                            }
+                        }
+                    }
                     match page.next {
                         Some(next) => from = Some(next),
                         None => break,

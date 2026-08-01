@@ -197,3 +197,161 @@ async fn batch_push_reports_fresh_then_replayed_disposition() {
     assert_eq!(replay.item_ids, first.item_ids);
     assert_eq!(fireweed.metrics(&q).await.unwrap().pending, 2);
 }
+
+/// fireweed-01802c42: async sqlite log-replay product must rebuild the push request-id ledger on
+/// recovery-on-open so same-body replays and changed-body conflicts survive a close/reopen.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn request_id_conflict_and_replay_survive_sqlite_async_reopen() {
+    use fireweed::open_sqlite;
+    let path = std::env::temp_dir().join(format!(
+        "fw-request-id-reopen-{}-{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let path_str = path.to_str().unwrap();
+    let rid = RequestId::new("reopen-rid-1").unwrap();
+    let empty_rid = RequestId::new("reopen-empty-1").unwrap();
+    let q = qkey();
+    let first = {
+        let fw = open_sqlite(path_str, Arc::new(ManualClock::at(0))).unwrap();
+        fw.create_queue(qdef(60_000)).await.unwrap();
+        assert!(
+            fw.commit_capabilities(&q)
+                .unwrap()
+                .retained_commit_idempotency,
+            "async sqlite product must advertise retained_commit_idempotency"
+        );
+        let (id, disp) = fw
+            .push_with_request_id(&q, rid.clone(), item(10))
+            .await
+            .unwrap();
+        assert_eq!(disp, PushDisposition::Fresh);
+        let (id2, disp2) = fw
+            .push_with_request_id(&q, rid.clone(), item(10))
+            .await
+            .unwrap();
+        assert_eq!(disp2, PushDisposition::Replayed);
+        assert_eq!(id, id2);
+        let err = fw
+            .push_with_request_id(&q, rid.clone(), item(99))
+            .await
+            .unwrap_err();
+        assert_eq!(err, EngineError::RequestIdConflict);
+
+        // Empty batch under a request_id is a durable no-op with retained conflict/replay.
+        let empty_first = fw
+            .push_batch_with_request_id(&q, empty_rid.clone(), vec![])
+            .await
+            .unwrap();
+        assert!(empty_first.is_fresh());
+        assert!(empty_first.item_ids.is_empty());
+        let empty_replay = fw
+            .push_batch_with_request_id(&q, empty_rid.clone(), vec![])
+            .await
+            .unwrap();
+        assert!(empty_replay.is_replayed());
+        let empty_conflict = fw
+            .push_batch_with_request_id(&q, empty_rid.clone(), vec![item(1)])
+            .await
+            .unwrap_err();
+        assert_eq!(empty_conflict, EngineError::RequestIdConflict);
+        id
+    };
+
+    let reopened = open_sqlite(path_str, Arc::new(ManualClock::at(0))).unwrap();
+    reopened.create_queue(qdef(60_000)).await.unwrap();
+    assert!(
+        reopened
+            .commit_capabilities(&q)
+            .unwrap()
+            .retained_commit_idempotency
+    );
+    let (replay_id, replay_disp) = reopened
+        .push_with_request_id(&q, rid.clone(), item(10))
+        .await
+        .unwrap();
+    assert_eq!(
+        replay_disp,
+        PushDisposition::Replayed,
+        "same body after reopen must Replayed"
+    );
+    assert_eq!(replay_id, first);
+    let err = reopened
+        .push_with_request_id(&q, rid, item(99))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        EngineError::RequestIdConflict,
+        "changed body after reopen must RequestIdConflict"
+    );
+
+    let empty_after = reopened
+        .push_batch_with_request_id(&q, empty_rid.clone(), vec![])
+        .await
+        .unwrap();
+    assert!(
+        empty_after.is_replayed(),
+        "empty request_id body must Replayed after reopen"
+    );
+    let empty_nonempty = reopened
+        .push_batch_with_request_id(&q, empty_rid, vec![item(1)])
+        .await
+        .unwrap_err();
+    assert_eq!(empty_nonempty, EngineError::RequestIdConflict);
+
+    drop(reopened);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// fireweed-01802c42: batch push disposition Fresh → Replayed and changed-body conflict across reopen.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn batch_request_id_replay_and_conflict_survive_sqlite_async_reopen() {
+    use fireweed::open_sqlite;
+    let path = std::env::temp_dir().join(format!(
+        "fw-request-id-batch-reopen-{}-{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let path_str = path.to_str().unwrap();
+    let rid = RequestId::new("reopen-batch-1").unwrap();
+    let q = qkey();
+    let body = vec![item(10), item(20)];
+    let first = {
+        let fw = open_sqlite(path_str, Arc::new(ManualClock::at(0))).unwrap();
+        fw.create_queue(qdef(60_000)).await.unwrap();
+        let outcome = fw
+            .push_batch_with_request_id(&q, rid.clone(), body.clone())
+            .await
+            .unwrap();
+        assert!(outcome.is_fresh());
+        outcome.item_ids.clone()
+    };
+    let reopened = open_sqlite(path_str, Arc::new(ManualClock::at(0))).unwrap();
+    reopened.create_queue(qdef(60_000)).await.unwrap();
+    let replay = reopened
+        .push_batch_with_request_id(&q, rid.clone(), body)
+        .await
+        .unwrap();
+    assert!(
+        replay.is_replayed(),
+        "batch same body after reopen must Replayed"
+    );
+    assert_eq!(replay.item_ids, first);
+    let conflict = reopened
+        .push_batch_with_request_id(&q, rid, vec![item(11), item(22)])
+        .await;
+    assert_eq!(conflict.unwrap_err(), EngineError::RequestIdConflict);
+    drop(reopened);
+    let _ = std::fs::remove_file(&path);
+}

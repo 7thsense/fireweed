@@ -11,9 +11,9 @@
 use fireweed_conformance::{qdef, shard, ts};
 use fireweed_core::{GateKeyPolicy, GroupKey, ItemId, PriorityValue, QueueId, RequestId, TenantId};
 use fireweed_engine::{
-use fireweed_engine::AsyncLogReplayBackend;
-    Backend, ChangeRecordSink, ClaimPort, ControlPlaneStore, DiscoveryGranularity, DiscoveryPort,
-    EngineError, LogStore, ProjectionRead, PushPort, PushSpec, SetGatesCommand, SetGatesPort,
+    AsyncLogReplayBackend, Backend, ChangeRecordSink, ClaimPort, ControlPlaneStore,
+    DiscoveryGranularity, DiscoveryPort, EngineError, LogStore, ProjectionRead, PushPort, PushSpec,
+    SetGatesCommand, SetGatesPort,
 };
 use fireweed_sqlite::composed_sqlite_backend;
 use std::cell::Cell;

@@ -514,6 +514,79 @@ async fn request_id_push_replays_over_sqlite_relational_facade() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// fireweed-01802c42: facade-level request-id retention across reopen on the public
+/// `open_sqlite` async log-replay product (Fresh / Replayed / RequestIdConflict).
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn request_id_push_retention_survives_open_sqlite_reopen() {
+    use fireweed::open_sqlite;
+    let path = std::env::temp_dir()
+        .join(format!(
+            "fireweed-facade-request-id-reopen-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+        .to_str()
+        .unwrap()
+        .to_string();
+    let _ = std::fs::remove_file(&path);
+    let q = qkey();
+    let rid = RequestId::new("facade-reopen-req").unwrap();
+    let first_ids = {
+        let fireweed = open_sqlite(&path, Arc::new(ManualClock::at(0))).unwrap();
+        fireweed.create_queue(qdef()).await.unwrap();
+        assert!(
+            fireweed
+                .commit_capabilities(&q)
+                .unwrap()
+                .retained_commit_idempotency
+        );
+        let first = fireweed
+            .push_batch_with_request_id(&q, rid.clone(), vec![at(10), at(20)])
+            .await
+            .unwrap();
+        assert!(first.is_fresh());
+        let replay = fireweed
+            .push_batch_with_request_id(&q, rid.clone(), vec![at(10), at(20)])
+            .await
+            .unwrap();
+        assert!(replay.is_replayed());
+        assert_eq!(replay.item_ids, first.item_ids);
+        assert_eq!(
+            fireweed
+                .push_batch_with_request_id(&q, rid.clone(), vec![at(11), at(22)])
+                .await
+                .unwrap_err(),
+            EngineError::RequestIdConflict
+        );
+        first.item_ids.clone()
+    };
+    let reopened = open_sqlite(&path, Arc::new(ManualClock::at(0))).unwrap();
+    reopened.create_queue(qdef()).await.unwrap();
+    let replay = reopened
+        .push_batch_with_request_id(&q, rid.clone(), vec![at(10), at(20)])
+        .await
+        .unwrap();
+    assert!(
+        replay.is_replayed(),
+        "facade reopen must Replayed same body under retained request id"
+    );
+    assert_eq!(replay.item_ids, first_ids);
+    assert_eq!(
+        reopened
+            .push_batch_with_request_id(&q, rid, vec![at(11), at(22)])
+            .await
+            .unwrap_err(),
+        EngineError::RequestIdConflict,
+        "facade reopen must RequestIdConflict on changed body"
+    );
+    drop(reopened);
+    let _ = std::fs::remove_file(&path);
+}
+
 #[tokio::test]
 async fn request_id_push_is_idempotent_on_memory_backend() {
     // The memory reference backend now wires the retained request-id idempotency cache (ddx-pqueue-2201fd37,

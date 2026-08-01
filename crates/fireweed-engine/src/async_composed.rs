@@ -843,7 +843,12 @@ fn validate_push_definition(
         ));
     }
     if request.items.is_empty() {
-        return Err(EngineError::Invalid("push batch must not be empty"));
+        // Empty batches are only meaningful under a request_id: a durable no-op with retained
+        // replay/conflict semantics (e.g. snorri empty enqueue). Without a request_id there is
+        // nothing to retain and no work to append.
+        if request.request_id.is_none() {
+            return Err(EngineError::Invalid("push batch must not be empty"));
+        }
     }
     if request.items.len() > definition.max_push_batch_size as usize {
         return Err(EngineError::Invalid("push batch exceeds queue limit"));
@@ -2272,7 +2277,11 @@ mod tests {
                     return Ok(AsyncPushPlan::replay(vec![item_id]));
                 }
                 let (mut items, ids) = build_push_items(request.items.clone(), 1, 1, 1, 3);
-                assert_eq!(ids, vec![item_id]);
+                if request.items.is_empty() {
+                    assert!(ids.is_empty());
+                } else {
+                    assert_eq!(ids, vec![item_id]);
+                }
                 if matches!(mode, PushPlanMode::SmugglePayload) {
                     items[0].payload = Some(bytes::Bytes::from_static(b"smuggled"));
                 }
@@ -2768,9 +2777,9 @@ mod tests {
     }
 
     #[test]
-    fn typed_push_rejects_empty_batch_before_planning() {
+    fn typed_push_rejects_empty_batch_without_request_id_before_planning() {
         let fixture = push_fixture(PushPlanMode::Valid, true);
-        let mut request = push_request("push", true);
+        let mut request = push_request("push", false);
         request.items.clear();
         let mut push = Box::pin(fixture.backend.push(request));
         assert!(matches!(poll_once(push.as_mut()), Poll::Pending));
@@ -2783,6 +2792,25 @@ mod tests {
         ));
         assert_eq!(fixture.plan_calls.load(Ordering::Acquire), 0);
         assert_eq!(fixture.commit_calls.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn typed_push_empty_batch_with_request_id_reaches_planner() {
+        // Retained empty enqueues are part of the request-id contract (replay / conflict).
+        let fixture = push_fixture(PushPlanMode::Valid, true);
+        let mut request = push_request("push", true);
+        request.items.clear();
+        let mut push = Box::pin(fixture.backend.push(request));
+        assert!(matches!(poll_once(push.as_mut()), Poll::Pending));
+        assert!(fixture.dispatcher.drive_next());
+        // Planner is consulted (empty request_id batch is no longer rejected pre-plan).
+        assert!(fixture.plan_calls.load(Ordering::Acquire) >= 1);
+        // Empty plan is valid: one empty Push envelope, zero item ids.
+        assert!(matches!(
+            poll_once(push.as_mut()),
+            Poll::Ready(Ok(outcome)) if outcome.is_fresh() && outcome.item_ids.is_empty()
+        ));
+        assert_eq!(fixture.commit_calls.load(Ordering::Acquire), 1);
     }
 
     #[test]
