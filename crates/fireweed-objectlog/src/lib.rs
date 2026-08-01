@@ -24,9 +24,9 @@ pub use async_product_hybrid::{AsyncObjectLogHybridBackend, HybridProductConfig}
 pub use async_product_sqlite::AsyncObjectLogSqliteBackend;
 pub use commit_surface::{
     CommitIdempotency, PreparedCommitTransition, durability_for_strict,
-    eventual_commit_capabilities, explain_commit_if_authoritative, new_commit_idempotency,
-    outcomes_of, prepare_commit_transition, record_commit_idempotency, side_record,
-    strict_commit_capabilities,
+    eventual_commit_capabilities, explain_commit_if_authoritative,
+    finish_prepared_commit_transition, map_submit_error, new_commit_idempotency, outcomes_of,
+    prepare_commit_transition, record_commit_idempotency, side_record, strict_commit_capabilities,
 };
 pub use compose_log::{
     ComposedObjectLogBackend, ObjectLogTaskDispatcher, block_on_objectlog,

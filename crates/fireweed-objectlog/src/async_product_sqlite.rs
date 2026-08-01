@@ -12,16 +12,17 @@ use fireweed_core::{
     RequestId, TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
-    AsyncClaimError, AsyncComposedBackend, AsyncControlPlane, AsyncFinalizeRequest, AsyncLogStore,
-    AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError, AsyncPushRequest, AsyncRenewRequest,
-    Backend, ClaimPort, ClaimRequest, Claimed, CommandChecksum, CommandEnvelope, ControlPlaneStore,
-    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeOutcome, FinalizePort,
-    FinalizeTarget, IdGen, InProcessControlPlane, InProcessProjectionStore, OwnedTask,
-    ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead,
-    ProjectionReclaimPlanner, ProjectionStore, PurgePort, PushPort, PushSpec, QueueCommand,
-    QueueCounters, QueueKey, RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand,
-    ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort, RenewTarget,
-    SeparateReplayCommit, SeparateReplayCommitter, TickReport, UpsertOutcome, UpsertPort,
+    AsyncClaimError, AsyncCommitStrategy, AsyncComposedBackend, AsyncControlPlane,
+    AsyncFinalizeRequest, AsyncLogStore, AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError,
+    AsyncPushRequest, AsyncRenewRequest, Backend, ClaimPort, ClaimRequest, Claimed, CommandChecksum,
+    CommandEnvelope, ControlPlaneStore, CreateQueueOutcome, DurabilityClass, EngineError,
+    EngineResult, FinalizeOutcome, FinalizePort, FinalizeTarget, IdGen, InProcessControlPlane,
+    InProcessProjectionStore, OwnedTask, ProjectionClaimPlanner, ProjectionLifecyclePlanner,
+    ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner, ProjectionStore, PurgePort,
+    PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, RawCommitOutcome, RawCommitRequest,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort,
+    RenewTarget, SeparateReplayCommit, SeparateReplayCommitter, TickReport, UpsertOutcome,
+    UpsertPort,
 };
 use fireweed_sqlite::SqliteProjectionStore;
 use object_log::FlushConfig;
@@ -29,8 +30,7 @@ use object_log::FlushConfig;
 use crate::ObjectLogEngineStore;
 use crate::async_product::SeqIdGen;
 use crate::commit_surface::{
-    self, CommitIdempotency, PreparedCommitTransition, new_commit_idempotency,
-    strict_commit_capabilities,
+    self, CommitIdempotency, new_commit_idempotency, strict_commit_capabilities,
 };
 
 type Proj = InProcessProjectionStore<SqliteProjectionStore>;
@@ -774,53 +774,48 @@ impl fireweed_engine::CommitTransitionPort for AsyncObjectLogSqliteBackend {
                 }
                 None => AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?,
             };
-            match commit_surface::prepare_commit_transition(
-                self.projection.as_ref(),
-                self.control.as_ref(),
-                self.ids.as_ref(),
-                self.counters.as_ref(),
-                self.node_id,
-                &self.commit_idempotency,
-                epoch,
-                &shard,
-                transition,
-                now,
-            )
-            .await?
-            {
-                PreparedCommitTransition::Replay(outcomes) => Ok(outcomes),
-                PreparedCommitTransition::Proceed {
-                    envelopes,
-                    recovery,
-                    request_id,
-                    fingerprint,
-                    retention_ms,
-                } => {
-                    if !envelopes.is_empty() {
-                        self.engine
-                            .submit_commit(RawCommitRequest::new(shard.clone(), envelopes, epoch))
-                            .await
-                            .map_err(|error| {
-                                EngineError::Storage(format!(
-                                    "async commit_transition submission failed: {error:?}"
-                                ))
-                            })??;
-                    }
-                    let outcomes = commit_surface::outcomes_of(&recovery);
-                    if let Some(rid) = request_id {
-                        commit_surface::record_commit_idempotency(
-                            &self.commit_idempotency,
+            // fireweed-5497780d: prepare (instance-fence validation) + append/apply must share the
+            // queue-local admission permit. submit_commit alone only serializes append+apply, so
+            // concurrent prepares could both pass the same fence and LWW-overwrite side records.
+            let strategy = self.engine.commit_strategy();
+            let projection = Arc::clone(&self.projection);
+            let control = Arc::clone(&self.control);
+            let ids = Arc::clone(&self.ids);
+            let counters = Arc::clone(&self.counters);
+            let commit_idempotency = Arc::clone(&self.commit_idempotency);
+            let node_id = self.node_id;
+            self.engine
+                .submit_operation(shard.clone(), move || {
+                    Box::pin(async move {
+                        let prepared = commit_surface::prepare_commit_transition(
+                            projection.as_ref(),
+                            control.as_ref(),
+                            ids.as_ref(),
+                            counters.as_ref(),
+                            node_id,
+                            &commit_idempotency,
+                            epoch,
                             &shard,
-                            rid,
-                            fingerprint,
-                            recovery,
+                            transition,
                             now,
-                            retention_ms,
-                        );
-                    }
-                    Ok(outcomes)
-                }
-            }
+                        )
+                        .await?;
+                        commit_surface::finish_prepared_commit_transition(
+                            &shard,
+                            epoch,
+                            prepared,
+                            &commit_idempotency,
+                            now,
+                            |request| {
+                                let strategy = Arc::clone(&strategy);
+                                async move { strategy.commit(request).await }
+                            },
+                        )
+                        .await
+                    })
+                })
+                .await
+                .map_err(commit_surface::map_submit_error)?
         }
     }
 }
@@ -933,13 +928,18 @@ impl AsyncObjectLogSqliteBackend {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use bytes::Bytes;
     use fireweed_core::{
         EligibilityPolicy, LeaseToken, OrderingMode, PriorityModel, QueueDefinition, QueueId,
         RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
     };
     use fireweed_engine::{
-        ClaimCompatibility, ClaimPort, ClaimRequest, ControlPlaneStore, FinalizeKind,
-        FinalizeOutcome, FinalizePort, ProjectionRead, PushPort, PushSpec,
+        ClaimCompatibility, ClaimPort, ClaimRef, ClaimRequest, CommitEntryOutcome, CommitTransition,
+        CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore, EngineError, FinalizeKind,
+        FinalizeOutcome, FinalizePort, InstanceFence, ProjectionRead, ProjectionStore, PushPort,
+        PushSpec, RecoveryReadPort, SideRecord,
     };
     use object_log::FlushConfig;
 
@@ -971,9 +971,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn object_log_sqlite_push_claim_finalize() {
-        let backend = AsyncObjectLogSqliteBackend::open_memory_log(
+    async fn open_backend() -> AsyncObjectLogSqliteBackend {
+        AsyncObjectLogSqliteBackend::open_memory_log(
             ":memory:",
             FlushConfig {
                 linger: std::time::Duration::ZERO,
@@ -982,7 +981,12 @@ mod tests {
             0,
         )
         .await
-        .unwrap();
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn object_log_sqlite_push_claim_finalize() {
+        let backend = open_backend().await;
         let def = qdef();
         let shard = fireweed_engine::QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
         backend.create_queue(def).await.unwrap();
@@ -1024,5 +1028,220 @@ mod tests {
             .unwrap();
         let metrics = backend.metrics(&shard).await.unwrap();
         assert_eq!(metrics.leased, 0);
+    }
+
+    /// fireweed-5497780d: N concurrent fenced commits on one shard must not lose side-record
+    /// updates. Without prepare under the queue permit, every candidate can pass
+    /// `validate_instance_fence` against the same stored fence and `WriteSideRecords` last-writer-wins;
+    /// with the fix, only the fence-ordered winner survives.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_fenced_side_record_commits_preserve_fence_ordered_winner() {
+        const N: usize = 8;
+        let backend = Arc::new(open_backend().await);
+        let def = qdef();
+        let shard = fireweed_engine::QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        backend.create_queue(def).await.unwrap();
+
+        // One claimed item per racer so each commit can finalize its own lease.
+        let mut push_specs = Vec::with_capacity(N);
+        for i in 0..N {
+            push_specs.push(PushSpec {
+                payload: Some(Bytes::from(format!("item-{i}"))),
+                ..PushSpec::default()
+            });
+        }
+        let _ids = backend
+            .push(&shard, push_specs, UtcTimestamp::new(1, 0).unwrap(), None)
+            .await
+            .unwrap();
+        let claimed = backend
+            .claim(ClaimRequest {
+                shard: shard.clone(),
+                worker_id: WorkerId::new("w").unwrap(),
+                max_items: N,
+                lease_token: LeaseToken::new("lease-race").unwrap(),
+                lease_expires_at: UtcTimestamp::new(10_000, 0).unwrap(),
+                now: UtcTimestamp::new(2, 0).unwrap(),
+                eligibility_time: None,
+                compatibility: ClaimCompatibility::default(),
+                expected_epoch: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(claimed.items.len(), N);
+
+        let instance_key = b"wf-race".to_vec();
+        let side_key = b"state/instance".to_vec();
+        let barrier = Arc::new(tokio::sync::Barrier::new(N));
+        let mut handles = Vec::with_capacity(N);
+        for (i, item) in claimed.items.into_iter().enumerate() {
+            let backend = Arc::clone(&backend);
+            let shard = shard.clone();
+            let barrier = Arc::clone(&barrier);
+            let instance_key = instance_key.clone();
+            let side_key = side_key.clone();
+            let payload = Bytes::from(format!("candidate-{i}"));
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                let claim_ref = ClaimRef {
+                    item_id: item.item_id,
+                    lease_token: item.lease_token.clone().expect("lease token"),
+                    lease_expires_at: item.lease_expires_at,
+                    item_version: item.item_version,
+                };
+                let outcomes = backend
+                    .commit_transition(
+                        &shard,
+                        CommitTransition {
+                            request_id: None,
+                            entries: vec![CommitTransitionEntry {
+                                claim_ref,
+                                additional_claim_refs: Vec::new(),
+                                finalize: FinalizeKind::Complete,
+                                side_records: vec![SideRecord {
+                                    key: side_key,
+                                    payload: payload.clone(),
+                                }],
+                                lifecycle_items: Vec::new(),
+                                instance_fence: Some(InstanceFence {
+                                    instance_key,
+                                    expected: 0,
+                                    next: 1,
+                                }),
+                            }],
+                        },
+                        UtcTimestamp::new(10 + i as i64, 0).unwrap(),
+                        None,
+                    )
+                    .await
+                    .expect("commit_transition transport ok");
+                (i, payload, outcomes)
+            }));
+        }
+
+        let mut committed_payloads = Vec::new();
+        let mut rejected = 0usize;
+        for handle in handles {
+            let (i, payload, outcomes) = handle.await.expect("join");
+            assert_eq!(outcomes.len(), 1, "racer {i}");
+            match &outcomes[0] {
+                CommitEntryOutcome::Committed { .. } => committed_payloads.push(payload),
+                CommitEntryOutcome::Rejected(EngineError::Conflict) => rejected += 1,
+                other => panic!("racer {i}: unexpected outcome {other:?}"),
+            }
+        }
+
+        assert_eq!(
+            committed_payloads.len(),
+            1,
+            "exactly one fenced candidate must win the CAS; got {committed_payloads:?}"
+        );
+        assert_eq!(
+            rejected,
+            N - 1,
+            "stale same-expected racers must Conflict, not overwrite"
+        );
+
+        let winner = &committed_payloads[0];
+        let durable = backend
+            .side_record(&shard, &side_key)
+            .await
+            .unwrap()
+            .expect("side record present");
+        assert_eq!(
+            durable.as_ref(),
+            winner.as_ref(),
+            "surviving side record must match the fence-ordered winner (no lost update)"
+        );
+        let fence = backend
+            .with_projection(|p| ProjectionStore::instance_fence(p, &shard, &instance_key))
+            .unwrap();
+        assert_eq!(fence, Some(1), "fence advances exactly once");
+    }
+
+    /// Sequential fence chain: side record tracks fence-ordered history (no concurrent lost update).
+    #[tokio::test]
+    async fn sequential_fenced_side_records_preserve_order() {
+        let backend = open_backend().await;
+        let def = qdef();
+        let shard = fireweed_engine::QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        backend.create_queue(def).await.unwrap();
+        let instance_key = b"wf-seq".to_vec();
+        let side_key = b"state/instance".to_vec();
+        backend
+            .push(
+                &shard,
+                vec![PushSpec::default(), PushSpec::default()],
+                UtcTimestamp::new(1, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        let claimed = backend
+            .claim(ClaimRequest {
+                shard: shard.clone(),
+                worker_id: WorkerId::new("w").unwrap(),
+                max_items: 2,
+                lease_token: LeaseToken::new("lease-seq").unwrap(),
+                lease_expires_at: UtcTimestamp::new(10_000, 0).unwrap(),
+                now: UtcTimestamp::new(2, 0).unwrap(),
+                eligibility_time: None,
+                compatibility: ClaimCompatibility::default(),
+                expected_epoch: None,
+            })
+            .await
+            .unwrap();
+        for (step, item) in claimed.items.into_iter().enumerate() {
+            let expected = step as u64;
+            let next = expected + 1;
+            let claim_ref = ClaimRef {
+                item_id: item.item_id,
+                lease_token: item.lease_token.clone().unwrap(),
+                lease_expires_at: item.lease_expires_at,
+                item_version: item.item_version,
+            };
+            let outcomes = backend
+                .commit_transition(
+                    &shard,
+                    CommitTransition {
+                        request_id: None,
+                        entries: vec![CommitTransitionEntry {
+                            claim_ref,
+                            additional_claim_refs: Vec::new(),
+                            finalize: FinalizeKind::Complete,
+                            side_records: vec![SideRecord {
+                                key: side_key.clone(),
+                                payload: Bytes::from(format!("step-{next}")),
+                            }],
+                            lifecycle_items: Vec::new(),
+                            instance_fence: Some(InstanceFence {
+                                instance_key: instance_key.clone(),
+                                expected,
+                                next,
+                            }),
+                        }],
+                    },
+                    UtcTimestamp::new(10 + step as i64, 0).unwrap(),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert!(
+                matches!(outcomes[0], CommitEntryOutcome::Committed { .. }),
+                "sequential step {next}"
+            );
+        }
+        assert_eq!(
+            backend
+                .side_record(&shard, &side_key)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(b"step-2".as_slice())
+        );
+        let fence = backend
+            .with_projection(|p| ProjectionStore::instance_fence(p, &shard, &instance_key))
+            .unwrap();
+        assert_eq!(fence, Some(2));
     }
 }

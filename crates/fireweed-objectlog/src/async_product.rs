@@ -13,24 +13,23 @@ use fireweed_core::{
     RequestId, TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
-    AsyncClaimError, AsyncComposedBackend, AsyncControlPlane, AsyncFinalizeRequest, AsyncLogStore,
-    AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError, AsyncPushRequest, AsyncRenewRequest,
-    Backend, ClaimPort, ClaimRequest, Claimed, CommandChecksum, CommandEnvelope, ControlPlaneStore,
-    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeOutcome, FinalizePort,
-    FinalizeTarget, IdGen, InProcessControlPlane, OwnedTask, ProjectionClaimPlanner,
-    ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead, ProjectionStore, PurgePort,
-    PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, RawCommitOutcome, RawCommitRequest,
-    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort,
-    RenewTarget, SeparateReplayCommit, SeparateReplayCommitter, TickReport, UpsertOutcome,
-    UpsertPort,
+    AsyncClaimError, AsyncCommitStrategy, AsyncComposedBackend, AsyncControlPlane,
+    AsyncFinalizeRequest, AsyncLogStore, AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError,
+    AsyncPushRequest, AsyncRenewRequest, Backend, ClaimPort, ClaimRequest, Claimed, CommandChecksum,
+    CommandEnvelope, ControlPlaneStore, CreateQueueOutcome, DurabilityClass, EngineError,
+    EngineResult, FinalizeOutcome, FinalizePort, FinalizeTarget, IdGen, InProcessControlPlane,
+    OwnedTask, ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner,
+    ProjectionRead, ProjectionStore, PurgePort, PushPort, PushSpec, QueueCommand, QueueCounters,
+    QueueKey, RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort,
+    ReclaimDriver, ReclaimPort, RenewLeasePort, RenewTarget, SeparateReplayCommit,
+    SeparateReplayCommitter, TickReport, UpsertOutcome, UpsertPort,
 };
 use fireweed_projection::{AsyncInMemoryProjection, InMemoryProjection};
 use object_log::FlushConfig;
 
 use crate::ObjectLogEngineStore;
 use crate::commit_surface::{
-    self, CommitIdempotency, PreparedCommitTransition, new_commit_idempotency,
-    strict_commit_capabilities,
+    self, CommitIdempotency, new_commit_idempotency, strict_commit_capabilities,
 };
 
 /// Sequential id generation for object-log async products.
@@ -701,53 +700,47 @@ impl fireweed_engine::CommitTransitionPort for AsyncObjectLogMemoryBackend {
                 }
                 None => AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?,
             };
-            match commit_surface::prepare_commit_transition(
-                self.projection.as_ref(),
-                self.control.as_ref(),
-                self.ids.as_ref(),
-                self.counters.as_ref(),
-                self.node_id,
-                &self.commit_idempotency,
-                epoch,
-                &shard,
-                transition,
-                now,
-            )
-            .await?
-            {
-                PreparedCommitTransition::Replay(outcomes) => Ok(outcomes),
-                PreparedCommitTransition::Proceed {
-                    envelopes,
-                    recovery,
-                    request_id,
-                    fingerprint,
-                    retention_ms,
-                } => {
-                    if !envelopes.is_empty() {
-                        self.engine
-                            .submit_commit(RawCommitRequest::new(shard.clone(), envelopes, epoch))
-                            .await
-                            .map_err(|error| {
-                                EngineError::Storage(format!(
-                                    "async commit_transition submission failed: {error:?}"
-                                ))
-                            })??;
-                    }
-                    let outcomes = commit_surface::outcomes_of(&recovery);
-                    if let Some(rid) = request_id {
-                        commit_surface::record_commit_idempotency(
-                            &self.commit_idempotency,
+            // fireweed-5497780d: prepare (instance-fence validation) + append/apply under one
+            // queue-local permit so concurrent fenced side-record commits cannot LWW-lose updates.
+            let strategy = self.engine.commit_strategy();
+            let projection = Arc::clone(&self.projection);
+            let control = Arc::clone(&self.control);
+            let ids = Arc::clone(&self.ids);
+            let counters = Arc::clone(&self.counters);
+            let commit_idempotency = Arc::clone(&self.commit_idempotency);
+            let node_id = self.node_id;
+            self.engine
+                .submit_operation(shard.clone(), move || {
+                    Box::pin(async move {
+                        let prepared = commit_surface::prepare_commit_transition(
+                            projection.as_ref(),
+                            control.as_ref(),
+                            ids.as_ref(),
+                            counters.as_ref(),
+                            node_id,
+                            &commit_idempotency,
+                            epoch,
                             &shard,
-                            rid,
-                            fingerprint,
-                            recovery,
+                            transition,
                             now,
-                            retention_ms,
-                        );
-                    }
-                    Ok(outcomes)
-                }
-            }
+                        )
+                        .await?;
+                        commit_surface::finish_prepared_commit_transition(
+                            &shard,
+                            epoch,
+                            prepared,
+                            &commit_idempotency,
+                            now,
+                            |request| {
+                                let strategy = Arc::clone(&strategy);
+                                async move { strategy.commit(request).await }
+                            },
+                        )
+                        .await
+                    })
+                })
+                .await
+                .map_err(commit_surface::map_submit_error)?
         }
     }
 }

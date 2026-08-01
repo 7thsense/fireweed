@@ -19,27 +19,27 @@ use fireweed_core::{
 };
 
 use crate::{
-    AsOfProjectionStore, AsyncClaimError, AsyncComposedBackend, AsyncControlPlane,
-    AsyncLifecycleError, AsyncLogStore, AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError,
-    AsyncPushRequest, AsyncReclaimRequest, Backend, BatchUpdatePort, BatchUpdateRequest,
-    BatchUpdateResponse, BoundedMutationContext, ClaimByItemIdsResponse, ClaimByQueryContext,
-    ClaimCommand, ClaimPort, ClaimRequest, Claimed, CommandChecksum, CommandEnvelope, CommandId,
-    CommandPage, CommandPosition, ControlPlaneStore, CreateQueueOutcome, DurabilityClass,
-    EngineError, EngineResult, FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort,
-    HotProjectionQueryPort, IdGen, IdempotencyDecision, InProcessControlPlane, InProcessLogStore,
-    InProcessProjectionStore, IndexHit, IndexQueryPort, InlineOwnedTaskDispatcher, ItemView,
-    LeaseView, LiveItemView, LogRead, LogStore, OwnedTask, PayloadUpdate, PendingPage,
-    PendingSummary, ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner,
-    ProjectionRead, ProjectionReclaimPlanner, ProjectionSnapshot, ProjectionStore, PurgePort,
-    PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueCounters, QueueIdempotencyCache,
-    QueueKey, QueueMetrics, RawCommitFault, RawCommitOutcome, RawCommitRequest,
-    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeaseCommand,
-    RenewLeasePort, ReplacePendingCommand, SnapshotRef, SnapshotStore, TerminalEmissionMetrics,
-    TickReport, UnifiedAtomicCommit, UnifiedAtomicCommitter, UpdateFieldsCommand, UpdateFieldsPort,
-    UpsertOutcome, UpsertPort, WriteSideRecordsCommand, batch_update_body_hash,
-    claim_by_item_ids_body_hash, claim_by_query_body_hash, compile_entity_schema,
-    generate_query_lease_token, plan_batch_update, validate_api001_reserved_write_fields,
-    validate_entity,
+    AsOfProjectionStore, AsyncClaimError, AsyncCommitStrategy, AsyncComposedBackend,
+    AsyncControlPlane, AsyncLifecycleError, AsyncLogStore, AsyncProjectionStore, AsyncPurgeRequest,
+    AsyncPushError, AsyncPushRequest, AsyncReclaimRequest, Backend, BatchUpdatePort,
+    BatchUpdateRequest, BatchUpdateResponse, BoundedMutationContext, ClaimByItemIdsResponse,
+    ClaimByQueryContext, ClaimCommand, ClaimPort, ClaimRequest, Claimed, CommandChecksum,
+    CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore, CreateQueueOutcome,
+    DurabilityClass, EngineError, EngineResult, FinalizeCommand, FinalizeKind, FinalizeOutcome,
+    FinalizePort, HotProjectionQueryPort, IdGen, IdempotencyDecision, InProcessControlPlane,
+    InProcessLogStore, InProcessProjectionStore, IndexHit, IndexQueryPort,
+    InlineOwnedTaskDispatcher, ItemView, LeaseView, LiveItemView, LogRead, LogStore, OwnedTask,
+    PayloadUpdate, PendingPage, PendingSummary, ProjectionClaimPlanner, ProjectionLifecyclePlanner,
+    ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner, ProjectionSnapshot,
+    ProjectionStore, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand,
+    QueueCounters, QueueIdempotencyCache, QueueKey, QueueMetrics, RawCommitFault, RawCommitOutcome,
+    RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
+    RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SnapshotRef, SnapshotStore,
+    TerminalEmissionMetrics, TickReport, UnifiedAtomicCommit, UnifiedAtomicCommitter,
+    UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, WriteSideRecordsCommand,
+    batch_update_body_hash, claim_by_item_ids_body_hash, claim_by_query_body_hash,
+    compile_entity_schema, generate_query_lease_token, plan_batch_update,
+    validate_api001_reserved_write_fields, validate_entity,
 };
 
 /// Sequential id generation for async log-replay products.
@@ -3027,233 +3027,263 @@ where
                 }
             }
 
+            // fireweed-5497780d: fence validation + append/apply under one queue-local permit so
+            // concurrent fenced side-record commits cannot last-writer-wins overwrite each other.
             let commit_fingerprint = fingerprint.0;
             let epoch = self.resolve_epoch(&shard, expected_epoch).await?;
-            let mut recovery: Vec<EntryRecovery> = Vec::with_capacity(entries.len());
-            let mut committed_envelopes: Vec<CommandEnvelope> = Vec::new();
-            let mut finalized_in_commit: HashSet<ItemId> = HashSet::new();
-            let mut staged_fences: HashMap<Vec<u8>, u64> = HashMap::new();
-            let mut committed_pushes: Vec<PushItem> = Vec::new();
+            let strategy = self.engine.commit_strategy();
+            let projection = Arc::clone(&self.projection);
+            let ids = Arc::clone(&self.ids);
+            let counters = Arc::clone(&self.counters);
+            let commit_idempotency = Arc::clone(&self.commit_idempotency);
+            let node_id = self.node_id;
+            self.engine
+                .submit_operation(shard.clone(), move || {
+                    Box::pin(async move {
+                        let mut recovery: Vec<EntryRecovery> =
+                            Vec::with_capacity(entries.len());
+                        let mut committed_envelopes: Vec<CommandEnvelope> = Vec::new();
+                        let mut finalized_in_commit: HashSet<ItemId> = HashSet::new();
+                        let mut staged_fences: HashMap<Vec<u8>, u64> = HashMap::new();
+                        let mut committed_pushes: Vec<PushItem> = Vec::new();
 
-            for entry in entries {
-                let CommitTransitionEntry {
-                    claim_ref,
-                    additional_claim_refs,
-                    finalize,
-                    side_records,
-                    lifecycle_items,
-                    instance_fence,
-                } = entry;
-                let consumed_input_id = claim_ref.item_id;
-                let additional_consumed_input_ids = additional_claim_refs
-                    .iter()
-                    .map(|c| c.item_id)
-                    .collect::<Vec<_>>();
-                let mut claim_refs = Vec::with_capacity(1 + additional_claim_refs.len());
-                claim_refs.push(claim_ref);
-                claim_refs.extend(additional_claim_refs);
-                let reject = |e: EngineError| EntryRecovery {
-                    consumed_input_id,
-                    additional_consumed_input_ids: additional_consumed_input_ids.clone(),
-                    instance: None,
-                    side_record_keys: Vec::new(),
-                    lifecycle_item_ids: Vec::new(),
-                    status: CommitEntryStatus::Rejected(e),
-                };
+                        for entry in entries {
+                            let CommitTransitionEntry {
+                                claim_ref,
+                                additional_claim_refs,
+                                finalize,
+                                side_records,
+                                lifecycle_items,
+                                instance_fence,
+                            } = entry;
+                            let consumed_input_id = claim_ref.item_id;
+                            let additional_consumed_input_ids = additional_claim_refs
+                                .iter()
+                                .map(|c| c.item_id)
+                                .collect::<Vec<_>>();
+                            let mut claim_refs =
+                                Vec::with_capacity(1 + additional_claim_refs.len());
+                            claim_refs.push(claim_ref);
+                            claim_refs.extend(additional_claim_refs);
+                            let reject = |e: EngineError| EntryRecovery {
+                                consumed_input_id,
+                                additional_consumed_input_ids: additional_consumed_input_ids
+                                    .clone(),
+                                instance: None,
+                                side_record_keys: Vec::new(),
+                                lifecycle_item_ids: Vec::new(),
+                                status: CommitEntryStatus::Rejected(e),
+                            };
 
-                if let Err(error) =
-                    validate_distinct_commit_claims(&claim_refs[0], &claim_refs[1..])
-                {
-                    recovery.push(reject(error));
-                    continue;
-                }
-                if claim_refs
-                    .iter()
-                    .any(|c| finalized_in_commit.contains(&c.item_id))
-                {
-                    recovery.push(reject(EngineError::Terminal));
-                    continue;
-                }
-                if let Err(e) = self
-                    .projection
-                    .run_with_store({
-                        let shard = shard.clone();
-                        let claim_refs = claim_refs.clone();
-                        move |p| ProjectionStore::commit_validate(p, &shard, &claim_refs, now)
+                            if let Err(error) = validate_distinct_commit_claims(
+                                &claim_refs[0],
+                                &claim_refs[1..],
+                            ) {
+                                recovery.push(reject(error));
+                                continue;
+                            }
+                            if claim_refs
+                                .iter()
+                                .any(|c| finalized_in_commit.contains(&c.item_id))
+                            {
+                                recovery.push(reject(EngineError::Terminal));
+                                continue;
+                            }
+                            if let Err(e) = projection
+                                .run_with_store({
+                                    let shard = shard.clone();
+                                    let claim_refs = claim_refs.clone();
+                                    move |p| {
+                                        ProjectionStore::commit_validate(
+                                            p, &shard, &claim_refs, now,
+                                        )
+                                    }
+                                })
+                                .await
+                            {
+                                recovery.push(reject(e));
+                                continue;
+                            }
+                            if let Some(fence) = &instance_fence {
+                                let stored = match staged_fences.get(&fence.instance_key) {
+                                    Some(v) => *v,
+                                    None => projection
+                                        .run_with_store({
+                                            let shard = shard.clone();
+                                            let key = fence.instance_key.clone();
+                                            move |p| {
+                                                ProjectionStore::instance_fence(p, &shard, &key)
+                                            }
+                                        })
+                                        .await?
+                                        .unwrap_or(0),
+                                };
+                                if let Err(e) = validate_instance_fence(stored, fence) {
+                                    recovery.push(reject(e));
+                                    continue;
+                                }
+                            }
+
+                            let side_record_keys: Vec<Vec<u8>> =
+                                side_records.iter().map(|r| r.key.clone()).collect();
+                            let instance = instance_fence
+                                .as_ref()
+                                .map(|f| (f.instance_key.clone(), f.next));
+                            let mut envelopes: Vec<CommandEnvelope> = Vec::new();
+                            let mk_env =
+                                |command: QueueCommand, item_ids: Vec<ItemId>| CommandEnvelope {
+                                    command_id: ids.next_command_id(),
+                                    request_id: request_id.clone(),
+                                    request_fingerprint: Some(commit_fingerprint),
+                                    request_outcome: None,
+                                    item_ids,
+                                    command,
+                                    checksum: CommandChecksum(0),
+                                    created_at: now,
+                                };
+
+                            if !side_records.is_empty() {
+                                envelopes.push(mk_env(
+                                    QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                                        records: side_records,
+                                    }),
+                                    Vec::new(),
+                                ));
+                            }
+                            if let Some(fence) = instance_fence {
+                                envelopes.push(mk_env(
+                                    QueueCommand::AdvanceInstanceFence(
+                                        AdvanceInstanceFenceCommand {
+                                            instance_key: fence.instance_key,
+                                            expected: fence.expected,
+                                            next: fence.next,
+                                        },
+                                    ),
+                                    Vec::new(),
+                                ));
+                            }
+
+                            let mut lifecycle_item_ids = Vec::new();
+                            let mut entry_pushes: Vec<PushItem> = Vec::new();
+                            if !lifecycle_items.is_empty() {
+                                if let Some(e) = lifecycle_items.iter().find_map(|item| {
+                                    validate_entity(schema.as_ref(), item.entity.as_ref()).err()
+                                }) {
+                                    recovery.push(reject(e));
+                                    continue;
+                                }
+                                let counter_base = counters.reserve(
+                                    &shard,
+                                    epoch,
+                                    lifecycle_items.len() as u32,
+                                );
+                                let (push_items, push_ids) = build_push_items(
+                                    lifecycle_items,
+                                    epoch,
+                                    node_id,
+                                    counter_base,
+                                    max_attempts,
+                                );
+                                let mut candidate = committed_pushes.clone();
+                                candidate.extend(push_items.iter().cloned());
+                                if let Err(e) = projection
+                                    .run_with_store({
+                                        let shard = shard.clone();
+                                        let candidate = candidate.clone();
+                                        move |p| {
+                                            ProjectionStore::index_validate_push(
+                                                p, &shard, &candidate,
+                                            )
+                                        }
+                                    })
+                                    .await
+                                {
+                                    recovery.push(reject(e));
+                                    continue;
+                                }
+                                lifecycle_item_ids = push_ids.clone();
+                                entry_pushes = push_items.clone();
+                                envelopes.push(mk_env(
+                                    QueueCommand::Push(PushCommand { items: push_items }),
+                                    push_ids,
+                                ));
+                            }
+
+                            envelopes.push(mk_env(
+                                QueueCommand::Finalize(FinalizeCommand {
+                                    outcomes: claim_refs
+                                        .iter()
+                                        .map(|c| FinalizeOutcome::new(c.item_id, finalize))
+                                        .collect(),
+                                }),
+                                claim_refs.iter().map(|c| c.item_id).collect(),
+                            ));
+
+                            finalized_in_commit.extend(claim_refs.iter().map(|c| c.item_id));
+                            if let Some((key, next)) = &instance {
+                                staged_fences.insert(key.clone(), *next);
+                            }
+                            committed_pushes.extend(entry_pushes);
+                            committed_envelopes.append(&mut envelopes);
+                            recovery.push(EntryRecovery {
+                                consumed_input_id,
+                                additional_consumed_input_ids,
+                                instance,
+                                side_record_keys,
+                                lifecycle_item_ids,
+                                status: CommitEntryStatus::Committed,
+                            });
+                        }
+
+                        let mut batch = committed_envelopes;
+                        if let Some(rid) = &request_id {
+                            let outcome_entries: Vec<CommitOutcomeEntry> =
+                                recovery.iter().map(outcome_entry_from_recovery).collect();
+                            batch.push(CommandEnvelope {
+                                command_id: ids.next_command_id(),
+                                request_id: Some(rid.clone()),
+                                request_fingerprint: Some(commit_fingerprint),
+                                request_outcome: Some(RequestOutcome::CommitTransition {
+                                    entries: outcome_entries,
+                                }),
+                                item_ids: Vec::new(),
+                                command: QueueCommand::WriteSideRecords(
+                                    WriteSideRecordsCommand {
+                                        records: Vec::new(),
+                                    },
+                                ),
+                                checksum: CommandChecksum(0),
+                                created_at: now,
+                            });
+                        }
+                        if !batch.is_empty() {
+                            // Under the held permit — do not re-enter submit_commit.
+                            strategy
+                                .commit(RawCommitRequest::new(shard.clone(), batch, epoch))
+                                .await?;
+                        }
+
+                        let outcomes = outcomes_from_recovery(&recovery);
+                        if let Some(rid) = request_id {
+                            commit_idempotency
+                                .lock()
+                                .expect("commit idempotency poisoned")
+                                .entry(shard)
+                                .or_default()
+                                .record(
+                                    rid,
+                                    fingerprint,
+                                    recovery,
+                                    request_expires_at(now, retention),
+                                );
+                        }
+                        Ok(outcomes)
                     })
-                    .await
-                {
-                    recovery.push(reject(e));
-                    continue;
-                }
-                if let Some(fence) = &instance_fence {
-                    let stored = match staged_fences.get(&fence.instance_key) {
-                        Some(v) => *v,
-                        None => self
-                            .projection
-                            .run_with_store({
-                                let shard = shard.clone();
-                                let key = fence.instance_key.clone();
-                                move |p| ProjectionStore::instance_fence(p, &shard, &key)
-                            })
-                            .await?
-                            .unwrap_or(0),
-                    };
-                    if let Err(e) = validate_instance_fence(stored, fence) {
-                        recovery.push(reject(e));
-                        continue;
-                    }
-                }
-
-                let side_record_keys: Vec<Vec<u8>> =
-                    side_records.iter().map(|r| r.key.clone()).collect();
-                let instance = instance_fence
-                    .as_ref()
-                    .map(|f| (f.instance_key.clone(), f.next));
-                let mut envelopes: Vec<CommandEnvelope> = Vec::new();
-                let mk_env = |command: QueueCommand, item_ids: Vec<ItemId>| CommandEnvelope {
-                    command_id: self.ids.next_command_id(),
-                    request_id: request_id.clone(),
-                    request_fingerprint: Some(commit_fingerprint),
-                    request_outcome: None,
-                    item_ids,
-                    command,
-                    checksum: CommandChecksum(0),
-                    created_at: now,
-                };
-
-                if !side_records.is_empty() {
-                    envelopes.push(mk_env(
-                        QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
-                            records: side_records,
-                        }),
-                        Vec::new(),
-                    ));
-                }
-                if let Some(fence) = instance_fence {
-                    envelopes.push(mk_env(
-                        QueueCommand::AdvanceInstanceFence(AdvanceInstanceFenceCommand {
-                            instance_key: fence.instance_key,
-                            expected: fence.expected,
-                            next: fence.next,
-                        }),
-                        Vec::new(),
-                    ));
-                }
-
-                let mut lifecycle_item_ids = Vec::new();
-                let mut entry_pushes: Vec<PushItem> = Vec::new();
-                if !lifecycle_items.is_empty() {
-                    if let Some(e) = lifecycle_items
-                        .iter()
-                        .find_map(|item| validate_entity(schema.as_ref(), item.entity.as_ref()).err())
-                    {
-                        recovery.push(reject(e));
-                        continue;
-                    }
-                    let counter_base = self.counters.reserve(
-                        &shard,
-                        epoch,
-                        lifecycle_items.len() as u32,
-                    );
-                    let (push_items, ids) = build_push_items(
-                        lifecycle_items,
-                        epoch,
-                        self.node_id,
-                        counter_base,
-                        max_attempts,
-                    );
-                    let mut candidate = committed_pushes.clone();
-                    candidate.extend(push_items.iter().cloned());
-                    if let Err(e) = self
-                        .projection
-                        .run_with_store({
-                            let shard = shard.clone();
-                            let candidate = candidate.clone();
-                            move |p| ProjectionStore::index_validate_push(p, &shard, &candidate)
-                        })
-                        .await
-                    {
-                        recovery.push(reject(e));
-                        continue;
-                    }
-                    lifecycle_item_ids = ids.clone();
-                    entry_pushes = push_items.clone();
-                    envelopes.push(mk_env(
-                        QueueCommand::Push(PushCommand { items: push_items }),
-                        ids,
-                    ));
-                }
-
-                envelopes.push(mk_env(
-                    QueueCommand::Finalize(FinalizeCommand {
-                        outcomes: claim_refs
-                            .iter()
-                            .map(|c| FinalizeOutcome::new(c.item_id, finalize))
-                            .collect(),
-                    }),
-                    claim_refs.iter().map(|c| c.item_id).collect(),
-                ));
-
-                finalized_in_commit.extend(claim_refs.iter().map(|c| c.item_id));
-                if let Some((key, next)) = &instance {
-                    staged_fences.insert(key.clone(), *next);
-                }
-                committed_pushes.extend(entry_pushes);
-                committed_envelopes.append(&mut envelopes);
-                recovery.push(EntryRecovery {
-                    consumed_input_id,
-                    additional_consumed_input_ids,
-                    instance,
-                    side_record_keys,
-                    lifecycle_item_ids,
-                    status: CommitEntryStatus::Committed,
-                });
-            }
-
-            let mut batch = committed_envelopes;
-            if let Some(rid) = &request_id {
-                let outcome_entries: Vec<CommitOutcomeEntry> =
-                    recovery.iter().map(outcome_entry_from_recovery).collect();
-                batch.push(CommandEnvelope {
-                    command_id: self.ids.next_command_id(),
-                    request_id: Some(rid.clone()),
-                    request_fingerprint: Some(commit_fingerprint),
-                    request_outcome: Some(RequestOutcome::CommitTransition {
-                        entries: outcome_entries,
-                    }),
-                    item_ids: Vec::new(),
-                    command: QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
-                        records: Vec::new(),
-                    }),
-                    checksum: CommandChecksum(0),
-                    created_at: now,
-                });
-            }
-            if !batch.is_empty() {
-                self.engine
-                    .submit_commit(RawCommitRequest::new(shard.clone(), batch, epoch))
-                    .await
-                    .map_err(|e| {
-                        EngineError::Storage(format!("async commit_transition failed: {e:?}"))
-                    })??;
-            }
-
-            let outcomes = outcomes_from_recovery(&recovery);
-            if let Some(rid) = request_id {
-                self.commit_idempotency
-                    .lock()
-                    .expect("commit idempotency poisoned")
-                    .entry(shard)
-                    .or_default()
-                    .record(
-                        rid,
-                        fingerprint,
-                        recovery,
-                        request_expires_at(now, retention),
-                    );
-            }
-            Ok(outcomes)
+                })
+                .await
+                .map_err(|e| {
+                    EngineError::Storage(format!("async commit_transition failed: {e:?}"))
+                })?
         }
     }
 }

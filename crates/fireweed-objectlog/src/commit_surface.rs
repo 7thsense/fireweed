@@ -377,6 +377,72 @@ pub fn record_commit_idempotency(
         );
 }
 
+/// Finish a prepared Strict commit: append+apply envelopes via `commit` (must already hold the
+/// queue-local admission permit — use `strategy.commit`, not `engine.submit_commit`), then record
+/// request-id idempotency.
+///
+/// # Why the permit must cover prepare + this finish (fireweed-5497780d)
+///
+/// Instance-fence validation in [`prepare_commit_transition`] reads the projection, then side
+/// records and fence advances are applied only after log append. If two concurrent
+/// `commit_transition` calls both prepare against the same stored fence and only serialize at
+/// `submit_commit`, both pass validation, both append, and `WriteSideRecords` last-writer-wins —
+/// a stale candidate can overwrite a newer fence-ordered side record. Holding the same
+/// queue-local permit across prepare and append+apply closes that TOCTOU window (parity with
+/// claim/push plan+commit and the sync relational single-transaction path).
+pub async fn finish_prepared_commit_transition<Commit, CommitFut>(
+    shard: &QueueKey,
+    epoch: u64,
+    prepared: PreparedCommitTransition,
+    commit_idempotency: &CommitIdempotency,
+    now: UtcTimestamp,
+    commit: Commit,
+) -> EngineResult<Vec<CommitEntryOutcome>>
+where
+    Commit: FnOnce(fireweed_engine::RawCommitRequest) -> CommitFut,
+    CommitFut: std::future::Future<Output = EngineResult<fireweed_engine::RawCommitOutcome>>,
+{
+    match prepared {
+        PreparedCommitTransition::Replay(outcomes) => Ok(outcomes),
+        PreparedCommitTransition::Proceed {
+            envelopes,
+            recovery,
+            request_id,
+            fingerprint,
+            retention_ms,
+        } => {
+            if !envelopes.is_empty() {
+                commit(fireweed_engine::RawCommitRequest::new(
+                    shard.clone(),
+                    envelopes,
+                    epoch,
+                ))
+                .await?;
+            }
+            let outcomes = outcomes_of(&recovery);
+            if let Some(rid) = request_id {
+                record_commit_idempotency(
+                    commit_idempotency,
+                    shard,
+                    rid,
+                    fingerprint,
+                    recovery,
+                    now,
+                    retention_ms,
+                );
+            }
+            Ok(outcomes)
+        }
+    }
+}
+
+/// Map an async composition submit error into a storage engine error.
+pub fn map_submit_error(error: impl std::fmt::Debug) -> EngineError {
+    EngineError::Storage(format!(
+        "async commit_transition submission failed: {error:?}"
+    ))
+}
+
 pub fn outcomes_of(recovery: &[EntryRecovery]) -> Vec<CommitEntryOutcome> {
     outcomes_from_recovery(recovery)
 }

@@ -399,12 +399,28 @@ where
         self.durability
     }
 
+    /// Shared commit strategy handle for multi-step plan+commit under [`Self::submit_operation`].
+    ///
+    /// Callers that must validate optimistically against the projection (instance fences, lease
+    /// checks) and then append+apply without a TOCTOU window should:
+    /// 1. `let strategy = backend.commit_strategy();`
+    /// 2. `backend.submit_operation(queue, || { plan...; strategy.commit(request) })`
+    ///
+    /// Do **not** nest [`Self::submit_commit`] / [`Self::submit_operation`] for the same queue
+    /// inside that body — admission is not re-entrant and will deadlock.
+    pub fn commit_strategy(&self) -> Arc<S> {
+        Arc::clone(&self.strategy)
+    }
+
     /// Serialize and dispatch one complete queue-local operation.
     ///
     /// The factory is invoked only after dispatcher acceptance. Its owned task retains the queue permit
     /// across every phase it contains, such as validation, idempotency, claim planning, commit, and render.
-    /// This remains a narrow composition primitive and does not imply operation-port parity.
-    pub(crate) async fn submit_operation<T, F>(
+    /// This is the public composition primitive used by claim/push/lifecycle and by
+    /// `commit_transition` so instance-fence validation cannot race concurrent applies on the same
+    /// shard (fireweed-5497780d). Nested `submit_operation` / `submit_commit` for the same queue
+    /// deadlocks.
+    pub async fn submit_operation<T, F>(
         &self,
         queue: QueueKey,
         operation: F,
@@ -432,6 +448,10 @@ where
     }
 
     /// Typed raw-commit wrapper over [`Self::submit_operation`].
+    ///
+    /// Strategy `prepare` runs **outside** the queue permit; only `commit_prepared` is serialized.
+    /// Prefer [`Self::submit_operation`] + [`Self::commit_strategy`] when pre-commit validation
+    /// must observe the post-apply projection of prior same-shard commits (instance fences).
     pub async fn submit_commit(
         &self,
         request: RawCommitRequest,

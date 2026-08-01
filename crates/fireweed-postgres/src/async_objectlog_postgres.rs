@@ -11,22 +11,21 @@ use fireweed_core::{
     RequestId, TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
-    AsyncClaimError, AsyncComposedBackend, AsyncControlPlane, AsyncFinalizeRequest, AsyncLogStore,
-    AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError, AsyncPushRequest, AsyncRenewRequest,
-    Backend, ClaimPort, ClaimRequest, Claimed, CommandChecksum, CommandEnvelope, ControlPlaneStore,
-    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeOutcome, FinalizePort,
-    FinalizeTarget, IdGen, InProcessControlPlane, InProcessProjectionStore,
-    InlineOwnedTaskDispatcher, OwnedTask, ProjectionClaimPlanner, ProjectionLifecyclePlanner,
-    ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner, ProjectionStore, PurgePort,
-    PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, RawCommitOutcome, RawCommitRequest,
-    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort,
-    RenewTarget, SeparateReplayCommit, SeparateReplayCommitter, TickReport, UpsertOutcome,
-    UpsertPort,
+    AsyncClaimError, AsyncCommitStrategy, AsyncComposedBackend, AsyncControlPlane,
+    AsyncFinalizeRequest, AsyncLogStore, AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError,
+    AsyncPushRequest, AsyncRenewRequest, Backend, ClaimPort, ClaimRequest, Claimed, CommandChecksum,
+    CommandEnvelope, ControlPlaneStore, CreateQueueOutcome, DurabilityClass, EngineError,
+    EngineResult, FinalizeOutcome, FinalizePort, FinalizeTarget, IdGen, InProcessControlPlane,
+    InProcessProjectionStore, InlineOwnedTaskDispatcher, OwnedTask, ProjectionClaimPlanner,
+    ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner,
+    ProjectionStore, PurgePort, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey,
+    RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
+    ReclaimPort, RenewLeasePort, RenewTarget, SeparateReplayCommit, SeparateReplayCommitter,
+    TickReport, UpsertOutcome, UpsertPort,
 };
 use fireweed_objectlog::{
-    CommitIdempotency, FlushConfig, ObjectLogEngineStore, PreparedCommitTransition, SeqIdGen,
-    new_commit_idempotency, outcomes_of, prepare_commit_transition, record_commit_idempotency,
-    strict_commit_capabilities,
+    CommitIdempotency, FlushConfig, ObjectLogEngineStore, SeqIdGen, finish_prepared_commit_transition,
+    map_submit_error, new_commit_idempotency, prepare_commit_transition, strict_commit_capabilities,
 };
 use fireweed_objectlog::{explain_commit_if_authoritative, side_record as objectlog_side_record};
 
@@ -760,53 +759,46 @@ impl fireweed_engine::CommitTransitionPort for AsyncObjectLogPostgresBackend {
                 }
                 None => AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?,
             };
-            match prepare_commit_transition(
-                self.projection.as_ref(),
-                self.control.as_ref(),
-                self.ids.as_ref(),
-                self.counters.as_ref(),
-                self.node_id,
-                &self.commit_idempotency,
-                epoch,
-                &shard,
-                transition,
-                now,
-            )
-            .await?
-            {
-                PreparedCommitTransition::Replay(outcomes) => Ok(outcomes),
-                PreparedCommitTransition::Proceed {
-                    envelopes,
-                    recovery,
-                    request_id,
-                    fingerprint,
-                    retention_ms,
-                } => {
-                    if !envelopes.is_empty() {
-                        self.engine
-                            .submit_commit(RawCommitRequest::new(shard.clone(), envelopes, epoch))
-                            .await
-                            .map_err(|error| {
-                                EngineError::Storage(format!(
-                                    "async commit_transition submission failed: {error:?}"
-                                ))
-                            })??;
-                    }
-                    let outcomes = outcomes_of(&recovery);
-                    if let Some(rid) = request_id {
-                        record_commit_idempotency(
-                            &self.commit_idempotency,
+            // fireweed-5497780d: prepare + append/apply under one queue-local permit.
+            let strategy = self.engine.commit_strategy();
+            let projection = Arc::clone(&self.projection);
+            let control = Arc::clone(&self.control);
+            let ids = Arc::clone(&self.ids);
+            let counters = Arc::clone(&self.counters);
+            let commit_idempotency = Arc::clone(&self.commit_idempotency);
+            let node_id = self.node_id;
+            self.engine
+                .submit_operation(shard.clone(), move || {
+                    Box::pin(async move {
+                        let prepared = prepare_commit_transition(
+                            projection.as_ref(),
+                            control.as_ref(),
+                            ids.as_ref(),
+                            counters.as_ref(),
+                            node_id,
+                            &commit_idempotency,
+                            epoch,
                             &shard,
-                            rid,
-                            fingerprint,
-                            recovery,
+                            transition,
                             now,
-                            retention_ms,
-                        );
-                    }
-                    Ok(outcomes)
-                }
-            }
+                        )
+                        .await?;
+                        finish_prepared_commit_transition(
+                            &shard,
+                            epoch,
+                            prepared,
+                            &commit_idempotency,
+                            now,
+                            |request| {
+                                let strategy = Arc::clone(&strategy);
+                                async move { strategy.commit(request).await }
+                            },
+                        )
+                        .await
+                    })
+                })
+                .await
+                .map_err(map_submit_error)?
         }
     }
 }
