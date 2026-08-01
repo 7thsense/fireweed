@@ -4672,6 +4672,9 @@ fn open_memory_log_cell(
     namespace: &str,
 ) -> EngineResult<Fireweed> {
     match projection {
+        // Class B reference cell: pure AsyncLogReplay over RAM axes.
+        // Intentionally NOT wrapped in process-wide BlockingLibBackend — ports are
+        // non-blocking-under-poll (fireweed-ca57127b / API-005 native-async path).
         ProjectionStoreConfig::Memory => {
             #[cfg(feature = "memory")]
             {
@@ -5506,12 +5509,118 @@ mod tests {
         SortDirection, TenantId, TypedValue, UtcTimestamp, WorkerId,
     };
 
-    use super::{ClaimByQueryAt, NewItem, RuntimeCore, SystemClock, apply_owned_renewal_outcomes};
+    use super::{
+        ClaimByQueryAt, ClaimRef, CommitEntry, CommitRequest, EntryOutcome, FinalizeKind, NewItem,
+        RuntimeCore, StorageConfig, SystemClock, apply_owned_renewal_outcomes, open, open_async,
+    };
     use crate::EngineResult;
     use fireweed_engine::{
         Clock, EngineError, InMemoryControlPlane, LeaseRenewalOutcome, LeaseState, OwnedSession,
         QueueControlPlane, QueueKey, QueueLease,
     };
+
+    /// Public memory×memory open drives AsyncLogReplay without process-wide
+    /// BlockingLibBackend. Proves claim+commit on a current-thread Tokio runtime
+    /// (fireweed-ca57127b): no block_in_place / nested-runtime panic, and the
+    /// facade path is the product surface Snorri depends on.
+    #[cfg(feature = "memory")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_open_memory_claim_and_commit_on_current_thread() -> EngineResult<()> {
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        let fireweed = open(StorageConfig::memory(), Arc::clone(&clock))?;
+        let definition = query_definition();
+        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+
+        fireweed.create_queue(definition).await?;
+        let item_id = fireweed
+            .push(
+                &queue,
+                NewItem {
+                    priority: Some(PriorityValue::Int64(1)),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        let claimed = fireweed.claim(&queue, 1, 30_000).await?;
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].item_id, item_id);
+
+        let outcomes = fireweed
+            .commit(
+                &queue,
+                CommitRequest {
+                    request_id: None,
+                    entries: vec![CommitEntry {
+                        claim_ref: ClaimRef {
+                            item_id: claimed[0].item_id,
+                            lease_token: claimed[0]
+                                .lease_token
+                                .clone()
+                                .expect("lease token on claimed item"),
+                            lease_expires_at: claimed[0].lease_expires_at,
+                            item_version: claimed[0].item_version,
+                        },
+                        finalize: FinalizeKind::Complete,
+                        side_records: vec![],
+                        lifecycle_items: vec![],
+                        instance_fence: None,
+                    }],
+                },
+            )
+            .await?;
+        assert_eq!(outcomes.len(), 1);
+        assert!(
+            matches!(outcomes[0], EntryOutcome::Committed { .. }),
+            "expected Committed, got {:?}",
+            outcomes[0]
+        );
+        assert_eq!(fireweed.metrics(&queue).await?.complete, 1);
+        assert_eq!(fireweed.metrics(&queue).await?.leased, 0);
+        Ok(())
+    }
+
+    /// Same product cell via [`open_async`]: memory×memory does not need
+    /// spawn_blocking offload and must remain current-thread safe.
+    #[cfg(feature = "memory")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_open_async_memory_claim_and_commit_on_current_thread() -> EngineResult<()> {
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        let fireweed = open_async(StorageConfig::memory(), clock).await?;
+        let definition = query_definition();
+        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+
+        fireweed.create_queue(definition).await?;
+        fireweed.push(&queue, NewItem::default()).await?;
+        let claimed = fireweed.claim(&queue, 1, 30_000).await?;
+        assert_eq!(claimed.len(), 1);
+
+        let outcomes = fireweed
+            .commit(
+                &queue,
+                CommitRequest {
+                    request_id: None,
+                    entries: vec![CommitEntry {
+                        claim_ref: ClaimRef {
+                            item_id: claimed[0].item_id,
+                            lease_token: claimed[0]
+                                .lease_token
+                                .clone()
+                                .expect("lease token on claimed item"),
+                            lease_expires_at: claimed[0].lease_expires_at,
+                            item_version: claimed[0].item_version,
+                        },
+                        finalize: FinalizeKind::Complete,
+                        side_records: vec![],
+                        lifecycle_items: vec![],
+                        instance_fence: None,
+                    }],
+                },
+            )
+            .await?;
+        assert!(matches!(outcomes.as_slice(), [EntryOutcome::Committed { .. }]));
+        Ok(())
+    }
 
     #[cfg(feature = "memory")]
     #[tokio::test(flavor = "current_thread")]
