@@ -355,3 +355,119 @@ async fn batch_request_id_replay_and_conflict_survive_sqlite_async_reopen() {
     drop(reopened);
     let _ = std::fs::remove_file(&path);
 }
+
+/// fireweed-6486ed63: empty request_id batch must retain fingerprint so a later non-empty body
+/// under the same id returns RequestIdConflict (snorri workflow_enqueue empty→nonempty).
+/// Repeated create_queue mirrors snorri's enqueue path.
+#[cfg(feature = "memory")]
+#[tokio::test]
+async fn empty_request_id_then_nonempty_conflicts_on_memory() {
+    use fireweed::open_memory;
+    let fw = open_memory(Arc::new(ManualClock::at(0)));
+    let q = qkey();
+    let def = qdef(60_000);
+    fw.create_queue(def.clone()).await.unwrap();
+    let rid = RequestId::new("empty-then-full").unwrap();
+    fw.create_queue(def.clone()).await.unwrap();
+    let empty = fw
+        .push_batch_with_request_id(&q, rid.clone(), vec![])
+        .await
+        .unwrap();
+    assert!(empty.is_fresh(), "empty first is Fresh");
+    assert!(empty.item_ids.is_empty());
+    fw.create_queue(def.clone()).await.unwrap();
+    let empty_replay = fw
+        .push_batch_with_request_id(&q, rid.clone(), vec![])
+        .await
+        .unwrap();
+    assert!(
+        empty_replay.is_replayed(),
+        "empty same-body must Replayed; got {:?}",
+        empty_replay.disposition
+    );
+    fw.create_queue(def).await.unwrap();
+    let err = fw
+        .push_batch_with_request_id(&q, rid, vec![item(1)])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        EngineError::RequestIdConflict,
+        "empty then nonempty must RequestIdConflict; got {err:?}"
+    );
+}
+
+/// fireweed-6486ed63: changed-body-across-reopen only (batch), after empty request_id is also retained.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn changed_body_request_id_conflicts_across_sqlite_async_reopen() {
+    use fireweed::open_sqlite;
+    let path = std::env::temp_dir().join(format!(
+        "fw-request-id-changed-body-reopen-{}-{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let path_str = path.to_str().unwrap();
+    let rid = RequestId::new("changed-body-reopen").unwrap();
+    let empty_rid = RequestId::new("changed-body-empty").unwrap();
+    let q = qkey();
+    let original = vec![item(10), item(20)];
+    let first_ids = {
+        let fw = open_sqlite(path_str, Arc::new(ManualClock::at(0))).unwrap();
+        fw.create_queue(qdef(60_000)).await.unwrap();
+        let outcome = fw
+            .push_batch_with_request_id(&q, rid.clone(), original.clone())
+            .await
+            .unwrap();
+        assert!(outcome.is_fresh());
+        // Empty request_id is a durable no-op that still occupies the ledger.
+        let empty = fw
+            .push_batch_with_request_id(&q, empty_rid.clone(), vec![])
+            .await
+            .unwrap();
+        assert!(empty.is_fresh());
+        outcome.item_ids.clone()
+    };
+
+    let reopened = open_sqlite(path_str, Arc::new(ManualClock::at(0))).unwrap();
+    reopened.create_queue(qdef(60_000)).await.unwrap();
+    let replay = reopened
+        .push_batch_with_request_id(&q, rid.clone(), original)
+        .await
+        .unwrap();
+    assert!(
+        replay.is_replayed(),
+        "same body after reopen must Replayed"
+    );
+    assert_eq!(replay.item_ids, first_ids);
+    assert_eq!(
+        reopened
+            .push_batch_with_request_id(&q, rid, vec![item(11), item(22)])
+            .await
+            .unwrap_err(),
+        EngineError::RequestIdConflict,
+        "changed body after reopen must RequestIdConflict"
+    );
+    assert!(
+        reopened
+            .push_batch_with_request_id(&q, empty_rid.clone(), vec![])
+            .await
+            .unwrap()
+            .is_replayed(),
+        "empty same body after reopen must Replayed"
+    );
+    assert_eq!(
+        reopened
+            .push_batch_with_request_id(&q, empty_rid, vec![item(1)])
+            .await
+            .unwrap_err(),
+        EngineError::RequestIdConflict,
+        "empty then nonempty after reopen must RequestIdConflict"
+    );
+    drop(reopened);
+    let _ = std::fs::remove_file(&path);
+}

@@ -1226,10 +1226,15 @@ where
                     let Some(request_id) = env.request_id.clone() else {
                         continue;
                     };
-                    let QueueCommand::Push(_) = &env.command else {
+                    let QueueCommand::Push(push) = &env.command else {
                         continue;
                     };
-                    let fingerprint = BodyHash(env.request_fingerprint.unwrap_or(0));
+                    // Prefer durable envelope fingerprint; recompute from Push items when legacy
+                    // logs omit it so recovery conflict/replay still compare body hashes.
+                    let fingerprint = match env.request_fingerprint {
+                        Some(fp) => BodyHash(fp),
+                        None => crate::compose::push_item_body_hash(&push.items)?,
+                    };
                     let expires_at =
                         request_expires_at(env.created_at, IN_PROCESS_PUSH_IDEM_RETENTION_MS);
                     let ids = match &env.request_outcome {

@@ -514,8 +514,11 @@ async fn request_id_push_replays_over_sqlite_relational_facade() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// fireweed-01802c42: facade-level request-id retention across reopen on the public
-/// `open_sqlite` async log-replay product (Fresh / Replayed / RequestIdConflict).
+/// fireweed-6486ed63 / fireweed-01802c42: facade-level request-id retention across reopen on
+/// the public `open_sqlite` async log-replay product (Fresh / Replayed / RequestIdConflict).
+///
+/// Specifically asserts **changed-body-across-reopen** returns `RequestIdConflict` and same body
+/// returns `Replayed` after a cold open (recovery rebuilds the push ledger fingerprints).
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn request_id_push_retention_survives_open_sqlite_reopen() {

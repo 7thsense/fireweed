@@ -42,6 +42,21 @@ use crate::{
     validate_api001_reserved_write_fields, validate_entity,
 };
 
+/// Resolve the push request-id body fingerprint for ledger record/rebuild.
+///
+/// Prefer the durable envelope field (written at plan time from the caller's [`PushSpec`]s). When
+/// legacy envelopes omit it, recompute from the committed [`PushItem`]s so same-body Replayed and
+/// changed-body RequestIdConflict survive recovery-on-open (fireweed-6486ed63).
+fn push_envelope_body_hash(env: &CommandEnvelope) -> EngineResult<BodyHash> {
+    if let Some(fp) = env.request_fingerprint {
+        return Ok(BodyHash(fp));
+    }
+    match &env.command {
+        QueueCommand::Push(PushCommand { items }) => crate::compose::push_item_body_hash(items),
+        _ => Ok(BodyHash(0)),
+    }
+}
+
 /// Sequential id generation for async log-replay products.
 #[derive(Default)]
 pub struct SeqIdGen {
@@ -139,7 +154,7 @@ where
                 let QueueCommand::Push(_) = &env.command else {
                     continue;
                 };
-                let fingerprint = BodyHash(env.request_fingerprint.unwrap_or(0));
+                let fingerprint = push_envelope_body_hash(env)?;
                 let expires_at = crate::request_expires_at(env.created_at, retention_ms);
                 let ids = match &env.request_outcome {
                     Some(crate::RequestOutcome::Push { item_ids }) => item_ids.clone(),
@@ -735,7 +750,7 @@ where
                             continue;
                         };
                         if let QueueCommand::Push(_) = &env.command {
-                            let fingerprint = BodyHash(env.request_fingerprint.unwrap_or(0));
+                            let fingerprint = push_envelope_body_hash(env)?;
                             let expires_at =
                                 request_expires_at(env.created_at, retention_ms);
                             let ids = match &env.request_outcome {
@@ -1109,8 +1124,7 @@ where
                                 continue;
                             };
                             if let QueueCommand::Push(_) = &env.command {
-                                let fingerprint =
-                                    BodyHash(env.request_fingerprint.unwrap_or(0));
+                                let fingerprint = push_envelope_body_hash(env)?;
                                 let expires_at =
                                     request_expires_at(env.created_at, retention_ms);
                                 let ids = match &env.request_outcome {

@@ -1876,7 +1876,7 @@ pub fn push_specs_fingerprint_sha256(items: &[PushSpec]) -> EngineResult<[u8; 32
 /// original [`PushSpec`]s: assigned `item_id` and `max_attempts` are excluded, and a defaulted
 /// `client_item_key == item_id` is normalized back to `None` so same-body retries with omitted keys replay
 /// after restart.
-fn push_item_body_hash(items: &[PushItem]) -> EngineResult<BodyHash> {
+pub(crate) fn push_item_body_hash(items: &[PushItem]) -> EngineResult<BodyHash> {
     #[derive(serde::Serialize)]
     struct CanonicalPushItem<'a> {
         client_item_key: Option<&'a ClientItemKey>,
