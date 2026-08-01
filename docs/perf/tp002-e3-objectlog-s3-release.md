@@ -1,8 +1,6 @@
 # TP-002 E3 — live object-log projection matrix over S3-compatible storage
 
-**Status:** PREPARED (LogEngine product surface); the exact 10M recovery proof harness
-compiles and the offline AC validators pass, but a new release-profile live MinIO/S3 run is still
-required to stamp a PASS artifact.
+**Status:** PARTIAL (exact 10M recovery contracts recorded; full cost/ack E3 ledger still open).
 
 ### LogEngine port (fireweed-3aaa3ebc)
 
@@ -15,10 +13,22 @@ Product open records `RecoveryStats` (`start_seq`, `tail_replayed`, `snapshot_us
 counters). SQLite recovery resumes from `recovery_high_water`; in-memory always genesis-replays.
 The SQLite crash tail uses `RawCommitFault::AfterAppendBeforeApply` (append durable, apply suppressed).
 
-**Residual before PASS:** run the governed 10M release shape under `FIREWEED_PERF_ENV=1` via
-`scripts/perf/tp002-e3-minio.sh` / `tp002-e3-s3.sh`. Store PUT/GET/LIST cost linkage is best-effort under
-object-log 0.2 `MediaOpStats` (not a full per-op recorder). Segment seal-trigger counters are approximated
-from push-command accounting for evidence continuity until LogEngine exposes seal-class telemetry.
+### Exact 10M recovery evidence (live MinIO, 2026-08-01)
+
+Host: `fireweed-e3-minio-16g` (16 GiB tmpfs `/data`), release binary, `FIREWEED_E3_RESIDENT=10000000`.
+
+| Contract | Result | Notes |
+|----------|--------|-------|
+| Snapshot-tail (`TestE3RecoveryExactSnapshotTailReplay`) | **PASS** | `snapshot_used=true`, `start_seq=10000`, `tail_replayed=1`, `total=10001`, recovery ~9.2 s, wall ~3213 s (`/tmp/fireweed-e3-10m-snapshot.log`) |
+| Genesis (`TestE3RecoveryExactGenesisReplay`) | **PASS** (re-run after log-pagination fix) | `snapshot_used=false`, full 10M commands, recovery ~117 s, wall ~10473 s |
+| Offline reject inexact range / checksum drift | **PASS** | No S3 required |
+
+**Pagination fix:** `ObjectLogEngineStore::read_from` always returns a next cursor on non-empty pages so
+a 4 MiB fetch that returns fewer than `limit` entries cannot truncate multi-million genesis replay.
+
+**Residual before full E3 ledger PASS:** governed `scripts/perf/tp002-e3-s3.sh` cost/ack matrix and
+semantic verifier packaging (sibling beads under `pqueue-820565a9` / `pqueue-c4e5f691`). Store PUT/GET/LIST
+cost linkage remains best-effort under object-log 0.2 `MediaOpStats`.
 
 The 2026-07-16 run is retained only as
 `docs/perf/evidence/tp002-e3-objectlog-minio-historical-invalid.jsonl`. It is invalid under the current

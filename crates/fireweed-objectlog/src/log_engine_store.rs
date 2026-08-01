@@ -395,13 +395,13 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
                     break;
                 }
             }
-            let next = if entries.len() >= limit {
-                entries
-                    .last()
-                    .map(|(p, _)| CommandPosition::new(shard.clone(), p.backend_epoch, p.sequence))
-            } else {
-                None
-            };
+            // Always return a cursor when this page is non-empty. A 4 MiB engine fetch may
+            // return fewer than `limit` entries while more history remains; stopping early would
+            // truncate genesis recovery (observed as a short tail under multi-million loads —
+            // fireweed-3aaa3ebc / TestE3RecoveryExactGenesisReplay).
+            let next = entries
+                .last()
+                .map(|(p, _)| CommandPosition::new(shard.clone(), p.backend_epoch, p.sequence));
             Ok(CommandPage { entries, next })
         }
     }
