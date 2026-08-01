@@ -527,6 +527,53 @@ impl ProjectionStore for InMemoryProjection {
         Ok(self.get(shard)?.eligible_candidates(now, max))
     }
 
+    /// Item-level claim selection with optional `group_key` / `metadata_equals` fences (API-001).
+    ///
+    /// Matches the v0.23.3 relational filter: eligible pending non-cohort items, ordered by the
+    /// projection's eligibility index, restricted to an exact group when requested and to a conjunctive
+    /// metadata equality fence. Without either predicate this is exactly [`eligible_candidates`].
+    fn select_item_claim(
+        &self,
+        shard: &QueueKey,
+        compatibility: &ClaimCompatibility,
+        now: UtcTimestamp,
+        max: usize,
+    ) -> EngineResult<Vec<ItemId>> {
+        if max == 0 {
+            return Ok(Vec::new());
+        }
+        if compatibility.group_key.is_none() && compatibility.metadata_equals.is_empty() {
+            return self.eligible_candidates(shard, now, max);
+        }
+        let projection = self.get(shard)?;
+        let mut selected = Vec::new();
+        for item_id in projection.eligible_candidates(now, usize::MAX) {
+            let item = projection
+                .items
+                .get(&item_id)
+                .expect("eligibility index references a live item");
+            // Item-unit claims never lease cohort members; whole_cohort is a separate claim unit.
+            if item.cohort_size.is_some() {
+                continue;
+            }
+            if compatibility
+                .group_key
+                .as_ref()
+                .is_some_and(|required| item.group_key.as_ref() != Some(required))
+            {
+                continue;
+            }
+            if !Self::metadata_matches(projection, &item_id, &compatibility.metadata_equals) {
+                continue;
+            }
+            selected.push(item_id);
+            if selected.len() == max {
+                break;
+            }
+        }
+        Ok(selected)
+    }
+
     fn eligible_candidates_after(
         &self,
         shard: &QueueKey,
@@ -1027,5 +1074,143 @@ mod async_axis_tests {
             AsyncProjectionStore::supports_gates(&projection),
             ProjectionStore::supports_gates(&InMemoryProjection::new())
         );
+    }
+
+    #[test]
+    fn select_item_claim_honors_group_key_and_metadata_equals() {
+        use fireweed_core::{
+            ClientItemKey, EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel,
+            PriorityModelKind, PriorityTieBreaker, PriorityValue, RecurrencePolicy, RetryPolicy,
+        };
+        use fireweed_engine::{CommandChecksum, CommandId, PushCommand, QueueCommand};
+
+        let mut projection = InMemoryProjection::new();
+        let definition = QueueDefinition {
+            tenant_id: TenantId::new("tenant").unwrap(),
+            queue_id: QueueId::new("queue").unwrap(),
+            priority_model: PriorityModel {
+                kind: PriorityModelKind::Int64,
+                direction: PriorityDirection::Ascending,
+                tie_breaker: PriorityTieBreaker::CreatedSequence,
+            },
+            ordering_mode: OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 60_000,
+            eligibility_policy: EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 100,
+            max_claim_batch_size: 100,
+            max_eligible_group_size: None,
+            secondary_indexes: vec![],
+            entity_schema: None,
+            typed_indexes: vec![],
+            emit_change_records: true,
+        };
+        ProjectionStore::ensure_shard(&mut projection, &definition).unwrap();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        let east_match = ItemId::mint(1, 0, 0);
+        let east_wrong_group = ItemId::mint(1, 0, 1);
+        let west = ItemId::mint(1, 0, 2);
+        let group_a = GroupKey::new("group-a").unwrap();
+        let group_b = GroupKey::new("group-b").unwrap();
+        let mut east = fireweed_core::Metadata::new();
+        east.insert("region", MetadataValue::String("east".into()));
+        let mut west_md = fireweed_core::Metadata::new();
+        west_md.insert("region", MetadataValue::String("west".into()));
+        let items = vec![
+            PushItem {
+                client_item_key: ClientItemKey::new("east-a").unwrap(),
+                item_id: east_match,
+                priority: Some(PriorityValue::Int64(1)),
+                not_before: None,
+                group_key: Some(group_a.clone()),
+                max_attempts: 3,
+                payload: None,
+                fields: Default::default(),
+                metadata: east.clone(),
+                cohort_size: None,
+                gate_keys: Vec::new(),
+                entity_document: None,
+            },
+            PushItem {
+                client_item_key: ClientItemKey::new("east-b").unwrap(),
+                item_id: east_wrong_group,
+                priority: Some(PriorityValue::Int64(2)),
+                not_before: None,
+                group_key: Some(group_b),
+                max_attempts: 3,
+                payload: None,
+                fields: Default::default(),
+                metadata: east,
+                cohort_size: None,
+                gate_keys: Vec::new(),
+                entity_document: None,
+            },
+            PushItem {
+                client_item_key: ClientItemKey::new("west-a").unwrap(),
+                item_id: west,
+                priority: Some(PriorityValue::Int64(0)),
+                not_before: None,
+                group_key: Some(group_a.clone()),
+                max_attempts: 3,
+                payload: None,
+                fields: Default::default(),
+                metadata: west_md,
+                cohort_size: None,
+                gate_keys: Vec::new(),
+                entity_document: None,
+            },
+        ];
+        let envelope = CommandEnvelope {
+            command_id: CommandId::new("push"),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: vec![east_match, east_wrong_group, west],
+            command: QueueCommand::Push(PushCommand { items }),
+            checksum: CommandChecksum(0),
+            created_at: UtcTimestamp::new(10, 0).unwrap(),
+        };
+        ProjectionStore::apply(
+            &mut projection,
+            &[CommandPosition::new(shard.clone(), 1, 0)],
+            &[envelope],
+        )
+        .unwrap();
+
+        let compatibility = ClaimCompatibility {
+            group_key: Some(group_a),
+            metadata_equals: BTreeMap::from([(
+                "region".to_string(),
+                MetadataValue::String("east".into()),
+            )]),
+            ..ClaimCompatibility::default()
+        };
+        let selected = ProjectionStore::select_item_claim(
+            &projection,
+            &shard,
+            &compatibility,
+            UtcTimestamp::new(10, 0).unwrap(),
+            10,
+        )
+        .unwrap();
+        assert_eq!(selected, vec![east_match]);
+
+        let via_async = AsyncInMemoryProjection::new(projection);
+        let async_selected = one_poll(AsyncProjectionStore::select_item_claim(
+            &via_async,
+            shard,
+            compatibility,
+            UtcTimestamp::new(10, 0).unwrap(),
+            10,
+        ))
+        .unwrap();
+        assert_eq!(async_selected, vec![east_match]);
     }
 }

@@ -3444,8 +3444,9 @@ impl<B: LibBackend> RuntimeCore<B> {
 
     /// Claim with API-001 compatibility options (group_batching / whole_cohort / same_group_key /
     /// group_key / metadata_equals). `ClaimCompatibility::default()` is the item-level claim (see
-    /// [`claim`](Self::claim)). Every supported composition implements each declared claim unit without
-    /// silently downgrading to item-level delivery.
+    /// [`claim`](Self::claim)). Item-unit `group_key` / `metadata_equals` fences are honored on memory
+    /// and sqlite projections (v0.23.3 semantics). Every supported composition implements each declared
+    /// claim unit without silently downgrading to item-level delivery.
     pub async fn claim_with(
         &self,
         queue: &QueueKey,

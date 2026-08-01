@@ -7,9 +7,9 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use bytes::Bytes;
 use fireweed::{
-    ClaimAt, ClaimRef, CommitEntry, CommitRequest, ControlPlaneConfig, DiscoveryGranularity,
-    EngineError, FinalizeKind, GateKeyPolicy, GroupKey, MetadataValue, Nack, NewItem, OwnerId,
-    PayloadUpdate, RequestId, RuntimeCore, UtcTimestamp,
+    ClaimAt, ClaimCompatibility, ClaimRef, CommitEntry, CommitRequest, ControlPlaneConfig,
+    DiscoveryGranularity, EngineError, FinalizeKind, GateKeyPolicy, GroupKey, Metadata,
+    MetadataValue, Nack, NewItem, OwnerId, PayloadUpdate, RequestId, RuntimeCore, UtcTimestamp,
 };
 use fireweed_core::{
     ClientItemKey, EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel,
@@ -91,6 +91,129 @@ impl fireweed::Clock for GuardedClock {
         );
         ts(self.seconds.load(Ordering::SeqCst))
     }
+}
+
+fn metadata_fence_item(priority: i64, group: &str, region: &str) -> NewItem {
+    let mut metadata = Metadata::new();
+    metadata.insert("region", MetadataValue::String(region.to_string()));
+    NewItem {
+        priority: Some(PriorityValue::Int64(priority)),
+        group_key: Some(GroupKey::new(group).unwrap()),
+        metadata,
+        ..Default::default()
+    }
+}
+
+fn metadata_equals_compatibility(group: &str, region: &str) -> ClaimCompatibility {
+    ClaimCompatibility {
+        group_key: Some(GroupKey::new(group).unwrap()),
+        metadata_equals: BTreeMap::from([(
+            "region".to_string(),
+            MetadataValue::String(region.to_string()),
+        )]),
+        ..ClaimCompatibility::default()
+    }
+}
+
+/// Compatibility-constrained item claims must not fail closed as Unavailable on memory projections
+/// (AsyncLogReplayBackend / InMemoryProjection path).
+#[tokio::test]
+async fn claim_with_metadata_equals_filters_over_memory() {
+    let fireweed = fireweed::open_memory(Arc::new(ManualClock::at(0)));
+    let q = qkey();
+    fireweed.create_queue(qdef()).await.unwrap();
+
+    let match_id = fireweed
+        .push(&q, metadata_fence_item(10, "group-a", "east"))
+        .await
+        .unwrap();
+    fireweed
+        .push(&q, metadata_fence_item(5, "group-a", "west"))
+        .await
+        .unwrap();
+    fireweed
+        .push(&q, metadata_fence_item(1, "group-b", "east"))
+        .await
+        .unwrap();
+
+    let claimed = fireweed
+        .claim_with(&q, 10, 30_000, metadata_equals_compatibility("group-a", "east"))
+        .await
+        .expect("metadata_equals claim must not be Unavailable on memory");
+    assert_eq!(
+        claimed.iter().map(|item| item.item_id).collect::<Vec<_>>(),
+        vec![match_id]
+    );
+    assert_eq!(
+        claimed[0].group_key.as_ref().map(|g| g.as_str()),
+        Some("group-a")
+    );
+}
+
+/// Same fence over sqlite (log × memory projection via open_sqlite, and relational projection).
+#[tokio::test]
+async fn claim_with_metadata_equals_filters_over_sqlite() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let log_path = std::env::temp_dir().join(format!(
+        "fireweed-facade-compat-claim-log-{}-{nonce}.db",
+        std::process::id()
+    ));
+    let rel_path = std::env::temp_dir().join(format!(
+        "fireweed-facade-compat-claim-rel-{}-{nonce}.db",
+        std::process::id()
+    ));
+
+    async fn exercise(label: &str, fireweed: fireweed::Fireweed) {
+        let q = qkey();
+        fireweed.create_queue(qdef()).await.unwrap();
+        let match_id = fireweed
+            .push(&q, metadata_fence_item(10, "group-a", "east"))
+            .await
+            .unwrap();
+        fireweed
+            .push(&q, metadata_fence_item(5, "group-a", "west"))
+            .await
+            .unwrap();
+        fireweed
+            .push(&q, metadata_fence_item(1, "group-b", "east"))
+            .await
+            .unwrap();
+
+        let claimed = fireweed
+            .claim_with(
+                &q,
+                10,
+                30_000,
+                metadata_equals_compatibility("group-a", "east"),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!("{label}: metadata_equals claim must not fail: {error:?}")
+            });
+        assert_eq!(
+            claimed.iter().map(|item| item.item_id).collect::<Vec<_>>(),
+            vec![match_id],
+            "{label}: only the group-a/east fence match is claimed"
+        );
+    }
+
+    exercise(
+        "open_sqlite",
+        fireweed::open_sqlite(log_path.to_str().unwrap(), Arc::new(ManualClock::at(0))).unwrap(),
+    )
+    .await;
+    exercise(
+        "open_sqlite_relational",
+        fireweed::open_sqlite_relational(rel_path.to_str().unwrap(), Arc::new(ManualClock::at(0)))
+            .unwrap(),
+    )
+    .await;
+
+    let _ = std::fs::remove_file(log_path);
+    let _ = std::fs::remove_file(rel_path);
 }
 
 #[tokio::test]
