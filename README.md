@@ -135,7 +135,7 @@ fail at startup instead of silently selecting another backend.
   covers images, charts, archives, and checksums.
 - [Operator deploy console](docs/site/deploy/index.html) (also linked from the
   legacy [docs/operator](docs/operator/index.html) shim).
-- [v0.29.1 release notes](docs/releases/v0.29.1.md) describe Snorri validate-before-apply
+- [v0.29.2 release notes](docs/releases/v0.29.2.md) describe Snorri validate-before-apply
   fixes, Garage authority matrix, and E3 TP-003 emitter scaffold.
 - [v0.23.2 release notes](docs/releases/v0.23.2.md) describe the completed
   public 5×3 storage matrix.
