@@ -25,6 +25,36 @@ fn store_err(e: impl std::fmt::Display) -> EngineError {
     EngineError::Storage(e.to_string())
 }
 
+/// Map an open-time blob/sequencer failure into an operator-facing storage error.
+///
+/// When the underlying store cannot prove create-only / conditional-write preconditions
+/// (fireweed-2aefefbb), the message must name the authority requirement and the endpoint so
+/// operators do not treat a permanent S3-compat gap as a transient `Unavailable`.
+fn open_store_err(endpoint: &str, e: impl std::fmt::Display) -> EngineError {
+    let detail = e.to_string();
+    let lower = detail.to_ascii_lowercase();
+    let precondition = lower.contains("if-none-match")
+        || lower.contains("precondition")
+        || lower.contains("create-only")
+        || lower.contains("put_if_absent")
+        || lower.contains("conditional")
+        || lower.contains("412");
+    if precondition {
+        EngineError::Storage(format!(
+            "object-log open failed on endpoint {endpoint}: NativeConditionalWrite requires \
+             create-only PutObject (If-None-Match: * / put-if-absent) to be *enforced* by the \
+             endpoint; probe or first create-only write did not prove that precondition. \
+             Garage v2.2.0 and similar non-enforcing stores are unsupported for multi-writer \
+             object-log authority (see docs/operator/object-log-authority-compatibility.md). \
+             detail: {detail}"
+        ))
+    } else {
+        EngineError::Storage(format!(
+            "object-log open failed on endpoint {endpoint}: {detail}"
+        ))
+    }
+}
+
 fn partition_key(shard: &QueueKey) -> PartitionKey {
     PartitionKey(format!(
         "{}\u{0}{}",
@@ -105,7 +135,17 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             access_key_id,
             secret_access_key,
         ));
-        Self::open_with_blob(blob, "fwlog/", "fwmeta/", flush).await
+        Self::open_with_blob(blob, "fwlog/", "fwmeta/", flush)
+            .await
+            .map_err(|err| match err {
+                EngineError::Storage(detail)
+                    if !detail.contains("INCOMPATIBLE_OBJECT_LOG_GENERATION")
+                        && !detail.contains("MIXED_OBJECT_LOG_GENERATION") =>
+                {
+                    open_store_err(endpoint, detail)
+                }
+                other => other,
+            })
     }
 
     /// Open over an existing blob store (local, memory, or S3) with durable manifest sequencing.

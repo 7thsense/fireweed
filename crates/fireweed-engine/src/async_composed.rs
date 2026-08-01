@@ -1315,6 +1315,157 @@ where
         .map_err(AsyncLifecycleError::from)
     }
 
+    /// Finalize by item id/kind under one queue permit: render leases, validate, and commit together.
+    ///
+    /// Product adapters must use this instead of rendering `ClaimedItem` lease tokens *outside*
+    /// [`Self::submit_operation`] then calling [`Self::finalize`] — that TOCTOU window is the
+    /// fireweed-c8e0a7a5 / fireweed-2be744bd validate-before-apply family (snorri objectlog + worker pool).
+    pub async fn finalize_outcomes(
+        &self,
+        shard: QueueKey,
+        outcomes: Vec<crate::FinalizeOutcome>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> Result<(), AsyncLifecycleError>
+    where
+        P: AsyncClaimPlanner,
+    {
+        if outcomes.is_empty() {
+            return Err(AsyncLifecycleError::BeforeCommit(EngineError::Invalid(
+                "finalize item batch must not be empty",
+            )));
+        }
+        let queue = shard.clone();
+        let claim_planner = Arc::clone(&self.claim_planner);
+        let lifecycle = Arc::clone(&self.lifecycle_planner);
+        let strategy = Arc::clone(&self.strategy);
+        self.submit_operation(queue.clone(), move || {
+            Box::pin(async move {
+                let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id).collect();
+                let claimed = claim_planner
+                    .render_claimed(shard.clone(), item_ids.clone())
+                    .await
+                    .map_err(LifecycleExecutionError::BeforeCommit)?;
+                if claimed.len() != outcomes.len() {
+                    return Err(LifecycleExecutionError::BeforeCommit(
+                        EngineError::StaleLease,
+                    ));
+                }
+                let targets = outcomes
+                    .into_iter()
+                    .zip(claimed)
+                    .map(|(outcome, item)| {
+                        Ok(FinalizeTarget {
+                            item_id: outcome.item_id,
+                            lease_token: item.lease_token.ok_or(EngineError::StaleLease)?,
+                            item_version: item.item_version,
+                            kind: outcome.kind,
+                            not_before: outcome.not_before,
+                        })
+                    })
+                    .collect::<EngineResult<Vec<_>>>()
+                    .map_err(LifecycleExecutionError::BeforeCommit)?;
+                let request = AsyncFinalizeRequest {
+                    shard,
+                    targets,
+                    now,
+                    expected_epoch,
+                };
+                let plan = lifecycle
+                    .plan_finalize(request.clone())
+                    .await
+                    .map_err(LifecycleExecutionError::BeforeCommit)?;
+                validate_finalize_plan(
+                    &request,
+                    &plan.request,
+                    plan.expected_finalize_outcomes.as_deref(),
+                )
+                .map_err(LifecycleExecutionError::BeforeCommit)?;
+                let epoch = plan.request.expected_epoch();
+                let outcome = strategy
+                    .commit(plan.request)
+                    .await
+                    .map_err(LifecycleExecutionError::Commit)?;
+                validate_lifecycle_commit_outcome(&queue, epoch, &outcome)
+                    .map_err(LifecycleExecutionError::AfterCommit)
+            })
+        })
+        .await
+        .map_err(AsyncLifecycleError::Submit)?
+        .map_err(AsyncLifecycleError::from)
+    }
+
+    /// Renew by item id under one queue permit: render leases, validate, and commit together.
+    ///
+    /// See [`Self::finalize_outcomes`] for the TOCTOU rationale (fireweed-c8e0a7a5).
+    pub async fn renew_item_ids(
+        &self,
+        shard: QueueKey,
+        item_ids: Vec<ItemId>,
+        new_lease_expires_at: UtcTimestamp,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> Result<(), AsyncLifecycleError>
+    where
+        P: AsyncClaimPlanner,
+    {
+        if item_ids.is_empty() {
+            return Err(AsyncLifecycleError::BeforeCommit(EngineError::Invalid(
+                "renew item batch must not be empty",
+            )));
+        }
+        let queue = shard.clone();
+        let claim_planner = Arc::clone(&self.claim_planner);
+        let lifecycle = Arc::clone(&self.lifecycle_planner);
+        let strategy = Arc::clone(&self.strategy);
+        self.submit_operation(queue.clone(), move || {
+            Box::pin(async move {
+                let claimed = claim_planner
+                    .render_claimed(shard.clone(), item_ids.clone())
+                    .await
+                    .map_err(LifecycleExecutionError::BeforeCommit)?;
+                if claimed.len() != item_ids.len() {
+                    return Err(LifecycleExecutionError::BeforeCommit(
+                        EngineError::StaleLease,
+                    ));
+                }
+                let targets = claimed
+                    .into_iter()
+                    .map(|item| {
+                        Ok(RenewTarget {
+                            item_id: item.item_id,
+                            lease_token: item.lease_token.ok_or(EngineError::StaleLease)?,
+                        })
+                    })
+                    .collect::<EngineResult<Vec<_>>>()
+                    .map_err(LifecycleExecutionError::BeforeCommit)?;
+                let request = AsyncRenewRequest {
+                    shard,
+                    targets,
+                    new_lease_expires_at,
+                    now,
+                    expected_epoch,
+                };
+                let plan = lifecycle
+                    .plan_renew(request.clone())
+                    .await
+                    .map_err(LifecycleExecutionError::BeforeCommit)?;
+                validate_renew_plan(&request, &plan.request)
+                    .map_err(LifecycleExecutionError::BeforeCommit)?;
+                let epoch = plan.request.expected_epoch();
+                let outcome = strategy
+                    .commit(plan.request)
+                    .await
+                    .map_err(LifecycleExecutionError::Commit)?;
+                validate_lifecycle_commit_outcome(&queue, epoch, &outcome)
+                    .map_err(LifecycleExecutionError::AfterCommit)
+            })
+        })
+        .await
+        .map_err(AsyncLifecycleError::Submit)?
+        .map_err(AsyncLifecycleError::from)
+    }
+
     /// Execute the internal async [`crate::PurgePort`] path and return its remove-if-present count.
     ///
     /// API adapters must resolve API-001 targeting and replay semantics before calling this method and

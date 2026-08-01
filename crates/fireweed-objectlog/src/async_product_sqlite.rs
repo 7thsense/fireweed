@@ -12,17 +12,16 @@ use fireweed_core::{
     RequestId, TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
-    AsyncClaimError, AsyncCommitStrategy, AsyncComposedBackend, AsyncControlPlane,
-    AsyncFinalizeRequest, AsyncLogStore, AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError,
-    AsyncPushRequest, AsyncRenewRequest, Backend, ClaimPort, ClaimRequest, Claimed,
-    CommandChecksum, CommandEnvelope, ControlPlaneStore, CreateQueueOutcome, DurabilityClass,
-    EngineError, EngineResult, FinalizeOutcome, FinalizePort, FinalizeTarget, IdGen,
+    AsyncClaimError, AsyncCommitStrategy, AsyncComposedBackend, AsyncControlPlane, AsyncLogStore,
+    AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError, AsyncPushRequest, Backend, ClaimPort,
+    ClaimRequest, Claimed, CommandChecksum, CommandEnvelope, ControlPlaneStore, CreateQueueOutcome,
+    DurabilityClass, EngineError, EngineResult, FinalizeOutcome, FinalizePort, IdGen,
     InProcessControlPlane, InProcessProjectionStore, OwnedTask, ProjectionClaimPlanner,
     ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner,
     ProjectionStore, PurgePort, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey,
     RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
-    ReclaimPort, RenewLeasePort, RenewTarget, SeparateReplayCommit, SeparateReplayCommitter,
-    TickReport, UpsertOutcome, UpsertPort,
+    ReclaimPort, RenewLeasePort, SeparateReplayCommit, SeparateReplayCommitter, TickReport,
+    UpsertOutcome, UpsertPort,
 };
 use fireweed_sqlite::SqliteProjectionStore;
 use object_log::FlushConfig;
@@ -474,29 +473,11 @@ impl FinalizePort for AsyncObjectLogSqliteBackend {
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        // fireweed-c8e0a7a5 / fireweed-2be744bd: resolve leases under the same queue permit as
+        // plan+commit so a concurrent reclaim/claim cannot invalidate a freshly observed token.
         async move {
-            let ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id).collect();
-            let claimed = self.claimed_targets(shard, &ids).await?;
-            let targets = outcomes
-                .into_iter()
-                .zip(claimed)
-                .map(|(outcome, item)| {
-                    Ok(FinalizeTarget {
-                        item_id: outcome.item_id,
-                        lease_token: item.lease_token.ok_or(EngineError::StaleLease)?,
-                        item_version: item.item_version,
-                        kind: outcome.kind,
-                        not_before: outcome.not_before,
-                    })
-                })
-                .collect::<EngineResult<Vec<_>>>()?;
             self.engine
-                .finalize(AsyncFinalizeRequest {
-                    shard: shard.clone(),
-                    targets,
-                    now,
-                    expected_epoch,
-                })
+                .finalize_outcomes(shard.clone(), outcomes, now, expected_epoch)
                 .await
                 .map_err(Self::map_lifecycle)
         }
@@ -513,24 +494,14 @@ impl RenewLeasePort for AsyncObjectLogSqliteBackend {
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         async move {
-            let claimed = self.claimed_targets(shard, &item_ids).await?;
-            let targets = claimed
-                .into_iter()
-                .map(|item| {
-                    Ok(RenewTarget {
-                        item_id: item.item_id,
-                        lease_token: item.lease_token.ok_or(EngineError::StaleLease)?,
-                    })
-                })
-                .collect::<EngineResult<Vec<_>>>()?;
             self.engine
-                .renew(AsyncRenewRequest {
-                    shard: shard.clone(),
-                    targets,
+                .renew_item_ids(
+                    shard.clone(),
+                    item_ids,
                     new_lease_expires_at,
                     now,
                     expected_epoch,
-                })
+                )
                 .await
                 .map_err(Self::map_lifecycle)
         }
@@ -1236,48 +1207,73 @@ impl fireweed_engine::HotProjectionQueryPort for AsyncObjectLogSqliteBackend {
     ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::ClaimByItemIdsResponse>> + Send
     {
         let shard = shard.clone();
+        // fireweed-2be744bd: prepare eligibility against the same serialized projection view
+        // that apply will see — hold the queue permit across prepare + append/apply.
         async move {
             let epoch = self.resolve_epoch(&shard, context.expected_epoch).await?;
-            match port_surface::prepare_claim_by_item_ids(
-                self.projection.as_ref(),
-                self.control.as_ref(),
-                self.ids.as_ref(),
-                &self.claim_by_item_ids_idempotency,
-                &shard,
-                request,
-                context,
-            )
-            .await?
-            {
-                PreparedClaimByItemIds::Replay(response) => Ok(response),
-                PreparedClaimByItemIds::Proceed {
-                    envelope,
-                    claim_item_ids,
-                    lease_token,
-                    outcomes,
-                    request_id,
-                    fingerprint,
-                    replay_expires_at,
-                } => {
-                    self.submit_envelopes(&shard, vec![envelope], epoch).await?;
-                    let items = port_surface::render_claimed(
-                        self.projection.as_ref(),
-                        &shard,
-                        &claim_item_ids,
-                    )?;
-                    port_surface::record_claim_by_item_ids_idempotency(
-                        &self.claim_by_item_ids_idempotency,
-                        &shard,
-                        request_id,
-                        fingerprint,
-                        claim_item_ids,
-                        lease_token,
-                        outcomes.clone(),
-                        replay_expires_at,
-                    );
-                    Ok(fireweed_engine::ClaimByItemIdsResponse { items, outcomes })
-                }
-            }
+            let projection = Arc::clone(&self.projection);
+            let control = Arc::clone(&self.control);
+            let ids = Arc::clone(&self.ids);
+            let claim_by_item_ids_idempotency = Arc::clone(&self.claim_by_item_ids_idempotency);
+            let strategy = self.engine.commit_strategy();
+            let queue = shard.clone();
+            self.engine
+                .submit_operation(queue, move || {
+                    Box::pin(async move {
+                        match port_surface::prepare_claim_by_item_ids(
+                            projection.as_ref(),
+                            control.as_ref(),
+                            ids.as_ref(),
+                            &claim_by_item_ids_idempotency,
+                            &shard,
+                            request,
+                            context,
+                        )
+                        .await?
+                        {
+                            PreparedClaimByItemIds::Replay(response) => Ok(response),
+                            PreparedClaimByItemIds::Proceed {
+                                envelope,
+                                claim_item_ids,
+                                lease_token,
+                                outcomes,
+                                request_id,
+                                fingerprint,
+                                replay_expires_at,
+                            } => {
+                                strategy
+                                    .commit(RawCommitRequest::new(
+                                        shard.clone(),
+                                        vec![envelope],
+                                        epoch,
+                                    ))
+                                    .await?;
+                                let items = port_surface::render_claimed(
+                                    projection.as_ref(),
+                                    &shard,
+                                    &claim_item_ids,
+                                )?;
+                                port_surface::record_claim_by_item_ids_idempotency(
+                                    &claim_by_item_ids_idempotency,
+                                    &shard,
+                                    request_id,
+                                    fingerprint,
+                                    claim_item_ids,
+                                    lease_token,
+                                    outcomes.clone(),
+                                    replay_expires_at,
+                                );
+                                Ok(fireweed_engine::ClaimByItemIdsResponse { items, outcomes })
+                            }
+                        }
+                    })
+                })
+                .await
+                .map_err(|error| {
+                    EngineError::Storage(format!(
+                        "async claim_by_item_ids submission failed: {error:?}"
+                    ))
+                })?
         }
     }
 }
@@ -1440,6 +1436,153 @@ mod tests {
             .unwrap();
         let metrics = backend.metrics(&shard).await.unwrap();
         assert_eq!(metrics.leased, 0);
+    }
+
+    /// fireweed-c8e0a7a5: claim then immediate Strict commit_transition must not see a stale lease.
+    #[tokio::test]
+    async fn claim_then_immediate_commit_transition_succeeds() {
+        let backend = open_backend().await;
+        let def = qdef();
+        let shard = fireweed_engine::QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        backend.create_queue(def).await.unwrap();
+        let ids = backend
+            .push(
+                &shard,
+                vec![PushSpec {
+                    payload: Some(bytes::Bytes::from_static(b"payload")),
+                    ..PushSpec::default()
+                }],
+                UtcTimestamp::new(1, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        let lease = LeaseToken::new("lease-fresh").unwrap();
+        let claimed = backend
+            .claim(ClaimRequest {
+                shard: shard.clone(),
+                worker_id: WorkerId::new("worker").unwrap(),
+                max_items: 1,
+                lease_token: lease.clone(),
+                lease_expires_at: UtcTimestamp::new(10_000, 0).unwrap(),
+                now: UtcTimestamp::new(2, 0).unwrap(),
+                eligibility_time: None,
+                compatibility: ClaimCompatibility::default(),
+                expected_epoch: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(claimed.items.len(), 1);
+        let item = &claimed.items[0];
+        let outcomes = backend
+            .commit_transition(
+                &shard,
+                CommitTransition {
+                    request_id: None,
+                    entries: vec![CommitTransitionEntry {
+                        claim_ref: ClaimRef {
+                            item_id: item.item_id,
+                            lease_token: lease,
+                            lease_expires_at: item.lease_expires_at,
+                            item_version: item.item_version,
+                        },
+                        additional_claim_refs: Vec::new(),
+                        finalize: FinalizeKind::Complete,
+                        side_records: Vec::new(),
+                        lifecycle_items: Vec::new(),
+                        instance_fence: None,
+                    }],
+                },
+                UtcTimestamp::new(3, 0).unwrap(),
+                None,
+            )
+            .await
+            .expect("fresh claim must commit_transition under Strict");
+        assert!(matches!(
+            outcomes.as_slice(),
+            [CommitEntryOutcome::Committed { .. }]
+        ));
+        let _ = ids;
+        let metrics = backend.metrics(&shard).await.unwrap();
+        assert_eq!(metrics.leased, 0);
+        assert!(metrics.complete >= 1);
+    }
+
+    /// fireweed-2be744bd: competing claim/finalize workers must not append illegal lifecycle
+    /// transitions (log-apply must never reject an admitted command).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn competing_workers_claim_finalize_never_illegal_lifecycle() {
+        const ITEMS: usize = 32;
+        const WORKERS: usize = 8;
+        let backend = Arc::new(open_backend().await);
+        let def = qdef();
+        let shard = fireweed_engine::QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        backend.create_queue(def).await.unwrap();
+        let mut specs = Vec::with_capacity(ITEMS);
+        for i in 0..ITEMS {
+            specs.push(PushSpec {
+                payload: Some(bytes::Bytes::from(format!("p{i}"))),
+                ..PushSpec::default()
+            });
+        }
+        backend
+            .push(&shard, specs, UtcTimestamp::new(1, 0).unwrap(), None)
+            .await
+            .unwrap();
+
+        let mut handles = Vec::new();
+        for w in 0..WORKERS {
+            let backend = Arc::clone(&backend);
+            let shard = shard.clone();
+            handles.push(tokio::spawn(async move {
+                let mut finalized = 0usize;
+                for tick in 0..ITEMS {
+                    let lease = LeaseToken::new(format!("w{w}-t{tick}")).unwrap();
+                    let claimed = backend
+                        .claim(ClaimRequest {
+                            shard: shard.clone(),
+                            worker_id: WorkerId::new(format!("w{w}")).unwrap(),
+                            max_items: 1,
+                            lease_token: lease.clone(),
+                            lease_expires_at: UtcTimestamp::new(50_000, 0).unwrap(),
+                            now: UtcTimestamp::new(10 + tick as i64, 0).unwrap(),
+                            eligibility_time: None,
+                            compatibility: ClaimCompatibility::default(),
+                            expected_epoch: None,
+                        })
+                        .await
+                        .expect("claim must not poison or return transport error");
+                    if claimed.items.is_empty() {
+                        continue;
+                    }
+                    let item = &claimed.items[0];
+                    // Finalize immediately (the snorri worker-pool pattern).
+                    backend
+                        .finalize(
+                            &shard,
+                            vec![FinalizeOutcome::new(item.item_id, FinalizeKind::Complete)],
+                            UtcTimestamp::new(11 + tick as i64, 0).unwrap(),
+                            None,
+                        )
+                        .await
+                        .expect("finalize after own claim must succeed; no illegal lifecycle");
+                    finalized += 1;
+                }
+                finalized
+            }));
+        }
+        let mut total = 0usize;
+        for h in handles {
+            total += h.await.expect("worker join");
+        }
+        assert_eq!(
+            total, ITEMS,
+            "every item finalized exactly once across workers"
+        );
+        let metrics = backend.metrics(&shard).await.unwrap();
+        assert_eq!(metrics.pending, 0);
+        assert_eq!(metrics.leased, 0);
+        assert_eq!(metrics.complete as usize, ITEMS);
     }
 
     /// fireweed-5497780d: N concurrent fenced commits on one shard must not lose side-record

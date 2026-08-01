@@ -13,17 +13,16 @@ use fireweed_core::{
     QueueDefinition, RequestId, TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
-    AsyncClaimError, AsyncCommitStrategy, AsyncComposedBackend, AsyncControlPlane,
-    AsyncFinalizeRequest, AsyncLogStore, AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError,
-    AsyncPushRequest, AsyncRenewRequest, Backend, ClaimPort, ClaimRef, ClaimRequest, Claimed,
-    CommandChecksum, CommandEnvelope, CommandPage, CommandPosition, CommitEntryStatus,
-    CommitOutcomeEntry, CommitTransitionEntry, ControlPlane, ControlPlaneStore, CreateQueueOutcome,
-    DurabilityClass, EngineError, EngineResult, EntryRecovery, FinalizeCommand, FinalizeKind,
-    FinalizeOutcome, FinalizePort, FinalizeTarget, IdGen, InProcessControlPlane, LogRead,
-    OwnedTask, ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner,
-    ProjectionRead, ProjectionStore, PurgePort, PushCommand, PushPort, PushSpec, QueueCommand,
-    QueueCounters, QueueKey, RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand,
-    ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort, RenewTarget,
+    AsyncClaimError, AsyncCommitStrategy, AsyncComposedBackend, AsyncControlPlane, AsyncLogStore,
+    AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError, AsyncPushRequest, Backend, ClaimPort,
+    ClaimRef, ClaimRequest, Claimed, CommandChecksum, CommandEnvelope, CommandPage,
+    CommandPosition, CommitEntryStatus, CommitOutcomeEntry, CommitTransitionEntry, ControlPlane,
+    ControlPlaneStore, CreateQueueOutcome, DurabilityClass, EngineError, EngineResult,
+    EntryRecovery, FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, IdGen,
+    InProcessControlPlane, LogRead, OwnedTask, ProjectionClaimPlanner, ProjectionLifecyclePlanner,
+    ProjectionPushPlanner, ProjectionRead, ProjectionStore, PurgePort, PushCommand, PushPort,
+    PushSpec, QueueCommand, QueueCounters, QueueKey, RawCommitOutcome, RawCommitRequest,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort,
     RequestIdReplayProbe, RequestOutcome, SeparateReplayCommit, SeparateReplayCommitter,
     TickReport, UpsertOutcome, UpsertPort, WriteSideRecordsCommand, build_push_items,
     commit_body_hash, compile_entity_schema, outcome_entry_from_recovery, push_body_hash,
@@ -549,29 +548,10 @@ impl FinalizePort for AsyncObjectLogMemoryBackend {
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        // fireweed-c8e0a7a5 / fireweed-2be744bd: resolve leases under the same queue permit as plan+commit.
         async move {
-            let ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id).collect();
-            let claimed = self.claimed_targets(shard, &ids).await?;
-            let targets = outcomes
-                .into_iter()
-                .zip(claimed)
-                .map(|(outcome, item)| {
-                    Ok(FinalizeTarget {
-                        item_id: outcome.item_id,
-                        lease_token: item.lease_token.ok_or(EngineError::StaleLease)?,
-                        item_version: item.item_version,
-                        kind: outcome.kind,
-                        not_before: outcome.not_before,
-                    })
-                })
-                .collect::<EngineResult<Vec<_>>>()?;
             self.engine
-                .finalize(AsyncFinalizeRequest {
-                    shard: shard.clone(),
-                    targets,
-                    now,
-                    expected_epoch,
-                })
+                .finalize_outcomes(shard.clone(), outcomes, now, expected_epoch)
                 .await
                 .map_err(Self::map_lifecycle)
         }
@@ -588,24 +568,14 @@ impl RenewLeasePort for AsyncObjectLogMemoryBackend {
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         async move {
-            let claimed = self.claimed_targets(shard, &item_ids).await?;
-            let targets = claimed
-                .into_iter()
-                .map(|item| {
-                    Ok(RenewTarget {
-                        item_id: item.item_id,
-                        lease_token: item.lease_token.ok_or(EngineError::StaleLease)?,
-                    })
-                })
-                .collect::<EngineResult<Vec<_>>>()?;
             self.engine
-                .renew(AsyncRenewRequest {
-                    shard: shard.clone(),
-                    targets,
+                .renew_item_ids(
+                    shard.clone(),
+                    item_ids,
                     new_lease_expires_at,
                     now,
                     expected_epoch,
-                })
+                )
                 .await
                 .map_err(Self::map_lifecycle)
         }
@@ -1179,48 +1149,72 @@ impl fireweed_engine::HotProjectionQueryPort for AsyncObjectLogMemoryBackend {
     ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::ClaimByItemIdsResponse>> + Send
     {
         let shard = shard.clone();
+        // fireweed-2be744bd: prepare + append/apply under one queue permit.
         async move {
             let epoch = self.resolve_epoch(&shard, context.expected_epoch).await?;
-            match port_surface::prepare_claim_by_item_ids(
-                self.projection.as_ref(),
-                self.control.as_ref(),
-                self.ids.as_ref(),
-                &self.claim_by_item_ids_idempotency,
-                &shard,
-                request,
-                context,
-            )
-            .await?
-            {
-                PreparedClaimByItemIds::Replay(response) => Ok(response),
-                PreparedClaimByItemIds::Proceed {
-                    envelope,
-                    claim_item_ids,
-                    lease_token,
-                    outcomes,
-                    request_id,
-                    fingerprint,
-                    replay_expires_at,
-                } => {
-                    self.submit_envelopes(&shard, vec![envelope], epoch).await?;
-                    let items = port_surface::render_claimed(
-                        self.projection.as_ref(),
-                        &shard,
-                        &claim_item_ids,
-                    )?;
-                    port_surface::record_claim_by_item_ids_idempotency(
-                        &self.claim_by_item_ids_idempotency,
-                        &shard,
-                        request_id,
-                        fingerprint,
-                        claim_item_ids,
-                        lease_token,
-                        outcomes.clone(),
-                        replay_expires_at,
-                    );
-                    Ok(fireweed_engine::ClaimByItemIdsResponse { items, outcomes })
-                }
-            }
+            let projection = Arc::clone(&self.projection);
+            let control = Arc::clone(&self.control);
+            let ids = Arc::clone(&self.ids);
+            let claim_by_item_ids_idempotency = Arc::clone(&self.claim_by_item_ids_idempotency);
+            let strategy = self.engine.commit_strategy();
+            let queue = shard.clone();
+            self.engine
+                .submit_operation(queue, move || {
+                    Box::pin(async move {
+                        match port_surface::prepare_claim_by_item_ids(
+                            projection.as_ref(),
+                            control.as_ref(),
+                            ids.as_ref(),
+                            &claim_by_item_ids_idempotency,
+                            &shard,
+                            request,
+                            context,
+                        )
+                        .await?
+                        {
+                            PreparedClaimByItemIds::Replay(response) => Ok(response),
+                            PreparedClaimByItemIds::Proceed {
+                                envelope,
+                                claim_item_ids,
+                                lease_token,
+                                outcomes,
+                                request_id,
+                                fingerprint,
+                                replay_expires_at,
+                            } => {
+                                strategy
+                                    .commit(RawCommitRequest::new(
+                                        shard.clone(),
+                                        vec![envelope],
+                                        epoch,
+                                    ))
+                                    .await?;
+                                let items = port_surface::render_claimed(
+                                    projection.as_ref(),
+                                    &shard,
+                                    &claim_item_ids,
+                                )?;
+                                port_surface::record_claim_by_item_ids_idempotency(
+                                    &claim_by_item_ids_idempotency,
+                                    &shard,
+                                    request_id,
+                                    fingerprint,
+                                    claim_item_ids,
+                                    lease_token,
+                                    outcomes.clone(),
+                                    replay_expires_at,
+                                );
+                                Ok(fireweed_engine::ClaimByItemIdsResponse { items, outcomes })
+                            }
+                        }
+                    })
+                })
+                .await
+                .map_err(|error| {
+                    EngineError::Storage(format!(
+                        "async claim_by_item_ids submission failed: {error:?}"
+                    ))
+                })?
         }
     }
 }

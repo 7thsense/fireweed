@@ -11,21 +11,21 @@ use fireweed_core::{
     RequestId, TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
-    AsyncClaimError, AsyncCommitStrategy, AsyncComposedBackend, AsyncControlPlane,
-    AsyncFinalizeRequest, AsyncLogStore, AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError,
-    AsyncPushRequest, AsyncRenewRequest, Backend, ClaimPort, ClaimRequest, Claimed, CommandChecksum,
-    CommandEnvelope, ControlPlaneStore, CreateQueueOutcome, DurabilityClass, EngineError,
-    EngineResult, FinalizeOutcome, FinalizePort, FinalizeTarget, IdGen, InProcessControlPlane,
-    InProcessProjectionStore, InlineOwnedTaskDispatcher, OwnedTask, ProjectionClaimPlanner,
-    ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner,
-    ProjectionStore, PurgePort, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey,
-    RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
-    ReclaimPort, RenewLeasePort, RenewTarget, SeparateReplayCommit, SeparateReplayCommitter,
-    TickReport, UpsertOutcome, UpsertPort,
+    AsyncClaimError, AsyncCommitStrategy, AsyncComposedBackend, AsyncControlPlane, AsyncLogStore,
+    AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError, AsyncPushRequest, Backend, ClaimPort,
+    ClaimRequest, Claimed, CommandChecksum, CommandEnvelope, ControlPlaneStore, CreateQueueOutcome,
+    DurabilityClass, EngineError, EngineResult, FinalizeOutcome, FinalizePort, IdGen,
+    InProcessControlPlane, InProcessProjectionStore, InlineOwnedTaskDispatcher, OwnedTask,
+    ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead,
+    ProjectionReclaimPlanner, ProjectionStore, PurgePort, PushPort, PushSpec, QueueCommand,
+    QueueCounters, QueueKey, RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand,
+    ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort, SeparateReplayCommit,
+    SeparateReplayCommitter, TickReport, UpsertOutcome, UpsertPort,
 };
 use fireweed_objectlog::{
-    CommitIdempotency, FlushConfig, ObjectLogEngineStore, SeqIdGen, finish_prepared_commit_transition,
-    map_submit_error, new_commit_idempotency, prepare_commit_transition, strict_commit_capabilities,
+    CommitIdempotency, FlushConfig, ObjectLogEngineStore, SeqIdGen,
+    finish_prepared_commit_transition, map_submit_error, new_commit_idempotency,
+    prepare_commit_transition, strict_commit_capabilities,
 };
 use fireweed_objectlog::{explain_commit_if_authoritative, side_record as objectlog_side_record};
 
@@ -409,29 +409,10 @@ impl FinalizePort for AsyncObjectLogPostgresBackend {
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        // fireweed-c8e0a7a5 / fireweed-2be744bd: resolve leases under the same queue permit as plan+commit.
         async move {
-            let ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id).collect();
-            let claimed = self.claimed_targets(shard, &ids).await?;
-            let targets = outcomes
-                .into_iter()
-                .zip(claimed)
-                .map(|(outcome, item)| {
-                    Ok(FinalizeTarget {
-                        item_id: outcome.item_id,
-                        lease_token: item.lease_token.ok_or(EngineError::StaleLease)?,
-                        item_version: item.item_version,
-                        kind: outcome.kind,
-                        not_before: outcome.not_before,
-                    })
-                })
-                .collect::<EngineResult<Vec<_>>>()?;
             self.engine
-                .finalize(AsyncFinalizeRequest {
-                    shard: shard.clone(),
-                    targets,
-                    now,
-                    expected_epoch,
-                })
+                .finalize_outcomes(shard.clone(), outcomes, now, expected_epoch)
                 .await
                 .map_err(Self::map_lifecycle)
         }
@@ -448,24 +429,14 @@ impl RenewLeasePort for AsyncObjectLogPostgresBackend {
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         async move {
-            let claimed = self.claimed_targets(shard, &item_ids).await?;
-            let targets = claimed
-                .into_iter()
-                .map(|item| {
-                    Ok(RenewTarget {
-                        item_id: item.item_id,
-                        lease_token: item.lease_token.ok_or(EngineError::StaleLease)?,
-                    })
-                })
-                .collect::<EngineResult<Vec<_>>>()?;
             self.engine
-                .renew(AsyncRenewRequest {
-                    shard: shard.clone(),
-                    targets,
+                .renew_item_ids(
+                    shard.clone(),
+                    item_ids,
                     new_lease_expires_at,
                     now,
                     expected_epoch,
-                })
+                )
                 .await
                 .map_err(Self::map_lifecycle)
         }

@@ -156,6 +156,9 @@ Look for:
    for v0.24+.
 3. Treat Garage/S3 NativeConditionalWrite tests as orthogonal to generation
    migration: prove CAS on a clean LogEngine namespace, not on FWSG residue.
+   See [object-log authority compatibility](object-log-authority-compatibility.md)
+   — Garage v2.2.0 does not enforce create-only preconditions and is unsupported
+   for multi-writer object-log authority.
 
 ## Related release notes
 

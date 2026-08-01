@@ -192,6 +192,12 @@ that primitive. Pair with a rebuildable local projection
 (`storage.projection.backend=sqlite`, `persistence.enabled=false`) so each pod
 rebuilds from the shared log.
 
+Object-log authority is **`NativeConditionalWrite` only**. The endpoint must
+**enforce** create-only PutObject (`If-None-Match: *` / equivalent). Open fails
+closed when that precondition cannot be proven. **Garage v2.2.0 is unsupported**
+for multi-writer object-log (it returns 200 on a second conditional put). See
+[object-log authority compatibility](../operator/object-log-authority-compatibility.md).
+
 ### Structured fields
 
 - Filesystem root: `storage.log.objectLog.root` (used when log is `filesystem`)
