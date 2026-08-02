@@ -1,0 +1,2 @@
+{"actor":"","body":"closed_because: all_children_terminal\ntotal_children: 8","created_at":"2026-08-01T02:14:18.995791411Z","kind":"epic_auto_close","source":"Store.Close.walkUpClosureCandidate","summary":"auto-closed: all children reached terminal state"}
+{"actor":"","body":"closed_because: all_children_terminal\ntotal_children: 8","created_at":"2026-08-01T02:15:21.849875427Z","kind":"epic_auto_close","source":"Store.Close.walkUpClosureCandidate","summary":"auto-closed: all children reached terminal state"}
