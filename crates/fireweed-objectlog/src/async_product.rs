@@ -923,12 +923,110 @@ impl fireweed_engine::BatchUpdatePort for AsyncObjectLogMemoryBackend {
 impl fireweed_engine::ItemMutationPort for AsyncObjectLogMemoryBackend {
     fn mutate_items(
         &self,
-        _shard: &QueueKey,
-        _request: fireweed_engine::ItemMutationRequest,
-        _expected_epoch: Option<u64>,
+        shard: &QueueKey,
+        request: fireweed_engine::ItemMutationRequest,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::ItemMutationResponse>> + Send
     {
-        std::future::ready(Err(EngineError::Unavailable))
+        let shard = shard.clone();
+        async move {
+            use fireweed_engine::{RequestOutcome, item_mutation_fingerprint};
+
+            let fingerprint = fireweed_core::BodyHash(item_mutation_fingerprint(&request)?);
+            let request_id = request.request_id.clone();
+            let evaluated_at = request.evaluated_at;
+
+            if let Some(response) = self.projection.with_store_mut(|projection| {
+                ProjectionStore::replay_durable_item_mutation(
+                    projection,
+                    &shard,
+                    &request_id,
+                    fingerprint.0,
+                    evaluated_at,
+                )
+            })? {
+                return Ok(response);
+            }
+
+            let mut from = None;
+            loop {
+                let page =
+                    AsyncLogStore::read_from(self.log.as_ref(), shard.clone(), from.clone(), 256)
+                        .await?;
+                for (position, envelope) in &page.entries {
+                    if envelope.request_id.as_ref() != Some(&request_id) {
+                        continue;
+                    }
+                    if envelope.request_fingerprint != Some(fingerprint.0) {
+                        return Err(EngineError::RequestIdConflict);
+                    }
+                    let Some(RequestOutcome::ItemMutation { response_payload }) =
+                        envelope.request_outcome.as_ref()
+                    else {
+                        return Err(EngineError::RequestIdConflict);
+                    };
+                    let mut response: fireweed_engine::ItemMutationResponse =
+                        serde_json::from_str(response_payload)
+                            .map_err(|error| EngineError::Storage(error.to_string()))?;
+                    response.position = Some(position.clone());
+                    return Ok(response);
+                }
+                match page.next {
+                    Some(next) => from = Some(next),
+                    None => break,
+                }
+            }
+
+            if request.dry_run {
+                let plan = self.projection.with_store_mut(|projection| {
+                    ProjectionStore::plan_item_mutation(projection, &shard, &request)
+                })?;
+                return Ok(plan.response);
+            }
+
+            let epoch = self.resolve_epoch(&shard, expected_epoch).await?;
+            let projection = Arc::clone(&self.projection);
+            let log = Arc::clone(&self.log);
+            let ids = Arc::clone(&self.ids);
+            let strategy = self.engine.commit_strategy();
+            let queue = shard.clone();
+            self.engine
+                .submit_operation(queue, move || {
+                    Box::pin(async move {
+                        let mut plan = projection.with_store_mut(|projection| {
+                            ProjectionStore::plan_item_mutation(projection, &shard, &request)
+                        })?;
+                        let response_payload = serde_json::to_string(&plan.response)
+                            .map_err(|error| EngineError::Storage(error.to_string()))?;
+                        let item_ids = plan
+                            .command
+                            .items
+                            .iter()
+                            .map(|item| item.item_id)
+                            .collect::<Vec<_>>();
+                        let mut envelope = port_surface::make_envelope(
+                            ids.as_ref(),
+                            QueueCommand::MutateItems(plan.command),
+                            item_ids,
+                            evaluated_at,
+                        );
+                        envelope.request_id = Some(request_id);
+                        envelope.request_fingerprint = Some(fingerprint.0);
+                        envelope.request_outcome =
+                            Some(RequestOutcome::ItemMutation { response_payload });
+                        strategy
+                            .commit(RawCommitRequest::new(shard.clone(), vec![envelope], epoch))
+                            .await?;
+                        plan.response.position =
+                            AsyncLogStore::high_water(log.as_ref(), shard.clone()).await?;
+                        Ok(plan.response)
+                    })
+                })
+                .await
+                .map_err(|error| {
+                    EngineError::Storage(format!("async mutate_items submission failed: {error:?}"))
+                })?
+        }
     }
 }
 impl fireweed_engine::SetGatesPort for AsyncObjectLogMemoryBackend {
