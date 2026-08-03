@@ -10,8 +10,9 @@
 //! [`RecoveryReadPort`] (Snorri CONTRACT-003 / historical embedded Strict path).
 //!
 //! `ResponseBarrier::AsyncProjection` remains eventual-apply: the product advertises
-//! [`DurabilityClass::EventualApply`] with `atomic_transition_commit: false` and
-//! `commit_transition` returns [`EngineError::Unavailable`].
+//! [`DurabilityClass::EventualApply`] with `atomic_transition_commit: false`. Vectorized
+//! transitions still commit through the authoritative object log and hot projection; only the
+//! durable SQLite checkpoint may lag the response.
 //!
 //! Separate append then apply (SeparateReplayCommit) is retained for crash-window recovery
 //! and fault injection; Strict does not claim a single substrate transaction, only that

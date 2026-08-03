@@ -850,7 +850,8 @@ pub enum ProjectionConfig {
 ///   (not one substrate transaction); Strict is a response/visibility barrier, not a single-TX claim.
 /// - [`ResponseBarrier::AsyncProjection`]: eventual-apply visibility. Success may return after
 ///   hot-projection update with deferred durable checkpoint; `atomic_transition_commit` is false and
-///   durability is [`DurabilityClass::EventualApply`]. `commit_transition` is Unavailable.
+///   durability is [`DurabilityClass::EventualApply`]. Vectorized transitions remain available through
+///   the authoritative object log; the deferred SQLite checkpoint is outside the response barrier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseBarrier {
     Strict,

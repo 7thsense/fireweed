@@ -120,8 +120,8 @@ pub struct AsyncObjectLogHybridBackend {
     ids: Arc<SeqIdGen>,
     counters: Arc<QueueCounters>,
     node_id: u8,
-    /// True when `HybridProjectionStore::is_strict()` (public `ResponseBarrier::Strict`).
-    authoritative: bool,
+    /// True when the public response barrier waits for the durable SQLite checkpoint.
+    strict_response_barrier: bool,
     commit_idempotency: CommitIdempotency,
     batch_update_idempotency: BatchUpdateIdempotency,
     claim_by_query_idempotency: ClaimByQueryIdempotency,
@@ -202,7 +202,7 @@ impl AsyncObjectLogHybridBackend {
         projection_store: HybridProjectionStore,
         node_id: u8,
     ) -> EngineResult<Self> {
-        let authoritative = projection_store.is_strict();
+        let strict_response_barrier = projection_store.is_strict();
         let projection = Arc::new(InProcessProjectionStore::new(projection_store));
         let control = Arc::new(InProcessControlPlane::new());
         let ids = Arc::new(SeqIdGen::default());
@@ -304,7 +304,7 @@ impl AsyncObjectLogHybridBackend {
             ids,
             counters,
             node_id,
-            authoritative,
+            strict_response_barrier,
             commit_idempotency,
             batch_update_idempotency,
             claim_by_query_idempotency,
@@ -376,13 +376,13 @@ impl AsyncObjectLogHybridBackend {
 
 impl Backend for AsyncObjectLogHybridBackend {
     fn durability_class(&self) -> DurabilityClass {
-        durability_for_strict(self.authoritative)
+        durability_for_strict(self.strict_response_barrier)
     }
     fn supports_gates(&self) -> bool {
         self.projection.supports_gates()
     }
     fn commit_capabilities(&self) -> fireweed_engine::CommitCapabilities {
-        if self.authoritative {
+        if self.strict_response_barrier {
             strict_commit_capabilities(
                 "Strict: object-log append then hybrid projection apply (response-after-apply, LogEngine)",
             )
@@ -948,9 +948,6 @@ impl fireweed_engine::CommitTransitionPort for AsyncObjectLogHybridBackend {
     {
         let shard = shard.clone();
         async move {
-            if !self.authoritative {
-                return Err(EngineError::Unavailable);
-            }
             let epoch = match expected_epoch {
                 Some(epoch) => {
                     let current =
@@ -1014,7 +1011,7 @@ impl fireweed_engine::RecoveryReadPort for AsyncObjectLogHybridBackend {
     ) -> impl std::future::Future<Output = EngineResult<Option<fireweed_engine::CommitRecovery>>> + Send
     {
         std::future::ready(commit_surface::explain_commit_if_authoritative(
-            self.authoritative,
+            true,
             self.projection.as_ref(),
             &self.commit_idempotency,
             shard,
@@ -1624,7 +1621,7 @@ mod tests {
     use fireweed_engine::{
         Backend, ClaimCompatibility, ClaimPort, ClaimRef, ClaimRequest, CommitEntryOutcome,
         CommitTransition, CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore,
-        DurabilityClass, EngineError, FinalizeKind, FinalizeOutcome, FinalizePort, InstanceFence,
+        DurabilityClass, FinalizeKind, FinalizeOutcome, FinalizePort, InstanceFence,
         ProjectionRead, PushPort, PushSpec, ReclaimDriver, RecoveryReadPort, SideRecord,
     };
     use object_log::FlushConfig;
@@ -1851,7 +1848,7 @@ mod tests {
         let def = qdef();
         let shard = fireweed_engine::QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
         backend.create_queue(def).await.unwrap();
-        let err = backend
+        let outcomes = backend
             .commit_transition(
                 &shard,
                 CommitTransition {
@@ -1862,8 +1859,8 @@ mod tests {
                 None,
             )
             .await
-            .unwrap_err();
-        assert!(matches!(err, EngineError::Unavailable));
+            .unwrap();
+        assert!(outcomes.is_empty());
     }
 
     #[tokio::test]
