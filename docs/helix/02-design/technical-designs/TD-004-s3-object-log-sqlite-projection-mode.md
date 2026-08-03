@@ -13,6 +13,7 @@ ddx:
     - adr-rust-workspace-and-toolchain-policy
     - prd
     - concerns
+  status: accepted
   review:
     self_hash: 56d80c3e6ad5ab54460e300fdf4ddfe535dc75a47b0a2a0e32d0de46c38c7e49
     deps:
@@ -30,23 +31,40 @@ ddx:
     reviewed_at: "2026-07-20T00:01:26Z"
 ---
 
-# Technical Design: TD-004 S3 Object-Log + SQLite Projection Mode
+# Technical Design: TD-004 Filesystem/S3 Object-Log Authority and Projection Composition
 
 **Contract**: API-001 | **ADR**: ADR-001, ADR-004, ADR-008 | **Depends on**: TD-001, TD-002, TD-003 | **Scope**: object-log local-projection backends
 
+## Current product and authority interpretation (2026-08-03)
+
+TD-004 is Accepted for the `filesystem` and `s3` Class A log rows paired with each public projection:
+`memory`, `sqlite`, and `postgres`. Historical names in the older build narrative below are interpreted
+by this table and are never public selectors:
+
+| Historical term | Current requirement |
+|---|---|
+| `object_log_inmemory_projection` / `objectlog/inmemory` | `filesystem` or `s3` log × `memory` projection. |
+| `object_log_sqlite_projection` / `objectlog/sqlite` | `filesystem` or `s3` log × `sqlite` projection. |
+| Hybrid strict/async names | Retired product profiles. `Strict` and `AsyncProjection(AsyncProjectionSpec)` are provider-neutral response-barrier policies, not projection values. |
+| `postgres_native` comparison | The relevant `postgres` log cell under the same external transaction contract. |
+| PostgreSQL control plane | Optional `ControlPlaneSpec::Postgres`; `in_process` remains valid. It never publishes an object-log manifest. |
+| PostgreSQL manifest-pointer fallback | Retired with no successor. A log provider that cannot enforce native conditional publication is rejected. |
+
+`NativeConditionalWrite` is the sole publication authority for queue definitions, epoch/head state, and
+manifest successors on these log rows. For S3 it requires enforced conditional object creation/update;
+for filesystem it requires an equivalent atomic native primitive. PostgreSQL may coordinate ownership or
+serve as a projection when selected independently, but it cannot replace this log authority.
+
+The remainder of the document preserves implementation lineage. Any normative sentence that uses a
+historical profile name inherits the mapping above; a sentence that would enable a retired selector or
+the PostgreSQL manifest-pointer fallback is superseded rather than mapped.
+
 ## Scope
 
-This technical design defines the object-log local-projection profiles for
-fireweed. In these modes an S3-compatible object store is the durable command log,
-a local in-memory, SQLite, or hybrid projection serves hot queue operations, the
-same object store holds periodic projection snapshots where configured, and
-Postgres remains the control plane. `object_log_inmemory_projection` is the fast
-local replay profile; `object_log_sqlite_projection` is the larger rebuildable
-local-index profile; `object_log_hybrid_projection_strict` / runtime
-`objectlog/hybrid-strict` is the SQLite-first plus hot-memory projection
-profile; and `object_log_hybrid_projection_async` / runtime
-`objectlog/hybrid-async` is the manifest-committed plus hot-memory
-success-barrier profile whose SQLite projection may lag. Per ADR-008 the queue
+This technical design defines the `filesystem` and `s3` durable log rows.
+Each pairs independently with the `memory`, `sqlite`, or `postgres` projection,
+and the selected log substrate holds periodic projection snapshots where
+configured. The control plane is independently composed. Per ADR-008 the queue
 is the unit of sharding:
 a whole queue is owned by exactly one node, so the object log, the manifest, and
 the local projection are all **per-`(tenant, queue)`**, and there is no
@@ -74,17 +92,15 @@ In scope:
   structured rejection has no committed effect for the rejected scope, and
   unknown outcomes resolve by `request_id`.
 - SQLite projection schema mapping from TD-001 logical projection records and TD-002 column semantics.
-- Hybrid projection semantics for `objectlog/hybrid-strict` and
-  `objectlog/hybrid-async`: hot in-memory reads and validation, explicit success
-  barriers, `ProjectionImage` hydration before returning SQLite high-water,
-  strict-mode poison-on-memory-apply failure, async-mode projection lag, and
-  durable request-id replay.
+- Provider-neutral `Strict` and `AsyncProjection` response barriers, including
+  projection high-water, poison/fail-closed behavior, lag bounds, and durable
+  request-id replay without creating a fourth projection axis.
 - Periodic SQLite snapshot to object storage at a committed log position.
 - Bounded replay and recovery: snapshot + log-tail, with safe segment expiry.
 - Manifest-commit epoch fencing validated against the epoch authoritative at the commit linearization point:
   guarded control-plane/CAS-row epoch for implementation (a), or storage-head epoch for implementation (b).
-- Object-store conditional-write (CAS) as a first-class required backend capability, with a defined
-  fallback for stores that lack it.
+- `NativeConditionalWrite` as a required backend capability; providers that lack
+  it fail configuration with no publication fallback.
 - Cohort (`cohort_policy` / `whole_cohort`, G6) projection, shared-lease, expiry, and replay bindings
   in the SQLite projection.
 - Commit-latency / cost tradeoff and how API-001 semantics still hold once a response returns.
@@ -128,13 +144,11 @@ should use `postgres_native` (TD-002) or a fast log backend instead.
 
 It follows TD-001's capability boundaries unchanged:
 
-- `ControlPlaneStore`: Postgres (queue defs, queue-owner assignment + `assignment_epoch`, backend
-  profile). Identical to TD-002's control plane; not re-specified here. The control-plane seam is
-  pluggable (ADR-008); the object-store control plane — the object log providing per-queue multi-node
-  fencing and coordination via its manifest-CAS series — is committed direction (ADR-008 §4) whose
-  acquire→fence atomicity proof has not yet landed, so in v1 this backend still uses the Postgres
-  control plane. TD-004 *reads* the current `assignment_epoch`
-  from it on the manifest-commit path (see Epoch Fencing).
+- `ControlPlaneStore`: independently selected `in_process` or optional `postgres`
+  for queue definitions, assignment, and lease orchestration. Neither provider
+  publishes the object-log head. TD-004 binds a confirmed `assignment_epoch` to
+  the selected log's native conditional head on the commit path (see Epoch
+  Fencing).
 - `LogStore`: S3-compatible object log with group-commit sealed segments and a per-queue manifest.
 - `ProjectionStore`: local in-memory or SQLite, rebuildable, applied only from
   committed commands. In-memory is the log-replay serving family; SQLite is the
@@ -156,24 +170,20 @@ It follows TD-001's capability boundaries unchanged:
   state; in-flight claim reservations are a separate, non-authoritative bookkeeping table that holds no
   acknowledged state (see "Claim Reservation"). Acknowledged state survives via object-store segments +
   snapshots, never via local disk alone (ADR-001 Option 4 rejection).
-- **Hybrid mode is explicit.** In `objectlog/hybrid-strict`,
-  `HybridProjectionStore::apply` MUST call SQLite batch apply first and then
-  apply the same positions and commands to `InMemoryProjection`. In
-  `objectlog/hybrid-async`, manifest commit plus synchronous memory apply/render
-  is the success barrier and SQLite apply may lag. All hot reads and pre-commit
-  validation delegate to memory. Strict mode poisons on SQLite-commit then memory
-  apply failure; async mode resolves pre-memory-render failures as
-  unknown-outcome by `request_id` and retries lagging SQLite apply from the log.
-- **Object log remains the authority.** Local SQLite under
-  `objectlog/hybrid-strict` or `objectlog/hybrid-async` is a restart
-  accelerator and durable projection image, not a command authority and not, by
-  itself, permission to expire object-log segments.
+- **Response barriers are provider-neutral.** `Strict` and
+  `AsyncProjection(AsyncProjectionSpec)` govern acknowledgement and projection
+  lag without defining a Hybrid projection or combined public profile. Any
+  internal dual-apply implementation must preserve the selected public
+  projection's behavior and fail closed on a poisoned serving view.
+- **Object log remains the authority.** Any local or remote projection is a
+  serving view and possible restart accelerator, not a command authority and not,
+  by itself, permission to expire object-log segments.
 - **Reject one-object-per-command.** Production configurations MUST seal multiple commands per segment;
   a 1-command-per-object configuration MUST be rejected at queue/backend configuration time. It remains
-  available only behind an explicit development/test fallback flag.
-- **Conditional object write (CAS) is a required capability.** If the configured object store cannot
-  provide a conditional write primitive, the queue MUST either be rejected or run in the
-  Postgres-manifest-pointer fallback mode (see "Object-Store Capability Requirements").
+  available only behind an explicit development/test override.
+- **`NativeConditionalWrite` is required.** If the configured log substrate
+  cannot enforce conditional create/update publication, configuration MUST be
+  rejected. PostgreSQL is not a manifest publication fallback.
 
 ## Group-Commit Pipeline (normative)
 
@@ -208,7 +218,7 @@ One request whose peak charge exceeds its applicable hard cap is permanently rej
 `EngineError::Backpressure` / retryable unavailable. The finite production policy rejects immediately on
 exhaustion. `AsyncComposedBackend` raw submission MUST run its generic strategy preparation before queue
 gating/dispatch. A service MAY select async waiting there and race the composed future with its runtime-owned
-deadline; the direct replay-committer fallback uses finite `Reject` inside its owned task. No path holds a
+deadline; the direct replay-committer path uses finite `Reject` inside its owned task. No path holds a
 queue gate while waiting. Cancellation deregisters
 the waiter without charge. After acceptance, the permit follows the serialized records through repair, seal,
 epoch/watermark fencing, manifest CAS success or loss, and projection apply. It releases only when the final
@@ -289,7 +299,7 @@ typed by validation stage and include only manifest index plus an opaque locator
 unchanged; logical segment validation emits one success/corrupt observation without object keys or error text.
 New writes are capped at 64 MiB per complete stored frame, 16 MiB per canonical record, and 1,000,000
 records; configuration above the frame cap is rejected. The two-pass decoder prevents attacker-controlled
-length/count fields from causing secondary allocations. There is no runtime format selector or fallback
+length/count fields from causing secondary allocations. There is no runtime format selector or alternate
 decoder; retired pre-release objects and namespaces are rejected during open.
 
 Object naming is implementation-refinable but MUST keep `tenant`, `queue` as the leading key
@@ -304,9 +314,9 @@ first `sequence`.
 
 | Element | Rule |
 |---------|------|
-| Conditional write | The object store MUST provide a conditional (compare-and-set) write usable for the manifest object — e.g., `If-Match`/ETag-conditional PUT, conditional-on-absence PUT for monotonic manifest objects, or an equivalent guaranteed atomic CAS. The accepted primitive(s) MUST be documented per supported store. |
-| Unsupported CAS | If the configured store provides no usable conditional-write primitive, `CreateQueue`/backend configuration MUST either reject the queue with `invalid-request` OR the deployment MUST select the Postgres-manifest-pointer fallback mode. A store without CAS MUST NOT silently run plain manifest appends. |
-| Postgres-manifest-pointer fallback | In fallback mode the manifest tail pointer and `assignment_epoch` check are committed in a Postgres `ControlPlaneStore` row (transactional CAS), while segments and snapshots remain in object storage. This preserves the single-writer fencing property when the object store cannot. The fallback's durable-commit cost is one small control-plane write per segment (still per-segment, not per-command). |
+| Native conditional write | The selected log substrate MUST provide an enforced conditional create/update primitive usable for queue definition, epoch/head, and manifest publication — e.g. `If-Match`/ETag conditional PUT, conditional-on-absence PUT, atomic filesystem link/rename with no-overwrite semantics, or an equivalent atomic primitive. Accepted primitives and provider boundaries MUST be documented. |
+| Unsupported conditional publication | If the configured provider cannot prove `NativeConditionalWrite`, `CreateQueue`/backend configuration MUST reject it with a typed configuration/storage error before publication. It MUST NOT silently append, overwrite, or redirect authority through PostgreSQL. |
+| PostgreSQL boundary | An optional PostgreSQL control plane may allocate/confirm an ownership epoch and a PostgreSQL projection may serve reads, but the log's native conditional head remains the only publication authority for these rows. |
 | Idempotent segment PUT | Segment writes MUST be idempotent under retry so a retried PUT after a network failure cannot create a divergent object at the same key. |
 
 ## Manifest Commit and Epoch Fencing (normative)
@@ -329,7 +339,7 @@ disabled while pending, and every `E` commit attempt after the storage head adva
 | Manifest tail CAS | In addition to the epoch validation, manifest commit MUST be conditional on the manifest tail still matching the writer's expected tail, so two writers at the same epoch (transient split-brain) cannot both extend the log from the same point. |
 | Fenced writer | A writer whose commit fails because the current epoch has advanced (or a fence record now records a higher epoch) MUST treat itself as fenced: it MUST discard its in-flight buffer and roll back its in-flight claim reservations (see "Claim Reservation") without ack, and MUST NOT retry the commit under the old epoch. Unacked commands are re-driven by the new epoch holder on the normal replay path (caller retries by `request_id`). |
 | Recovery read | A newly assigned epoch holder MUST publish its epoch fence, read the latest committed snapshot, and replay current-format manifest segments with `sequence > snapshot_sequence`, validating frame, record, position, and identity before sealing new data. |
-| No consensus | This mechanism MUST NOT introduce node discovery, leader election, or embedded consensus (ADR-001 / D4(c)). The object store's conditional write plus the Postgres-backed TD-003 lease/epoch are the only coordination primitives. |
+| No consensus | This mechanism MUST NOT introduce node discovery, leader election, or embedded consensus (ADR-001 / D4(c)). The selected log's native conditional write is the publication primitive; the independently selected control plane supplies only lease/epoch orchestration. |
 
 ## Claim Reservation (in-flight reservations before durable commit) (normative)
 
@@ -374,7 +384,13 @@ This section states exactly what a caller may observe so API-001 holds once a re
 | Recovery / new owner | After reassignment, the new owner serves reads only after it has replayed the committed log tail (Recovery), so a read served by the new owner reflects all acknowledged commands. There is no window in which an acknowledged command is invisible to the authoritative owner. |
 | No FR-9/FR-12 weakening | Progress age accrues from `eligible_since`/`eligible_at`, which is set when a push command commits and applies; an item is not eligible until then. Commit batching delays *when an item becomes eligible*, not the *rate* at which eligible age accrues, so the queue-global progress bound is unaffected. |
 
-## Hybrid Mode Taxonomy, Success Barriers, and Poisoning (normative)
+## Historical dual-projection experiment (non-normative)
+
+This section records the implementation lineage of the retired Hybrid profiles. Its selector, pairing,
+dual-projection, metric-name, and release-lane `MUST` statements do not govern the current product. Current
+requirements are: choose one public projection, then choose `Strict` or
+`AsyncProjection(AsyncProjectionSpec)` as the provider-neutral response policy. Reusable poison, lineage,
+bounded-debt, and recovery principles below carry forward only through those current contracts.
 
 `objectlog/hybrid` is a taxonomy prefix, not a complete contract. Implementations
 MUST select one of the named modes below and surface that mode in configuration,
@@ -515,7 +531,7 @@ high-water, repair, and release-lane load boundaries:
 | Crash during repair | Kill during a repair pass; prove repair is restartable, leaves no advertised recovery readiness until lineage is complete, and keeps the queue poisoned/backpressured if manifest, segment, memory render, SQLite apply, or high-water evidence is incomplete. |
 | Perf matrix under release-lane load | Run the release-lane scale/cost workload with async apply enabled; prove p50/p95/p99 ack latency, max/p99 `hybrid_async_sqlite_apply_lag`, `hybrid_async_apply_debt_bytes`, `hybrid_async_apply_queue_depth`, oldest unapplied `batch_sequence`, poison count, typed backpressure count/duration, segment batch density, object PUT count, recovery elapsed time, replayed tail length, and request-id replay convergence stay within the configured release gates. |
 
-## Hybrid ProjectionImage Recovery (normative)
+## Historical dual-projection ProjectionImage recovery (non-normative)
 
 Hybrid recovery MUST avoid full-genesis replay on ordinary owner-local restart
 without treating local SQLite as the command authority.
@@ -545,7 +561,7 @@ a hint. Address that through a separately governed constant-time conditional-hea
 fetch of a genuinely unapplied tail is a separate recovery optimization and requires an async store path,
 the node-global dispatcher, generation cancellation, and byte/object/deadline permits before integration.
 
-## Hybrid Snapshot Authority and Segment Retention (normative)
+## Historical dual-projection snapshot authority and segment retention (non-normative)
 
 `objectlog/hybrid-strict` and `objectlog/hybrid-async` have two supported
 recovery modes:
@@ -754,20 +770,18 @@ themselves.
 | Element | Rule |
 |---------|------|
 | Reject 1-object-per-command | A backend configuration that would seal one command per segment in production MUST be rejected at queue/backend configuration time with `invalid-request` (API-001). It is available only behind an explicit `dev_unsafe_one_command_segments` flag for tests; that flag MUST NOT be settable in a production deployment profile. |
-| Reject missing CAS | If the configured object store lacks a usable conditional-write primitive and the deployment has not selected the Postgres-manifest-pointer fallback, queue/backend configuration MUST be rejected with `invalid-request` (see "Object-Store Capability Requirements"). |
+| Reject missing native authority | If the configured `filesystem` or `s3` provider cannot prove `NativeConditionalWrite`, queue/backend configuration MUST be rejected before publication (see "Object-Store Capability Requirements"). There is no PostgreSQL manifest-pointer path. |
 | Window sanity | `segment_max_latency_ms` MUST be `> 0`; it is the implementation of the profile's `max_commit_latency_ms` / commit-latency-bound knob. The effective claim/ack latency budget MUST be documented to callers because it bounds API-001 commit latency for this profile. |
 | Snapshot vs recovery window | `log_recovery_window_ms` MUST be `>= snapshot_interval_ms` so an unexpired snapshot always exists before its covered segments can expire. |
-| Hybrid pairing | `FIREWEED_PROJECTION_BACKEND=hybrid-strict` and `FIREWEED_PROJECTION_BACKEND=hybrid-async` are supported only with `FIREWEED_LOG_BACKEND=objectlog` until other pairings are intentionally implemented and tested. `memory/hybrid-*`, `sqlite/hybrid-*`, and `postgres/hybrid-*` MUST fail closed at startup. |
+| Canonical selectors | Log is exactly `filesystem` or `s3`; projection is exactly `memory`, `sqlite`, or `postgres`. Retired `objectlog`, `inmemory`, Hybrid, and combined selectors fail closed. |
 | Buffered-byte bounds | `FIREWEED_OBJECTLOG_BUFFERED_BYTES_GLOBAL` and `FIREWEED_OBJECTLOG_QUEUE_WAITING_BYTES` MUST be positive; the queue cap and optional `FIREWEED_OBJECTLOG_BUFFERED_BYTES_TENANT` MUST not exceed the global cap; and the segment target MUST not exceed the global cap. The composition root builds one node budget and injects it into every live object-log projection profile. |
 
 ## Runtime Wiring (normative)
 
-`objectlog/hybrid-strict` and `objectlog/hybrid-async` MUST use the generic
-object-log group-commit composition:
-
-```
-ComposedBackend<fireweed_objectlog::ObjectLog, HybridProjectionStore, InProcessControlPlane>
-```
+Every `filesystem`/`s3` × public-projection cell MUST use the generic native-async
+log/replay composition with the independently selected control plane. A
+projection-specific wrapper may isolate a whole blocking transaction, but it
+must not create a combined profile type or second public facade.
 
 The server composition root MUST open the segmented object-log axis through the
 same `ObjectLog::open_group_commit` path used by other object-log profiles, not a
@@ -877,9 +891,10 @@ The validation boundary is:
 
 - `cargo +1.92.0 test -p fireweed-service local_object_log_deployment_smoke_tests -- --ignored --nocapture`
   passes the local object-log deployment profile.
-- `cargo +1.92.0 test -p fireweed-objectlog object_log_commit_recovery_tests -- --nocapture`
-  passes group commit, replay, epoch fencing, object-store capability rejection,
-  and Postgres manifest-pointer fallback checks.
+- The historical `object_log_commit_recovery_tests` aggregate route is no longer
+  present. Its group-commit, replay, epoch-fencing, and native-authority rejection
+  obligations map to TD004-ACK-1, TD004-REC-1, TD004-FENCE-1, and TD004-AUTH-1
+  below; the governing test manifest must assign current concrete routes.
 - `FIREWEED_BACKEND_PROFILE=object_log_sqlite_projection FIREWEED_E2E_SCALE=smoke FIREWEED_E2E_SEED=1801 cargo +1.92.0 test -p fireweed-service --test product_workflows -- --ignored --nocapture`
   passes all nine product workflows and emits verification-ledger rows validated
   by `fireweed-verify-ledger --strict`.
@@ -903,8 +918,8 @@ The following cases define the required evidence surface:
   writer after segment write but before manifest commit and prove the command is NOT acked and is safely
   re-driven by `request_id`.
 - Reject 1-object-per-command: configuration is rejected outside the dev-unsafe flag.
-- Object-store CAS capability: a store without conditional write is rejected OR runs the
-  Postgres-manifest-pointer fallback; the fallback still enforces single-writer fencing.
+- Native publication capability: a provider without enforced conditional
+  create/update is rejected before publication; PostgreSQL cannot substitute.
 - Current-epoch fencing: a writer holding epoch E whose queue was reassigned to E+1 in the control plane
   (WITHOUT the new owner having yet written a data manifest entry) MUST fail its manifest commit, discard
   its buffer, and roll back reservations; the new epoch holder reproduces acknowledged state. (This is
@@ -1038,27 +1053,30 @@ keep conservative retention or disable the async profile, never to infer missing
 |------|------|--------|------------|
 | Ack latency unacceptable for some callers | M | M | Document the window as a first-class knob; steer latency-sensitive queues to `postgres_native`. |
 | SQLite projection diverges from durable log | M | H | Apply only committed commands in `sequence` order with persisted applied position; reservations are non-authoritative; conformance replay + snapshot tests. |
-| Object store lacks/weak conditional write | M | H | CAS is a required capability: reject the queue or run the Postgres-manifest-pointer fallback (current-epoch CAS in the control plane); document supported stores. |
+| Object store lacks/weak conditional write | M | H | `NativeConditionalWrite` is required: reject the provider before publication and document supported primitives; do not redirect manifest authority through PostgreSQL. |
 | Stale-epoch writer commits after reassignment | M | H | Manifest commit validates against the CURRENT control-plane epoch (or epoch fence published to manifest before handoff), not manifest-recorded epoch alone; conformance test. |
 | Snapshot/replay too slow at 10M items | M | M | Measure replay rate; tune `snapshot_interval_*`; bound recovery window. |
 | Incomplete/gated cohort stalls atomic claim or recovery | M | H | Cohort row locked + rechecked under lock before leasing; `CohortExpired` linearized before terminal apply; liveness bound enforced `<= progress_bound_ms`; conformance replay test. |
 | Segment expiry deletes state still needed for recovery | L | H | Gate expiry on committed-snapshot coverage + recovery window; conformance test. |
 
-## Review Checklist
+## Requirement and evidence classification
 
-- [x] TD-001 traits map to object-log segments + SQLite projection + snapshot/replay + Postgres control plane (`fireweed-objectlog`, `fireweed-sqlite`, `local_object_log_deployment_smoke_tests`).
-- [x] API-001 operations are preserved once a response returns; self read-after-write and bounded apply behavior are covered by product workflows and apply-before-return object-log tests.
-- [x] Ack occurs only after durable manifest commit (replay-response); operation's own effect is applied before return (`object_log_commit_recovery_tests_reopens_from_object_log_blob`, request-id replay tests).
-- [x] In-flight claim reservation prevents duplicate local claims; rollback/crash behavior is covered by object-log recovery and product crash-recovery workflows.
-- [x] Manifest commit validates the current control-plane (queue) epoch, not only manifest-recorded epoch (`object_log_commit_recovery_tests_current_epoch_fences_stale_writers` and reopen-before-data-commit coverage).
-- [x] Object-store conditional write is required; unsupported stores reject or use the Postgres manifest-pointer fallback (`object_log_commit_recovery_tests_rejects_missing_cas_without_fallback`, `object_log_commit_recovery_tests_postgres_manifest_pointer_fallback_keeps_epoch_fence`).
-- [x] Queue-scoped commands (`SetGates`) commit on the queue's single manifest — durable+visible atomically, no cross-shard convergence (ADR-008). (Prior-build `storage_conformance_multi_shard_tests` are retired as a target; the single-owner gate path is covered by product workflow gate rows.)
-- [x] Single per-group summary projection logical key `(tenant_id, queue_id, group_key)`; oldest-eligible is authoritative and counts may lag (`sqlite_projection_tests`, service metrics ground-truth tests).
-- [x] Gate flips use the G2 `gate_keys`/`SetGates` model plus exact-on-read anti-join; no second gate mechanism (`service_gate_tests`, storage gate conformance).
-- [x] Cohort (`fireweed_cohorts`) projection + shared lease + `CohortExpired`-before-terminal + replay parity are materialized in SQLite and covered by product callback cohort workflows.
-- [x] One-object-per-command is rejected in production (`object_log_commit_recovery_tests_rejects_production_one_object_per_command_config`).
-- [x] Group co-residency by construction makes `whole_group` / `whole_cohort` owner-local; `same_group_key` stays item-level (`product_workflow_marketo_group_batching_e2e`, `product_workflow_callback_cohort_e2e`).
-- [x] Recurring `rearm` / in-band `PurgeItems` ride the pipeline as ordinary durable/replayable commands (`product_workflow_jobs_connectors_recurring_e2e`, recurrence/purge suites).
-- [x] Eligibility uses the single API-001 Eligibility Precedence subsection (`core_eligibility_precedence_tests`, service/product workflow coverage).
-- [x] Conformance parity with `postgres_native` is covered by the TD-001 shared suite and object-log product smoke matrix.
-- [x] Scale/cost evidence uses TP-002 E3 vs E0 through source-backed release-gate beads (`pqueue-b1abd895`, `pqueue-472a09d4`, `pqueue-7e2b3132`); TD-004 mints no new evidence IDs.
+The previous checked checklist mixed normative requirements, historical build
+attestations, and route names that no longer exist. A checked box is not current
+test evidence. The governing test manifest owns concrete routes; TD-004 owns the
+stable requirement IDs and old-to-new semantic mapping:
+
+| Requirement | Preserved current semantics | Prior claim disposition |
+|---|---|---|
+| **TD004-AUTH-1** | Queue definition, epoch/head, and manifest successor publish only through `NativeConditionalWrite`; unsupported providers reject. | Replaces both the missing-CAS rejection claim and the retired PostgreSQL manifest-pointer positive. The old positive has no successor. |
+| **TD004-ACK-1** | No acknowledgement before manifest publication and the configured response barrier; the operation's own effect is visible before success. | Preserves the old reopen/apply-before-return claim without naming the absent aggregate route. |
+| **TD004-FENCE-1** | A stale epoch loses native head CAS, discards its buffer/reservations, and never acknowledges, including before the new owner writes data. | Preserves the old current-epoch test intent; authority moves from a PostgreSQL pointer to the native log head. |
+| **TD004-REC-1** | Snapshot/high-water plus a checksum-valid contiguous tail reproduces acknowledged state; disk-loss/genesis replay remains fail-closed. | Preserves snapshot/replay, request replay, cohort, recurrence, and purge recovery obligations. |
+| **TD004-RES-1** | Pending claim reservations prevent duplicate leases and roll back on CAS loss, timeout, fencing, or writer death. | Preserves the claim-reservation claim without treating prose as proof. |
+| **TD004-GC-1** | Production rejects one-command-per-object; queue-scoped commands remain one-queue atomic; eligibility, group/cohort, and gate behavior match API-001. | Preserves the non-authority checklist semantics; retired multi-shard and missing service-gate route names are not evidence. |
+| **TD004-PERF-1** | E3 records exact outcomes, progress, bounded resources, batch density, request cost, latency, and recovery for each declared provider/topology. | Historical bead IDs and ledgers remain lineage only; current evidence is selected by the governing manifest. |
+
+Existing product-workflow tests may satisfy parts of these requirements, but no
+route is considered complete merely because its historical name appeared in this
+document. Current closure requires discoverable, executable, manifest-bound
+evidence for every applicable `filesystem`/`s3` cell.

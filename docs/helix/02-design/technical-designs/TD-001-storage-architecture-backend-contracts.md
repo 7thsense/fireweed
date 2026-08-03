@@ -14,6 +14,7 @@ ddx:
     - orthogonal-storage-matrix-brief
     - concerns
     - prd
+  status: accepted
   review:
     self_hash: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
     deps:
@@ -73,10 +74,9 @@ Out of scope:
 - Queue-to-owner assignment, leases, epoch allocation, drain, reassignment, and
   recovery *mechanism*. TD-003 owns ownership and fencing; TD-001 defines only
   the fencing token (`expected_epoch` on `append_batch`).
-- The no-Postgres / object-store `ControlPlaneStore` implementation — committed
-  direction (ADR-008 §4: the object log provides per-queue multi-node fencing
-  and coordination via manifest CAS), designed and proven separately (TD-003
-  seam invariants; acquire→fence atomicity proof pending).
+- Additional `ControlPlaneStore` providers beyond the shipped in-process and
+  optional PostgreSQL implementations. The external control plane is an
+  independent composition axis, not a prerequisite for any log or projection.
 - Broad operator repair, purge, redrive, and backend migration APIs. Targeted
   in-band recurring teardown (`PurgeItems`, per-key/`item_id`) is in native scope
   (P0); broad operator purge/redrive/retention remains a separate P1 operator
@@ -95,7 +95,7 @@ The native API appends command records on the selected log, then applies those
 records to a query-optimized projection used for priority claim, lease renewal,
 finalization, and metrics. Typed `StorageConfig` (API-005) is the composition
 root: five public logs × three public projections. Postgres is a first-class log
-and projection backend and the preferred control-plane store; a single Postgres
+and projection backend and an optional shared control-plane store; a single Postgres
 deployment may host log and projection together when both axes select `postgres`.
 
 **Key Decisions**:
@@ -149,14 +149,13 @@ deployment may host log and projection together when both axes select `postgres`
   cross-queue. A relational backend MAY internally hash-partition its item table
   for vacuum/index-size isolation (TD-002), but that partition is a client-invisible
   storage detail, never an ownership or routing unit.
-- **Control plane is pluggable; Postgres is the default**: queue definitions,
+- **Control plane is pluggable; PostgreSQL is optional**: queue definitions,
   queue-to-owner assignment, storage axis selection, and epochs live in the
-  `ControlPlaneStore`. Postgres is the preferred and only v1-settled
-  implementation. The object-store control plane — the object log providing
-  per-queue multi-node fencing and coordination via its manifest-CAS series —
-  is **committed direction** (ADR-008 §4, product-owner decision 2026-07-05),
-  not v1-settled: its S3-CAS acquire→fence atomicity proof is sequenced build
-  work and it ships only after passing the TD-003 seam invariants.
+  `ControlPlaneStore`. `in_process` is the single-node/default composition and
+  `postgres` is the optional shared multi-node implementation. Neither changes
+  the selected log's publication authority: `filesystem` and `s3` publish
+  definitions, epochs, and manifest heads only through `NativeConditionalWrite`
+  on their own substrate; lack of that capability is a configuration error.
 - **Queue epochs fence execution**: fireweed does not run node discovery or
   cluster consensus. A control-plane assignment gives a worker authority for a
   `(tenant_id, queue_id)` epoch; stale workers must be fenced before they can
@@ -216,7 +215,7 @@ layer originally sketched as a `fireweed-storage` crate is realized as:
 
 ### New: `fireweed-postgres`
 
-- **Purpose**: Postgres `ControlPlaneStore`; later TD-002 expands this to
+- **Purpose**: optional shared Postgres `ControlPlaneStore`; TD-002 expands this to
   Postgres-native `LogStore` and `ProjectionStore`.
 - **Interfaces**: Postgres connection pool in; trait implementations out.
 - **Files**: `crates/fireweed-postgres/src/**`
@@ -244,7 +243,7 @@ Public storage is the orthogonal product of log and projection axes
 |------|---------------|----------------|
 | **Log** | `memory`, `sqlite`, `postgres`, `filesystem`, `s3` | Command append, epoch/fence authority, replay when durable (Class A) |
 | **Projection** | `memory`, `sqlite`, `postgres` | Serving, claim selection, validation, apply |
-| **Control plane** | (pluggable; Postgres default) | Queue definitions, placement, ownership — composed, not redefined here |
+| **Control plane** | `in_process` or optional `postgres` | Queue definitions, placement, ownership — independently composed, not a log/projection prerequisite |
 
 **Not public product values:** `hybrid`, `hybrid-async`, `hybrid-strict`,
 `turso`, `objectlog/*` profile names, `postgres/*` wildcards. Hybrid/async apply
@@ -293,8 +292,8 @@ product SKUs. Mapping of common cells onto capability traits:
 | `memory` × `memory` | B | In-process memory log | In-memory | n/a | Ephemeral; loses log and projection on process death |
 | `memory` × `sqlite` / `postgres` | B | In-process memory log | Durable projection | n/a | Projection-only reopen; no log rebuild |
 
-Control plane remains Postgres-preferred across compositions unless a later
-settled control-plane adapter is selected. Kafka and DynamoDB log backends are
+Control plane is independently selected: `in_process` is the default single-node
+provider and `postgres` is the optional shared provider. Kafka and DynamoDB log backends are
 **retired** (design targets only; ADR-007 cutover deleted Kafka). Every cell
 becomes usable for a queue only after it passes the shared backend conformance
 suite for its durability class.
@@ -506,8 +505,8 @@ pub trait ControlPlaneStore {
 }
 ```
 
-`ControlPlaneStore` is a **pluggable capability** (ADR-008): Postgres is the
-default and only v1-settled implementation. TD-003 adds the queue-ownership
+`ControlPlaneStore` is a **pluggable capability** (ADR-008): `in_process` and
+optional `postgres` are shipped implementations. TD-003 adds the queue-ownership
 operations (`register_owner`, `resolve_queue_owner`, `acquire_queue_lease`,
 `renew_queue_lease`, `begin_drain`, `release_queue_lease`) to this trait and owns
 their semantics; TD-001 specifies only the base definition/assignment/storage-axis
@@ -821,8 +820,9 @@ duplicated here; they come from the single `fireweed_group_summary`.
 
 ### External Dependencies
 
-- **Postgres**: preferred `ControlPlaneStore`; fallback is no service-mode queue
-  creation or queue routing until Postgres is restored.
+- **Control plane**: `in_process` for the default single-node composition or
+  optional PostgreSQL for shared multi-node coordination. Unavailability fails
+  ownership changes closed; it does not change log publication authority.
 - **Log backend**: Class A authoritative durable commit boundary (or Class B
   in-process ordering); fallback is to reject mutating operations with retryable
   commit errors when the log cannot accept appends.
@@ -988,7 +988,7 @@ duplicated here; they come from the single `fireweed_group_summary`.
 2. Define `fireweed-storage` traits and conformance harness.
    Files: `crates/fireweed-storage/src/**`.
    Tests: backend-agnostic conformance fixtures (core / log / relational-durability).
-3. Implement Postgres `ControlPlaneStore`.
+3. Implement optional Postgres `ControlPlaneStore`.
    Files: `crates/fireweed-postgres/src/control_plane/**`.
    Tests: tenant-scoped queue create/read, queue assignment, storage axes.
 4. Implement Postgres `LogStore` and `ProjectionStore` per TD-002
@@ -1044,8 +1044,8 @@ traceability; Rust workspace setup bead filed from ADR-003.
       not public projection axes (`orthogonal-storage-matrix-brief`).
 - [x] Durability Class A vs Class B documented (ADR-013); silent null-log
       forbidden; Class B does not claim Class A guarantees.
-- [x] Control plane is a pluggable capability; Postgres preference preserved
-      (ADR-008; object-store impl deferred).
+- [x] Control plane is a pluggable capability; `in_process` is the single-node
+      default and `postgres` is optional shared coordination (ADR-008).
 - [x] Backend capability interfaces are explicit; the owned/routed unit is the
       whole queue (`QueueKey`), no `ShardKey` in the contract surface (ADR-008).
 - [x] Durable ack boundary is explicit per durability class.

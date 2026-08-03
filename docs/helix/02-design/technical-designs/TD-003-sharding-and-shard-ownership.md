@@ -7,6 +7,7 @@ ddx:
     - adr-queue-as-shard-unit-and-projection-families
     - prd
     - concerns
+  status: accepted
   review:
     self_hash: b98590bc7a51f8e904052d64aaa6ab4d8a9c9729d155d17ee0823ffcf6b64a0d
     deps:
@@ -31,8 +32,8 @@ owner. Per ADR-008, **the queue is the unit of sharding**: a whole queue is
 owned by exactly one node at a time, and horizontal scale is achieved by
 distributing *queues* across nodes — there is no intra-queue sharding, no
 cross-shard claim fan-out, and no cross-shard progress aggregation. This design
-is backend-neutral: it constrains every backend profile in TD-001, and TD-002
-(`postgres_native`) and TD-004 (`object_log_sqlite_projection`) inherit it.
+is backend-neutral: it constrains every storage cell in TD-001; the PostgreSQL
+log family in TD-002 and the `filesystem`/`s3` log families in TD-004 inherit it.
 
 In scope:
 
@@ -72,10 +73,9 @@ Out of scope:
 - Operator APIs to trigger reassign/drain (P1 operator contract).
 - Cross-tenant or cross-queue placement policy and capacity-based bin-packing
   (P1).
-- The no-Postgres / object-store `ControlPlaneStore` implementation — committed
-  direction per ADR-008 §4 (the object log provides per-queue multi-node fencing
-  and coordination), but designed and reviewed separately; this design specs only
-  the pluggable seam, see "Control-Plane Pluggability".
+- Additional control-plane providers beyond the shipped `in_process` and
+  optional `postgres` implementations; this design specifies the pluggable seam
+  and does not require a particular provider.
 
 ## Technical Approach
 
@@ -122,9 +122,9 @@ partitions it across multiple queues at the application layer (ADR-008).
 
 **Trade-offs**:
 
-- We gain single-writer-per-queue safety with a familiar transactional store, but
+- We gain single-writer-per-queue safety with a provider-neutral authority seam, but
   the control plane must stay available for ownership changes (assignment is read
-  from the control plane; the existing fallback in TD-001 — reject mutations with
+  from the configured provider; the fail-closed rule in TD-001 — reject mutations with
   retryable commit errors — applies).
 - We gain deterministic placement (cheap routing, no rebalance chatter), and
   because the owned unit is the whole queue, a claim never fans out across owners
@@ -404,24 +404,16 @@ owner's summary rows; there is no cross-owner merge. Results expose the summary
 ## Control-Plane Pluggability
 
 `ControlPlaneStore` (membership + leases + epoch allocation) is a **pluggable
-capability** (ADR-008). The default and only v1-settled implementation is
-Postgres (transactional acquire/renew/epoch allocation); ADR-001's bar — "Postgres
-is preferred; a backend-specific control plane may be supported later but must
-justify" — holds and is met. The no-Postgres / object-store implementation (S3
-conditional-PUT lease + heartbeat membership + epoch CAS), enabling a pure
-object-log + local-projection deployment, is **committed direction** (ADR-008 §4,
-product-owner decision 2026-07-05: the object log provides multi-node fencing and
-coordination at the per-queue level). The S3-CAS multi-object acquire→fence
-atomicity design must still be proven before it is specified as settled — that
-proof is sequenced build work, not an open question. This design specs only the
-pluggable **seam**; the object-store implementation gets its own fresh-eyes
-review when it lands.
+capability** (ADR-008). `in_process` is the shipped single-node/default provider;
+`postgres` is the shipped optional shared provider for multi-node coordination.
+The storage axes do not imply either provider. A future provider must satisfy the
+same seam and receive its own design review; this document does not pre-approve
+an object-store control plane.
 
 **Seam contract (what any `ControlPlaneStore` implementation MUST provide).** The
 seam is substrate-neutral; an implementation is admissible only if it upholds these
-invariants — which the Postgres implementation obtains for free from a single
-serializable transaction, and which the committed object-store implementation MUST
-prove out before it is specified:
+invariants. PostgreSQL obtains them from a serializable transaction; any future
+provider must prove the same behavior before it is selectable:
 
 | Invariant | Requirement |
 |-----------|-------------|
@@ -429,10 +421,10 @@ prove out before it is specified:
 | Monotonic epoch allocation | `assignment_epoch` is allocated strictly increasing per queue and never repeats or decreases, even across acquire races and reclaims (Epoch monotonicity, above). |
 | Atomic acquire→fence ordering | The acquired epoch MUST become durable and binding on the log **before** the new owner serves any claim or appends any data segment (Single Authoritative Fencing Rule step 1). On a non-transactional substrate this multi-object ordering (lease record + log/manifest epoch) is the hard part the spike must establish. |
 | Bounded staleness on resolve | `resolve_queue_owner` MAY return a stale `active_owner`/`state`, but a stale result MUST be *safe*: acting on it can only fail closed (the fenced append rejects a deposed owner), never produce two live writers. |
-| Fail-closed unavailability | When the control plane is unreachable, existing owners keep serving under live leases and new acquisitions/renewals fail with a retryable error (TD-001 control-plane fallback); no append proceeds on an unconfirmed epoch. |
+| Fail-closed unavailability | When the configured control plane is unreachable, existing owners keep serving only under live confirmed leases and new acquisitions/renewals fail with a retryable error; no append proceeds on an unconfirmed epoch. |
 
-The trait below is the seam; backend DDL/CAS mechanics live in TD-002 (Postgres)
-and the object-store control-plane design (TD-004 territory).
+The trait below is the seam; PostgreSQL provider mechanics live with TD-002.
+TD-004 owns native object-log publication and does not define another control-plane provider.
 
 ## API / Interface Design
 
@@ -524,8 +516,9 @@ pub trait ControlPlaneStore { // additions to the TD-001 trait
 
 ## Data Model Changes
 
-TD-003 defines logical records; backend DDL belongs in TD-002 (Postgres) /
-TD-004 (object-log control plane is still Postgres per ADR-001 in v1). The
+TD-003 defines logical records; backend DDL belongs in the selected control-plane
+provider. PostgreSQL DDL is in TD-002; TD-004 owns object-log publication, not a
+mandatory control plane. The
 `QueueAssignment` record extends TD-001; a worker registry is added.
 
 ```text
@@ -623,8 +616,8 @@ ownership/background resource and still meets its progress bound. Validated by
 
 | Profile | Queue lease store | Append fence | Recovery |
 |---------|-------------------|--------------|----------|
-| `postgres_native` (TD-002) | Postgres queue-owner row, transactional acquire/renew | `assignment_epoch` updated on the queue-owner row in the acquire transaction; the data-plane append transaction validates `expected_epoch == current assignment_epoch` (TD-002 stale-epoch reject). The acquire transaction IS the durable fence. | Normal reconnect: the DB-resident projection already holds acknowledged state at its persisted applied-high-water; recovery reads the current epoch and resumes. Per ADR-013 the projection is a rebuildable cache, not authoritative: it MUST also be reconstructable by replaying the persisted command log from genesis or a snapshot (migration tracked). |
-| `object_log_sqlite_projection` (TD-004, D4b) | Postgres `ControlPlaneStore` in v1 (the object-store control plane — the object log providing per-queue fencing/coordination via manifest CAS — is committed direction, ADR-008 §4, acquire→fence proof pending) | On acquire, the new owner MUST commit an epoch-fence manifest entry advancing the manifest's recorded current epoch to `E+1` via CAS BEFORE any data segment; thereafter manifest commit MUST reject any `expected_epoch` not equal to the manifest's recorded current epoch. | Recovery = latest SQLite snapshot from object storage + replay sealed segments after the snapshot position (ADR-001 S3/Object-Log section). |
+| `postgres` log × any public projection (TD-002) | Independently selected `in_process` or optional `postgres` provider | The PostgreSQL log transaction validates `expected_epoch` against its durable current epoch; an optional PostgreSQL control plane may coordinate the lease but is not the projection or log selector. | Replay the durable PostgreSQL log from projection high-water; a durable projection may accelerate but never replaces Class A log authority. |
+| `filesystem` / `s3` log × any public projection (TD-004) | Independently selected `in_process` or optional `postgres` provider | The log publishes the epoch/head and every manifest successor with `NativeConditionalWrite`. A provider without enforced native conditional publication is rejected; there is no PostgreSQL manifest-pointer fallback. | Recover the latest valid projection snapshot/high-water plus the contiguous sealed log tail. |
 
 Both committed v1 profiles MUST pass the TD-003 conformance scenarios (see
 Testing).
@@ -657,7 +650,7 @@ TD-003 is not satisfied until these scenarios pass for every backend profile.
 | Risk | Prob | Impact | Mitigation |
 |------|------|--------|------------|
 | Stale writer after epoch advance but before new data segment | M | H | Single Authoritative Fencing Rule: epoch durably fenced into the log at acquire; append rejects any non-current epoch; dedicated conformance row. |
-| Control-plane unavailability blocks ownership changes | M | M | Existing owners keep serving under live leases; new acquisitions fail closed (TD-001 control-plane fallback); appends never proceed on a stale epoch. |
+| Control-plane unavailability blocks ownership changes | M | M | Existing owners keep serving only under live confirmed leases; new acquisitions fail closed; appends never proceed on a stale epoch. |
 | Lease TTL too low causes ownership churn | M | M | TTL >> renew interval and GC pause; safety is epoch-based so churn only costs recovery, not correctness. |
 | Versioned authority history makes handoff metadata reads grow with queue lifetime | H | H | Treat the head as mutable authority that cannot be cached. Design a separately reviewed constant-time conditional-head primitive before adding handoff warmup; TP-002 records physical request amplification. |
 | Slow/indefinite drain hides a progress-bound violation | M | H | Owner-liveness guard counts draining/unowned queues; `drain_deadline_ms < progress_bound_ms`; stalled-queue conformance test. |
@@ -671,7 +664,7 @@ TD-003 is not satisfied until these scenarios pass for every backend profile.
       is postgres-only and runtime-refused elsewhere (object-log single-owner).
 - [x] No external coordinator / consensus (ADR-001, concerns.md override).
 - [x] Storage-backed queue leases owned by the pluggable `ControlPlaneStore`
-      (Postgres default; object-store deferred, ADR-008).
+      (`in_process` default for single-node; `postgres` optional for shared multi-node coordination).
 - [x] Single authoritative fencing rule: epoch durably fenced before new lease
       usable; append rejects any non-current epoch (no stale-writer window).
 - [x] Deterministic queue-to-owner assignment (HRW over `((tenant,queue),
