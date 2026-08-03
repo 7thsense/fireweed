@@ -10,7 +10,9 @@
 )]
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -18,7 +20,7 @@ use bytes::Bytes;
 use fireweed_core::QueueDefinition;
 use fireweed_engine::{
     AsyncLogStore, CommandEnvelope, CommandPage, CommandPosition, DurabilityClass, EngineError,
-    EngineResult, QueueKey,
+    EngineResult, ProjectionSnapshot, QueueKey, SnapshotRef,
 };
 use object_log::{
     BlobStore, Durability, FlushConfig, LocalBlobStore, LogEngine, ManifestSequencer,
@@ -93,9 +95,43 @@ struct HighWaterDoc {
     sequence: u64,
 }
 
+#[derive(Serialize, Deserialize)]
+struct SnapshotMetaDoc {
+    backend_epoch: u64,
+    sequence: u64,
+    ref_id: String,
+}
+
 #[derive(Clone, Serialize, Deserialize, Default)]
 struct CatalogDoc {
     definitions: Vec<QueueDefinition>,
+}
+
+static SNAPSHOT_ORDINAL: AtomicU64 = AtomicU64::new(0);
+
+fn partition_component(shard: &QueueKey) -> String {
+    let partition = partition_key(shard);
+    let mut encoded = String::with_capacity(partition.0.len() * 2);
+    for byte in partition.0.as_bytes() {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
+}
+
+fn next_snapshot_ref_id() -> String {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let ordinal = SNAPSHOT_ORDINAL.fetch_add(1, Ordering::Relaxed);
+    format!("{timestamp:x}-{:x}-{ordinal:x}", std::process::id())
+}
+
+fn valid_snapshot_ref_id(ref_id: &str) -> bool {
+    !ref_id.is_empty()
+        && ref_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
 /// Fireweed log axis backed by crates.io object-log.
@@ -206,6 +242,22 @@ impl<S: Sequencer<Meta = ()>> ObjectLogEngineStore<S> {
             "{}high_water/{}",
             self.meta_prefix,
             partition_key(shard).0.replace('\0', "/")
+        )
+    }
+
+    fn latest_snapshot_key(&self, shard: &QueueKey) -> String {
+        format!(
+            "{}snapshots/{}/latest.json",
+            self.meta_prefix,
+            partition_component(shard)
+        )
+    }
+
+    fn snapshot_payload_key(&self, shard: &QueueKey, ref_id: &str) -> String {
+        format!(
+            "{}snapshots/{}/objects/{ref_id}.bin",
+            self.meta_prefix,
+            partition_component(shard)
         )
     }
 
@@ -489,6 +541,14 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
         position: CommandPosition,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         async move {
+            if position.queue != shard {
+                return Err(EngineError::Invalid("high-water queue mismatch"));
+            }
+            if let Some(current) = AsyncLogStore::high_water(self, shard.clone()).await?
+                && position.precedes(&current)
+            {
+                return Err(EngineError::Invalid("high-water regression"));
+            }
             self.high_water
                 .lock()
                 .expect("high_water")
@@ -501,6 +561,93 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
                 },
             )
             .await
+        }
+    }
+
+    fn write_snapshot(
+        &self,
+        shard: QueueKey,
+        position: CommandPosition,
+        snapshot: ProjectionSnapshot,
+    ) -> impl std::future::Future<Output = EngineResult<SnapshotRef>> + Send {
+        async move {
+            if position.queue != shard {
+                return Err(EngineError::Invalid("snapshot position queue mismatch"));
+            }
+
+            let ref_id = next_snapshot_ref_id();
+            self.blob
+                .put(
+                    &self.snapshot_payload_key(&shard, &ref_id),
+                    Bytes::from(snapshot.payload),
+                )
+                .await
+                .map_err(store_err)?;
+            self.put_json(
+                &self.latest_snapshot_key(&shard),
+                &SnapshotMetaDoc {
+                    backend_epoch: position.backend_epoch,
+                    sequence: position.sequence,
+                    ref_id: ref_id.clone(),
+                },
+            )
+            .await?;
+
+            Ok(SnapshotRef {
+                queue: shard,
+                position,
+                ref_id,
+            })
+        }
+    }
+
+    fn latest_snapshot(
+        &self,
+        shard: QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<Option<SnapshotRef>>> + Send {
+        async move {
+            let Some(bytes) = self
+                .blob
+                .get(&self.latest_snapshot_key(&shard))
+                .await
+                .map_err(store_err)?
+            else {
+                return Ok(None);
+            };
+            let doc: SnapshotMetaDoc = serde_json::from_slice(&bytes).map_err(store_err)?;
+            if !valid_snapshot_ref_id(&doc.ref_id) {
+                return Err(EngineError::Storage(
+                    "invalid object-log snapshot reference metadata".into(),
+                ));
+            }
+            Ok(Some(SnapshotRef {
+                position: CommandPosition::new(shard.clone(), doc.backend_epoch, doc.sequence),
+                queue: shard,
+                ref_id: doc.ref_id,
+            }))
+        }
+    }
+
+    fn read_snapshot(
+        &self,
+        snapshot_ref: SnapshotRef,
+    ) -> impl std::future::Future<Output = EngineResult<ProjectionSnapshot>> + Send {
+        async move {
+            if snapshot_ref.position.queue != snapshot_ref.queue {
+                return Err(EngineError::Invalid("snapshot position queue mismatch"));
+            }
+            if !valid_snapshot_ref_id(&snapshot_ref.ref_id) {
+                return Err(EngineError::Invalid("invalid snapshot reference"));
+            }
+            let payload = self
+                .blob
+                .get(&self.snapshot_payload_key(&snapshot_ref.queue, &snapshot_ref.ref_id))
+                .await
+                .map_err(store_err)?
+                .ok_or(EngineError::NotFound)?;
+            Ok(ProjectionSnapshot {
+                payload: payload.to_vec(),
+            })
         }
     }
 
@@ -524,7 +671,8 @@ mod tests {
         RetryPolicy, TenantId, UtcTimestamp,
     };
     use fireweed_engine::{
-        AsyncLogStore, CommandChecksum, CommandEnvelope, CommandId, QueueCommand, QueueKey,
+        AsyncLogStore, CommandChecksum, CommandEnvelope, CommandId, CommandPosition, EngineError,
+        ProjectionSnapshot, QueueCommand, QueueKey, SnapshotRef,
     };
 
     use super::ObjectLogEngineStore;
@@ -587,6 +735,133 @@ mod tests {
         assert_eq!(page.entries.len(), 1);
         assert_eq!(page.entries[0].0, positions[0]);
         assert_eq!(page.entries[0].1.command_id, env.command_id);
+    }
+
+    #[tokio::test]
+    async fn local_snapshots_are_distinct_readable_and_durable_across_reopen() {
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-olog-snapshot-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let def = qdef();
+        let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        let position = CommandPosition::new(shard.clone(), 3, 17);
+        let flush = FlushConfig {
+            linger: std::time::Duration::ZERO,
+            ..FlushConfig::default()
+        };
+
+        let (first, second) = {
+            let log = ObjectLogEngineStore::open_local(&root, flush)
+                .await
+                .unwrap();
+            log.ensure_shard(shard.clone()).await.unwrap();
+            assert!(log.latest_snapshot(shard.clone()).await.unwrap().is_none());
+            let other_shard = QueueKey::new(
+                TenantId::new("other").unwrap(),
+                QueueId::new("queue").unwrap(),
+            );
+            assert!(matches!(
+                log.write_snapshot(
+                    other_shard.clone(),
+                    position.clone(),
+                    ProjectionSnapshot {
+                        payload: b"wrong-queue".to_vec(),
+                    },
+                )
+                .await,
+                Err(EngineError::Invalid("snapshot position queue mismatch"))
+            ));
+
+            let first = log
+                .write_snapshot(
+                    shard.clone(),
+                    position.clone(),
+                    ProjectionSnapshot {
+                        payload: b"first".to_vec(),
+                    },
+                )
+                .await
+                .unwrap();
+            let second = log
+                .write_snapshot(
+                    shard.clone(),
+                    position.clone(),
+                    ProjectionSnapshot {
+                        payload: b"second".to_vec(),
+                    },
+                )
+                .await
+                .unwrap();
+
+            assert_ne!(first.ref_id, second.ref_id);
+            assert_eq!(
+                log.latest_snapshot(shard.clone())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .ref_id,
+                second.ref_id
+            );
+            assert_eq!(
+                log.read_snapshot(first.clone()).await.unwrap().payload,
+                b"first"
+            );
+            assert_eq!(
+                log.read_snapshot(second.clone()).await.unwrap().payload,
+                b"second"
+            );
+            assert!(matches!(
+                log.read_snapshot(SnapshotRef {
+                    queue: shard.clone(),
+                    position: position.clone(),
+                    ref_id: "missing".into(),
+                })
+                .await,
+                Err(EngineError::NotFound)
+            ));
+            assert!(matches!(
+                log.read_snapshot(SnapshotRef {
+                    queue: shard.clone(),
+                    position: CommandPosition::new(other_shard, 3, 17),
+                    ref_id: second.ref_id.clone(),
+                })
+                .await,
+                Err(EngineError::Invalid("snapshot position queue mismatch"))
+            ));
+            (first, second)
+        };
+
+        let reopened = ObjectLogEngineStore::open_local(&root, flush)
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .latest_snapshot(shard.clone())
+                .await
+                .unwrap()
+                .unwrap()
+                .ref_id,
+            second.ref_id
+        );
+        assert_eq!(
+            reopened.read_snapshot(first).await.unwrap().payload,
+            b"first"
+        );
+        assert_eq!(
+            reopened.read_snapshot(second).await.unwrap().payload,
+            b"second"
+        );
+
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// fireweed-481d3e43: reopen must not overwrite sealed data objects (object-log v0.3.1).

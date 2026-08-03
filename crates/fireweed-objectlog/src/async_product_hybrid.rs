@@ -1510,6 +1510,49 @@ impl fireweed_engine::HistoricalProjectionRead for AsyncObjectLogHybridBackend {
     }
 }
 
+impl fireweed_engine::SnapshotStore for AsyncObjectLogHybridBackend {
+    fn write_snapshot(
+        &self,
+        shard: &QueueKey,
+        position: fireweed_engine::CommandPosition,
+        snapshot: fireweed_engine::ProjectionSnapshot,
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::SnapshotRef>> + Send {
+        AsyncLogStore::write_snapshot(self.log.as_ref(), shard.clone(), position, snapshot)
+    }
+
+    fn latest_snapshot(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<Option<fireweed_engine::SnapshotRef>>> + Send
+    {
+        AsyncLogStore::latest_snapshot(self.log.as_ref(), shard.clone())
+    }
+
+    fn read_snapshot(
+        &self,
+        snapshot_ref: &fireweed_engine::SnapshotRef,
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::ProjectionSnapshot>> + Send
+    {
+        AsyncLogStore::read_snapshot(self.log.as_ref(), snapshot_ref.clone())
+    }
+
+    fn high_water(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<Option<fireweed_engine::CommandPosition>>> + Send
+    {
+        AsyncLogStore::high_water(self.log.as_ref(), shard.clone())
+    }
+
+    fn set_high_water(
+        &self,
+        shard: &QueueKey,
+        position: fireweed_engine::CommandPosition,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        AsyncLogStore::set_high_water(self.log.as_ref(), shard.clone(), position)
+    }
+}
+
 impl AsyncObjectLogHybridBackend {
     /// Borrow the authoritative log axis (lifecycle / diagnostics).
     pub fn with_log<R>(&self, f: impl FnOnce(&ObjectLogEngineStore) -> R) -> R {

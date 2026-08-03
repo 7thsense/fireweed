@@ -1442,6 +1442,48 @@ impl LogRead for AsyncObjectLogMemoryBackend {
     }
 }
 
+impl fireweed_engine::SnapshotStore for AsyncObjectLogMemoryBackend {
+    fn write_snapshot(
+        &self,
+        shard: &QueueKey,
+        position: CommandPosition,
+        snapshot: fireweed_engine::ProjectionSnapshot,
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::SnapshotRef>> + Send {
+        AsyncLogStore::write_snapshot(self.log.as_ref(), shard.clone(), position, snapshot)
+    }
+
+    fn latest_snapshot(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<Option<fireweed_engine::SnapshotRef>>> + Send
+    {
+        AsyncLogStore::latest_snapshot(self.log.as_ref(), shard.clone())
+    }
+
+    fn read_snapshot(
+        &self,
+        snapshot_ref: &fireweed_engine::SnapshotRef,
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::ProjectionSnapshot>> + Send
+    {
+        AsyncLogStore::read_snapshot(self.log.as_ref(), snapshot_ref.clone())
+    }
+
+    fn high_water(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<Option<CommandPosition>>> + Send {
+        AsyncLogStore::high_water(self.log.as_ref(), shard.clone())
+    }
+
+    fn set_high_water(
+        &self,
+        shard: &QueueKey,
+        position: CommandPosition,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        AsyncLogStore::set_high_water(self.log.as_ref(), shard.clone(), position)
+    }
+}
+
 /// Harness probe for AC-TXN-3 mid-pipeline request_id cuts (append→apply window).
 impl RequestIdReplayProbe for AsyncObjectLogMemoryBackend {
     fn build_request_id_push_envelope(
