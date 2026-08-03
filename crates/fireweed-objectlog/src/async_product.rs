@@ -5,6 +5,11 @@
 //! against this concrete product only at the open edge; elsewhere use port traits.
 //! See [`crate::commit_surface`] for the Strict capability decision.
 
+#![allow(
+    clippy::manual_async_fn,
+    reason = "port traits deliberately expose explicit Send future return types"
+)]
+
 use std::sync::Arc;
 
 use bytes::Bytes;

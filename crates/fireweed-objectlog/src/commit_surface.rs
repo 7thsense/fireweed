@@ -99,6 +99,10 @@ pub enum PreparedCommitTransition {
 }
 
 /// Plan a Strict `commit_transition`. Caller submits envelopes then calls [`record_commit_idempotency`].
+#[allow(
+    clippy::too_many_arguments,
+    reason = "commit planning keeps authority, identity, and idempotency inputs explicit"
+)]
 pub async fn prepare_commit_transition<P>(
     projection: &InProcessProjectionStore<P>,
     control: &InProcessControlPlane,

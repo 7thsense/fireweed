@@ -5,6 +5,11 @@
 //! `ResponseBarrier::Strict` path), success is atomic response-after-apply and the product
 //! advertises full commit-transition capabilities (see [`crate::commit_surface`]).
 
+#![allow(
+    clippy::manual_async_fn,
+    reason = "port traits deliberately expose explicit Send future return types"
+)]
+
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -720,7 +725,7 @@ fn configure_hybrid(
     let mut store = store
         .with_deferred_flush_chunk(hybrid.deferred_flush_chunk)
         .with_strict_apply(hybrid.strict);
-    if let Some(thresholds) = hybrid.async_monitor.clone() {
+    if let Some(thresholds) = hybrid.async_monitor {
         store = store.with_async_monitor(thresholds);
     }
     store

@@ -121,16 +121,15 @@ where
     };
 
     let mut from: Option<CommandPosition> = None;
-    if use_projection_high_water {
-        if let Some(hw) =
+    if use_projection_high_water
+        && let Some(hw) =
             AsyncProjectionStore::recovery_high_water(projection, shard.clone()).await?
-        {
-            stats.snapshot_used = true;
-            // High-water is the last applied position; stats.start_seq is the exclusive count
-            // of commands already materialised (0-based sequence + 1).
-            stats.start_seq = hw.sequence.saturating_add(1);
-            from = Some(hw);
-        }
+    {
+        stats.snapshot_used = true;
+        // High-water is the last applied position; stats.start_seq is the exclusive count
+        // of commands already materialised (0-based sequence + 1).
+        stats.start_seq = hw.sequence.saturating_add(1);
+        from = Some(hw);
     }
 
     let mut tail_replayed = 0u64;

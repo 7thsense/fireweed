@@ -4,6 +4,11 @@
 //! the engine sequencer map 1:1 onto [`CommandPosition::sequence`]. Epoch and high-water metadata
 //! live in dedicated blob keys so they survive reopen with a [`object_log::ManifestSequencer`].
 
+#![allow(
+    clippy::manual_async_fn,
+    reason = "AsyncLogStore deliberately exposes explicit Send future return types"
+)]
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};

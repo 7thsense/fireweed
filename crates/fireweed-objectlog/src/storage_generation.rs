@@ -151,16 +151,16 @@ pub async fn reject_incompatible_storage_generation(
         }
         if key_looks_like_fwsg(&key) {
             // Prefer magic confirmation for `.seg` objects when present.
-            if key.ends_with(".seg") {
-                if let Some(bytes) = blob.get(&key).await.map_err(store_err)? {
-                    if bytes.len() >= 4 && &bytes[..4] == FWSG_SEGMENT_MAGIC.as_slice() {
-                        fwsg_hit = Some(format!("FWSG magic in object key shape …{}", tail(&key)));
-                        break;
-                    }
-                    // Non-magic `.seg` still indicates old layout naming.
-                    fwsg_hit = Some(format!(".seg key without LogEngine prefix …{}", tail(&key)));
+            if key.ends_with(".seg")
+                && let Some(bytes) = blob.get(&key).await.map_err(store_err)?
+            {
+                if bytes.len() >= 4 && &bytes[..4] == FWSG_SEGMENT_MAGIC.as_slice() {
+                    fwsg_hit = Some(format!("FWSG magic in object key shape …{}", tail(&key)));
                     break;
                 }
+                // Non-magic `.seg` still indicates old layout naming.
+                fwsg_hit = Some(format!(".seg key without LogEngine prefix …{}", tail(&key)));
+                break;
             }
             fwsg_hit = Some(format!("FWSG key shape …{}", tail(&key)));
             break;

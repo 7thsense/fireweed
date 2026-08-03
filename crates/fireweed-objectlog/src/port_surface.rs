@@ -91,6 +91,10 @@ pub struct PreparedUpsert {
 }
 
 /// Plan a pending-key upsert against the live projection.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "upsert planning keeps every caller-supplied mutation field explicit"
+)]
 pub async fn prepare_upsert<P>(
     projection: &InProcessProjectionStore<P>,
     control: &InProcessControlPlane,
@@ -222,6 +226,10 @@ pub enum PreparedBatchUpdate {
 }
 
 /// Plan an API-001 BatchUpdate.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "batch planning keeps projection, authority, and idempotency inputs explicit"
+)]
 pub async fn prepare_batch_update<P>(
     projection: &InProcessProjectionStore<P>,
     control: &InProcessControlPlane,
@@ -488,6 +496,10 @@ where
 }
 
 /// Result of planning claim_by_query.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the internal plan result avoids allocating the single-use proceed path"
+)]
 pub enum PreparedClaimByQuery {
     Replay(Claimed),
     Proceed {
@@ -680,6 +692,10 @@ where
 }
 
 /// Result of planning claim_by_item_ids.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the internal plan result avoids allocating the single-use proceed path"
+)]
 pub enum PreparedClaimByItemIds {
     Replay(ClaimByItemIdsResponse),
     Proceed {
@@ -843,6 +859,10 @@ where
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the idempotency record mirrors the complete durable claim outcome"
+)]
 pub fn record_claim_by_item_ids_idempotency(
     claim_by_item_ids_idempotency: &ClaimByItemIdsIdempotency,
     shard: &QueueKey,
@@ -867,6 +887,10 @@ pub fn record_claim_by_item_ids_idempotency(
 }
 
 /// Plan update_fields (validate + envelope). Returns new item_version after apply is caller's job.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "update planning keeps the complete public mutation request explicit"
+)]
 pub async fn prepare_update_fields<P>(
     projection: &InProcessProjectionStore<P>,
     control: &InProcessControlPlane,
@@ -916,6 +940,10 @@ where
 }
 
 /// Plan a reschedule (priority/not_before) UpdateFields envelope.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "reschedule planning keeps both schedule dimensions and version fence explicit"
+)]
 pub fn prepare_reschedule<P>(
     projection: &InProcessProjectionStore<P>,
     ids: &SeqIdGen,

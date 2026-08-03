@@ -4,6 +4,11 @@
 //! (atomic response-after-apply) and advertises full commit-transition capabilities
 //! (see [`crate::commit_surface`]).
 
+#![allow(
+    clippy::manual_async_fn,
+    reason = "port traits deliberately expose explicit Send future return types"
+)]
+
 use std::sync::Arc;
 
 use bytes::Bytes;
