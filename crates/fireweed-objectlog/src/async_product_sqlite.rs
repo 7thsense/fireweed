@@ -690,9 +690,17 @@ impl ReclaimPort for AsyncObjectLogSqliteBackend {
 impl ReclaimDriver for AsyncObjectLogSqliteBackend {
     fn tick(
         &self,
-        _now: UtcTimestamp,
+        now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<TickReport>> + Send {
-        std::future::ready(Ok(TickReport::default()))
+        async move {
+            crate::reclaim_tick::tick_expired_leases(
+                self.projection.as_ref(),
+                self.control.as_ref(),
+                self,
+                now,
+            )
+            .await
+        }
     }
 }
 
@@ -1544,7 +1552,7 @@ mod tests {
         ClaimCompatibility, ClaimPort, ClaimRef, ClaimRequest, CommitEntryOutcome,
         CommitTransition, CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore,
         EngineError, FinalizeKind, FinalizeOutcome, FinalizePort, InstanceFence, ProjectionRead,
-        ProjectionStore, PushPort, PushSpec, RecoveryReadPort, SideRecord,
+        ProjectionStore, PushPort, PushSpec, ReclaimDriver, RecoveryReadPort, SideRecord,
     };
     use object_log::FlushConfig;
 
@@ -1633,6 +1641,85 @@ mod tests {
             .unwrap();
         let metrics = backend.metrics(&shard).await.unwrap();
         assert_eq!(metrics.leased, 0);
+    }
+
+    #[tokio::test]
+    async fn tick_reclaims_multiple_queues_exactly_once_at_half_open_boundary() {
+        let backend = open_backend().await;
+        let mut first = qdef();
+        first.queue_id = QueueId::new("q-first").unwrap();
+        let mut second = qdef();
+        second.queue_id = QueueId::new("q-second").unwrap();
+        let first_shard =
+            fireweed_engine::QueueKey::new(first.tenant_id.clone(), first.queue_id.clone());
+        let second_shard =
+            fireweed_engine::QueueKey::new(second.tenant_id.clone(), second.queue_id.clone());
+        backend.create_queue(first).await.unwrap();
+        backend.create_queue(second).await.unwrap();
+
+        for (shard, item_count, lease) in [
+            (&first_shard, 2, "lease-first"),
+            (&second_shard, 1, "lease-second"),
+        ] {
+            backend
+                .push(
+                    shard,
+                    vec![PushSpec::default(); item_count],
+                    UtcTimestamp::new(1, 0).unwrap(),
+                    None,
+                )
+                .await
+                .unwrap();
+            let claimed = backend
+                .claim(ClaimRequest {
+                    shard: shard.clone(),
+                    worker_id: WorkerId::new("worker").unwrap(),
+                    max_items: item_count,
+                    lease_token: LeaseToken::new(lease).unwrap(),
+                    lease_expires_at: UtcTimestamp::new(100, 0).unwrap(),
+                    now: UtcTimestamp::new(2, 0).unwrap(),
+                    eligibility_time: None,
+                    compatibility: ClaimCompatibility::default(),
+                    expected_epoch: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(claimed.items.len(), item_count);
+        }
+
+        assert_eq!(
+            backend
+                .tick(UtcTimestamp::new(100, 0).unwrap())
+                .await
+                .unwrap()
+                .leases_reclaimed,
+            0,
+            "a lease remains valid at lease_expires_at"
+        );
+        assert_eq!(backend.metrics(&first_shard).await.unwrap().leased, 2);
+        assert_eq!(backend.metrics(&second_shard).await.unwrap().leased, 1);
+
+        assert_eq!(
+            backend
+                .tick(UtcTimestamp::new(101, 0).unwrap())
+                .await
+                .unwrap()
+                .leases_reclaimed,
+            3
+        );
+        assert_eq!(backend.metrics(&first_shard).await.unwrap().leased, 0);
+        assert_eq!(backend.metrics(&first_shard).await.unwrap().pending, 2);
+        assert_eq!(backend.metrics(&second_shard).await.unwrap().leased, 0);
+        assert_eq!(backend.metrics(&second_shard).await.unwrap().pending, 1);
+        assert_eq!(
+            backend
+                .tick(UtcTimestamp::new(101, 0).unwrap())
+                .await
+                .unwrap()
+                .leases_reclaimed,
+            0,
+            "a repeated tick reports only newly committed reclaims"
+        );
     }
 
     /// fireweed-2ad3a030: snorri path is claim_by_query then commit_transition with ClaimRef.
