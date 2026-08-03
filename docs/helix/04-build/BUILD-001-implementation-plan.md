@@ -120,6 +120,38 @@ scope.
 - Product E2E smoke (`FIREWEED_E2E_SCALE=smoke`) is a per-PR gate once a suite
   exists. Release E2E uses the row-specific release shapes in TP-003 §3.11.
 
+## Canonical storage authority manifest
+
+[`storage-authority-manifest.json`](storage-authority-manifest.json) is the
+machine-readable P1 authority boundary for the storage-matrix closure campaign.
+It binds the governed prose to the exact public axes, durability classes,
+response-barrier applicability, validation order, delivery profiles, legacy
+requirement dispositions, provider attestation, evidence ownership, immutable
+history, private-surface discovery, tracked-ignore policy, and public-identity
+classifications. Where BUILD-001's older implementation slices or route names
+conflict with that manifest, the manifest and its hashed governing documents
+control; the stale slice is historical sequencing until a downstream bead
+replaces it.
+
+The manifest deliberately contains semantic requirements and task ownership,
+not test binaries, filters, commands, or other concrete executable route IDs.
+P2r owns the separate generated route overlay and must bind every applicable
+semantic requirement exactly once after final source and Cargo discovery. P2
+beads consume this manifest but must not reinterpret, silently extend, or
+partially copy it. A needed authority change reopens P1 and updates the manifest
+and its governed-document digests together.
+
+Run the fail-closed contract before downstream route generation or qualification:
+
+```sh
+bash scripts/ci/verify-storage-authority-manifest.sh
+```
+
+The verifier rejects malformed schema, missing or duplicate P1 dispositions,
+retired requirements presented as current, executable-route leakage, governed
+document drift, history-corpus drift, and inconsistent matrix/profile counts.
+Its negative fixtures run with `--self-test`.
+
 ## Implementation Slices
 
 | Slice | Area | Governing Artifacts | Depends On | Validation Gate | Notes |

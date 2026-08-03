@@ -1,0 +1,842 @@
+{
+  "schema_version": 1,
+  "spec_id": "storage-matrix-completion-brief",
+  "authority_revision": "P1-2026-08-03",
+  "governed_documents": [
+    {
+      "path": "docs/helix/00-discover/product-vision.md",
+      "sha256": "ce9778ee630d440b4c7b61d11c599df2c4c3766eda8674578d61e9c9e2053292"
+    },
+    {
+      "path": "docs/helix/01-frame/prd.md",
+      "sha256": "40c2e8c18484e0517a8d5e06325a33c560a9cc62c481b552e57bb3dadfbd9729"
+    },
+    {
+      "path": "docs/helix/02-design/orthogonal-storage-matrix-brief.md",
+      "sha256": "7abf4ba4c991df857b52c18e71fac6c5ac77c6dfbd968fcf4e77c671804bf68f"
+    },
+    {
+      "path": "docs/helix/02-design/adr/ADR-002-auth-tenancy-and-storage-isolation.md",
+      "sha256": "56b9596b99e23181e1eb5e907e66b11bef3cce8cdcbe53ec8c529ed9dad0511a"
+    },
+    {
+      "path": "docs/helix/02-design/adr/ADR-008-queue-as-shard-unit-and-projection-families.md",
+      "sha256": "cff12ab1b446aeb39b52f1e34c22923796439796aa4c029a6a493da9b7619c4d"
+    },
+    {
+      "path": "docs/helix/02-design/adr/ADR-012-orthogonal-log-projection-composition.md",
+      "sha256": "f133596e3c06a6468b88d2a96f7ccd925f0fdd66f1796e5f4c091855ad8e9e13"
+    },
+    {
+      "path": "docs/helix/02-design/adr/ADR-014-fjord-embedded-change-log-consumer-surface.md",
+      "sha256": "45273c2f4c2fd25cb19ffd436ef273cab73081b3ee1b925144d11efe59abb342"
+    },
+    {
+      "path": "docs/helix/02-design/adr/ADR-015-full-async-storage-boundaries.md",
+      "sha256": "698fb510c78c559f9ed5f0022eddf47ce90b9c53019ac42582383d48fb705fc0"
+    },
+    {
+      "path": "docs/helix/02-design/adr/ADR-016-turso-derived-projection.md",
+      "sha256": "5d9116299c46105916763d89a9a4c24020b4e6d14faf8904792ad8e0b8810fbb"
+    },
+    {
+      "path": "docs/helix/02-design/adr/ADR-017-async-commit-strategy-and-dispatch.md",
+      "sha256": "84aa3e1e0bb75f1fe406dcc100b05194f9a4364d5feaad17f0c97292095dd4df"
+    },
+    {
+      "path": "docs/helix/02-design/adr/ADR-020-public-namespace-and-compatibility.md",
+      "sha256": "2eaf081ff738be4eb78cec6b0e5d127a9deec6a85a35b1550d3c0918970f91f1"
+    },
+    {
+      "path": "docs/helix/02-design/contracts/API-001-native-client-interface.md",
+      "sha256": "7ff1ab9f396f9ff4d9c94d6b8d67e0d59f90ecab41dabf7c921461d02c1db49b"
+    },
+    {
+      "path": "docs/helix/02-design/contracts/API-002-operator-repair-contract.md",
+      "sha256": "267730f2576c767835a0177b382801012b171eb420046a96fd5ab51269464327"
+    },
+    {
+      "path": "docs/helix/02-design/contracts/API-005-fireweed-rust-facade.md",
+      "sha256": "8dde2394469ff1505ff1c07c6989010bbfc31383da8a1edc26098b44fbb7dfe7"
+    },
+    {
+      "path": "docs/helix/02-design/technical-designs/TD-001-storage-architecture-backend-contracts.md",
+      "sha256": "b534bc14812f46a22f430cb29b1ef134dac05b5bf68f0940adba55cfa1c36e6b"
+    },
+    {
+      "path": "docs/helix/02-design/technical-designs/TD-003-sharding-and-shard-ownership.md",
+      "sha256": "914945fbe09af2a103865ec659a14d026c5f89660659e47b8a5b1b69678f2c37"
+    },
+    {
+      "path": "docs/helix/02-design/technical-designs/TD-004-s3-object-log-sqlite-projection-mode.md",
+      "sha256": "7cfd31c3905ed85e19aeebd93a2b7fc7bd1c4d7373f4127267cd1f9bace55c74"
+    },
+    {
+      "path": "docs/helix/02-design/technical-designs/TD-006-resp-wire-adapter.md",
+      "sha256": "9ac6873a0cb6c0c248d664d8e2e3868e42b4008fd949466b3c352bf11e69bd35"
+    },
+    {
+      "path": "docs/helix/02-design/technical-designs/TD-008-queue-history-change-records.md",
+      "sha256": "b9d411de379c9fb498392ac8765941342554ec1eed09fcd09318249a8758ec06"
+    },
+    {
+      "path": "docs/helix/02-design/technical-designs/TD-010-object-log-turso-projection.md",
+      "sha256": "0054d8027eb49bf407815707611923004cbc23163588742a4bafca9d339f4d34"
+    },
+    {
+      "path": "docs/helix/03-test/test-plans/TP-001-governing-test-traceability.md",
+      "sha256": "41e1394ed150687d8759cf4f4048f3345f09d601392b523a366ad0c67590beac"
+    },
+    {
+      "path": "docs/helix/03-test/test-plans/TP-002-scale-substantiation.md",
+      "sha256": "d1e5f795c4cbd7d806582d27558090448589c569ace8c564f6971db7d02bf253"
+    },
+    {
+      "path": "docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md",
+      "sha256": "097bb76402d1e750c1be0c726980928072ef9678e30d829b3cf0d006768373f5"
+    },
+    {
+      "path": "docs/helix/03-test/test-plans/TP-004-fireweed-facade-and-snorri-acceptance.md",
+      "sha256": "23580c9101f8dc486e4944d35dbb536065833ff40120742dc96184b768a210ad"
+    },
+    {
+      "path": "docs/helix/03-test/test-plans/TP-005-fireweed-performance-matrix.md",
+      "sha256": "7126a21c9b591571a8284c680a83059bb8b637875ef04a23b289641ecf7590d3"
+    }
+  ],
+  "canonical_axes": {
+    "logs": [
+      "memory",
+      "sqlite",
+      "postgres",
+      "filesystem",
+      "s3"
+    ],
+    "projections": [
+      "memory",
+      "sqlite",
+      "postgres"
+    ],
+    "control_planes": [
+      "in_process",
+      "postgres"
+    ],
+    "cell_id_separator": "--",
+    "required_cell_count": 15,
+    "profile_skus_are_public": false
+  },
+  "durability": {
+    "class_a_logs": [
+      "sqlite",
+      "postgres",
+      "filesystem",
+      "s3"
+    ],
+    "class_b_logs": [
+      "memory"
+    ],
+    "class_a_cell_count": 12,
+    "class_b_cell_count": 3,
+    "history_requires_class_a": true,
+    "silent_null_log_forbidden": true
+  },
+  "response_barriers": {
+    "strict": {
+      "public_name": "Strict",
+      "applicable_logs": [
+        "memory",
+        "sqlite",
+        "postgres",
+        "filesystem",
+        "s3"
+      ],
+      "required_cell_count": 15
+    },
+    "async_projection": {
+      "public_name": "AsyncProjection",
+      "spec_type": "AsyncProjectionSpec",
+      "applicable_logs": [
+        "filesystem",
+        "s3"
+      ],
+      "required_positive_cell_count": 6,
+      "required_pre_io_rejection_count": 9,
+      "bounds": [
+        "apply_lag_max_commands",
+        "apply_debt_max_bytes",
+        "apply_queue_depth_max",
+        "oldest_unapplied_max_ms",
+        "apply_poison_retry_threshold"
+      ],
+      "all_bounds_positive": true
+    },
+    "sqlite_projection_deferred_flush": {
+      "field": "sqlite_projection_deferred_flush_chunk",
+      "applicable_projections": [
+        "sqlite"
+      ],
+      "applicable_barriers": [
+        "Strict",
+        "AsyncProjection"
+      ],
+      "positive_when_present": true,
+      "part_of_async_projection_spec": false
+    }
+  },
+  "validation_contract": {
+    "before_storage_io": true,
+    "precedence": [
+      "endpoint_syntax",
+      "response_barrier",
+      "tuple_coherence",
+      "feature_availability",
+      "durability_and_provider_capability"
+    ],
+    "error_domains": {
+      "scalar_selector_syntax": "ConfigError",
+      "valid_but_inapplicable_composition": "EngineError"
+    },
+    "transitional_engine_error_reasons": [
+      "objectlog-memory-async-pending",
+      "s3-async-projection-pending",
+      "legacy-projection-change-record-delivery-retired"
+    ],
+    "current_engine_error_reasons": [
+      "async-projection-requires-object-log",
+      "change-record-endpoint-requires-enabled"
+    ]
+  },
+  "storage_authority": {
+    "object_log_publication": "NativeConditionalWrite",
+    "postgres_manifest_pointer_fallback": "retired",
+    "postgres_roles": [
+      "log",
+      "projection",
+      "optional_control_plane"
+    ],
+    "projection_is_never_log_authority": true,
+    "provider_without_native_conditional_write": "reject_before_io"
+  },
+  "configuration_surface": {
+    "async_projection_environment_keys": [
+      "FIREWEED_ASYNC_PROJECTION_APPLY_LAG_MAX_COMMANDS",
+      "FIREWEED_ASYNC_PROJECTION_APPLY_DEBT_MAX_BYTES",
+      "FIREWEED_ASYNC_PROJECTION_APPLY_QUEUE_DEPTH_MAX",
+      "FIREWEED_ASYNC_PROJECTION_OLDEST_UNAPPLIED_MAX_MS",
+      "FIREWEED_ASYNC_PROJECTION_APPLY_POISON_RETRY_THRESHOLD"
+    ],
+    "sqlite_deferred_flush_environment_key": "FIREWEED_SQLITE_PROJECTION_DEFERRED_FLUSH_CHUNK",
+    "retired_public_type": "HybridAsyncThresholds",
+    "legacy_environment_keys_are_aliases": false
+  },
+  "help_parser_bijections": {
+    "log": {
+      "help_values": [
+        "memory",
+        "sqlite",
+        "postgres",
+        "filesystem",
+        "s3"
+      ],
+      "parser_values": [
+        "memory",
+        "sqlite",
+        "postgres",
+        "filesystem",
+        "s3"
+      ],
+      "rejected_legacy_values": [
+        "objectlog"
+      ]
+    },
+    "projection": {
+      "help_values": [
+        "memory",
+        "sqlite",
+        "postgres"
+      ],
+      "parser_values": [
+        "memory",
+        "sqlite",
+        "postgres"
+      ],
+      "rejected_legacy_values": [
+        "inmemory",
+        "hybrid",
+        "hybrid-strict",
+        "hybrid-async",
+        "turso"
+      ]
+    },
+    "response_barrier": {
+      "help_values": [
+        "strict",
+        "async-projection"
+      ],
+      "parser_values": [
+        "strict",
+        "async-projection"
+      ],
+      "rejected_legacy_values": []
+    }
+  },
+  "delivery_contract": {
+    "modes": [
+      "Disabled",
+      "Embedded",
+      "ExternalKafka",
+      "Http"
+    ],
+    "enabled_modes": [
+      "Embedded",
+      "ExternalKafka",
+      "Http"
+    ],
+    "positive_profile_formula": {
+      "sqlite_or_postgres_log_strict_enabled": 18,
+      "filesystem_or_s3_log_both_barriers_enabled": 36,
+      "total": 54
+    },
+    "class_b_strict_enabled_durability_negatives": 9,
+    "class_b_strict_disabled_positives": 3,
+    "disabled_with_endpoint": "tuple_coherence_rejection",
+    "feature_unavailable_precedes_durability": true,
+    "class_b_async_precedes_delivery_validation": true
+  },
+  "error_vocabulary": {
+    "new_startup_only_engine_error": "ChangeRecordsRequireDurableLog",
+    "new_resp_token": "-ERR fireweed change_records_require_durable_log",
+    "existing_direct_resp_tokens": {
+      "QueueDefinitionConflict": "-ERR fireweed queue_conflict"
+    },
+    "commit_rejection_mirror": "exhaustive_name_level_semantics_with_payload_normalization",
+    "startup_only_error_may_escape_commit": false
+  },
+  "requirement_dispositions": [
+    {
+      "id": "TD004-LEGACY-DURABLE-MANIFEST-REOPEN",
+      "disposition": "replaced",
+      "current_requirement_ids": [
+        "TD004-DURABLE-MANIFEST-REOPEN"
+      ],
+      "semantic_owners": [
+        "P5aN",
+        "P5aS3"
+      ],
+      "qualifies_current_product": true
+    },
+    {
+      "id": "TD004-LEGACY-CURRENT-EPOCH-FENCING",
+      "disposition": "replaced",
+      "current_requirement_ids": [
+        "TD004-CURRENT-EPOCH-FENCING"
+      ],
+      "semantic_owners": [
+        "P5aN",
+        "P5aS3"
+      ],
+      "qualifies_current_product": true
+    },
+    {
+      "id": "TD004-LEGACY-MISSING-CAS-REJECTION",
+      "disposition": "replaced",
+      "current_requirement_ids": [
+        "TD004-MISSING-NATIVE-CONDITIONAL-WRITE"
+      ],
+      "semantic_owners": [
+        "P3s",
+        "P4s"
+      ],
+      "qualifies_current_product": true
+    },
+    {
+      "id": "TD004-LEGACY-POSTGRES-MANIFEST-POINTER",
+      "disposition": "retired",
+      "current_requirement_ids": [],
+      "semantic_owners": [],
+      "qualifies_current_product": false
+    },
+    {
+      "id": "TD004-LEGACY-ONE-OBJECT-PER-COMMAND",
+      "disposition": "replaced",
+      "current_requirement_ids": [
+        "TD004-PRODUCTION-GROUP-COMMIT-REQUIRED"
+      ],
+      "semantic_owners": [
+        "P3o"
+      ],
+      "qualifies_current_product": true
+    },
+    {
+      "id": "AC-TURSO-1",
+      "disposition": "internal",
+      "current_requirement_ids": [
+        "AC-TURSO-1"
+      ],
+      "semantic_owners": [
+        "P13t"
+      ],
+      "qualifies_current_product": false
+    },
+    {
+      "id": "AC-TURSO-2",
+      "disposition": "internal",
+      "current_requirement_ids": [
+        "AC-TURSO-2"
+      ],
+      "semantic_owners": [
+        "P13t"
+      ],
+      "qualifies_current_product": false
+    },
+    {
+      "id": "AC-TURSO-3",
+      "disposition": "internal",
+      "current_requirement_ids": [
+        "AC-TURSO-3"
+      ],
+      "semantic_owners": [
+        "P13t"
+      ],
+      "qualifies_current_product": false
+    },
+    {
+      "id": "AC-TURSO-4",
+      "disposition": "internal",
+      "current_requirement_ids": [
+        "AC-TURSO-4"
+      ],
+      "semantic_owners": [
+        "P13t"
+      ],
+      "qualifies_current_product": false
+    },
+    {
+      "id": "AC-TURSO-5.ENABLED",
+      "disposition": "retired",
+      "current_requirement_ids": [],
+      "semantic_owners": [],
+      "qualifies_current_product": false
+    },
+    {
+      "id": "AC-TURSO-5.DISABLED",
+      "disposition": "negative",
+      "current_requirement_ids": [
+        "AC-TURSO-5.DISABLED"
+      ],
+      "semantic_owners": [
+        "P12a"
+      ],
+      "qualifies_current_product": true
+    },
+    {
+      "id": "AC-TURSO-6",
+      "disposition": "internal",
+      "current_requirement_ids": [
+        "AC-TURSO-6"
+      ],
+      "semantic_owners": [
+        "P13t"
+      ],
+      "qualifies_current_product": false
+    },
+    {
+      "id": "AC-TXN-5-HYBRID-SELECTOR",
+      "disposition": "replaced",
+      "current_requirement_ids": [
+        "AC-TXN-5"
+      ],
+      "semantic_owners": [
+        "P3b",
+        "P11"
+      ],
+      "qualifies_current_product": true
+    },
+    {
+      "id": "AC-TXN-5A-HYBRID-SELECTOR",
+      "disposition": "replaced",
+      "current_requirement_ids": [
+        "AC-TXN-5A"
+      ],
+      "semantic_owners": [
+        "P3b",
+        "P11"
+      ],
+      "qualifies_current_product": true
+    },
+    {
+      "id": "LEGACY-PUBLIC-PROJECTION-SELECTORS",
+      "disposition": "retired",
+      "current_requirement_ids": [],
+      "semantic_owners": [
+        "P12a"
+      ],
+      "qualifies_current_product": false
+    },
+    {
+      "id": "LEGACY-PUBLIC-LOG-SELECTOR-OBJECTLOG",
+      "disposition": "retired",
+      "current_requirement_ids": [],
+      "semantic_owners": [
+        "P12a"
+      ],
+      "qualifies_current_product": false
+    },
+    {
+      "id": "LEGACY-HYBRID-ASYNC-THRESHOLDS",
+      "disposition": "replaced",
+      "current_requirement_ids": [
+        "ASYNC-PROJECTION-SPEC"
+      ],
+      "semantic_owners": [
+        "P3m",
+        "P3b"
+      ],
+      "qualifies_current_product": true
+    },
+    {
+      "id": "LEGACY-POSTGRES-PUBLICATION-AUTHORITY",
+      "disposition": "replaced",
+      "current_requirement_ids": [
+        "NATIVE-CONDITIONAL-WRITE-AUTHORITY"
+      ],
+      "semantic_owners": [
+        "P3s",
+        "P4s"
+      ],
+      "qualifies_current_product": true
+    },
+    {
+      "id": "TP004-GARAGE-REOPEN",
+      "disposition": "replaced",
+      "current_requirement_ids": [
+        "SNORRI-REOPEN"
+      ],
+      "semantic_owners": [
+        "P6s"
+      ],
+      "qualifies_current_product": true
+    },
+    {
+      "id": "TP004-GARAGE-PROJECTION-REBUILD",
+      "disposition": "replaced",
+      "current_requirement_ids": [
+        "SNORRI-PROJECTION-REBUILD"
+      ],
+      "semantic_owners": [
+        "P6s"
+      ],
+      "qualifies_current_product": true
+    },
+    {
+      "id": "TP004-GARAGE-RETRY-IDEMPOTENCY",
+      "disposition": "replaced",
+      "current_requirement_ids": [
+        "SNORRI-RETRY-ONCE"
+      ],
+      "semantic_owners": [
+        "P6s"
+      ],
+      "qualifies_current_product": true
+    },
+    {
+      "id": "TP004-ELDIR-HOST",
+      "disposition": "replaced",
+      "current_requirement_ids": [
+        "PROVISIONED-QUALIFICATION-RUNNER"
+      ],
+      "semantic_owners": [
+        "P1s",
+        "P6p"
+      ],
+      "qualifies_current_product": true
+    },
+    {
+      "id": "TP004-GARAGE-PROVIDER",
+      "disposition": "replaced",
+      "current_requirement_ids": [
+        "S3-NATIVE-CAS-CAPABILITY-ATTESTATION"
+      ],
+      "semantic_owners": [
+        "P1s"
+      ],
+      "qualifies_current_product": true
+    },
+    {
+      "id": "LEGACY-HYBRID-EVIDENCE",
+      "disposition": "historical",
+      "current_requirement_ids": [],
+      "semantic_owners": [
+        "P15",
+        "P17a"
+      ],
+      "qualifies_current_product": false
+    },
+    {
+      "id": "TD008-CLASS-B-HISTORY",
+      "disposition": "negative",
+      "current_requirement_ids": [
+        "CHANGE-RECORDS-REQUIRE-DURABLE-LOG"
+      ],
+      "semantic_owners": [
+        "P8c",
+        "P11"
+      ],
+      "qualifies_current_product": true
+    },
+    {
+      "id": "SERVER-PROJECTION-HELP-PARSER-MISMATCH",
+      "disposition": "replaced",
+      "current_requirement_ids": [
+        "PROJECTION-HELP-PARSER-BIJECTION"
+      ],
+      "semantic_owners": [
+        "P12a"
+      ],
+      "qualifies_current_product": true
+    },
+    {
+      "id": "SERVER-LOG-HELP-PARSER-MISMATCH",
+      "disposition": "replaced",
+      "current_requirement_ids": [
+        "LOG-HELP-PARSER-BIJECTION"
+      ],
+      "semantic_owners": [
+        "P12a"
+      ],
+      "qualifies_current_product": true
+    },
+    {
+      "id": "OPERATOR-VALIDATION-CAMPAIGN-BINDING",
+      "disposition": "retained",
+      "current_requirement_ids": [
+        "OPERATOR-VALIDATION-CAMPAIGN-BINDING"
+      ],
+      "semantic_owners": [
+        "P2r"
+      ],
+      "qualifies_current_product": true
+    },
+    {
+      "id": "PRIVATE-SURFACE-FIXED-COUNT",
+      "disposition": "replaced",
+      "current_requirement_ids": [
+        "DYNAMIC-PRIVATE-SURFACE-DISCOVERY"
+      ],
+      "semantic_owners": [
+        "P2a"
+      ],
+      "qualifies_current_product": true
+    },
+    {
+      "id": "TRACKED-IGNORE-LOCAL-EXCLUDE-AUTHORITY",
+      "disposition": "retired",
+      "current_requirement_ids": [],
+      "semantic_owners": [
+        "P17a"
+      ],
+      "qualifies_current_product": false
+    }
+  ],
+  "evidence_contract": {
+    "artifact_classes": [
+      "Fixture",
+      "RunOwned",
+      "Promoted"
+    ],
+    "semantic_current_ids": [
+      "CURRENT-TP003-TRANSACTION-MATRIX",
+      "CURRENT-TD008-DELIVERY-MATRIX",
+      "CURRENT-TP002-E3-OBJECT-LOG",
+      "CURRENT-TP005-PERFORMANCE-MATRIX"
+    ],
+    "portable_correctness_owners": [
+      "TP-001",
+      "TP-003",
+      "TP-004"
+    ],
+    "scale_correctness_owners": [
+      "TP-002-E0",
+      "TP-002-E1",
+      "TP-002-E2"
+    ],
+    "wall_clock_threshold_owner": "TP-002-E3",
+    "observational_performance_owner": "TP-005",
+    "historical_paths": [
+      "docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_100k.jsonl",
+      "docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_10m.jsonl",
+      "docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_1m.jsonl",
+      "docs/perf/evidence/performance_object_log_hybrid_smoke.jsonl",
+      "docs/perf/evidence/sp01-byte-admission-smoke.md",
+      "docs/perf/evidence/td008-terminal-reap-frontier.jsonl",
+      "docs/perf/evidence/tp002-e0-postgres-release-10m.jsonl",
+      "docs/perf/evidence/tp002-e1-postgres-release-10m.jsonl",
+      "docs/perf/evidence/tp002-e2-cross-queue-remeasured.jsonl",
+      "docs/perf/evidence/tp002-e2-density-durable.jsonl",
+      "docs/perf/evidence/tp002-e2-multinode-kind-release.jsonl",
+      "docs/perf/evidence/tp002-e2-multinode-smoke.jsonl",
+      "docs/perf/evidence/tp002-e2-objectlog-sqlite-failover-kind.json",
+      "docs/perf/evidence/tp002-e3-cost-model.jsonl",
+      "docs/perf/evidence/tp002-e3-objectlog-minio-historical-invalid.jsonl",
+      "docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl",
+      "docs/perf/evidence/tp003-ac-txn-matrix-postgres.jsonl",
+      "docs/perf/evidence/tp003-ac-txn-matrix-s3-storage-pairs.jsonl",
+      "docs/perf/evidence/tp003-ac-txn-matrix-sqlite-storage-pairs.jsonl",
+      "docs/perf/evidence/tp003-ac-txn-matrix.jsonl",
+      "docs/perf/evidence/tp003-ac-txn-parity-postgres-storage-pairs.jsonl"
+    ],
+    "historical_provenance_companion": "docs/perf/tp002-objectlog-hybrid-evidence.md",
+    "historical_files_may_qualify_current": false,
+    "silent_skip_allowed": false
+  },
+  "private_surface_discovery": {
+    "mode": "dynamic",
+    "roots": [
+      "crates/fireweed/src",
+      "crates/fireweed/tests"
+    ],
+    "classifiers": [
+      "crate_private_type_reference",
+      "crate_private_function_reference",
+      "top_level_test_source",
+      "cargo_test_registration"
+    ],
+    "diagnostic_lower_bounds": {
+      "private_types": 16,
+      "private_functions": 3
+    },
+    "lower_bounds_are_allowlist": false,
+    "every_discovered_reference_requires_binding": true,
+    "fixed_cardinality_forbidden": true
+  },
+  "tracked_ignore_policy": {
+    "authority": "tracked_gitignore_only",
+    "local_or_global_excludes_have_policy_authority": false,
+    "forbidden_in_repository_paths": [
+      ".env.garage-e3"
+    ],
+    "classes": {
+      "administrative": {
+        "roots": [
+          ".ddx/"
+        ],
+        "required_proofs": [
+          "tracked_rule",
+          "contained_path",
+          "no_source_authority",
+          "no_evidence_authority",
+          "no_s_bound_reader"
+        ]
+      },
+      "build_dependency_cache": {
+        "roots": [
+          "target/",
+          "scripts/site/node_modules/",
+          "__pycache__/",
+          "examples/python-resp/.venv/"
+        ],
+        "required_proofs": [
+          "tracked_rule",
+          "untracked_or_symlink_contained",
+          "tracked_lock_and_config_identity",
+          "no_credentials",
+          "no_governing_input",
+          "no_promoted_evidence_authority"
+        ]
+      }
+    },
+    "entry_schema": [
+      "path",
+      "class",
+      "tracked_rule",
+      "owner",
+      "reason",
+      "reader_policy",
+      "source_authority",
+      "evidence_authority",
+      "removal_condition"
+    ],
+    "classes_are_disjoint": true
+  },
+  "topology_attestation": {
+    "provider_brand_is_contractual": false,
+    "host_name_is_contractual": false,
+    "missing_live_s3_or_postgres": "qualification_failure",
+    "runner_fields": [
+      "runner_identity",
+      "topology",
+      "resource_limits"
+    ],
+    "s3_fields": [
+      "provider",
+      "version",
+      "region",
+      "native_atomic_conditional_create",
+      "native_atomic_conditional_update",
+      "consistency_contract",
+      "tls_mode",
+      "bucket_ownership_acknowledgement"
+    ],
+    "postgres_fields": [
+      "provider",
+      "server_version",
+      "durability_settings",
+      "isolation_support",
+      "database_ownership_acknowledgement"
+    ]
+  },
+  "public_identity_classification": [
+    {
+      "path": "README.md",
+      "state": "current_source_prose",
+      "classification": "garage_provider_residue",
+      "semantic_owner": "P19"
+    },
+    {
+      "path": "crates/fireweed-server/tests/production_s3_object_log_config.rs",
+      "state": "future_current_source",
+      "classification": "live_s3_provenance",
+      "semantic_owner": "P4s"
+    },
+    {
+      "path": "docs/releases/v0.23.0.md",
+      "state": "immutable_history",
+      "classification": "published_garage_claim",
+      "semantic_owner": "P17a"
+    },
+    {
+      "path": "docs/releases/v0.23.1.md",
+      "state": "immutable_history",
+      "classification": "published_garage_claim",
+      "semantic_owner": "P17a"
+    },
+    {
+      "path": "docs/releases/v0.29.0.md",
+      "state": "immutable_history",
+      "classification": "published_garage_claim",
+      "semantic_owner": "P17a"
+    },
+    {
+      "path": "docs/releases/v0.14.0.md",
+      "state": "immutable_history",
+      "classification": "inert_ddx_hyperlink_provenance",
+      "semantic_owner": "P17a"
+    }
+  ],
+  "route_binding_policy": {
+    "concrete_executable_routes_present": false,
+    "semantic_requirements_are_route_independent": true,
+    "route_overlay_owner": "P2r",
+    "applicable_requirement_binding_cardinality": "exactly_one",
+    "stage_values": [
+      "pre_s",
+      "S"
+    ],
+    "campaign_values": [
+      "shared",
+      "storage",
+      "product-ready"
+    ],
+    "storage_campaign_operator_stage_s": "out_of_campaign"
+  }
+}
