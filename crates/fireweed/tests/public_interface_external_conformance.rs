@@ -158,24 +158,34 @@ impl S3Namespace {
         if !self.active {
             return Ok(());
         }
-        let store = S3BlobStore::new(
-            &self.endpoint,
-            &self.bucket,
-            &self.access_key,
-            &self.secret_key,
-            &self.region,
-        )
-        .map_err(|_| ())?;
-        let keys = store.list(&self.prefix).map_err(|_| ())?;
-        if keys.iter().any(|key| !key.starts_with(&self.prefix)) {
-            return Err(());
-        }
-        for key in keys {
-            store.delete(&key).map_err(|_| ())?;
-        }
-        if !store.list(&self.prefix).map_err(|_| ())?.is_empty() {
-            return Err(());
-        }
+        let endpoint = self.endpoint.clone();
+        let bucket = self.bucket.clone();
+        let region = self.region.clone();
+        let access_key = self.access_key.clone();
+        let secret_key = self.secret_key.clone();
+        let prefix = self.prefix.clone();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| ())?;
+            runtime.block_on(async move {
+                let store = S3BlobStore::new(&endpoint, &region, &bucket, &access_key, &secret_key);
+                let keys = store.list(&prefix).await.map_err(|_| ())?;
+                if keys.iter().any(|key| !key.starts_with(&prefix)) {
+                    return Err(());
+                }
+                for key in keys {
+                    store.delete(&key).await.map_err(|_| ())?;
+                }
+                if !store.list(&prefix).await.map_err(|_| ())?.is_empty() {
+                    return Err(());
+                }
+                Ok(())
+            })
+        })
+        .join()
+        .map_err(|_| ())??;
         self.active = false;
         Ok(())
     }

@@ -2356,7 +2356,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                             access_key_id,
                             secret_access_key,
                         },
-                    allow_insecure_http: _,
                     ..
                 } => {
                     let log = fireweed_objectlog::ObjectLogEngineStore::open_s3(
@@ -3264,9 +3263,8 @@ mod byte_admission_wiring_tests {
         PriorityModelKind, PriorityTieBreaker, RecurrencePolicy, RetryPolicy,
     };
     use fireweed_engine::{
-        AcquireOutcome, ControlPlaneConfig, ControlPlaneStore, InMemoryControlPlane, LeaseRenewal,
-        LeaseRenewalOutcome, LeaseState, OwnerEndpointAdvertisement, OwnerResolution,
-        ProjectionRead, PushPort, PushSpec, QueueControlPlane, QueueLease,
+        ControlPlaneStore, InMemoryControlPlane, LeaseRenewal, LeaseRenewalOutcome, LeaseState,
+        PushPort, PushSpec, QueueControlPlane, QueueLease,
     };
     use std::sync::mpsc;
 
@@ -3340,105 +3338,6 @@ mod byte_admission_wiring_tests {
             executor.execute(|| Ok::<_, EngineError>(4)).await,
             Err(EngineError::Unavailable)
         ));
-    }
-
-    struct PauseAfterAcquire {
-        inner: Arc<InMemoryControlPlane>,
-        entered: mpsc::Sender<()>,
-        resume: Mutex<mpsc::Receiver<()>>,
-    }
-
-    impl QueueControlPlane for PauseAfterAcquire {
-        fn register_owner(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()> {
-            self.inner.register_owner(owner, now)
-        }
-        fn advertise_owner_endpoint(
-            &self,
-            owner: &OwnerId,
-            endpoint: &str,
-            now: UtcTimestamp,
-        ) -> EngineResult<()> {
-            self.inner.advertise_owner_endpoint(owner, endpoint, now)
-        }
-        fn live_owner_endpoints(
-            &self,
-            now: UtcTimestamp,
-        ) -> EngineResult<Vec<OwnerEndpointAdvertisement>> {
-            self.inner.live_owner_endpoints(now)
-        }
-        fn heartbeat(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()> {
-            self.inner.heartbeat(owner, now)
-        }
-        fn resolve_queue_owner(
-            &self,
-            queue: &QueueKey,
-            now: UtcTimestamp,
-        ) -> EngineResult<OwnerResolution> {
-            self.inner.resolve_queue_owner(queue, now)
-        }
-        fn acquire_queue_lease(
-            &self,
-            queue: &QueueKey,
-            owner: &OwnerId,
-            now: UtcTimestamp,
-        ) -> EngineResult<AcquireOutcome> {
-            let outcome = self.inner.acquire_queue_lease(queue, owner, now)?;
-            self.entered
-                .send(())
-                .map_err(|_| EngineError::Unavailable)?;
-            self.resume
-                .lock()
-                .expect("pause receiver poisoned")
-                .recv_timeout(Duration::from_secs(5))
-                .map_err(|_| EngineError::Unavailable)?;
-            Ok(outcome)
-        }
-        fn confirm_queue_lease_fence(
-            &self,
-            queue: &QueueKey,
-            owner: &OwnerId,
-            expected_epoch: u64,
-            now: UtcTimestamp,
-        ) -> EngineResult<QueueLease> {
-            self.inner
-                .confirm_queue_lease_fence(queue, owner, expected_epoch, now)
-        }
-        fn renew_queue_lease(
-            &self,
-            queue: &QueueKey,
-            owner: &OwnerId,
-            expected_epoch: u64,
-            now: UtcTimestamp,
-        ) -> EngineResult<QueueLease> {
-            self.inner
-                .renew_queue_lease(queue, owner, expected_epoch, now)
-        }
-        fn begin_drain(
-            &self,
-            queue: &QueueKey,
-            expected_epoch: u64,
-            target_owner: &OwnerId,
-            now: UtcTimestamp,
-        ) -> EngineResult<QueueLease> {
-            self.inner
-                .begin_drain(queue, expected_epoch, target_owner, now)
-        }
-        fn release_queue_lease(
-            &self,
-            queue: &QueueKey,
-            owner: &OwnerId,
-            expected_epoch: u64,
-            now: UtcTimestamp,
-        ) -> EngineResult<()> {
-            self.inner
-                .release_queue_lease(queue, owner, expected_epoch, now)
-        }
-        fn lease(&self, queue: &QueueKey) -> EngineResult<QueueLease> {
-            self.inner.lease(queue)
-        }
-        fn is_ephemeral(&self) -> bool {
-            true
-        }
     }
 
     fn queue_definition() -> QueueDefinition {
@@ -4622,39 +4521,6 @@ mod class_b_memory_log_tests {
         }
     }
 }
-
-/// Full T0–T4 bar for the three Class A **filesystem** log cells
-/// (`filesystem×memory`, `filesystem×sqlite`, `filesystem×postgres`).
-///
-/// Governing bar: `docs/helix/04-build/storage-matrix-completion-brief.md` §2
-///
-/// | Layer | Coverage here |
-/// |-------|---------------|
-/// | **T0 Construct** | open product backends over LocalFsBlobStore |
-/// | **T1 Lifecycle** | create_queue → push → claim → finalize; invalid entity rejected |
-/// | **T2 Reopen** | process-local drop → reopen recovers pending (Class A log SoT) |
-/// | **T3 Contract** | request_id Fresh→Replayed (AC-TXN-3); reject has no durable effect (AC-TXN-2) |
-/// | **T4 Deploy** | chart CI values declare public axes for chart-installable cells |
-///
-/// Live postgres cells need `--features postgres` and `FIREWEED_PG_TEST_URL`.
-// Removed filesystem_matrix_t0_t4_tests: exercised retired SegmentedObjectLog* facades (LogEngine product path covered elsewhere).
-
-/// Full T0–T4 bar for the three Class A **s3** log cells
-/// (`s3×memory`, `s3×sqlite`, `s3×postgres`).
-///
-/// Governing bar: `docs/helix/04-build/storage-matrix-completion-brief.md` §2
-///
-/// | Layer | Coverage here |
-/// |-------|---------------|
-/// | **T0 Construct** | network-free `S3BlobStore` client + segmented backend open (no blob ops) |
-/// | **T1 Lifecycle** | live when `FIREWEED_S3_TEST_ENDPOINT` set: push → claim → finalize; reject no effect |
-/// | **T2 Reopen** | live: process-local drop → reopen recovers pending (Class A log SoT) |
-/// | **T3 Contract** | live: request_id Fresh→Replayed (AC-TXN-3); reject has no durable effect (AC-TXN-2) |
-/// | **T4 Deploy** | chart CI values declare public s3×{memory,sqlite,postgres} axes |
-///
-/// Mandatory CI job requirements: `scripts/ci/s3-matrix-job-requirements.md`.
-/// Live postgres cells also need `--features postgres` and `FIREWEED_PG_TEST_URL`.
-// Removed s3_object_log_matrix_tests: exercised retired SegmentedObjectLog* facades (LogEngine product path covered elsewhere).
 
 /// Class A **sqlite log** matrix cells (brief §1.1 / §2): `sqlite×memory`, `sqlite×sqlite`,
 /// `sqlite×postgres`.
@@ -6066,19 +5932,6 @@ mod postgres_log_matrix_tests {
                 cell,
                 futures::executor::block_on(ac_txn_3_unknown_outcome_replay(make, DURABLE)),
             );
-        }
-
-        // Preserve AC-TXN-6 parity rows already present so release-gate still sees them after rewrite.
-        let existing_path = fireweed_conformance::fault::evidence_dir()
-            .join("tp003-ac-txn-matrix-postgres-storage-pairs.jsonl");
-        if existing_path.is_file() {
-            if let Ok(body) = std::fs::read_to_string(&existing_path) {
-                for line in body.lines() {
-                    if line.contains("\"ac\":\"AC-TXN-6\"") {
-                        // Keep prior AC-TXN-6 rows from parity file; matrix file may not hold them.
-                    }
-                }
-            }
         }
 
         let path = write_evidence("tp003-ac-txn-matrix-postgres-storage-pairs.jsonl", &records)

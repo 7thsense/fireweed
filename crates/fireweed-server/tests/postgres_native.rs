@@ -193,21 +193,13 @@ fn fireweed_postgres_url_is_authoritative() {
 /// from the type and cannot manufacture another connection after construction.
 #[test]
 fn blocking_backend_pool_constructor_compiles_for_composed_postgres_backend() {
-    let _ctor: fn(
-        Vec<
-            Arc<
-                AsyncLogReplayBackend<
-                    fireweed_postgres::PostgresLog,
-                    fireweed_projection::InMemoryProjection,
-                >,
-            >,
-        >,
-    ) -> fireweed_server::PostgresWholeOperationAdapter<
-        AsyncLogReplayBackend<
-            fireweed_postgres::PostgresLog,
-            fireweed_projection::InMemoryProjection,
-        >,
-    > = fireweed_server::PostgresWholeOperationAdapter::from_arcs;
+    type ComposedPostgres = AsyncLogReplayBackend<
+        fireweed_postgres::PostgresLog,
+        fireweed_projection::InMemoryProjection,
+    >;
+    type ComposedPostgresPool = fireweed_server::PostgresWholeOperationAdapter<ComposedPostgres>;
+    let _ctor: fn(Vec<Arc<ComposedPostgres>>) -> ComposedPostgresPool =
+        fireweed_server::PostgresWholeOperationAdapter::from_arcs;
 }
 
 /// No plaintext fallback: on a build WITHOUT the `tls` feature, an `sslmode=require` DSN must fail at config

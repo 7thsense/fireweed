@@ -100,7 +100,7 @@ fn prove_native_create_only_fence(s3: &S3Env, source_revision: &str, output: &st
             &s3.bucket,
             &s3.access,
             &s3.secret,
-            flush.clone(),
+            flush,
         )
         .await
         .expect("open S3 log for fence owner A");
@@ -461,19 +461,6 @@ impl SegmentCounters {
     fn max_batch_size(&self) -> usize {
         self.group_commit_batches.iter().copied().max().unwrap_or(0)
     }
-
-    fn account_commands(&mut self, commands: u64, batch_size: usize) {
-        self.commands_committed = self.commands_committed.saturating_add(commands);
-        if batch_size > 0 {
-            self.group_commit_batches.push(batch_size);
-            self.segments_sealed = self.segments_sealed.saturating_add(1);
-            self.objects_put = self.objects_put.saturating_add(1);
-            self.size_triggered_seals = self.size_triggered_seals.saturating_add(1);
-            self.segment_bytes = self
-                .segment_bytes
-                .saturating_add((batch_size as u64).saturating_mul(256));
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -687,7 +674,6 @@ trait E3Backend:
 {
     fn snapshot_segment_counters(&self) -> SegmentCounters;
     fn resource_bounds(&self) -> ResourceBounds;
-    fn command_accounting(&self) -> &CommandAccounting;
     /// Append a single push command without projection apply (crash seam for SQLite snapshot-tail).
     async fn append_push_without_apply(
         &self,
@@ -898,9 +884,6 @@ impl E3Backend for E3Handle<AsyncObjectLogSqliteBackend> {
             ..ResourceBounds::default()
         }
     }
-    fn command_accounting(&self) -> &CommandAccounting {
-        &self.accounting
-    }
     async fn append_push_without_apply(
         &self,
         shard: &QueueKey,
@@ -919,9 +902,6 @@ impl E3Backend for E3Handle<AsyncObjectLogMemoryBackend> {
             configured_global_bytes: RELEASE_QUEUE_WAITING_BYTES as u64,
             ..ResourceBounds::default()
         }
-    }
-    fn command_accounting(&self) -> &CommandAccounting {
-        &self.accounting
     }
     async fn append_push_without_apply(
         &self,

@@ -452,6 +452,43 @@ async fn apply_committed_batch_applies_segment_in_one_transaction() {
 }
 
 #[tokio::test]
+async fn apply_committed_batch_replays_contiguous_push_run_idempotently() {
+    let store = SqliteProjectionStore::in_memory().unwrap();
+    store.create_queue_projection(qdef()).unwrap();
+    let first = ItemId::new("1").unwrap();
+    let second = ItemId::new("2").unwrap();
+    let positions = vec![pos(0), pos(1)];
+    let envelopes = vec![
+        envelope(
+            "push-run-1",
+            QueueCommand::Push(PushCommand {
+                items: vec![item("1", "run-1", 10)],
+            }),
+            vec![first],
+            0,
+        ),
+        envelope(
+            "push-run-2",
+            QueueCommand::Push(PushCommand {
+                items: vec![item("2", "run-2", 20)],
+            }),
+            vec![second],
+            1,
+        ),
+    ];
+
+    store.apply_committed_batch(&positions, &envelopes).unwrap();
+    assert_eq!(store.metrics(&shard()).await.unwrap().pending, 2);
+
+    store.apply_committed_batch(&positions, &envelopes).unwrap();
+    assert_eq!(
+        store.metrics(&shard()).await.unwrap().pending,
+        2,
+        "replaying a fully absorbed push run must not duplicate items"
+    );
+}
+
+#[tokio::test]
 async fn sqlite_projection_image_exports_hydratable_recovery_image() {
     let store = SqliteProjectionStore::in_memory().unwrap();
     let definition = qdef();
