@@ -756,16 +756,6 @@ impl Default for ProjectionRecoveryPolicy {
 ))]
 use sha2::{Digest, Sha256};
 
-/// Hex encoding of a namespace string (object-log path segment safety).
-#[cfg(feature = "objectlog")]
-fn object_log_namespace(namespace: &str) -> String {
-    namespace
-        .as_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 /// Deterministic, legal Postgres schema name derived from an isolation key.
 /// Used for object-log×postgres and other matrix cells that share a DSN.
 #[cfg(all(
@@ -4826,9 +4816,9 @@ fn open_postgres_log_cell(
     #[cfg(not(feature = "postgres"))]
     {
         let _ = (url, schema, mode, node_id, coordination, projection, clock);
-        return Err(EngineError::Invalid(
+        Err(EngineError::Invalid(
             "postgres log cells require the `postgres` cargo feature",
-        ));
+        ))
     }
     #[cfg(feature = "postgres")]
     {
@@ -5574,7 +5564,7 @@ mod tests {
     use crate::EngineResult;
     use fireweed_engine::{
         Clock, EngineError, InMemoryControlPlane, LeaseRenewalOutcome, LeaseState, OwnedSession,
-        QueueControlPlane, QueueKey, QueueLease,
+        QueueKey, QueueLease,
     };
 
     /// Frozen wall clock (snorri AdapterClock shape) for lease/claim timing tests.
@@ -6678,12 +6668,6 @@ mod tests {
             );
             assert_eq!(schema, super::derived_postgres_schema_name(&namespace));
         }
-    }
-
-    #[cfg(feature = "objectlog")]
-    #[test]
-    fn object_log_namespace_encoding_stays_hex_bytes() {
-        assert_eq!(super::object_log_namespace("a-b:/é"), "612d623a2fc3a9");
     }
 
     fn query_request(request_id: &str) -> ClaimByQueryRequest {
