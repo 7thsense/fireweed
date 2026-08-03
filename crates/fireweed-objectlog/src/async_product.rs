@@ -935,56 +935,6 @@ impl fireweed_engine::ItemMutationPort for AsyncObjectLogMemoryBackend {
             let fingerprint = fireweed_core::BodyHash(item_mutation_fingerprint(&request)?);
             let request_id = request.request_id.clone();
             let evaluated_at = request.evaluated_at;
-
-            if let Some(response) = self.projection.with_store_mut(|projection| {
-                ProjectionStore::replay_durable_item_mutation(
-                    projection,
-                    &shard,
-                    &request_id,
-                    fingerprint.0,
-                    evaluated_at,
-                )
-            })? {
-                return Ok(response);
-            }
-
-            let mut from = None;
-            loop {
-                let page =
-                    AsyncLogStore::read_from(self.log.as_ref(), shard.clone(), from.clone(), 256)
-                        .await?;
-                for (position, envelope) in &page.entries {
-                    if envelope.request_id.as_ref() != Some(&request_id) {
-                        continue;
-                    }
-                    if envelope.request_fingerprint != Some(fingerprint.0) {
-                        return Err(EngineError::RequestIdConflict);
-                    }
-                    let Some(RequestOutcome::ItemMutation { response_payload }) =
-                        envelope.request_outcome.as_ref()
-                    else {
-                        return Err(EngineError::RequestIdConflict);
-                    };
-                    let mut response: fireweed_engine::ItemMutationResponse =
-                        serde_json::from_str(response_payload)
-                            .map_err(|error| EngineError::Storage(error.to_string()))?;
-                    response.position = Some(position.clone());
-                    return Ok(response);
-                }
-                match page.next {
-                    Some(next) => from = Some(next),
-                    None => break,
-                }
-            }
-
-            if request.dry_run {
-                let plan = self.projection.with_store_mut(|projection| {
-                    ProjectionStore::plan_item_mutation(projection, &shard, &request)
-                })?;
-                return Ok(plan.response);
-            }
-
-            let epoch = self.resolve_epoch(&shard, expected_epoch).await?;
             let projection = Arc::clone(&self.projection);
             let log = Arc::clone(&self.log);
             let ids = Arc::clone(&self.ids);
@@ -993,6 +943,38 @@ impl fireweed_engine::ItemMutationPort for AsyncObjectLogMemoryBackend {
             self.engine
                 .submit_operation(queue, move || {
                     Box::pin(async move {
+                        if let Some(response) = projection.with_store_mut(|projection| {
+                            ProjectionStore::replay_durable_item_mutation(
+                                projection,
+                                &shard,
+                                &request_id,
+                                fingerprint.0,
+                                evaluated_at,
+                            )
+                        })? {
+                            return Ok(response);
+                        }
+                        if let Some(response) = port_surface::retained_item_mutation_response(
+                            log.as_ref(),
+                            &shard,
+                            &request_id,
+                            fingerprint.0,
+                        )
+                        .await?
+                        {
+                            return Ok(response);
+                        }
+                        if request.dry_run {
+                            let plan = projection.with_store_mut(|projection| {
+                                ProjectionStore::plan_item_mutation(projection, &shard, &request)
+                            })?;
+                            return Ok(plan.response);
+                        }
+                        let epoch =
+                            AsyncLogStore::current_epoch(log.as_ref(), shard.clone()).await?;
+                        if expected_epoch.is_some_and(|expected| expected != epoch) {
+                            return Err(EngineError::EpochFenced);
+                        }
                         let mut plan = projection.with_store_mut(|projection| {
                             ProjectionStore::plan_item_mutation(projection, &shard, &request)
                         })?;
@@ -1661,11 +1643,13 @@ pub async fn composed_objectlog_memory_async(
 mod tests {
     use fireweed_core::{
         EligibilityPolicy, LeaseToken, OrderingMode, PriorityModel, QueueDefinition, QueueId,
-        RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
+        RecurrencePolicy, RequestId, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
     };
     use fireweed_engine::{
-        ClaimCompatibility, ClaimPort, ClaimRequest, ControlPlaneStore, FinalizeKind,
-        FinalizeOutcome, FinalizePort, ProjectionRead, PushPort, PushSpec,
+        AddressedMutation, AsyncLogStore, ClaimCompatibility, ClaimPort, ClaimRequest,
+        ControlPlaneStore, FinalizeKind, FinalizeOutcome, FinalizePort, ItemMutationOperation,
+        ItemMutationPort, ItemMutationRequest, ItemMutationReturning, ItemPatch, ProjectionRead,
+        ProjectionStore, PushPort, PushSpec,
     };
     use object_log::FlushConfig;
 
@@ -1744,6 +1728,117 @@ mod tests {
         assert_eq!(claimed.items[0].item_id, ids[0]);
         let metrics = backend.metrics(&shard).await.unwrap();
         assert_eq!(metrics.leased, 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_item_mutation_request_id_commits_once() {
+        let backend = std::sync::Arc::new(backend().await);
+        let def = qdef();
+        let shard = fireweed_engine::QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        backend.create_queue(def).await.unwrap();
+        let item_id = backend
+            .push(
+                &shard,
+                vec![PushSpec::default()],
+                UtcTimestamp::new(1, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap()[0];
+        let before = backend
+            .projection
+            .with_store(|projection| ProjectionStore::item_version(projection, &shard, &item_id))
+            .unwrap()
+            .unwrap();
+        let request_id = RequestId::new("concurrent-native-mutation").unwrap();
+        let request = ItemMutationRequest {
+            request_id: request_id.clone(),
+            evaluated_at: UtcTimestamp::new(2, 0).unwrap(),
+            dry_run: false,
+            returning: ItemMutationReturning::BeforeSnapshot,
+            gate_changes: vec![],
+            operation: ItemMutationOperation::Addressed {
+                entries: vec![AddressedMutation {
+                    item_id,
+                    expected_item_version: Some(before),
+                    predicates: vec![],
+                    lease_guard: Default::default(),
+                    patch: ItemPatch {
+                        field_edits: std::collections::BTreeMap::from([(
+                            "owner".into(),
+                            Some(bytes::Bytes::from_static(b"worker-7")),
+                        )]),
+                        ..ItemPatch::default()
+                    },
+                }],
+            },
+        };
+
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let holder_backend = std::sync::Arc::clone(&backend);
+        let holder_shard = shard.clone();
+        let holder = tokio::spawn(async move {
+            holder_backend
+                .engine
+                .submit_operation(holder_shard, move || {
+                    Box::pin(async move {
+                        entered_tx.send(()).unwrap();
+                        release_rx.await.unwrap();
+                    })
+                })
+                .await
+        });
+        entered_rx.await.unwrap();
+
+        let first_backend = std::sync::Arc::clone(&backend);
+        let first_shard = shard.clone();
+        let first_request = request.clone();
+        let first = tokio::spawn(async move {
+            first_backend
+                .mutate_items(&first_shard, first_request, None)
+                .await
+                .unwrap()
+        });
+        let second_backend = std::sync::Arc::clone(&backend);
+        let second_shard = shard.clone();
+        let second = tokio::spawn(async move {
+            second_backend
+                .mutate_items(&second_shard, request, None)
+                .await
+                .unwrap()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        release_tx.send(()).unwrap();
+        holder.await.unwrap().unwrap();
+
+        let first = first.await.unwrap();
+        let second = second.await.unwrap();
+        assert_eq!(first, second);
+        let after = backend
+            .projection
+            .with_store(|projection| ProjectionStore::item_version(projection, &shard, &item_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(after, before + 1);
+
+        let mut from = None;
+        let mut retained = 0;
+        loop {
+            let page = AsyncLogStore::read_from(backend.log.as_ref(), shard.clone(), from, 256)
+                .await
+                .unwrap();
+            retained += page
+                .entries
+                .iter()
+                .filter(|(_, envelope)| envelope.request_id.as_ref() == Some(&request_id))
+                .count();
+            match page.next {
+                Some(next) => from = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(retained, 1);
     }
 
     #[tokio::test]

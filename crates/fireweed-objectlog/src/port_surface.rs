@@ -18,7 +18,7 @@ use fireweed_core::{
     RangeScanResponse, RequestId, UtcTimestamp,
 };
 use fireweed_engine::{
-    AsyncControlPlane, BatchUpdateOutcome, BatchUpdateRequest, BatchUpdateResponse,
+    AsyncControlPlane, AsyncLogStore, BatchUpdateOutcome, BatchUpdateRequest, BatchUpdateResponse,
     BoundedMutationContext, ClaimByItemIdsResponse, ClaimByQueryContext, ClaimCommand, Claimed,
     ClaimedItem, CommandChecksum, CommandEnvelope, EngineError, EngineResult, IdGen,
     IdempotencyDecision, InProcessControlPlane, InProcessProjectionStore, IndexHit, PayloadUpdate,
@@ -76,6 +76,47 @@ pub fn make_envelope(
         command,
         checksum: CommandChecksum(0),
         created_at,
+    }
+}
+
+/// Resolve a retained item-mutation outcome from the authoritative command log.
+///
+/// Callers invoke this while holding the queue-local operation permit so request-id lookup,
+/// selector planning, append, and projection visibility share one serialization boundary.
+pub async fn retained_item_mutation_response<L>(
+    log: &L,
+    shard: &QueueKey,
+    request_id: &RequestId,
+    fingerprint: u64,
+) -> EngineResult<Option<fireweed_engine::ItemMutationResponse>>
+where
+    L: AsyncLogStore,
+{
+    let mut from = None;
+    loop {
+        let page = AsyncLogStore::read_from(log, shard.clone(), from.clone(), 256).await?;
+        for (position, envelope) in &page.entries {
+            if envelope.request_id.as_ref() != Some(request_id) {
+                continue;
+            }
+            if envelope.request_fingerprint != Some(fingerprint) {
+                return Err(EngineError::RequestIdConflict);
+            }
+            let Some(RequestOutcome::ItemMutation { response_payload }) =
+                envelope.request_outcome.as_ref()
+            else {
+                return Err(EngineError::RequestIdConflict);
+            };
+            let mut response: fireweed_engine::ItemMutationResponse =
+                serde_json::from_str(response_payload)
+                    .map_err(|error| EngineError::Storage(error.to_string()))?;
+            response.position = Some(position.clone());
+            return Ok(Some(response));
+        }
+        match page.next {
+            Some(next) => from = Some(next),
+            None => return Ok(None),
+        }
     }
 }
 
