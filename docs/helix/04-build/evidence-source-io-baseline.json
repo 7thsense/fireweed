@@ -742,7 +742,64 @@
         "release"
       ],
       "lines": [
-        681
+        349,
+        350,
+        354,
+        358
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "accepts_not_yet_created_external_descendant"
+    },
+    {
+      "groups": [
+        "release"
+      ],
+      "lines": [
+        369,
+        375
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "rejects_repository_and_tracked_evidence_targets"
+    },
+    {
+      "groups": [
+        "release"
+      ],
+      "lines": [
+        386
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "rejects_parent_traversal"
+    },
+    {
+      "groups": [
+        "release"
+      ],
+      "lines": [
+        404
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "rejects_symlink_escape"
+    },
+    {
+      "groups": [
+        "release"
+      ],
+      "lines": [
+        422,
+        423,
+        425,
+        432
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "fixture_and_promoted_are_read_only"
+    },
+    {
+      "groups": [
+        "release"
+      ],
+      "lines": [
+        686
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "to_jsonl"
@@ -753,8 +810,8 @@
         "release"
       ],
       "lines": [
-        3673,
-        3676
+        3678,
+        3681
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "build_release_cost_rows"
@@ -765,12 +822,12 @@
         "release"
       ],
       "lines": [
-        4135,
         4140,
-        4143,
-        4149,
+        4145,
+        4148,
         4154,
-        4161
+        4159,
+        4166
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "real_e3_counts_objectlog_below_postgres"
@@ -781,9 +838,9 @@
         "release"
       ],
       "lines": [
-        4176,
-        4182,
-        4188
+        4181,
+        4187,
+        4193
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "crossover_when_put_price_cranked"
@@ -794,8 +851,8 @@
         "release"
       ],
       "lines": [
-        4203,
-        4213
+        4208,
+        4218
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "iops_floor_and_segment_fill_drive_the_crossover"
@@ -806,7 +863,7 @@
         "release"
       ],
       "lines": [
-        4230
+        4235
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "win_survives_equal_node_pricing"
@@ -817,9 +874,9 @@
         "release"
       ],
       "lines": [
-        4249,
-        4250,
-        4251
+        4254,
+        4255,
+        4256
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "e3_release_comparator_normalizes_only_the_measured_push_operation"
@@ -830,9 +887,9 @@
         "release"
       ],
       "lines": [
-        4380,
-        4381,
-        4382
+        4385,
+        4386,
+        4387
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "measured_10m_recovery_requests_are_charged_once_not_scaled_by_batch_commands"
@@ -843,9 +900,9 @@
         "release"
       ],
       "lines": [
-        4393,
-        4394,
-        4395
+        4398,
+        4399,
+        4400
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "cost_row_is_smoke_tier_and_traceable"
@@ -855,7 +912,7 @@
         "release"
       ],
       "lines": [
-        4569
+        4574
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "release_cost_validator_rejects_smoke_tier_cost"
@@ -866,7 +923,7 @@
         "release"
       ],
       "lines": [
-        4586
+        4591
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "release_cost_inputs_reject_quiet_host_and_absolute_speed_gates"
@@ -877,7 +934,7 @@
         "release"
       ],
       "lines": [
-        4607
+        4612
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "release_cost_inputs_require_explicit_portable_gate_marker"
@@ -887,7 +944,7 @@
         "release"
       ],
       "lines": [
-        4682
+        4687
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "release_cost_validator_rejects_stale_price_provenance"
@@ -897,9 +954,9 @@
         "release"
       ],
       "lines": [
-        4710,
         4715,
-        4720
+        4720,
+        4725
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "release_cost_validator_rejects_wrong_recovery_mode_or_source_identity"
@@ -909,7 +966,7 @@
         "release"
       ],
       "lines": [
-        4734
+        4739
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "release_cost_validator_rejects_mixed_source_revisions"
@@ -920,7 +977,7 @@
         "release"
       ],
       "lines": [
-        4752
+        4757
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "release_cost_inputs_reject_failed_recovery_bar"
@@ -931,8 +988,8 @@
         "release"
       ],
       "lines": [
-        4776,
-        4791
+        4781,
+        4796
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "release_cost_inputs_reject_inexact_recovery_range_or_progress_endpoint"
@@ -943,9 +1000,9 @@
         "release"
       ],
       "lines": [
-        4815,
-        4831,
-        4845
+        4820,
+        4836,
+        4850
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "release_cost_inputs_reject_missing_tampered_or_zero_load_batch_measurements"
@@ -956,7 +1013,7 @@
         "release"
       ],
       "lines": [
-        4875
+        4880
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "release_cost_inputs_reject_zero_sqlite_command_count_without_panicking"
@@ -967,7 +1024,7 @@
         "release"
       ],
       "lines": [
-        4889
+        4894
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "release_cost_inputs_require_measured_recovery_puts"
@@ -978,9 +1035,9 @@
         "release"
       ],
       "lines": [
-        4904,
-        4912,
-        4923
+        4909,
+        4917,
+        4928
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "release_cost_inputs_reject_duplicate_or_invalid_source_rows"
@@ -991,7 +1048,7 @@
         "release"
       ],
       "lines": [
-        4946
+        4951
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "release_cost_inputs_reject_undeclared_or_overclaimed_storage_topology"
@@ -1002,10 +1059,10 @@
         "release"
       ],
       "lines": [
-        5033,
-        5034,
-        5036,
-        5043
+        5038,
+        5039,
+        5041,
+        5048
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "smoke_tier_evidence_does_not_count_toward_the_headline"
@@ -1015,9 +1072,9 @@
         "release"
       ],
       "lines": [
-        5062,
-        5064,
-        5072
+        5067,
+        5069,
+        5077
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "strict_rejects_failed_and_untraceable_rows"
@@ -1027,9 +1084,9 @@
         "release"
       ],
       "lines": [
-        5083,
         5088,
-        5093
+        5093,
+        5098
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "ledger_path_honors_env_override_and_default"
@@ -1040,10 +1097,61 @@
         "release"
       ],
       "lines": [
-        5104
+        5109
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "missing_evidence_reports_the_gap"
+    },
+    {
+      "groups": [
+        "release"
+      ],
+      "lines": [
+        287
+      ],
+      "path": "crates/fireweed-release/src/source_boundary.rs",
+      "symbol": "rejects_source_classes_in_the_evidence_root_even_when_named_in_allowlist"
+    },
+    {
+      "groups": [
+        "release"
+      ],
+      "lines": [
+        307
+      ],
+      "path": "crates/fireweed-release/src/source_boundary.rs",
+      "symbol": "rejects_source_classes_outside_the_source_root"
+    },
+    {
+      "groups": [
+        "release"
+      ],
+      "lines": [
+        325,
+        326
+      ],
+      "path": "crates/fireweed-release/src/source_boundary.rs",
+      "symbol": "empty_default_rejects_promoted_data"
+    },
+    {
+      "groups": [
+        "release"
+      ],
+      "lines": [
+        345
+      ],
+      "path": "crates/fireweed-release/src/source_boundary.rs",
+      "symbol": "exact_allowlist_entry_accepts_only_the_named_promoted_data"
+    },
+    {
+      "groups": [
+        "release"
+      ],
+      "lines": [
+        356
+      ],
+      "path": "crates/fireweed-release/src/source_boundary.rs",
+      "symbol": "allowlist_cannot_name_non_evidence_data"
     },
     {
       "groups": [
@@ -2813,6 +2921,17 @@
     },
     {
       "groups": [
+        "script"
+      ],
+      "lines": [
+        36,
+        127
+      ],
+      "path": "scripts/ci/check-evidence-contract-schemas.sh",
+      "symbol": "<module>"
+    },
+    {
+      "groups": [
         "matrix",
         "script"
       ],
@@ -2997,7 +3116,7 @@
       "calls": [
         "run"
       ],
-      "line": 609,
+      "line": 614,
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "verify_file"
     },
@@ -3188,7 +3307,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "778dd0e49f04d714f52ea876d3892c092a8f4981f0f133d43b23809667c20687",
+  "scan_sha256": "e587167218e16837cfef03eba31a00c2fe639659438e6d0278efcdca1847dbad",
   "schema_version": 1,
   "source_surfaces": [
     {
@@ -6521,17 +6640,363 @@
       "evidence_paths": [],
       "first_match_line": 1,
       "groups": [
+        "release"
+      ],
+      "last_match_line": 42,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 8,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 45,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 91,
+      "line": 43,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 6,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "fmt"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 100,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 100,
+      "line": 92,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "source"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 113,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 113,
+      "line": 113,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "new"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 123,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 128,
+      "line": 122,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "authorize"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 135,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 135,
+      "line": 135,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "new"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 145,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 145,
+      "line": 144,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "authorize"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 166,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 197,
+      "line": 162,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 8,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "new"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 219,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 219,
+      "line": 218,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "authorize"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 232,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 237,
+      "line": 231,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 3,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "canonical_input"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 245,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 250,
+      "line": 241,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 5,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "authorize_read_only"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 258,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 272,
+      "line": 257,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "normalize_absolute"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 284,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 289,
+      "line": 283,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "constant",
+        "reader"
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "resolve_existing_ancestor"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 317,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 317,
+      "line": 314,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "deleter",
+        "writer"
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "new"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 351,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 355,
+      "line": 344,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "accepts_not_yet_created_external_descendant"
+    },
+    {
+      "evidence_paths": [
+        "docs/perf/evidence/new.jsonl"
+      ],
+      "first_match_line": 362,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 377,
+      "line": 362,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 4,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "rejects_repository_and_tracked_evidence_targets"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 388,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 388,
+      "line": 382,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "rejects_parent_traversal"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 410,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 410,
+      "line": 394,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "rejects_symlink_escape"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 422,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 434,
+      "line": 415,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 5,
+      "operations": [
+        "writer"
+      ],
+      "path": "crates/fireweed-release/src/evidence_io.rs",
+      "symbol": "fixture_and_promoted_are_read_only"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 1,
+      "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 25,
+      "last_match_line": 30,
       "line": 1,
       "markers": [
         "e3",
         "evidence",
         "tp003"
       ],
-      "match_count": 6,
+      "match_count": 8,
       "operations": [
         "reader",
         "writer"
@@ -6541,12 +7006,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 373,
+      "first_match_line": 378,
       "groups": [
         "release"
       ],
-      "last_match_line": 444,
-      "line": 361,
+      "last_match_line": 449,
+      "line": 366,
       "markers": [
         "evidence",
         "source_guard"
@@ -6561,13 +7026,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 623,
+      "first_match_line": 628,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 658,
-      "line": 609,
+      "last_match_line": 663,
+      "line": 614,
       "markers": [
         "e3",
         "evidence"
@@ -6581,13 +7046,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 666,
+      "first_match_line": 671,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 672,
-      "line": 661,
+      "last_match_line": 677,
+      "line": 666,
       "markers": [
         "e3",
         "evidence"
@@ -6601,12 +7066,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 685,
+      "first_match_line": 690,
       "groups": [
         "release"
       ],
-      "last_match_line": 691,
-      "line": 680,
+      "last_match_line": 696,
+      "line": 685,
       "markers": [
         "evidence",
         "evidence_environment"
@@ -6620,12 +7085,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 694,
+      "first_match_line": 699,
       "groups": [
         "release"
       ],
-      "last_match_line": 695,
-      "line": 694,
+      "last_match_line": 700,
+      "line": 699,
       "markers": [
         "evidence_environment",
         "ledger_path"
@@ -6641,12 +7106,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 722,
+      "first_match_line": 727,
       "groups": [
         "release"
       ],
-      "last_match_line": 722,
-      "line": 714,
+      "last_match_line": 727,
+      "line": 719,
       "markers": [
         "evidence"
       ],
@@ -6659,12 +7124,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 732,
+      "first_match_line": 737,
       "groups": [
         "release"
       ],
-      "last_match_line": 759,
-      "line": 727,
+      "last_match_line": 764,
+      "line": 732,
       "markers": [
         "evidence"
       ],
@@ -6677,13 +7142,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 792,
+      "first_match_line": 797,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 814,
-      "line": 761,
+      "last_match_line": 819,
+      "line": 766,
       "markers": [
         "e3",
         "evidence"
@@ -6697,12 +7162,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 836,
+      "first_match_line": 841,
       "groups": [
         "release"
       ],
-      "last_match_line": 870,
-      "line": 834,
+      "last_match_line": 875,
+      "line": 839,
       "markers": [
         "evidence"
       ],
@@ -6715,12 +7180,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 892,
+      "first_match_line": 897,
       "groups": [
         "release"
       ],
-      "last_match_line": 893,
-      "line": 872,
+      "last_match_line": 898,
+      "line": 877,
       "markers": [
         "evidence"
       ],
@@ -6733,13 +7198,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 950,
+      "first_match_line": 955,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 1034,
-      "line": 916,
+      "last_match_line": 1039,
+      "line": 921,
       "markers": [
         "e3",
         "evidence"
@@ -6753,13 +7218,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1064,
+      "first_match_line": 1069,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 1145,
-      "line": 1060,
+      "last_match_line": 1150,
+      "line": 1065,
       "markers": [
         "e3",
         "evidence"
@@ -6773,12 +7238,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1146,
+      "first_match_line": 1151,
       "groups": [
         "release"
       ],
-      "last_match_line": 1155,
-      "line": 1146,
+      "last_match_line": 1160,
+      "line": 1151,
       "markers": [
         "evidence"
       ],
@@ -6791,13 +7256,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1156,
+      "first_match_line": 1161,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 1238,
-      "line": 1156,
+      "last_match_line": 1243,
+      "line": 1161,
       "markers": [
         "e3",
         "evidence",
@@ -6813,12 +7278,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1307,
+      "first_match_line": 1312,
       "groups": [
         "release"
       ],
-      "last_match_line": 1331,
-      "line": 1290,
+      "last_match_line": 1336,
+      "line": 1295,
       "markers": [
         "evidence",
         "source_guard"
@@ -6833,12 +7298,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1396,
+      "first_match_line": 1401,
       "groups": [
         "release"
       ],
-      "last_match_line": 1396,
-      "line": 1385,
+      "last_match_line": 1401,
+      "line": 1390,
       "markers": [
         "source_guard"
       ],
@@ -6854,12 +7319,12 @@
       "evidence_paths": [
         "docs/perf/evidence/tp002-e2-multinode-kind-release.jsonl"
       ],
-      "first_match_line": 1556,
+      "first_match_line": 1561,
       "groups": [
         "release"
       ],
-      "last_match_line": 1558,
-      "line": 1479,
+      "last_match_line": 1563,
+      "line": 1484,
       "markers": [
         "evidence"
       ],
@@ -6872,12 +7337,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1684,
+      "first_match_line": 1689,
       "groups": [
         "release"
       ],
-      "last_match_line": 1744,
-      "line": 1562,
+      "last_match_line": 1749,
+      "line": 1567,
       "markers": [
         "evidence",
         "source_guard"
@@ -6892,12 +7357,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2145,
+      "first_match_line": 2150,
       "groups": [
         "release"
       ],
-      "last_match_line": 2147,
-      "line": 1923,
+      "last_match_line": 2152,
+      "line": 1928,
       "markers": [
         "evidence"
       ],
@@ -6910,13 +7375,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2161,
+      "first_match_line": 2166,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 2457,
-      "line": 2152,
+      "last_match_line": 2462,
+      "line": 2157,
       "markers": [
         "e3",
         "evidence"
@@ -6931,13 +7396,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2543,
+      "first_match_line": 2548,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 2585,
-      "line": 2522,
+      "last_match_line": 2590,
+      "line": 2527,
       "markers": [
         "e3"
       ],
@@ -6950,13 +7415,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2589,
+      "first_match_line": 2594,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 2612,
-      "line": 2589,
+      "last_match_line": 2617,
+      "line": 2594,
       "markers": [
         "e3"
       ],
@@ -6969,13 +7434,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2614,
+      "first_match_line": 2619,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 2638,
-      "line": 2614,
+      "last_match_line": 2643,
+      "line": 2619,
       "markers": [
         "e3"
       ],
@@ -6988,12 +7453,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2677,
+      "first_match_line": 2682,
       "groups": [
         "release"
       ],
-      "last_match_line": 2677,
-      "line": 2671,
+      "last_match_line": 2682,
+      "line": 2676,
       "markers": [
         "evidence"
       ],
@@ -7006,13 +7471,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2869,
+      "first_match_line": 2874,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 2884,
-      "line": 2779,
+      "last_match_line": 2889,
+      "line": 2784,
       "markers": [
         "e3",
         "source_guard"
@@ -7027,13 +7492,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2954,
+      "first_match_line": 2959,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 2954,
-      "line": 2931,
+      "last_match_line": 2959,
+      "line": 2936,
       "markers": [
         "e3"
       ],
@@ -7046,13 +7511,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2958,
+      "first_match_line": 2963,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 3308,
-      "line": 2955,
+      "last_match_line": 3313,
+      "line": 2960,
       "markers": [
         "e3",
         "evidence",
@@ -7067,13 +7532,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3325,
+      "first_match_line": 3330,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 3325,
-      "line": 3309,
+      "last_match_line": 3330,
+      "line": 3314,
       "markers": [
         "e3"
       ],
@@ -7086,13 +7551,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3327,
+      "first_match_line": 3332,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 3327,
-      "line": 3327,
+      "last_match_line": 3332,
+      "line": 3332,
       "markers": [
         "e3"
       ],
@@ -7105,13 +7570,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3530,
+      "first_match_line": 3535,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 3534,
-      "line": 3406,
+      "last_match_line": 3539,
+      "line": 3411,
       "markers": [
         "e3",
         "evidence"
@@ -7125,13 +7590,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3616,
+      "first_match_line": 3621,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 3650,
-      "line": 3535,
+      "last_match_line": 3655,
+      "line": 3540,
       "markers": [
         "e3",
         "evidence"
@@ -7145,13 +7610,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3713,
+      "first_match_line": 3718,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 3775,
-      "line": 3651,
+      "last_match_line": 3780,
+      "line": 3656,
       "markers": [
         "e3",
         "evidence",
@@ -7166,13 +7631,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3787,
+      "first_match_line": 3792,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 4124,
-      "line": 3784,
+      "last_match_line": 4129,
+      "line": 3789,
       "markers": [
         "e3",
         "evidence",
@@ -7188,13 +7653,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4128,
+      "first_match_line": 4133,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 4129,
-      "line": 4128,
+      "last_match_line": 4134,
+      "line": 4133,
       "markers": [
         "e3"
       ],
@@ -7207,13 +7672,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4172,
+      "first_match_line": 4177,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 4192,
-      "line": 4171,
+      "last_match_line": 4197,
+      "line": 4176,
       "markers": [
         "e3"
       ],
@@ -7226,13 +7691,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4201,
+      "first_match_line": 4206,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 4202,
-      "line": 4196,
+      "last_match_line": 4207,
+      "line": 4201,
       "markers": [
         "e3"
       ],
@@ -7245,13 +7710,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4225,
+      "first_match_line": 4230,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 4225,
-      "line": 4224,
+      "last_match_line": 4230,
+      "line": 4229,
       "markers": [
         "e3"
       ],
@@ -7264,13 +7729,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4247,
+      "first_match_line": 4252,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 4248,
-      "line": 4247,
+      "last_match_line": 4253,
+      "line": 4252,
       "markers": [
         "e3"
       ],
@@ -7283,13 +7748,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4368,
+      "first_match_line": 4373,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 4385,
-      "line": 4367,
+      "last_match_line": 4390,
+      "line": 4372,
       "markers": [
         "e3",
         "evidence"
@@ -7303,13 +7768,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4388,
+      "first_match_line": 4393,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 4394,
-      "line": 4387,
+      "last_match_line": 4399,
+      "line": 4392,
       "markers": [
         "e3",
         "evidence"
@@ -7323,13 +7788,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4422,
+      "first_match_line": 4427,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 4539,
-      "line": 4397,
+      "last_match_line": 4544,
+      "line": 4402,
       "markers": [
         "e3",
         "evidence",
@@ -7344,13 +7809,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4546,
+      "first_match_line": 4551,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 4553,
-      "line": 4544,
+      "last_match_line": 4558,
+      "line": 4549,
       "markers": [
         "e3"
       ],
@@ -7363,12 +7828,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4568,
+      "first_match_line": 4573,
       "groups": [
         "release"
       ],
-      "last_match_line": 4568,
-      "line": 4566,
+      "last_match_line": 4573,
+      "line": 4571,
       "markers": [
         "evidence"
       ],
@@ -7381,13 +7846,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4579,
+      "first_match_line": 4584,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 4579,
-      "line": 4578,
+      "last_match_line": 4584,
+      "line": 4583,
       "markers": [
         "e3"
       ],
@@ -7400,13 +7865,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4597,
+      "first_match_line": 4602,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 4597,
-      "line": 4596,
+      "last_match_line": 4602,
+      "line": 4601,
       "markers": [
         "e3"
       ],
@@ -7419,12 +7884,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4681,
+      "first_match_line": 4686,
       "groups": [
         "release"
       ],
-      "last_match_line": 4681,
-      "line": 4676,
+      "last_match_line": 4686,
+      "line": 4681,
       "markers": [
         "source_guard"
       ],
@@ -7438,12 +7903,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4708,
+      "first_match_line": 4713,
       "groups": [
         "release"
       ],
-      "last_match_line": 4708,
-      "line": 4691,
+      "last_match_line": 4713,
+      "line": 4696,
       "markers": [
         "source_guard"
       ],
@@ -7457,12 +7922,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4728,
+      "first_match_line": 4733,
       "groups": [
         "release"
       ],
-      "last_match_line": 4731,
-      "line": 4728,
+      "last_match_line": 4736,
+      "line": 4733,
       "markers": [
         "source_guard"
       ],
@@ -7476,13 +7941,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4744,
+      "first_match_line": 4749,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 4744,
-      "line": 4743,
+      "last_match_line": 4749,
+      "line": 4748,
       "markers": [
         "e3"
       ],
@@ -7495,13 +7960,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4762,
+      "first_match_line": 4767,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 4762,
-      "line": 4761,
+      "last_match_line": 4767,
+      "line": 4766,
       "markers": [
         "e3"
       ],
@@ -7514,13 +7979,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4804,
+      "first_match_line": 4809,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 4804,
-      "line": 4802,
+      "last_match_line": 4809,
+      "line": 4807,
       "markers": [
         "e3"
       ],
@@ -7533,13 +7998,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4858,
+      "first_match_line": 4863,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 4858,
-      "line": 4857,
+      "last_match_line": 4863,
+      "line": 4862,
       "markers": [
         "e3"
       ],
@@ -7552,13 +8017,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4881,
+      "first_match_line": 4886,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 4881,
-      "line": 4880,
+      "last_match_line": 4886,
+      "line": 4885,
       "markers": [
         "e3"
       ],
@@ -7571,13 +8036,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4899,
+      "first_match_line": 4904,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 4922,
-      "line": 4898,
+      "last_match_line": 4927,
+      "line": 4903,
       "markers": [
         "e3",
         "source_guard"
@@ -7591,13 +8056,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4933,
+      "first_match_line": 4938,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 4933,
-      "line": 4932,
+      "last_match_line": 4938,
+      "line": 4937,
       "markers": [
         "e3"
       ],
@@ -7610,12 +8075,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 5000,
+      "first_match_line": 5005,
       "groups": [
         "release"
       ],
-      "last_match_line": 5014,
-      "line": 4999,
+      "last_match_line": 5019,
+      "line": 5004,
       "markers": [
         "evidence"
       ],
@@ -7628,13 +8093,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 5021,
+      "first_match_line": 5026,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 5043,
-      "line": 5021,
+      "last_match_line": 5048,
+      "line": 5026,
       "markers": [
         "e3",
         "evidence"
@@ -7650,12 +8115,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 5069,
+      "first_match_line": 5074,
       "groups": [
         "release"
       ],
-      "last_match_line": 5069,
-      "line": 5060,
+      "last_match_line": 5074,
+      "line": 5065,
       "markers": [
         "evidence"
       ],
@@ -7670,12 +8135,12 @@
       "evidence_paths": [
         "docs/perf/evidence/suite_a.jsonl"
       ],
-      "first_match_line": 5082,
+      "first_match_line": 5087,
       "groups": [
         "release"
       ],
-      "last_match_line": 5094,
-      "line": 5080,
+      "last_match_line": 5099,
+      "line": 5085,
       "markers": [
         "evidence",
         "evidence_environment",
@@ -7691,13 +8156,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 5100,
+      "first_match_line": 5105,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 5103,
-      "line": 5100,
+      "last_match_line": 5108,
+      "line": 5105,
       "markers": [
         "e3",
         "evidence"
@@ -7708,6 +8173,264 @@
       ],
       "path": "crates/fireweed-release/src/lib.rs",
       "symbol": "missing_evidence_reports_the_gap"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 1,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 6,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 3,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-release/src/source_boundary.rs",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 59,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 63,
+      "line": 41,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-release/src/source_boundary.rs",
+      "symbol": "kind"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 83,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 90,
+      "line": 68,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 4,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-release/src/source_boundary.rs",
+      "symbol": "fmt"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 117,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 121,
+      "line": 112,
+      "markers": [
+        "evidence",
+        "source_guard"
+      ],
+      "match_count": 3,
+      "operations": [
+        "source_guard"
+      ],
+      "path": "crates/fireweed-release/src/source_boundary.rs",
+      "symbol": "from"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 128,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 140,
+      "line": 127,
+      "markers": [
+        "evidence",
+        "source_guard"
+      ],
+      "match_count": 7,
+      "operations": [
+        "source_guard"
+      ],
+      "path": "crates/fireweed-release/src/source_boundary.rs",
+      "symbol": "new"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 152,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 153,
+      "line": 144,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-release/src/source_boundary.rs",
+      "symbol": "with_promoted_allowlist"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 169,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 176,
+      "line": 162,
+      "markers": [
+        "evidence",
+        "source_guard"
+      ],
+      "match_count": 3,
+      "operations": [
+        "reader",
+        "source_guard"
+      ],
+      "path": "crates/fireweed-release/src/source_boundary.rs",
+      "symbol": "validate"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 226,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 226,
+      "line": 219,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "deleter",
+        "writer"
+      ],
+      "path": "crates/fireweed-release/src/source_boundary.rs",
+      "symbol": "new"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 245,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 245,
+      "line": 243,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-release/src/source_boundary.rs",
+      "symbol": "boundary"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 271,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 289,
+      "line": 271,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 6,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-release/src/source_boundary.rs",
+      "symbol": "rejects_source_classes_in_the_evidence_root_even_when_named_in_allowlist"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 298,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 298,
+      "line": 298,
+      "markers": [
+        "source_guard"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader",
+        "source_guard"
+      ],
+      "path": "crates/fireweed-release/src/source_boundary.rs",
+      "symbol": "rejects_source_classes_outside_the_source_root"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 321,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 322,
+      "line": 319,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-release/src/source_boundary.rs",
+      "symbol": "empty_default_rejects_promoted_data"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 335,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 336,
+      "line": 333,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-release/src/source_boundary.rs",
+      "symbol": "exact_allowlist_entry_accepts_only_the_named_promoted_data"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 352,
+      "groups": [
+        "release"
+      ],
+      "last_match_line": 358,
+      "line": 352,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-release/src/source_boundary.rs",
+      "symbol": "allowlist_cannot_name_non_evidence_data"
     },
     {
       "evidence_paths": [],
@@ -11657,6 +12380,24 @@
       ],
       "path": "crates/fireweed/tests/storage_matrix_t0_t2.rs",
       "symbol": "postgres_log_t3_t4_evidence_and_helm_values_present"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 15,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 185,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 8,
+      "operations": [
+        "reader"
+      ],
+      "path": "scripts/ci/check-evidence-contract-schemas.sh",
+      "symbol": "<module>"
     },
     {
       "evidence_paths": [],
