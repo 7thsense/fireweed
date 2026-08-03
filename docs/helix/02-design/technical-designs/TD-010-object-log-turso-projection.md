@@ -19,7 +19,7 @@ ddx:
     - {kind: informed_by, to: td-s3-object-log-sqlite-projection-mode}
     - {kind: informed_by, to: api-native-client-interface}
     - {kind: informed_by, to: concerns}
-  status: accepted
+  status: superseded
   review:
     self_hash: 1e3623771c800e9d2c6874c19e94103d00c165f1afdd27ece4760fb43f6f7f69
     deps:
@@ -34,23 +34,36 @@ ddx:
     reviewed_at: "2026-07-20T00:01:28Z"
 ---
 
-# Technical Design: TD-010 Object-log + Turso Projection
+# Technical Design: TD-010 Internal Object-log + Turso Compatibility Projection
 
-**Contract**: API-001 | **ADR**: ADR-013, ADR-015, ADR-016, ADR-017 | **Scope**: native-async derived projection
+**Contract**: API-001 | **ADR**: ADR-012, ADR-015, ADR-016, ADR-017 | **Scope**: internal native-async compatibility projection
+
+## Disposition
+
+This design is superseded as a public server profile. It remains implementation guidance for the
+internal, experimental `fireweed-turso` adapter and its focused compatibility tests only.
+
+- Public log selectors are exactly `memory`, `sqlite`, `postgres`, `filesystem`, and `s3`.
+- Public projection selectors are exactly `memory`, `sqlite`, and `postgres`.
+- No `objectlog`, `inmemory`, `turso`, `hybrid`, or combined-profile alias is supported.
+- Public selection of `turso` must return a configuration error in both feature-disabled and
+  feature-enabled builds. Feature enablement exposes internal tests, not a public positive path.
+- Historical `object-log + Turso` and `objectlog/turso` wording below describes design lineage only where
+  it is not explicitly replaced by this disposition.
 
 ## Scope
 
-This design adds Turso Database as a local, rebuildable relational projection paired with the segmented
-object log. It defines the production adapter, shared relational substrate, server profile, recovery,
-failure behavior, and verification gates.
+This design retains Turso Database as a local, rebuildable relational projection used by internal
+compatibility tests with the segmented object log. It defines the experimental adapter, shared
+relational substrate, recovery, failure behavior, and validation gates without adding a public profile.
 
 In scope:
 
 - async storage-axis migration required to call a native-async projection without blocking;
 - a driver-neutral relational schema/codec/query substrate shared by SQLite and Turso;
 - `fireweed-turso`, pinned to Turso 0.7.0 in ordinary local WAL mode;
-- feature-gated `objectlog/turso` server composition;
-- full relational differential, cancellation, replay, reopen, and server conformance.
+- feature-gated internal object-log/Turso composition;
+- full relational differential, cancellation, replay, and reopen conformance.
 
 Out of scope:
 
@@ -59,6 +72,7 @@ Out of scope:
 - experimental Turso MVCC, sync, FTS, or remote/cloud features;
 - Niflheim changes and deployment-capacity benchmarks;
 - a new broad GitHub Actions matrix dimension.
+- any public Turso selector, alias, server profile, or support commitment.
 
 ## Technical Approach
 
@@ -82,7 +96,8 @@ whose manifest remains the acknowledged-command authority.
   shutdown drains started tasks and replay resolves any process-loss outcome.
 - Every applied batch uses one immediate transaction. Projection rows, indexes, replay outcome, counters,
   and applied cursor commit together; an overlapping prefix is idempotent and a gap is rejected.
-- Public server selection is feature-gated. Default builds and profiles remain unchanged.
+- Public server selection does not exist. The experimental feature gates adapter code and focused tests;
+  public parsing rejects `turso` with the same typed configuration error in all builds.
 
 **Trade-offs**: preserving relational SQL minimizes semantic porting risk, but Turso's pre-1.0 API and
 build size require an exact pin and a focused validation lane.
@@ -118,14 +133,16 @@ row APIs remain in their adapter crates.
 timeout `5000`. It does not send the rusqlite PRAGMA batch through `execute_batch`, because the probe proved
 that call can report failure after changing journal mode.
 
-### Modified: segmented object-log composition
+### Internal: segmented object-log compatibility composition
 
-- Generalize the current object-log + SQLite projection backend over the async derived-projection
-  contract while preserving its existing public alias.
-- Add a feature-gated Turso alias/profile and await create, replay, apply, read, recovery, and shutdown.
-- Ack only after object-log manifest commit and the profile's required Turso response barrier. A lost
+- Exercise the segmented object log over the async derived-projection contract in internal tests without
+  preserving or introducing a combined public alias.
+- Add a feature-gated Turso test composition that awaits create, replay, apply, read, recovery, and
+  shutdown without entering server configuration.
+- Ack only after object-log manifest commit and the internal composition's Turso response barrier. A lost
   response is resolved from the durable log/request outcome.
-- **Files**: `crates/fireweed-server/src/object_log_sqlite.rs`, server configuration and tests.
+- **Files**: internal composition and focused adapter tests; public server configuration is unchanged
+  except for explicit rejection coverage.
 
 ### Modified: blocking reference adapters
 
@@ -139,12 +156,13 @@ that call can report failure after changing journal mode.
 | Surface | Governing Contract | Story-Level Usage |
 |---------|--------------------|-------------------|
 | Queue operations and transaction outcomes | API-001 | No client-visible semantic change. |
-| Backend profile selection | TD-001 / ADR-016 | Adds feature-gated `objectlog/turso`; unsupported builds fail configuration explicitly. |
+| Backend profile selection | TD-001 / ADR-012 | No Turso profile; `turso` fails public configuration explicitly in every build. |
 | Storage traits | ADR-015 / TD-001 | Runtime-neutral `Send` futures; no Tokio type crosses into domain ports. |
 
-The exact environment/config spellings are owned by the existing server configuration surface. The
-implementation uses `FIREWEED_PROJECTION_BACKEND=turso` and `FIREWEED_TURSO_PROJECTION_PATH` only if those
-names pass the server's existing compatibility and validation conventions.
+The public server configuration must reject `FIREWEED_PROJECTION_BACKEND=turso`; it must not silently
+map that value to another projection or condition acceptance on a compile feature.
+`FIREWEED_TURSO_PROJECTION_PATH`, if retained at all, is internal test configuration and is not a public
+operator contract.
 
 ## Data Model Changes
 
@@ -181,10 +199,9 @@ upgrade refuses a newer/unknown schema until the compatibility probe and migrati
 - No blocking driver call on a Tokio worker; a single-thread heartbeat must advance throughout DB work.
 - No connection, task, or loop per queue. Connections and background apply are bounded shared resources.
 - Turso must preserve exact operation outcomes, monotonic progress, structural
-  query bounds, and declared resource ceilings under load before default enablement;
+  query bounds, and declared resource ceilings under internal validation;
   throughput and latency are compared with interleaved same-run SQLite controls
-  and reported as declared-topology capacity. Initial production
-  status does not claim improvement over SQLite.
+  and reported as experimental evidence. No production status or public performance claim follows.
 - CI adds one focused/path-filtered Turso job, not a projection-by-kind matrix multiplication.
 
 ## Testing
@@ -200,18 +217,19 @@ upgrade refuses a newer/unknown schema until the compatibility probe and migrati
 - [ ] **Dispatch/strategy**: atomic profiles cannot construct with separate append/apply; object-log uses
   `SeparateReplayCommit`; submitted tasks survive caller drop; a stalled queue does not stall another.
 - [ ] **Runtime**: blocking-reference wrappers and Turso both keep a single-thread heartbeat alive.
-- [ ] **Server**: create/push/claim/finalize/renew/reassign/read/reopen and feature-disabled config error.
+- [ ] **Configuration**: feature-disabled and feature-enabled builds both reject the public `turso`
+  selector; internal tests cover create/push/claim/finalize/renew/reassign/read/reopen directly.
 - [ ] **Concurrency**: 16 disjoint writers and deterministic same-active-key conflict.
 - [ ] **Security**: tenant isolation and corrupted-local-projection fail-closed behavior.
 
 ## Migration & Rollback
 
-- **Backward compatibility**: client operations are unchanged; new profile is opt-in.
+- **Backward compatibility**: client operations are unchanged; there is no new public profile or alias.
 - **Data migration**: none from SQLite is required. A Turso projection rebuilds from the object log into a
   fresh file and becomes eligible only after frontier/image verification.
-- **Feature toggle**: compile feature plus projection profile selection.
-- **Rollback**: disable the profile, discard the local Turso file, and rebuild the SQLite projection from
-  the same authoritative object log.
+- **Feature toggle**: compile feature for the internal adapter and validation lane only.
+- **Rollback**: disable the experimental feature or discard its local Turso test state; supported public
+  configurations are unaffected.
 
 ## Implementation Sequence
 
@@ -221,11 +239,12 @@ upgrade refuses a newer/unknown schema until the compatibility probe and migrati
 3. Wrap blocking SQLite/object-log/Postgres transactions and remove composition-root blocking shims.
 4. Extract the driver-neutral relational substrate with SQLite parity.
 5. Implement and differentially test `fireweed-turso`.
-6. Wire feature-gated object-log + Turso server profile and focused CI/render validation.
+6. Wire feature-gated internal object-log + Turso validation and verify public selector rejection in
+   both feature modes.
 7. Remove the remaining legacy synchronous axes after repository-wide conformance passes.
 
-**Prerequisites**: ADR-015 and ADR-016 accepted; exact Turso 0.7 probe preserved; ADR-013 response and
-rebuild rules unchanged.
+**Prerequisites**: ADR-015 accepted; ADR-016 retained as superseded experimental evidence; exact Turso
+0.7 probe preserved; ADR-013 response and rebuild rules unchanged.
 
 ## Risks
 
@@ -233,6 +252,6 @@ rebuild rules unchanged.
 |------|------|--------|------------|
 | Async migration becomes a flag-day rewrite | M | H | Additive traits, explicit wrappers, dependency-ordered beads, removal last. |
 | Relational extraction changes SQLite behavior | M | H | Land extraction with SQLite-only parity before Turso code. |
-| Full command corpus exposes unsupported Turso behavior | M | H | Differential test blocks profile enablement; keep SQLite rollback. |
+| Full command corpus exposes unsupported Turso behavior | M | H | Differential failure blocks the internal validation lane; public profiles are unaffected. |
 | Cancellation leaves waiter or transaction stranded | M | H | Owned commit and lock-wait cancellation tests. |
 | New CI work is over-scaled | M | M | One focused job; no broad matrix expansion. |

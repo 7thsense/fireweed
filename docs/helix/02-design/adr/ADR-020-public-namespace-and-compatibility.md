@@ -17,6 +17,20 @@ ddx:
 > Superseded on 2026-07-25 by ADR-023. Fireweed is pre-release; the compatibility period and retained
 > runtime/persistence namespaces specified here do not apply.
 
+## Post-supersession storage-selector clarification (2026-08-03)
+
+This clarification does not reactivate the namespace migration policy below. It records the current
+public storage names so the historical compatibility language cannot be read as authority for storage
+aliases:
+
+- log selectors are exactly `memory`, `sqlite`, `postgres`, `filesystem`, and `s3`;
+- projection selectors are exactly `memory`, `sqlite`, and `postgres`;
+- each selector maps bijectively to the same-named implementation family and canonical public label;
+- `inmemory`, `objectlog`, `turso`, `hybrid`, and combined profile spellings are not compatibility
+  aliases and must fail closed at public configuration boundaries; and
+- `fireweed-turso` may remain an internal experimental adapter, while historical source, audit, and
+  document occurrences of retired names remain inert evidence rather than supported configuration.
+
 ## Context
 
 The project has already selected Fireweed Queue as the public identity. The
