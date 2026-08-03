@@ -30,18 +30,19 @@ use crate::{
     BatchUpdateRequest, BatchUpdateResponse, BoundedMutationContext, ClaimByItemIdsResponse,
     ClaimByQueryContext, ClaimCommand, ClaimPort, ClaimRef, ClaimRequest, Claimed, CommandChecksum,
     CommandEnvelope, CommandId, CommandPage, CommandPosition, CommitEntryStatus,
-    CommitOutcomeEntry, CommitTransitionEntry, ControlPlane, ControlPlaneStore, CreateQueueOutcome,
-    DurabilityClass, EngineError, EngineResult, EntryRecovery, FinalizeCommand, FinalizeKind,
-    FinalizeOutcome, FinalizePort, HotProjectionQueryPort, IdGen, IdempotencyDecision,
-    InProcessControlPlane, InProcessLogStore, InProcessProjectionStore, IndexHit, IndexQueryPort,
-    InlineOwnedTaskDispatcher, ItemView, LeaseView, LiveItemView, LogRead, LogStore, OwnedTask,
-    PayloadUpdate, PendingPage, PendingSummary, ProjectionClaimPlanner, ProjectionLifecyclePlanner,
-    ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner, ProjectionSnapshot,
-    ProjectionStore, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand,
-    QueueCounters, QueueIdempotencyCache, QueueKey, QueueMetrics, RawCommitFault, RawCommitOutcome,
-    RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, RequestIdReplayProbe, RequestOutcome,
-    SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport, UnifiedAtomicCommit,
+    CommitOutcomeEntry, CommitTransitionEntry, ComposeFaultHook, ComposeFaultPoint, ControlPlane,
+    ControlPlaneStore, CreateQueueOutcome, DurabilityClass, EngineError, EngineResult,
+    EntryRecovery, FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort,
+    HotProjectionQueryPort, IdGen, IdempotencyDecision, InProcessControlPlane, InProcessLogStore,
+    InProcessProjectionStore, IndexHit, IndexQueryPort, InlineOwnedTaskDispatcher, ItemView,
+    LeaseView, LiveItemView, LogRead, LogStore, OwnedTask, PayloadUpdate, PendingPage,
+    PendingSummary, ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner,
+    ProjectionRead, ProjectionReclaimPlanner, ProjectionSnapshot, ProjectionStore, PurgePort,
+    PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueCounters, QueueIdempotencyCache,
+    QueueKey, QueueMetrics, RawCommitFault, RawCommitOutcome, RawCommitRequest,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeaseCommand,
+    RenewLeasePort, ReplacePendingCommand, RequestIdReplayProbe, RequestOutcome, SnapshotRef,
+    SnapshotStore, TerminalEmissionMetrics, TickReport, UnifiedAtomicCommit,
     UnifiedAtomicCommitter, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
     WriteSideRecordsCommand, batch_update_body_hash, build_push_items, claim_by_item_ids_body_hash,
     claim_by_query_body_hash, commit_body_hash, compile_entity_schema, generate_query_lease_token,
@@ -84,6 +85,26 @@ impl IdGen for SeqIdGen {
 
 /// Shared push request-id cache (parity with sync `ComposedBackend` in-memory idempotency).
 type PushIdempotency = Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>>;
+/// Shared test-only hook slot for the two composed projection-apply crash instants.
+type ComposeFaultHookSlot = Arc<Mutex<Option<Arc<dyn ComposeFaultHook>>>>;
+
+async fn apply_with_compose_fault_hook<A, F>(
+    fault_hook: Option<&Arc<dyn ComposeFaultHook>>,
+    apply: A,
+) -> EngineResult<()>
+where
+    A: FnOnce() -> F,
+    F: std::future::Future<Output = EngineResult<()>> + Send,
+{
+    if let Some(hook) = fault_hook {
+        hook.fault_point(ComposeFaultPoint::DuringProjectionApply)?;
+    }
+    apply().await?;
+    if let Some(hook) = fault_hook {
+        hook.fault_point(ComposeFaultPoint::AfterApplyBeforeResponse)?;
+    }
+    Ok(())
+}
 
 /// Append + apply under the composition's queue gate (atomic memory profile).
 #[derive(Clone)]
@@ -92,6 +113,7 @@ pub struct AtomicLogReplayCommitter<L, P> {
     projection: Arc<InProcessProjectionStore<P>>,
     control: Arc<InProcessControlPlane>,
     push_idempotency: Arc<PushIdempotency>,
+    fault_hook: ComposeFaultHookSlot,
 }
 
 impl<L, P> AtomicLogReplayCommitter<L, P> {
@@ -100,12 +122,14 @@ impl<L, P> AtomicLogReplayCommitter<L, P> {
         projection: Arc<InProcessProjectionStore<P>>,
         control: Arc<InProcessControlPlane>,
         push_idempotency: Arc<PushIdempotency>,
+        fault_hook: ComposeFaultHookSlot,
     ) -> Self {
         Self {
             log,
             projection,
             control,
             push_idempotency,
+            fault_hook,
         }
     }
 }
@@ -123,6 +147,7 @@ where
         let projection = Arc::clone(&self.projection);
         let control = Arc::clone(&self.control);
         let push_idempotency = Arc::clone(&self.push_idempotency);
+        let fault_hook = Arc::clone(&self.fault_hook);
         Box::pin(async move {
             let (shard, commands, expected_epoch, fault) = request.into_parts();
             match fault {
@@ -136,6 +161,10 @@ where
             for env in &commands {
                 crate::validate_gate_command_definition(&definition, &env.command)?;
             }
+            let fault_hook = fault_hook
+                .lock()
+                .expect("compose fault hook poisoned")
+                .clone();
             let positions = AsyncLogStore::append(
                 log.as_ref(),
                 shard.clone(),
@@ -146,11 +175,13 @@ where
             if matches!(fault, RawCommitFault::AfterAppendBeforeApply) {
                 return Ok(RawCommitOutcome::appended(positions));
             }
-            AsyncProjectionStore::apply_live(
-                projection.as_ref(),
-                positions.clone(),
-                commands.clone(),
-            )
+            apply_with_compose_fault_hook(fault_hook.as_ref(), || {
+                AsyncProjectionStore::apply_live(
+                    projection.as_ref(),
+                    positions.clone(),
+                    commands.clone(),
+                )
+            })
             .await?;
             // Record push request-id outcomes after a successful atomic apply (sync composition parity).
             // Expiry must honor the queue's request_id_retention_ms (not a hardcoded window).
@@ -444,6 +475,7 @@ where
     batch_update_idempotency: Arc<BatchUpdateIdempotency>,
     commit_idempotency:
         Arc<Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<crate::EntryRecovery>>>>>,
+    fault_hook: ComposeFaultHookSlot,
 }
 
 /// Assemble a fresh async log-replay product over the given axes (no recovery).
@@ -540,6 +572,46 @@ where
     L: LogStore + Send + 'static,
     P: ProjectionStore + Send + 'static,
 {
+    assemble_async_log_replay_from_parts_with_fault_hook(
+        log,
+        projection,
+        control,
+        ids,
+        counters,
+        push_idempotency,
+        claim_by_query_idempotency,
+        claim_by_item_ids_idempotency,
+        batch_update_idempotency,
+        commit_idempotency,
+        Arc::new(Mutex::new(None)),
+        node_id,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "assembly keeps each shared axis, cache, and test-only hook explicit"
+)]
+fn assemble_async_log_replay_from_parts_with_fault_hook<L, P>(
+    log: Arc<InProcessLogStore<L>>,
+    projection: Arc<InProcessProjectionStore<P>>,
+    control: Arc<InProcessControlPlane>,
+    ids: Arc<SeqIdGen>,
+    counters: Arc<QueueCounters>,
+    push_idempotency: Arc<PushIdempotency>,
+    claim_by_query_idempotency: Arc<ClaimByQueryIdempotency>,
+    claim_by_item_ids_idempotency: Arc<ClaimByItemIdsIdempotency>,
+    batch_update_idempotency: Arc<BatchUpdateIdempotency>,
+    commit_idempotency: Arc<
+        Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<crate::EntryRecovery>>>>,
+    >,
+    fault_hook: ComposeFaultHookSlot,
+    node_id: u8,
+) -> EngineResult<AsyncLogReplayBackend<L, P>>
+where
+    L: LogStore + Send + 'static,
+    P: ProjectionStore + Send + 'static,
+{
     let axis = Arc::new(PushIdempotentProjection {
         inner: Arc::clone(&projection),
         push_idempotency: Arc::clone(&push_idempotency),
@@ -549,6 +621,7 @@ where
         Arc::clone(&projection),
         Arc::clone(&control),
         Arc::clone(&push_idempotency),
+        Arc::clone(&fault_hook),
     );
     let strategy = UnifiedAtomicCommit::for_profile(DurabilityClass::Atomic, committer)
         .map_err(|e| EngineError::Storage(e.to_string()))?;
@@ -600,6 +673,7 @@ where
         claim_by_item_ids_idempotency,
         batch_update_idempotency,
         commit_idempotency,
+        fault_hook,
     })
 }
 
@@ -610,7 +684,7 @@ where
 {
     /// Rebuild planners so push minting uses `node_id` (preserves log + projection state).
     pub fn with_node_id(self, node_id: u8) -> Self {
-        assemble_async_log_replay_from_parts(
+        assemble_async_log_replay_from_parts_with_fault_hook(
             self.log,
             self.projection,
             self.control,
@@ -621,9 +695,18 @@ where
             self.claim_by_item_ids_idempotency,
             self.batch_update_idempotency,
             self.commit_idempotency,
+            self.fault_hook,
             node_id,
         )
         .expect("rebuild with_node_id")
+    }
+
+    /// Install or clear the test-only composed projection-apply fault hook.
+    ///
+    /// Production assembly leaves this slot empty. A configured hook is shared with the atomic committer
+    /// and survives [`Self::with_node_id`] rebuilds.
+    pub fn set_fault_hook(&self, hook: Option<Arc<dyn ComposeFaultHook>>) {
+        *self.fault_hook.lock().expect("compose fault hook poisoned") = hook;
     }
 
     /// Observability/test seam: run `f` against the log under its mutex.
@@ -3537,5 +3620,90 @@ where
                     EngineError::Storage(format!("async commit_transition failed: {e:?}"))
                 })?
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+    struct FailAtHook {
+        fail_at: ComposeFaultPoint,
+        seen: Arc<Mutex<Vec<ComposeFaultPoint>>>,
+    }
+
+    impl ComposeFaultHook for FailAtHook {
+        fn fault_point(&self, cut: ComposeFaultPoint) -> EngineResult<()> {
+            self.seen.lock().expect("seen points poisoned").push(cut);
+            if cut == self.fail_at {
+                return Err(EngineError::Invalid("test composed apply fault"));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn during_projection_apply_fault_stops_before_projection_advance() {
+        futures::executor::block_on(async {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let hook: Arc<dyn ComposeFaultHook> = Arc::new(FailAtHook {
+                fail_at: ComposeFaultPoint::DuringProjectionApply,
+                seen: Arc::clone(&seen),
+            });
+            let applied = AtomicBool::new(false);
+
+            assert!(
+                apply_with_compose_fault_hook(Some(&hook), || async {
+                    applied.store(true, AtomicOrdering::SeqCst);
+                    Ok(())
+                })
+                .await
+                .is_err(),
+                "the injected pre-apply fault must fail the caller"
+            );
+            assert_eq!(
+                *seen.lock().expect("seen points poisoned"),
+                vec![ComposeFaultPoint::DuringProjectionApply]
+            );
+            assert!(
+                !applied.load(AtomicOrdering::SeqCst),
+                "the projection must not advance at the during-apply cut"
+            );
+        });
+    }
+
+    #[test]
+    fn after_apply_fault_advances_projection_before_failing_response() {
+        futures::executor::block_on(async {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let hook: Arc<dyn ComposeFaultHook> = Arc::new(FailAtHook {
+                fail_at: ComposeFaultPoint::AfterApplyBeforeResponse,
+                seen: Arc::clone(&seen),
+            });
+            let applied = AtomicBool::new(false);
+
+            assert!(
+                apply_with_compose_fault_hook(Some(&hook), || async {
+                    applied.store(true, AtomicOrdering::SeqCst);
+                    Ok(())
+                })
+                .await
+                .is_err(),
+                "the injected post-apply fault must fail the caller"
+            );
+            assert_eq!(
+                *seen.lock().expect("seen points poisoned"),
+                vec![
+                    ComposeFaultPoint::DuringProjectionApply,
+                    ComposeFaultPoint::AfterApplyBeforeResponse,
+                ],
+                "the post-apply cut must follow the during-apply cut"
+            );
+            assert!(
+                applied.load(AtomicOrdering::SeqCst),
+                "the projection must already be advanced at the post-apply cut"
+            );
+        });
     }
 }
