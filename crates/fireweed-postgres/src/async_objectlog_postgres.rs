@@ -277,30 +277,19 @@ impl Backend for AsyncObjectLogPostgresBackend {
             "Strict: object-log append then postgres projection apply (response-after-apply, LogEngine)",
         )
     }
-    fn commit_raw(
-        &self,
-        request: RawCommitRequest,
-    ) -> impl std::future::Future<Output = EngineResult<RawCommitOutcome>> + Send {
-        async move {
-            self.engine.submit_commit(request).await.map_err(|error| {
-                EngineError::Storage(format!("async raw commit submission failed: {error:?}"))
-            })?
-        }
+    async fn commit_raw(&self, request: RawCommitRequest) -> EngineResult<RawCommitOutcome> {
+        self.engine.submit_commit(request).await.map_err(|error| {
+            EngineError::Storage(format!("async raw commit submission failed: {error:?}"))
+        })?
     }
 }
 
 impl ControlPlaneStore for AsyncObjectLogPostgresBackend {
-    fn create_queue(
-        &self,
-        definition: QueueDefinition,
-    ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
-        async move {
-            let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-            AsyncLogStore::ensure_shard(self.log.as_ref(), shard).await?;
-            AsyncProjectionStore::ensure_shard(self.projection.as_ref(), definition.clone())
-                .await?;
-            AsyncControlPlane::create_queue(self.control.as_ref(), definition).await
-        }
+    async fn create_queue(&self, definition: QueueDefinition) -> EngineResult<CreateQueueOutcome> {
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        AsyncLogStore::ensure_shard(self.log.as_ref(), shard).await?;
+        AsyncProjectionStore::ensure_shard(self.projection.as_ref(), definition.clone()).await?;
+        AsyncControlPlane::create_queue(self.control.as_ref(), definition).await
     }
     fn queue_definition(
         &self,
@@ -326,125 +315,106 @@ impl ControlPlaneStore for AsyncObjectLogPostgresBackend {
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         AsyncLogStore::acquire_epoch(self.log.as_ref(), shard.clone())
     }
-    fn fence_epoch(
-        &self,
-        shard: &QueueKey,
-        target_epoch: u64,
-    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
-        async move {
-            let mut current =
-                AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?;
-            if current > target_epoch {
-                return Err(EngineError::EpochFenced);
-            }
-            while current < target_epoch {
-                current = AsyncLogStore::acquire_epoch(self.log.as_ref(), shard.clone()).await?;
-            }
-            Ok(current)
+    async fn fence_epoch(&self, shard: &QueueKey, target_epoch: u64) -> EngineResult<u64> {
+        let mut current = AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?;
+        if current > target_epoch {
+            return Err(EngineError::EpochFenced);
         }
+        while current < target_epoch {
+            current = AsyncLogStore::acquire_epoch(self.log.as_ref(), shard.clone()).await?;
+        }
+        Ok(current)
     }
 }
 
 impl PushPort for AsyncObjectLogPostgresBackend {
-    fn push(
+    async fn push(
         &self,
         shard: &QueueKey,
         items: Vec<PushSpec>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
-    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
-        async move {
-            let outcome = self
-                .engine
-                .push(AsyncPushRequest {
-                    shard: shard.clone(),
-                    request_id: None,
-                    items,
-                    now,
-                    expected_epoch,
-                })
-                .await
-                .map_err(Self::map_push)?;
-            Ok(outcome.into_item_ids())
-        }
+    ) -> EngineResult<Vec<ItemId>> {
+        let outcome = self
+            .engine
+            .push(AsyncPushRequest {
+                shard: shard.clone(),
+                request_id: None,
+                items,
+                now,
+                expected_epoch,
+            })
+            .await
+            .map_err(Self::map_push)?;
+        Ok(outcome.into_item_ids())
     }
-    fn push_with_request_id(
+    async fn push_with_request_id(
         &self,
         shard: &QueueKey,
         request_id: RequestId,
         items: Vec<PushSpec>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
-    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::PushBatchOutcome>> + Send
-    {
-        async move {
-            self.engine
-                .push(AsyncPushRequest {
-                    shard: shard.clone(),
-                    request_id: Some(request_id),
-                    items,
-                    now,
-                    expected_epoch,
-                })
-                .await
-                .map_err(Self::map_push)
-        }
+    ) -> EngineResult<fireweed_engine::PushBatchOutcome> {
+        self.engine
+            .push(AsyncPushRequest {
+                shard: shard.clone(),
+                request_id: Some(request_id),
+                items,
+                now,
+                expected_epoch,
+            })
+            .await
+            .map_err(Self::map_push)
     }
 }
 
 impl ClaimPort for AsyncObjectLogPostgresBackend {
-    fn claim(
-        &self,
-        request: ClaimRequest,
-    ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
-        async move { self.engine.claim(request).await.map_err(Self::map_claim) }
+    async fn claim(&self, request: ClaimRequest) -> EngineResult<Claimed> {
+        self.engine.claim(request).await.map_err(Self::map_claim)
     }
 }
 
 impl FinalizePort for AsyncObjectLogPostgresBackend {
-    fn finalize(
+    async fn finalize(
         &self,
         shard: &QueueKey,
         outcomes: Vec<FinalizeOutcome>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
-    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+    ) -> EngineResult<()> {
         // fireweed-c8e0a7a5 / fireweed-2be744bd: resolve leases under the same queue permit as plan+commit.
-        async move {
-            self.engine
-                .finalize_outcomes(shard.clone(), outcomes, now, expected_epoch)
-                .await
-                .map_err(Self::map_lifecycle)
-        }
+        self.engine
+            .finalize_outcomes(shard.clone(), outcomes, now, expected_epoch)
+            .await
+            .map_err(Self::map_lifecycle)
     }
 }
 
 impl RenewLeasePort for AsyncObjectLogPostgresBackend {
-    fn renew(
+    async fn renew(
         &self,
         shard: &QueueKey,
         item_ids: Vec<ItemId>,
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
-    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
-        async move {
-            self.engine
-                .renew_item_ids(
-                    shard.clone(),
-                    item_ids,
-                    new_lease_expires_at,
-                    now,
-                    expected_epoch,
-                )
-                .await
-                .map_err(Self::map_lifecycle)
-        }
+    ) -> EngineResult<()> {
+        self.engine
+            .renew_item_ids(
+                shard.clone(),
+                item_ids,
+                new_lease_expires_at,
+                now,
+                expected_epoch,
+            )
+            .await
+            .map_err(Self::map_lifecycle)
     }
 }
 
 impl ReassignLeasePort for AsyncObjectLogPostgresBackend {
-    fn reassign(
+    async fn reassign(
         &self,
         shard: &QueueKey,
         item_ids: Vec<ItemId>,
@@ -452,59 +422,55 @@ impl ReassignLeasePort for AsyncObjectLogPostgresBackend {
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
-    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
-        async move {
-            self.claimed_targets(shard, &item_ids).await?;
-            let epoch = match expected_epoch {
-                Some(epoch) => epoch,
-                None => AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?,
-            };
-            let envelope = CommandEnvelope {
-                command_id: self.ids.next_command_id(),
-                request_id: None,
-                request_fingerprint: None,
-                request_outcome: None,
-                item_ids: item_ids.clone(),
-                command: QueueCommand::ReassignLease(ReassignLeaseCommand {
-                    item_ids,
-                    lease_token: new_lease_token,
-                    lease_expires_at: new_lease_expires_at,
-                }),
-                checksum: CommandChecksum(0),
-                created_at: now,
-            };
-            self.engine
-                .submit_commit(RawCommitRequest::new(shard.clone(), vec![envelope], epoch))
-                .await
-                .map_err(|error| {
-                    EngineError::Storage(format!("async reassign submission failed: {error:?}"))
-                })??;
-            Ok(())
-        }
+    ) -> EngineResult<()> {
+        self.claimed_targets(shard, &item_ids).await?;
+        let epoch = match expected_epoch {
+            Some(epoch) => epoch,
+            None => AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?,
+        };
+        let envelope = CommandEnvelope {
+            command_id: self.ids.next_command_id(),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: item_ids.clone(),
+            command: QueueCommand::ReassignLease(ReassignLeaseCommand {
+                item_ids,
+                lease_token: new_lease_token,
+                lease_expires_at: new_lease_expires_at,
+            }),
+            checksum: CommandChecksum(0),
+            created_at: now,
+        };
+        self.engine
+            .submit_commit(RawCommitRequest::new(shard.clone(), vec![envelope], epoch))
+            .await
+            .map_err(|error| {
+                EngineError::Storage(format!("async reassign submission failed: {error:?}"))
+            })??;
+        Ok(())
     }
 }
 
 impl PurgePort for AsyncObjectLogPostgresBackend {
-    fn purge(
+    async fn purge(
         &self,
         shard: &QueueKey,
         item_ids: Vec<ItemId>,
         force: bool,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
-    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
-        async move {
-            self.engine
-                .purge(AsyncPurgeRequest {
-                    shard: shard.clone(),
-                    item_ids,
-                    force,
-                    now,
-                    expected_epoch,
-                })
-                .await
-                .map_err(Self::map_lifecycle)
-        }
+    ) -> EngineResult<u64> {
+        self.engine
+            .purge(AsyncPurgeRequest {
+                shard: shard.clone(),
+                item_ids,
+                force,
+                now,
+                expected_epoch,
+            })
+            .await
+            .map_err(Self::map_lifecycle)
     }
 }
 
@@ -528,24 +494,22 @@ impl UpsertPort for AsyncObjectLogPostgresBackend {
 }
 
 impl ReclaimPort for AsyncObjectLogPostgresBackend {
-    fn reclaim_expired(
+    async fn reclaim_expired(
         &self,
         shard: &QueueKey,
         limit: Option<usize>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
-    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
-        async move {
-            self.engine
-                .reclaim_expired(fireweed_engine::AsyncReclaimRequest {
-                    shard: shard.clone(),
-                    limit,
-                    now,
-                    expected_epoch,
-                })
-                .await
-                .map_err(Self::map_lifecycle)
-        }
+    ) -> EngineResult<Vec<ItemId>> {
+        self.engine
+            .reclaim_expired(fireweed_engine::AsyncReclaimRequest {
+                shard: shard.clone(),
+                limit,
+                now,
+                expected_epoch,
+            })
+            .await
+            .map_err(Self::map_lifecycle)
     }
 }
 
