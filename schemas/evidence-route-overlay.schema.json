@@ -1,0 +1,47 @@
+{
+  "$id": "https://fireweed.dev/schemas/evidence-route-overlay-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "assignments": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "requirement_id": {
+            "pattern": "^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*$",
+            "type": "string"
+          },
+          "routes": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "requirement_id",
+          "routes"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "semantic_requirements_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "semantic_requirements_sha256",
+    "assignments"
+  ],
+  "title": "Fireweed evidence route overlay",
+  "type": "object"
+}

@@ -1,0 +1,85 @@
+{
+  "$id": "https://fireweed.dev/schemas/evidence-semantic-requirement-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "requirements": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "capability": {
+            "enum": [
+              "core",
+              "durable_log_replay",
+              "projection_reopen",
+              "relational_reconnect",
+              "eventual_apply",
+              "in_process_log_read"
+            ]
+          },
+          "durability_class": {
+            "enum": [
+              "A",
+              "B",
+              "A-or-B"
+            ]
+          },
+          "evidence_semantics": {
+            "additionalProperties": false,
+            "properties": {
+              "artifact_class": {
+                "enum": [
+                  "fixture",
+                  "run-owned",
+                  "promoted"
+                ]
+              },
+              "required_result": {
+                "enum": [
+                  "pass",
+                  "explicit-na",
+                  "measured"
+                ]
+              },
+              "stale_input_fails": {
+                "const": true
+              }
+            },
+            "required": [
+              "artifact_class",
+              "required_result",
+              "stale_input_fails"
+            ],
+            "type": "object"
+          },
+          "governing_assertion": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "id": {
+            "pattern": "^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "governing_assertion",
+          "durability_class",
+          "capability",
+          "evidence_semantics"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "const": 1
+    }
+  },
+  "required": [
+    "schema_version",
+    "requirements"
+  ],
+  "title": "Fireweed evidence semantic requirements",
+  "type": "object"
+}
