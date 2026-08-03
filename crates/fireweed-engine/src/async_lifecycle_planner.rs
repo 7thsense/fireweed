@@ -130,9 +130,6 @@ where
             let definition = control.queue_definition(request.shard.clone()).await?;
             for target in &request.targets {
                 match target.kind {
-                    FinalizeKind::Retry if target.not_before.is_none() => {
-                        return Err(EngineError::Invalid("retry.not_before is required"));
-                    }
                     FinalizeKind::Rearm => validate_rearm(target.not_before, &definition)?,
                     FinalizeKind::Complete | FinalizeKind::Fail | FinalizeKind::Release
                         if target.not_before.is_some() =>
@@ -592,12 +589,21 @@ mod tests {
         };
         assert_eq!(command.outcomes[0].applied_state, Some(ItemState::Failed));
 
+        *axes.attempts.lock().unwrap() = vec![1];
+        let immediate_retry = futures::executor::block_on(planner.plan_finalize(request(
+            &definition,
+            vec![target(3, FinalizeKind::Retry, None)],
+            7,
+        )))
+        .unwrap();
+        let QueueCommand::Finalize(command) = &immediate_retry.request().commands()[0].command
+        else {
+            panic!("expected finalize")
+        };
+        assert_eq!(command.outcomes[0].applied_state, Some(ItemState::Pending));
+        assert_eq!(command.outcomes[0].not_before, None);
+
         for (kind, not_before, expected) in [
-            (
-                FinalizeKind::Retry,
-                None,
-                EngineError::Invalid("retry.not_before is required"),
-            ),
             (
                 FinalizeKind::Rearm,
                 Some(UtcTimestamp::new(100, 0).unwrap()),

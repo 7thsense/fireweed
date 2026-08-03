@@ -138,9 +138,6 @@ fn validate_finalize_disposition(
 ) -> EngineResult<()> {
     match kind {
         FinalizeKind::Rearm => Err(EngineError::Invalid("cohort rearm is invalid")),
-        FinalizeKind::Retry if not_before.is_none() => {
-            Err(EngineError::Invalid("retry.not_before is required"))
-        }
         FinalizeKind::Complete | FinalizeKind::Fail | FinalizeKind::Release
             if not_before.is_some() =>
         {
@@ -340,7 +337,7 @@ mod tests {
     fn cohort_finalize_disposition_controls_not_before() {
         let later = Some(UtcTimestamp::new(20, 0).unwrap());
         assert!(validate_finalize_disposition(FinalizeKind::Retry, later).is_ok());
-        assert!(validate_finalize_disposition(FinalizeKind::Retry, None).is_err());
+        assert!(validate_finalize_disposition(FinalizeKind::Retry, None).is_ok());
         assert!(validate_finalize_disposition(FinalizeKind::Rearm, later).is_err());
         for kind in [
             FinalizeKind::Complete,
