@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Pull-request gate runner for Fireweed Queue.
 #
-# Usage: pr-gate.sh --mode bootstrap|enforcing
+# Usage: pr-gate.sh --mode bootstrap|enforcing|remediation|closure
 #
 # bootstrap  Run fmt / clippy / test / cargo-deny / cargo-machete /
 #            coverage-report (no thresholds) / property+fuzz smoke.
@@ -24,13 +24,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$MODE" ]]; then
-    echo "Usage: $(basename "$0") --mode <bootstrap|enforcing>" >&2
+    echo "Usage: $(basename "$0") --mode <bootstrap|enforcing|remediation|closure>" >&2
     exit 1
 fi
 
 case "$MODE" in
-    bootstrap|enforcing) ;;
-    *) echo "Unknown mode: $MODE (supported: bootstrap, enforcing)" >&2; exit 1 ;;
+    bootstrap|enforcing|remediation|closure) ;;
+    *) echo "Unknown mode: $MODE (supported: bootstrap, enforcing, remediation, closure)" >&2; exit 1 ;;
 esac
 
 echo "=== pr-gate [mode=${MODE}] ==="
@@ -40,6 +40,19 @@ bash "${SCRIPT_DIR}/../release/verify-release-artifacts-test.sh"
 
 echo "--- governed evidence archive fixtures ---"
 bash "${SCRIPT_DIR}/../release/build-governed-evidence-bundle-test.sh"
+
+POLICY_MODE="remediation"
+if [[ "$MODE" == "enforcing" || "$MODE" == "closure" ]]; then
+    POLICY_MODE="closure"
+fi
+
+echo "--- storage remediation policy [${POLICY_MODE}] ---"
+bash "${SCRIPT_DIR}/storage-remediation-policy.sh" --policy "${POLICY_MODE}"
+
+if [[ "$MODE" == "remediation" || "$MODE" == "closure" ]]; then
+    echo "=== pr-gate [${MODE}] PASSED ==="
+    exit 0
+fi
 
 if [[ "$MODE" == "enforcing" ]]; then
     echo "--- fmt ---"

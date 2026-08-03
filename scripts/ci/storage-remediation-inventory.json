@@ -1228,6 +1228,34 @@
           "P2f"
         ],
         "detail": "early_success=true",
+        "id": "40e7bed9fa30ce547a70",
+        "identity": "echo \"No property tests or fuzz targets registered yet (scaffold passes).\"",
+        "line": 29,
+        "owner": "P10px",
+        "path": "scripts/ci/property-fuzz-smoke.sh",
+        "status": "debt"
+      },
+      {
+        "category": "harness_skip",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "early_success=true",
+        "id": "34442671598e8c20a4e2",
+        "identity": "echo \"=== property + fuzz smoke PASSED (no targets) ===\"",
+        "line": 30,
+        "owner": "P10px",
+        "path": "scripts/ci/property-fuzz-smoke.sh",
+        "status": "debt"
+      },
+      {
+        "category": "harness_skip",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "early_success=true",
         "id": "8c994b9cd2fecdd6606f",
         "identity": "echo \"--- cargo matrix suites: SKIPPED (--skip-cargo) ---\"",
         "line": 139,
@@ -4247,6 +4275,20 @@
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-engine/src/control_plane.rs",
         "status": "discovery_negative"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P3-P9/P15",
+          "P2f"
+        ],
+        "detail": "early_success=false",
+        "id": "75960bf4a2aa9bcecc8b",
+        "identity": "// No owners registered \u2192 fail-closed: nobody serves.",
+        "line": 1171,
+        "owner": "P3-P9/P15",
+        "path": "crates/fireweed-engine/src/control_plane.rs",
+        "status": "debt"
       },
       {
         "category": "loud_skip",
@@ -11074,12 +11116,12 @@
           "P10px",
           "P2f"
         ],
-        "detail": "early_success=false",
-        "id": "0ad88c4c377c0708501b",
-        "identity": "r\"SKIPPED|skipped|skip(?:ping)?[ :] |not[_ -]configured|not configured|\"",
-        "line": 440,
+        "detail": "early_success=true",
+        "id": "660251feb774596b7dca",
+        "identity": "echo \"No property tests or fuzz targets registered yet (scaffold passes).\"",
+        "line": 29,
         "owner": "P10px",
-        "path": "scripts/ci/inventory-storage-remediation.py",
+        "path": "scripts/ci/property-fuzz-smoke.sh",
         "status": "debt"
       },
       {
@@ -11088,12 +11130,12 @@
           "P10px",
           "P2f"
         ],
-        "detail": "early_success=false",
-        "id": "bfddc3035aa5745109c6",
-        "identity": "r\"missing[^\\n]{0,50}(?:URL|endpoint|fixture|service|binary)|unavailable\",",
-        "line": 441,
+        "detail": "early_success=true",
+        "id": "c1921b0cad913a0b6413",
+        "identity": "echo \"=== property + fuzz smoke PASSED (no targets) ===\"",
+        "line": 30,
         "owner": "P10px",
-        "path": "scripts/ci/inventory-storage-remediation.py",
+        "path": "scripts/ci/property-fuzz-smoke.sh",
         "status": "debt"
       },
       {
@@ -12057,12 +12099,12 @@
           "P10px",
           "P2f"
         ],
-        "detail": "early_success=false",
-        "id": "17bb50bbf7bbf1982b55",
-        "identity": "r\"SKIPPED|skipped|skip(?:ping)?[ :] |not[_ -]configured|not configured|\"",
-        "line": 440,
+        "detail": "early_success=true",
+        "id": "b368f72f23fa38046382",
+        "identity": "echo \"No property tests or fuzz targets registered yet (scaffold passes).\"",
+        "line": 29,
         "owner": "P10px",
-        "path": "scripts/ci/inventory-storage-remediation.py",
+        "path": "scripts/ci/property-fuzz-smoke.sh",
         "status": "debt"
       },
       {
@@ -12071,12 +12113,12 @@
           "P10px",
           "P2f"
         ],
-        "detail": "early_success=false",
-        "id": "b892560cbdbb2f614531",
-        "identity": "r\"missing[^\\n]{0,50}(?:URL|endpoint|fixture|service|binary)|unavailable\",",
-        "line": 441,
+        "detail": "early_success=true",
+        "id": "dfea352564f32cd4b137",
+        "identity": "echo \"=== property + fuzz smoke PASSED (no targets) ===\"",
+        "line": 30,
         "owner": "P10px",
-        "path": "scripts/ci/inventory-storage-remediation.py",
+        "path": "scripts/ci/property-fuzz-smoke.sh",
         "status": "debt"
       }
     ],
@@ -12328,232 +12370,7 @@
         "status": "debt"
       }
     ],
-    "quarantine": [
-      {
-        "category": "quarantine",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "93a62a7b26d46b80e5c5",
-        "identity": "\"quarantine\": [],",
-        "line": 428,
-        "owner": "P10px",
-        "path": "scripts/ci/inventory-storage-remediation.py",
-        "status": "debt"
-      },
-      {
-        "category": "quarantine",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "5f182a918448c1093e54",
-        "identity": "if \"quarantine\" in line_text.lower():",
-        "line": 476,
-        "owner": "P10px",
-        "path": "scripts/ci/inventory-storage-remediation.py",
-        "status": "debt"
-      },
-      {
-        "category": "quarantine",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "395864469dbc045bbc16",
-        "identity": "debt[\"quarantine\"].append(",
-        "line": 477,
-        "owner": "P10px",
-        "path": "scripts/ci/inventory-storage-remediation.py",
-        "status": "debt"
-      },
-      {
-        "category": "quarantine",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "e3a27fce24c95783a3f2",
-        "identity": "debt_row(\"quarantine\", path, index, line_text.strip()[:120], performance=performance, e3=e3)",
-        "line": 478,
-        "owner": "P10px",
-        "path": "scripts/ci/inventory-storage-remediation.py",
-        "status": "debt"
-      },
-      {
-        "category": "quarantine",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "7867b4fc666f674f1a94",
-        "identity": "\"release_repeat_quarantine\": repeat_contract,",
-        "line": 714,
-        "owner": "P10px",
-        "path": "scripts/ci/inventory-storage-remediation.py",
-        "status": "debt"
-      },
-      {
-        "category": "quarantine",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "568145e1d5f27745f131",
-        "identity": "\"release_repeat_quarantine\",",
-        "line": 70,
-        "owner": "P10px",
-        "path": "scripts/ci/storage-remediation-policy.py",
-        "status": "debt"
-      },
-      {
-        "category": "quarantine",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "856e6bf7cd60ad75ba9f",
-        "identity": "document[\"release_repeat_quarantine\"] == refreshed[\"release_repeat_quarantine\"],",
-        "line": 116,
-        "owner": "P10px",
-        "path": "scripts/ci/storage-remediation-policy.py",
-        "status": "debt"
-      },
-      {
-        "category": "quarantine",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "6e96c3dce3894bd0e7a6",
-        "identity": "\"release-repeat quarantine changed; regenerate remediation inventory\",",
-        "line": 117,
-        "owner": "P10px",
-        "path": "scripts/ci/storage-remediation-policy.py",
-        "status": "debt"
-      },
-      {
-        "category": "quarantine",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "1eaffb9ebaf86adb5d5d",
-        "identity": "\"quarantine\",",
-        "line": 143,
-        "owner": "P10px",
-        "path": "scripts/ci/storage-remediation-policy.py",
-        "status": "debt"
-      },
-      {
-        "category": "quarantine",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "84705b9edbe12bacfb55",
-        "identity": "quarantine = document[\"release_repeat_quarantine\"]",
-        "line": 173,
-        "owner": "P10px",
-        "path": "scripts/ci/storage-remediation-policy.py",
-        "status": "debt"
-      },
-      {
-        "category": "quarantine",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "9f9c6077740742a325de",
-        "identity": "require(len(quarantine[\"legacy_rows\"]) == 9, \"legacy repeat row count drift\")",
-        "line": 174,
-        "owner": "P10px",
-        "path": "scripts/ci/storage-remediation-policy.py",
-        "status": "debt"
-      },
-      {
-        "category": "quarantine",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "fb127055909b7f3f2535",
-        "identity": "all(row[\"kind\"] == \"legacy_false_green\" and row[\"executable\"] is False for row in quarantine[\"legacy_rows\"]),",
-        "line": 176,
-        "owner": "P10px",
-        "path": "scripts/ci/storage-remediation-policy.py",
-        "status": "debt"
-      },
-      {
-        "category": "quarantine",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "065aac6ccd9e101fbdaf",
-        "identity": "require(len(quarantine[\"required_contract_debts\"]) == 11, \"contract debt count drift\")",
-        "line": 179,
-        "owner": "P10px",
-        "path": "scripts/ci/storage-remediation-policy.py",
-        "status": "debt"
-      },
-      {
-        "category": "quarantine",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "e61372cb01516494f506",
-        "identity": "require(quarantine[\"current_verifier_semantics\"] == \"missing_only_required_minus_names\", \"verifier characterization\")",
-        "line": 180,
-        "owner": "P10px",
-        "path": "scripts/ci/storage-remediation-policy.py",
-        "status": "debt"
-      },
-      {
-        "category": "quarantine",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "6681bb71fb811afbac45",
-        "identity": "require(quarantine[\"required_jobs_executed_or_counted\"] is False, \"false execution claim\")",
-        "line": 181,
-        "owner": "P10px",
-        "path": "scripts/ci/storage-remediation-policy.py",
-        "status": "debt"
-      },
-      {
-        "category": "quarantine",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "d20dc943afc29be1ec34",
-        "identity": "require(not quarantine[\"legacy_rows\"], \"closure blocked by legacy false-green rows\")",
-        "line": 185,
-        "owner": "P10px",
-        "path": "scripts/ci/storage-remediation-policy.py",
-        "status": "debt"
-      }
-    ],
+    "quarantine": [],
     "release_repeat_contract": [
       {
         "category": "release_repeat_contract",
@@ -15393,34 +15210,6 @@
           "P2f"
         ],
         "detail": "",
-        "id": "1dd59e9bac13e106764c",
-        "identity": "r\"source_revision|source[_-]root|expected[_-]source|expected[_-]revision|\"",
-        "line": 446,
-        "owner": "P10px",
-        "path": "scripts/ci/inventory-storage-remediation.py",
-        "status": "debt"
-      },
-      {
-        "category": "source_guard",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "fec196072d96c79dde8b",
-        "identity": "r\"git\\s+rev-parse|git_commit|producing[_-]root\",",
-        "line": 447,
-        "owner": "P10px",
-        "path": "scripts/ci/inventory-storage-remediation.py",
-        "status": "debt"
-      },
-      {
-        "category": "source_guard",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "",
         "id": "5f8195f1440616550072",
         "identity": "SOURCE_REVISION=\"$(git -C \"${REPO_ROOT}\" rev-parse HEAD)\"",
         "line": 45,
@@ -16294,7 +16083,8 @@
   "discovery_negatives": [
     "Iterator::skip and iterator .skip(...) calls",
     "fault-injection skip operations",
-    "SQLite chaos skip-point vocabulary"
+    "SQLite chaos skip-point vocabulary",
+    "P2 inventory/policy source vocabulary (covered by policy self-tests and shape fixtures)"
   ],
   "generated_by": "scripts/ci/inventory-storage-remediation.py",
   "harness_routes": [
@@ -70639,14 +70429,9 @@
   "release_repeat_quarantine": {
     "callers": [
       {
-        "line": 575,
+        "line": 585,
         "path": "scripts/ci/inventory-storage-remediation.py",
         "text": "suite_path = ROOT / \"scripts/ci/release-repeat-suites.toml\""
-      },
-      {
-        "line": 593,
-        "path": "scripts/ci/inventory-storage-remediation.py",
-        "text": "\"scripts/ci/release-repeat-suites.toml\","
       },
       {
         "line": 603,
@@ -70654,7 +70439,12 @@
         "text": "\"scripts/ci/release-repeat-suites.toml\","
       },
       {
-        "line": 615,
+        "line": 613,
+        "path": "scripts/ci/inventory-storage-remediation.py",
+        "text": "\"scripts/ci/release-repeat-suites.toml\","
+      },
+      {
+        "line": 625,
         "path": "scripts/ci/inventory-storage-remediation.py",
         "text": "if \"release-repeat-suites.toml\" in line or \"verify-product-workflow-names.sh\" in line:"
       },
@@ -70916,7 +70706,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "219def7657ca8e6e8e5c34d5a9055af40ff81659113b5933423d8ad2f83bf141",
+  "source_inventory_sha256": "a6108944dd725008a92b0be9b7e104126696b165a4e6d34f23e8e972c27b90d6",
   "workspaces": [
     {
       "listing_error_sha256": "",

@@ -40,3 +40,6 @@ jobs:
           python3 scripts/ci/public-release-gate.py \
             --manifest scripts/ci/public-release-gates-ci.json \
             --evidence target/public-release-gate.json
+
+      - name: Storage remediation policy
+        run: bash scripts/ci/storage-remediation-policy.sh --mode-file scripts/ci/storage-remediation-policy.mode

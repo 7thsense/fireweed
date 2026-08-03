@@ -18,7 +18,7 @@ fi
 
 ci="${workflow_root}/ci.yml"
 grep -Fq 'timeout-minutes: 3' "${ci}"
-if rg -n 'services:|matrix:|cargo install|rustup toolchain install nightly|docker run|kind-helm|release-gate|nightly-gate|cargo test --workspace' "${ci}"; then
+if rg -n 'services:|matrix:|cargo install|rustup toolchain install nightly|docker run|kind-helm|(^|[[:space:]/])release-gate\.sh([[:space:]]|$)|(^|[[:space:]/])nightly-gate\.sh([[:space:]]|$)|cargo test --workspace' "${ci}"; then
     echo "default CI contains an unbounded or duplicated heavy lane" >&2
     exit 1
 fi

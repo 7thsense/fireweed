@@ -23,6 +23,10 @@ SOURCE_SUFFIXES = {".rs", ".sh", ".py", ".toml", ".yml", ".yaml", ".lock"}
 EXCLUDED_DIGEST_PATHS = {
     "scripts/ci/storage-remediation-inventory.json",
 }
+META_POLICY_SOURCES = {
+    "scripts/ci/inventory-storage-remediation.py",
+    "scripts/ci/storage-remediation-policy.py",
+}
 
 PRODUCT_WORKFLOW_REQUIREMENTS = [
     "product_validation_tests",
@@ -438,7 +442,8 @@ def scan_source_debt(paths: list[str]) -> dict[str, list[dict[str, object]]]:
     }
     skip_pattern = re.compile(
         r"SKIPPED|skipped|skip(?:ping)?[ :] |not[_ -]configured|not configured|"
-        r"missing[^\n]{0,50}(?:URL|endpoint|fixture|service|binary)|unavailable",
+        r"missing[^\n]{0,50}(?:URL|endpoint|fixture|service|binary)|unavailable|"
+        r"(?:none|no\s+[^\n]{0,40})(?:are\s+)?registered|no\s+targets|scaffold passes",
         re.IGNORECASE,
     )
     early_pattern = re.compile(r"\breturn\s*(?:;|Ok\s*\(\s*\)\s*;)|\bexit\s+0\b|\bcontinue\s*;", re.DOTALL)
@@ -448,6 +453,11 @@ def scan_source_debt(paths: list[str]) -> dict[str, list[dict[str, object]]]:
         re.IGNORECASE,
     )
     for path in paths:
+        # These two files contain the registry vocabulary and discovery regexes as data. Scanning their
+        # string literals as product behavior recursively manufactures false debt; their executable
+        # behavior is covered by policy self-tests and shape fixtures instead.
+        if path in META_POLICY_SOURCES:
+            continue
         resolved = ROOT / path
         text = resolved.read_text(errors="replace")
         lines = text.splitlines()
@@ -716,6 +726,7 @@ def inventory(with_cargo: bool) -> dict[str, object]:
             "Iterator::skip and iterator .skip(...) calls",
             "fault-injection skip operations",
             "SQLite chaos skip-point vocabulary",
+            "P2 inventory/policy source vocabulary (covered by policy self-tests and shape fixtures)",
         ],
     }
 

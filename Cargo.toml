@@ -3,8 +3,11 @@
 # conformance harness, the four driven adapters (memory/sqlite/postgres/objectlog), and the two driving
 # faces (RESP front + library facade) plus the composition root. The removed HTTP-service/Kafka/storage-
 # trait crates were deleted in Phase 6; the postgres adapter was rebuilt fresh to the engine ports
-# (OWED-resolution Chunk 4) via the durable-adapter template. No crate is excluded, so `cargo test`
-# covers everything; postgres conformance is env-gated on FIREWEED_PG_TEST_URL (LOUD skip without a DB).
+# (OWED-resolution Chunk 4) via the durable-adapter template. `cargo test --workspace` covers exactly
+# the members below. It does not cover the independently routed
+# `crates/fireweed-bench/Cargo.toml` or `tools/fireweed-turso-compat-probe/Cargo.toml` workspaces;
+# their harnesses must be listed and invoked separately. PostgreSQL conformance is env-gated on
+# FIREWEED_PG_TEST_URL and remains registered remediation debt until its LOUD-skip paths are closed.
 members = [
     "crates/fireweed-core",
     "crates/fireweed-engine",
@@ -41,4 +44,3 @@ homepage = "https://github.com/7thsense/fireweed"
 # ADR-011 AC path-dep check (rg for path=.*axon etc.) does not false-positive on the git URL.
 axon-esf = { version = "0.3.2", git = """https://github.com/DocumentDrivenDX/\
 axon""", tag = "v0.3.2" }
-
