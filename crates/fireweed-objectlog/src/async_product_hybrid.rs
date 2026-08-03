@@ -20,13 +20,14 @@ use fireweed_core::{
 use fireweed_engine::{
     AsyncClaimError, AsyncCommitStrategy, AsyncComposedBackend, AsyncControlPlane, AsyncLogStore,
     AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError, AsyncPushRequest, Backend, ClaimPort,
-    ClaimRequest, Claimed, CommandEnvelope, ControlPlaneStore, CreateQueueOutcome, DurabilityClass,
-    EngineError, EngineResult, FinalizeOutcome, FinalizePort, InProcessControlPlane,
-    InProcessProjectionStore, OwnedTask, ProjectionClaimPlanner, ProjectionLifecyclePlanner,
-    ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner, ProjectionStore, PurgePort,
-    PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, RawCommitOutcome, RawCommitRequest,
-    ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort, SeparateReplayCommit,
-    SeparateReplayCommitter, TickReport, UpsertOutcome, UpsertPort,
+    ClaimRequest, Claimed, CommandEnvelope, ControlPlane, ControlPlaneStore, CreateQueueOutcome,
+    DurabilityClass, EngineError, EngineResult, FinalizeOutcome, FinalizePort,
+    InProcessControlPlane, InProcessProjectionStore, OwnedTask, ProjectionClaimPlanner,
+    ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner,
+    ProjectionStore, PurgePort, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey,
+    RawCommitOutcome, RawCommitRequest, ReassignLeasePort, ReclaimDriver, ReclaimPort,
+    RenewLeasePort, SeparateReplayCommit, SeparateReplayCommitter, TickReport, UpsertOutcome,
+    UpsertPort,
 };
 use fireweed_sqlite::{HybridAsyncThresholds, HybridProjectionStore};
 use object_log::FlushConfig;
@@ -410,13 +411,75 @@ impl ControlPlaneStore for AsyncObjectLogHybridBackend {
     ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
         async move {
             let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-            // Persist definition into the durable object-log catalog so verify/reopen can discover
-            // the shard (parity with memory/sqlite products; fireweed-2ad3a030).
-            self.log.register_definition(definition.clone()).await?;
-            AsyncLogStore::ensure_shard(self.log.as_ref(), shard).await?;
-            AsyncProjectionStore::ensure_shard(self.projection.as_ref(), definition.clone())
+            let outcome = self
+                .log
+                .create_or_read_definition(definition.clone())
                 .await?;
-            AsyncControlPlane::create_queue(self.control.as_ref(), definition).await
+            ControlPlane::cache_authoritative_definition(
+                self.control.as_ref(),
+                outcome.definition.clone(),
+            )?;
+            if outcome.definition != definition {
+                return Err(EngineError::QueueDefinitionConflict);
+            }
+            AsyncLogStore::ensure_shard(self.log.as_ref(), shard.clone()).await?;
+            let needs_replay = self.projection.with_store(|projection| {
+                Ok(ProjectionStore::metrics(projection, &shard).is_err())
+            })?;
+            AsyncProjectionStore::ensure_shard(
+                self.projection.as_ref(),
+                outcome.definition.clone(),
+            )
+            .await?;
+            if needs_replay {
+                let mut from = None;
+                loop {
+                    let page = AsyncLogStore::read_from(
+                        self.log.as_ref(),
+                        shard.clone(),
+                        from.clone(),
+                        256,
+                    )
+                    .await?;
+                    if page.entries.is_empty() {
+                        break;
+                    }
+                    let positions = page
+                        .entries
+                        .iter()
+                        .map(|(position, _)| position.clone())
+                        .collect();
+                    let commands = page
+                        .entries
+                        .iter()
+                        .map(|(_, envelope)| envelope.clone())
+                        .collect();
+                    AsyncProjectionStore::apply_recovery(
+                        self.projection.as_ref(),
+                        positions,
+                        commands,
+                    )
+                    .await?;
+                    match page.next {
+                        Some(next) => from = Some(next),
+                        None => break,
+                    }
+                }
+                self.projection.with_store(|projection| {
+                    ProjectionStore::restore_counters(projection, &shard, self.counters.as_ref())
+                })?;
+                rebuild_process_idempotency_from_log(
+                    self.log.as_ref(),
+                    &shard,
+                    outcome.definition.request_id_retention_ms,
+                    &self.commit_idempotency,
+                    &self.batch_update_idempotency,
+                    &self.claim_by_query_idempotency,
+                    &self.claim_by_item_ids_idempotency,
+                )
+                .await?;
+            }
+            Ok(outcome)
         }
     }
     fn queue_definition(

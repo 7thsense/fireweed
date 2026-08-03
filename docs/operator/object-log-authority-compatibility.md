@@ -2,43 +2,62 @@
 
 Fireweed’s public object-log authority is **`NativeConditionalWrite`** only
 (create-only / `If-None-Match: *` or equivalent). Multi-writer publication
-and fencing assume the blob store **rejects** a second create of the same key
-when the precondition is set. Endpoints that accept but ignore the
-precondition would silently lose fencing and are rejected at open.
+and fencing assume the storage adapter **rejects** a second create of the same
+key. Queue definitions are immutable per-queue objects; the stored first writer
+is cached before a caller's complete definition is compared with it.
+
+The current local adapter implements that operation with a synced temporary
+file followed by an atomic create-only hard link. Local handles in one process
+also share one LogEngine/manifest sequencer for the canonical namespace root.
+The registry that shares this sequencer is open-time plumbing, not definition
+authority, and it is not held around append, read, or projection I/O.
+Filesystem publication runs on Tokio's blocking pool because file and directory
+sync are deliberately durable, potentially slow control-plane operations; it
+does not block an async runtime worker or the data-plane LogEngine.
+
+The upstream `object-log` v0.3.1 `BlobStore` port exposes overwrite-only `put`.
+Consequently, the current Fireweed S3/custom-BlobStore path cannot express or
+probe `If-None-Match: *`, and queue creation fails closed instead of pretending
+an unconditional read-then-put is authoritative. S3 becomes supported only
+when its adapter exposes enforced conditional create **and** its manifest
+sequencer is fenced/shared by a real single-writer authority.
 
 ## Compatibility matrix
 
-| Endpoint class | Conditional create (`If-None-Match: *` / put-if-absent) | Fireweed `NativeConditionalWrite` |
-|----------------|----------------------------------------------------------|-------------------------------------|
-| **AWS S3** | Enforced (HTTP 412 on conflict) | Supported |
-| **MinIO** (recent) | Enforced when configured as S3-compatible create-only | Supported (verify on your build) |
-| **Filesystem local blob** | Enforced via O_EXCL / create-new | Supported |
-| **Garage v2.2.0** | **Not enforced** — second conditional PUT returns **200** | **Unsupported** — open fails closed |
-| **Other S3-compatible** | Operator-verified | Supported only if probe proves rejection |
+| Endpoint class | Conditional create boundary | Current Fireweed support |
+|----------------|-----------------------------|--------------------------|
+| **Filesystem local blob, one process** | Synced temp + atomic hard-link create; canonical-root handles share one sequencer | Supported, including concurrent handles and unrelated queues |
+| **Filesystem local blob, multiple processes** | Definition hard-link is authoritative, but `object-log` v0.3.1 manifest sequencing is not cross-process fenced | Unsupported for concurrent writers |
+| **AWS S3 / MinIO** | The service can enforce HTTP 412, but the current `BlobStore` port cannot request it | Unsupported until the adapter and sequencer boundary are upgraded; creation fails closed |
+| **Garage v2.2.0** | **Not enforced** — second conditional PUT returns **200** | **Unsupported** |
+| **Other S3-compatible** | Must enforce create-only and supply fenced sequencing | Unsupported through the current overwrite-only port |
 
 **Garage (as of v2.2.0):** execution-verified 2026-08-01 (`fireweed-2aefefbb` /
 snorri-a1b67264). Garage’s S3 docs do not claim conditional-write support.
-Until Garage enforces create-only preconditions, use MinIO/AWS/filesystem for
-object-log authority, or keep single-writer non-shared topologies only where
-the product path does not require multi-writer CAS.
+Until the S3 adapter exposes and proves create-only preconditions, use the
+single-process filesystem object-log product. A deployment may use an S3
+service for other purposes, but must not claim that the current Fireweed
+object-log S3 path provides multi-writer queue-definition or manifest authority.
 
 There is **no** second public authority mode in the product matrix (historical
 Postgres-pointer fallbacks were demoted). Multi-replica shared S3 still
 requires a control plane (Postgres) for owner fencing; that does not replace
 native conditional create on the object store.
 
-## Open-time probe
+## Failure boundary
 
-On open, Fireweed (or the LogEngine/S3 stack it embeds) proves create-only
-semantics before accepting the endpoint as authority. Failure is fail-closed
-with [`EngineError::Unavailable`] / `Storage` carrying a message that names:
+Local authority is selected from the canonical filesystem root and needs no
+network probe. For S3/custom BlobStore paths, open may still inspect storage
+generation, but the first queue create fails closed with `EngineError::Storage`
+because the adapter cannot issue conditional create. The error names:
 
 1. That **native conditional create** was required  
-2. That the **precondition was not enforced** (or the probe could not prove it)  
-3. The **endpoint class** when known (e.g. S3-compatible URL)
+2. That overwrite-only `put` cannot prove the precondition
+3. The required adapter operation (`If-None-Match: *` / put-if-absent)
 
-Operators should not treat bare `Unavailable` on open as a transient network
-error when the message references conditional create / `If-None-Match`.
+An ambiguous network response in a future conditional adapter must be resolved
+by rereading the immutable per-queue authority key; it must never be converted
+to `created=true` from process-local state.
 
 ## Poisoned projection (illegal-lifecycle residual)
 
