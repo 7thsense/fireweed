@@ -21,9 +21,11 @@ pub mod attestation;
 pub mod e2_failover;
 pub mod e3_contract;
 pub mod evidence_io;
+pub mod source_boundary;
 pub mod transaction;
 
 pub use evidence_io::{EvidenceIoError, EvidenceOperation, Fixture, Promoted, RunOwned};
+pub use source_boundary::{SourceBoundary, SourceBoundaryError, SourceInput, SourceInputKind};
 
 /// Portable TP-002 E0/E1 evidence validation. Wall-clock rates and latency
 /// percentiles are retained as capacity observations, but never decide this
