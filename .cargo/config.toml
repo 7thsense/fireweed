@@ -1,0 +1,7 @@
+[build]
+# Bound local compile and link concurrency on high-core-count hosts.
+jobs = 4
+
+[target.x86_64-unknown-linux-gnu]
+# The wrapper prefers clang+mold when available and otherwise uses the system C linker.
+linker = ".cargo/fireweed-linker.sh"

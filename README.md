@@ -149,6 +149,14 @@ fail at startup instead of silently selecting another backend.
 
 For source development, the standard local gates are:
 
+Cargo defaults to 4 build jobs through [`.cargo/config.toml`](.cargo/config.toml)
+to prevent compile and link storms on high-core-count machines. On GNU Linux,
+the tracked linker wrapper uses PATH-resolved `clang` with `mold` when both are
+available and falls back to the PATH-resolved system `cc` linker otherwise, so
+ordinary CI does not require a Homebrew installation. Set `CARGO_BUILD_JOBS`
+for a one-off narrower or wider build, for example
+`CARGO_BUILD_JOBS=2 cargo test --workspace`.
+
 ```sh
 cargo build --workspace
 cargo test --workspace
