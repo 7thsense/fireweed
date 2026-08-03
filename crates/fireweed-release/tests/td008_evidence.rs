@@ -43,13 +43,20 @@ fn observed_run() -> ObservedTerminalReapRun {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let marker = stdout
-        .lines()
-        .find(|line| line.starts_with("TD008_OBSERVED "))
-        .unwrap_or_else(|| panic!("observed suite did not print the TD008 marker:\n{}", stdout))
-        .to_string();
+    let marker = find_observed_marker(&stdout).unwrap_or_else(|err| panic!("{err}:\n{stdout}"));
 
     parse_observed_run(&marker).unwrap_or_else(|err| panic!("{err}"))
+}
+
+fn find_observed_marker(stdout: &str) -> Result<String, String> {
+    const PREFIX: &str = "TD008_OBSERVED ";
+    stdout
+        .lines()
+        .find_map(|line| {
+            line.find(PREFIX)
+                .map(|offset| line[offset..].trim().to_string())
+        })
+        .ok_or_else(|| "observed suite did not print the TD008 marker".to_string())
 }
 
 fn parse_observed_run(marker: &str) -> Result<ObservedTerminalReapRun, String> {
@@ -94,6 +101,28 @@ fn parse_observed_run(marker: &str) -> Result<ObservedTerminalReapRun, String> {
         lag_after: parse_u32("lag_after")?,
         oldest_unemitted_age_ms: parse_u64("oldest_unemitted_age_ms")?,
     })
+}
+
+#[test]
+fn observed_marker_parser_accepts_line_leading_marker() {
+    let marker = "TD008_OBSERVED reap_waits_for_emission reaped=1 lag_before=1 lag_after=0 oldest_unemitted_age_ms=90000";
+    assert_eq!(find_observed_marker(marker).as_deref(), Ok(marker));
+}
+
+#[test]
+fn observed_marker_parser_accepts_libtest_prefix() {
+    let marker = "TD008_OBSERVED reap_waits_for_emission reaped=1 lag_before=1 lag_after=0 oldest_unemitted_age_ms=90000";
+    let output = format!("running 1 test\ntest tests::reap_waits_for_emission ... {marker}\nok\n");
+    assert_eq!(find_observed_marker(&output).as_deref(), Ok(marker));
+}
+
+#[test]
+fn observed_marker_parser_rejects_missing_exact_marker() {
+    let error = find_observed_marker(
+        "test tests::reap_waits_for_emission ... TD008_OBSERVEDISH reap_waits_for_emission",
+    )
+    .expect_err("near-match must not count as an observed marker");
+    assert_eq!(error, "observed suite did not print the TD008 marker");
 }
 
 fn observed_row(run: &ObservedTerminalReapRun) -> LedgerRow {
