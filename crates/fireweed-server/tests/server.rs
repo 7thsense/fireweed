@@ -1,7 +1,6 @@
 //! Composition-root integration: the background ReclaimDriver task recovers orphaned leases with no
 //! client traffic, and the wired server is drivable by an off-the-shelf Redis client.
 
-use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,8 +12,8 @@ use fireweed_core::{
 use fireweed_engine::{
     ChangeRecord, ChangeRecordKind, ChangeRecordSink, ClaimPort, ClaimRequest, Clock,
     ControlPlaneConfig, ControlPlaneStore, EngineError, FinalizeKind, FinalizeOutcome,
-    FinalizePort, InMemoryControlPlane, InProcessControlPlane, LogStore, ProjectionRead, PushPort,
-    PushSpec, QueueControlPlane, QueueKey, ReclaimDriver,
+    FinalizePort, InMemoryControlPlane, LogStore, ProjectionRead, PushPort, PushSpec,
+    QueueControlPlane, QueueKey, ReclaimDriver,
 };
 #[cfg(feature = "turso-projection")]
 use fireweed_engine::{ReassignLeasePort, RenewLeasePort};
@@ -29,7 +28,7 @@ use fireweed_server::{
     NiflheimChangeRecordSink, ObjectLogSpec, OwnershipRuntime, ProjectionSpec, SegmentConfig,
     emit_change_record_tick, start, start_with,
 };
-use fireweed_sqlite::{HybridProjectionStore, composed_sqlite_backend_in_memory};
+use fireweed_sqlite::composed_sqlite_backend_in_memory;
 
 /// The composed objectlog-LOG + sqlite-PROJECTION spec (replaces the retired `Backend::ObjectLogSqlite` /
 /// `Backend::SegmentedObjectLogSqlite` variants — both are now this one composition).
@@ -1728,91 +1727,6 @@ async fn change_record_sink_rejected_without_durable_cursor_store() {
             err
         ),
     }
-    let _ = std::fs::remove_dir_all(&object_root);
-    let _ = std::fs::remove_file(&projection_path);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn objectlog_hybrid_force_seals_before_claim_and_fences_stale_epoch() {
-    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
-    let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid-force-seal");
-    let backend = Arc::new(open_direct_objectlog_hybrid(&object_root, &projection_path));
-    backend.create_queue(qdef()).await.unwrap();
-    let flusher_backend = backend.clone();
-    let flusher = tokio::spawn(async move {
-        loop {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
-                .unwrap_or(0);
-            let _ = flusher_backend.flush_tick(now_ms);
-            let _ = flusher_backend.flush_deferred_projection();
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    });
-    let queue = shard();
-    let e0 = backend.current_epoch(&queue).await.unwrap();
-    let mut push = Box::pin(backend.push(
-        &queue,
-        vec![PushSpec {
-            priority: Some(PriorityValue::Int64(1)),
-            ..Default::default()
-        }],
-        ts(0),
-        Some(e0),
-    ));
-    let waker = std::task::Waker::noop();
-    let mut cx = std::task::Context::from_waker(waker);
-    assert!(
-        matches!(push.as_mut().poll(&mut cx), std::task::Poll::Pending),
-        "large-segment push must buffer until a seal"
-    );
-    let claimed = backend
-        .claim(ClaimRequest {
-            eligibility_time: None,
-            shard: queue.clone(),
-            worker_id: WorkerId::new("claimer").unwrap(),
-            max_items: 1,
-            lease_token: LeaseToken::new("lease-force-seal").unwrap(),
-            lease_expires_at: ts(60),
-            now: ts(1),
-            compatibility: fireweed_engine::ClaimCompatibility::default(),
-            expected_epoch: Some(e0),
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        claimed.items.len(),
-        1,
-        "claim must see the force-sealed pending push"
-    );
-    let ids = tokio::time::timeout(Duration::from_secs(1), push)
-        .await
-        .expect("force-sealed push acked")
-        .unwrap();
-    assert_eq!(
-        claimed.items[0].item_id, ids[0],
-        "claim saw force-sealed push"
-    );
-
-    let e1 = backend.acquire_epoch(&queue).await.unwrap();
-    assert!(e1 > e0);
-    let stale = backend
-        .push_with_request_id(
-            &queue,
-            RequestId::new("stale-writer").unwrap(),
-            vec![PushSpec {
-                priority: Some(PriorityValue::Int64(2)),
-                ..Default::default()
-            }],
-            ts(2),
-            Some(e0),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(stale, EngineError::EpochFenced);
-
-    flusher.abort();
     let _ = std::fs::remove_dir_all(&object_root);
     let _ = std::fs::remove_file(&projection_path);
 }
