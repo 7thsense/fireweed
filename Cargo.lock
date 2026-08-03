@@ -1492,13 +1492,11 @@ dependencies = [
 name = "fireweed-memory"
 version = "0.29.2"
 dependencies = [
- "axon-esf",
  "bytes",
  "fireweed-conformance",
  "fireweed-core",
  "fireweed-engine",
  "fireweed-projection",
- "serde_json",
  "tokio",
 ]
 
@@ -1514,7 +1512,6 @@ dependencies = [
  "fireweed-release",
  "fireweed-sim-support",
  "fireweed-sqlite",
- "futures",
  "object-log",
  "serde",
  "serde_json",

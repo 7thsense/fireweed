@@ -15,11 +15,7 @@ path = "src/lib.rs"
 fireweed-core = { path = "../fireweed-core" }
 fireweed-engine = { path = "../fireweed-engine" }
 fireweed-projection = { path = "../fireweed-projection" }
-axon-esf.workspace = true
 bytes = "1"
-# Canonical serialization for the request-id body fingerprint (mirrors the relational backend, which
-# hashes the same serialized push specs). Used only by the request-id idempotency path.
-serde_json = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }

@@ -6,6 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+# LogEngine cutover retired `ObjectLogTursoBackend`, but the legacy `turso-projection` selector and its
+# feature-gated tests remain until P12a removes them atomically after its storage-campaign prerequisites.
+# P2 inventories this one temporary exception and P2f rejects it in closure mode.
+[package.metadata.cargo-machete]
+ignored = ["fireweed-turso"]
+
 [lib]
 path = "src/lib.rs"
 
