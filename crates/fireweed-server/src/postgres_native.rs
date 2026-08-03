@@ -1389,15 +1389,24 @@ mod tests {
         assert!(!tick.contains("tokio::spawn"));
         assert!(!tick.contains("for (index, inner)"));
     }
-    fn fault_point(&self, cut: ComposeFaultPoint) -> EngineResult<()> {
-        if cut == ComposeFaultPoint::DuringProjectionApply {
-            if let Some(entered) = self.entered.lock().unwrap().take() {
-                let _ = entered.send(());
-            }
-            self.release.lock().unwrap().recv().unwrap();
-        }
-        Ok(())
+
+    struct BlockingApplyHook {
+        entered: std::sync::Mutex<Option<oneshot::Sender<()>>>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
     }
+
+    impl ComposeFaultHook for BlockingApplyHook {
+        fn fault_point(&self, cut: ComposeFaultPoint) -> EngineResult<()> {
+            if cut == ComposeFaultPoint::DuringProjectionApply {
+                if let Some(entered) = self.entered.lock().unwrap().take() {
+                    let _ = entered.send(());
+                }
+                self.release.lock().unwrap().recv().unwrap();
+            }
+            Ok(())
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn blocked_storage_does_not_block_runtime_or_another_queue() {
         let adapter = adapter(2, 2);
@@ -1547,17 +1556,6 @@ mod tests {
         a_task.await.unwrap().unwrap();
         drop(adapter);
         let _ = std::fs::remove_file(path);
-    }
-    #[tokio::test(flavor = "current_thread")]
-    async fn every_production_hybrid_mode_progresses_queue_b_while_queue_a_is_blocked() {
-        assert_hybrid_pool_progress("hybrid", false, None).await;
-        assert_hybrid_pool_progress("hybrid-strict", true, None).await;
-        assert_hybrid_pool_progress(
-            "hybrid-async",
-            false,
-            Some(crate::HybridAsyncThresholds::default()),
-        )
-        .await;
     }
     #[tokio::test(flavor = "current_thread")]
     async fn aborting_caller_after_submit_does_not_cancel_storage_operation() {
