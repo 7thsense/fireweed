@@ -230,40 +230,33 @@ scale/density/horizontal coverage is TP-002 E0–E3.)
 ### 3.10 External transaction contract under duress
 
 These criteria are the release gate for API-001's backend-independent mutation
-contract. They run against every implemented profile combination, including
-memory/dev where present, SQLite, `postgres_native`, `object_log_inmemory_projection`,
-`object_log_sqlite_projection`, `object_log_hybrid_projection_strict`,
-`object_log_hybrid_projection_async`, and segmented object-log variants. A
-profile that does not pass this section is not selectable outside the explicitly
-documented test/dev scope.
+contract. The route register is the Cartesian product of five canonical logs
+(`memory`, `sqlite`, `postgres`, `filesystem`, `s3`) and three canonical
+projections (`memory`, `sqlite`, `postgres`): exactly **15** cells. Every cell
+MUST execute the common criteria and its durability-class assertions. Class A
+has 12 durable-log rows; Class B has three memory-log rows and proves
+projection-only persistence without claiming log replay. An unregistered row,
+ignored test, missing required feature/fixture, `n/a`, or process-successful test
+with no assertions is a release failure. There are zero silent skips.
 
-> **Status (2026-07, v0.11.0): the AC-TXN matrix is implemented and evidenced, with one documented
-> residual.** AC-TXN-1..7 all have recorded evidence from
-> `external_transaction_contract_matrix_tests`
-> (`crates/fireweed-conformance/tests/external_transaction_contract_matrix_tests.rs`) in
-> `docs/perf/evidence/tp003-ac-txn-matrix.jsonl` (plus `tp003-ac-txn-matrix-postgres.jsonl` for the
-> postgres-profile rows). Every row passes except: two principled `n/a` rows (AC-TXN-1 on the
-> non-durable in-memory dev profile, where kill/restart durability does not apply; AC-TXN-3's
-> after-append-before-apply cut point on the unified `sqlite_relational` store, where log-append and
-> projection-apply share one transaction so the cut point has no window) and one `partial` —
-> AC-TXN-5A passes all of its success-barrier / ordered-batching / poison / debt-backpressure /
-> high-water-withholding / terminal-item-retention-advancement assertions, but object-log
-> **segment-object reclamation is deferred**: recovery folds the object log from genesis to rebuild
-> the request-id idempotency maps, so segment trimming first needs a bounded-recovery durable
-> retention floor (tracked as bead `pqueue-b5cc2bc7`).
+Evidence binds the exact cell, durability class, barrier disposition, test
+revision, command, exit status, assertion count, and artifact digest. Historical
+`tp003-ac-txn-matrix*.jsonl` and legacy profile rows may be retained as
+provenance, but they do not qualify this 15-cell register. No current complete
+claim is made until all required rows pass on one release-candidate revision.
 
 | AC | Setup | Assertion | Pass bar |
 |----|-------|-----------|----------|
-| AC-TXN-1 success durable + visible | For each mutating operation (`CreateQueue`, `BatchPush`, `BatchUpdate`, `SetGates`, `BatchClaim`, `BatchRenewLeases`, `BatchFinalize`, `PurgeItems`), inject process kill/restart immediately after success return and then read/replay/claim from recovered state | INV-10 and INV-12 | 0 missing acknowledged commands; 0 read-after-success gaps on the authoritative owner |
+| AC-TXN-1 success durable + visible | In every cell, run each mutating operation (`CreateQueue`, `BatchPush`, `BatchUpdate`, `SetGates`, `BatchClaim`, `BatchRenewLeases`, `BatchFinalize`, `PurgeItems`) and verify immediate visibility. Then kill/restart: Class A recovers from its log; Class B reopens from its selected projection without log replay | INV-12 everywhere; INV-10 for Class A; API-005 Class B persistence boundary | 0 read-after-success gaps; 0 missing Class A acknowledgements; memory-log × durable-projection rows preserve latest projection state; memory × memory restarts empty and exposes no replay/history capability rather than claiming durability |
 | AC-TXN-2 rejection no-effect | Generate envelope-invalid batches, per-item invalid/conflict/stale cases, capacity/unavailable paths, and commit-timeout paths; restart and replay from durable state | INV-13 | 0 durable effects for rejected envelopes or rejected items; accepted siblings in partial batches retain normal success semantics |
 | AC-TXN-3 unknown outcome replay | Drop responses, time out clients, kill service processes, and duplicate retry each mutating `request_id` across before-append, after-append-before-commit, after-commit-before-apply, after-apply-before-response, and after-response cut points | INV-5 and INV-14 | same `request_id` resolves to exactly one committed result or a fresh execution when no original commit exists; 0 duplicate state transitions |
-| AC-TXN-4 object-log crash-point matrix | For object-log profiles and each commit-latency-bound setting from TP-002 E3, inject failures before segment write, after segment write before manifest, after manifest before projection apply, during projection apply, after projection apply before response, during snapshot write, during owner reassignment, and during manifest CAS/fallback commit | INV-1, INV-2, INV-10, INV-12, INV-14 | 0 lost accepted items; 0 duplicate active leases; committed commands replay exactly once; orphan segments ignored or reconciled per TD-004; stale-epoch commits rejected |
-| AC-TXN-5 objectlog/hybrid-strict poison + replay | Run `FIREWEED_LOG_BACKEND=objectlog FIREWEED_PROJECTION_BACKEND=hybrid-strict` with injected failures after manifest commit, after SQLite commit before memory apply, during memory apply, and before response delivery; include request_id coverage for push, claim, renew, finalize, retry/release, update, purge, and operator-style mutations plus conflicting retry bodies | TD-004 `objectlog/hybrid-strict` apply/poison contract, INV-5, INV-10, INV-12, INV-14 | SQLite failure returns no success and replays tail; SQLite-commit/memory-fail poisons the store so all later reads/validation/writes fail closed until restart; restart hydrates memory from SQLite `ProjectionImage`; same-body retry returns the original result without a second append; conflicting body returns `request-id-conflict` |
-| AC-TXN-5A objectlog/hybrid-async success barrier + unknown-outcome replay | Run `FIREWEED_LOG_BACKEND=objectlog FIREWEED_PROJECTION_BACKEND=hybrid-async` with injected failures before manifest, after manifest before memory apply/render, after memory apply before response delivery, during async SQLite apply, after SQLite lag recovery, while async apply debt exceeds budget, and after backpressure admission trips; cover push, claim, renew, finalize, retry/release, update, purge, and operator-style `request_id` cases; force sealed batches to apply out of scheduler order and restart after a partial SQLite batch transaction; include a poisoned async SQLite worker and an operator repair attempt while the poison is active | TD-004 `objectlog/hybrid-async` success barrier, ordered batching contract, poison/fail-closed contract, bounded async apply debt, unknown-outcome contract, INV-5, INV-10, INV-11, INV-12, INV-14 | Success is returned only after manifest commit plus synchronous memory apply/render; SQLite ordered batching may lag within budget but applies sealed batches in `batch_sequence` order exactly once; `sqlite_high_water` advances only after complete logical batch apply; a crash before memory apply/render resolves as unknown-outcome by `request_id`; same-body retry returns the original committed result or fresh execution when no original commit exists; conflicting body returns `request-id-conflict`; SQLite lag never creates duplicate state transitions or read-after-success gaps from memory; async apply debt records `sqlite_apply_lag_ms`, pending logical batches, oldest unapplied `batch_sequence`, `sqlite_high_water`, memory high-water, and configured debt/backpressure thresholds; when SQLite lag or replay debt exceeds budget, new mutating admission and retention/high-water advancement fail closed or return typed backpressure without acknowledging extra commands until debt is below budget; operator repair cannot bypass poison, stale lease fencing, request-id replay, or high-water lineage gates |
-| AC-TXN-6 implementation-combination parity | Run the same generated operation history and failure schedule across all profile combinations, then compare final visible queue state, idempotency records, terminal outcomes, active leases, and metrics exact fields | backend-independent API semantics | no semantic divergence except documented latency/cost/recovery metadata; fireweed callers need no backend-specific repair path |
+| AC-TXN-4 object-log crash-point matrix | For the six `filesystem`/`s3` log cells and each commit-latency-bound setting from TP-002 E3, inject failures before segment write, after segment write before manifest, after manifest before projection apply, during projection apply, after projection apply before response, during snapshot write, during owner reassignment, and during native conditional manifest commit | INV-1, INV-2, INV-10, INV-12, INV-14 | 0 lost accepted items; 0 duplicate active leases; committed commands replay exactly once; orphan segments ignored or reconciled per TD-004; stale-epoch commits rejected; a provider lacking native conditional publication fails configuration before I/O |
+| AC-TXN-5 `Strict` response barrier | Run all 15 cells with `ResponseBarrier::Strict`; inject selected-projection apply failure and cuts after log append, after durable commit, after projection apply, and before response; cover push, claim, renew, finalize, retry/release, update, purge, and operator mutations with same and conflicting `request_id` bodies | Provider-neutral strict apply/poison contract, INV-5, INV-10, INV-12, INV-14 | No success precedes selected-projection visibility; apply failure returns no success and the cell fails closed or recovers from its class authority; same-body retry yields one result, conflicting body returns `request-id-conflict`; final state and error semantics do not vary by projection implementation |
+| AC-TXN-5A `AsyncProjection(AsyncProjectionSpec)` response barrier | Give each of the 15 cells an explicit async-barrier disposition. For every valid tuple, inject lag, out-of-order scheduler wakeups, durable apply failure/poison, crash before/after the response boundary, debt beyond each of the five configured bounds, and operator mutation while poisoned; for a tuple that cannot preserve its durability-class contract, assert typed rejection during pre-I/O durability validation rather than skip it | Provider-neutral async success barrier, ordered apply, poison/fail-closed, bounded debt/backpressure, unknown-outcome contract, INV-5, INV-10, INV-11, INV-12, INV-14 | Every matrix row reports either the complete runtime assertions or its specified construction rejection; valid rows return success only after the class authority plus response state can resolve replay, apply committed batches in order exactly once, advance projection high-water only after complete apply, preserve read-after-success through the serving state, and apply typed backpressure without acknowledging extra commands; same-body replay converges and conflicting bodies fail |
+| AC-TXN-6 implementation-combination parity | Run the same generated operation history and applicable failure schedule across all 15 cells, then compare final visible queue state, idempotency records, terminal outcomes, active leases, and metrics exact fields | backend-independent API semantics | no semantic divergence except the documented Class A/Class B persistence boundary and latency/cost/recovery metadata; fireweed callers need no backend-specific repair path |
 | AC-TXN-7 latency-bound is not a correctness knob | Repeat AC-TXN-1..6 across the TP-002 E3 commit-latency-bound sweep | invariants unchanged by latency/cost setting | 0 invariant deltas across lower-latency vs cost-optimized settings |
 | AC-TXN-8 async cancellation cuts | For every backend class cancel before append, after staging/before commit, during commit, after durable append/before eventual apply, and while waiting for serialization; replay the same and conflicting `request_id` | ADR-015 cancellation and unknown-outcome contract | pre-commit cuts leave no durable effect; commit cancellation converges to exactly one outcome; eventual append repairs exactly once; conflicting replay fails; no stranded waiter or poisoned lock |
-| AC-TXN-9 runtime non-blocking boundary | Inject slow blocking-driver and native-async I/O for SQLite, Postgres, object-log, and Turso on a single-thread Tokio runtime with a heartbeat and bounded timeout | ADR-015 adapter boundary | heartbeat continues within its documented scheduling tolerance; no runtime-worker stall |
+| AC-TXN-9 runtime non-blocking boundary | Inject slow blocking-driver and native-async I/O for every public SQLite, Postgres, filesystem, and S3 adapter on a single-thread Tokio runtime with a heartbeat and bounded timeout; internal Turso compatibility may run as additive evidence only | ADR-015 adapter boundary | heartbeat continues within its documented scheduling tolerance; no runtime-worker stall |
 | AC-TXN-11 async commit strategy and dispatch | Attempt atomic-profile construction with separate append/apply, cancel a caller after owned-task submission, stall one queue at each mutation phase, and drive another queue concurrently | ADR-017 strategy, submission, and queue-gate contract | invalid atomic composition is unrepresentable or rejected at construction; submitted commit resolves exactly once; stalled queue does not stop unrelated queue progress; no duplicate claim planning or stranded permit |
 | AC-TXN-12 object-log byte admission | Generate acquire/release/cancel traces; run small/target/oversize commands through stalled-store, epoch-fence, watermark self-fence, same-epoch CAS-loss, seal-success, post-seal apply-failure, caller-drop, close, and drain paths; contend hot and cold tenants/queues | ADR-017 byte admission, TD-004 buffered-byte admission, INV-10, INV-12, INV-13 | global and tenant permit conservation returns to zero after drain; charged bytes never exceed caps; oversize is permanent invalid-request; exhaustion/timeout is typed retryable backpressure; retained records never outlive their permit; unrelated tenant progress and queue FIFO remain intact |
 | AC-TXN-10 forbidden lock/bridge structure | Search production storage paths and run the dependency guard | ADR-015 structural boundary | no `std::sync::MutexGuard` crosses an await; no nested runtime/block-on bridge; blocking adapters offload whole transactions rather than statements |
@@ -360,47 +353,55 @@ append, commit-timeout retry, request-id conflict, duplicate push, mutable
 schedule, leased-update conflict, single active lease, stale-lease finalize, claim
 replay, success-visible, rejection-no-effect, unknown-outcome replay, snapshot
 recovery, progress-bound risk, tenant isolation, group co-residency by
-construction, cohort, gates, queue ownership/fence/routing) before that backend is
-selectable by backend profile (the core / transaction contract / log /
-relational-reconnect conformance classes per ADR-008). A backend at <100%
-conformance is not v1-eligible. The committed profiles
-(`postgres_native`, `object_log_inmemory_projection`, and
-`object_log_sqlite_projection`) and any release-candidate
-`object_log_hybrid_projection_strict` or `object_log_hybrid_projection_async`
-run the identical transaction-contract suite;
-profile-specific suites add only substrate obligations such as reconnect
-durability, replay, snapshots, segment/manifest fencing, hybrid
-`ProjectionImage` hydration, poison-on-memory-apply failure, durable request-id
-replay, and latency-bound cost evidence.
+construction, cohort, gates, queue ownership/fence/routing) in each of the exact
+15 `StorageConfig` cells. A cell at <100% conformance is not release-eligible.
+The core/transaction class runs everywhere; Class A adds durable-log replay and
+recovery; Class B adds projection-persistence assertions and negative history
+capability checks. Projection-specific suites may add substrate obligations but
+cannot replace, skip, or weaken the common route.
 
-The feature-gated `object_log_turso_projection` is not selectable until it also
-passes 100% of the SQLite-versus-Turso differential corpus: every command arm,
-projection read, cursor/counter, lease, index, replay outcome, reopen image,
-cancellation cut, and tenant-isolation case must match. Turso upgrade evidence
-must rerun the exact 0.7 compatibility probe before the version pin changes.
+The public route register contains only the five log and three projection names.
+The following table is the single disposition registry for the legacy Turso and
+Hybrid-bound requirements; immutable historical evidence may keep old strings,
+but no retired selector or enabled Turso server route counts toward current
+qualification.
 
-### 4.1 `objectlog/turso` projection gates
+| Legacy requirement / selector | Disposition | Current binding |
+|---|---|---|
+| AC-TURSO-1 | Retained, internal | Initialization compatibility probe only; never a public matrix row. |
+| AC-TURSO-2 | Retained, internal | SQLite-versus-Turso differential corpus for implementation learning only. |
+| AC-TURSO-3 | Retained, internal | Replay/rebuild compatibility probe only. |
+| AC-TURSO-4 | Retained, internal | Native-async cancellation/concurrency compatibility probe only. |
+| AC-TURSO-5 enabled server selection | Retired | No positive server route exists or may count as evidence. |
+| AC-TURSO-5 disabled selection | Retained, negative | The retired `turso` selector fails with the exact configuration error before I/O. |
+| AC-TURSO-6 | Retained, focused | One path-filtered internal compatibility lane; it adds no public matrix dimension. |
+| AC-TXN-5 legacy Hybrid strict selector | Replaced | AC-TXN-5 runs `ResponseBarrier::Strict` independently across the 15-cell register. |
+| AC-TXN-5A legacy Hybrid async selector | Replaced | AC-TXN-5A runs or rejects `AsyncProjection(AsyncProjectionSpec)` explicitly for every cell; there are no silent skips. |
+| `hybrid`, `hybrid-strict`, `hybrid-async`, `objectlog/*`, `object_log_*` public selectors | Retired | Negative selector-error coverage only; pair strings remain permissible solely in immutable provenance and non-product test IDs. |
+
+### 4.1 Internal Turso compatibility gates
+
+These criteria preserve useful implementation probes without creating a public
+projection value, server-positive route, support claim, or release-matrix row.
 
 | AC | Setup | Assertion | Pass bar |
 |----|-------|-----------|----------|
-| AC-TURSO-1 Schema and initialization | Open a fresh file and exercise the known `execute_batch` PRAGMA trap followed by supported individual configuration | TD-010 initialization contract | trap proves partial WAL side effect; supported path reads back WAL, synchronous `1`, timeout `5000`; exact shared schema succeeds |
-| AC-TURSO-2 Full differential corpus | Apply every supported queue command/history to SQLite and Turso, including rollback injection, then close/reopen | Projection family parity | 0 mismatches in `ProjectionImage`, cursor, counters, replay outcomes, reads, eligibility, leases, indexes, summaries, or errors |
-| AC-TURSO-3 Replay and rebuild | Exercise overlap, gap, manifest-sealed-before-apply crash, snapshot tail, reset, and local-file loss | ADR-013 log authority | overlap is idempotent; gap fails closed; cursor never leads rows; rebuild from object log is exact |
-| AC-TURSO-4 Async cancellation and concurrency | Run AC-TXN-8/9 plus 16 disjoint writers and same-active-key conflict | ADR-015 native-async contract | exactly one conflict winner; all disjoint writes present; zero reactor stalls, waiter loss, duplicate outcomes, or unrecoverable accepted state |
-| AC-TURSO-5 Server profile | Feature-enabled and feature-disabled builds run create/push/claim/finalize/renew/reassign/read/reopen | TD-010 integration contract | enabled profile passes end to end; disabled selection returns explicit configuration error; no default-profile change |
-| AC-TURSO-6 CI scale | Inspect workflow expansion and run focused Turso lane | ADR-016 CI constraint | one focused/path-filtered lane; no new projection-by-kind matrix dimension |
+| AC-TURSO-1 Schema and initialization (internal) | Open a fresh file and exercise the known `execute_batch` PRAGMA trap followed by supported individual configuration | TD-010 initialization compatibility | trap proves partial WAL side effect; supported path reads back WAL, synchronous `1`, timeout `5000`; exact shared schema succeeds |
+| AC-TURSO-2 Full differential corpus (internal) | Apply every supported queue command/history to SQLite and Turso, including rollback injection, then close/reopen | Internal projection compatibility | 0 mismatches in `ProjectionImage`, cursor, counters, replay outcomes, reads, eligibility, leases, indexes, summaries, or errors |
+| AC-TURSO-3 Replay and rebuild (internal) | Exercise overlap, gap, manifest-sealed-before-apply crash, snapshot tail, reset, and local-file loss | ADR-013 log authority compatibility | overlap is idempotent; gap fails closed; cursor never leads rows; rebuild from object log is exact |
+| AC-TURSO-4 Async cancellation and concurrency (internal) | Run AC-TXN-8/9 plus 16 disjoint writers and same-active-key conflict | ADR-015 native-async compatibility | exactly one conflict winner; all disjoint writes present; zero reactor stalls, waiter loss, duplicate outcomes, or unrecoverable accepted state |
+| AC-TURSO-5 enabled server selection (retired) | Attempt the retired selector in a feature-enabled build | Public namespace closure | exact configuration error before I/O; no constructor or server route opens Turso |
+| AC-TURSO-5 disabled selection (retained negative) | Attempt the retired selector in a feature-disabled build | Public namespace closure | the same exact configuration error before I/O; feature state does not change the public namespace |
+| AC-TURSO-6 Focused CI compatibility | Inspect workflow expansion and run the internal Turso lane | ADR-016 CI constraint | one focused/path-filtered lane; no public projection-by-kind matrix dimension |
 
-### 4.2 `objectlog/hybrid-*` projection gates
+### 4.2 Historical Hybrid evidence (non-qualifying)
 
-These gates are mandatory before `FIREWEED_PROJECTION_BACKEND=hybrid-strict` or
-`FIREWEED_PROJECTION_BACKEND=hybrid-async` can be advertised outside experimental
-builds. The 2026-07-19 deployment decision defers public
-`objectlog/hybrid-strict` support: runtime wiring remains experimental
-env/direct-config-only and authorization to implement chart or evidence work is
-not a declaration of support. Reconsideration requires fresh governed evidence
-for AC-HYB-1 through AC-HYB-6, chart/PVC/operator support, live-`kind`
-install/restart/readback, release/tag binding, and closed fencing plus TP-002
-E2/E3 prerequisites on one release candidate revision.
+AC-HYB-1 through AC-HYB-10 below are preserved only to interpret immutable
+evidence and extract reusable assertions. They are not current product gates,
+and their retired selectors MUST NOT appear in the 15-cell result count. Their
+current replacements are AC-TXN-5 (`Strict`), AC-TXN-5A
+(`AsyncProjection(AsyncProjectionSpec)`), the common projection-conformance
+class, and TP-005's provider-neutral performance rows.
 
 AC-HYB-5 and AC-HYB-6 use portable under-load comparisons and exact recovery
 invariants. Wall-clock and absolute rate observations may report capacity for a
@@ -420,7 +421,7 @@ support across hosts.
 | AC-HYB-9 Hybrid-async crash matrix release gate | Run `objectlog/hybrid-async` against the full crash matrix for push, claim, renew, finalize, retry/release, update, purge, and operator-style mutations; inject crash/restart cut points before manifest commit, after manifest commit before memory apply/render, during memory apply/render, after memory apply/render before response, during async SQLite apply, during partial SQLite batch transactions, after SQLite lag recovery, during replay, and during high-water recovery; force ordered batching with delayed sealed batches and include request-id same-body and conflicting-body retries | TD-004 async success barrier, ordered batching contract, lineage validation, bounded async apply debt, retention frontier gates, INV-5, INV-10, INV-11, INV-12, INV-14 | The hybrid-async crash matrix records manifest tail, segment sequence ranges, batch_sequence ordering, memory high-water, `sqlite_high_water`, request-id replay outcome, async SQLite lag, replay contract outcome, lineage validation result, retention_frontier inputs, and typed poison/backpressure state for every cut point; success is acknowledged only after manifest commit plus memory apply/render; `sqlite_high_water` advances only after complete logical batch apply; restart/replay/high-water recovery produce 0 lost accepted commands, 0 duplicate state transitions, 0 read-after-success gaps, and no retention or high-water advancement without complete lineage and debt evidence |
 | AC-HYB-10 Hybrid-async perf matrix release gate | Compare `objectlog/hybrid-async` with interleaved same-run `objectlog/inmemory`, `objectlog/sqlite`, and committed release-lane controls under identical seeded object-log settings and hot-path mixes for push, claim, renew, finalize, retry/release, update, purge, replay, recovery, and hot read/claim paths; run both no-lag and injected-lag async SQLite profiles with ordered batching enabled | TD-004 performance model, async success barrier, ordered batching contract, lineage validation, retention frontier authority, release-lane hot path evidence | The perf matrix records exact counts/progress, declared resource bounds, p50/p95/p99 ack latency, push throughput, claim/finalize hot-path latency, replay latency, recovery elapsed time, segment batch density, object PUT count, memory high-water, `sqlite_high_water`, lineage validation, retention frontier, async SQLite lag, apply/replay debt, thresholds, typed backpressure, replay counters, high-water decisions, and same-run comparison deltas. Async mode satisfies AC-HYB-5's portable relative/resource bars or fails; absolute timings remain capacity evidence, and WAL/fsync/checkpoint state is never logical high-water or retention authority. |
 
-### 3.11 Deterministic object-log model corpus (SP-02)
+### 4.3 Deterministic object-log model corpus (SP-02)
 
 The bounded deterministic suite complements, but does not replace, AC-TXN-4's process-kill harness:
 
@@ -474,10 +475,13 @@ registry larger than the per-pass request cap. They assert that skipped entries 
 pass is never reported complete, registry paging converges, and the report charges actual watermark calls
 while admission reserves the maximum ambiguous-publication cost.
 
-Hybrid-async segment/manifest deletion has a negative acceptance result until a single owner-fenced API can
-prove the complete TD-004 authority snapshot. Its required assertion is conservative retention plus a
-missing-frontier/storage-growth signal; recovery-success and bounded-growth claims remain unverified. The
-SP-04 same-run overhead comparison remains separate and is not part of this functional gate.
+For `AsyncProjection(AsyncProjectionSpec)` on a durable object log,
+segment/manifest deletion has a negative acceptance result until a single
+owner-fenced API can prove the complete TD-004 authority snapshot. Its required
+assertion is conservative retention plus a missing-frontier/storage-growth
+signal; recovery-success and bounded-growth claims remain unverified. The SP-04
+same-run overhead comparison remains separate and is not part of this
+functional gate.
 
 Gates run at two cadences. **Per-PR (fast)** gates MUST pass to merge.
 **Release (full)** gates MUST pass to call a build "verified" for v1; they include
@@ -501,8 +505,8 @@ but not sufficient.
 | **Every `AC-*` in §3 executes and passes at its stated bar** | 100% of claimed `AC-*` green | per-PR for unit/integration ACs and product smoke; release for soak, scale, and release-shape product E2E ACs |
 | Portable capacity/degradation gates `AC-LAT-1..4` | exact work, same-run ratios, structural complexity, and declared resource bounds pass; absolute p50/p95/p99 are reported only | release |
 | Operator suites (`operator_repair/redrive/purge/async/auth` + `AC-OP-1..9`) | 100% pass | operator-enabled release |
-| Backend conformance (§4) — both committed profiles | 100% of scenarios | release |
-| External transaction contract (§3.10) — all profile combinations | AC-TXN-1..6 green; INV-12..INV-14 = 0 | release |
+| Backend conformance (§4) — exact 15-cell register | 100% of scenarios; zero missing/ignored/fixture-skipped rows | release |
+| External transaction contract (§3.10) — exact 15-cell register | AC-TXN-1..6 green with Class A/Class B bars and explicit barrier dispositions; INV-12..INV-14 = 0 | release |
 | Coverage — `fireweed-storage` conformance scenarios | 100% executed | release |
 | Loom (each custom concurrent structure) | exhaustive to the bounded preemption depth; 0 failing interleavings | release |
 | Property + fuzz (nightly tier) | ≥ `props`/`fuzz` nightly values; 0 falsifications/crashes | release |
@@ -526,7 +530,8 @@ Each bead that claims an `AC-*` MUST record, in the bead's evidence:
 
 - the `AC-*` / `INV-*` IDs satisfied;
 - the exact command(s) run and their exit status;
-- the environment (toolchain, backend profile, instance class, seed);
+- the environment (toolchain, exact log × projection cell, response barrier,
+  durability class, instance class, seed);
 - the measured numbers vs the pass bar;
 - the named test suite(s) (TP-001) that produced them.
 
@@ -539,10 +544,13 @@ criteria touch storage, concurrency, claim, lease, operator, or scale behavior
 
 fireweed P0/core v1 is "verified" when:
 
-1. INV-1..INV-10 and INV-12..INV-14 hold with 0 violations across the §2 stress
-   matrix and §3.10 duress matrix on every committed backend profile.
+1. INV-1..INV-10 and INV-12..INV-14 hold with 0 violations where applicable
+   across the §2 stress matrix and §3.10 duress matrix on all 15 cells; Class B
+   rows prove their projection-only boundary instead of claiming durable-log
+   history.
 2. Every `AC-*` in §3 passes at its stated bar, recorded in the ledger.
-3. The §4 backend conformance gate is 100% for every committed profile.
+3. The §4 backend conformance gate is 100% for the exact 15-cell registry, with
+   zero silent skips.
 4. The §5 CI quality gates are green.
 5. TP-002 E0 (portable progress/capacity contract), E1, E2 (cross-queue scale-out + ≥1000-queue
    density), and E3 (object-log latency/cost/recovery) pass.

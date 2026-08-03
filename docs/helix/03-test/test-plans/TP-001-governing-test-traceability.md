@@ -51,11 +51,11 @@ active-scope discovery (`DiscoverActiveScopes`), recurring / never-terminal item
 (`rearm`, `PurgeItems`), atomic complete-cohort claim (`cohort_policy`,
 `whole_cohort`), granularity (ADR-004), per-queue ownership with queue-local
 progress and client routing (TD-003, TD-006), and the
-`object_log_sqlite_projection` second backend (TD-004).
+orthogonal five-log × three-projection storage matrix (TD-001/API-005).
 
-This is a pre-implementation test plan. Exact Rust function names may change
-when the workspace is created, but implementation beads must preserve the suite
-intent and cite the relevant requirement IDs.
+This is the governing implementation and release test plan. Exact Rust function
+names may evolve, but implementation beads must preserve the suite intent and
+cite the relevant requirement IDs.
 
 Scale, queue-density, horizontal-envelope evidence, and object-log latency/cost
 evidence (the portable progress/capacity contract, ≥1000-active-queue density,
@@ -75,7 +75,7 @@ queue's persisted progress contract.
 | Layer | Location | Purpose |
 |-------|----------|---------|
 | Core unit | `crates/fireweed-core/src/**`, `crates/fireweed-engine/**` | Pure validation, priority encoding, lifecycle, retry, idempotency, version rules, and the engine's decision helpers + dependency-direction guard. |
-| Backend conformance | `crates/fireweed-conformance/**` (run by each adapter's `tests/`) | The shared no-stub port-conformance suite executed against every backend combination: memory/sqlite, postgres, object-log/in-memory projection, and object-log/SQLite projection where implemented. It includes backend-independent transaction-contract scenarios (success-visible, rejection-no-effect, unknown-outcome replay), durability, replay, lease, claim, finalize, renew/reassign, purge, and projection-read scenarios. |
+| Backend conformance | `crates/fireweed-conformance/**` (run by each adapter's `tests/`) | The shared no-stub port-conformance suite executes against all 15 canonical `StorageConfig` log × projection cells. It includes backend-independent transaction-contract scenarios (success-visible, rejection-no-effect, unknown-outcome replay), durability-class-specific reopen, lease, claim, finalize, renew/reassign, purge, and projection-read scenarios. Required routes fail rather than silently skip when a fixture or feature is absent. |
 | Postgres integration | `crates/fireweed-postgres/tests/**` | The durable-log postgres adapter (TD-004 template) against a real DB, env-gated on `FIREWEED_PG_TEST_URL`: the full conformance suite + a reconnect/durability replay test. |
 | Wire (RESP) integration | `crates/fireweed-resp/tests/**` | End-to-end over real TCP with an off-the-shelf `redis` client: XADD/XREADGROUP/XACK/XPENDING/XCLAIM/XAUTOCLAIM/XLEN/XDEL/XINFO, error tokens, and Invariant-1/2 reconcile (ADR-007 RESP face). |
 | Library (facade) integration | `crates/fireweed/tests/**` | The ergonomic Rust library face: every verb (push/claim/ack/nack/fail/renew/reassign/rearm/purge/peek/claimed/metrics) over real backends. |
@@ -122,12 +122,14 @@ queue's persisted progress contract.
 | API-001 auth | API-001 / ADR-002 | Principal authorized for tenant A cannot access tenant B routes or storage-backed data. |
 | API-001 claimed-item response shape | API-001 | Every `BatchClaim` result returns the documented field set (`item_id`, `client_item_key`, `item_version`, `lease_token`, `lease_expires_at`, `priority`); conditional fields (`not_before`, `group_key`, `payload`, `metadata`, `gate_keys`) are present/omitted per the rules; `gate_keys` appear only on `gate_keys=dynamic` queues; `whole_cohort` results omit the per-item `lease_token`; the shared conformance now re-claims after `update_fields` and verifies the current `fields` map in the claimed-item shape. |
 | API-003 workload integration profile | API-003 / API-001 / API-002 | The scheduled-batch-delivery profile maps producer/worker/finalize obligations onto native primitives; finalize maps only to the five outcomes (`complete`/`fail`/`retry`/`release`/`rearm`); the downstream-rate non-goal is preserved (caller-driven pacing only); archive/retention defers to API-002. Anchored by `product_workflow_scheduled_action_delivery_e2e`. |
-| TD-001 durability | TD-001 | Kill process after acknowledged append; replay or committed Postgres rows preserve the command and projection state. |
-| TD-001 backend conformance (conformance-as-contract) | TD-001 / ADR-008 | Every backend passes the shared conformance suite before it is selectable: the **core** class (substrate-independent behavior incl. ordering, eligibility, claim atomicity, idempotency, lease/epoch fencing, per-queue progress) binds every backend; the **log** class (replay/snapshot+tail/segment-commit) binds log-bearing backends; the **relational reconnect-after-crash** class binds the transactional-authoritative relational projection. The two projection families are held behaviorally identical by this suite. |
+| TD-001 durability | TD-001 / API-005 | After success, Class A recovers the command and projection state from its durable log. Class B reopens from the selected projection only: SQLite/Postgres preserves latest state; memory preserves nothing across process death. Tests must prove that exact boundary and reject log-history claims for every Class B row. |
+| Public storage matrix | API-005 / orthogonal-storage-matrix-brief | Enumerate exactly 15 canonical cells: `memory`, `sqlite`, `postgres`, `filesystem`, and `s3` logs × `memory`, `sqlite`, and `postgres` projections. Every row opens, runs lifecycle and transaction assertions, and reports a result. Missing fixture, disabled required feature, ignored test, or unregistered cell is a failure, not a skip. |
+| TD-001 backend conformance (conformance-as-contract) | TD-001 / ADR-008 | Every cell passes the shared conformance suite before it is selectable: the **core** class (substrate-independent behavior incl. ordering, eligibility, claim atomicity, idempotency, lease/epoch fencing, per-queue progress) binds all 15 cells; the **Class A log** class (replay/snapshot+tail/segment-commit as applicable) binds the 12 durable-log cells; the **Class B projection-persistence** class binds the three memory-log cells and proves that no log-history capability is claimed. All three public projection implementations are held behaviorally identical by this suite. |
+| Response barriers | API-005 / TD-004 | `Strict` and `AsyncProjection(AsyncProjectionSpec)` are policy axes independent of projection identity. AC-TXN-5 and AC-TXN-5A exercise their success, poison, order, backpressure, and unknown-outcome boundaries. Each of the 15 cells has an explicit barrier disposition; an unsupported durability tuple must fail typed configuration validation before I/O and never disappear as a skipped test. |
 | TD-002 Postgres fencing | TD-002 | Stale `assignment_epoch` appends are rejected; current epoch appends succeed. |
 | TD-002 Postgres locking | TD-002 | `FOR UPDATE SKIP LOCKED` claim tests prove single active lease under concurrent workers. |
 | TD-003 queue ownership | TD-003 | Deterministic queue-to-owner assignment (target vs active owner), durable epoch fence at acquire, stale-epoch append reject, graceful drain without loss/duplication, interrupted-drain single-writer safety, reassignment recovery from snapshot + log tail, per-queue local progress, and stalled/unowned-queue visibility. |
-| TD-004 object-log backend | TD-004 / ADR-001 | Group-commit ack boundary (no command acked before its manifest commit), manifest-CAS fencing against the current control-plane (queue) epoch (and the Postgres-pointer fallback on no-CAS stores), in-flight claim reservation, replay-response idempotency, SQLite snapshot + bounded log-tail recovery, and parity on the shared TD-001 backend conformance suite (incl. group co-residency by construction, cohort, gates, and the queue-scoped single-owner command path). Cost/ack/recovery magnitude → TP-002 E3. |
+| TD-004 object-log backend | TD-004 / ADR-001 | Group-commit ack boundary (no command acked before its manifest commit), native conditional-write manifest fencing against the current control-plane (queue) epoch, fail-closed rejection of providers without that capability, in-flight claim reservation, replay-response idempotency, projection snapshot + bounded log-tail recovery, and parity on the shared TD-001 backend conformance suite (incl. group co-residency by construction, cohort, gates, and the queue-scoped single-owner command path). Cost/ack/recovery magnitude → TP-002 E3. |
 | TD-005 standalone sqlite backend | TD-005 / ADR-006 | Single-file durable backend: atomic single-transaction append+apply (strict read-after-write, one WAL fsync ack boundary), epoch bootstrap (log/control-plane lockstep) and bump-on-open fencing, single-writer ownership (second opener rejected), reopen recovery preserves committed state (no log-tail replay needed), parity with the in-memory reference on the item-lifecycle conformance dimensions (`shared_conformance`), and the embedder delivery-adapter conformance (`embedder_delivery_conformance`) mapping to 7snx `assert_delivery_queue_adapter_conformance`. NOTE: `client_item_key` convergence is the embedder adapter's responsibility (fireweed converges by `item_id`); see bead pqueue-9ff01321. |
 | Queue density / bounded per-node resources | ADR-002 / ADR-003 / TD-001 / TD-002 / TD-003 / TD-004 | Per-queue background work (lease-expiry sweeps, progress-bound aggregation, summary recompute, recurring rearm, idempotency/retention GC) is multiplexed onto bounded shared per-node pools — never one task/loop/connection per queue; per-queue projection handles are LRU-bounded. Density magnitude (≥1000 active queues/node) → TP-002 E2 `queue_density_single_node_tests`. |
 | ADR-003 Rust policy | ADR-003 | `cargo fmt`, `cargo clippy -D warnings`, `cargo test`, dependency checks, unsafe denial, and the bounded-per-node-background-work rule run/verified in CI. |
@@ -143,6 +145,8 @@ Implementation beads should create or extend these suites:
 - `core_eligibility_precedence_tests`
 - `core_recurrence_rearm_tests`
 - `storage_conformance_durability_tests`
+- `storage_matrix_transaction_contract_tests` (exact 15-cell registry; zero
+  missing, ignored, or fixture-skipped rows)
 - `storage_conformance_claim_tests`
 - `storage_conformance_progress_tests`
 - `storage_conformance_group_batching_tests`
@@ -205,9 +209,9 @@ Scale, density, and object-log performance suites (`performance_single_deploymen
 `external_transaction_contract_matrix_tests`, `recurrence_scale_both_profiles_tests`)
 are owned by TP-002 (`tp-scale-substantiation`); see that plan for their pass bars —
 except `external_transaction_contract_matrix_tests`, whose acceptance bars are the
-AC-TXN rows in TP-003 §3.10 (implemented and evidenced as of v0.11.0, with the
-segment-object-reclamation residual tracked as bead `pqueue-b5cc2bc7`; evidence in
-`docs/perf/evidence/tp003-ac-txn-matrix*.jsonl`).
+AC-TXN rows in TP-003 §3.10. Historical
+`docs/perf/evidence/tp003-ac-txn-matrix*.jsonl` records predate the canonical
+15-cell register and cannot by themselves qualify the current matrix.
 
 ## Performance Evidence
 
