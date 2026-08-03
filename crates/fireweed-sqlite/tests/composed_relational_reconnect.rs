@@ -7,10 +7,10 @@
 //! `relational_reconnect.rs`. The db path is keyed by the test's thread id.
 
 use fireweed_conformance::{claim_req, qdef, shard, ts};
-use fireweed_core::{ItemId, PriorityValue};
+use fireweed_core::{ItemId, PriorityValue, RequestId};
 use fireweed_engine::{
-    ClaimPort, CommandPosition, ControlPlaneStore, FinalizeKind, FinalizeOutcome, FinalizePort,
-    LogStore, ProjectionRead, ProjectionStore, PushPort, PushSpec,
+    ClaimPort, CommandPosition, ControlPlaneStore, EngineError, FinalizeKind, FinalizeOutcome,
+    FinalizePort, LogStore, ProjectionRead, ProjectionStore, PushPort, PushSpec,
 };
 use fireweed_sqlite::{SqliteRelational, composed_sqlite_relational};
 use std::cell::Cell;
@@ -128,6 +128,42 @@ fn composed_relational_recovery_seeds_counters() {
         ItemId::mint(0, 0, 2),
         "item-id counters must resume past the durable projection snapshot"
     );
+}
+
+#[tokio::test]
+async fn request_id_replay_and_conflict_survive_composed_relational_reopen() {
+    let path = unique_path("request-id-reopen");
+    let _ = std::fs::remove_file(&path);
+    let request_id = RequestId::new("sqlite-relational-compose-request-1").unwrap();
+    let body = vec![push(11)];
+
+    let first = {
+        let backend =
+            composed_sqlite_relational(&path).expect("open composed sqlite-relational db");
+        backend.create_queue(qdef()).await.unwrap();
+        backend
+            .push_with_request_id(&shard(), request_id.clone(), body.clone(), ts(0), None)
+            .await
+            .unwrap()
+    };
+
+    let reopened = composed_sqlite_relational(&path).expect("reopen composed sqlite-relational db");
+    let replay = reopened
+        .push_with_request_id(&shard(), request_id.clone(), body, ts(1), None)
+        .await
+        .unwrap();
+    assert!(first.is_fresh());
+    assert!(replay.is_replayed());
+    assert_eq!(replay.item_ids, first.item_ids);
+    assert_eq!(reopened.metrics(&shard()).await.unwrap().pending, 1);
+
+    let conflict = reopened
+        .push_with_request_id(&shard(), request_id, vec![push(12)], ts(1), None)
+        .await;
+    assert_eq!(conflict, Err(EngineError::RequestIdConflict));
+    assert_eq!(reopened.metrics(&shard()).await.unwrap().pending, 1);
+
+    let _ = std::fs::remove_file(&path);
 }
 
 /// Terminal-item reaping deletes durable `fireweed_items` rows (the mint-counter authority for this

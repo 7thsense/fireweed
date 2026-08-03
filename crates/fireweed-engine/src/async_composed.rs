@@ -1004,7 +1004,7 @@ pub(crate) fn validate_push_shape(
     Ok(())
 }
 
-fn canonicalize_push_gate_keys(items: &mut [PushSpec]) {
+pub(crate) fn canonicalize_push_gate_keys(items: &mut [PushSpec]) {
     for item in items {
         item.gate_keys.sort();
         item.gate_keys.dedup();

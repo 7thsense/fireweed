@@ -1377,6 +1377,25 @@ where
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<crate::PushBatchOutcome>> + Send {
         async move {
+            // Unified relational products persist request outcomes in their projection transaction
+            // and have no command stream from which `recover()` can rebuild the process-local cache.
+            // Resolve that durable authority before epoch validation or any new write. Canonicalizing
+            // gate keys matches the async push planner's fingerprint contract.
+            let mut replay_items = items.clone();
+            crate::async_composed::canonicalize_push_gate_keys(&mut replay_items);
+            let durable_replay = self
+                .projection
+                .run_with_store_mut({
+                    let shard = shard.clone();
+                    let request_id = request_id.clone();
+                    move |projection| {
+                        projection.replay_durable_push(&shard, &request_id, &replay_items, now)
+                    }
+                })
+                .await?;
+            if let Some(item_ids) = durable_replay {
+                return Ok(crate::PushBatchOutcome::replayed(item_ids));
+            }
             self.engine
                 .push(AsyncPushRequest {
                     shard: shard.clone(),
