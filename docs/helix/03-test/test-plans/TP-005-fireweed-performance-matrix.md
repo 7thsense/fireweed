@@ -17,7 +17,7 @@ ddx:
 ## Testing strategy
 
 **Goals**: Produce a reproducible, revision-bound comparative performance
-profile of every supported Fireweed embedding storage composition on one
+record of every supported Fireweed embedding storage composition on one
 declared client/service topology;
 measure the public facade rather than internal storage ports; preserve raw
 samples and correctness evidence; distinguish comparable common-path results
@@ -34,13 +34,13 @@ construction-dependent `EngineError::Unavailable` results. An incomplete cell
 is release-blocking and ineligible for performance execution; the runner MUST
 NOT spend benchmark time characterizing it.
 
-**Traceability source**: PRD scale substantiation; ADR-001 storage profiles;
+**Traceability source**: PRD scale substantiation; ADR-001 durability classes;
 ADR-012 orthogonal log/projection composition; API-005 construction boundary;
 TD-001 backend contract; TP-002 capacity and scale evidence.
 
 Performance qualification runs on controlled operator-selected hardware.
 GitHub Actions may compile the runner, execute deterministic verifier tests, and
-verify a checked-in evidence artifact. It MUST NOT produce authoritative timing
+verify a supplied evidence artifact. It MUST NOT produce authoritative timing
 evidence. The runner rejects an authoritative run when a conventional CI
 environment variable is present unless the operator selects a non-authoritative
 smoke tier.
@@ -55,11 +55,11 @@ recovery, or exact-tag release requirements.
 
 | Class | Purpose | Comparable across cells | Release claim |
 | --- | --- | --- | --- |
-| `common` | Public facade append, claim, and finalize | Only within one response-barrier class and one run | Host/topology-bound embedding profile |
-| `recovery` | Close, reopen, rebuild, and verify durable state | Only among cells with the same recovery contract | Host-bound recovery profile |
-| `maintenance` | Verify, delete, and rebuild disposable projections | Only among cells exposing `projection_control()` | Host-bound maintenance profile |
+| `common` | Public facade append, claim, and finalize | Only within one response-barrier class and one run | Host/topology-bound embedding record |
+| `recovery` | Close, reopen, rebuild, and verify durable state | Only among cells with the same recovery contract | Host-bound recovery record |
+| `maintenance` | Verify, delete, and rebuild disposable projections | Only among cells exposing `projection_control()` | Host-bound maintenance record |
 | `smoke` | Fast runner and schema validation | No | None |
-| `million-cycle-v1` | Insert 1M, modify 500K, read and verify 1M through every supported constructor | No; each constructor is gated independently | P0 per-constructor functionality and host-bound performance gate |
+| `million-cycle-v1` | Insert 1M, modify 500K, read and verify 1M through all 15 cells | No; each cell is reported independently | P0 fixed-work functionality plus host-bound timing observations |
 
 ### Targeted million-item lifecycle gate
 
@@ -68,95 +68,75 @@ every supported matrix cell it performs the same public-facade lifecycle:
 
 1. Create one queue with a maximum push batch of 1,000.
 2. Insert exactly 1,000,000 deterministic items with unique
-   `ClientItemKey`s, in batches of 1,000. The timed insert phase MUST complete
-   in at most 9 seconds.
+   `ClientItemKey`s, in batches of 1,000, and record the timed insert phase.
 3. Modify exactly the first 500,000 items using API-001 `BatchUpdate`, in
-   batches of 1,000. Every outcome MUST be `Updated`; the timed modify phase
-   MUST complete in at most 9 seconds.
+   batches of 1,000. Every outcome MUST be `Updated`; record the timed modify
+   phase.
 4. Read exactly 1,000,000 items using `live_items` in key-order batches of
-   1,000. The timed read phase includes value/version verification and MUST
-   complete in at most 9 seconds.
+   1,000. The timed read phase includes value/version verification and is
+   recorded.
 5. Verify an exact deterministic digest: 500,000 updated rows at version 2 and
    500,000 untouched rows at version 1. Missing, duplicate, reordered,
    incorrectly updated, or extra rows fail.
-6. For every durable constructor, close and reopen after modification, then
-   repeat the exact read/digest verification outside the timed phase. Volatile
-   memory records `durability=volatile`; every other cell must record and prove
-   its documented durability boundary.
+6. Close and reopen after modification, then repeat the exact read/digest
+   verification outside the timed phase. Class A recovers from the durable log.
+   Class B records its selected projection boundary: SQLite/Postgres preserves
+   latest projection state; memory is volatile and makes no replay claim.
 
 Queue creation, one bounded 10,000-item warmup, close/reopen, service setup,
 and cleanup are outside phase timings and recorded separately. Item/request
 construction remains inside each timed phase because the gate represents the
 caller-observed public operation. `EngineError::Unavailable`, an omitted cell,
 a skip, or a reduced item count is a P0 failure. The authoritative gate runs on
-controlled local hardware and is forbidden in CI.
+controlled local hardware and is forbidden in CI. TP-005 does not impose a
+portable wall-clock ceiling; only governed TP-002 E3 evidence may define a
+release performance threshold for its declared, attested topology.
 
 ### Matrix
 
-Each cell has a stable identifier. `required` means failure or omission makes a
-full local run fail. `conditional` means the cell is required when its declared
-service configuration is supplied; otherwise the result is `not_configured`,
-never `pass` or a silent skip. These requirement states describe infrastructure
-availability only; they never excuse missing Fireweed functionality.
+Each cell identifier is the canonical `log--projection` pair. A full run has
+exactly 15 required rows; a missing service is a qualification failure, not a
+conditional pass or silent skip.
 
-| Cell | Construction | Authority | Projection / barrier | Requirement |
-| --- | --- | --- | --- | --- |
-| `memory` | `open_memory` | memory | in-memory / atomic | required |
-| `sqlite-log` | `open_sqlite` | SQLite command log | in-memory replay | required |
-| `sqlite-relational` | `open_sqlite_relational` | SQLite relational | relational / atomic | required |
-| `postgres-log` | `open_postgres_runtime(LogReplay)` | PostgreSQL command log | in-memory replay | conditional on PostgreSQL |
-| `postgres-relational` | `open_postgres_runtime(Relational)` | PostgreSQL relational | relational / atomic | conditional on PostgreSQL |
-| `objectlog-local-direct` | `open_objectlog` | local filesystem object log | durable object-log state visible | required direct object-log baseline |
-| `objectlog-local-sqlite-strict` | `open_objectlog_sqlite` | local filesystem object log | SQLite / strict | required |
-| `objectlog-local-sqlite-async` | `open_objectlog_sqlite` | local filesystem object log | SQLite / authority + hot view visible; SQLite deferred | required diagnostic; not release-promotable |
-| `objectlog-local-postgres-strict` | `open_objectlog_postgres` | local filesystem object log | PostgreSQL / strict | conditional on PostgreSQL |
-| `objectlog-s3-sqlite-strict` | `open_objectlog_sqlite` | S3-compatible object log | SQLite / strict | conditional on S3 |
-| `objectlog-s3-sqlite-async` | `open_objectlog_sqlite` | S3-compatible object log | SQLite / authority + hot view visible; SQLite deferred | conditional diagnostic; not release-promotable |
-| `objectlog-s3-postgres-strict` | `open_objectlog_postgres` | S3-compatible object log | PostgreSQL / strict | conditional on S3 and PostgreSQL |
-| `objectlog-s3-memory` | none | S3-compatible object log | in-memory | unsupported by API-005 |
-| `objectlog-*-postgres-async` | none | object log | PostgreSQL / async projection | unsupported by API-005 |
+| Log \ Projection | `memory` | `sqlite` | `postgres` |
+| --- | --- | --- | --- |
+| `memory` | `memory--memory` | `memory--sqlite` | `memory--postgres` |
+| `sqlite` | `sqlite--memory` | `sqlite--sqlite` | `sqlite--postgres` |
+| `postgres` | `postgres--memory` | `postgres--sqlite` | `postgres--postgres` |
+| `filesystem` | `filesystem--memory` | `filesystem--sqlite` | `filesystem--postgres` |
+| `s3` | `s3--memory` | `s3--sqlite` | `s3--postgres` |
 
-The matrix records unsupported rows in its manifest but never fabricates timing
-samples for them. Composed local and S3-compatible object-log cells use the
-same segmented-log target and maximum-latency settings. API-005 specifies the
-direct `open_objectlog` constructor separately; it exposes no segment settings,
-is reported as its own public-API baseline, and is not compared with composed
-segmented object-log cells.
+Every row constructs through `open(StorageConfig)` or `open_async(StorageConfig)`
+and performs identical fixed work. Convenience constructors may be measured as
+additional aliases only after configuration equivalence is proved; they do not
+add cells or replace a canonical row. Retired profile names and Turso/Hybrid
+selectors are absent from the result count.
 
 ### Response-barrier classes
 
 The runner assigns every result to exactly one class. It prints values from all
 classes together but computes comparative verdicts only inside a class.
 
-| Class | Cells | Success boundary |
+| Class | Rows | Success boundary |
 | --- | --- | --- |
-| `volatile-visible` | `memory` | Volatile state visible |
-| `local-durable-visible` | `sqlite-log`, `sqlite-relational` | Local durable authority and serving view visible |
-| `postgres-durable-visible` | `postgres-log`, `postgres-relational` | PostgreSQL durable authority and serving view visible |
-| `objectlog-durable-visible` | `objectlog-local-direct` | Direct local object-log commit visible |
-| `objectlog-hot-visible` | `objectlog-*-sqlite-async` | Segmented object-log authority and synchronous hot view visible; disposable SQLite may lag |
-| `objectlog-projection-visible` | `objectlog-*-sqlite-strict`, `objectlog-*-postgres-strict` | Object-log authority and durable serving projection visible |
+| `Strict` | All 15 cells | The selected projection has applied the accepted effect before success. |
+| `AsyncProjection` | Every cell whose explicit TP-003 AC-TXN-5A disposition is valid | The class authority and replay-resolvable serving state satisfy success while selected-projection lag remains within `AsyncProjectionSpec`; an invalid durability tuple is a pre-I/O configuration result, not a benchmark skip. |
 
 Cross-class ratios are descriptive only and carry `comparison_status =
 "different_success_boundary"`. Async rows report the timed response boundary
-and a separate untimed catch-up duration; the two values are never added and
-never presented as a strict-barrier equivalent. Async rows remain diagnostic
-until ADR-012's release blockers are independently closed.
+and a separate untimed catch-up duration; the two values are never added or
+presented as a strict-barrier equivalent. Durability class is recorded
+separately from response-barrier class.
 
 ### Exact construction contract
 
-The runner uses `futures::executor::block_on` on one caller thread and the
-synchronous API-005 constructors. It MUST NOT create a Tokio runtime. Async-safe
-constructor variants are equivalent construction-entry alternatives, not
-storage cells; TP-004 owns their compile/semantic coverage. Coordinated and
+The runner uses the public `open(StorageConfig)` or
+`open_async(StorageConfig)` entry point consistently for a run. The two entry
+forms are construction alternatives, not storage cells. Coordinated and
 multi-node construction changes deployment topology and remains under TP-002,
 not this single-owner embedding matrix.
 
-All `PostgresRuntimeConfig` cells set `schema` to a unique run-owned value,
-`node_id = None`, and `coordination = None`. Mode is exactly `LogReplay` or
-`Relational` as named by the cell.
-
-All composed object-log cells except `objectlog-local-direct` use:
+All object-log cells use the same non-provider fields:
 
 ```text
 SegmentConfig::new(262144, 20)
@@ -167,10 +147,8 @@ RecoveryPolicy {
 }
 ```
 
-`ObjectLogStorage`, `ProjectionConfig`, and `ResponseBarrier` match the matrix
-row exactly. The direct object-log cell records the fixed behavior of the
-specified `open_objectlog` constructor; it has no synthetic `SegmentConfig` and
-no pairwise comparator. Every local root, SQLite projection path, PostgreSQL schema, and
+`LogConfig`, `ProjectionStoreConfig`, and `ResponseBarrier` match the matrix
+row exactly. Every local root, SQLite projection path, PostgreSQL schema, and
 object-log namespace is derived from the run ID, cell ID, shape ID, and
 repetition. The full resolved non-secret configuration is serialized with the
 row. A mismatch between the resolved config and the cell definition fails
@@ -183,7 +161,7 @@ before warm-up.
 | Contract | 100% of matrix cell IDs, evidence fields, and failure semantics | P0 |
 | Integration | Every configured cell constructs through API-005 and reconciles exact state | P0 |
 | Performance | Five measured repetitions per common-path workload after warm-up | P0 |
-| Targeted lifecycle | Exact 1M/500K/1M cycle and three 9-second phase ceilings on every supported constructor | P0 |
+| Targeted lifecycle | Exact 1M/500K/1M cycle with recorded phase durations on all 15 cells | P0 |
 | Recovery | Every durable configured cell reopens and reconciles exact state | P0 |
 | Maintenance | Every configured disposable-projection cell verifies and rebuilds | P0 |
 | Smoke | One small repetition over local cells for developer feedback | P1 |
@@ -213,8 +191,8 @@ The authoritative full tier uses concurrency 1, one unmeasured warm-up
 repetition, and five measured repetitions. Each operation therefore retains
 100 request samples per repetition and 500 pooled samples per cell/shape.
 This is a deliberate embedding baseline: it measures one caller driving one
-queue without claiming saturation throughput. A later saturation profile may
-vary concurrency, but it must use a different profile ID and may not replace
+queue without claiming saturation throughput. A later saturation workload may
+vary concurrency, but it must use a different workload ID and may not replace
 this baseline.
 
 Each repetition uses a fresh queue and fresh isolated storage namespace. The
@@ -230,7 +208,7 @@ percentiles.
 
 | Metric | Target | Minimum | Enforcement |
 | --- | --- | --- | --- |
-| Full-tier matrix cells completed | Every supported cell whose services are required by the tier | 100% | Runner exits non-zero |
+| Full-tier matrix cells completed | Exact canonical 15-cell register | 15/15; zero skips | Runner exits non-zero |
 | Common operations per cell/shape | append, claim, finalize | 100% | Semantic verifier |
 | Accepted/claimed/finalized reconciliation | exact | exact | Runner and verifier |
 | Measured repetitions | 5 | 5 | Semantic verifier |
@@ -240,9 +218,9 @@ percentiles.
 | Environment provenance | complete required fields | 100% | Semantic verifier |
 | Source provenance | clean pushed commit | exact | Launch wrapper and verifier |
 | Secret leakage | zero credential values | zero | Redaction test and evidence scan |
-| Million-cycle functionality | insert + `batch_update` + `live_items` on every supported cell | 100%, zero `Unavailable` | Runner exits non-zero |
-| Million-cycle phase ceilings | insert ≤9 s; modify ≤9 s; read+verify ≤9 s | all three per cell | Runner and semantic verifier |
-| Million-cycle durable reopen | exact final digest after close/reopen for every durable cell | 100% | Runner and semantic verifier |
+| Million-cycle functionality | insert + `batch_update` + `live_items` on all 15 cells | 100%, zero `Unavailable` | Runner exits non-zero |
+| Million-cycle phase observations | insert, modify, and read+verify duration | recorded for all three phases in every cell; no TP-005 ceiling | Semantic verifier |
+| Million-cycle reopen | exact class-appropriate final digest/capability boundary after close/reopen | 100% | Runner and semantic verifier |
 
 ### Common-path protocol
 
@@ -299,7 +277,7 @@ state. A required preflight failure blocks every timing row for that cell.
 - No samples are trimmed. Failed repetitions remain recorded as failures and
   make the run incomplete.
 - Comparisons are valid only between rows sharing run ID, host fingerprint,
-  response-barrier class, profile, shape, item count, batch size, operation, and
+  response-barrier class, workload shape, item count, batch size, operation, and
   repetition schedule.
 - Pairwise comparison status is `material` only when at least four of five
   same-round throughput ratios point in the same direction, the median ratio is
@@ -310,28 +288,32 @@ state. A required preflight failure blocks every timing row for that cell.
 
 ### Recovery, async catch-up, and maintenance protocol
 
-Every durable cell receives three recovery repetitions for both `minimal` and
-`record-1k`, using the shape's authoritative item count. The runner closes the
-handle after append, reopens the same authority/projection coordinates, times
-the constructor call through its successful return (the public ready boundary),
-and verifies exact pending identity and a complete duplicate-free drain.
-Recovery results report all three raw durations plus median/min/max; no p95 or
-p99 is claimed from three samples. Recovery includes payload, fields, priority,
-and item identity for `record-1k`, not counts alone.
+Every cell receives three reopen repetitions for both `minimal` and `record-1k`,
+using the shape's authoritative item count. The runner closes the handle,
+reopens the same log/projection coordinates, times construction through its
+successful return, and verifies the exact Class A or Class B boundary. Class A
+verifies pending identity and a complete duplicate-free drain from durable-log
+recovery. Class B uses only the selected projection: SQLite/Postgres verifies
+latest state, while memory verifies volatility and absence of log-history
+capability. Results report all three raw durations plus median/min/max; no p95
+or p99 is claimed from three samples. Recovery includes payload, fields,
+priority, and item identity for `record-1k`, not counts alone.
 
 For an async cell, recovery setup first reaches and verifies exact public
 projection catch-up before closing; reopening therefore measures a known
 durable checkpoint rather than unbounded pre-close projection debt.
 
 After each async common repetition, the runner polls public projection
-`verify()` with a 60-second monotonic bound until `compatible=true` and
+`verify()` until `compatible=true` and
 `projection_sequence == authoritative_sequence`. It records response-end
 sequence, catch-up duration, final sequences, poll count, and typed
-backpressure/errors. Timeout or non-convergence fails the repetition. This is a
-catch-up observation, not ADR-012 debt/lineage release evidence.
+backpressure/errors. The orchestration safety deadline is operator-declared and
+recorded; it only bounds runner execution and is not a performance pass bar.
+Timeout or non-convergence fails correctness. This is a catch-up observation,
+not ADR-012 debt/lineage release evidence.
 
-For each `objectlog-{local,s3}-{sqlite,postgres}-*` cell, the runner additionally
-obtains `projection_control()`, records `capabilities()`, and invokes only
+For each capability-bearing cell, the runner additionally obtains
+`projection_control()`, records `capabilities()`, and invokes only
 operations whose capability bit is true. Three maintenance repetitions each
 begin with a fresh 12,800-item `record-1k` population and exact pending identity
 verification, delete only the run-owned disposable projection, rebuild from the
@@ -341,25 +323,29 @@ capability required by the cell contract but absent is a cell failure; an
 operation not promised for that cell is `not_applicable`. Projection maintenance
 is never included in common-path latency.
 
-Memory records `not_applicable` for recovery. DB-resident relational profiles
-record reopen rather than replay. Unsupported maintenance capabilities record
-`not_applicable`, not zero-duration success.
+Unsupported maintenance capabilities record `not_applicable`, not zero-duration
+success. This capability result is independent of projection brand and does not
+remove the row's common or reopen work.
 
 ### External-service isolation and tier semantics
 
-`smoke` runs only memory, SQLite, and local object-log cells, only the `minimal`
+`smoke` runs only memory, SQLite, and filesystem-log cells, only the `minimal`
 shape, 512 items, batch 64, one warm-up, and one measured repetition. Its
 verifier expects exactly eight samples per operation and never applies the full
 tier's repetition or sample counts. It is always non-authoritative. `full`
-requires both PostgreSQL and S3 configuration and every supported matrix cell;
-missing configuration exits 64 before creating storage. A supplied but
-unreachable service is `failed`, never `not_configured`. A future `local` tier
+requires attested live PostgreSQL and S3 services and all 15 matrix cells;
+missing configuration or attestation exits before creating storage. A supplied
+but unreachable service is `failed`, never `not_configured`. A future `local` tier
 may omit external cells but cannot call itself full.
 
-The full run executes the client and local filesystems on this machine, an
-isolated PostgreSQL database reachable from this machine, and Garage on
-`eldir`. This differs from TP-004's acceptance-test placement and makes no
-claim about performance on the Garage host itself.
+The full run executes on a provisioned qualification runner with isolated local
+paths plus reachable PostgreSQL and S3-compatible services. Before any cell
+opens, the runner attests its identity/topology and the services' non-secret
+capabilities: S3 provider/version/region, atomic conditional create/update,
+consistency contract, TLS mode, bucket ownership; and PostgreSQL version,
+durability settings, isolation support, database ownership. Provider brand and
+host name are observations, not requirements. A missing required capability
+fails closed before timing.
 
 PostgreSQL configuration is accepted only when
 `FIREWEED_PERF_POSTGRES_DATABASE_ACK` exactly equals the parsed database name,
@@ -409,15 +395,18 @@ document contains:
   memory, virtualization/container signal, filesystem type/mount, free space,
   CPU governor/turbo data when available, load average, Rust and Cargo versions,
   exact enabled features/rustflags, build profile, and benchmark lockfile hash;
-- profile parameters, seed, cell order per repetition, shape definitions, and
+- workload parameters, seed, cell order per repetition, shape definitions, and
   redacted service topology;
-- every supported, configured, not-configured, unsupported, passed, and failed
-  cell with a reason;
+- all 15 canonical cells plus every response-barrier disposition, with passed
+  or failed status and a reason; full-tier `not_configured`, `unsupported`, and
+  skipped rows are invalid;
 - raw request durations, per-repetition totals, derived summaries, exact
   reconciliation counts, recovery results, and maintenance results;
-- PostgreSQL server version and durability settings when configured;
-- S3 endpoint scheme, hashed endpoint host and bucket, region, provider label,
-  and preflight RTT samples when configured; access and secret keys are omitted;
+- PostgreSQL provider/version, durability settings, isolation capability,
+  database acknowledgement, and preflight results;
+- S3 endpoint scheme, hashed endpoint host and bucket, region, provider/version,
+  native conditional-write and consistency capabilities, TLS mode, bucket
+  acknowledgement, and preflight RTT samples; access and secret keys are omitted;
 - cleanup status for every run-owned local path, database schema, and object
   namespace.
 
@@ -439,9 +428,10 @@ changes, and rejects untracked files under `docs/`, `crates/`, `scripts/`,
 represented only by content hashes in provenance; they cannot alter the
 benchmark or its governing specification. Submodules, when present, must be initialized,
 clean, and at recorded commits. The runner records the fetched ref and remote
-commit after these checks. The evidence file itself is added after execution
-and may be committed separately. Re-running the same commit creates a new run
-ID; evidence is append-only and is never silently overwritten.
+commit after these checks. The evidence file is archived with its attestation;
+repository tracking is not a qualification prerequisite. Re-running the same
+commit creates a new run ID; evidence is append-only and is never silently
+overwritten.
 
 The full orchestrator has a four-hour run timeout and a 15-minute timeout per
 cell/shape/round fragment. It writes an atomic checkpoint after every fragment.
@@ -464,11 +454,11 @@ output are recorded; raw output is retained separately after value redaction.
 | Requirement source | Primary layer | Blocking evidence |
 | --- | --- | --- |
 | API-005 opaque facade | Contract/integration | All cells are constructed publicly and timed through `Fireweed` |
-| ADR-001 selectable profiles | Performance matrix | Every supported composition is classified and configured cells execute |
+| ADR-001 durability classes | Performance matrix | Every canonical composition is classified and all 15 cells execute |
 | ADR-012 orthogonal composition | Matrix completeness | Public embedding log, projection, and barrier choices are explicit; control-plane/topology variants remain TP-002 scope |
 | TD-001 shared semantics | Common protocol | Exact accepted/claimed/finalized reconciliation for every row |
 | TP-002 evidence honesty | Evidence verifier | Host-bound claims, exact revision, raw samples, and no silent skips |
-| TP-004 Garage boundary | External integration | Garage cells run when S3 and PostgreSQL configuration is supplied |
+| TP-004 live-provider boundary | External integration | Attested S3 and PostgreSQL prerequisites exist and all dependent cells execute |
 
 ## Implementation order
 
@@ -490,12 +480,12 @@ output are recorded; raw output is retained separately after value redaction.
 
 | Requirement | Specification |
 | --- | --- |
-| Execution host | This operator-selected client machine plus the declared Garage service host; never a GitHub-hosted runner |
+| Execution host | Provisioned, attested operator-selected runner and declared service topology; never a GitHub-hosted runner |
 | Rust | Repository-pinned toolchain; `cargo run --release --locked`; exact features recorded |
 | PostgreSQL | PostgreSQL 16+ dedicated database acknowledged by `FIREWEED_PERF_POSTGRES_DATABASE_ACK`; URL supplied by `FIREWEED_PERF_POSTGRES_URL` |
-| Object storage | Garage on `eldir`; endpoint/bucket/region and credentials supplied by `FIREWEED_PERF_S3_*`; bucket separately acknowledged |
+| Object storage | Live S3-compatible provider attesting native conditional publication; endpoint/bucket/region and credentials supplied by `FIREWEED_PERF_S3_*`; bucket separately acknowledged |
 | Local storage | Run-owned directory under an explicit work root on the measured filesystem |
-| Output | `docs/perf/matrix-results/<commit>-<run-id>.json` plus `.sha256` |
+| Output | run-owned `target/fireweed-perf/<commit>-<run-id>.json` plus `.sha256`; an external evidence archive may retain the attested pair |
 | CI | Compile and verifier tests only; timing evidence from CI is non-authoritative |
 
 ## Risks
@@ -503,7 +493,7 @@ output are recorded; raw output is retained separately after value redaction.
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
 | Thermal or background-load drift | Comparisons biased by order | Warm-up, five repetitions, rotated cell order, raw samples, CV reporting |
-| Remote Garage network variance | S3 tails obscure implementation changes | Record hashed topology and RTT; retain raw samples; compare only within run/class |
+| Remote provider network variance | S3 tails obscure implementation changes | Record hashed topology and RTT; retain raw samples; compare only within run/class |
 | PostgreSQL residue or cross-run contention | Later cells become incomparable | Unique schemas, isolated database, explicit cleanup status |
 | Object namespace residue | Cost and list performance drift | Unique prefix per repetition and verified prefix cleanup |
 | Async projection reports success before catch-up | False reconciliation | Report response timing separately; bounded public verification catch-up blocks correctness |
@@ -511,11 +501,11 @@ output are recorded; raw output is retained separately after value redaction.
 | Secrets reach evidence or logs | Credential disclosure | Redacted configuration types, field-name denylist, value scan before write |
 | Benchmark becomes a release bottleneck | Tests are avoided or run on CI | Separate smoke/full tiers; controlled-host execution; verifier remains fast |
 
-**Known gaps**: This baseline is single-caller and does not establish saturation
-capacity, multi-client fairness, multi-node scaling, or cloud-provider durability.
-Those require distinct profile IDs or remain governed by TP-002. The current
-public facade does not offer S3 object log plus in-memory projection or async
-PostgreSQL projection; the manifest records those boundaries.
+**Known boundaries**: This baseline is single-caller and does not establish
+saturation capacity, multi-client fairness, multi-node scaling, or certification
+of every S3 provider. Those require distinct workload IDs or remain governed by
+TP-002. Functional support is nevertheless complete: all 15 public cells must
+run here, while provider certification remains outside scope.
 
 ## Build handoff
 
@@ -528,16 +518,16 @@ set -a
 source <operator-managed-performance-env-file>
 set +a
 scripts/perf/fireweed-matrix.sh --tier full \
-  --output docs/perf/matrix-results
+  --output target/fireweed-perf
 scripts/perf/verify-fireweed-matrix.sh \
-  docs/perf/matrix-results/<commit>-<run-id>.json
+  target/fireweed-perf/<commit>-<run-id>.json
 ```
 
 **Priority**: Evidence contract and verifier first; public-facade common path;
-local cells; PostgreSQL cells; Garage cells; recovery and maintenance.
+local cells; provisioned PostgreSQL/S3 cells; recovery and maintenance.
 
 **Blocking gate**: The full matrix refuses missing PostgreSQL or S3
-configuration; every supported cell executes; exact reconciliation, async
+configuration/attestation; all 15 cells execute with zero skips; exact reconciliation, async
 catch-up, recovery, maintenance, and cleanup pass; the verifier independently
 recomputes the artifact and comparison labels; the sidecar matches; and no
 credential value is present.
@@ -545,14 +535,15 @@ credential value is present.
 ## Review checklist
 
 - [ ] Every API-005-supported storage/projection/barrier composition is present.
-- [ ] Unsupported and not-configured cells cannot masquerade as passing.
+- [ ] Full-tier registry is exactly 15/15 with zero skips; missing live services
+      fail before timing.
 - [ ] Common-path measurements use identical operations and workload parameters.
 - [ ] Comparisons never cross response-barrier classes.
 - [ ] Setup, recovery, maintenance, and cleanup are excluded from common timing.
 - [ ] Raw samples, repetition summaries, environment, and exact source revision are retained.
 - [ ] Statistical derivations are specified and independently recomputed.
 - [ ] Correctness reconciliation blocks every timing claim.
-- [ ] PostgreSQL schemas and Garage prefixes are run-owned, locked, and fail-closed on cleanup.
+- [ ] PostgreSQL schemas and S3 prefixes are run-owned, locked, and fail-closed on cleanup.
 - [ ] Async rows report bounded catch-up separately and remain diagnostic.
 - [ ] Service credentials are never serialized or printed.
 - [ ] Authoritative execution fetches and matches the remote revision and rejects source-affecting dirt.

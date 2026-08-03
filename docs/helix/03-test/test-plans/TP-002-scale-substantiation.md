@@ -39,9 +39,9 @@ measurable benchmarks. Per ADR-008 the queue is the unit of sharding, so
 horizontal scale is **cross-queue** — distributing queues across owner nodes —
 not intra-queue sharding.
 
-This is a pre-implementation test plan. Exact Rust function and harness names may
-change when the workspace is created, but implementation beads must preserve the
-evidence-record intent and cite the relevant evidence IDs.
+This is the governing scale-evidence plan. Exact Rust function and harness names
+may evolve, but implementation beads must preserve the evidence-record intent
+and cite the relevant evidence IDs.
 
 The general lifecycle, conformance, idempotency, and per-backend coverage live in
 the governing test traceability plan (`tp-governing-test-traceability`). This
@@ -62,8 +62,8 @@ The two v1 scale envelopes both deliver and both substantiate:
 
 | Envelope | Deployment shape | Delivered by | Evidence record |
 |----------|------------------|--------------|-----------------|
-| **Tier-1 (single-deployment)** | one storage deployment, one queue owned by one node | `postgres_native` (TD-002) | **E1** vs the portable progress/capacity contract **E0** |
-| **Tier-2 (cross-queue horizontal)** | N queues distributed across N independent owner nodes (per-queue ownership leases), each queue's progress bound local to its owner | per-queue ownership (TD-003) + cross-queue distribution (ADR-008) + object-log local-projection profiles (TD-004) | **E2** (cross-queue scale-out) and **E3** (object-log latency/cost + recovery) |
+| **Tier-1 (single-deployment)** | one storage deployment, one queue owned by one node | PostgreSQL log × PostgreSQL projection reference cell (TD-002) | **E1** vs the portable progress/capacity contract **E0** |
+| **Tier-2 (cross-queue horizontal)** | N queues distributed across N independent owner nodes (per-queue ownership leases), each queue's progress bound local to its owner | per-queue ownership (TD-003) + cross-queue distribution (ADR-008) + S3 log with each public projection (TD-004) | **E2** (cross-queue scale-out) and **E3** (object-log latency/cost + recovery) |
 
 ## Scale Evidence Records
 
@@ -114,7 +114,9 @@ Release-gate mapping as of 2026-06-16 (**pre-ADR-008 build record**):
 > detail only; the binaries, backend, cluster topology, and load are identical to
 > the source-build path.) These absolute rates and ratios remain topology-bound
 > capacity evidence; current release qualification applies the portable E0/E2
-> correctness, progress, resource, and same-run comparison bars below.
+> correctness, progress, resource, and same-run comparison bars below. Because
+> that historical run covered only the SQLite projection, it does not by itself
+> qualify the current three-projection E2 register.
 
 `scripts/release/build-governed-evidence-bundle.sh` stages explicitly named E0,
 E1, E2 cross-owner, E2 density, E2 failover/routing, and E3 producer outputs for
@@ -158,6 +160,16 @@ Each tag has one JSON attestation with these required fields:
   present. Producers must bind the complete inputs to the command, including
   the product crates/workspace manifests, benchmark and deployment scripts,
   chart/runtime configuration, and dependency lockfiles.
+
+E1–E3 qualification runs also bind a provisioned-runner capability attestation.
+It records runner identity/topology and resource limits; PostgreSQL
+provider/version, durability settings, isolation support, and database ownership
+acknowledgement; and S3 provider/version/region, native atomic conditional
+create/update support, consistency contract, TLS mode, and bucket ownership
+acknowledgement. Provider brand and host name are observations, not required
+values. A missing, unreachable, or un-attested live S3/PostgreSQL prerequisite
+fails closed before governed work begins; no required row may become `skip`,
+`not_configured`, or a successful zero-test result.
 
 The normative wire schema is
 [`release-evidence-attestation.schema.json`](../../../perf/evidence/release-evidence-attestation.schema.json).
@@ -230,7 +242,8 @@ extrapolated to other hosts or required to equal 1000 times a per-queue number.
 
 ### E1 — Tier-1 single-deployment envelope (pass/fail)
 
-Backend: `postgres_native` (TD-002). Deployment: one Postgres, one queue owned by one node.
+Cell: `postgres` log × `postgres` projection (TD-002). Deployment: one attested
+PostgreSQL service, one queue owned by one node.
 
 | Parameter | Value |
 |-----------|-------|
@@ -239,7 +252,7 @@ Backend: `postgres_native` (TD-002). Deployment: one Postgres, one queue owned b
 | Operation mix | representative Seventh Sense ingest / claim / finalize ratio |
 | Group cardinality / skew | group-heavy and skewed-priority profiles |
 | Telemetry | enabled |
-| Postgres sizing | stated instance class, CPU, memory, IOPS, pool |
+| PostgreSQL attestation | provider/version, durability/isolation settings, stated instance class, CPU, memory, IOPS, pool, and run-owned database acknowledgement |
 | Resident set | 10M items including terminal retained rows under retention policy |
 | Pass: progress and correctness | exact accepted/claimed/finalized counts, no lost or duplicate transitions, monotonic cursor/progress samples, an explicitly declared positive queue-global progress bound equal to the persisted queue definition, and zero accepted-to-claim or discovery-age violations of that declaration |
 | Pass: resources | shared workers, connections, pending tasks, and memory remain within workload-declared bounds |
@@ -250,17 +263,14 @@ Backend: `postgres_native` (TD-002). Deployment: one Postgres, one queue owned b
 Mechanism: per-queue ownership (TD-003) + cross-queue distribution (ADR-008) —
 many queues spread across many owner nodes; each queue is a single-owner,
 single-hop claim (no intra-queue sharding, no scatter-gather).
-**Backend: object-log local projection (TD-004) is REQUIRED** for the headline
-horizontal evidence. This release matrix is resolved to
-`object_log_sqlite_projection` only: the released E2 authority is the durable
-SQLite projection profile, while `object_log_inmemory_projection` remains a
-non-authoritative comparator for hot-path analysis and hybrid benchmarking.
-Revisit the comparator exclusion only if a release-tier, strict-validated
-`object_log_inmemory_projection` E2 row is produced under the same bars and
-reviewed into the governed release manifest. **`postgres_native` MAY additionally
-be run as a comparator** but does not on its own satisfy E2 (per ADR-001 "Scale
-Claim Scoping", `postgres_native` alone is not evidence for the horizontal
-envelope).
+**S3 log × every public projection is required** for headline horizontal
+evidence. The E2 register therefore contains `s3--memory`, `s3--sqlite`, and
+`s3--postgres`, all under the same portable work/progress/resource bars and an
+attested provider with native conditional publication. Filesystem-log cells may
+run as local protocol controls. The E1 PostgreSQL reference cell MAY run as a
+comparator but does not on its own satisfy E2 (per ADR-001 Scale Claim Scoping).
+Missing S3 or PostgreSQL infrastructure is a failed qualification prerequisite,
+not a skipped or reduced E2 matrix.
 
 | Parameter | Value |
 |-----------|-------|
@@ -296,29 +306,34 @@ avoidable reads exceed 70% and absolute modeled gain exceeds 50 ms, but relative
 11.69%, below 20%. The observed authority-head history amplification is a new
 design input for constant-time head access and async bounded-parallel tail recovery.
 
-Backend: `object_log_inmemory_projection` and `object_log_sqlite_projection`
-(TD-004). Evaluated against the portable E0 contract.
+Cells: `filesystem` and `s3` logs × `memory`, `sqlite`, and `postgres`
+projections (six TD-004 cells), evaluated against the portable E0 contract.
+The filesystem rows are local protocol controls; S3 rows use the live attested
+provider. This section is the sole home for governed wall-clock release
+thresholds. TP-003/TP-004 correctness uses fixed work and exact outcomes;
+TP-005 timing remains host-bound observation unless an E3 row explicitly adopts
+its metric on this controlled topology.
 
 | Parameter | Value |
 |-----------|-------|
 | Commit-latency-bound sweep | run at ≥ 4 configured bounds, including low-latency, balanced, and cost-optimized values (for example 1 ms, 5 ms, 20 ms, 100 ms or implementation-equivalent documented values) |
 | Pass: commit-bound semantics | every acknowledged request is durable and visible within the declared commit-bound semantics; p50/p95/p99 are reported as topology-bound capacity evidence |
-| Pass: progress and resources | exact logical operation counts, monotonic progress, and bounded memory/work queues hold for every bound/profile; throughput is reported but is not an absolute release threshold |
-| Pass: cost | $/billion-commands and object/log requests per billion commands reported for each latency bound; the cost-optimized point beats `postgres_native` at high sustained volume (ADR-001 cost table) |
+| Pass: progress and resources | exact logical operation counts, monotonic progress, and bounded memory/work queues hold for every bound/cell; throughput is reported unless a reviewed E3 threshold explicitly governs it |
+| Pass: cost | $/billion-commands and object/log requests per billion commands reported for each latency bound; any comparative release threshold names its reference cell, topology, and attested provider in this E3 record |
 | Pass: recovery | rebuild an exact 10M-item projection from snapshot + log tail with checksum/count/order equality, monotonic replay progress, and bounded memory/work queues; wall time is capacity evidence only |
-| Pass: manifest fencing | a stale-epoch writer's manifest CAS commit is rejected; on a no-CAS object store the Postgres-held authoritative pointer atomically commits the head and assignment epoch, performs zero object-store manifest-head writes, fences stale writers, and remains directly readable through a fresh Postgres client after restart (TD-004) |
+| Pass: manifest fencing | a stale-epoch writer's native conditional manifest commit is rejected; a provider without atomic conditional publication is rejected before I/O, with no PostgreSQL manifest-pointer fallback (TD-004) |
 | Pass: transaction contract | success-visible, rejection-no-effect, and unknown-outcome replay invariants hold under the same bound sweep; no latency setting may weaken TP-003 transaction invariants |
 | Pass: byte admission | Compare request-count-only evidence with global+tenant byte admission for small, target-sized, and oversize payloads under stalled-store and hot/cold-tenant contention. Global/tenant charges never exceed caps; a cold tenant progresses; median throughput regression is <=5% and p99 regression <=10%, including serialization paid before oversize rejection. |
 
-### Recurrence under scale (both backend profiles)
+### Recurrence under scale (representative envelopes)
 
-Run the recurrence scale row under BOTH the Postgres-native profile (E1 shape)
-and the object-log + SQLite profile (E2/E3 shape). This row substantiates that
-recurring/never-terminal items participate in the scale envelopes without special
-handling (recurring items participate in the per-queue local oldest-eligible
-computation like any item).
+Run recurrence under the E1 PostgreSQL reference cell and all three required E2
+S3 projection cells. TP-003/TP-004 own the common 15-cell correctness matrix;
+these scale rows substantiate that recurring/never-terminal items participate in
+both deployment envelopes without special handling (recurring items participate
+in the per-queue local oldest-eligible computation like any item).
 
-| Benchmark | Required Evidence (both profiles) |
+| Benchmark | Required evidence |
 |-----------|-----------------------------------|
 | Recurrence under scale (D4) | (a) **High-frequency immediate rearm** (`not_before` = now tight loop) sustains target throughput without version-monotonicity or projection corruption; (b) **idle recurring inventory** of N idle re-armed items does not inflate active-scope discovery, busy-poll, or `oldest_eligible_age_ms`, and `recurring_pending` is reported within its documented lag; (c) **purge under load** (targeted + `force` while leased), queue-local (one owner) and idempotent by `request_id`, completes within bound and leaves consistent tombstones. |
 
@@ -331,13 +346,13 @@ P0 items are referenced by name (not number) to stay robust to PRD renumbering.
 |-------------|--------------------|------------------------|
 | PRD P0 horizontal-distribution item | PRD / TD-001 / TD-003 / ADR-008 | E2 cross-queue scale-out: exact work and logical progress remain monotonic as owner count rises; the portable E0 contract holds for every queue under K-queue concurrency; single lease across owner reassignment. |
 | PRD P0 performance-at-scale item | PRD / TD-001 / TD-002 / TD-004 | E1 and E2 preserve exact outcomes, queue-global progress, and bounded resources while distributing queues across owners. Throughput and latency remain declared-topology capacity evidence. |
-| PRD P0 queue-density item | PRD / TD-001 / TD-002 / TD-003 / TD-004 | E2 queue density: the release command `scripts/perf/tp002-e2-density-kind.sh` proves exactly 1,000 cold queues plus one hot queue on one live objectlog/SQLite node using canonical 300,000-item hot windows, 8 hot connections, 8 cold workers, 4 server workers, and seed 42. Every cold queue retains an eligible item and completes a non-empty claim/finalize operation during loaded hot work; additional exact hot sustain windows keep load active until all 1,000 queues progress. Hot baseline/load/baseline counts reconcile, shared workers/tasks/connections stay within declared bounds, and quiet-host or fixed-speed gates are forbidden. Absolute rates, latency, and retention remain declared-topology capacity evidence. |
+| PRD P0 queue-density item | PRD / TD-001 / TD-002 / TD-003 / TD-004 | E2 queue density uses fixed work (at least 1,000 cold queues plus one hot queue) on an attested live S3 row. Every cold queue retains an eligible item and completes a non-empty claim/finalize operation during loaded hot work; hot baseline/load/baseline counts reconcile, shared workers/tasks/connections stay within declared bounds, and quiet-host or fixed-speed gates are forbidden. Concrete producer commands and topology values are evidence inputs, not permanent provider contracts. |
 | TD-003 queue ownership | TD-003 | Deterministic queue-to-owner assignment, epoch fencing of a stale owner, graceful drain without loss/duplication, recovery, and stalled-queue visibility. |
-| TD-004 object-log backend | TD-004 / ADR-001 | E3 latency/cost/recovery; commit-latency-bound sweep; manifest-CAS or authoritative Postgres-pointer current-epoch fencing; passes the shared TD-001 backend conformance suite. |
+| TD-004 object-log backend | TD-004 / ADR-001 | E3 latency/cost/recovery across six object-log cells; commit-latency-bound sweep; native conditional current-epoch fencing; providers without it fail configuration before I/O. |
 | Per-queue local progress (D1) | TD-001 / TD-003 | Each queue's oldest-eligible age is computed locally on its owner (gate-aware); the oldest item is claimed before the bound; no cross-shard aggregation. |
 | TD-006 client routing | TD-006 / TD-003 | A wrong-node command is `-MOVED`-redirected to the queue's owner and converges in one hop; a stale/misrouted write is fenced, never corrupting state. |
-| Recurrence under scale (D4) | TD-001 / TD-002 / TD-004 | Recurrence scale row passes under both backend profiles: high-frequency rearm, idle inventory bound, queue-local purge under load. |
-| Shared backend conformance | TD-001 | `postgres_native`, `object_log_inmemory_projection`, and `object_log_sqlite_projection` pass the same TD-001 shared backend conformance suite (core + transaction contract + log / relational-reconnect-durability classes, including group/cohort, `same_group_key`, ownership/fence, and recovery rows) before any is selectable by backend profile. |
+| Recurrence under scale (D4) | TD-001 / TD-002 / TD-004 | Recurrence scale passes in the E1 reference cell and all three required E2 S3 projection cells: high-frequency rearm, idle inventory bound, queue-local purge under load. |
+| Shared backend conformance | TD-001 / TP-003 / TP-004 | All 15 log × projection cells pass the same core/transaction surface with Class A/Class B recovery assertions and zero silent skips before scale evidence may qualify a subset. |
 
 ## Named Test Suites
 
@@ -353,7 +368,7 @@ Implementation beads should create or extend these suites:
 - `performance_cross_queue_scale_out_tests` (replaces the retired `performance_multi_shard_scale_out_tests`)
 - `performance_single_deployment_baseline_tests`
 - `queue_density_single_node_tests`
-- `recurrence_scale_both_profiles_tests`
+- `recurrence_scale_envelope_matrix_tests`
 
 ## Scale Evidence Requirements
 
@@ -381,12 +396,12 @@ Scale benchmarking must include:
   $/command and object/log requests per billion commands at high volume, and
   10M-item projection rebuild time for each committed object-log projection
   variant (E3);
-- manifest-CAS fencing or, on no-CAS object stores, fencing through the
-  Postgres-held authoritative manifest pointer with zero object-store
-  manifest-head writes and direct fresh-client restart reads (E3);
+- native conditional manifest fencing and fail-closed pre-I/O rejection of an
+  S3 provider that cannot supply it (E3);
 - external transaction-contract invariants under the E3 latency-bound sweep, so
   lower latency or lower cost configurations cannot publish weaker semantics;
-- recurrence under scale on both backend profiles.
+- recurrence under scale on the E1 reference cell and all required E2 S3
+  projection cells.
 
 ## Workload profile — Seventh Sense (RESP black box)
 
@@ -398,8 +413,9 @@ the RESP worker surface only:
   `./examples/python-resp/scripts/start_ss_service.sh`)
 - Hard bars: insert / mutate / point-query / drain exactness on three bootstrap
   queues (`ss:jobs`, `ss:actions`, `ss:scheduled`)
-- Soft latency: sub-second p95 defaults on smoke (capacity + regression); not a
-  substitute for E1–E3 Class A release stamps
+- Latency: p50/p95/p99 are reported as smoke capacity/regression observations;
+  they have no portable threshold and cannot substitute for governed E3
+  evidence
 
 ## Manual or Deferred Evidence
 
@@ -415,8 +431,8 @@ covered before claiming product validation:
   NOT deferred; only operator/adapter-facing discovery surfaces remain P1.)
 - Kafka/Redpanda and DynamoDB backend conformance (later design targets).
 
-Object-log and SQLite projection scale profiles are NO LONGER deferred: they are
-committed v1 evidence via E2/E3.
+Object-log scale evidence is not deferred: E2/E3 require the attested S3 rows
+across all three public projections.
 
 ## Scale-Claim Review Checklist (docs lint)
 
@@ -437,18 +453,22 @@ Before scale claims are published, the referencing evidence records must pass
 against the portable E0 correctness, progress, and resource contract: E1 for the
 single-deployment envelope, E2 for the horizontal envelope (including every-queue
 progress under K-queue concurrency),
-and E3 for the object-log latency/cost/recovery profile. A scale claim in any
+and E3 for the object-log latency/cost/recovery record. A scale claim in any
 document must cite at least one evidence record (E0–E3) and, where it asserts a
 benchmark outcome, the named scale test suite that produces it. A horizontal-scale
-claim MUST NOT be substantiated by `postgres_native` alone.
+claim MUST NOT be substantiated by the E1 PostgreSQL reference cell alone.
 
 ## Resolved Decisions
 
 - Cross-owner throughput and efficiency are published capacity observations, not
   universal bars. Release qualification uses the portable E0/E2 contract and
   never waits for an operator to select a machine-speed threshold.
-- Object-log remains required for E2. A `postgres_native` comparator may be
-  recorded when useful but is not required to qualify the portable envelope.
+- Attested live S3 remains required for E2, including memory, SQLite, and
+  PostgreSQL projections. The E1 reference cell may be recorded as a comparator
+  but cannot qualify the horizontal envelope by itself.
+- TP-003/TP-004 require all 15 functional cells with zero skips before E1–E3
+  performance/scale evidence can qualify their governed subsets. Missing live
+  S3 or PostgreSQL fails closed on the provisioned runner.
 
 The queue-density target is **at least 1000 cold queues plus one hot queue on one
 node**. Every queue meets its progress contract, all lifecycle counts reconcile,

@@ -27,20 +27,39 @@ release artifacts, and runtime-hardening work not exposed by API-005
 | Level | Coverage target | Priority |
 | --- | --- | --- |
 | Contract compile | 100% of API-005 constructors, Snorri methods, named types, and forbidden retired Rust names | P0 |
-| Fireweed integration | The same capability-complete operation suite succeeds through every supported constructor | P0 |
+| Fireweed integration | The same capability-complete operation suite succeeds through all 15 `StorageConfig` cells | P0 |
 | Atomic item mutation | Addressed and selector mutation, dry-run, CAS, lease rejection/match/invalidation, lifecycle transitions, purge, schedule/caller-data/gate/field/entity edits, atomic rollback, and exact replay pass through every supported constructor | P0 |
-| Million-cycle parity | Insert 1,000,000, batch-update 500,000, and read/verify 1,000,000 through every supported constructor | P0 |
+| Million-cycle parity | Insert 1,000,000, batch-update 500,000, and read/verify 1,000,000 through all 15 canonical cells; convenience constructors prove equivalent mapping | P0 |
 | Downstream integration | All five Snorri feature combinations compile against one concrete type | P0 |
-| Garage integration | SQLite and PostgreSQL projection lifecycle plus retry/idempotency run against Garage on `eldir` without skips | P0 |
+| Live provider integration | S3 × each public projection, including PostgreSQL-backed rows, runs on a provisioned qualification runner with provider capability attestation and zero skips | P0 |
 | Published-source consumption | Snorri resolves the tagged public `7thsense/fireweed` repository rather than a workspace-internal crate | P0 |
-| Existing backend suites | No regression in the selected profile's current semantic tests | P0 |
+| Existing backend suites | No regression in each selected cell's current semantic tests | P0 |
 
 ## Test data
 
-Fireweed integration tests use unique temporary SQLite/object-log paths and
-synthetic queue/item identifiers. PostgreSQL tests use the existing
-`FIREWEED_PG_TEST_URL` gate and unique schemas. No production or customer data is
-required.
+Fireweed integration tests use unique temporary SQLite/filesystem-log paths and
+synthetic queue/item identifiers. Live S3 and PostgreSQL tests use provisioned,
+run-owned namespaces supplied to the qualification runner. No production or
+customer data is required.
+
+The runner records a non-secret capability attestation before construction:
+runner identity and topology; S3 provider/version/region, atomic conditional
+create/update support, consistency contract, endpoint TLS mode, and bucket
+ownership acknowledgement; PostgreSQL server version, durability settings,
+isolation support, and database ownership acknowledgement. The public contract
+depends on those capabilities, not a provider brand or host name. A missing,
+unreachable, or non-attested live S3/PostgreSQL prerequisite fails release
+qualification before tests start; it is never a passing skip.
+
+Legacy provider/topology evidence maps as follows; this is a semantic mapping,
+not a requirement to preserve old executable names:
+
+| Former contract | Provider-neutral binding |
+| --- | --- |
+| Garage round-trip/reopen on `eldir` | `SNORRI-REOPEN` on an attested live S3 row. |
+| Garage + PostgreSQL projection delete/rebuild | `SNORRI-PROJECTION-REBUILD` on `s3--postgres`. |
+| Garage retry applied exactly once | `SNORRI-RETRY-ONCE` on every live S3 projection row. |
+| Reachability of host `eldir` | Availability of any provisioned runner satisfying the runner/S3/PostgreSQL attestation. |
 
 ## Coverage requirements
 
@@ -55,8 +74,10 @@ required.
 ## Fireweed gates
 
 1. A downstream fixture depends only on package `fireweed`.
-2. The fixture constructs every enabled profile and assigns each result to the
-   same concrete `Fireweed` type.
+2. The fixture constructs the exact five-log × three-projection matrix through
+   `StorageConfig` and assigns all 15 results to the same concrete `Fireweed`
+   type. The route registry rejects a missing, duplicate, ignored, or silently
+   skipped cell.
 3. The fixture names every API-005 input/output type required by Snorri without
    depending on `fireweed-core` or `fireweed-engine`.
 4. Compile-fail fixtures reject attempts to construct with a raw backend or use
@@ -78,9 +99,10 @@ required.
    selector, dry-run leaves no durable or in-memory trace, each logical patch
    bumps the item version once, and lease invalidation removes every claim-token
    and selection-index reference before a replacement claim can succeed.
-6. Plain profiles return `None` from `projection_control`. Object-log plus
-   disposable-projection profiles return `Some` and retain existing lifecycle
-   verification/delete/rebuild tests.
+6. `projection_control()` returns `Some` only where the composition owns a
+   disposable projection and the relevant maintenance capability is present;
+   all other cells return `None`. Capability-bearing cells retain
+   verify/delete/rebuild and reopen tests without exposing storage identity.
 7. No constructor result exposes backend/projection identity, configuration,
    a backend discriminator, or a downcast. Capability assertions remain
    separate and queue-scoped.
@@ -106,19 +128,22 @@ git diff --check
     pass with zero skips and zero construction-dependent `Unavailable`
     results, run the TP-005 `million-cycle-v1` gate. A constructor that has
     not passed those prerequisites is ineligible for performance testing, not
-    a slower or reduced benchmark cell. Each eligible constructor must insert
-    1,000,000 keyed items in at most 9 seconds, batch-update 500,000 in at most
-    9 seconds, and read plus verify 1,000,000 in at most 9 seconds. Durable
-    constructors additionally close, reopen, and verify the exact final image
-    outside timed phases. No row may skip an operation or report
-    `Unavailable`.
+    a slower or reduced benchmark cell. Each eligible constructor performs the
+    fixed 1,000,000-key insert, 500,000-item batch update, and 1,000,000-item
+    read/verify workload; durations are recorded as host-bound observations,
+    not portable correctness bars. Class A rows additionally close, reopen,
+    and verify the exact final image outside timed phases; Class B rows prove
+    the projection-only persistence boundary. No row may skip an operation or
+    report `Unavailable`. Any governed wall-clock release threshold belongs
+    solely to TP-002 E3 on its controlled, attested topology.
 
 Crates.io package closure is a separate follow-up. The v0.21 GitHub release
 MUST NOT publish repository-only internal crates merely to make the facade's
 current path dependencies registry-resolvable.
 
-Environment-gated PostgreSQL tests remain explicitly reported rather than
-silently counted as passing when no database is available.
+Developer runs may report live PostgreSQL/S3 rows as `not run`; that status is
+never qualification evidence. The release runner fails closed if either live
+service is absent or its capability attestation is incomplete.
 
 The public-API closure comparison normalizes away the root-type rename and the
 explicit API-005 exclusions, then fails on any other removed public method or
@@ -140,7 +165,7 @@ repository. `cargo tree` and `Cargo.lock` evidence MUST show package `fireweed`
 at the intended path, revision, or tagged git source; any other repository
 source is a hard failure even if compilation succeeds from cache.
 
-Compile each feature profile independently before `--all-features`:
+Compile each feature set independently before `--all-features`:
 
 ```sh
 cargo check --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features memory
@@ -151,46 +176,37 @@ cargo check --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default
 cargo check --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --all-features
 ```
 
-Required local semantic tests cover memory conformance, SQLite commit and
-reopen, SQLite hot queries, and object-log/SQLite verify-delete-rebuild and
-worker reassignment. PostgreSQL and object-log/PostgreSQL tests run when the
-documented test database variable is available and are otherwise recorded as
-not run.
+Required Snorri semantic evidence is provider-neutral and keyed by stable
+contract IDs rather than an implementation test filename:
 
-```sh
-cargo test --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features memory,conformance -- --list | rg '^tests::fireweed_memory_state_store_conformance_executes: test$'
-cargo test --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features memory,conformance tests::fireweed_memory_state_store_conformance_executes -- --exact --nocapture
-cargo test --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features sqlite sqlite_public_facade_commits_authoritative_transition -- --nocapture
-cargo test --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features sqlite hot_projection_sqlite_visibility_business_cases -- --nocapture
-cargo test --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features objectlog,sqlite objectlog_sqlite_delete_and_rehydrate -- --nocapture
-cargo test --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features objectlog,sqlite objectlog_sqlite_worker_reassignment_recovers_deleted_projection -- --nocapture
-cargo test --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features postgres postgres_public_facade_is_env_gated_and_capability_checked -- --nocapture
-cargo test --manifest-path ../snorri/Cargo.toml -p snorri-fireweed --no-default-features --features objectlog,postgres objectlog_postgres_delete_and_rehydrate -- --nocapture
-```
+| ID | Required semantics |
+| --- | --- |
+| `SNORRI-MATRIX-LIFECYCLE` | Complete public push/claim/finalize/query/mutation surface through every one of the 15 cells. |
+| `SNORRI-REOPEN` | Class A log recovery and Class B projection-only reopen produce their exact documented state. |
+| `SNORRI-PROJECTION-REBUILD` | Every capability-bearing disposable projection verifies, deletes, rebuilds, and returns the same item/image digest. |
+| `SNORRI-RETRY-ONCE` | Response loss and same-`request_id` retry converge to exactly one transition; conflicting body fails. |
+
+The acceptance record maps each stable ID to the actual executed Snorri test
+binary/filter at the accepted revision. Historical filenames may remain in old
+evidence, but they are not governing identities.
 
 Each targeted command MUST report at least one executed test. A successful
 process with `running 0 tests` is a failed gate, including when a feature gate
 or a non-exact filter silently excludes the named test.
 
-The release acceptance record additionally runs the real S3-compatible matrix
-on host `eldir`, where Garage and PostgreSQL are provisioned. Working SSH
-access to `eldir` is a prerequisite; inability to reach the host blocks this
-P0 row rather than converting it to a local skip. The runner exports
+The release acceptance record additionally runs the real S3-compatible and
+PostgreSQL rows on a provisioned qualification runner. Access to a particular
+host or provider brand is not contractual; the capability attestation above is.
+Inability to obtain an attested runner blocks this P0 row rather than converting
+it to a local skip. The runner exports
 `SNORRI_S3_TEST_ENDPOINT`, `SNORRI_S3_TEST_BUCKET`,
 `SNORRI_S3_TEST_REGION`, `SNORRI_S3_TEST_ACCESS_KEY`,
 `SNORRI_S3_TEST_SECRET_KEY`, and `SNORRI_FIREWEED_POSTGRES_URL` from host-managed
-secrets. Values MUST NOT be copied into the repository or logs. From the Snorri
-checkout pinned to the accepted Fireweed revision, run:
-
-```sh
-cargo test -p snorri-embed --no-default-features --features objectlog-s3,postgres --test garage_objectlog -- --nocapture
-```
-
-The tests `garage_round_trip_reopen_and_rebuild`,
-`garage_postgres_round_trip_delete_and_rebuild`, and
-`garage_retry_push_is_applied_exactly_once` MUST each execute and pass. A
-missing-variable `SKIP` line or `running 0 tests` is a failed P0 row, not
-passing evidence.
+secrets. Values MUST NOT be copied into the repository or logs. The accepted
+revision must execute `SNORRI-MATRIX-LIFECYCLE`, `SNORRI-REOPEN`,
+`SNORRI-PROJECTION-REBUILD`, and `SNORRI-RETRY-ONCE` for the live S3 rows,
+including PostgreSQL projection. A missing-variable `SKIP`, `running 0 tests`,
+unmapped semantic ID, or absent cell is a failed P0 row, not passing evidence.
 
 ## Acceptance criteria layer allocation
 
@@ -202,7 +218,7 @@ passing evidence.
 | API-005 Snorri slice | Downstream integration | Independent feature checks and semantic tests above |
 | API-005 projection control | Fireweed + Snorri object-log integration | Borrowed control verify/delete/rebuild and reassignment tests |
 | API-005 opaque composition | Contract compile | Construction selects composition; the live facade cannot disclose it |
-| Garage durability acceptance | Snorri on `eldir` | All three named Garage tests execute without skips and pass |
+| Live S3/PostgreSQL durability acceptance | Provisioned runner | Provider attestation passes; all four semantic IDs execute over required cells with zero skips |
 | Published facade consumption | GitHub release + downstream integration | Public tag/release exists; post-publication lockfile resolves the exact `7thsense/fireweed` tag |
 
 ## Infrastructure and implementation order
@@ -212,17 +228,18 @@ passing evidence.
 2. Add the zero-skip shared functional and durability matrix.
 3. Complete all `Fireweed` forwarding and backend implementations until that
    matrix is green.
-4. Run Fireweed profile tests and boundary scripts.
+4. Run Fireweed cell tests and boundary scripts.
 5. Run TP-005 performance gates only for the already-green matrix.
 6. Migrate Snorri against the exact local commit and run independent feature
    checks before semantic tests.
-7. Run the no-skip Garage matrix on `eldir` against the release candidate.
+7. Run the no-skip live S3/PostgreSQL matrix on the attested qualification
+   runner against the release candidate.
 8. Publish the GitHub tag/release, then repeat dependency identity and the full
    Snorri gates against that public tag.
 
-Local developer runs may report PostgreSQL rows as `not run` when the URL is
-absent. Release acceptance requires both Garage and PostgreSQL on `eldir`; no
-environment-gated row may be skipped there.
+Local developer runs may report PostgreSQL/S3 rows as `not run` when fixtures
+are absent. Release acceptance requires both live services on the provisioned,
+attested runner; no governed row may be skipped there.
 
 ## Risks
 
@@ -233,18 +250,18 @@ environment-gated row may be skipped there.
 | A method exists on `Fireweed` but only some constructors install it | Critical | Shared per-constructor suite and million-cycle gate treat `Unavailable` as failure |
 | Compile-fail and namespace policy disagree | High | API-005 makes retired Rust types unavailable; ADR-023 permits no package aliases |
 | PostgreSQL is silently skipped | Medium | Report as `not run`; never count as a pass |
-| Garage credentials leak into evidence | High | Source host-managed secrets and reject credential values in logs |
+| Provider credentials leak into evidence | High | Source runner-managed secrets and reject credential values in logs |
 
-The concrete facade, sibling Snorri migration, supported-surface fixture, and
-compile-fail fixtures are implemented. Release acceptance completed against
-Fireweed `v0.21.0` at `5b2cf59b29c0652af9e8513ea2e6de5e93201474`:
-the exact-revision Garage/PostgreSQL matrices ran without skips, and Snorri
-`v0.11.0` repeated its full integration against the published tag.
+Historical release records for Fireweed `v0.21.0` and Snorri `v0.11.0` remain
+useful provenance for the former provider-specific routes. They do not qualify
+the current 15-cell contract; current qualification requires a fresh revision-
+bound provider attestation and the zero-skip semantic-ID matrix above.
 
 ## Build handoff
 
-**Priority**: contract fixtures → forwarding closure → Fireweed matrix → Snorri
-matrix → `eldir` Garage matrix → public GitHub tag/release → tagged-source repeat
+**Priority**: contract fixtures → forwarding closure → 15-cell Fireweed matrix →
+Snorri matrix → attested live-provider matrix → public GitHub tag/release →
+tagged-source repeat
 **Blocking gate**: every P0 row above passes against one recorded Fireweed
 revision with zero phantom test claims and no unreviewed supported-API removal.
 
