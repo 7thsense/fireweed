@@ -140,6 +140,23 @@ Two implementers must build the same consumer, so the record shape is pinned:
 - Fjord-side topic retention is configured independently and bounds how far back a Kafka consumer
   can catch up; it never gates fireweed's source-log safety.
 
+### Durability-class boundary
+
+The embedded consumer surface does not strengthen a queue's storage class.
+Class A queues may rebuild emission state from their durable log subject to the
+cursor and retention frontier above. Class B (`log=memory`) can emit committed
+change records while the process is alive, but after process death it has no
+durable log from which to rebuild, backfill, branch, or reconstruct a lost
+emission cursor. A durable SQLite/Postgres projection does not become a
+substitute change log. Configuration and capabilities must expose that boundary
+before enabling a history/backfill claim.
+
+Emission remains off the commit path under both public response barriers.
+`Strict` and `AsyncProjection` govern command/projection acknowledgement, not
+Fjord delivery. The native-async emission task consumes the durable emission
+frontier after commit and never holds a queue gate or projection transaction
+while awaiting the sink.
+
 ### CL-8 tenant authz
 
 - Access to the embedded Kafka surface MUST be tenant-scoped: topic names are tenant-prefixed and

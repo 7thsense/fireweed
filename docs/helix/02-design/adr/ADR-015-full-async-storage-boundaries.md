@@ -95,10 +95,21 @@ No detached task may hold only a borrowed connection, transaction, mutex guard, 
 Native drivers are awaited directly *inside* the owned commit task. Reads and pre-commit planning do not
 need this task boundary because their cancellation has no durable effect.
 
-Migration is additive at first: explicit async axis traits and compatibility wrappers land beside the
-legacy synchronous axes, the reference composition and memory backend move first, blocking adapters move
-through explicit wrappers, and native-async adapters implement the new axes directly. The legacy traits,
-ready-future shims, and composition-root blocking wrappers are removed only after conformance parity.
+The migration reached async-only product composition in v0.24: supported
+log-by-projection cells assemble through async products. A residual facade bridge
+may still dispatch a public operation through blocking compatibility code while
+individual adapters become runtime-safe, but it is not the product execution
+model and must not grow new call sites. Removal requires per-cell conformance,
+same-queue serialization, cross-queue heartbeat progress, and shutdown/drain
+proof. Removing that bridge does not create a second public facade type.
+
+The public response barrier is orthogonal to adapter I/O mechanics. `Strict`
+acknowledges only after the serving projection satisfies the operation's full
+visibility contract. On the six applicable filesystem/S3 cells,
+`AsyncProjection` may defer a durable projection while synchronously applying
+and rendering the acknowledged result from the serving projection. Both use
+owned commit tasks, bounded admission, request-id outcome replay, and the same
+per-queue gate; neither permits a process-global lock across awaited I/O.
 
 ## Alternatives
 
@@ -116,7 +127,7 @@ ready-future shims, and composition-root blocking wrappers are removed only afte
 | Positive | Native async databases and clients no longer require nested runtimes or reactor blocking. |
 | Positive | Cancellation and unknown outcomes become testable storage contracts instead of wrapper behavior. |
 | Negative | The migration touches the generic composition and every storage adapter. |
-| Negative | A temporary compatibility layer remains until all synchronous axes and raw-write tests migrate. |
+| Negative | A residual facade bridge remains until every adapter is runtime-safe and its per-cell progress/closure evidence passes. |
 | Neutral | SQLite, object-log filesystem, and other blocking implementations remain supported through bounded whole-transaction offload. |
 
 ## Risks
@@ -126,7 +137,7 @@ ready-future shims, and composition-root blocking wrappers are removed only afte
 | Cancellation interrupts a commit after its outcome becomes durable | M | H | Owned commit task plus request-id outcome replay tests at every cancellation cut. |
 | Async conversion weakens transaction affinity | M | H | Typed operations; whole-transaction blocking wrappers; no per-statement offload. |
 | Global async lock serializes unrelated queues | M | H | Per-queue serialization and queue-density/heartbeat tests. |
-| Dual traits persist indefinitely | M | M | Beads include explicit call-site inventory and removal gates. |
+| Residual facade bridge persists indefinitely | M | M | Per-cell inventory, source guards, and removal gates forbid new bridge call sites. |
 
 ## Validation
 

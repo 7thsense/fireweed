@@ -48,7 +48,7 @@ atomicity or cancellation safety.
    - `UnifiedAtomicCommit` owns one substrate transaction that commits log append, projection state,
      cursor/frontier, and replay outcome together.
    - `SeparateReplayCommit` is legal only for `EventualApply`; it durably appends first, repairs projection
-     state from the log, and enforces ADR-013's response barrier.
+     state from the log, and enforces the selected public response barrier.
 2. A runtime-neutral owned-task dispatcher. Already-formed raw commits complete strategy preparation before
    queue gating and submission. State-dependent typed operations acquire their queue gate before submission,
    but currently perform authoritative planning and finite byte admission inside dispatcher-owned work.
@@ -85,10 +85,22 @@ from capturing the node budget. Runtime-neutral budget futures contain no timer:
 its runtime deadline and maps timeout/exhaustion to typed retryable backpressure; the finite production
 default rejects immediately when the budget is exhausted.
 
-The current live production profiles use the synchronous/group-commit composition and are fully byte-bounded.
-Raw generic `AsyncComposedBackend` submission is structurally prepared before queue gating and dispatch.
-Moving state-dependent typed-operation planning to an equivalent prepared boundary remains full-async
-activation work; it is not claimed as an SP-01 production path.
+Supported product compositions are native async. Raw generic
+`AsyncComposedBackend` submission is structurally prepared before queue gating
+and dispatch. State-dependent typed operations plan inside dispatcher-owned work
+under their queue gate and use finite non-waiting byte admission; moving that
+planning to an equivalent pre-dispatch prepared boundary remains optimization
+work, not permission to route the product through synchronous composition or a
+process-wide facade pool.
+
+Commit strategy and response barrier are independent construction inputs.
+`Strict` is required on every one of the 15 log-by-projection cells and does not
+return until the serving projection can satisfy the complete operation result.
+`AsyncProjection` is additionally available on the six filesystem/S3 cells: it
+may defer a durable projection, but the acknowledged result is synchronously
+visible through the serving projection and the deferred state remains bounded,
+ordered, replayable, and poison-aware. These are provider-neutral barriers, not
+additional projection selectors.
 
 Immediate memory implementations may use an immediate dispatcher only when the complete typed commit
 resolves in one poll. Blocking stores dispatch one whole transaction to a bounded actor/executor. Native
@@ -107,11 +119,11 @@ async stores await their drivers inside the owned task.
 
 | Type | Impact |
 |------|--------|
-| Positive | Atomic and eventual-apply profiles cannot be accidentally composed through the wrong commit sequence. |
+| Positive | Atomic and eventual-apply compositions cannot be accidentally assembled through the wrong commit sequence. |
 | Positive | Started-commit cancellation semantics are enforceable without a Tokio dependency in `fireweed-engine`. |
 | Positive | Shared receivers and adapter-owned concurrency permit unrelated queues to progress. |
-| Negative | Memory, blocking, and native-async profiles require explicit strategy and dispatcher wiring. |
-| Negative | The additive migration carries legacy composition until every profile has an explicit strategy. |
+| Negative | Memory, blocking, and native-async adapters require explicit strategy and dispatcher wiring. |
+| Negative | The residual facade bridge cannot be removed until every supported cell has explicit runtime-safety and progress evidence. |
 
 ## Risks
 
@@ -126,8 +138,8 @@ async stores await their drivers inside the owned task.
 
 | Success Metric | Review Trigger |
 |----------------|----------------|
-| Atomic profiles expose only `UnifiedAtomicCommit` | Any atomic profile calls separate append/apply operations. |
-| Eventual profiles recover every durable append and preserve the response barrier | Any lost accepted command or read-after-success gap. |
+| Atomic compositions expose only `UnifiedAtomicCommit` | Any atomic composition calls separate append/apply operations. |
+| Eventual compositions recover every durable append and preserve the response barrier | Any lost accepted command or read-after-success gap. |
 | Submitted commits resolve after caller cancellation | Any started task stops when its response waiter is dropped. |
 | A blocked queue does not stop another queue's read or mutation heartbeat | Any process-global storage lock spans awaited I/O. |
 | Buffered-byte permits conserve global and tenant charges through every cancellation/fence/CAS path | Any retained serialized command has no permit, a permit is released before its bytes, or charged bytes exceed a configured cap. |
