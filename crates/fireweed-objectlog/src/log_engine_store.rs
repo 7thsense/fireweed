@@ -11,16 +11,17 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::io::Write as IoWrite;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use bytes::Bytes;
 use fireweed_core::QueueDefinition;
 use fireweed_engine::{
-    AsyncLogStore, CommandEnvelope, CommandPage, CommandPosition, DurabilityClass, EngineError,
-    EngineResult, ProjectionSnapshot, QueueKey, SnapshotRef,
+    AsyncLogStore, CommandEnvelope, CommandPage, CommandPosition, CreateQueueOutcome,
+    DurabilityClass, EngineError, EngineResult, ProjectionSnapshot, QueueKey, SnapshotRef,
 };
 use object_log::{
     BlobStore, Durability, FlushConfig, LocalBlobStore, LogEngine, ManifestSequencer,
@@ -108,6 +109,38 @@ struct CatalogDoc {
 }
 
 static SNAPSHOT_ORDINAL: AtomicU64 = AtomicU64::new(0);
+static DEFINITION_ORDINAL: AtomicU64 = AtomicU64::new(0);
+
+type LocalEngine = LogEngine<ManifestSequencer>;
+type EpochCache = Mutex<HashMap<String, u64>>;
+type HighWaterCache = Mutex<HashMap<String, CommandPosition>>;
+type MetadataPermits = Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
+
+struct LocalEngineRegistration {
+    engine: Weak<LocalEngine>,
+    epochs: Weak<EpochCache>,
+    high_water: Weak<HighWaterCache>,
+    metadata_permits: Weak<MetadataPermits>,
+    flush_config: String,
+}
+
+fn local_engine_registry() -> &'static Mutex<HashMap<std::path::PathBuf, LocalEngineRegistration>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<std::path::PathBuf, LocalEngineRegistration>>> =
+        OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+enum DefinitionAuthority {
+    /// Durable create-only files are the authority. The process registry only shares the
+    /// LogEngine sequencer; it is neither consulted nor required to select a definition.
+    Local { root: std::path::PathBuf },
+    /// One store owns this in-memory blob namespace. A short catalog-only permit makes the
+    /// get/put pair atomic without serializing append, read, projection, or unrelated I/O.
+    ProcessLocal,
+    /// The crates.io BlobStore port has overwrite-only `put`; an S3/custom adapter cannot claim
+    /// multi-writer authority until it exposes an enforced conditional-create operation.
+    ConditionalCreateUnavailable,
+}
 
 fn partition_component(shard: &QueueKey) -> String {
     let partition = partition_key(shard);
@@ -136,13 +169,16 @@ fn valid_snapshot_ref_id(ref_id: &str) -> bool {
 
 /// Fireweed log axis backed by crates.io object-log.
 pub struct ObjectLogEngineStore<S: Sequencer = ManifestSequencer> {
-    engine: LogEngine<S>,
+    engine: Arc<LogEngine<S>>,
     blob: Arc<dyn BlobStore>,
     /// In-process epoch cache (also written to blob for reopen).
-    epochs: Mutex<HashMap<String, u64>>,
-    high_water: Mutex<HashMap<String, CommandPosition>>,
+    epochs: Arc<EpochCache>,
+    high_water: Arc<HighWaterCache>,
+    metadata_permits: Arc<MetadataPermits>,
     catalog: Mutex<CatalogDoc>,
     meta_prefix: String,
+    definition_authority: DefinitionAuthority,
+    definition_permit: tokio::sync::Mutex<()>,
 }
 
 impl ObjectLogEngineStore<ManifestSequencer> {
@@ -150,14 +186,95 @@ impl ObjectLogEngineStore<ManifestSequencer> {
     pub async fn open_local(root: impl AsRef<Path>, flush: FlushConfig) -> EngineResult<Self> {
         let root = root.as_ref();
         std::fs::create_dir_all(root).map_err(store_err)?;
-        let blob: Arc<dyn BlobStore> = Arc::new(LocalBlobStore::new(root));
-        Self::open_with_blob(blob, "fwlog/", "fwmeta/", flush).await
+        let root = std::fs::canonicalize(root).map_err(store_err)?;
+        let blob: Arc<dyn BlobStore> = Arc::new(LocalBlobStore::new(&root));
+        crate::storage_generation::reject_incompatible_storage_generation(
+            &blob, "fwlog/", "fwmeta/",
+        )
+        .await?;
+        let sequencer = ManifestSequencer::open(Arc::clone(&blob), "fwmeta/manifest/")
+            .await
+            .map_err(store_err)?;
+        let candidate = Arc::new(LogEngine::new(
+            Arc::clone(&blob),
+            Arc::new(sequencer),
+            flush,
+            "fwlog/",
+        ));
+        let candidate_epochs = Arc::new(Mutex::new(HashMap::new()));
+        let candidate_high_water = Arc::new(Mutex::new(HashMap::new()));
+        let candidate_metadata_permits = Arc::new(Mutex::new(HashMap::new()));
+        let flush_config = format!("{flush:?}");
+        let (engine, epochs, high_water, metadata_permits) = {
+            let mut registry = local_engine_registry()
+                .lock()
+                .expect("local engine registry");
+            match registry.get(&root).and_then(|entry| {
+                Some((
+                    entry.engine.upgrade()?,
+                    entry.epochs.upgrade()?,
+                    entry.high_water.upgrade()?,
+                    entry.metadata_permits.upgrade()?,
+                    &entry.flush_config,
+                ))
+            }) {
+                Some((engine, epochs, high_water, metadata_permits, existing_config))
+                    if existing_config == &flush_config =>
+                {
+                    (engine, epochs, high_water, metadata_permits)
+                }
+                Some((_engine, _epochs, _high_water, _metadata_permits, _)) => {
+                    return Err(EngineError::Invalid(
+                        "object-log namespace is already open with a different flush configuration",
+                    ));
+                }
+                None => {
+                    registry.insert(
+                        root.clone(),
+                        LocalEngineRegistration {
+                            engine: Arc::downgrade(&candidate),
+                            epochs: Arc::downgrade(&candidate_epochs),
+                            high_water: Arc::downgrade(&candidate_high_water),
+                            metadata_permits: Arc::downgrade(&candidate_metadata_permits),
+                            flush_config,
+                        },
+                    );
+                    (
+                        candidate,
+                        candidate_epochs,
+                        candidate_high_water,
+                        candidate_metadata_permits,
+                    )
+                }
+            }
+        };
+        let blob = Arc::clone(engine.blob_store());
+        let store = Self {
+            engine,
+            blob,
+            epochs,
+            high_water,
+            metadata_permits,
+            catalog: Mutex::new(CatalogDoc::default()),
+            meta_prefix: "fwmeta/".to_string(),
+            definition_authority: DefinitionAuthority::Local { root },
+            definition_permit: tokio::sync::Mutex::new(()),
+        };
+        store.load_meta().await?;
+        Ok(store)
     }
 
     /// In-memory substrate for tests (sequencer + blob are process-local).
     pub async fn open_memory(flush: FlushConfig) -> EngineResult<Self> {
         let blob: Arc<dyn BlobStore> = Arc::new(MemoryBlobStore::new());
-        Self::open_with_blob(blob, "fwlog/", "fwmeta/", flush).await
+        Self::open_with_blob_and_authority(
+            blob,
+            "fwlog/",
+            "fwmeta/",
+            flush,
+            DefinitionAuthority::ProcessLocal,
+        )
+        .await
     }
 
     /// Open against an S3-compatible endpoint (crates.io `object_log::S3BlobStore`).
@@ -202,6 +319,23 @@ impl ObjectLogEngineStore<ManifestSequencer> {
         meta_prefix: impl Into<String>,
         flush: FlushConfig,
     ) -> EngineResult<Self> {
+        Self::open_with_blob_and_authority(
+            blob,
+            data_prefix,
+            meta_prefix,
+            flush,
+            DefinitionAuthority::ConditionalCreateUnavailable,
+        )
+        .await
+    }
+
+    async fn open_with_blob_and_authority(
+        blob: Arc<dyn BlobStore>,
+        data_prefix: impl Into<String>,
+        meta_prefix: impl Into<String>,
+        flush: FlushConfig,
+        definition_authority: DefinitionAuthority,
+    ) -> EngineResult<Self> {
         let data_prefix = data_prefix.into();
         let meta_prefix = meta_prefix.into();
         crate::storage_generation::reject_incompatible_storage_generation(
@@ -214,14 +348,22 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             ManifestSequencer::open(Arc::clone(&blob), format!("{meta_prefix}manifest/"))
                 .await
                 .map_err(store_err)?;
-        let engine = LogEngine::new(Arc::clone(&blob), Arc::new(sequencer), flush, data_prefix);
+        let engine = Arc::new(LogEngine::new(
+            Arc::clone(&blob),
+            Arc::new(sequencer),
+            flush,
+            data_prefix,
+        ));
         let store = Self {
             engine,
             blob,
-            epochs: Mutex::new(HashMap::new()),
-            high_water: Mutex::new(HashMap::new()),
+            epochs: Arc::new(Mutex::new(HashMap::new())),
+            high_water: Arc::new(Mutex::new(HashMap::new())),
+            metadata_permits: Arc::new(Mutex::new(HashMap::new())),
             catalog: Mutex::new(CatalogDoc::default()),
             meta_prefix,
+            definition_authority,
+            definition_permit: tokio::sync::Mutex::new(()),
         };
         store.load_meta().await?;
         Ok(store)
@@ -265,8 +407,42 @@ impl<S: Sequencer<Meta = ()>> ObjectLogEngineStore<S> {
         format!("{}catalog.json", self.meta_prefix)
     }
 
+    fn definition_prefix(&self) -> String {
+        format!("{}queue_definitions/", self.meta_prefix)
+    }
+
+    fn metadata_permit(&self, shard: &QueueKey) -> Arc<tokio::sync::Mutex<()>> {
+        self.metadata_permits
+            .lock()
+            .expect("metadata permits")
+            .entry(partition_key(shard).0)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    fn definition_key(&self, shard: &QueueKey) -> String {
+        format!(
+            "{}{}.json",
+            self.definition_prefix(),
+            partition_component(shard)
+        )
+    }
+
+    fn cache_definition(&self, definition: QueueDefinition) {
+        let mut catalog = self.catalog.lock().expect("catalog");
+        if let Some(existing) = catalog.definitions.iter_mut().find(|existing| {
+            existing.tenant_id == definition.tenant_id && existing.queue_id == definition.queue_id
+        }) {
+            *existing = definition;
+        } else {
+            catalog.definitions.push(definition);
+        }
+    }
+
     async fn load_meta(&self) -> EngineResult<()> {
-        // Catalog
+        // Read the retired aggregate catalog for backward-compatible reopen, then merge every
+        // per-queue authority record. New writes never update catalog.json: independent queues
+        // therefore cannot erase one another through a stale read/modify/write cycle.
         if let Some(bytes) = self
             .blob
             .get(&self.catalog_key())
@@ -275,6 +451,22 @@ impl<S: Sequencer<Meta = ()>> ObjectLogEngineStore<S> {
         {
             let doc: CatalogDoc = serde_json::from_slice(&bytes).map_err(store_err)?;
             *self.catalog.lock().expect("catalog mutex") = doc;
+        }
+        let mut keys = self
+            .blob
+            .list(&self.definition_prefix())
+            .await
+            .map_err(store_err)?;
+        keys.sort();
+        for key in keys {
+            let bytes = self
+                .blob
+                .get(&key)
+                .await
+                .map_err(store_err)?
+                .ok_or_else(|| EngineError::Storage(format!("definition disappeared: {key}")))?;
+            let definition: QueueDefinition = serde_json::from_slice(&bytes).map_err(store_err)?;
+            self.cache_definition(definition);
         }
         Ok(())
     }
@@ -308,25 +500,127 @@ impl<S: Sequencer<Meta = ()>> ObjectLogEngineStore<S> {
             .await
     }
 
-    /// Persist a queue definition into the durable catalog (survives reopen).
+    /// Atomically publish or read the durable first-writer definition for one queue.
     ///
-    /// Product `create_queue` paths call this so projection recovery can discover
-    /// shards without requiring a separate CreateQueue log envelope.
-    pub async fn register_definition(&self, definition: QueueDefinition) -> EngineResult<()> {
-        let doc =
-            {
-                let mut catalog = self.catalog.lock().expect("catalog");
-                if let Some(existing) = catalog.definitions.iter_mut().find(|d| {
-                    d.tenant_id == definition.tenant_id && d.queue_id == definition.queue_id
-                }) {
-                    *existing = definition;
+    /// The returned winner is cached even when the caller later rejects it as incompatible.
+    /// Local files use an immutable hard-link publication after syncing a unique temporary file;
+    /// no process-local mutex decides the winner. The process-local memory adapter uses the short
+    /// catalog permit because it has no cross-process durability contract.
+    pub async fn create_or_read_definition(
+        &self,
+        definition: QueueDefinition,
+    ) -> EngineResult<CreateQueueOutcome> {
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        let key = self.definition_key(&shard);
+        // A definition found only in the retired aggregate catalog is still an existing durable
+        // winner. Publish that exact value into the immutable per-queue layout before considering
+        // the caller's candidate; migration must never let a later create rewrite legacy truth.
+        let legacy_winner = self
+            .catalog
+            .lock()
+            .expect("catalog")
+            .definitions
+            .iter()
+            .find(|existing| {
+                existing.tenant_id == definition.tenant_id
+                    && existing.queue_id == definition.queue_id
+            })
+            .cloned();
+        let publication = legacy_winner.clone().unwrap_or_else(|| definition.clone());
+        let bytes = serde_json::to_vec(&publication).map_err(store_err)?;
+        let physically_created = match &self.definition_authority {
+            DefinitionAuthority::Local { root } => {
+                let root = root.clone();
+                let key = key.clone();
+                tokio::task::spawn_blocking(move || publish_local_definition(&root, &key, &bytes))
+                    .await
+                    .map_err(|error| {
+                        EngineError::Storage(format!(
+                            "local definition publication worker failed: {error}"
+                        ))
+                    })??
+            }
+            DefinitionAuthority::ProcessLocal => {
+                let _permit = self.definition_permit.lock().await;
+                if self.blob.get(&key).await.map_err(store_err)?.is_some() {
+                    false
                 } else {
-                    catalog.definitions.push(definition);
+                    self.blob
+                        .put(&key, Bytes::from(bytes))
+                        .await
+                        .map_err(store_err)?;
+                    true
                 }
-                catalog.clone()
-            };
-        self.put_json(&self.catalog_key(), &doc).await
+            }
+            DefinitionAuthority::ConditionalCreateUnavailable => {
+                return Err(EngineError::Storage(
+                    "NativeConditionalWrite queue-definition authority is unavailable: the \
+                     configured BlobStore exposes overwrite-only put and cannot prove create-only \
+                     publication; use the local filesystem adapter or an S3 adapter with enforced \
+                     If-None-Match: * support"
+                        .into(),
+                ));
+            }
+        };
+        let created = physically_created && legacy_winner.is_none();
+        let winner_bytes = self
+            .blob
+            .get(&key)
+            .await
+            .map_err(store_err)?
+            .ok_or_else(|| {
+                EngineError::Storage("definition authority vanished after publish".into())
+            })?;
+        let winner: QueueDefinition = serde_json::from_slice(&winner_bytes).map_err(store_err)?;
+        if winner.tenant_id != definition.tenant_id || winner.queue_id != definition.queue_id {
+            return Err(EngineError::Storage(
+                "queue-definition authority key contains a different queue identity".into(),
+            ));
+        }
+        self.cache_definition(winner.clone());
+        Ok(CreateQueueOutcome {
+            created,
+            definition: winner,
+        })
     }
+}
+
+fn publish_local_definition(root: &Path, key: &str, bytes: &[u8]) -> EngineResult<bool> {
+    let final_path = root.join(key);
+    let parent = final_path
+        .parent()
+        .ok_or_else(|| EngineError::Storage("definition authority path has no parent".into()))?;
+    std::fs::create_dir_all(parent).map_err(store_err)?;
+
+    let ordinal = DEFINITION_ORDINAL.fetch_add(1, Ordering::Relaxed);
+    let temp_path = parent.join(format!(".definition-{}-{ordinal}.tmp", std::process::id()));
+    let mut temp = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temp_path)
+        .map_err(store_err)?;
+    IoWrite::write_all(&mut temp, bytes).map_err(store_err)?;
+    temp.sync_all().map_err(store_err)?;
+    drop(temp);
+
+    let publish = std::fs::hard_link(&temp_path, &final_path);
+    let created = match publish {
+        Ok(()) => {
+            std::fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(store_err)?;
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(error) => {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(store_err(format!(
+                "local create-only definition publication failed: {error}"
+            )));
+        }
+    };
+    std::fs::remove_file(&temp_path).map_err(store_err)?;
+    Ok(created)
 }
 
 /// Map env-style segment knobs onto object-log flush config (names unchanged at product edge).
@@ -370,6 +664,8 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
         shard: QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         async move {
+            let permit = self.metadata_permit(&shard);
+            let _guard = permit.lock().await;
             let next = self.load_epoch(&shard).await?.saturating_add(1);
             self.store_epoch(&shard, next).await?;
             Ok(next)
@@ -390,30 +686,6 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
             if epoch != expected_epoch {
                 return Err(EngineError::EpochFenced);
             }
-            // Persist catalog updates from CreateQueue / definition-carrying commands.
-            let catalog_dirty =
-                {
-                    let mut catalog = self.catalog.lock().expect("catalog");
-                    let mut dirty = false;
-                    for env in &commands {
-                        if let fireweed_engine::QueueCommand::CreateQueue(cmd) = &env.command {
-                            let def = cmd.definition.clone();
-                            if let Some(existing) = catalog.definitions.iter_mut().find(|d| {
-                                d.tenant_id == def.tenant_id && d.queue_id == def.queue_id
-                            }) {
-                                *existing = def;
-                            } else {
-                                catalog.definitions.push(def);
-                            }
-                            dirty = true;
-                        }
-                    }
-                    dirty.then(|| catalog.clone())
-                };
-            if let Some(doc) = catalog_dirty {
-                self.put_json(&self.catalog_key(), &doc).await?;
-            }
-
             let frame = BatchFrame {
                 backend_epoch: expected_epoch,
                 commands: commands.clone(),
@@ -439,18 +711,28 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
                 .map(|i| CommandPosition::new(shard.clone(), expected_epoch, base + i))
                 .collect();
             if let Some(last) = positions.last() {
-                self.high_water
+                let permit = self.metadata_permit(&shard);
+                let _guard = permit.lock().await;
+                let should_advance = self
+                    .high_water
                     .lock()
                     .expect("high_water")
-                    .insert(partition_key(&shard).0, last.clone());
-                self.put_json(
-                    &self.high_water_key(&shard),
-                    &HighWaterDoc {
-                        backend_epoch: last.backend_epoch,
-                        sequence: last.sequence,
-                    },
-                )
-                .await?;
+                    .get(&partition_key(&shard).0)
+                    .is_none_or(|current| current.precedes(last));
+                if should_advance {
+                    self.high_water
+                        .lock()
+                        .expect("high_water")
+                        .insert(partition_key(&shard).0, last.clone());
+                    self.put_json(
+                        &self.high_water_key(&shard),
+                        &HighWaterDoc {
+                            backend_epoch: last.backend_epoch,
+                            sequence: last.sequence,
+                        },
+                    )
+                    .await?;
+                }
             }
             Ok(positions)
         }
@@ -544,6 +826,8 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
             if position.queue != shard {
                 return Err(EngineError::Invalid("high-water queue mismatch"));
             }
+            let permit = self.metadata_permit(&shard);
+            let _guard = permit.lock().await;
             if let Some(current) = AsyncLogStore::high_water(self, shard.clone()).await?
                 && position.precedes(&current)
             {
@@ -654,7 +938,10 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
     fn recover_definitions(
         &self,
     ) -> impl std::future::Future<Output = EngineResult<Vec<QueueDefinition>>> + Send {
-        async move { Ok(self.catalog.lock().expect("catalog").definitions.clone()) }
+        async move {
+            self.load_meta().await?;
+            Ok(self.catalog.lock().expect("catalog").definitions.clone())
+        }
     }
 }
 
@@ -677,6 +964,21 @@ mod tests {
 
     use super::ObjectLogEngineStore;
     use object_log::FlushConfig;
+
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "fireweed-olog-{tag}-{}-{}",
+            std::process::id(),
+            super::DEFINITION_ORDINAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ))
+    }
+
+    fn zero_linger() -> FlushConfig {
+        FlushConfig {
+            linger: std::time::Duration::ZERO,
+            ..FlushConfig::default()
+        }
+    }
 
     fn qdef() -> QueueDefinition {
         QueueDefinition {
@@ -702,6 +1004,171 @@ mod tests {
             typed_indexes: Vec::new(),
             emit_change_records: false,
         }
+    }
+
+    #[tokio::test]
+    async fn local_definition_authority_returns_preopen_winner_and_full_definition() {
+        let root = temp_root("definition-preopen");
+        let _ = std::fs::remove_dir_all(&root);
+        let winner = ObjectLogEngineStore::open_local(&root, zero_linger())
+            .await
+            .unwrap();
+        let compatible_loser = ObjectLogEngineStore::open_local(&root, zero_linger())
+            .await
+            .unwrap();
+        let incompatible_loser = ObjectLogEngineStore::open_local(&root, zero_linger())
+            .await
+            .unwrap();
+        let definition = qdef();
+        let mut incompatible = definition.clone();
+        incompatible.request_id_retention_ms += 1;
+
+        assert!(
+            winner
+                .create_or_read_definition(definition.clone())
+                .await
+                .unwrap()
+                .created
+        );
+        let compatible = compatible_loser
+            .create_or_read_definition(definition.clone())
+            .await
+            .unwrap();
+        assert!(!compatible.created);
+        assert_eq!(compatible.definition, definition);
+        let incompatible_outcome = incompatible_loser
+            .create_or_read_definition(incompatible)
+            .await
+            .unwrap();
+        assert!(!incompatible_outcome.created);
+        assert_eq!(incompatible_outcome.definition, definition);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn local_definition_authority_preserves_concurrent_different_queues() {
+        let root = temp_root("definition-different-queues");
+        let _ = std::fs::remove_dir_all(&root);
+        let first = ObjectLogEngineStore::open_local(&root, zero_linger())
+            .await
+            .unwrap();
+        let second = ObjectLogEngineStore::open_local(&root, zero_linger())
+            .await
+            .unwrap();
+        let first_definition = qdef();
+        let mut second_definition = qdef();
+        second_definition.queue_id = QueueId::new("q2").unwrap();
+
+        let (first_outcome, second_outcome) = tokio::join!(
+            first.create_or_read_definition(first_definition.clone()),
+            second.create_or_read_definition(second_definition.clone())
+        );
+        assert!(first_outcome.unwrap().created);
+        assert!(second_outcome.unwrap().created);
+        drop(first);
+        drop(second);
+
+        let reopened = ObjectLogEngineStore::open_local(&root, zero_linger())
+            .await
+            .unwrap();
+        let definitions = reopened.recover_definitions().await.unwrap();
+        assert!(definitions.contains(&first_definition));
+        assert!(definitions.contains(&second_definition));
+        assert_eq!(definitions.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn local_definition_authority_has_exactly_one_concurrent_creator() {
+        let root = temp_root("definition-same-queue");
+        let _ = std::fs::remove_dir_all(&root);
+        let first = ObjectLogEngineStore::open_local(&root, zero_linger())
+            .await
+            .unwrap();
+        let second = ObjectLogEngineStore::open_local(&root, zero_linger())
+            .await
+            .unwrap();
+        let definition = qdef();
+
+        let (first_outcome, second_outcome) = tokio::join!(
+            first.create_or_read_definition(definition.clone()),
+            second.create_or_read_definition(definition.clone())
+        );
+        let outcomes = [first_outcome.unwrap(), second_outcome.unwrap()];
+        assert_eq!(outcomes.iter().filter(|outcome| outcome.created).count(), 1);
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| outcome.definition == definition)
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn local_namespace_rejects_conflicting_live_flush_configuration() {
+        let root = temp_root("flush-config-conflict");
+        let _ = std::fs::remove_dir_all(&root);
+        let _first = ObjectLogEngineStore::open_local(&root, zero_linger())
+            .await
+            .unwrap();
+        let mut conflicting = zero_linger();
+        conflicting.linger = std::time::Duration::from_millis(1);
+        assert!(matches!(
+            ObjectLogEngineStore::open_local(&root, conflicting).await,
+            Err(EngineError::Invalid(
+                "object-log namespace is already open with a different flush configuration"
+            ))
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn local_preopen_handles_share_epoch_authority_cache() {
+        let root = temp_root("epoch-handoff");
+        let _ = std::fs::remove_dir_all(&root);
+        let first = ObjectLogEngineStore::open_local(&root, zero_linger())
+            .await
+            .unwrap();
+        let second = ObjectLogEngineStore::open_local(&root, zero_linger())
+            .await
+            .unwrap();
+        let definition = qdef();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+
+        assert_eq!(first.acquire_epoch(shard.clone()).await.unwrap(), 1);
+        assert_eq!(second.current_epoch(shard).await.unwrap(), 1);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn legacy_catalog_definition_migrates_without_candidate_overwrite() {
+        let root = temp_root("legacy-catalog-migration");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("fwmeta")).unwrap();
+        let durable = qdef();
+        std::fs::write(
+            root.join("fwmeta/catalog.json"),
+            serde_json::to_vec(&super::CatalogDoc {
+                definitions: vec![durable.clone()],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let store = ObjectLogEngineStore::open_local(&root, zero_linger())
+            .await
+            .unwrap();
+        let mut candidate = durable.clone();
+        candidate.request_id_retention_ms += 1;
+
+        let outcome = store.create_or_read_definition(candidate).await.unwrap();
+        assert!(!outcome.created);
+        assert_eq!(outcome.definition, durable);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
@@ -891,7 +1358,7 @@ mod tests {
             let log = ObjectLogEngineStore::open_local(&root, flush)
                 .await
                 .unwrap();
-            log.register_definition(def.clone()).await.unwrap();
+            log.create_or_read_definition(def.clone()).await.unwrap();
             log.ensure_shard(shard.clone()).await.unwrap();
             let epoch = log.acquire_epoch(shard.clone()).await.unwrap();
             let big = "X".repeat(20_000);

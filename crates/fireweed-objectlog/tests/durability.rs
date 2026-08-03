@@ -122,9 +122,26 @@ async fn composed_object_log_compatible_loser_can_use_queue_immediately() {
         .await
         .expect("loser claims replayed authoritative item");
     assert_eq!(claimed.items.len(), 1);
+    loser
+        .push(
+            &qkey(),
+            vec![PushSpec::default()],
+            UtcTimestamp::new(2, 0).unwrap(),
+            None,
+        )
+        .await
+        .expect("loser appends after handoff");
 
     let reopened = composed_objectlog_backend(&root).expect("reopen");
     assert_eq!(reopened.queue_definition(&qkey()).await.unwrap(), qdef());
+    assert_eq!(
+        reopened
+            .peek(&qkey(), 10)
+            .await
+            .expect("winner and loser history replay")
+            .len(),
+        1
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }

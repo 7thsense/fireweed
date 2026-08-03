@@ -21,13 +21,13 @@ use fireweed_engine::{
     AsyncClaimError, AsyncCommitStrategy, AsyncComposedBackend, AsyncControlPlane, AsyncLogStore,
     AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError, AsyncPushRequest, Backend, ClaimPort,
     ClaimRef, ClaimRequest, Claimed, CommandEnvelope, CommandPage, CommandPosition,
-    CommitTransitionEntry, ControlPlaneStore, CreateQueueOutcome, DurabilityClass, EngineError,
-    EngineResult, FinalizeKind, FinalizeOutcome, FinalizePort, IdGen, InProcessControlPlane,
-    LogRead, OwnedTask, ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner,
-    ProjectionRead, ProjectionStore, PurgePort, PushPort, PushSpec, QueueCommand, QueueCounters,
-    QueueKey, RawCommitOutcome, RawCommitRequest, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RenewLeasePort, RequestIdReplayProbe, SeparateReplayCommit, SeparateReplayCommitter,
-    TickReport, UpsertOutcome, UpsertPort,
+    CommitTransitionEntry, ControlPlane, ControlPlaneStore, CreateQueueOutcome, DurabilityClass,
+    EngineError, EngineResult, FinalizeKind, FinalizeOutcome, FinalizePort, IdGen,
+    InProcessControlPlane, LogRead, OwnedTask, ProjectionClaimPlanner, ProjectionLifecyclePlanner,
+    ProjectionPushPlanner, ProjectionRead, ProjectionStore, PurgePort, PushPort, PushSpec,
+    QueueCommand, QueueCounters, QueueKey, RawCommitOutcome, RawCommitRequest, ReassignLeasePort,
+    ReclaimDriver, ReclaimPort, RenewLeasePort, RequestIdReplayProbe, SeparateReplayCommit,
+    SeparateReplayCommitter, TickReport, UpsertOutcome, UpsertPort,
 };
 use fireweed_projection::{AsyncInMemoryProjection, InMemoryProjection};
 use object_log::FlushConfig;
@@ -419,10 +419,23 @@ impl ControlPlaneStore for AsyncObjectLogMemoryBackend {
     ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
         async move {
             let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-            self.log.register_definition(definition.clone()).await?;
-            AsyncLogStore::ensure_shard(self.log.as_ref(), shard.clone()).await?;
-            AsyncProjectionStore::ensure_shard(self.projection.as_ref(), definition.clone())
+            let outcome = self
+                .log
+                .create_or_read_definition(definition.clone())
                 .await?;
+            ControlPlane::cache_authoritative_definition(
+                self.control.as_ref(),
+                outcome.definition.clone(),
+            )?;
+            if outcome.definition != definition {
+                return Err(EngineError::QueueDefinitionConflict);
+            }
+            AsyncLogStore::ensure_shard(self.log.as_ref(), shard.clone()).await?;
+            AsyncProjectionStore::ensure_shard(
+                self.projection.as_ref(),
+                outcome.definition.clone(),
+            )
+            .await?;
             if self.recovery_stats.get(&shard).is_none() {
                 let stats = replay_log_into_projection(
                     self.log.as_ref(),
@@ -431,9 +444,22 @@ impl ControlPlaneStore for AsyncObjectLogMemoryBackend {
                     false,
                 )
                 .await?;
+                self.projection.with_store(|projection| {
+                    ProjectionStore::restore_counters(projection, &shard, self.counters.as_ref())
+                })?;
+                rebuild_process_idempotency_from_log(
+                    self.log.as_ref(),
+                    &shard,
+                    outcome.definition.request_id_retention_ms,
+                    &self.commit_idempotency,
+                    &self.batch_update_idempotency,
+                    &self.claim_by_query_idempotency,
+                    &self.claim_by_item_ids_idempotency,
+                )
+                .await?;
                 self.recovery_stats.insert(shard, stats);
             }
-            AsyncControlPlane::create_queue(self.control.as_ref(), definition).await
+            Ok(outcome)
         }
     }
 
