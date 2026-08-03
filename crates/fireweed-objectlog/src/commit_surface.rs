@@ -25,15 +25,15 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use fireweed_core::{BodyHash, ItemId, RequestId, UtcTimestamp};
 use fireweed_engine::{
-    AdvanceInstanceFenceCommand, AsyncControlPlane, CommandChecksum, CommandEnvelope,
-    CommitCapabilities, CommitEntryOutcome, CommitEntryStatus, CommitOutcomeEntry, CommitRecovery,
-    CommitTransition, CommitTransitionEntry, DurabilityClass, EngineError, EngineResult,
-    EntryRecovery, FinalizeCommand, FinalizeOutcome, IdGen, IdempotencyDecision,
-    InProcessControlPlane, InProcessProjectionStore, ProjectionStore, PushCommand, PushItem,
-    QueueCommand, QueueCounters, QueueIdempotencyCache, QueueKey, RequestOutcome,
-    WriteSideRecordsCommand, build_push_items, commit_body_hash, compile_entity_schema,
-    outcome_entry_from_recovery, outcomes_from_recovery, recovery_from_outcome_entry,
-    request_expires_at, validate_distinct_commit_claims, validate_entity, validate_instance_fence,
+    AdvanceInstanceFenceCommand, AsyncControlPlane, AsyncProjectionStore, CommandChecksum,
+    CommandEnvelope, CommitCapabilities, CommitEntryOutcome, CommitEntryStatus, CommitOutcomeEntry,
+    CommitRecovery, CommitTransition, CommitTransitionEntry, DurabilityClass, EngineError,
+    EngineResult, EntryRecovery, FinalizeCommand, FinalizeOutcome, IdGen, IdempotencyDecision,
+    InProcessControlPlane, PushCommand, PushItem, QueueCommand, QueueCounters,
+    QueueIdempotencyCache, QueueKey, RequestOutcome, WriteSideRecordsCommand, build_push_items,
+    commit_body_hash, compile_entity_schema, outcome_entry_from_recovery, outcomes_from_recovery,
+    recovery_from_outcome_entry, request_expires_at, validate_distinct_commit_claims,
+    validate_entity, validate_instance_fence,
 };
 
 use crate::async_product::SeqIdGen;
@@ -105,7 +105,7 @@ pub enum PreparedCommitTransition {
     reason = "commit planning keeps authority, identity, and idempotency inputs explicit"
 )]
 pub async fn prepare_commit_transition<P>(
-    projection: &InProcessProjectionStore<P>,
+    projection: &P,
     control: &InProcessControlPlane,
     ids: &SeqIdGen,
     counters: &QueueCounters,
@@ -117,7 +117,7 @@ pub async fn prepare_commit_transition<P>(
     now: UtcTimestamp,
 ) -> EngineResult<PreparedCommitTransition>
 where
-    P: ProjectionStore + Send + 'static,
+    P: AsyncProjectionStore,
 {
     let CommitTransition {
         request_id,
@@ -156,9 +156,15 @@ where
                 | IdempotencyDecision::Expired => {}
             }
         }
-        if let Some(entries) = projection.with_store_mut(|p| {
-            ProjectionStore::replay_durable_commit(p, shard, rid, fingerprint.0, now)
-        })? {
+        if let Some(entries) = AsyncProjectionStore::replay_durable_commit(
+            projection,
+            shard.clone(),
+            rid.clone(),
+            fingerprint.0,
+            now,
+        )
+        .await?
+        {
             let recovery = entries
                 .into_iter()
                 .map(recovery_from_outcome_entry)
@@ -222,8 +228,13 @@ where
             recovery.push(reject(EngineError::Terminal));
             continue;
         }
-        if let Err(e) =
-            projection.with_store(|p| ProjectionStore::commit_validate(p, shard, &claim_refs, now))
+        if let Err(e) = AsyncProjectionStore::commit_validate(
+            projection,
+            shard.clone(),
+            claim_refs.clone(),
+            now,
+        )
+        .await
         {
             recovery.push(reject(e));
             continue;
@@ -231,9 +242,13 @@ where
         if let Some(fence) = &instance_fence {
             let stored = match staged_fences.get(&fence.instance_key) {
                 Some(v) => *v,
-                None => projection
-                    .with_store(|p| ProjectionStore::instance_fence(p, shard, &fence.instance_key))?
-                    .unwrap_or(0),
+                None => AsyncProjectionStore::instance_fence(
+                    projection,
+                    shard.clone(),
+                    fence.instance_key.clone(),
+                )
+                .await?
+                .unwrap_or(0),
             };
             if let Err(e) = validate_instance_fence(stored, fence) {
                 recovery.push(reject(e));
@@ -291,8 +306,9 @@ where
                 build_push_items(lifecycle_items, epoch, node_id, counter_base, max_attempts);
             let mut candidate = committed_pushes.clone();
             candidate.extend(push_items.iter().cloned());
-            if let Err(e) = projection
-                .with_store(|p| ProjectionStore::index_validate_push(p, shard, &candidate))
+            if let Err(e) =
+                AsyncProjectionStore::index_validate_push(projection, shard.clone(), candidate)
+                    .await
             {
                 recovery.push(reject(e));
                 continue;
@@ -453,15 +469,15 @@ pub fn outcomes_of(recovery: &[EntryRecovery]) -> Vec<CommitEntryOutcome> {
 }
 
 /// `explain_commit` when authoritative; otherwise Unavailable.
-pub fn explain_commit_if_authoritative<P>(
+pub async fn explain_commit_if_authoritative<P>(
     authoritative: bool,
-    projection: &InProcessProjectionStore<P>,
+    projection: &P,
     commit_idempotency: &CommitIdempotency,
     shard: &QueueKey,
     request_id: RequestId,
 ) -> EngineResult<Option<CommitRecovery>>
 where
-    P: ProjectionStore + Send + 'static,
+    P: AsyncProjectionStore,
 {
     if !authoritative {
         return Err(EngineError::Unavailable);
@@ -478,7 +494,8 @@ where
         }));
     }
     let durable =
-        projection.with_store(|p| ProjectionStore::read_durable_commit(p, shard, &request_id))?;
+        AsyncProjectionStore::read_durable_commit(projection, shard.clone(), request_id.clone())
+            .await?;
     Ok(durable.map(|entries| CommitRecovery {
         request_id,
         entries: entries
@@ -489,13 +506,13 @@ where
 }
 
 /// Side-record read (available whenever the projection materializes side records).
-pub fn side_record<P>(
-    projection: &InProcessProjectionStore<P>,
+pub async fn side_record<P>(
+    projection: &P,
     shard: &QueueKey,
     key: &[u8],
 ) -> EngineResult<Option<Bytes>>
 where
-    P: ProjectionStore + Send + 'static,
+    P: AsyncProjectionStore,
 {
-    projection.with_store(|p| ProjectionStore::side_record(p, shard, key))
+    AsyncProjectionStore::side_record(projection, shard.clone(), key.to_vec()).await
 }

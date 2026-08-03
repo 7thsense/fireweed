@@ -5,6 +5,7 @@
 //! Postgres transaction is never split across blocking tasks and no blocking client call runs on an async
 //! executor thread.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::mpsc::{self, SyncSender, TrySendError};
@@ -321,7 +322,7 @@ impl<S: Send + 'static> ActorHandle<S> {
         }
     }
 
-    async fn execute<T, F>(&self, operation: F) -> EngineResult<T>
+    pub(crate) async fn execute<T, F>(&self, operation: F) -> EngineResult<T>
     where
         T: Send + 'static,
         F: FnOnce(&mut S) -> EngineResult<T> + Send + 'static,
@@ -393,7 +394,7 @@ impl AsyncPostgresRelationalProjection {
         Ok(Self { actor })
     }
 
-    async fn execute<T, F>(&self, operation: F) -> EngineResult<T>
+    pub(crate) async fn execute<T, F>(&self, operation: F) -> EngineResult<T>
     where
         T: Send + 'static,
         F: FnOnce(&mut PostgresRelational) -> EngineResult<T> + Send + 'static,
@@ -409,6 +410,21 @@ impl AsyncPostgresRelationalProjection {
     /// Stop admission and asynchronously wait for all accepted operations and client teardown.
     pub async fn close_and_drain(&self) -> EngineResult<()> {
         self.actor.close_and_drain().await
+    }
+
+    /// Delete the disposable relational projection on its owning thread.
+    pub async fn delete_projection(&self) -> EngineResult<()> {
+        self.execute(|store| store.delete_projection()).await
+    }
+
+    /// Restore hash-validated raw lease capabilities after scanning an authoritative log.
+    pub(crate) async fn restore_live_tokens(
+        &self,
+        shard: QueueKey,
+        candidates: HashMap<ItemId, fireweed_core::LeaseToken>,
+    ) -> EngineResult<()> {
+        self.execute(move |store| store.restore_live_tokens(&shard, candidates))
+            .await
     }
 }
 
@@ -477,6 +493,101 @@ impl AsyncProjectionStore for AsyncPostgresRelationalProjection {
                 .execute(move |store| {
                     store.async_push_idempotency(&shard, &request_id, fingerprint, now)
                 })
+                .await
+        }
+    }
+
+    fn replay_durable_commit(
+        &self,
+        shard: QueueKey,
+        request_id: RequestId,
+        fingerprint: u64,
+        now: UtcTimestamp,
+    ) -> impl Future<Output = EngineResult<Option<Vec<fireweed_engine::CommitOutcomeEntry>>>> + Send
+    {
+        let actor = self.clone();
+        async move {
+            actor
+                .execute(move |store| {
+                    ProjectionStore::replay_durable_commit(
+                        store,
+                        &shard,
+                        &request_id,
+                        fingerprint,
+                        now,
+                    )
+                })
+                .await
+        }
+    }
+
+    fn commit_validate(
+        &self,
+        shard: QueueKey,
+        claim_refs: Vec<fireweed_engine::ClaimRef>,
+        now: UtcTimestamp,
+    ) -> impl Future<Output = EngineResult<()>> + Send {
+        let actor = self.clone();
+        async move {
+            actor
+                .execute(move |store| {
+                    ProjectionStore::commit_validate(store, &shard, &claim_refs, now)
+                })
+                .await
+        }
+    }
+
+    fn instance_fence(
+        &self,
+        shard: QueueKey,
+        key: Vec<u8>,
+    ) -> impl Future<Output = EngineResult<Option<u64>>> + Send {
+        let actor = self.clone();
+        async move {
+            actor
+                .execute(move |store| ProjectionStore::instance_fence(store, &shard, &key))
+                .await
+        }
+    }
+
+    fn index_validate_push(
+        &self,
+        shard: QueueKey,
+        items: Vec<fireweed_engine::PushItem>,
+    ) -> impl Future<Output = EngineResult<()>> + Send {
+        let actor = self.clone();
+        async move {
+            actor
+                .execute(move |store| ProjectionStore::index_validate_push(store, &shard, &items))
+                .await
+        }
+    }
+
+    fn read_durable_commit(
+        &self,
+        shard: QueueKey,
+        request_id: RequestId,
+    ) -> impl Future<Output = EngineResult<Option<Vec<fireweed_engine::CommitOutcomeEntry>>>> + Send
+    {
+        let actor = self.clone();
+        async move {
+            actor
+                .execute(move |store| {
+                    ProjectionStore::read_durable_commit(store, &shard, &request_id)
+                })
+                .await
+        }
+    }
+
+    fn side_record(
+        &self,
+        shard: QueueKey,
+        key: Vec<u8>,
+    ) -> impl Future<Output = EngineResult<Option<bytes::Bytes>>> + Send {
+        let actor = self.clone();
+        async move {
+            actor
+                .execute(move |store| ProjectionStore::side_record(store, &shard, &key))
                 .await
         }
     }

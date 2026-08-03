@@ -736,9 +736,13 @@ async fn background_reclaim_recovers_orphaned_lease_without_client_traffic() {
     // Advance Tokio's virtual clock instead of waiting for host scheduling. Observe the complete outcome:
     // the backend mutation and the counter publication are consecutive operations, not one atomic snapshot.
     let ticks_before = server.reclaim_stats().ticks;
-    tokio::time::advance(Duration::from_millis(10)).await;
     let mut observed = None;
     for _ in 0..100 {
+        // The background task may not have installed its next timer before the first advance.
+        // Advance one complete ticker interval per observation so a loaded parallel test run
+        // cannot strand the task behind paused virtual time.
+        tokio::time::advance(Duration::from_millis(5)).await;
+        tokio::task::yield_now().await;
         let metrics = backend.metrics(&qkey()).await.unwrap();
         let stats = server.reclaim_stats();
         if metrics.leased == 0 && stats.leases_reclaimed >= 1 {

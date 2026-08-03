@@ -13,7 +13,7 @@ fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 fn fireweed_environment_is_authoritative() {
     let config = Config::from_env(&env(&[
         ("FIREWEED_LOG_BACKEND", "memory"),
-        ("FIREWEED_PROJECTION_BACKEND", "inmemory"),
+        ("FIREWEED_PROJECTION_BACKEND", "memory"),
         ("FIREWEED_LISTEN_ADDR", "127.0.0.1:7001"),
     ]))
     .expect("Fireweed environment names must parse");
@@ -40,6 +40,10 @@ fn service_help_advertises_only_fireweed_runtime_names() {
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 help");
     assert!(stdout.starts_with("fireweed-service\n"));
     assert!(stdout.contains("FIREWEED_LISTEN_ADDR"));
+    assert!(stdout.contains("FIREWEED_LOG_BACKEND=memory|sqlite|postgres|filesystem|s3"));
+    assert!(stdout.contains("FIREWEED_PROJECTION_BACKEND=memory|sqlite|postgres"));
+    assert!(!stdout.contains("FIREWEED_LOG_BACKEND=objectlog"));
+    assert!(!stdout.contains("FIREWEED_PROJECTION_BACKEND=inmemory"));
 }
 
 #[test]
@@ -144,10 +148,9 @@ fn postgres_control_plane_invalid_ttls_fail_closed() {
     }
 }
 #[test]
-fn objectlog_s3_env_builds_typed_shared_profile() {
+fn s3_env_builds_typed_shared_profile() {
     let config = Config::from_env(&env(&[
-        ("FIREWEED_LOG_BACKEND", "objectlog"),
-        ("FIREWEED_OBJECT_LOG_STORE", "s3"),
+        ("FIREWEED_LOG_BACKEND", "s3"),
         ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "https://s3.example.com"),
         ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fireweed-prod"),
         ("FIREWEED_OBJECT_LOG_S3_REGION", "us-west-2"),
@@ -194,12 +197,11 @@ fn objectlog_s3_env_builds_typed_shared_profile() {
 }
 
 #[test]
-fn every_objectlog_s3_projection_accepts_postgres_publication_authority() {
-    for projection in ["memory", "inmemory", "sqlite"] {
+fn every_s3_projection_accepts_postgres_publication_authority() {
+    for projection in ["memory", "sqlite"] {
         let config = Config::from_env(&env(&[
-            ("FIREWEED_LOG_BACKEND", "objectlog"),
+            ("FIREWEED_LOG_BACKEND", "s3"),
             ("FIREWEED_PROJECTION_BACKEND", projection),
-            ("FIREWEED_OBJECT_LOG_STORE", "s3"),
             ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "https://s3.example.com"),
             ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fireweed-prod"),
             ("FIREWEED_OBJECT_LOG_S3_REGION", "us-west-2"),
@@ -215,7 +217,7 @@ fn every_objectlog_s3_projection_accepts_postgres_publication_authority() {
                 "postgres://fireweed:secret@postgres.internal/fireweed",
             ),
         ]))
-        .unwrap_or_else(|error| panic!("objectlog/{projection} must parse: {error}"));
+        .unwrap_or_else(|error| panic!("s3/{projection} must parse: {error}"));
 
         assert!(matches!(
             config.backend.log,
@@ -228,8 +230,8 @@ fn every_objectlog_s3_projection_accepts_postgres_publication_authority() {
     }
 }
 
-/// First-class `FIREWEED_LOG_BACKEND=s3` (not only the objectlog+store alias) pairs with
-/// public projections memory and sqlite; postgres when the `postgres` feature is on.
+/// `FIREWEED_LOG_BACKEND=s3` pairs with public projections memory and sqlite;
+/// postgres when the `postgres` feature is on.
 #[test]
 fn first_class_s3_log_backend_pairs_with_memory_and_sqlite() {
     for (projection, extra) in [
@@ -298,9 +300,9 @@ fn first_class_s3_log_backend_pairs_with_postgres_projection() {
 }
 
 #[test]
-fn objectlog_s3_env_rejects_plaintext_without_explicit_local_opt_in() {
+fn s3_env_rejects_plaintext_without_explicit_local_opt_in() {
     let result = Config::from_env(&env(&[
-        ("FIREWEED_OBJECT_LOG_STORE", "s3"),
+        ("FIREWEED_LOG_BACKEND", "s3"),
         ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "http://minio:9000"),
         ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fireweed"),
         ("FIREWEED_OBJECT_LOG_S3_REGION", "us-east-1"),
@@ -315,21 +317,25 @@ fn objectlog_s3_env_rejects_plaintext_without_explicit_local_opt_in() {
 }
 
 #[test]
-fn objectlog_s3_env_rejects_s3_variables_under_local_profile() {
+fn filesystem_env_rejects_s3_variables() {
     let result = Config::from_env(&env(&[
-        ("FIREWEED_OBJECT_LOG_STORE", "local"),
+        ("FIREWEED_LOG_BACKEND", "filesystem"),
         ("FIREWEED_OBJECT_LOG_S3_BUCKET", "must-not-be-ignored"),
     ]));
     let Err(error) = result else {
         panic!("shared-store settings must not silently fall back to local");
     };
-    assert!(error.0.contains("fall back to node-local storage"));
+    assert!(
+        error
+            .0
+            .contains("refusing to ignore shared S3 configuration")
+    );
 }
 
 #[test]
-fn objectlog_s3_local_profile_is_explicitly_single_replica() {
+fn filesystem_profile_is_explicitly_single_replica() {
     let config = Config::from_env(&env(&[
-        ("FIREWEED_OBJECT_LOG_STORE", "local"),
+        ("FIREWEED_LOG_BACKEND", "filesystem"),
         ("FIREWEED_OBJECT_LOG_ROOT", "/tmp/fireweed-local-only"),
     ]))
     .expect("explicit local profile");

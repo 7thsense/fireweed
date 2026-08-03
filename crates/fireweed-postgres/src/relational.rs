@@ -9595,6 +9595,38 @@ impl PostgresRelational {
         Ok(())
     }
 
+    /// Restore raw lease capabilities from an authoritative-log scan after reopen.
+    ///
+    /// PostgreSQL persists only token hashes. Candidates are therefore admitted only when the
+    /// current row is still an unfenced, unsuperseded lease and its persisted hash matches the
+    /// newest raw token observed in the authoritative log.
+    pub(crate) fn restore_live_tokens(
+        &self,
+        shard: &QueueKey,
+        candidates: HashMap<ItemId, LeaseToken>,
+    ) -> EngineResult<()> {
+        let mut g = self.lock();
+        let (tenant, queue) = parts(shard);
+        let rows = st(g.client.query(
+            "SELECT item_id,lease_token_hash FROM fireweed_items \
+             WHERE tenant_id=$1 AND queue_id=$2 AND lifecycle_state='Leased' \
+             AND fenced=false AND superseded=false AND lease_token_hash IS NOT NULL",
+            &[&tenant, &queue],
+        ))?;
+        for row in rows {
+            let item_id = ItemId::new(row.get::<_, String>(0))
+                .map_err(|error| EngineError::Storage(error.to_string()))?;
+            let stored_hash: Vec<u8> = row.get(1);
+            let Some(token) = candidates.get(&item_id) else {
+                continue;
+            };
+            if lease_hash(token) == stored_hash {
+                g.live_tokens.insert(item_id, token.clone());
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn async_validate_push(
         &self,
         shard: &QueueKey,
@@ -10233,6 +10265,30 @@ impl ProjectionStore for PostgresRelational {
         st(tx.commit())?;
         g.queues.insert(key, definition.clone());
         Ok(())
+    }
+
+    fn restore_process_state(
+        &mut self,
+        shard: &QueueKey,
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        let mut candidates = HashMap::new();
+        for envelope in commands {
+            match &envelope.command {
+                QueueCommand::Claim(claim) => {
+                    for item_id in &claim.item_ids {
+                        candidates.insert(*item_id, claim.lease_token.clone());
+                    }
+                }
+                QueueCommand::ReassignLease(reassign) => {
+                    for item_id in &reassign.item_ids {
+                        candidates.insert(*item_id, reassign.lease_token.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.restore_live_tokens(shard, candidates)
     }
 
     fn apply(

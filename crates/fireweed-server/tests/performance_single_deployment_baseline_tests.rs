@@ -1015,156 +1015,15 @@ fn performance_single_deployment_baseline_tests() {
         assert_eq!(persisted.progress_bound_ms, progress_bound_ms);
         let consumer_fireweed = Arc::clone(&fireweed);
 
-        let hot_pool_partition = fireweed_engine::queue_worker_partition(&shard, 2);
-        let (preflight_queue_id, preflight_shard) = (0..100)
-            .map(|index| format!("hot-preflight-{index}"))
-            .map(|queue_id| {
-                let key = sk("e0e1", &queue_id);
-                (queue_id, key)
-            })
-            .find(|(_, key)| {
-                fireweed_engine::queue_worker_partition(key, 2) == hot_pool_partition
-            })
-            .expect("a distinct preflight queue maps to the hot production-pool member");
-        let (canary_queue_id, canary_shard, canary_pool_partition) = (0..100)
-            .map(|index| format!("canary-{index}"))
-            .map(|queue_id| {
-                let key = sk("e0e1", &queue_id);
-                let partition = fireweed_engine::queue_worker_partition(&key, 2);
-                (queue_id, key, partition)
-            })
-            .find(|(_, _, partition)| *partition != hot_pool_partition)
-            .expect("two queue keys must cover both production pool members");
-        fireweed.create_queue(big_qdef("e0e1", &canary_queue_id, progress_bound_ms))
-            .await
-            .unwrap();
-        fireweed.create_queue(big_qdef("e0e1", &preflight_queue_id, progress_bound_ms))
-            .await
-            .unwrap();
-
-        // One preflight insert on the hot queue's pool member cannot finish until the affinity-routed canary
-        // reaches the other member and removes this row. This is a causal topology proof, not a speed gate.
-        // It runs on a separate queue so the governed hot queue's identity/count evidence starts untouched.
-        let gate_url = observer_url.clone();
-        let gate_schema = schema.clone();
-        let gate_canary = canary_queue_id.clone();
-        let gate_preflight = preflight_queue_id.clone();
-        std::thread::spawn(move || {
-            let mut gate_admin = postgres::Client::connect(&gate_url, postgres::NoTls)
-                .expect("connect causal-gate observer");
-            gate_admin
-                .batch_execute(&format!(
-                "SET search_path TO {schema};
-                 CREATE TABLE e0_pool_hold(queue_id TEXT PRIMARY KEY);
-                 INSERT INTO e0_pool_hold(queue_id) VALUES('{gate_preflight}');
-                 CREATE FUNCTION e0_pool_causal_gate() RETURNS trigger LANGUAGE plpgsql AS $$
-                 BEGIN
-                   IF NEW.queue_id = '{gate_preflight}' THEN
-                     WHILE EXISTS (SELECT 1 FROM e0_pool_hold WHERE queue_id = '{gate_preflight}') LOOP
-                       PERFORM pg_sleep(0.01);
-                     END LOOP;
-                   ELSIF NEW.queue_id = '{gate_canary}' THEN
-                     DELETE FROM e0_pool_hold WHERE queue_id = '{gate_preflight}';
-                   END IF;
-                   RETURN NEW;
-                 END $$;
-                 CREATE TRIGGER e0_pool_causal_gate BEFORE INSERT ON fireweed_items
-                   FOR EACH ROW EXECUTE FUNCTION e0_pool_causal_gate();",
-                schema = gate_schema,
-            ))
-                .expect("install causal production-pool gate");
-        })
-        .join()
-        .expect("causal-gate setup thread");
-
-        let canary_causal_progress = std::thread::scope(|scope| {
-            let hot = scope.spawn({
-                let fireweed = Arc::clone(&fireweed);
-                let preflight_shard = preflight_shard.clone();
-                let runtime = Arc::clone(&runtime);
-                move || {
-                    let _runtime = runtime.enter();
-                    let ops = OperationProbe::default();
-                    futures::executor::block_on(push_batch(
-                        &fireweed,
-                        &preflight_shard,
-                        resident + 20_000,
-                        1,
-                        &ops,
-                    ))
-                }
-            });
-            let canary = scope.spawn({
-                let fireweed = Arc::clone(&fireweed);
-                let canary_shard = canary_shard.clone();
-                let observer_url = observer_url.clone();
-                let application_name = application_name.clone();
-                let runtime = Arc::clone(&runtime);
-                move || {
-                    let _runtime = runtime.enter();
-                    let mut observer = postgres::Client::connect(&observer_url, postgres::NoTls)
-                        .expect("connect canary causal observer");
-                    loop {
-                        let sleeping: bool = observer
-                            .query_one(
-                                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name LIKE $1 AND wait_event='PgSleep')",
-                                &[&format!("{application_name}%")],
-                            )
-                            .expect("observe hot production pool member")
-                            .get(0);
-                        if sleeping {
-                            break;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                    }
-                    let ops = OperationProbe::default();
-                    let ids = futures::executor::block_on(push_batch(
-                        &fireweed,
-                        &canary_shard,
-                        resident + 10_000,
-                        1,
-                        &ops,
-                    ));
-                    let claimed = futures::executor::block_on(claim(&fireweed, &canary_shard, 1, &ops));
-                    futures::executor::block_on(finalize(
-                        &fireweed,
-                        &canary_shard,
-                        &claimed,
-                        &ops,
-                    ));
-                    ids == claimed && ids.len() == 1
-                }
-            });
-            let hot_ids = hot.join().unwrap();
-            let canary_ok = canary.join().unwrap();
-            let ops = OperationProbe::default();
-            let hot_claimed = futures::executor::block_on(claim(&fireweed, &preflight_shard, 1, &ops));
-            futures::executor::block_on(finalize(
-                &fireweed,
-                &preflight_shard,
-                &hot_claimed,
-                &ops,
-            ));
-            canary_ok && hot_ids == hot_claimed && hot_ids.len() == 1
-        });
-        assert!(canary_causal_progress, "causal fixed-pool preflight failed");
-
-        let cleanup_url = observer_url.clone();
-        let cleanup_schema = schema.clone();
-        std::thread::spawn(move || {
-            let mut admin = postgres::Client::connect(&cleanup_url, postgres::NoTls)
-                .expect("connect causal-gate cleanup observer");
-            admin
-                .batch_execute(&format!(
-                    "SET search_path TO {cleanup_schema};
-                     DROP TRIGGER e0_pool_causal_gate ON fireweed_items;
-                     DROP FUNCTION e0_pool_causal_gate();
-                     DROP TABLE e0_pool_hold;"
-                ))
-                .expect("remove causal preflight objects before measured workload");
-        })
-        .join()
-        .expect("causal-gate cleanup thread");
+        // `open_postgres_runtime(Relational)` currently owns one synchronous relational backend behind
+        // adapter-private offload. The server composition owns the separate fixed queue-affine pool and
+        // proves cross-queue progress in `postgres_native` tests. Do not run the former two-member trigger
+        // proof against this one-connection facade: it deadlocks by construction and could make bootstrap
+        // hang whenever FIREWEED_PG_TEST_URL is set. This evidence row therefore remains smoke until the
+        // benchmark is rewired to the actual server pool.
+        let hot_pool_partition = Some(0_usize);
+        let canary_pool_partition: Option<usize> = None;
+        let canary_causal_progress = false;
 
         // E0: one fixed two-member production pool. Stable affinity serializes the hot queue on one member;
         // the completed causal preflight proved the other member independently progresses. No row trigger
@@ -1891,7 +1750,7 @@ fn performance_single_deployment_baseline_tests() {
             && progress_evidence_complete
             && bounded_resources
             && canary_causal_progress
-            && resources.max_connections == 2;
+            && resources.max_connections == 1;
         let e1_pass = e0_pass
             && probe_accepted == probe_claimed
             && probe_claimed == probe_finalized
@@ -1927,8 +1786,8 @@ fn performance_single_deployment_baseline_tests() {
         }
 
         // ----- Emit E0 and E1 ledger rows from the REAL measured values -----
-        // The fixed two-member pool is a declared shared-resource bound. The hot queue uses one affinity
-        // member; the causal cross-queue canary proves the other member remains live under hot load.
+        // The public facade measured here owns one connection. The production server's fixed two-member
+        // pool has separate focused overlap coverage, but this harness does not yet drive that wrapper.
         // RELEASE-tier only when a perf env actually met the bar; otherwise SMOKE (recorded, gate-visible, but
         // never satisfies a release E0/E1 requirement). A failing/non-perf run is honest evidence, not fake.
         let env_note = format!(
@@ -1981,9 +1840,13 @@ fn performance_single_deployment_baseline_tests() {
             ),
             (
                 "one_instance_production_wrapper".to_string(),
+                serde_json::json!(false),
+            ),
+            ("production_pool_size".to_string(), serde_json::json!(1)),
+            (
+                "public_facade_runtime_safe_wrapper".to_string(),
                 serde_json::json!(true),
             ),
-            ("production_pool_size".to_string(), serde_json::json!(2)),
             (
                 "production_pool_connections_observed".to_string(),
                 serde_json::json!(resources.max_connections),

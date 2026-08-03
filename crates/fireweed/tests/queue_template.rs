@@ -443,14 +443,18 @@ fn postgres_public_constructors_and_composed_reopen_idempotently() {
         recovery: ProjectionRecoveryPolicy::default(),
     };
     let composed_queue = key("template-live", &format!("composed-{nonce}"));
+    let composed_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build object-log PostgreSQL operation runtime");
     let handle =
         fireweed::open_composed_postgres(composed_config.clone(), Arc::new(ManualClock::at(10)))
             .unwrap();
-    futures::executor::block_on(assert_ensure(&handle, &composed_queue, true));
+    composed_runtime.block_on(assert_ensure(&handle, &composed_queue, true));
     drop(handle);
     let handle =
         fireweed::open_composed_postgres(composed_config, Arc::new(ManualClock::at(20))).unwrap();
-    futures::executor::block_on(assert_ensure(&handle, &composed_queue, false));
+    composed_runtime.block_on(assert_ensure(&handle, &composed_queue, false));
     drop(handle);
     std::fs::remove_dir_all(composed_root).unwrap();
 }

@@ -40,6 +40,13 @@ pub use compose_log::{
 };
 pub use log_engine_store::{ObjectLogEngineStore, flush_config_from_segment};
 pub use object_log::{BlobStore, FlushConfig, S3BlobStore};
+#[doc(hidden)]
+pub use port_surface::{
+    BatchUpdateIdempotency, ClaimByItemIdsIdempotency, ClaimByQueryIdempotency, make_envelope,
+    new_batch_update_idempotency, new_claim_by_item_ids_idempotency,
+    new_claim_by_query_idempotency, record_claim_by_query_idempotency,
+    retained_item_mutation_response,
+};
 pub use recovery_stats::{
     RECOVERY_COMMAND_PAGE_LIMIT, RECOVERY_MANIFEST_OBJECT_PAGE_LIMIT, RecoveryStats,
     RecoveryStatsMap, rebuild_process_idempotency_from_log, replay_log_into_projection,

@@ -1835,7 +1835,6 @@ type ObjectLogPostgresBackend = fireweed_postgres::AsyncObjectLogPostgresBackend
 #[cfg(all(feature = "objectlog", feature = "postgres"))]
 struct ObjectLogPostgresLifecycle {
     backend: Option<Arc<ObjectLogPostgresBackend>>,
-    executor: blocking_backend::OwnedBlockingExecutor,
     max_tail_commands: u64,
     stop: Arc<std::sync::atomic::AtomicBool>,
     flusher: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -1870,13 +1869,13 @@ fn objectlog_read_from(
 }
 
 #[cfg(all(feature = "objectlog", feature = "postgres"))]
-fn validate_objectlog_postgres_catalog(
+async fn validate_objectlog_postgres_catalog(
     log: &fireweed_objectlog::ObjectLogEngineStore,
-    projection: &fireweed_postgres::PostgresRelational,
+    projection: &fireweed_postgres::AsyncPostgresRelationalProjection,
 ) -> EngineResult<Vec<QueueDefinition>> {
-    use fireweed_engine::ProjectionStore;
+    use fireweed_engine::{AsyncLogStore, AsyncProjectionStore};
 
-    let definitions = objectlog_recover_definitions(log)?;
+    let definitions = AsyncLogStore::recover_definitions(log).await?;
     let log_by_key: HashMap<QueueKey, QueueDefinition> = definitions
         .iter()
         .cloned()
@@ -1887,7 +1886,7 @@ fn validate_objectlog_postgres_catalog(
             )
         })
         .collect();
-    for projected in ProjectionStore::recover_definitions(projection)? {
+    for projected in AsyncProjectionStore::recover_definitions(projection).await? {
         let key = QueueKey::new(projected.tenant_id.clone(), projected.queue_id.clone());
         let Some(authoritative) = log_by_key.get(&key) else {
             return Err(EngineError::Storage(
@@ -1899,8 +1898,9 @@ fn validate_objectlog_postgres_catalog(
                 "projection queue definition conflicts with the authoritative object log".into(),
             ));
         }
-        let projected_high_water = ProjectionStore::recovery_high_water(projection, &key)?;
-        let authoritative_high_water = objectlog_high_water(log, &key)?;
+        let projected_high_water =
+            AsyncProjectionStore::recovery_high_water(projection, key.clone()).await?;
+        let authoritative_high_water = AsyncLogStore::high_water(log, key).await?;
         match (projected_high_water, authoritative_high_water) {
             (Some(_), None) => {
                 return Err(EngineError::Storage(
@@ -1924,24 +1924,22 @@ fn validate_objectlog_postgres_catalog(
 
 #[cfg(all(feature = "objectlog", feature = "postgres"))]
 impl ObjectLogPostgresLifecycle {
-    fn verify_backend(
+    async fn verify_backend(
         backend: &ObjectLogPostgresBackend,
     ) -> EngineResult<ProjectionVerificationState> {
-        use fireweed_engine::ProjectionStore;
+        use fireweed_engine::AsyncLogStore;
 
-        let definitions = backend.with_log(|log| {
-            backend
-                .with_projection(|projection| validate_objectlog_postgres_catalog(log, projection))
-        })?;
+        let log = backend.log_store();
+        let projection = backend.projection_store();
+        let definitions = validate_objectlog_postgres_catalog(&log, &projection).await?;
         let mut projection_sequence = 0;
         let mut authoritative_sequence = 0;
         let mut compatible = true;
         for definition in definitions {
             let key = QueueKey::new(definition.tenant_id, definition.queue_id);
-            let projected_position = backend.with_projection(|projection| {
-                ProjectionStore::recovery_high_water(projection, &key)
-            })?;
-            let authoritative_position = backend.with_log(|log| objectlog_high_water(log, &key))?;
+            let projected_position = backend.projection_high_water(&key).await?;
+            let authoritative_position =
+                AsyncLogStore::high_water(log.as_ref(), key.clone()).await?;
             compatible &= projected_position == authoritative_position;
             projection_sequence = projection_sequence.max(
                 projected_position
@@ -1961,27 +1959,23 @@ impl ObjectLogPostgresLifecycle {
         })
     }
 
-    fn rebuilde_backend(
+    async fn rebuilde_backend(
         backend: &ObjectLogPostgresBackend,
         max_tail_commands: u64,
     ) -> EngineResult<ProjectionRebuildState> {
-        use fireweed_engine::ProjectionStore;
+        use fireweed_engine::AsyncLogStore;
 
-        let definitions = backend.with_log(|log| {
-            backend
-                .with_projection(|projection| validate_objectlog_postgres_catalog(log, projection))
-        })?;
+        let log = backend.log_store();
+        let projection = backend.projection_store();
+        let definitions = validate_objectlog_postgres_catalog(&log, &projection).await?;
         let mut replay = Vec::new();
         for definition in &definitions {
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-            backend.with_projection_mut(|projection| {
-                ProjectionStore::ensure_shard(projection, definition)
-            })?;
-            let mut from =
-                backend.with_projection(|projection| projection.recovery_high_water(&key))?;
+            backend.ensure_projection_shard(definition.clone()).await?;
+            let mut from = backend.projection_high_water(&key).await?;
             loop {
-                let page =
-                    backend.with_log(|log| objectlog_read_from(log, &key, from.clone(), 1_024))?;
+                let page = AsyncLogStore::read_from(log.as_ref(), key.clone(), from.clone(), 1_024)
+                    .await?;
                 replay.extend(page.entries);
                 if replay.len() as u64 > max_tail_commands {
                     return Err(EngineError::Storage(format!(
@@ -1998,11 +1992,11 @@ impl ObjectLogPostgresLifecycle {
         for chunk in replay.chunks(1_024) {
             let positions: Vec<_> = chunk.iter().map(|(position, _)| position.clone()).collect();
             let commands: Vec<_> = chunk.iter().map(|(_, command)| command.clone()).collect();
-            backend.with_projection_mut(|projection| {
-                projection.apply_recovery(&positions, &commands)
-            })?;
+            backend
+                .apply_projection_recovery(positions, commands)
+                .await?;
         }
-        let verification = Self::verify_backend(backend)?;
+        let verification = Self::verify_backend(backend).await?;
         Ok(ProjectionRebuildState {
             snapshot_used: false,
             tail_commands_replayed: replay.len() as u64,
@@ -2027,10 +2021,7 @@ impl ProjectionLifecycle for ObjectLogPostgresLifecycle {
                 .as_ref()
                 .expect("object-log postgres lifecycle is active"),
         );
-        Box::pin(
-            self.executor
-                .run(move || Self::verify_backend(backend.as_ref())),
-        )
+        Box::pin(async move { Self::verify_backend(backend.as_ref()).await })
     }
 
     fn delete_projection(&self) -> ProjectionLifecycleFuture<'_, ()> {
@@ -2039,9 +2030,7 @@ impl ProjectionLifecycle for ObjectLogPostgresLifecycle {
                 .as_ref()
                 .expect("object-log postgres lifecycle is active"),
         );
-        Box::pin(self.executor.run(move || {
-            backend.with_projection(fireweed_postgres::PostgresRelational::delete_projection)
-        }))
+        Box::pin(async move { backend.delete_projection().await })
     }
 
     fn rebuild_projection(&self) -> ProjectionLifecycleFuture<'_, ProjectionRebuildState> {
@@ -2051,10 +2040,7 @@ impl ProjectionLifecycle for ObjectLogPostgresLifecycle {
                 .expect("object-log postgres lifecycle is active"),
         );
         let max_tail_commands = self.max_tail_commands;
-        Box::pin(
-            self.executor
-                .run(move || Self::rebuilde_backend(backend.as_ref(), max_tail_commands)),
-        )
+        Box::pin(async move { Self::rebuilde_backend(backend.as_ref(), max_tail_commands).await })
     }
 
     fn shutdown(&mut self) {
@@ -5214,21 +5200,27 @@ fn open_objectlog_postgres_blocking(
     if config.response_barrier != CommitResponseBarrier::Strict {
         return Err(EngineError::Unavailable);
     }
+    let projection_schema = derived_postgres_schema_name(&config.namespace);
     let projection = match &config.projection {
-        ComposedProjectionConfig::Postgres { url } => {
-            fireweed_postgres::PostgresRelational::connect_in_schema(
+        ComposedProjectionConfig::Postgres { url } => fireweed_objectlog::block_on_objectlog(
+            fireweed_postgres::AsyncPostgresRelationalProjection::connect_in_schema(
                 &url.0,
-                &derived_postgres_schema_name(&config.namespace),
-            )?
-        }
+                &projection_schema,
+            ),
+        )?,
         ComposedProjectionConfig::Sqlite { .. } => return Err(EngineError::Unavailable),
     };
     let log = open_composed_object_log_engine(&config)?;
 
-    if let Err(error) = validate_objectlog_postgres_catalog(&log, &projection) {
+    if let Err(error) = fireweed_objectlog::block_on_objectlog(validate_objectlog_postgres_catalog(
+        &log,
+        &projection,
+    )) {
         match config.recovery.incompatible_projection {
             ProjectionRecoveryAction::FailClosed => return Err(error),
-            ProjectionRecoveryAction::RebuildProjection => projection.delete_projection()?,
+            ProjectionRecoveryAction::RebuildProjection => {
+                fireweed_objectlog::block_on_objectlog(projection.delete_projection())?
+            }
         }
     }
     let backend = fireweed_objectlog::block_on_objectlog(
@@ -5238,10 +5230,8 @@ fn open_objectlog_postgres_blocking(
     )?;
     let flush_interval = 50_u64;
     let backend = Arc::new(backend);
-    // Ports: native-async LogEngine path (no process-wide BlockingLibBackend).
-    // Lifecycle verify/delete/rebuild still offloads sync postgres projection work via
-    // the shared executor only (not a full product port bridge) — fireweed-8a023735.
-    let lifecycle_executor = blocking_backend::shared_executor()?;
+    // Both axes now own their async boundaries: LogEngine runs on the object-log runtime and the
+    // synchronous PostgreSQL projection is isolated behind its dedicated bounded actor.
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let weak_backend = Arc::downgrade(&backend);
     let thread_stop = Arc::clone(&stop);
@@ -5262,7 +5252,6 @@ fn open_objectlog_postgres_blocking(
             _config: config.clone(),
             lifecycle: Box::new(ObjectLogPostgresLifecycle {
                 backend: Some(Arc::clone(&backend)),
-                executor: lifecycle_executor,
                 max_tail_commands: config.recovery.max_tail_commands,
                 stop,
                 flusher: Mutex::new(Some(flusher)),

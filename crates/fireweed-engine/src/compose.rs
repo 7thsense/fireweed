@@ -1431,6 +1431,19 @@ pub trait ProjectionStore: Send {
         }
         Ok(())
     }
+
+    /// Rebuild process-local projection state from authoritative command envelopes during reopen.
+    ///
+    /// Durable projections that persist only one-way capabilities (for example lease-token hashes)
+    /// can restore their validated in-process counterparts here without reapplying already materialized
+    /// commands. The default projection families have no such state.
+    fn restore_process_state(
+        &mut self,
+        _shard: &QueueKey,
+        _commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        Ok(())
+    }
 }
 
 /// The minimum immutable projection row needed to plan a BatchUpdate without scalar projection calls.

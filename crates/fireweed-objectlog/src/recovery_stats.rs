@@ -198,12 +198,16 @@ pub async fn rebuild_process_idempotency_from_log<L>(
     batch_update_idempotency: &BatchUpdateIdempotency,
     claim_by_query_idempotency: &ClaimByQueryIdempotency,
     claim_by_item_ids_idempotency: &ClaimByItemIdsIdempotency,
-) -> EngineResult<()>
+) -> EngineResult<HashMap<ItemId, fireweed_core::LeaseToken>>
 where
     L: AsyncLogStore + ?Sized,
 {
     let page_limit = RECOVERY_COMMAND_PAGE_LIMIT as usize;
     let mut from = None;
+    // The authoritative log retains raw lease capabilities while durable relational projections
+    // intentionally persist only their hashes. Return each item's newest minted token so those
+    // projections can restore their process-local token map after validating it against current rows.
+    let mut live_token_candidates = HashMap::new();
     loop {
         let page = AsyncLogStore::read_from(log, shard.clone(), from.clone(), page_limit).await?;
         if page.entries.is_empty() {
@@ -224,6 +228,19 @@ where
                 .expect("claim_by_item_ids idempotency poisoned");
 
             for (_, env) in &page.entries {
+                match &env.command {
+                    QueueCommand::Claim(claim) => {
+                        for item_id in &claim.item_ids {
+                            live_token_candidates.insert(*item_id, claim.lease_token.clone());
+                        }
+                    }
+                    QueueCommand::ReassignLease(reassign) => {
+                        for item_id in &reassign.item_ids {
+                            live_token_candidates.insert(*item_id, reassign.lease_token.clone());
+                        }
+                    }
+                    _ => {}
+                }
                 // Renew extends active query/item-id claim replay retention (parity with
                 // AsyncLogReplayBackend recovery).
                 if let QueueCommand::RenewLease(renew) = &env.command {
@@ -333,7 +350,7 @@ where
             None => break,
         }
     }
-    Ok(())
+    Ok(live_token_candidates)
 }
 
 /// Thread-safe map of per-shard recovery telemetry from the last product open.

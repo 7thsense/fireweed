@@ -1550,6 +1550,7 @@ dependencies = [
  "bytes",
  "fireweed-core",
  "fireweed-engine",
+ "futures",
  "rustc-hash 2.1.3",
  "serde",
  "serde_json",

@@ -1,29 +1,39 @@
 #![cfg(all(feature = "objectlog", feature = "postgres"))]
 
+use std::collections::BTreeMap;
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fireweed::{
-    Bytes, ClaimRef, CommitEntry, CommitRequest, CommitResponseBarrier, ComposedProjectionConfig,
-    ComposedStorageConfig, CompoundIndexDef, CompoundIndexField, ConfigSecret, EligibilityPolicy,
-    EngineError, EntityEdit, EntityEditOperation, EntityPredicateValue, EntryOutcome, FilterOp,
-    FinalizeKind, GateChange, IndexDeclaration, IndexType, InstanceFence, ItemMutationOperation,
-    ItemMutationRequest, ItemMutationReturning, ItemPatch, ItemPredicate, ItemSelector,
-    ItemSelectorScope, LeaseGuard, NewItem, ObjectLogAuthority, ObjectLogAuthorityConfig,
-    ObjectLogConfig, ObjectLogRuntimeConfig, ObjectLogStorage, OrderField, OrderingMode,
-    PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
-    ProjectionConfig, ProjectionRecoveryPolicy, QueryFilter, QueueDefinition, QueueId, QueueIndex,
-    QueueKey, RangeScanRequest, RecoveryPolicy, RecurrencePolicy, RequestId, ResponseBarrier,
-    RetryPolicy, SecretValue, SegmentConfig, SegmentSettings, SelectedMutation, SideRecord,
-    SortDirection, TenantId, TypedValue, UtcTimestamp,
+    BoundedMutationRequest, Bytes, ClaimByQueryRequest, ClaimRef, CommitEntry, CommitRequest,
+    CommitResponseBarrier, ComposedProjectionConfig, ComposedStorageConfig, CompoundIndexDef,
+    CompoundIndexField, ConfigSecret, EligibilityPolicy, EngineError, EntityEdit,
+    EntityEditOperation, EntityPredicateValue, EntryOutcome, FilterOp, FinalizeKind, GateChange,
+    IndexDeclaration, IndexType, InstanceFence, ItemMutationOperation, ItemMutationRequest,
+    ItemMutationReturning, ItemPatch, ItemPredicate, ItemSelector, ItemSelectorScope, LeaseGuard,
+    NewItem, ObjectLogAuthority, ObjectLogAuthorityConfig, ObjectLogConfig, ObjectLogRuntimeConfig,
+    ObjectLogStorage, OrderField, OrderingMode, PriorityDirection, PriorityModel,
+    PriorityModelKind, PriorityTieBreaker, PriorityValue, ProjectionConfig,
+    ProjectionRecoveryPolicy, QueryFilter, QueueDefinition, QueueId, QueueIndex, QueueKey,
+    RangeScanRequest, RecoveryPolicy, RecurrencePolicy, RequestId, ResponseBarrier, RetryPolicy,
+    SecretValue, SegmentConfig, SegmentSettings, SelectedMutation, SideRecord, SortDirection,
+    TenantId, TypedValue, UtcTimestamp, WorkerId,
 };
 use fireweed_engine::DurabilityClass;
 use fireweed_memory::ManualClock;
 use fireweed_objectlog::segmented::S3BlobStore;
-use futures::executor::block_on;
 use postgres::{Client, NoTls};
+
+fn block_on<F>(future: F) -> F::Output
+where
+    F: Future + Send,
+    F::Output: Send,
+{
+    fireweed_objectlog::block_on_objectlog_future(future)
+}
 
 fn runtime_env(suffix: &str) -> Result<String, std::env::VarError> {
     std::env::var(format!("FIREWEED_{suffix}"))
@@ -286,6 +296,103 @@ fn objectlog_postgres_item_mutation_reopens_and_replays_resolved_response() {
     assert_eq!(
         block_on(reopened.mutate_items(&queue, changed_body)).unwrap_err(),
         EngineError::RequestIdConflict
+    );
+    drop(reopened);
+    drop_schema(&url, &namespace);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn objectlog_postgres_hot_mutations_and_query_claim_replay_after_reopen() {
+    let Ok(url) = runtime_env("PG_TEST_URL") else {
+        eprintln!(
+            "SKIP objectlog_postgres_hot_mutations_and_query_claim_replay_after_reopen: \
+             FIREWEED_PG_TEST_URL is unset"
+        );
+        return;
+    };
+    let (root, namespace) = unique_fixture("objectlog_postgres_hot_mutations");
+    let durability = config(&root, &namespace, &url);
+    let clock = Arc::new(ManualClock::at(1_000));
+    let queue = queue();
+    let fireweed = fireweed::open_composed_postgres(durability.clone(), clock.clone()).unwrap();
+    block_on(fireweed.create_queue(definition())).unwrap();
+    let first = block_on(fireweed.push(&queue, item(10))).unwrap();
+    let second = block_on(fireweed.push(&queue, item(20))).unwrap();
+
+    let mutation = block_on(fireweed.bounded_mutation(
+        &queue,
+        BoundedMutationRequest {
+            index: Some("by_kind_priority".into()),
+            filters: vec![
+                QueryFilter {
+                    field: "kind".into(),
+                    op: FilterOp::Eq,
+                    value: TypedValue::String("composed-lifecycle".into()),
+                },
+                QueryFilter {
+                    field: "priority".into(),
+                    op: FilterOp::Eq,
+                    value: TypedValue::Integer(10),
+                },
+            ],
+            set_fields: BTreeMap::from([("priority".into(), TypedValue::Integer(99))]),
+            max_scan_rows: 1,
+        },
+    ))
+    .unwrap();
+    assert_eq!(mutation.results.len(), 1);
+    assert_eq!(mutation.results[0].item_id, first);
+    let reindexed = block_on(fireweed.range_scan(
+        &queue,
+        RangeScanRequest {
+            index: Some("by_kind_priority".into()),
+            filters: vec![QueryFilter {
+                field: "priority".into(),
+                op: FilterOp::Eq,
+                value: TypedValue::Integer(99),
+            }],
+            order_by: vec![OrderField {
+                field: "priority".into(),
+                direction: SortDirection::Ascending,
+            }],
+            page_size: 10,
+            cursor: None,
+        },
+    ))
+    .unwrap();
+    assert_eq!(reindexed.rows.len(), 1);
+    assert_eq!(reindexed.rows[0].item_id, first);
+
+    let claim_request = ClaimByQueryRequest {
+        index: Some("by_kind_priority".into()),
+        filters: vec![QueryFilter {
+            field: "kind".into(),
+            op: FilterOp::Eq,
+            value: TypedValue::String("composed-lifecycle".into()),
+        }],
+        order_by: OrderField {
+            field: "priority".into(),
+            direction: SortDirection::Ascending,
+        },
+        max_items: 1,
+        lease_duration_ms: 30_000,
+        worker_id: WorkerId::new("postgres-query-worker").unwrap(),
+        request_id: Some(RequestId::new("postgres-query-claim-replay").unwrap()),
+    };
+    let claimed = block_on(fireweed.claim_by_query(&queue, claim_request.clone())).unwrap();
+    assert_eq!(claimed.items.len(), 1);
+    assert_eq!(claimed.items[0].item_id, second);
+    drop(fireweed);
+
+    let reopened = fireweed::open_composed_postgres(durability, clock).unwrap();
+    let replayed = block_on(reopened.claim_by_query(&queue, claim_request)).unwrap();
+    assert_eq!(replayed.items.len(), 1);
+    assert_eq!(replayed.items[0].item_id, claimed.items[0].item_id);
+    assert_eq!(replayed.items[0].lease_token, claimed.items[0].lease_token);
+    assert_eq!(
+        replayed.items[0].lease_expires_at,
+        claimed.items[0].lease_expires_at
     );
     drop(reopened);
     drop_schema(&url, &namespace);

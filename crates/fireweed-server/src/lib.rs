@@ -89,7 +89,7 @@ pub enum LogSpec {
 
 impl LogSpec {
     /// Public product axis name (orthogonal storage matrix). Object-log local/s3 map to
-    /// `filesystem` / `s3`; the legacy `objectlog` env name remains an accepted parse alias.
+    /// `filesystem` / `s3`; legacy env aliases are rejected by the public adapter.
     fn label(&self) -> &'static str {
         match self {
             LogSpec::Memory => "memory",
@@ -325,7 +325,7 @@ impl ProjectionSpec {
     /// legacy hybrid/turso names remain for non-public implementation profiles.
     fn label(&self) -> &'static str {
         match self {
-            // Public matrix name is `memory` (env alias `inmemory` still parses).
+            // Public matrix name is `memory`.
             ProjectionSpec::InMemory => "memory",
             ProjectionSpec::Sqlite { .. } => "sqlite",
             ProjectionSpec::Turso { .. } => "turso",
@@ -2835,17 +2835,9 @@ async fn open_objectlog_postgres_backend(
     let url = projection_url.to_string();
     let backend = match spec {
         ObjectLogSpec::LocalFilesystem { root, .. } => {
-            // Postgres connect is blocking; open projection off-reactor then assemble with log.
             let log = fireweed_objectlog::ObjectLogEngineStore::open_local(root, flush).await?;
-            let projection = tokio::task::spawn_blocking(move || {
-                fireweed_postgres::PostgresRelational::connect(&url)
-            })
-            .await
-            .map_err(|e| {
-                EngineError::Storage(format!(
-                    "object-log/postgres projection connect failed: {e}"
-                ))
-            })??;
+            let projection =
+                fireweed_postgres::AsyncPostgresRelationalProjection::connect(&url).await?;
             fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection(
                 log, projection, node_id,
             )
@@ -2871,15 +2863,8 @@ async fn open_objectlog_postgres_backend(
                 flush,
             )
             .await?;
-            let projection = tokio::task::spawn_blocking(move || {
-                fireweed_postgres::PostgresRelational::connect(&url)
-            })
-            .await
-            .map_err(|e| {
-                EngineError::Storage(format!(
-                    "object-log/postgres projection connect failed: {e}"
-                ))
-            })??;
+            let projection =
+                fireweed_postgres::AsyncPostgresRelationalProjection::connect(&url).await?;
             fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection(
                 log, projection, node_id,
             )
@@ -3860,8 +3845,8 @@ mod byte_admission_wiring_tests {
 
     /// When a live postgres is available, open filesystem object-log × postgres projection.
     #[cfg(feature = "postgres")]
-    #[tokio::test]
-    async fn filesystem_object_log_postgres_projection_constructs_when_pg_available() {
+    #[test]
+    fn filesystem_object_log_postgres_projection_constructs_when_pg_available() {
         let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
             eprintln!(
                 "FILESYSTEM/POSTGRES CONSTRUCT SKIPPED — set FIREWEED_PG_TEST_URL to a live DB"
@@ -3886,10 +3871,15 @@ mod byte_admission_wiring_tests {
         let root = filesystem_tmp_root(&schema);
         let segment_config = SegmentConfig::new(262_144, 20).unwrap();
         let log_spec = ObjectLogSpec::local(&root, segment_config);
-        let backend = open_objectlog_postgres_backend(log_spec, &scoped, 0)
-            .await
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build object-log PostgreSQL operation runtime");
+        let backend = runtime
+            .block_on(open_objectlog_postgres_backend(log_spec, &scoped, 0))
             .expect("construct filesystem×postgres");
         drop(backend);
+        drop(runtime);
 
         let _ = std::fs::remove_dir_all(&root);
         if let Ok(mut client) =
@@ -5426,8 +5416,8 @@ mod postgres_log_matrix_tests {
 
     /// T0–T2: postgres×memory — durable log, in-memory projection; reopen recovers via log.
     #[cfg(feature = "postgres")]
-    #[tokio::test]
-    async fn postgres_log_memory_lifecycle_and_reopen() {
+    #[test]
+    fn postgres_log_memory_lifecycle_and_reopen() {
         let Some(url) = pg_url() else {
             eprintln!(
                 "postgres_log_memory_lifecycle_and_reopen SKIPPED — set FIREWEED_PG_TEST_URL \
@@ -5437,114 +5427,39 @@ mod postgres_log_matrix_tests {
         };
         let cell = "postgres×memory";
         let schema = schema_name("mem");
-
         {
             let backend = fireweed_postgres::composed_postgres_backend_in_schema(&url, &schema)
                 .unwrap_or_else(|e| panic!("{cell} T0 open: {e:?}"));
-            lifecycle_push_claim_complete(&backend, cell).await;
-            let pending = backend
-                .push(&shard(), vec![PushSpec::default()], ts(10), None)
-                .await
-                .expect("T2 seed push");
-            assert_eq!(pending.len(), 1);
-            assert_eq!(
-                backend.metrics(&shard()).await.unwrap().pending,
-                1,
-                "{cell}: seed pending before drop"
-            );
+            futures::executor::block_on(async {
+                lifecycle_push_claim_complete(&backend, cell).await;
+                let pending = backend
+                    .push(&shard(), vec![PushSpec::default()], ts(10), None)
+                    .await
+                    .expect("T2 seed push");
+                assert_eq!(pending.len(), 1);
+                assert_eq!(
+                    backend.metrics(&shard()).await.unwrap().pending,
+                    1,
+                    "{cell}: seed pending before drop"
+                );
+            });
             drop(backend);
         }
 
         // T2 Class A reopen: same durable log schema, fresh in-memory projection rebuilt from log.
         let reopened = fireweed_postgres::composed_postgres_backend_in_schema(&url, &schema)
             .unwrap_or_else(|e| panic!("{cell} T2 reopen: {e:?}"));
-        assert_eq!(
-            reopened.metrics(&shard()).await.unwrap().pending,
-            1,
-            "{cell} T2 Class A: durable log recovers 1 pending"
-        );
-        let claimed = reopened
-            .claim(claim_req(1, 40_000, 20))
-            .await
-            .expect("T2 claim");
-        assert_eq!(claimed.items.len(), 1, "{cell} T2 claim");
-        reopened
-            .finalize(
-                &shard(),
-                vec![FinalizeOutcome::new(
-                    claimed.items[0].item_id,
-                    FinalizeKind::Complete,
-                )],
-                ts(21),
-                None,
-            )
-            .await
-            .expect("T2 finalize");
-        assert_eq!(reopened.metrics(&shard()).await.unwrap().pending, 0);
-        drop(reopened);
-
-        if let Ok(mut client) =
-            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
-        {
-            let _ = client.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE;"));
-        }
-    }
-
-    /// T0–T2: postgres×sqlite — durable postgres log + file-backed sqlite projection.
-    #[cfg(feature = "postgres")]
-    #[tokio::test]
-    async fn postgres_log_sqlite_lifecycle_and_reopen() {
-        let Some(url) = pg_url() else {
-            eprintln!(
-                "postgres_log_sqlite_lifecycle_and_reopen SKIPPED — set FIREWEED_PG_TEST_URL \
-                 (cell postgres×sqlite remains registered)"
-            );
-            return;
-        };
-        let cell = "postgres×sqlite";
-        let schema = schema_name("sqlite");
-        let root = fixture_root("sqlite");
-        let proj_path = root.join("projection.db");
-        let proj_s = proj_path.to_str().unwrap().to_string();
-
-        {
-            let log = fireweed_postgres::PostgresLog::connect_in_schema(&url, &schema)
-                .expect("connect postgres log");
-            let projection = fireweed_sqlite::SqliteProjectionStore::open(&proj_s)
-                .expect("open sqlite projection");
-            let backend = assemble_async_log_replay(log, projection, 0)
-                .expect("assemble async log-replay")
-                .recover()
-                .unwrap_or_else(|e| panic!("{cell} T0 recover: {e:?}"));
-            lifecycle_push_claim_complete(&backend, cell).await;
-            let pending = backend
-                .push(&shard(), vec![PushSpec::default()], ts(10), None)
-                .await
-                .expect("T2 seed");
-            assert_eq!(pending.len(), 1);
-            assert_eq!(backend.metrics(&shard()).await.unwrap().pending, 1);
-            drop(backend);
-        }
-
-        {
-            let log = fireweed_postgres::PostgresLog::connect_in_schema(&url, &schema)
-                .expect("reconnect postgres log");
-            let projection = fireweed_sqlite::SqliteProjectionStore::open(&proj_s)
-                .expect("reopen sqlite projection");
-            let reopened = assemble_async_log_replay(log, projection, 0)
-                .expect("assemble async log-replay")
-                .recover()
-                .unwrap_or_else(|e| panic!("{cell} T2 reopen: {e:?}"));
+        futures::executor::block_on(async {
             assert_eq!(
                 reopened.metrics(&shard()).await.unwrap().pending,
                 1,
-                "{cell} T2 Class A: pending recovers via durable postgres log"
+                "{cell} T2 Class A: durable log recovers 1 pending"
             );
             let claimed = reopened
                 .claim(claim_req(1, 40_000, 20))
                 .await
                 .expect("T2 claim");
-            assert_eq!(claimed.items.len(), 1);
+            assert_eq!(claimed.items.len(), 1, "{cell} T2 claim");
             reopened
                 .finalize(
                     &shard(),
@@ -5557,6 +5472,87 @@ mod postgres_log_matrix_tests {
                 )
                 .await
                 .expect("T2 finalize");
+            assert_eq!(reopened.metrics(&shard()).await.unwrap().pending, 0);
+        });
+        drop(reopened);
+
+        if let Ok(mut client) =
+            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
+        {
+            let _ = client.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE;"));
+        }
+    }
+
+    /// T0–T2: postgres×sqlite — durable postgres log + file-backed sqlite projection.
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn postgres_log_sqlite_lifecycle_and_reopen() {
+        let Some(url) = pg_url() else {
+            eprintln!(
+                "postgres_log_sqlite_lifecycle_and_reopen SKIPPED — set FIREWEED_PG_TEST_URL \
+                 (cell postgres×sqlite remains registered)"
+            );
+            return;
+        };
+        let cell = "postgres×sqlite";
+        let schema = schema_name("sqlite");
+        let root = fixture_root("sqlite");
+        let proj_path = root.join("projection.db");
+        let proj_s = proj_path.to_str().unwrap().to_string();
+        {
+            let log = fireweed_postgres::PostgresLog::connect_in_schema(&url, &schema)
+                .expect("connect postgres log");
+            let projection = fireweed_sqlite::SqliteProjectionStore::open(&proj_s)
+                .expect("open sqlite projection");
+            let backend = assemble_async_log_replay(log, projection, 0)
+                .expect("assemble async log-replay")
+                .recover()
+                .unwrap_or_else(|e| panic!("{cell} T0 recover: {e:?}"));
+            futures::executor::block_on(async {
+                lifecycle_push_claim_complete(&backend, cell).await;
+                let pending = backend
+                    .push(&shard(), vec![PushSpec::default()], ts(10), None)
+                    .await
+                    .expect("T2 seed");
+                assert_eq!(pending.len(), 1);
+                assert_eq!(backend.metrics(&shard()).await.unwrap().pending, 1);
+            });
+            drop(backend);
+        }
+
+        {
+            let log = fireweed_postgres::PostgresLog::connect_in_schema(&url, &schema)
+                .expect("reconnect postgres log");
+            let projection = fireweed_sqlite::SqliteProjectionStore::open(&proj_s)
+                .expect("reopen sqlite projection");
+            let reopened = assemble_async_log_replay(log, projection, 0)
+                .expect("assemble async log-replay")
+                .recover()
+                .unwrap_or_else(|e| panic!("{cell} T2 reopen: {e:?}"));
+            futures::executor::block_on(async {
+                assert_eq!(
+                    reopened.metrics(&shard()).await.unwrap().pending,
+                    1,
+                    "{cell} T2 Class A: pending recovers via durable postgres log"
+                );
+                let claimed = reopened
+                    .claim(claim_req(1, 40_000, 20))
+                    .await
+                    .expect("T2 claim");
+                assert_eq!(claimed.items.len(), 1);
+                reopened
+                    .finalize(
+                        &shard(),
+                        vec![FinalizeOutcome::new(
+                            claimed.items[0].item_id,
+                            FinalizeKind::Complete,
+                        )],
+                        ts(21),
+                        None,
+                    )
+                    .await
+                    .expect("T2 finalize");
+            });
             drop(reopened);
         }
 
@@ -5570,8 +5566,8 @@ mod postgres_log_matrix_tests {
 
     /// T0–T2: postgres×postgres — product unified relational backend (server arm).
     #[cfg(feature = "postgres")]
-    #[tokio::test]
-    async fn postgres_log_postgres_lifecycle_and_reopen() {
+    #[test]
+    fn postgres_log_postgres_lifecycle_and_reopen() {
         let Some(url) = pg_url() else {
             eprintln!(
                 "postgres_log_postgres_lifecycle_and_reopen SKIPPED — set FIREWEED_PG_TEST_URL \
@@ -5581,18 +5577,19 @@ mod postgres_log_matrix_tests {
         };
         let cell = "postgres×postgres";
         let schema = schema_name("pgpg");
-
         {
             let backend =
                 fireweed_postgres::PostgresRelationalBackend::connect_in_schema(&url, &schema)
                     .unwrap_or_else(|e| panic!("{cell} T0 open: {e:?}"));
-            lifecycle_push_claim_complete(&backend, cell).await;
-            let pending = backend
-                .push(&shard(), vec![PushSpec::default()], ts(10), None)
-                .await
-                .expect("T2 seed");
-            assert_eq!(pending.len(), 1);
-            assert_eq!(backend.metrics(&shard()).await.unwrap().pending, 1);
+            futures::executor::block_on(async {
+                lifecycle_push_claim_complete(&backend, cell).await;
+                let pending = backend
+                    .push(&shard(), vec![PushSpec::default()], ts(10), None)
+                    .await
+                    .expect("T2 seed");
+                assert_eq!(pending.len(), 1);
+                assert_eq!(backend.metrics(&shard()).await.unwrap().pending, 1);
+            });
             drop(backend);
         }
 
@@ -5600,28 +5597,30 @@ mod postgres_log_matrix_tests {
             let reopened =
                 fireweed_postgres::PostgresRelationalBackend::connect_in_schema(&url, &schema)
                     .unwrap_or_else(|e| panic!("{cell} T2 reopen: {e:?}"));
-            assert_eq!(
-                reopened.metrics(&shard()).await.unwrap().pending,
-                1,
-                "{cell} T2 Class A: pending recovers via durable postgres relational store"
-            );
-            let claimed = reopened
-                .claim(claim_req(1, 40_000, 20))
-                .await
-                .expect("T2 claim");
-            assert_eq!(claimed.items.len(), 1);
-            reopened
-                .finalize(
-                    &shard(),
-                    vec![FinalizeOutcome::new(
-                        claimed.items[0].item_id,
-                        FinalizeKind::Complete,
-                    )],
-                    ts(21),
-                    None,
-                )
-                .await
-                .expect("T2 finalize");
+            futures::executor::block_on(async {
+                assert_eq!(
+                    reopened.metrics(&shard()).await.unwrap().pending,
+                    1,
+                    "{cell} T2 Class A: pending recovers via durable postgres relational store"
+                );
+                let claimed = reopened
+                    .claim(claim_req(1, 40_000, 20))
+                    .await
+                    .expect("T2 claim");
+                assert_eq!(claimed.items.len(), 1);
+                reopened
+                    .finalize(
+                        &shard(),
+                        vec![FinalizeOutcome::new(
+                            claimed.items[0].item_id,
+                            FinalizeKind::Complete,
+                        )],
+                        ts(21),
+                        None,
+                    )
+                    .await
+                    .expect("T2 finalize");
+            });
             drop(reopened);
         }
 

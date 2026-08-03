@@ -64,11 +64,11 @@ use fireweed_core::{
 };
 
 use crate::{
-    ClaimCompatibility, ClaimUnit, ClaimedItem, CommandEnvelope, CommandPage, CommandPosition,
-    ControlPlane, CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeTarget,
-    IdempotencyDecision, LogStore, ProjectionSnapshot, ProjectionStore, PushFingerprint, PushItem,
-    QueueCommand, QueueIdempotencyCache, QueueKey, RenewTarget, RichClaimSelection, SnapshotRef,
-    request_expires_at,
+    ClaimCompatibility, ClaimRef, ClaimUnit, ClaimedItem, CommandEnvelope, CommandPage,
+    CommandPosition, CommitOutcomeEntry, ControlPlane, CreateQueueOutcome, DurabilityClass,
+    EngineError, EngineResult, FinalizeTarget, IdempotencyDecision, LogStore, ProjectionSnapshot,
+    ProjectionStore, PushFingerprint, PushItem, QueueCommand, QueueIdempotencyCache, QueueKey,
+    RenewTarget, RichClaimSelection, SnapshotRef, request_expires_at,
 };
 
 /// An owned blocking operation over one store instance.
@@ -833,6 +833,61 @@ pub trait AsyncProjectionStore: Send + Sync {
         std::future::ready(Err(EngineError::Unavailable))
     }
 
+    /// Resolve a retained vectorized commit from durable projection authority.
+    fn replay_durable_commit(
+        &self,
+        _shard: QueueKey,
+        _request_id: RequestId,
+        _fingerprint: u64,
+        _now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<Option<Vec<CommitOutcomeEntry>>>> + Send
+    {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+
+    /// Validate all vectorized-commit leases against one projection image.
+    fn commit_validate(
+        &self,
+        _shard: QueueKey,
+        _claim_refs: Vec<ClaimRef>,
+        _now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+
+    fn instance_fence(
+        &self,
+        _shard: QueueKey,
+        _key: Vec<u8>,
+    ) -> impl std::future::Future<Output = EngineResult<Option<u64>>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+
+    fn index_validate_push(
+        &self,
+        _shard: QueueKey,
+        _items: Vec<PushItem>,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+
+    fn read_durable_commit(
+        &self,
+        _shard: QueueKey,
+        _request_id: RequestId,
+    ) -> impl std::future::Future<Output = EngineResult<Option<Vec<CommitOutcomeEntry>>>> + Send
+    {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+
+    fn side_record(
+        &self,
+        _shard: QueueKey,
+        _key: Vec<u8>,
+    ) -> impl std::future::Future<Output = EngineResult<Option<bytes::Bytes>>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+
     /// Validate that every item remains an active, unfenced lease.
     fn renew_validate(
         &self,
@@ -1174,6 +1229,59 @@ where
                 .unwrap_or(IdempotencyDecision::Proceed))
         };
         std::future::ready(result)
+    }
+
+    fn replay_durable_commit(
+        &self,
+        shard: QueueKey,
+        request_id: RequestId,
+        fingerprint: u64,
+        now: UtcTimestamp,
+    ) -> impl Future<Output = EngineResult<Option<Vec<CommitOutcomeEntry>>>> + Send {
+        self.run_with_store_mut(move |store| {
+            store.replay_durable_commit(&shard, &request_id, fingerprint, now)
+        })
+    }
+
+    fn commit_validate(
+        &self,
+        shard: QueueKey,
+        claim_refs: Vec<ClaimRef>,
+        now: UtcTimestamp,
+    ) -> impl Future<Output = EngineResult<()>> + Send {
+        self.run_with_store(move |store| store.commit_validate(&shard, &claim_refs, now))
+    }
+
+    fn instance_fence(
+        &self,
+        shard: QueueKey,
+        key: Vec<u8>,
+    ) -> impl Future<Output = EngineResult<Option<u64>>> + Send {
+        self.run_with_store(move |store| store.instance_fence(&shard, &key))
+    }
+
+    fn index_validate_push(
+        &self,
+        shard: QueueKey,
+        items: Vec<PushItem>,
+    ) -> impl Future<Output = EngineResult<()>> + Send {
+        self.run_with_store(move |store| store.index_validate_push(&shard, &items))
+    }
+
+    fn read_durable_commit(
+        &self,
+        shard: QueueKey,
+        request_id: RequestId,
+    ) -> impl Future<Output = EngineResult<Option<Vec<CommitOutcomeEntry>>>> + Send {
+        self.run_with_store(move |store| store.read_durable_commit(&shard, &request_id))
+    }
+
+    fn side_record(
+        &self,
+        shard: QueueKey,
+        key: Vec<u8>,
+    ) -> impl Future<Output = EngineResult<Option<bytes::Bytes>>> + Send {
+        self.run_with_store(move |store| store.side_record(&shard, &key))
     }
 
     fn renew_validate(
@@ -1581,6 +1689,59 @@ where
         shard: QueueKey,
     ) -> impl Future<Output = EngineResult<bool>> + Send {
         self.run_sync(move |store: &mut S| store.pause_blocks_intake(&shard))
+    }
+
+    fn replay_durable_commit(
+        &self,
+        shard: QueueKey,
+        request_id: RequestId,
+        fingerprint: u64,
+        now: UtcTimestamp,
+    ) -> impl Future<Output = EngineResult<Option<Vec<CommitOutcomeEntry>>>> + Send {
+        self.run_sync(move |store: &mut S| {
+            store.replay_durable_commit(&shard, &request_id, fingerprint, now)
+        })
+    }
+
+    fn commit_validate(
+        &self,
+        shard: QueueKey,
+        claim_refs: Vec<ClaimRef>,
+        now: UtcTimestamp,
+    ) -> impl Future<Output = EngineResult<()>> + Send {
+        self.run_sync(move |store: &mut S| store.commit_validate(&shard, &claim_refs, now))
+    }
+
+    fn instance_fence(
+        &self,
+        shard: QueueKey,
+        key: Vec<u8>,
+    ) -> impl Future<Output = EngineResult<Option<u64>>> + Send {
+        self.run_sync(move |store: &mut S| store.instance_fence(&shard, &key))
+    }
+
+    fn index_validate_push(
+        &self,
+        shard: QueueKey,
+        items: Vec<PushItem>,
+    ) -> impl Future<Output = EngineResult<()>> + Send {
+        self.run_sync(move |store: &mut S| store.index_validate_push(&shard, &items))
+    }
+
+    fn read_durable_commit(
+        &self,
+        shard: QueueKey,
+        request_id: RequestId,
+    ) -> impl Future<Output = EngineResult<Option<Vec<CommitOutcomeEntry>>>> + Send {
+        self.run_sync(move |store: &mut S| store.read_durable_commit(&shard, &request_id))
+    }
+
+    fn side_record(
+        &self,
+        shard: QueueKey,
+        key: Vec<u8>,
+    ) -> impl Future<Output = EngineResult<Option<bytes::Bytes>>> + Send {
+        self.run_sync(move |store: &mut S| store.side_record(&shard, &key))
     }
 
     fn apply_live(

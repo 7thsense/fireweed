@@ -500,8 +500,10 @@ fn postgres_relational_truncate_then_recover_exact_state() {
                     )
                     .await
                     .unwrap();
+                assert!(original_ids.is_fresh());
+                assert!(replayed.is_replayed());
                 assert_eq!(
-                    replayed, original_ids,
+                    replayed.item_ids, original_ids.item_ids,
                     "request-id replay returns the original item ids"
                 );
 

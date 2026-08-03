@@ -825,11 +825,14 @@ where
             let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             self.log
                 .with_store_mut(|log| LogStore::ensure_shard(log, &shard))?;
-            if projection_owns_catalog
-                && let Some(position) = self.projection.with_store(|projection| {
+            let projection_high_water = self.projection.with_store(|projection| {
+                if projection.recovery_backpressured(&shard) {
+                    Ok(None)
+                } else {
                     ProjectionStore::recovery_high_water(projection, &shard)
-                })?
-            {
+                }
+            })?;
+            if projection_owns_catalog && let Some(position) = projection_high_water.clone() {
                 self.log
                     .with_store_mut(|log| LogStore::set_high_water(log, &shard, position))?;
             }
@@ -844,10 +847,26 @@ where
                 if page.entries.is_empty() {
                     break;
                 }
-                let positions: Vec<_> = page.entries.iter().map(|(p, _)| p.clone()).collect();
-                let commands: Vec<_> = page.entries.iter().map(|(_, e)| e.clone()).collect();
-                self.projection.with_store_mut(|p| {
-                    ProjectionStore::apply_recovery(p, &positions, &commands)
+                let tail = page.entries.iter().filter(|(position, _)| {
+                    projection_high_water.as_ref().is_none_or(|high_water| {
+                        position.backend_epoch > high_water.backend_epoch
+                            || (position.backend_epoch == high_water.backend_epoch
+                                && position.sequence > high_water.sequence)
+                    })
+                });
+                let (positions, commands): (Vec<_>, Vec<_>) = tail
+                    .map(|(position, envelope)| (position.clone(), envelope.clone()))
+                    .unzip();
+                self.projection.with_store_mut(|projection| {
+                    if !positions.is_empty() {
+                        ProjectionStore::apply_recovery(projection, &positions, &commands)?;
+                    }
+                    let all_commands = page
+                        .entries
+                        .iter()
+                        .map(|(_, envelope)| envelope.clone())
+                        .collect::<Vec<_>>();
+                    ProjectionStore::restore_process_state(projection, &shard, &all_commands)
                 })?;
                 // Rebuild request-id caches from durable envelopes (push, claim-by-query,
                 // batch-update, commit-transition).
@@ -1830,13 +1849,68 @@ where
             // expired_leases_page sweep — definitions are not required).
             let expired = self
                 .projection
-                .with_store(|projection| ProjectionStore::all_expired_leases(projection, now));
+                .run_with_store(move |projection| {
+                    Ok(ProjectionStore::all_expired_leases(projection, now))
+                })
+                .await?;
             let mut leases_reclaimed = 0u64;
             for (shard, _ids) in expired {
                 let reclaimed = ReclaimPort::reclaim_expired(self, &shard, None, now, None)
                     .await?
                     .len() as u64;
                 leases_reclaimed += reclaimed;
+            }
+
+            // Terminal retention is part of the same maintenance driver as lease reclamation.
+            // A Class A log owns the queue catalog; Class B memory logs recover it from a durable
+            // projection. For emit-enabled queues the durable emission cursor remains a hard
+            // deletion barrier, matching the relational products.
+            let mut definitions = AsyncLogStore::recover_definitions(self.log.as_ref()).await?;
+            if definitions.is_empty() {
+                definitions =
+                    AsyncProjectionStore::recover_definitions(self.projection.as_ref()).await?;
+            }
+            for definition in definitions {
+                let shard =
+                    QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+                let may_advance = self
+                    .projection
+                    .run_with_store({
+                        let shard = shard.clone();
+                        move |projection| {
+                            Ok(ProjectionStore::retention_may_advance(projection, &shard))
+                        }
+                    })
+                    .await?;
+                if !may_advance {
+                    continue;
+                }
+                let emission_cursor = if definition.emit_change_records {
+                    self.log
+                        .run_with_store({
+                            let shard = shard.clone();
+                            move |log| LogStore::emission_cursor(log, &shard)
+                        })
+                        .await?
+                } else {
+                    None
+                };
+                if definition.emit_change_records && emission_cursor.is_none() {
+                    continue;
+                }
+                self.projection
+                    .run_with_store_mut(move |projection| {
+                        ProjectionStore::reap_terminal_items(
+                            projection,
+                            &shard,
+                            now,
+                            definition.terminal_retention_ms,
+                            definition.emit_change_records,
+                            emission_cursor.as_ref(),
+                        )
+                        .map(|_| ())
+                    })
+                    .await?;
             }
             Ok(TickReport {
                 leases_reclaimed,
@@ -2248,29 +2322,25 @@ where
                 }),
             }
         }
-        // Emit the terminal marker whenever the commit has ≥1 rejected entry (mixed or all-rejected),
-        // matching commit_transition so recovery rebuilds the full per-entry vec.
-        let has_rejected = recovery
-            .iter()
-            .any(|r| matches!(r.status, CommitEntryStatus::Rejected(_)));
-        if has_rejected {
-            let outcome_entries: Vec<CommitOutcomeEntry> =
-                recovery.iter().map(outcome_entry_from_recovery).collect();
-            envelopes.push(CommandEnvelope {
-                command_id: self.ids.next_command_id(),
-                request_id: Some(request_id),
-                request_fingerprint: Some(commit_fingerprint),
-                request_outcome: Some(RequestOutcome::CommitTransition {
-                    entries: outcome_entries,
-                }),
-                item_ids: Vec::new(),
-                command: QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
-                    records: Vec::new(),
-                }),
-                checksum: CommandChecksum(0),
-                created_at: now,
-            });
-        }
+        // Always stamp a CommitTransition marker when request_id is present. Without the marker,
+        // a success-only batch killed after append but before apply cannot rebuild commit
+        // idempotency on reopen, and its retry is misclassified as a fresh terminal rejection.
+        let outcome_entries: Vec<CommitOutcomeEntry> =
+            recovery.iter().map(outcome_entry_from_recovery).collect();
+        envelopes.push(CommandEnvelope {
+            command_id: self.ids.next_command_id(),
+            request_id: Some(request_id),
+            request_fingerprint: Some(commit_fingerprint),
+            request_outcome: Some(RequestOutcome::CommitTransition {
+                entries: outcome_entries,
+            }),
+            item_ids: Vec::new(),
+            command: QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                records: Vec::new(),
+            }),
+            checksum: CommandChecksum(0),
+            created_at: now,
+        });
         Ok((envelopes, fingerprint))
     }
 }

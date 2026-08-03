@@ -1010,13 +1010,19 @@ impl fireweed_engine::RecoveryReadPort for AsyncObjectLogHybridBackend {
         request_id: RequestId,
     ) -> impl std::future::Future<Output = EngineResult<Option<fireweed_engine::CommitRecovery>>> + Send
     {
-        std::future::ready(commit_surface::explain_commit_if_authoritative(
-            true,
-            self.projection.as_ref(),
-            &self.commit_idempotency,
-            shard,
-            request_id,
-        ))
+        let projection = Arc::clone(&self.projection);
+        let commit_idempotency = Arc::clone(&self.commit_idempotency);
+        let shard = shard.clone();
+        async move {
+            commit_surface::explain_commit_if_authoritative(
+                true,
+                projection.as_ref(),
+                &commit_idempotency,
+                &shard,
+                request_id,
+            )
+            .await
+        }
     }
 
     fn side_record(
@@ -1024,12 +1030,10 @@ impl fireweed_engine::RecoveryReadPort for AsyncObjectLogHybridBackend {
         shard: &QueueKey,
         key: &[u8],
     ) -> impl std::future::Future<Output = EngineResult<Option<Bytes>>> + Send {
+        let projection = Arc::clone(&self.projection);
+        let shard = shard.clone();
         let key = key.to_vec();
-        std::future::ready(commit_surface::side_record(
-            self.projection.as_ref(),
-            shard,
-            &key,
-        ))
+        async move { commit_surface::side_record(projection.as_ref(), &shard, &key).await }
     }
 }
 
