@@ -5,6 +5,7 @@ use fireweed_release::e3_contract::{
     E3_EVIDENCE_LINK_SCHEMA_VERSION, E3AuthorityMode, E3EvidenceLink, build_e3_contract_manifest,
     verify_e3_contract, write_e3_contract,
 };
+use fireweed_release::{Promoted, RunOwned};
 
 fn main() -> ExitCode {
     let mut output = None;
@@ -64,6 +65,34 @@ fn main() -> ExitCode {
         _ => return fail("--authority-mode must be native-create-only"),
     };
     let output = PathBuf::from(output);
+    let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("resolve repository root");
+    let Some(run_root) = output.parent() else {
+        return fail("--out must have an existing external parent directory");
+    };
+    let output = match RunOwned::new(repository_root, run_root, &output) {
+        Ok(output) => output,
+        Err(error) => return fail(&format!("invalid run-owned --out: {error}")),
+    };
+    let promoted_path = |label: &str, value: String| -> Result<String, ExitCode> {
+        let input = Promoted::new(&value)
+            .map_err(|error| fail(&format!("invalid promoted {label}: {error}")))?;
+        Ok(input.path().to_string_lossy().into_owned())
+    };
+    let ledger = match promoted_path("--e3-ledger", ledger) {
+        Ok(path) => path,
+        Err(exit) => return exit,
+    };
+    let transactions = match promoted_path("--transaction-evidence", transactions) {
+        Ok(path) => path,
+        Err(exit) => return exit,
+    };
+    let fencing = match promoted_path("--fencing-evidence", fencing) {
+        Ok(path) => path,
+        Err(exit) => return exit,
+    };
     let evidence_link = E3EvidenceLink {
         schema_version: E3_EVIDENCE_LINK_SCHEMA_VERSION,
         run_id,
@@ -81,21 +110,24 @@ fn main() -> ExitCode {
         Err(error) => return fail(&error.0),
     };
     if let Err(error) = write_e3_contract(&output, &manifest) {
-        return fail(&format!("cannot write {}: {error}", output.display()));
+        return fail(&format!(
+            "cannot write {}: {error}",
+            output.path().display()
+        ));
     }
-    match verify_e3_contract(&output, &revision) {
+    match verify_e3_contract(output.path(), &revision) {
         Ok(summary) => {
             eprintln!(
                 "wrote verified E3 contract: {} entries, {} TP-003 rows, {} recomputed cost rows -> {}",
                 summary.entries,
                 summary.transaction_rows,
                 summary.cost_rows,
-                output.display()
+                output.path().display()
             );
             ExitCode::SUCCESS
         }
         Err(errors) => {
-            let _ = std::fs::remove_file(&output);
+            let _ = output.delete();
             fail(&format!(
                 "generated E3 contract failed semantic validation: {}",
                 errors

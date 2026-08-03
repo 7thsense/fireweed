@@ -5,9 +5,12 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
-use fireweed_release::{LedgerRow, Measurements, append_row, ledger_path, verify_ledger};
+use fireweed_release::{
+    EvidenceIoError, EvidenceOperation, Fixture, LedgerRow, Measurements, RunOwned, append_row,
+    ledger_path, verify_ledger,
+};
 
-const ARTIFACT_PATH: &str = "docs/perf/evidence/td008-terminal-reap-frontier.jsonl";
+const HISTORICAL_ARTIFACT_PATH: &str = "docs/perf/evidence/td008-terminal-reap-frontier.jsonl";
 const OBSERVED_RUN_COMMAND: &str =
     "cargo test -p fireweed-projection reap_waits_for_emission -- --nocapture";
 
@@ -125,14 +128,14 @@ fn observed_marker_parser_rejects_missing_exact_marker() {
     assert_eq!(error, "observed suite did not print the TD008 marker");
 }
 
-fn observed_row(run: &ObservedTerminalReapRun) -> LedgerRow {
+fn observed_row(run: &ObservedTerminalReapRun, artifact_path: &Path) -> LedgerRow {
     LedgerRow {
         suite: "td008_terminal_reap_frontier".into(),
         command: OBSERVED_RUN_COMMAND.into(),
         backend_profile: "object_log_sqlite_projection".into(),
         scale: "smoke".into(),
         seed: 0,
-        environment: "docs/perf/evidence".into(),
+        environment: "run-owned-test-output".into(),
         exit_status: 0,
         ac_ids: vec![
             "TestTD008EvidenceBundleRecorded".into(),
@@ -144,7 +147,10 @@ fn observed_row(run: &ObservedTerminalReapRun) -> LedgerRow {
         measurements: Measurements {
             tp002_evidence_ids: vec![],
             values: BTreeMap::from([
-                ("artifact_path".into(), serde_json::json!(ARTIFACT_PATH)),
+                (
+                    "artifact_path".into(),
+                    serde_json::json!(artifact_path.display().to_string()),
+                ),
                 ("frontier_rule".into(), serde_json::json!(true)),
                 (
                     "observed_run_stdout".into(),
@@ -163,15 +169,25 @@ fn observed_row(run: &ObservedTerminalReapRun) -> LedgerRow {
     }
 }
 
-fn tmp_ledger(tag: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "fireweed-release-td008-{tag}-{}.jsonl",
+fn tmp_ledger(tag: &str) -> RunOwned {
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let run_root = std::env::temp_dir().join(format!(
+        "fireweed-release-td008-{tag}-{}",
         std::process::id()
-    ))
+    ));
+    let _ = std::fs::remove_dir_all(&run_root);
+    std::fs::create_dir_all(&run_root).unwrap();
+    RunOwned::new(repository_root, &run_root, format!("{tag}.jsonl")).unwrap()
 }
 
-fn verify_td008_harness(path: &Path, observed_marker: &str) -> Result<(), String> {
-    verify_ledger(path, true).map_err(|errors| {
+fn verify_td008_harness(path: &RunOwned, observed_marker: &str) -> Result<(), String> {
+    let readable = path
+        .authorize(EvidenceOperation::Read)
+        .map_err(|error| error.to_string())?;
+    verify_ledger(readable, true).map_err(|errors| {
         errors
             .into_iter()
             .map(|e| e.0)
@@ -179,8 +195,8 @@ fn verify_td008_harness(path: &Path, observed_marker: &str) -> Result<(), String
             .join("; ")
     })?;
 
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("read td008 evidence bundle at {}: {e}", path.display()))?;
+    let content = std::fs::read_to_string(readable)
+        .map_err(|e| format!("read td008 evidence bundle at {}: {e}", readable.display()))?;
     if !content.contains(observed_marker) {
         return Err(format!(
             "td008 evidence bundle must include the observed run marker; missing {observed_marker:?}"
@@ -191,15 +207,16 @@ fn verify_td008_harness(path: &Path, observed_marker: &str) -> Result<(), String
 
 #[test]
 fn td008_evidence_bundle_recorded() {
-    let path = ledger_path(env!("CARGO_MANIFEST_DIR"), "td008-terminal-reap-frontier");
-    let _ = std::fs::remove_file(&path);
+    let path = ledger_path(env!("CARGO_MANIFEST_DIR"), "td008-terminal-reap-frontier")
+        .expect("create run-owned TD008 ledger path");
+    path.delete().expect("clear run-owned TD008 ledger");
 
     let run = observed_run();
-    let row = observed_row(&run);
+    let row = observed_row(&run, path.path());
     append_row(&path, &row).expect("append td008 observed evidence row");
     verify_td008_harness(&path, &run.marker).expect("observed td008 evidence ledger validates");
 
-    let content = std::fs::read_to_string(&path).expect("read td008 evidence bundle");
+    let content = std::fs::read_to_string(path.path()).expect("read td008 evidence bundle");
     let serialized = row.to_jsonl();
     assert_eq!(content, format!("{serialized}\n"));
 
@@ -207,7 +224,7 @@ fn td008_evidence_bundle_recorded() {
     assert_eq!(parsed, row);
     assert_eq!(
         parsed.measurements.values["artifact_path"],
-        serde_json::json!(ARTIFACT_PATH)
+        serde_json::json!(path.path().display().to_string())
     );
     assert_eq!(
         parsed.measurements.values["observed_run_stdout"],
@@ -233,13 +250,14 @@ fn td008_evidence_bundle_recorded() {
 
 #[test]
 fn td008_observed_evidence_row_matches_run() {
+    let path = tmp_ledger("observed-row");
     let run = observed_run();
-    let row = observed_row(&run);
+    let row = observed_row(&run, path.path());
 
     assert_eq!(row.command, OBSERVED_RUN_COMMAND);
     assert_eq!(
         row.measurements.values["artifact_path"],
-        serde_json::json!(ARTIFACT_PATH)
+        serde_json::json!(path.path().display().to_string())
     );
     assert_eq!(
         row.measurements.values["frontier_rule"],
@@ -275,7 +293,6 @@ fn td008_observed_evidence_row_matches_run() {
 #[test]
 fn td008_evidence_ledger_rejects_static_attestation() {
     let path = tmp_ledger("static");
-    let _ = std::fs::remove_file(&path);
 
     let run = observed_run();
     let row = LedgerRow {
@@ -284,7 +301,7 @@ fn td008_evidence_ledger_rejects_static_attestation() {
         backend_profile: "object_log_sqlite_projection".into(),
         scale: "smoke".into(),
         seed: 0,
-        environment: "docs/perf/evidence".into(),
+        environment: "run-owned-test-output".into(),
         exit_status: 0,
         ac_ids: vec!["TestTD008EvidenceLedgerRejectsStaticAttestation".into()],
         inv_ids: vec![],
@@ -295,7 +312,7 @@ fn td008_evidence_ledger_rejects_static_attestation() {
             values: BTreeMap::from([
                 (
                     "artifact_path".into(),
-                    serde_json::json!(ARTIFACT_PATH),
+                    serde_json::json!(path.path().display().to_string()),
                 ),
                 ("frontier_rule".into(), serde_json::json!(true)),
                 ("retain_only_opt_out".into(), serde_json::json!(true)),
@@ -309,4 +326,33 @@ fn td008_evidence_ledger_rejects_static_attestation() {
         err.contains("observed run marker"),
         "rejection should explain the missing observed run marker: {err}"
     );
+}
+
+#[test]
+fn td008_tracked_artifact_rejects_write_and_delete_authority() {
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let tracked = repository_root.join(HISTORICAL_ARTIFACT_PATH);
+    let run_root = std::env::temp_dir().join(format!(
+        "fireweed-release-td008-tracked-negative-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&run_root);
+    std::fs::create_dir_all(&run_root).unwrap();
+
+    assert!(matches!(
+        RunOwned::new(&repository_root, &run_root, &tracked),
+        Err(EvidenceIoError::TrackedEvidence(_))
+    ));
+
+    let historical = Fixture::new(&tracked).expect("tracked TD008 history exists as a fixture");
+    for operation in [EvidenceOperation::Write, EvidenceOperation::Delete] {
+        assert!(matches!(
+            historical.authorize(operation),
+            Err(EvidenceIoError::OperationDenied { operation: denied, .. }) if denied == operation
+        ));
+    }
+    let _ = std::fs::remove_dir_all(run_root);
 }

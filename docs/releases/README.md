@@ -7,9 +7,10 @@ authority to be substituted.
 The default local invocation of `scripts/ci/release-gate.sh` first creates a
 clean ledger and runs the current smoke suites. Fresh smoke-tier E2 and E3 rows
 are required. The same command then validates the governed TP-002 composite at
-`target/tp002-release/composite-contract.json`. Exact-commit evidence producers stage
-these files outside Git because a commit cannot contain a file that embeds that
-same commit's not-yet-computed SHA. The composite names separate E0, E1, E2
+`target/tp002-release/composite-contract.json`. Exact-commit evidence producers first stage
+these files in an explicit run-owned directory outside the repository because a commit cannot
+contain a file that embeds that same commit's not-yet-computed SHA. The tag workflow verifies and
+extracts the promoted archive at `target/tp002-release`. The composite names separate E0, E1, E2
 cross-owner, E2 density, E2 failover/routing, and E3 authorities. No directory
 scan or generic `bars_met=true` row can satisfy a missing semantic authority.
 The tag workflow invokes `release-gate.sh --governed-performance-only`: it runs
@@ -106,7 +107,7 @@ public version source must be added to the inventory command before release.
 `scripts/release/build-governed-evidence-bundle.sh` is the local source of
 truth for staging release evidence. It accepts only explicitly named producer
 outputs, requires the requested revision to equal checked-out `HEAD`, copies
-them into a fresh directory, writes `composite-contract.json`, and immediately
+them into a fresh external run-owned directory, writes `composite-contract.json`, and immediately
 dispatches the E0/E1, E2 cross-owner, exact-profile density, failover/routing,
 and E3 semantic validators.
 
@@ -124,14 +125,16 @@ metadata make identical inputs byte-identical. Existing output, archive, or
 sidecar paths fail closed instead of substituting stale evidence. The tag
 workflow explicitly acquires that archive before installing toolchains or
 starting heavy validation. A fresh checkout never assumes untracked `target/`
-files exist.
+files exist. Repository-owned output paths are rejected; `target/tp002-release`
+is only the tag workflow's verified promotion/extraction location.
 
 ```bash
 revision=$(git rev-parse HEAD)
+run_root=$(mktemp -d)
 bash scripts/release/build-governed-evidence-bundle.sh \
-  --source-dir target/tp002-producer-output \
-  --e3-source-dir target/tp002-e3-producer-output \
-  --out target/tp002-release \
+  --source-dir "$run_root/tp002-producer-output" \
+  --e3-source-dir "$run_root/tp002-e3-producer-output" \
+  --out "$run_root/tp002-release" \
   --revision "$revision" \
   --tag vX.Y.Z \
   --produced-at 2026-07-20T00:00:00Z \

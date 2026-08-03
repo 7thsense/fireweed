@@ -1,4 +1,4 @@
-use std::path::Path;
+use fireweed_release::{Promoted, ReadableEvidence};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -8,8 +8,10 @@ fn main() {
     if args.next().is_some() || flag != "--expected-revision" {
         usage()
     }
-    let body =
-        std::fs::read_to_string(Path::new(&path)).unwrap_or_else(|e| fail(vec![e.to_string()]));
+    let input = Promoted::new(&path)
+        .unwrap_or_else(|error| fail(vec![format!("cannot authorize promoted input: {error}")]));
+    let body = std::fs::read_to_string(input.readable_path().expect("Promoted authorizes reads"))
+        .unwrap_or_else(|e| fail(vec![e.to_string()]));
     let rows = body
         .lines()
         .filter(|line| !line.trim().is_empty())

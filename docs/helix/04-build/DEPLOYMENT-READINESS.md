@@ -292,14 +292,16 @@ responsibilities:
    smoke-tier E2 and E3 rows. It then validates the exact E0-E3 authority files
    listed by `target/tp002-release/composite-contract.json`, including
    `target/tp002-release/e3/e3-contract.json`, against the checked-out source
-   revision. These exact-commit outputs are staged by the evidence producers;
-   they cannot be checked into the commit whose SHA they bind.
+   revision. Evidence producers write the exact-commit outputs only to an external
+   run-owned directory; the tag workflow promotes the verified archive into
+   `target/tp002-release`. They cannot be checked into the commit whose SHA they bind.
 2. The release workflow invokes `scripts/ci/release-gate.sh
    --governed-performance-only`, which runs functional release checks and the
    exact-revision composite verifier without rerunning scaled local smoke
    workloads on a shared GitHub runner. It then verifies
    `target/tp002-release/attestation.json` with
-   the resolved release tag and `GITHUB_SHA`. The tag must resolve to that exact
+   `--evidence-root target/tp002-release`, the resolved release tag, and `GITHUB_SHA`.
+   The tag must resolve to that exact
    checked-out commit, and every attested evidence/input digest must match.
 
 The governed lane never scans `docs/perf/evidence` or the staging directory.

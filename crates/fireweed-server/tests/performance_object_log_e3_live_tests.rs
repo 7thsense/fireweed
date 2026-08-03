@@ -83,7 +83,11 @@ const EXPECTED_RECORDER_CONTROL_SCHEDULE: &str =
 const EXPECTED_RECORDER_CONTROL_FINGERPRINT_ALGORITHM: &str =
     "fnv1a128+disk-unique-id-index+canonical-live-state-v1";
 
-fn prove_native_create_only_fence(s3: &S3Env, source_revision: &str, output: &std::path::Path) {
+fn prove_native_create_only_fence(
+    s3: &S3Env,
+    source_revision: &str,
+    output: &fireweed_release::RunOwned,
+) {
     // LogEngine product fence: two owners over shared S3 log × memory projection.
     // Stale-epoch seal is modelled as a fenced push after a newer owner acquires the epoch.
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -197,6 +201,17 @@ fn prove_native_create_only_fence(s3: &S3Env, source_revision: &str, output: &st
     .expect("build executed native S3 fence evidence");
     fireweed_release::e3_contract::write_e3_fence_evidence(output, &row)
         .expect("write executed native S3 fence evidence");
+}
+
+fn run_owned_e3_output(output: &str) -> fireweed_release::RunOwned {
+    let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("resolve repository root for E3 evidence");
+    let run_root = std::env::var("FIREWEED_E3_EVIDENCE_DIR")
+        .expect("E3 evidence output requires FIREWEED_E3_EVIDENCE_DIR");
+    fireweed_release::RunOwned::new(repository_root, run_root, output)
+        .expect("E3 evidence output must be run-owned and outside the repository")
 }
 
 const E3_BOUND_CONFIGS: [BoundConfig; 4] = [
@@ -3560,14 +3575,11 @@ async fn performance_object_log_e3_live_tests() {
         );
         let fence_output = std::env::var("FIREWEED_E3_FENCE_EVIDENCE_OUT")
             .expect("release E3 requires an output path for executed native S3 fence evidence");
+        let fence_output = run_owned_e3_output(&fence_output);
         let fence_s3 = s3.clone();
         let fence_revision = source_revision.clone();
         tokio::task::spawn_blocking(move || {
-            prove_native_create_only_fence(
-                &fence_s3,
-                &fence_revision,
-                std::path::Path::new(&fence_output),
-            );
+            prove_native_create_only_fence(&fence_s3, &fence_revision, &fence_output);
         })
         .await
         .expect("executed native S3 fence worker must join");
@@ -3762,14 +3774,15 @@ async fn performance_object_log_e3_live_tests() {
     let path = fireweed_release::ledger_path(
         env!("CARGO_MANIFEST_DIR"),
         "performance_object_log_e3_live_tests",
-    );
-    let _ = std::fs::remove_file(&path);
+    )
+    .expect("create run-owned E3 ledger path");
+    path.delete().expect("clear run-owned E3 ledger");
     for run in &runs {
         let row = profile_row(&s3.endpoint, perf_env, resident, load_batch, run);
         fireweed_release::append_row(&path, &row).expect("emit E3 ledger row");
     }
-    let summary =
-        fireweed_release::verify_ledger(&path, true).expect("emitted E3 rows validate strict");
+    let summary = fireweed_release::verify_ledger(path.path(), true)
+        .expect("emitted E3 rows validate strict");
     let seen = if perf_env && release_shape && runs.iter().all(|run| run.bars_met) {
         summary.evidence_ids.contains("E3")
     } else {
@@ -3779,7 +3792,7 @@ async fn performance_object_log_e3_live_tests() {
     println!(
         "  emitted {} E3 ledger row(s) -> {}",
         runs.len(),
-        path.display()
+        path.path().display()
     );
 }
 
@@ -3798,7 +3811,8 @@ fn e3_release_fence_proofs_only() {
     let source_revision =
         std::env::var("FIREWEED_E3_SOURCE_REVISION").expect("exact source revision");
     let output = std::env::var("FIREWEED_E3_FENCE_EVIDENCE_OUT").expect("fence evidence path");
-    prove_native_create_only_fence(&s3, &source_revision, std::path::Path::new(&output));
+    let output = run_owned_e3_output(&output);
+    prove_native_create_only_fence(&s3, &source_revision, &output);
 }
 
 fn synthetic_ack(

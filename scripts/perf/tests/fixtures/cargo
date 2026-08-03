@@ -8,7 +8,10 @@ if [ -n "${FIREWEED_E3_CARGO_EVENT_LOG:-}" ]; then
 fi
 if [ -n "${FIREWEED_E3_TEST_ARTIFACTS:-}" ]; then
   case " $* " in
-    *" external_transaction_contract_matrix_tests "*)
+    *" e3_governed_transaction_evidence_matrix "*" --list "*)
+      printf 'e3_governed_transaction_evidence_matrix: test\n'
+      ;;
+    *" e3_governed_transaction_evidence_matrix "*)
       printf 'fixture transaction evidence\n' >"$FIREWEED_E3_TRANSACTION_EVIDENCE_OUT"
       ;;
     *" performance_object_log_e3_live_tests "*)

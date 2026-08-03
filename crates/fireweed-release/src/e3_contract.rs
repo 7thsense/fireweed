@@ -13,7 +13,7 @@ use crate::cost::{
     validate_release_cost_rows,
 };
 use crate::transaction::TransactionEvidenceRow;
-use crate::{LedgerRow, verify_ledger};
+use crate::{LedgerRow, RunOwned, verify_ledger};
 
 pub const REQUIRED_E3_PROFILES: [&str; 2] = [
     "object_log_inmemory_projection",
@@ -319,7 +319,7 @@ pub fn build_e3_contract_manifest(
     })
 }
 
-pub fn write_e3_contract(path: &Path, manifest: &E3ContractManifest) -> std::io::Result<()> {
+pub fn write_e3_contract(path: &RunOwned, manifest: &E3ContractManifest) -> std::io::Result<()> {
     let body = serde_json::to_vec_pretty(manifest).expect("E3ContractManifest serializes");
     atomic_write_evidence(path, &body, "E3 contract")
 }
@@ -388,12 +388,15 @@ fn validate_evidence_link(link: &E3EvidenceLink) -> Result<(), E3ContractError> 
     }
 }
 
-pub fn write_e3_fence_evidence(path: &Path, row: &E3FenceEvidenceRow) -> std::io::Result<()> {
+pub fn write_e3_fence_evidence(path: &RunOwned, row: &E3FenceEvidenceRow) -> std::io::Result<()> {
     let body = serde_json::to_vec_pretty(row).expect("E3FenceEvidenceRow serializes");
     atomic_write_evidence(path, &body, "fence evidence")
 }
 
-fn atomic_write_evidence(path: &Path, body: &[u8], label: &str) -> std::io::Result<()> {
+fn atomic_write_evidence(path: &RunOwned, body: &[u8], label: &str) -> std::io::Result<()> {
+    let path = path
+        .authorize(crate::EvidenceOperation::Write)
+        .map_err(std::io::Error::other)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
         let mut cursor = PathBuf::new();

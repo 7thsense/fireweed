@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use fireweed_release::Promoted;
 use fireweed_release::transaction::{REQUIRED_ACS, REQUIRED_PROFILES, verify_transaction_evidence};
 
 fn main() {
@@ -14,7 +15,18 @@ fn main() {
             _ => usage(&format!("unknown argument {arg:?}")),
         }
     }
-    let summary = verify_transaction_evidence(&paths).unwrap_or_else(|errors| {
+    let inputs = paths
+        .into_iter()
+        .map(|path| {
+            Promoted::new(&path).unwrap_or_else(|error| {
+                usage(&format!(
+                    "cannot authorize promoted evidence {}: {error}",
+                    path.display()
+                ))
+            })
+        })
+        .collect::<Vec<_>>();
+    let summary = verify_transaction_evidence(&inputs).unwrap_or_else(|errors| {
         for error in errors {
             eprintln!("error: {error}");
         }

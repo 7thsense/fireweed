@@ -1,4 +1,4 @@
-use std::path::Path;
+use fireweed_release::{Promoted, ReadableEvidence};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -22,9 +22,15 @@ fn main() {
     }
     let mut errors = Vec::new();
     for (path, id) in [(&e0, "E0"), (&e1, "E1")] {
-        if let Err(found) =
-            fireweed_release::single_deployment::verify_file(Path::new(path), id, &revision)
-        {
+        let input = Promoted::new(path).unwrap_or_else(|error| {
+            eprintln!("{id}: cannot authorize promoted input: {error}");
+            std::process::exit(1);
+        });
+        if let Err(found) = fireweed_release::single_deployment::verify_file(
+            input.readable_path().expect("Promoted authorizes reads"),
+            id,
+            &revision,
+        ) {
             errors.extend(found.into_iter().map(|e| format!("{id}: {e}")));
         }
     }

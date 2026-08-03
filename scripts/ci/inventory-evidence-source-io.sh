@@ -258,7 +258,7 @@ for path in source_paths:
 
 surfaces.sort(key=lambda row: (row["path"], row["start_line"], row["symbol"]))
 
-definitions = {"evidence_dir", "write_evidence", "atomic_write_evidence"}
+definitions = {"write_evidence", "atomic_write_evidence"}
 depth_by_key: dict[tuple[str, str, int], int] = {}
 for surface in surfaces:
     key = (surface["path"], surface["symbol"], surface["start_line"])
@@ -429,42 +429,40 @@ def validate() -> None:
             f"missing {group} reader inventory",
         )
 
-    required_epoch_writers = {
-        (
-            "crates/fireweed/tests/storage_matrix_t0_t2.rs",
-            "sqlite_log_t3_t4_evidence_and_helm_values_present",
-        ),
-        (
-            "crates/fireweed/tests/storage_matrix_t0_t2.rs",
-            "postgres_log_t3_t4_evidence_and_helm_values_present",
-        ),
-        (
-            "crates/fireweed-server/src/lib.rs",
-            "sqlite_log_t3_evidence_axis_names_file_contract",
-        ),
-        (
-            "crates/fireweed-server/src/lib.rs",
-            "postgres_log_t3_evidence_axis_names_file_contract",
-        ),
-    }
-    actual_epoch_writers = {
-        (row["path"], row["symbol"]) for row in epoch_zero_writers
-    }
     require(
-        required_epoch_writers <= actual_epoch_writers,
-        f"missing epoch-zero writers: {sorted(required_epoch_writers - actual_epoch_writers)}",
+        epoch_zero_writers == [],
+        f"epoch-zero evidence writers remain: {[(row['path'], row['symbol']) for row in epoch_zero_writers]}",
     )
 
-    required_direct_writers = {
-        "sqlite_log_t3_tp003_ac_txn_exact_pairs",
-        "postgres_log_t3_tp003_ac_txn_exact_pairs",
-        "write_evidence",
-        "evidence_dir",
-    }
+    required_direct_writers = {"write_evidence", "atomic_write_evidence"}
     call_symbols = {row["symbol"] for row in evidence_call_graph}
     require(
         required_direct_writers <= call_symbols,
-        f"missing conformance evidence callers: {sorted(required_direct_writers - call_symbols)}",
+        f"missing typed evidence writer call graph: {sorted(required_direct_writers - call_symbols)}",
+    )
+    require(
+        "evidence_dir" not in call_symbols,
+        "legacy untyped evidence_dir helper remains in the evidence call graph",
+    )
+    source_symbols = {surface["symbol"] for surface in surfaces}
+    required_tp003_surfaces = {
+        "render_evidence",
+        "sqlite_log_t3_tp003_ac_txn_exact_pairs",
+        "postgres_log_t3_tp003_ac_txn_exact_pairs",
+    }
+    require(
+        required_tp003_surfaces <= source_symbols,
+        f"missing TP-003 typed producer surfaces: {sorted(required_tp003_surfaces - source_symbols)}",
+    )
+    typed_io = read_text("crates/fireweed-release/src/evidence_io.rs")
+    for declaration in ("pub struct Fixture", "pub struct Promoted", "pub struct RunOwned"):
+        require(
+            declaration in typed_io,
+            f"typed evidence ownership declaration missing: {declaration}",
+        )
+    require(
+        "pub fn write(&self" in typed_io and "pub fn delete(&self" in typed_io,
+        "RunOwned must expose typed write and delete operations",
     )
     require(assertion_inventory, "assertion inventory must not be empty")
 

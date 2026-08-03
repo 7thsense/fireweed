@@ -117,6 +117,8 @@ grep -Fq -- '--expected-revision "$GITHUB_SHA"' "$release_workflow" ||
   fail "release workflow does not bind the composite to the checked-out revision"
 grep -Fq -- '--manifest target/tp002-release/attestation.json' "$release_workflow" ||
   fail "release workflow does not verify the acquired attestation"
+grep -Fq -- '--evidence-root target/tp002-release' "$release_workflow" ||
+  fail "release workflow does not bind attestation evidence to the promoted bundle root"
 # shellcheck disable=SC2016 # Literal GitHub expression under test.
 grep -Fq -- '--tag "${{ steps.release.outputs.tag }}"' "$release_workflow" ||
   fail "release workflow does not bind evidence to the resolved release tag"

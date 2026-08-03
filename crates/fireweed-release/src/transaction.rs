@@ -1,10 +1,10 @@
 //! Schema-aware TP-003 transaction evidence verification for shipped Postgres storage pairs.
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use crate::ReadableEvidence;
 
 /// Canonical required Postgres storage-pair profiles (slash form kept for release-gate messages
 /// and fixture compatibility). Axis-named backends (`postgres×sqlite`, `postgres×postgres`) are
@@ -88,18 +88,27 @@ pub struct TransactionEvidenceSummary {
 /// authorizes a whole-row N/A substitute for an AC-TXN requirement.
 /// Coverage gaps, partial/fail/N/A results, duplicate rows, unknown profiles/ACs,
 /// and missing pairs fail closed.
-pub fn verify_transaction_evidence(
-    paths: &[PathBuf],
+pub fn verify_transaction_evidence<T: ReadableEvidence>(
+    inputs: &[T],
 ) -> Result<TransactionEvidenceSummary, Vec<TransactionEvidenceError>> {
     let mut errors = Vec::new();
-    if paths.is_empty() {
+    if inputs.is_empty() {
         return Err(vec![TransactionEvidenceError(
             "at least one transaction evidence file is required".into(),
         )]);
     }
 
     let mut summary = TransactionEvidenceSummary::default();
-    for path in paths {
+    for input in inputs {
+        let path = match input.readable_path() {
+            Ok(path) => path,
+            Err(error) => {
+                errors.push(TransactionEvidenceError(format!(
+                    "transaction evidence input is not readable: {error}"
+                )));
+                continue;
+            }
+        };
         let contents = match fs::read_to_string(path) {
             Ok(contents) => contents,
             Err(error) => {
@@ -236,11 +245,4 @@ pub fn verify_transaction_evidence(
     } else {
         Err(errors)
     }
-}
-
-pub fn evidence_paths(paths: impl IntoIterator<Item = impl AsRef<Path>>) -> Vec<PathBuf> {
-    paths
-        .into_iter()
-        .map(|path| path.as_ref().to_path_buf())
-        .collect()
 }

@@ -1,0 +1,8 @@
+# E3_ENV_FORWARDING_START
+env \
+  FIREWEED_PERF_ENV="$FIREWEED_PERF_ENV" \
+  # This comment terminates the env assignment before cargo.
+  FIREWEED_E3_RESIDENT="$FIREWEED_E3_RESIDENT" \
+  cargo test -p fireweed-server --release --test performance_object_log_e3_live_tests \
+    performance_object_log_e3_live_tests -- --nocapture
+# E3_ENV_FORWARDING_END

@@ -6,7 +6,7 @@ use fireweed_release::e3_contract::{
     E3_EVIDENCE_LINK_SCHEMA_VERSION, E3AuthorityMode, E3EvidenceLink, E3FenceAuthorityEvidence,
     E3FenceAuthorityObservation, E3FenceObservation, E3ObservedOutcome, E3TransactionObservation,
     build_e3_contract_manifest, build_e3_fence_evidence, build_e3_transaction_evidence_row,
-    verify_e3_contract, write_e3_contract, write_e3_fence_evidence,
+    verify_e3_contract, write_e3_contract,
 };
 
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
@@ -67,6 +67,11 @@ impl Fixture {
 
     fn manifest(&self) -> PathBuf {
         self.root.join("contract.json")
+    }
+
+    fn run_owned(&self, name: &str) -> fireweed_release::RunOwned {
+        fireweed_release::RunOwned::new(repo_root(), &self.root, self.root.join(name))
+            .expect("authorize run-owned E3 test output")
     }
 
     fn mutate_json(&self, name: &str, mutate: impl FnOnce(&mut serde_json::Value)) {
@@ -306,7 +311,7 @@ fn TestE3ReleaseGatesPassFmtClippyAndOperatorChecks() {
 #[test]
 fn production_generator_builds_and_semantically_verifies_the_full_matrix() {
     let fixture = Fixture::new();
-    let generated = fixture.root.join("generated.json");
+    let generated = fixture.run_owned("generated.json");
     let manifest = build_e3_contract_manifest(
         REVISION.into(),
         evidence_link(),
@@ -316,7 +321,7 @@ fn production_generator_builds_and_semantically_verifies_the_full_matrix() {
     )
     .unwrap();
     write_e3_contract(&generated, &manifest).unwrap();
-    let summary = verify_e3_contract(&generated, REVISION).unwrap();
+    let summary = verify_e3_contract(generated.path(), REVISION).unwrap();
     assert_eq!(
         (summary.entries, summary.transaction_rows, summary.cost_rows),
         (8, 48, 8)
@@ -825,8 +830,7 @@ fn rejects_symlink_authority_and_writer_target() {
     let victim = fixture.root.join("victim.json");
     fs::write(&victim, "unchanged").unwrap();
     symlink(&victim, &output).unwrap();
-    let row = build_e3_fence_evidence(native_fence_observation()).unwrap();
-    assert!(write_e3_fence_evidence(&output, &row).is_err());
+    assert!(fireweed_release::RunOwned::new(repo_root(), &fixture.root, &output).is_err());
     assert_eq!(fs::read_to_string(victim).unwrap(), "unchanged");
 }
 

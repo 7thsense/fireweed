@@ -338,23 +338,22 @@ pub fn digest_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-pub fn write_evidence(path: &Path, evidence: &MatrixEvidence) -> Result<(), String> {
+pub fn write_evidence(
+    path: &fireweed_release::RunOwned,
+    digest_path: &fireweed_release::RunOwned,
+    evidence: &MatrixEvidence,
+) -> Result<(), String> {
     let bytes = canonical_bytes(evidence)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, &bytes).map_err(|error| error.to_string())?;
-    fs::rename(&tmp, path).map_err(|error| error.to_string())?;
-    fs::write(
-        path.with_extension("json.sha256"),
+    path.write(&bytes).map_err(|error| error.to_string())?;
+    digest_path
+        .write(
         format!(
             "{}  {}\n",
             digest_hex(&bytes),
-            path.file_name().unwrap().to_string_lossy()
+            path.path().file_name().unwrap().to_string_lossy()
         ),
     )
-    .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())
 }
 
 fn verify_evidence(evidence: &MatrixEvidence) -> Result<(), String> {

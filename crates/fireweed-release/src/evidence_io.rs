@@ -109,6 +109,15 @@ pub struct Fixture {
     path: PathBuf,
 }
 
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// A typed evidence input whose ownership class authorizes reads.
+pub trait ReadableEvidence: sealed::Sealed {
+    fn readable_path(&self) -> Result<&Path, EvidenceIoError>;
+}
+
 impl Fixture {
     pub fn new(path: impl AsRef<Path>) -> Result<Self, EvidenceIoError> {
         Ok(Self {
@@ -122,6 +131,14 @@ impl Fixture {
 
     pub fn authorize(&self, operation: EvidenceOperation) -> Result<&Path, EvidenceIoError> {
         authorize_read_only("Fixture", &self.path, operation)
+    }
+}
+
+impl sealed::Sealed for Fixture {}
+
+impl ReadableEvidence for Fixture {
+    fn readable_path(&self) -> Result<&Path, EvidenceIoError> {
+        self.authorize(EvidenceOperation::Read)
     }
 }
 
@@ -147,6 +164,14 @@ impl Promoted {
     }
 }
 
+impl sealed::Sealed for Promoted {}
+
+impl ReadableEvidence for Promoted {
+    fn readable_path(&self) -> Result<&Path, EvidenceIoError> {
+        self.authorize(EvidenceOperation::Read)
+    }
+}
+
 /// An output proven to remain beneath one explicit external run root.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunOwned {
@@ -166,12 +191,6 @@ impl RunOwned {
     ) -> Result<Self, EvidenceIoError> {
         let repository_root = fs::canonicalize(repository_root.as_ref())?;
         let requested_run_root = run_root.as_ref();
-        let run_root = fs::canonicalize(requested_run_root)
-            .map_err(|_| EvidenceIoError::InvalidRunRoot(requested_run_root.to_path_buf()))?;
-        if !run_root.is_dir() || run_root.starts_with(&repository_root) {
-            return Err(EvidenceIoError::InvalidRunRoot(run_root));
-        }
-
         let requested = if path.as_ref().is_absolute() {
             path.as_ref().to_path_buf()
         } else {
@@ -184,6 +203,31 @@ impl RunOwned {
         }
         if lexical.starts_with(&repository_root) {
             return Err(EvidenceIoError::RepositoryOwned(lexical));
+        }
+
+        let run_root = fs::canonicalize(requested_run_root)
+            .map_err(|_| EvidenceIoError::InvalidRunRoot(requested_run_root.to_path_buf()))?;
+        if !run_root.is_dir() || run_root.starts_with(&repository_root) {
+            return Err(EvidenceIoError::InvalidRunRoot(run_root));
+        }
+
+        let relative =
+            lexical
+                .strip_prefix(&run_root)
+                .map_err(|_| EvidenceIoError::OutsideRunRoot {
+                    path: lexical.clone(),
+                    run_root: run_root.clone(),
+                })?;
+        let mut cursor = run_root.clone();
+        for component in relative.components() {
+            cursor.push(component.as_os_str());
+            if fs::symlink_metadata(&cursor).is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                return Err(EvidenceIoError::SymlinkEscape {
+                    path: cursor,
+                    run_root,
+                });
+            }
         }
 
         let resolved = resolve_existing_ancestor(&lexical)?;
@@ -217,15 +261,69 @@ impl RunOwned {
     }
 
     pub fn authorize(&self, _operation: EvidenceOperation) -> Result<&Path, EvidenceIoError> {
+        let current_root = fs::canonicalize(&self.run_root)
+            .map_err(|_| EvidenceIoError::InvalidRunRoot(self.run_root.clone()))?;
+        if current_root != self.run_root || !current_root.is_dir() {
+            return Err(EvidenceIoError::InvalidRunRoot(current_root));
+        }
+        let relative = self.path.strip_prefix(&self.run_root).map_err(|_| {
+            EvidenceIoError::OutsideRunRoot {
+                path: self.path.clone(),
+                run_root: self.run_root.clone(),
+            }
+        })?;
+        let mut cursor = self.run_root.clone();
+        for component in relative.components() {
+            cursor.push(component.as_os_str());
+            if fs::symlink_metadata(&cursor).is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                return Err(EvidenceIoError::SymlinkEscape {
+                    path: cursor,
+                    run_root: self.run_root.clone(),
+                });
+            }
+        }
+        let resolved = resolve_existing_ancestor(&self.path)?;
+        if !resolved.starts_with(&self.run_root) {
+            return Err(EvidenceIoError::SymlinkEscape {
+                path: resolved,
+                run_root: self.run_root.clone(),
+            });
+        }
         Ok(&self.path)
     }
 
-    pub fn writable_path(&self) -> &Path {
-        &self.path
+    /// Write the complete artifact after re-validating write authority.
+    pub fn write(&self, body: impl AsRef<[u8]>) -> Result<(), EvidenceIoError> {
+        let path = self.authorize(EvidenceOperation::Write)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, body).map_err(EvidenceIoError::Io)
     }
 
-    pub fn deletable_path(&self) -> &Path {
-        &self.path
+    /// Delete this run's artifact if present after re-validating delete authority.
+    pub fn delete(&self) -> Result<(), EvidenceIoError> {
+        let path = self.authorize(EvidenceOperation::Delete)?;
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(EvidenceIoError::Io(error)),
+        }
+    }
+}
+
+impl AsRef<Path> for RunOwned {
+    fn as_ref(&self) -> &Path {
+        self.path()
+    }
+}
+
+impl sealed::Sealed for RunOwned {}
+
+impl ReadableEvidence for RunOwned {
+    fn readable_path(&self) -> Result<&Path, EvidenceIoError> {
+        self.authorize(EvidenceOperation::Read)
     }
 }
 
@@ -407,6 +505,17 @@ mod tests {
                 &run_root,
                 run_root.join("redirect/result.jsonl")
             ),
+            Err(EvidenceIoError::SymlinkEscape { .. })
+        ));
+
+        let late = RunOwned::new(repository_root(), &run_root, "late/result.jsonl").unwrap();
+        symlink(&outside, run_root.join("late")).unwrap();
+        assert!(matches!(
+            late.write(b"must not escape"),
+            Err(EvidenceIoError::SymlinkEscape { .. })
+        ));
+        assert!(matches!(
+            late.delete(),
             Err(EvidenceIoError::SymlinkEscape { .. })
         ));
     }

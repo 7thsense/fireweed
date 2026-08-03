@@ -1,4 +1,5 @@
 use fireweed_release::e2_failover::{FailoverEvidence, validate};
+use fireweed_release::{EvidenceOperation, Fixture};
 
 fn valid() -> FailoverEvidence {
     FailoverEvidence {
@@ -49,10 +50,17 @@ fn e2_failover_validator_accepts_release_row() {
 
 #[test]
 fn e2_failover_validator_keeps_historical_v1_readable() {
-    let row: FailoverEvidence = serde_json::from_str(include_str!(
-        "../../../docs/perf/evidence/tp002-e2-objectlog-sqlite-failover-kind.json"
-    ))
+    let fixture = Fixture::new(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/e2-failover-v1.json"),
+    )
+    .expect("open immutable v1 compatibility fixture");
+    let body = std::fs::read_to_string(
+        fixture
+            .authorize(EvidenceOperation::Read)
+            .expect("fixture authorizes reads"),
+    )
     .unwrap();
+    let row: FailoverEvidence = serde_json::from_str(&body).unwrap();
     assert_eq!(row.schema_version, 1);
     assert!(row.handoff_object_store_profile.is_none());
     validate(&row).unwrap();

@@ -1,0 +1,3 @@
+{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"s3×memory","result":"pass","detail":"immutable axis-contract fixture","assertions":["axis identity"],"recorded_at":"fixture:static"}
+{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"s3×sqlite","result":"pass","detail":"immutable axis-contract fixture","assertions":["axis identity"],"recorded_at":"fixture:static"}
+{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"s3×postgres","result":"pass","detail":"immutable axis-contract fixture","assertions":["axis identity"],"recorded_at":"fixture:static"}

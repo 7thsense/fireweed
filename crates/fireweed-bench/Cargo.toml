@@ -44,7 +44,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 fireweed-objectlog = { path = "../fireweed-objectlog" }
+fireweed-release = { path = "../fireweed-release" }
 
 [dev-dependencies]
-# The scale/density evidence suites emit verification-ledger rows (TP-002 E2) via this crate.
-fireweed-release = { path = "../fireweed-release" }

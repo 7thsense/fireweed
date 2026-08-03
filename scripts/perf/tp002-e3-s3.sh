@@ -157,42 +157,36 @@ FIREWEED_E3_RECORDED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 set +e
 # TP-003 transaction matrix: the historical `external_transaction_contract_matrix_tests`
-# target was retired with the FWSG cutover. Prefer a live re-emitter when present; otherwise
-# seed from repository-held governed TP-003 evidence so the E3 contract builder still has a
-# transaction artifact. Full recovery/load still runs below via performance_object_log_e3_live_tests.
-# LogEngine E3 matrix emitter (pqueue-802be88f). Prefer live 48-row profile×bound×AC emission.
-if cargo test -p fireweed-conformance --release --test e3_governed_transaction_evidence_matrix \
-  e3_governed_transaction_evidence_matrix -- --list >/dev/null 2>&1; then
-  env \
-    FIREWEED_E3_SOURCE_REVISION="$SOURCE_REVISION" \
-    FIREWEED_E3_RUN_ID="$FIREWEED_E3_RUN_ID" \
-    FIREWEED_E3_COMPOSITION_FINGERPRINT="$COMPOSITION_FINGERPRINT" \
-    FIREWEED_E3_RECORDED_AT="$FIREWEED_E3_RECORDED_AT" \
-    FIREWEED_E3_TRANSACTION_EVIDENCE_OUT="$FIREWEED_E3_TRANSACTION_EVIDENCE_OUT" \
-    cargo test -p fireweed-conformance --release --test e3_governed_transaction_evidence_matrix \
-      e3_governed_transaction_evidence_matrix -- --nocapture --test-threads=1
-  TXN_STATUS=$?
-  if [ "$TXN_STATUS" -ne 0 ]; then
-    set -e
-    exit "$TXN_STATUS"
-  fi
-else
-  set -e
-  echo "E3 note: e3_governed_transaction_evidence_matrix unavailable; seeding from docs/perf/evidence" >&2
-  if [[ ! -s "$REPO_ROOT/docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl" ]]; then
-    fail "no transaction evidence source available for E3 contract"
-  fi
-  {
-    cat "$REPO_ROOT/docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl"
-    if [[ -s "$REPO_ROOT/docs/perf/evidence/tp003-ac-txn-parity-postgres-storage-pairs.jsonl" ]]; then
-      cat "$REPO_ROOT/docs/perf/evidence/tp003-ac-txn-parity-postgres-storage-pairs.jsonl"
-    fi
-  } > "$FIREWEED_E3_TRANSACTION_EVIDENCE_OUT"
+# The governed producer is mandatory. A missing or unlisted target is qualification failure; historical
+# TP-003 files are immutable audit records and can never substitute for this run's transaction artifact.
+TXN_LIST=$(cargo test -p fireweed-conformance --release \
+  --test e3_governed_transaction_evidence_matrix \
+  e3_governed_transaction_evidence_matrix -- --list 2>&1) || \
+  fail "cannot list governed E3 transaction producer"
+if ! grep -Eq '^e3_governed_transaction_evidence_matrix: test$' <<<"$TXN_LIST"; then
+  fail "governed E3 transaction producer is not registered"
+fi
+set +e
+env \
+  FIREWEED_E3_SOURCE_REVISION="$SOURCE_REVISION" \
+  FIREWEED_E3_RUN_ID="$FIREWEED_E3_RUN_ID" \
+  FIREWEED_E3_COMPOSITION_FINGERPRINT="$COMPOSITION_FINGERPRINT" \
+  FIREWEED_E3_RECORDED_AT="$FIREWEED_E3_RECORDED_AT" \
+  FIREWEED_E3_TRANSACTION_EVIDENCE_OUT="$FIREWEED_E3_TRANSACTION_EVIDENCE_OUT" \
+  cargo test -p fireweed-conformance --release --test e3_governed_transaction_evidence_matrix \
+    e3_governed_transaction_evidence_matrix -- --nocapture --test-threads=1
+TXN_STATUS=$?
+set -e
+if [ "$TXN_STATUS" -ne 0 ]; then
+  exit "$TXN_STATUS"
 fi
 set +e
 
 # The matrix executes exact snapshot-tail and genesis recovery. Standalone recovery entrypoints remain
 # available for focused runs without duplicating both 10M datasets in this governed run.
+# LogEngine products are AsyncObjectLogMemory/Sqlite over ObjectLogEngineStore::open_s3. The governed
+# command requires a clean worktree and the release resident shape enforced above.
+# E3_ENV_FORWARDING_START
 env \
   FIREWEED_PERF_ENV="${FIREWEED_PERF_ENV:-1}" \
   FIREWEED_E3_RESIDENT="$FIREWEED_E3_RESIDENT" \
@@ -206,6 +200,8 @@ env \
   FIREWEED_E3_STORAGE_DURABILITY_CLAIM="$FIREWEED_E3_STORAGE_DURABILITY_CLAIM" \
   FIREWEED_E3_AUTHORITY_MODE="$FIREWEED_E3_AUTHORITY_MODE" \
   FIREWEED_E3_SOURCE_REVISION="$SOURCE_REVISION" \
+  FIREWEED_E3_RUN_ID="$FIREWEED_E3_RUN_ID" \
+  FIREWEED_E3_COMPOSITION_FINGERPRINT="$COMPOSITION_FINGERPRINT" \
   FIREWEED_E3_FENCE_EVIDENCE_OUT="$FIREWEED_E3_FENCE_EVIDENCE_OUT" \
   FIREWEED_LEDGER_DIR="$FIREWEED_LEDGER_DIR" \
   FIREWEED_S3_TEST_ENDPOINT="$FIREWEED_S3_TEST_ENDPOINT" \
@@ -213,10 +209,9 @@ env \
   FIREWEED_S3_TEST_BUCKET="$FIREWEED_S3_TEST_BUCKET" \
   FIREWEED_S3_TEST_ACCESS_KEY="$FIREWEED_S3_TEST_ACCESS_KEY" \
   FIREWEED_S3_TEST_SECRET_KEY="$FIREWEED_S3_TEST_SECRET_KEY" \
-  # LogEngine products (AsyncObjectLogMemory/Sqlite over ObjectLogEngineStore::open_s3).
-  # Requires a clean worktree and the release resident shape enforced above.
   cargo test -p fireweed-server --release --test performance_object_log_e3_live_tests \
     performance_object_log_e3_live_tests -- --nocapture
+# E3_ENV_FORWARDING_END
 TEST_STATUS=$?
 set -e
 

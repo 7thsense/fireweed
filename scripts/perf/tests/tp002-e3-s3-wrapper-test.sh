@@ -11,6 +11,14 @@ PREFLIGHT_EVIDENCE_ROOT=$(mktemp -d)
 DRIFT_SENTINEL="$REPO_ROOT/.e3-s3-wrapper-drift-test-$$"
 trap 'rm -rf "$EVIDENCE_ROOT" "$DRIFT_EVIDENCE_ROOT" "$PREFLIGHT_EVIDENCE_ROOT"; rm -f "$OUTPUT" "$CARGO_ARGS_OUTPUT" "$EVENT_LOG" "$DRIFT_SENTINEL"' EXIT
 
+python3 "$REPO_ROOT/scripts/perf/tests/verify-e3-env-forwarding.py" \
+  "$REPO_ROOT/scripts/perf/tp002-e3-s3.sh"
+if python3 "$REPO_ROOT/scripts/perf/tests/verify-e3-env-forwarding.py" \
+  "$REPO_ROOT/scripts/perf/tests/fixtures/e3-env-comment-regression.shfrag" >/dev/null 2>&1; then
+  echo "comment/line-continuation regression fixture unexpectedly passed" >&2
+  exit 1
+fi
+
 COMMON_ENV=(
   FIREWEED_S3_TEST_ENDPOINT=http://127.0.0.2:3900
   FIREWEED_S3_TEST_REGION=test-region-1
@@ -31,6 +39,7 @@ COMMON_ENV=(
 : >"$EVENT_LOG"
 env "${COMMON_ENV[@]}" \
   FIREWEED_E3_AUTHORITY_MODE=native-create-only \
+  FIREWEED_E3_PLANNED_WALL_HOURS=48 \
   FIREWEED_E3_EVIDENCE_DIR="$EVIDENCE_ROOT" \
   FIREWEED_E3_CARGO_ARGS_OUT="$CARGO_ARGS_OUTPUT" \
   FIREWEED_E3_TEST_ARTIFACTS=1 \
@@ -66,6 +75,7 @@ fi
 set +e
 env "${COMMON_ENV[@]}" \
   FIREWEED_E3_AUTHORITY_MODE=native-create-only \
+  FIREWEED_E3_PLANNED_WALL_HOURS=48 \
   FIREWEED_E3_EVIDENCE_DIR="$PREFLIGHT_EVIDENCE_ROOT" \
   FIREWEED_E3_PROVIDER_FIXTURE_FAIL_ACTION=prefix-empty \
   FIREWEED_E3_PROVIDER_FIXTURE_LOG="$EVENT_LOG" \
@@ -88,6 +98,7 @@ fi
 set +e
 env "${COMMON_ENV[@]}" \
   FIREWEED_E3_AUTHORITY_MODE=native-create-only \
+  FIREWEED_E3_PLANNED_WALL_HOURS=48 \
   FIREWEED_E3_EVIDENCE_DIR="$DRIFT_EVIDENCE_ROOT" \
   FIREWEED_E3_DRIFT_SENTINEL="$DRIFT_SENTINEL" \
   FIREWEED_E3_CARGO_ARGS_OUT="$CARGO_ARGS_OUTPUT" \

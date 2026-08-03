@@ -25,8 +25,8 @@ done
 out="$(realpath -m "$out")"
 repo_root="$(realpath "$REPO_ROOT")"
 case "$out" in
-  "$repo_root"/*) ;;
-  *) echo "output must be inside the repository: $out" >&2; exit 1 ;;
+  "$repo_root"/*) echo "output must be outside the repository: $out" >&2; exit 1 ;;
+  *) ;;
 esac
 [[ "$(basename "$out")" == tp002-release ]] || {
   echo "output basename must be tp002-release so the release workflow extracts the governed path" >&2
@@ -75,13 +75,12 @@ PY
 bash "$REPO_ROOT/scripts/ci/verify-governed-release-composite.sh" \
   --contract "$out/composite-contract.json" --expected-revision "$revision"
 if [[ -n "$tag$produced_at$reviewed_at" ]]; then
-  bundle_rel="$(realpath -m --relative-to="$REPO_ROOT" "$out")"
-  [[ "$bundle_rel" != .. && "$bundle_rel" != ../* ]] || { echo "attested output must be inside the repository" >&2; exit 1; }
   rustup run 1.92.0 cargo run -q -p fireweed-release --bin fireweed-build-evidence-attestation -- \
-    --repo-root "$REPO_ROOT" --bundle "$bundle_rel" --tag "$tag" --commit "$revision" \
+    --repo-root "$REPO_ROOT" --bundle-root "$out" --tag "$tag" --commit "$revision" \
     --produced-at "$produced_at" --reviewed-at "$reviewed_at" --out "$out/attestation.json"
   rustup run 1.92.0 cargo run -q -p fireweed-release --bin fireweed-verify-evidence-attestation -- \
-    --manifest "$out/attestation.json" --repo-root "$REPO_ROOT" --tag "$tag" --commit "$revision"
+    --manifest "$out/attestation.json" --repo-root "$REPO_ROOT" --evidence-root "$out" \
+    --tag "$tag" --commit "$revision"
 
   archive_tmp="$(mktemp "$archive_dir/.${revision}.tar.XXXXXX")"
   gzip_tmp="$(mktemp "$archive_dir/.${revision}.tar.gz.XXXXXX")"

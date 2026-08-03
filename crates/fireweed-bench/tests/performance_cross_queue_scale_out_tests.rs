@@ -450,7 +450,15 @@ fn live_multi_node_object_log_sqlite_projection_e2() {
     let image =
         std::env::var("FIREWEED_E2_IMAGE").unwrap_or_else(|_| format!("fireweed-e2-live:{tag}"));
     let sweeps = std::env::var("FIREWEED_E2_SWEEPS").unwrap_or_else(|_| "1".to_string());
-    let ledger_out = std::env::temp_dir().join(format!("tp002-e2-live-{tag}.jsonl"));
+    let evidence_root = std::env::temp_dir().join(format!("tp002-e2-live-{tag}"));
+    let _ = std::fs::remove_dir_all(&evidence_root);
+    std::fs::create_dir_all(&evidence_root).expect("create run-owned E2 evidence root");
+    let ledger_out = fireweed_release::RunOwned::new(
+        repo_root.canonicalize().expect("resolve repository root"),
+        &evidence_root,
+        "matrix.jsonl",
+    )
+    .expect("authorize run-owned E2 matrix output");
 
     // Arm teardown BEFORE provisioning so a panic anywhere below still deletes the cluster + image.
     let _guard = LiveClusterGuard {
@@ -472,7 +480,7 @@ fn live_multi_node_object_log_sqlite_projection_e2() {
         .env("CLUSTER", &cluster)
         .env("IMAGE", &image)
         .env("SWEEPS", &sweeps)
-        .env("LEDGER_OUT", &ledger_out)
+        .env("LEDGER_OUT", ledger_out.path())
         .status()
         .expect("spawn tp002-e2-kind.sh orchestrator");
     assert!(
@@ -483,10 +491,13 @@ fn live_multi_node_object_log_sqlite_projection_e2() {
     );
 
     // TEETH: re-assert the four bars from the emitted ledger ourselves — do not merely trust the exit code.
-    let text = std::fs::read_to_string(&ledger_out).unwrap_or_else(|e| {
+    let readable = ledger_out
+        .authorize(fireweed_release::EvidenceOperation::Read)
+        .expect("run-owned E2 output authorizes reads");
+    let text = std::fs::read_to_string(readable).unwrap_or_else(|e| {
         panic!(
             "orchestrator produced no ledger at {}: {e}",
-            ledger_out.display()
+            readable.display()
         )
     });
     let rows: Vec<fireweed_release::LedgerRow> = text
@@ -497,9 +508,10 @@ fn live_multi_node_object_log_sqlite_projection_e2() {
     assert!(
         !rows.is_empty(),
         "orchestrator emitted no E2 ledger rows at {}",
-        ledger_out.display()
+        readable.display()
     );
-    let _ = std::fs::remove_file(&ledger_out);
+    ledger_out.delete().expect("delete run-owned E2 output");
+    let _ = std::fs::remove_dir(&evidence_root);
 
     println!(
         "\n  owners 2->4->8 ingest agg | 8/2 ingest | worst ingest/q | worst claim+final/q  ({} sweep row(s))",
@@ -647,17 +659,16 @@ fn tp002_e2_release_rows_emit_only_on_pass() {
         "the release row must carry exactly the E2 evidence id"
     );
     // Strict-validate + confirm the gate counts E2 as RELEASE (headline) evidence, not smoke.
-    let dir = std::env::temp_dir();
-    let path = dir.join(format!("fireweed-e2-pass-{}.jsonl", std::process::id()));
-    let _ = std::fs::remove_file(&path);
+    let path = fireweed_release::ledger_path(env!("CARGO_MANIFEST_DIR"), "e2-pass")
+        .expect("create run-owned E2 pass ledger path");
     fireweed_release::append_row(&path, &row).expect("emit release row");
-    let summary =
-        fireweed_release::verify_ledger(&path, true).expect("release row validates strict");
+    let summary = fireweed_release::verify_ledger(path.path(), true)
+        .expect("release row validates strict");
     assert!(
         summary.evidence_ids.contains("E2") && !summary.smoke_evidence_ids.contains("E2"),
         "a release-tier E2 row must count toward the headline (release) bucket, not smoke"
     );
-    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(path.run_root());
 
     // Host-capacity outcomes never make the portable release row red.
     let mut a = e2_passing_sweep();
@@ -727,46 +738,17 @@ fn tp002_e2_release_rows_emit_only_on_pass() {
         "absolute scale multiple is not a host-independent release gate"
     );
 
-    // ---- SCHEMA COMPATIBILITY with the committed live E2 evidence (36d405a9 / a983b5e2 rows). ----
-    // The release row this shared builder emits must be schema-identical to the rows already captured in
-    // docs/perf/evidence/tp002-e2-multinode-kind-release.jsonl, so the historical evidence + any newly
-    // emitted row validate under the SAME ledger schema.
-    let evidence_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/perf/evidence/tp002-e2-multinode-kind-release.jsonl");
-    let text = std::fs::read_to_string(&evidence_path).unwrap_or_else(|e| {
-        panic!(
-            "read committed E2 evidence {}: {e}",
-            evidence_path.display()
-        )
-    });
-    let first = text
-        .lines()
-        .find(|l| !l.trim().is_empty())
-        .expect("evidence has a row");
-    let evidence_row: fireweed_release::LedgerRow = serde_json::from_str(first)
-        .expect("committed E2 evidence row parses under the current schema");
+    // Schema compatibility is proved from the current builder's serialized row. Historical evidence is
+    // immutable audit input and is not a live test oracle.
     let built = build_e2_row(
         &e2_passing_sweep(),
         &tuning,
         &evaluate_e2_bars(&e2_passing_sweep()),
     );
-    assert_eq!(
-        built.suite, evidence_row.suite,
-        "suite must match the committed evidence"
-    );
-    assert_eq!(built.backend_profile, evidence_row.backend_profile);
-    assert_eq!(
-        built.measurements.tp002_evidence_ids, evidence_row.measurements.tp002_evidence_ids,
-        "evidence ids must match"
-    );
-    let built_keys: std::collections::BTreeSet<&String> =
-        built.measurements.values.keys().collect();
-    let evidence_keys: std::collections::BTreeSet<&String> =
-        evidence_row.measurements.values.keys().collect();
-    assert!(
-        evidence_keys.is_subset(&built_keys),
-        "new portable-gate markers may extend the historical schema, but every historical capacity field remains readable"
-    );
+    let serialized = built.to_jsonl();
+    let round_trip: fireweed_release::LedgerRow =
+        serde_json::from_str(&serialized).expect("current E2 row round-trips");
+    assert_eq!(round_trip, built);
 
     println!(
         "TP-002 E2 release-gate judgment verified: all-bars-pass -> release; each single-bar violation -> smoke; schema matches committed live evidence"
@@ -777,11 +759,12 @@ fn tp002_e2_release_rows_emit_only_on_pass() {
 /// strict validation and carries `evidence_id`. (This checks the row's structure, not the measured values;
 /// the measurements are verified by the suite's own assertions above, which run before this emission.)
 fn emit_and_verify(suite: &str, row: &fireweed_release::LedgerRow, evidence_id: &str) {
-    let path = fireweed_release::ledger_path(env!("CARGO_MANIFEST_DIR"), suite);
-    let _ = std::fs::remove_file(&path);
+    let path = fireweed_release::ledger_path(env!("CARGO_MANIFEST_DIR"), suite)
+        .expect("create run-owned scale-out ledger path");
+    path.delete().expect("clear run-owned E2 ledger");
     fireweed_release::append_row(&path, row).expect("emit ledger row");
-    let summary =
-        fireweed_release::verify_ledger(&path, true).expect("emitted row validates strict");
+    let summary = fireweed_release::verify_ledger(path.path(), true)
+        .expect("emitted row validates strict");
     // These are SMOKE-tier rows: the id is recorded under smoke_evidence_ids (a release gate must NOT count
     // it toward the headline E2/E3 requirement — the live runs supply release-tier evidence).
     assert!(

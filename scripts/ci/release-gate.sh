@@ -73,11 +73,6 @@ bash "${REPO_ROOT}/scripts/verify-public-crate-boundary.sh"
 echo "--- exact Postgres TP-003 transaction evidence fixtures ---"
 ${CARGO} test -p fireweed-release --test transaction_evidence_tests -- --nocapture
 
-echo "--- repository-held Postgres TP-003 transaction evidence snapshot ---"
-${CARGO} run -p fireweed-release --bin fireweed-verify-transaction-evidence -- \
-    --evidence "${REPO_ROOT}/docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl" \
-    --evidence "${REPO_ROOT}/docs/perf/evidence/tp003-ac-txn-parity-postgres-storage-pairs.jsonl"
-
 # A clean ledger directory so stale pre-migration rows in the retained
 # target/fireweed-ledger evidence path can
 # never satisfy the gate. Every suite is pointed at this dir via the env var

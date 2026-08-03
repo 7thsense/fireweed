@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 pub const SCHEMA_VERSION: u32 = 1;
 pub const POLICY: &str = "exact-tag-rerun";
 pub const SCOPE: &str = "tp002-release-v1";
+pub const PROMOTED_EVIDENCE_PREFIX: &str = "target/tp002-release";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -101,6 +102,34 @@ pub fn verify_attestation(
     expected_tag: &str,
     expected_commit: &str,
 ) -> Result<(), Vec<AttestationError>> {
+    verify_attestation_impl(manifest, repo_root, None, expected_tag, expected_commit)
+}
+
+/// Verify a not-yet-promoted bundle while keeping v1 evidence bindings pinned to their eventual
+/// `target/tp002-release` locations. Source inputs are still verified against `repo_root`.
+pub fn verify_attestation_with_evidence_root(
+    manifest: &EvidenceAttestation,
+    repo_root: &Path,
+    evidence_root: &Path,
+    expected_tag: &str,
+    expected_commit: &str,
+) -> Result<(), Vec<AttestationError>> {
+    verify_attestation_impl(
+        manifest,
+        repo_root,
+        Some(evidence_root),
+        expected_tag,
+        expected_commit,
+    )
+}
+
+fn verify_attestation_impl(
+    manifest: &EvidenceAttestation,
+    repo_root: &Path,
+    evidence_root: Option<&Path>,
+    expected_tag: &str,
+    expected_commit: &str,
+) -> Result<(), Vec<AttestationError>> {
     let mut errors = Vec::new();
     if manifest.schema_version != SCHEMA_VERSION {
         errors.push(format!(
@@ -159,10 +188,28 @@ pub fn verify_attestation(
     let mut kinds = BTreeSet::new();
     let mut seen_paths = BTreeSet::new();
     for binding in &manifest.evidence {
+        let (root, path) = match evidence_root {
+            Some(root) => {
+                let prefix = Path::new(PROMOTED_EVIDENCE_PREFIX);
+                let bound = Path::new(&binding.path);
+                let relative = match bound.strip_prefix(prefix) {
+                    Ok(relative) if relative.components().next().is_some() => relative,
+                    _ => {
+                        errors.push(format!(
+                            "evidence path {:?} is outside promoted prefix {PROMOTED_EVIDENCE_PREFIX:?}",
+                            binding.path
+                        ));
+                        continue;
+                    }
+                };
+                (root, relative.to_string_lossy().into_owned())
+            }
+            None => (repo_root, binding.path.clone()),
+        };
         verify_digest_binding(
-            repo_root,
+            root,
             "evidence",
-            &binding.path,
+            &path,
             &binding.sha256,
             &mut seen_paths,
             &mut errors,

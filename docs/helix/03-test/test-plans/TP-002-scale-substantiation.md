@@ -120,12 +120,13 @@ Release-gate mapping as of 2026-06-16 (**pre-ADR-008 build record**):
 
 `scripts/release/build-governed-evidence-bundle.sh` stages explicitly named E0,
 E1, E2 cross-owner, E2 density, E2 failover/routing, and E3 producer outputs for
-the checked-out revision. It writes `target/tp002-release/composite-contract.json`
+the checked-out revision. It writes `composite-contract.json` beneath an explicit
+external run-owned `tp002-release` directory
 and dispatches `scripts/ci/verify-governed-release-composite.sh`; neither command
 scans a ledger or evidence directory for substitutes. `scripts/ci/release-gate.sh`
 separately generates fresh smoke-tier E2/E3 rows, then requires that exact
-composite and verifies every named semantic authority against checked-out
-`HEAD`. The tag workflow acquires the deterministic exact-revision archive and
+composite after promotion to `target/tp002-release` and verifies every named semantic authority
+against checked-out `HEAD`. The tag workflow acquires the deterministic exact-revision archive and
 SHA-256 sidecar, reruns the composite verifier with `GITHUB_SHA`, and verifies
 the archive's attestation against the resolved tag and commit before packaging
 or publication.

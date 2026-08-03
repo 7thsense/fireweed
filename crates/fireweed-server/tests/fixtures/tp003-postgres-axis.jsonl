@@ -1,0 +1,3 @@
+{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"postgres×memory","result":"pass","detail":"immutable axis-contract fixture","assertions":["axis identity"],"recorded_at":"fixture:static"}
+{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"postgres×sqlite","result":"pass","detail":"immutable axis-contract fixture","assertions":["axis identity"],"recorded_at":"fixture:static"}
+{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"postgres×postgres","result":"pass","detail":"immutable axis-contract fixture","assertions":["axis identity"],"recorded_at":"fixture:static"}

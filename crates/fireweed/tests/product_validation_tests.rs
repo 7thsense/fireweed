@@ -176,11 +176,12 @@ fn emit_ac_with_context(
             values,
         },
     };
-    let path = fireweed_release::ledger_path(env!("CARGO_MANIFEST_DIR"), &suite);
-    let _ = std::fs::remove_file(&path);
+    let path = fireweed_release::ledger_path(env!("CARGO_MANIFEST_DIR"), &suite)
+        .expect("create run-owned AC ledger path");
+    path.delete().expect("clear run-owned product ledger");
     fireweed_release::append_row(&path, &row).expect("emit AC ledger row");
-    let summary =
-        fireweed_release::verify_ledger(&path, true).expect("emitted AC row validates strict");
+    let summary = fireweed_release::verify_ledger(path.path(), true)
+        .expect("emitted AC row validates strict");
     // ac_ids make the row traceable even with no tp002 evidence id.
     assert_eq!(summary.rows, 1, "one AC row emitted");
 }

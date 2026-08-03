@@ -3,15 +3,26 @@
 use std::collections::BTreeMap;
 
 use fireweed_release::{
-    LedgerRow, Measurements, ReleaseAuthority, ReleaseManifest, append_row, missing_evidence,
-    verify_ledger, verify_release_manifest,
+    LedgerRow, Measurements, ReleaseAuthority, ReleaseManifest, RunOwned, append_row,
+    missing_evidence, verify_ledger, verify_release_manifest,
 };
 
-fn tmp_ledger(tag: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "fireweed-release-ledger-{tag}-{}.jsonl",
+fn owned_ledger(tag: &str) -> RunOwned {
+    let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let run_root = std::env::temp_dir().join(format!(
+        "fireweed-release-owned-ledger-{tag}-{}",
         std::process::id()
-    ))
+    ));
+    let _ = std::fs::remove_dir_all(&run_root);
+    std::fs::create_dir_all(&run_root).unwrap();
+    RunOwned::new(repository_root, &run_root, format!("{tag}.jsonl")).unwrap()
+}
+
+fn tmp_ledger(tag: &str) -> RunOwned {
+    owned_ledger(&format!("raw-{tag}"))
 }
 
 fn row(suite: &str, exit: i32, evidence: &[&str]) -> LedgerRow {
@@ -36,8 +47,7 @@ fn row(suite: &str, exit: i32, evidence: &[&str]) -> LedgerRow {
 
 #[test]
 fn appended_rows_validate_and_evidence_is_asserted() {
-    let path = tmp_ledger("ok");
-    let _ = std::fs::remove_file(&path);
+    let path = owned_ledger("ok");
 
     append_row(&path, &row("object_log_commit_recovery_tests", 0, &["E3"])).unwrap();
     append_row(
@@ -46,7 +56,7 @@ fn appended_rows_validate_and_evidence_is_asserted() {
     )
     .unwrap();
 
-    let summary = verify_ledger(&path, true).expect("strict validation passes");
+    let summary = verify_ledger(path.path(), true).expect("strict validation passes");
     assert_eq!(summary.rows, 2);
     assert!(summary.evidence_ids.contains("E2") && summary.evidence_ids.contains("E3"));
 
@@ -54,21 +64,20 @@ fn appended_rows_validate_and_evidence_is_asserted() {
     let missing = missing_evidence(&summary, &["E0", "E1", "E2", "E3"].map(String::from));
     assert_eq!(missing, vec!["E0".to_string(), "E1".to_string()]);
 
-    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(path.run_root());
 }
 
 #[test]
 fn strict_validation_fails_a_failed_run_row() {
-    let path = tmp_ledger("failed");
-    let _ = std::fs::remove_file(&path);
+    let path = owned_ledger("failed");
     append_row(
         &path,
         &row("performance_cross_queue_scale_out_tests", 1, &["E2"]),
     )
     .unwrap();
-    let errors = verify_ledger(&path, true).expect_err("a failed-run row must be rejected");
+    let errors = verify_ledger(path.path(), true).expect_err("a failed-run row must be rejected");
     assert!(errors.iter().any(|e| e.0.contains("exit_status")));
-    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(path.run_root());
 }
 
 #[test]
@@ -76,42 +85,42 @@ fn strict_rejects_missing_and_unknown_evidence_tiers() {
     let path = tmp_ledger("strict-tier");
     let mut unknown = row("tier", 0, &["E0"]);
     unknown.evidence_tier = "gold".into();
-    std::fs::write(&path, format!("{}\n", unknown.to_jsonl())).unwrap();
-    assert!(verify_ledger(&path, true).is_err());
+    path.write(format!("{}\n", unknown.to_jsonl())).unwrap();
+    assert!(verify_ledger(path.path(), true).is_err());
 
     let mut raw = serde_json::to_value(row("tier", 0, &["E0"])).unwrap();
     raw.as_object_mut().unwrap().remove("evidence_tier");
-    std::fs::write(&path, format!("{}\n", raw)).unwrap();
-    assert!(verify_ledger(&path, true).is_err());
-    let compatibility = verify_ledger(&path, false).unwrap();
+    path.write(format!("{}\n", raw)).unwrap();
+    assert!(verify_ledger(path.path(), true).is_err());
+    let compatibility = verify_ledger(path.path(), false).unwrap();
     assert!(compatibility.evidence_ids.is_empty());
     assert!(compatibility.smoke_evidence_ids.is_empty());
-    let _ = std::fs::remove_file(path);
+    path.delete().unwrap();
 }
 
 #[test]
 fn malformed_line_is_rejected() {
     let path = tmp_ledger("malformed");
-    std::fs::write(&path, b"{not valid json}\n").unwrap();
-    let errors = verify_ledger(&path, true).expect_err("malformed row rejected");
+    path.write(b"{not valid json}\n").unwrap();
+    let errors = verify_ledger(path.path(), true).expect_err("malformed row rejected");
     assert!(errors.iter().any(|e| e.0.contains("malformed")));
-    let _ = std::fs::remove_file(&path);
+    path.delete().unwrap();
 }
 
 #[test]
 fn empty_ledger_fails_strict() {
     let path = tmp_ledger("empty");
-    std::fs::write(&path, b"\n  \n").unwrap(); // only blank lines
-    let errors = verify_ledger(&path, true).expect_err("an empty ledger is not evidence");
+    path.write(b"\n  \n").unwrap(); // only blank lines
+    let errors = verify_ledger(path.path(), true).expect_err("an empty ledger is not evidence");
     assert!(errors.iter().any(|e| e.0.contains("empty")));
-    let _ = std::fs::remove_file(&path);
+    path.delete().unwrap();
 }
 
 #[test]
 fn missing_file_is_an_error() {
     let path = tmp_ledger("does-not-exist");
-    let _ = std::fs::remove_file(&path);
-    let errors = verify_ledger(&path, true).expect_err("a missing ledger is an error");
+    path.delete().unwrap();
+    let errors = verify_ledger(path.path(), true).expect_err("a missing ledger is an error");
     assert!(errors.iter().any(|e| e.0.contains("cannot open")));
 }
 

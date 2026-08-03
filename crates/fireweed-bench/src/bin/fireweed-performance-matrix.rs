@@ -1670,7 +1670,19 @@ fn run(cfg: Config) -> Result<PathBuf, String> {
     };
     let path = output_directory_or_file(cfg.output.as_deref(), &commit, &run_id);
     redactor.validate_serialized_evidence(&canonical_bytes(&evidence)?)?;
-    write_evidence(&path, &evidence)?;
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .map_err(|error| format!("resolve repository root for matrix evidence: {error}"))?;
+    let run_root = path
+        .parent()
+        .ok_or_else(|| "matrix evidence output requires an existing external parent".to_string())?;
+    let output = fireweed_release::RunOwned::new(&repository_root, run_root, &path)
+        .map_err(|error| format!("matrix evidence output is not run-owned: {error}"))?;
+    let digest_path = path.with_extension("json.sha256");
+    let digest_output = fireweed_release::RunOwned::new(&repository_root, run_root, &digest_path)
+        .map_err(|error| format!("matrix evidence digest output is not run-owned: {error}"))?;
+    write_evidence(&output, &digest_output, &evidence)?;
     verify_file(&path)?;
     if evidence.status != "passed" {
         return Err(format!("matrix failed; evidence at {}", path.display()));

@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use fireweed_release::{Promoted, ReadableEvidence};
+
 fn usage() -> ! {
     eprintln!(
         "usage: fireweed-verify-e3-contract --manifest <path> --expected-revision <40-char-sha>"
@@ -25,8 +27,13 @@ fn main() {
     {
         usage();
     }
+    let path = PathBuf::from(path);
+    let input = Promoted::new(&path).unwrap_or_else(|error| {
+        eprintln!("E3 contract input is not readable: {error}");
+        std::process::exit(1);
+    });
     match fireweed_release::e3_contract::verify_e3_contract(
-        &PathBuf::from(path),
+        input.readable_path().expect("Promoted authorizes reads"),
         &expected_revision.to_string_lossy(),
     ) {
         Ok(summary) => println!(

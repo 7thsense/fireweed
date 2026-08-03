@@ -7,8 +7,7 @@ REVISION="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 TAG="v0.0.0-archive-test"
 PRODUCED_AT="2026-07-20T00:00:00Z"
 REVIEWED_AT="2026-07-20T00:05:00Z"
-mkdir -p "$REPO_ROOT/target"
-CASE_ROOT="$(mktemp -d "$REPO_ROOT/target/governed-archive-test.XXXXXX")"
+CASE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/fireweed-governed-archive-test.XXXXXX")"
 trap 'rm -rf "$CASE_ROOT"' EXIT
 
 fail() {
@@ -121,13 +120,13 @@ expect_failure wrong_revision env PATH="$CASE_ROOT/wrong-revision/bin:$PATH" \
   --source-dir "$CASE_ROOT/wrong-revision/source" --e3-source-dir "$CASE_ROOT/wrong-revision/e3" \
   --out "$CASE_ROOT/wrong-revision/tp002-release" --revision "$wrong_revision"
 
-make_inputs "$CASE_ROOT/outside"
-outside="$(mktemp -d "${TMPDIR:-/tmp}/fireweed-governed-archive-outside.XXXXXX")"
-trap 'rm -rf "$CASE_ROOT" "$outside"' EXIT
-expect_failure outside_repo env PATH="$CASE_ROOT/outside/bin:$PATH" \
+make_inputs "$CASE_ROOT/inside"
+inside="$(mktemp -d "$REPO_ROOT/target/governed-archive-inside.XXXXXX")"
+trap 'rm -rf "$CASE_ROOT" "$inside"' EXIT
+expect_failure inside_repo env PATH="$CASE_ROOT/inside/bin:$PATH" \
   bash "$SCRIPT_DIR/build-governed-evidence-bundle.sh" \
-  --source-dir "$CASE_ROOT/outside/source" --e3-source-dir "$CASE_ROOT/outside/e3" \
-  --out "$outside/tp002-release" --revision "$REVISION"
+  --source-dir "$CASE_ROOT/inside/source" --e3-source-dir "$CASE_ROOT/inside/e3" \
+  --out "$inside/tp002-release" --revision "$REVISION"
 
 make_inputs "$CASE_ROOT/stale-archive"
 touch "$CASE_ROOT/stale-archive/$REVISION.tar.gz"

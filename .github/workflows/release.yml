@@ -160,6 +160,7 @@ jobs:
             --bin fireweed-verify-evidence-attestation -- \
             --manifest target/tp002-release/attestation.json \
             --repo-root . \
+            --evidence-root target/tp002-release \
             --tag "${{ steps.release.outputs.tag }}" \
             --commit "${GITHUB_SHA}"
 

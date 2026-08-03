@@ -4520,14 +4520,14 @@ mod class_b_memory_log_tests {
 /// | **T0 Construct** | composition-root arms + open via product adapters |
 /// | **T1 Lifecycle** | create_queue → push → claim → finalize |
 /// | **T2 Reopen** | Class A: pending survives process-local drop+reopen via durable log |
-/// | **T3 Contract** | TP-003 AC-TXN-1/2/3 for exact pairs → `docs/perf/evidence/tp003-ac-txn-matrix-sqlite-storage-pairs.jsonl` |
+/// | **T3 Contract** | TP-003 AC-TXN-1/2/3 for exact pairs → explicit run-owned JSONL |
 /// | **T4 Deploy** | Helm CI values under `charts/fireweed-queue/ci/sqlite-*-values.yaml` (+ helm-gate) |
 #[cfg(test)]
 mod sqlite_log_matrix_tests {
     use super::*;
     use fireweed_conformance::fault::{
         AcEvidence, TxnCaps, ac_txn_1_success_durable_visible, ac_txn_2_rejection_no_effect,
-        ac_txn_3_unknown_outcome_replay, write_evidence,
+        ac_txn_3_unknown_outcome_replay, render_evidence,
     };
     use fireweed_conformance::{claim_req, qdef, shard, ts};
     use fireweed_engine::{
@@ -4557,6 +4557,21 @@ mod sqlite_log_matrix_tests {
 
     fn cleanup_root(root: &Path) {
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn evidence_output(base: &Path, variable: &str, filename: &str) -> fireweed_release::RunOwned {
+        let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("resolve repository root");
+        let requested = std::env::var_os(variable)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| base.join(filename));
+        let run_root = requested
+            .parent()
+            .expect("TP-003 output requires a parent directory");
+        fireweed_release::RunOwned::new(repository_root, run_root, &requested)
+            .expect("authorize run-owned TP-003 output")
     }
 
     /// T0: composition root wires all three sqlite-log × projection cells.
@@ -5084,36 +5099,34 @@ mod sqlite_log_matrix_tests {
             );
         } else {
             eprintln!(
-                "sqlite_log T3 sqlite×postgres SKIPPED (FIREWEED_PG_TEST_URL unset); \
-                 AC-TXN-1/2/3 still recorded for sqlite×memory and sqlite×sqlite"
+                "sqlite_log T3 ordinary route did not receive a PostgreSQL fixture; \
+                 AC-TXN-1/2/3 executed for sqlite×memory and sqlite×sqlite"
             );
-            records.push(AcEvidence {
-                ac: "AC-TXN-1",
-                backend: "sqlite×postgres".into(),
-                result: "n/a",
-                detail: "FIREWEED_PG_TEST_URL unset in this process; cell remains registered. \
-                         Re-run with a live DB to refresh pass evidence."
-                    .into(),
-                assertions: vec![],
-            });
+            assert!(
+                std::env::var_os("FIREWEED_TP003_SQLITE_EVIDENCE_OUT").is_none(),
+                "governed sqlite TP-003 evidence requires FIREWEED_PG_TEST_URL"
+            );
         }
 
         #[cfg(not(feature = "postgres"))]
         {
-            records.push(AcEvidence {
-                ac: "AC-TXN-1",
-                backend: "sqlite×postgres".into(),
-                result: "n/a",
-                detail: "build without --features postgres; cell remains registered".into(),
-                assertions: vec![],
-            });
+            assert!(
+                std::env::var_os("FIREWEED_TP003_SQLITE_EVIDENCE_OUT").is_none(),
+                "governed sqlite TP-003 evidence requires the postgres feature"
+            );
         }
 
-        let path = write_evidence("tp003-ac-txn-matrix-sqlite-storage-pairs.jsonl", &records)
-            .expect("write sqlite storage-pair TP-003 evidence");
+        let output = evidence_output(
+            &base,
+            "FIREWEED_TP003_SQLITE_EVIDENCE_OUT",
+            "tp003-ac-txn-matrix-sqlite-storage-pairs.jsonl",
+        );
+        output
+            .write(render_evidence(&records))
+            .expect("write run-owned sqlite storage-pair TP-003 evidence");
         eprintln!(
             "sqlite_log T3 TP-003 evidence written to {} ({} rows)",
-            path.display(),
+            output.path().display(),
             records.len()
         );
         cleanup_root(&base);
@@ -5124,55 +5137,21 @@ mod sqlite_log_matrix_tests {
         );
     }
 
-    /// T3 linkage: evidence file uses axis names (`sqlite×…`) under docs/perf/evidence.
+    /// T3 linkage: the immutable test fixture uses exact sqlite axis names. Live evidence is produced
+    /// separately into a run-owned output by `sqlite_log_t3_tp003_ac_txn_exact_pairs`.
     #[test]
     fn sqlite_log_t3_evidence_axis_names_file_contract() {
-        // Prefer the just-written evidence path (write_evidence resolves via fireweed-conformance
-        // manifest). Also accept a workspace-relative path for source-tree checks.
-        let via_conformance = fireweed_conformance::fault::evidence_dir()
-            .join("tp003-ac-txn-matrix-sqlite-storage-pairs.jsonl");
-        let via_server = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../docs/perf/evidence/tp003-ac-txn-matrix-sqlite-storage-pairs.jsonl");
-        let path = if via_conformance.is_file() {
-            via_conformance
-        } else {
-            via_server
-        };
-
-        // If the full AC-TXN matrix has not run yet in this workspace, the file may be absent —
-        // create a pointer document that links legacy `sqlite_log` evidence to axis names so
-        // the cell registry is complete before the first full T3 run.
-        if !path.is_file() {
-            let dir = path.parent().unwrap();
-            std::fs::create_dir_all(dir).ok();
-            let legacy = dir.join("tp003-ac-txn-matrix.jsonl");
-            let mut lines = Vec::new();
-            if legacy.is_file() {
-                for line in std::fs::read_to_string(&legacy).unwrap().lines() {
-                    if line.contains("\"backend\":\"sqlite_log\"") {
-                        lines.push(line.replace(
-                            "\"backend\":\"sqlite_log\"",
-                            "\"backend\":\"sqlite×memory\"",
-                        ));
-                    }
-                }
-            }
-            if lines.is_empty() {
-                lines.push(
-                    r#"{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"sqlite×memory","result":"pass","detail":"alias of legacy backend=sqlite_log (composed_sqlite_backend); see tp003-ac-txn-matrix.jsonl","assertions":["linked from existing sqlite_log AC-TXN-1"],"recorded_at":"epoch:0"}"#.into(),
-                );
-            }
-            // Register remaining cells as linked/pending until exact-pair T3 test refreshes them.
-            lines.push(
-                r#"{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"sqlite×sqlite","result":"n/a","detail":"refresh via cargo test -p fireweed-server --lib sqlite_log_t3_tp003","assertions":[],"recorded_at":"epoch:0"}"#.into(),
-            );
-            lines.push(
-                r#"{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"sqlite×postgres","result":"n/a","detail":"refresh via cargo test -p fireweed-server --features postgres --lib sqlite_log_t3_tp003 with FIREWEED_PG_TEST_URL","assertions":[],"recorded_at":"epoch:0"}"#.into(),
-            );
-            std::fs::write(&path, format!("{}\n", lines.join("\n"))).expect("seed evidence");
-        }
-
-        let body = std::fs::read_to_string(&path).expect("read sqlite pair evidence");
+        let fixture = fireweed_release::Fixture::new(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/tp003-sqlite-axis.jsonl"),
+        )
+        .expect("open immutable sqlite axis fixture");
+        let body = std::fs::read_to_string(
+            fixture
+                .authorize(fireweed_release::EvidenceOperation::Read)
+                .expect("fixture authorizes reads"),
+        )
+        .expect("read sqlite axis fixture");
         assert!(
             body.contains("sqlite×memory") || body.contains("sqlite\\u00d7memory"),
             "evidence must name sqlite×memory axis"
@@ -5185,15 +5164,6 @@ mod sqlite_log_matrix_tests {
             body.contains("sqlite×postgres") || body.contains("sqlite\\u00d7postgres"),
             "evidence must name sqlite×postgres axis"
         );
-        // Legacy name still present in the main matrix for the memory-projection composition.
-        let legacy = fireweed_conformance::fault::evidence_dir().join("tp003-ac-txn-matrix.jsonl");
-        if legacy.is_file() {
-            let legacy_body = std::fs::read_to_string(&legacy).unwrap();
-            assert!(
-                legacy_body.contains("\"backend\":\"sqlite_log\""),
-                "legacy tp003-ac-txn-matrix.jsonl must retain sqlite_log rows (sqlite×memory composition)"
-            );
-        }
     }
 
     /// T4: chart-installable sqlite-log cells have CI values files and helm-gate registration.
@@ -5290,12 +5260,12 @@ mod sqlite_log_matrix_tests {
 /// | **T0 Construct** | composition-root arms + open via product adapters |
 /// | **T1 Lifecycle** | create_queue → push → claim → finalize |
 /// | **T2 Reopen** | Class A: pending survives process-local drop+reopen via durable log |
-/// | **T3 Contract** | TP-003 AC-TXN-1/2/3 for exact pairs → `docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl` |
+/// | **T3 Contract** | TP-003 AC-TXN-1/2/3 for exact pairs → explicit run-owned JSONL |
 /// | **T4 Deploy** | Helm CI values under `charts/fireweed-queue/ci/postgres-*-values.yaml` (+ helm-gate) |
 ///
-/// Live fixtures: every cell needs `FIREWEED_PG_TEST_URL` (and `--features postgres`). When the URL
-/// is unset the cell remains registered — tests skip with `eprintln!` and T3 writes/keeps axis-named
-/// evidence rows (n/a only when no prior pass evidence exists).
+/// Live fixtures: every cell needs `FIREWEED_PG_TEST_URL` (and `--features postgres`). An explicit
+/// governed evidence output fails closed without that URL; the ordinary route asserts the missing-input
+/// boundary and the immutable axis fixture keeps name-contract coverage deterministic.
 #[cfg(test)]
 mod postgres_log_matrix_tests {
     // Helpers and AC-TXN imports are only exercised under `--features postgres`.
@@ -5306,7 +5276,7 @@ mod postgres_log_matrix_tests {
     use super::*;
     use fireweed_conformance::fault::{
         AcEvidence, TxnCaps, ac_txn_1_success_durable_visible, ac_txn_2_rejection_no_effect,
-        ac_txn_3_unknown_outcome_replay, write_evidence,
+        ac_txn_3_unknown_outcome_replay, render_evidence,
     };
     use fireweed_conformance::{claim_req, qdef, shard, ts};
     use fireweed_engine::{
@@ -5330,6 +5300,21 @@ mod postgres_log_matrix_tests {
 
     fn cleanup_root(root: &Path) {
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn evidence_output(base: &Path, variable: &str, filename: &str) -> fireweed_release::RunOwned {
+        let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("resolve repository root");
+        let requested = std::env::var_os(variable)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| base.join(filename));
+        let run_root = requested
+            .parent()
+            .expect("TP-003 output requires a parent directory");
+        fireweed_release::RunOwned::new(repository_root, run_root, &requested)
+            .expect("authorize run-owned TP-003 output")
     }
 
     fn pg_url() -> Option<String> {
@@ -5679,11 +5664,10 @@ mod postgres_log_matrix_tests {
         let base = fixture_root("t3");
 
         let Some(url) = pg_url() else {
-            eprintln!(
-                "postgres_log T3 SKIPPED (FIREWEED_PG_TEST_URL unset); cells remain registered. \
-                 Axis-named evidence file is preserved/seeded by postgres_log_t3_evidence_axis_names_file_contract"
+            assert!(
+                std::env::var_os("FIREWEED_TP003_POSTGRES_EVIDENCE_OUT").is_none(),
+                "governed postgres TP-003 evidence requires FIREWEED_PG_TEST_URL"
             );
-            // Do not overwrite existing pass evidence with n/a when the live DB is absent.
             cleanup_root(&base);
             return;
         };
@@ -5933,11 +5917,17 @@ mod postgres_log_matrix_tests {
             );
         }
 
-        let path = write_evidence("tp003-ac-txn-matrix-postgres-storage-pairs.jsonl", &records)
-            .expect("write postgres storage-pair TP-003 evidence");
+        let output = evidence_output(
+            &base,
+            "FIREWEED_TP003_POSTGRES_EVIDENCE_OUT",
+            "tp003-ac-txn-matrix-postgres-storage-pairs.jsonl",
+        );
+        output
+            .write(render_evidence(&records))
+            .expect("write run-owned postgres storage-pair TP-003 evidence");
         eprintln!(
             "postgres_log T3 TP-003 evidence written to {} ({} rows)",
-            path.display(),
+            output.path().display(),
             records.len()
         );
         cleanup_root(&base);
@@ -5948,31 +5938,21 @@ mod postgres_log_matrix_tests {
         );
     }
 
-    /// T3 linkage: evidence file uses axis names (`postgres×…`) under docs/perf/evidence.
+    /// T3 linkage: the immutable test fixture uses exact postgres axis names. Live evidence is produced
+    /// separately into a run-owned output by `postgres_log_t3_tp003_ac_txn_exact_pairs`.
     #[test]
     fn postgres_log_t3_evidence_axis_names_file_contract() {
-        let via_conformance = fireweed_conformance::fault::evidence_dir()
-            .join("tp003-ac-txn-matrix-postgres-storage-pairs.jsonl");
-        let via_server = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl");
-        let path = if via_conformance.is_file() {
-            via_conformance
-        } else {
-            via_server
-        };
-
-        if !path.is_file() {
-            let dir = path.parent().unwrap();
-            std::fs::create_dir_all(dir).ok();
-            let lines = [
-                r#"{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"postgres×memory","result":"n/a","detail":"refresh via cargo test -p fireweed-server --features postgres --lib postgres_log_t3_tp003 with FIREWEED_PG_TEST_URL; also see tp003-ac-txn-matrix-postgres.jsonl","assertions":[],"recorded_at":"epoch:0"}"#,
-                r#"{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"postgres×sqlite","result":"n/a","detail":"refresh via cargo test -p fireweed-server --features postgres --lib postgres_log_t3_tp003 with FIREWEED_PG_TEST_URL","assertions":[],"recorded_at":"epoch:0"}"#,
-                r#"{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"postgres×postgres","result":"n/a","detail":"refresh via cargo test -p fireweed-server --features postgres --lib postgres_log_t3_tp003 with FIREWEED_PG_TEST_URL","assertions":[],"recorded_at":"epoch:0"}"#,
-            ];
-            std::fs::write(&path, format!("{}\n", lines.join("\n"))).expect("seed evidence");
-        }
-
-        let body = std::fs::read_to_string(&path).expect("read postgres pair evidence");
+        let fixture = fireweed_release::Fixture::new(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/tp003-postgres-axis.jsonl"),
+        )
+        .expect("open immutable postgres axis fixture");
+        let body = std::fs::read_to_string(
+            fixture
+                .authorize(fireweed_release::EvidenceOperation::Read)
+                .expect("fixture authorizes reads"),
+        )
+        .expect("read postgres axis fixture");
         // Accept either the axis multiplication sign or unicode-escaped form.
         for axis in ["postgres×memory", "postgres×sqlite", "postgres×postgres"] {
             let escaped = axis.replace('×', "\\u00d7");
@@ -5982,19 +5962,6 @@ mod postgres_log_matrix_tests {
                     || body.contains(&axis.replace('×', "/")),
                 "evidence must name axis {axis} (or slash alias); body head: {}",
                 body.chars().take(200).collect::<String>()
-            );
-        }
-
-        // Memory composition also appears in the legacy composed-postgres evidence file.
-        let legacy =
-            fireweed_conformance::fault::evidence_dir().join("tp003-ac-txn-matrix-postgres.jsonl");
-        if legacy.is_file() {
-            let legacy_body = std::fs::read_to_string(&legacy).unwrap();
-            assert!(
-                legacy_body.contains("postgres×memory")
-                    || legacy_body.contains("postgres\\u00d7memory")
-                    || legacy_body.contains("\"backend\":\"postgres\""),
-                "legacy tp003-ac-txn-matrix-postgres.jsonl must name postgres×memory (or legacy backend=postgres)"
             );
         }
     }

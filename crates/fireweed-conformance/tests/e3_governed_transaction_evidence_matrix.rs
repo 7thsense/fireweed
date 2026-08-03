@@ -1,8 +1,8 @@
 //! Governed E3 producer: 2 profiles × 4 bounds × 6 ACs = 48 revision/run-bound TP-003 rows.
 //!
-//! Opt-in via `FIREWEED_E3_TRANSACTION_EVIDENCE_OUT`. Used by `scripts/perf/tp002-e3-s3.sh`
-//! (pqueue-802be88f). Without the output path the test is a no-op so it never fabricates
-//! release evidence by accident.
+//! Invoked with an explicit run-owned `FIREWEED_E3_TRANSACTION_EVIDENCE_OUT` by
+//! `scripts/perf/tp002-e3-s3.sh` (pqueue-802be88f). An ordinary test invocation proves the
+//! governed input is absent instead of fabricating release evidence.
 //!
 //! LogEngine product factories (post FWSG cutover). Native-create-only is the only E3
 //! authority mode — no-CAS fallback is excluded by the release profile (AC-2).
@@ -215,15 +215,7 @@ async fn e3_ac_txn_7_cell(profile: &str, bound_ms: u64) -> AcOutcome {
     Ok(asserts)
 }
 
-/// Governed E3 producer entrypoint (scripts/perf/tp002-e3-s3.sh).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn e3_governed_transaction_evidence_matrix() {
-    let Ok(output) = std::env::var("FIREWEED_E3_TRANSACTION_EVIDENCE_OUT") else {
-        eprintln!(
-            "E3 transaction evidence skipped — set FIREWEED_E3_TRANSACTION_EVIDENCE_OUT for release emission"
-        );
-        return;
-    };
+async fn produce_governed_transaction_evidence(output: String) {
     let revision = std::env::var("FIREWEED_E3_SOURCE_REVISION")
         .expect("E3 transaction evidence requires FIREWEED_E3_SOURCE_REVISION");
     let recorded_at = std::env::var("FIREWEED_E3_RECORDED_AT")
@@ -353,11 +345,53 @@ async fn e3_governed_transaction_evidence_matrix() {
         .collect::<Vec<_>>()
         .join("\n")
         + "\n";
-    std::fs::write(&output, body).expect("write governed E3 transaction evidence");
+    let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("resolve repository root");
+    let output_path = PathBuf::from(&output);
+    let run_root = output_path
+        .parent()
+        .expect("E3 transaction evidence output requires a parent directory");
+    let output = fireweed_release::RunOwned::new(&repository_root, run_root, &output_path)
+        .expect("authorize run-owned E3 transaction evidence output");
+    output
+        .write(body)
+        .expect("write governed E3 transaction evidence");
     eprintln!(
-        "E3 governed transaction evidence: {} rows -> {output}",
-        rows.len()
+        "E3 governed transaction evidence: {} rows -> {}",
+        rows.len(),
+        output.path().display()
     );
+}
+
+/// Governed E3 producer entrypoint (`scripts/perf/tp002-e3-s3.sh`).
+///
+/// In the ordinary workspace route, all governed inputs must be absent and that missing-input
+/// contract is asserted. If any governed input is forwarded, the complete input set is required and
+/// the producer executes; a partially forwarded invocation therefore fails closed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e3_governed_transaction_evidence_matrix() {
+    match std::env::var("FIREWEED_E3_TRANSACTION_EVIDENCE_OUT") {
+        Ok(output) => produce_governed_transaction_evidence(output).await,
+        Err(error) => {
+            assert!(
+                matches!(error, std::env::VarError::NotPresent),
+                "E3 transaction output must be valid Unicode"
+            );
+            for variable in [
+                "FIREWEED_E3_SOURCE_REVISION",
+                "FIREWEED_E3_RECORDED_AT",
+                "FIREWEED_E3_RUN_ID",
+                "FIREWEED_E3_COMPOSITION_FINGERPRINT",
+            ] {
+                assert!(
+                    std::env::var_os(variable).is_none(),
+                    "partial governed E3 invocation: {variable} is set without FIREWEED_E3_TRANSACTION_EVIDENCE_OUT"
+                );
+            }
+        }
+    }
 }
 
 /// Offline smoke: open LogEngine memory product and run push/claim (no durable reopen).
@@ -394,7 +428,5 @@ async fn e3_objectlog_memory_product_open_push_claim_smoke() {
     assert!(m.leased + m.pending >= 1, "reopen recovers work");
 }
 
-// Full AC-TXN-1..7 matrix emission is env-gated (`e3_governed_transaction_evidence_matrix`).
-// Local durable reopen under concurrent cargo test workers has hit intermittent LogEngine
-// "byte range out of bounds" on open; the product open/push/claim smoke above is the always-on
-// gate. Release producers set FIREWEED_E3_TRANSACTION_EVIDENCE_OUT for the 48-row emit.
+// Full AC-TXN-1..7 matrix emission requires the governed inputs consumed by
+// `e3_governed_transaction_evidence_matrix`; the ordinary workspace route proves their absence.

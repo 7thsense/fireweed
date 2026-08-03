@@ -2306,11 +2306,12 @@ fn emit(tag: &str, row: fireweed_release::LedgerRow) {
         "single-deployment evidence must carry exactly its governed identity"
     );
     let suite = format!("performance_single_deployment_baseline_tests_{tag}");
-    let path = fireweed_release::ledger_path(env!("CARGO_MANIFEST_DIR"), &suite);
-    let _ = std::fs::remove_file(&path);
+    let path = fireweed_release::ledger_path(env!("CARGO_MANIFEST_DIR"), &suite)
+        .expect("create run-owned single-deployment ledger path");
+    path.delete().expect("clear run-owned baseline ledger");
     fireweed_release::append_row(&path, &row).expect("emit ledger row");
     let summary =
-        fireweed_release::verify_ledger(&path, true).expect("emitted row validates strict");
+        fireweed_release::verify_ledger(path.path(), true).expect("emitted row validates strict");
     // Release-tier ids count as headline evidence; smoke-tier ids are tracked separately.
     let seen = if row.evidence_tier == "smoke" {
         summary.smoke_evidence_ids.contains(expected_id)

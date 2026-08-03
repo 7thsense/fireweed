@@ -13,7 +13,8 @@
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Write};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +25,9 @@ pub mod evidence_io;
 pub mod source_boundary;
 pub mod transaction;
 
-pub use evidence_io::{EvidenceIoError, EvidenceOperation, Fixture, Promoted, RunOwned};
+pub use evidence_io::{
+    EvidenceIoError, EvidenceOperation, Fixture, Promoted, ReadableEvidence, RunOwned,
+};
 pub use source_boundary::{SourceBoundary, SourceBoundaryError, SourceInput, SourceInputKind};
 
 /// Portable TP-002 E0/E1 evidence validation. Wall-clock rates and latency
@@ -688,35 +691,45 @@ impl LedgerRow {
 }
 
 /// The ledger file an evidence suite writes its row to: `<dir>/<suite>.jsonl`, where `<dir>` is
-/// `$FIREWEED_LEDGER_DIR` if set, else
-/// `<repo>/target/fireweed-ledger` derived from the caller's `manifest_dir` (pass `env!("CARGO_MANIFEST_DIR")`
-/// so this resolves to the repo-root `target/` regardless of which workspace the suite runs in).
+/// `$FIREWEED_LEDGER_DIR` if set, else a process-unique directory below the system temporary root. The
+/// returned [`RunOwned`] rejects repository-owned and tracked-evidence targets before any write occurs.
 ///
 /// NOTE: this ledger-directory read is the ONE intentional library `std::env` access in the workspace. It
 /// is CI / test-evidence tooling (where validation suites drop their JSONL ledger rows), NOT server runtime
 /// configuration — so it is exempt from the "no env reads in library runtime code" rule. The runtime
 /// `Config` populator (`fireweed_server::Config::from_env`) is the only env→config path for the server itself.
-pub fn ledger_path(manifest_dir: &str, suite: &str) -> std::path::PathBuf {
+pub fn ledger_path(manifest_dir: &str, suite: &str) -> Result<RunOwned, EvidenceIoError> {
+    static NEXT_LEDGER: AtomicU64 = AtomicU64::new(0);
+
+    let repository_root = Path::new(manifest_dir).join("../..").canonicalize()?;
     let dir = match std::env::var("FIREWEED_LEDGER_DIR") {
-        Ok(d) if !d.trim().is_empty() => {
-            let path = std::path::PathBuf::from(d);
+        Ok(value) if !value.trim().is_empty() => {
+            let path = PathBuf::from(value);
             if path.is_absolute() {
                 path
             } else {
-                Path::new(manifest_dir).join("../..").join(path)
+                repository_root.join(path)
             }
         }
-        // `..` resolves at IO time; crates/<x>/../../target == repo-root target.
-        _ => Path::new(manifest_dir).join("../../target/fireweed-ledger"),
+        _ => {
+            let serial = NEXT_LEDGER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("fireweed-ledger-{}-{serial}", std::process::id()));
+            fs::create_dir_all(&path)?;
+            path
+        }
     };
-    dir.join(format!("{suite}.jsonl"))
+    RunOwned::new(&repository_root, &dir, format!("{suite}.jsonl"))
 }
 
 /// Append one row to the ledger at `path`, creating the file (and parent dirs) if needed. The whole line —
 /// JSON body AND trailing newline — is written in a SINGLE `write_all`, so under the OS append flag
 /// concurrent appenders stay line-atomic for lines below the platform atomic-append size (PIPE_BUF). (A
 /// `writeln!` would emit the body and `"\n"` as two separate writes, which O_APPEND could interleave.)
-pub fn append_row(path: &Path, row: &LedgerRow) -> io::Result<()> {
+pub fn append_row(path: &RunOwned, row: &LedgerRow) -> io::Result<()> {
+    let path = path
+        .authorize(EvidenceOperation::Write)
+        .map_err(io::Error::other)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -5001,6 +5014,23 @@ pub mod cost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static LEDGER_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn run_owned_temp(label: &str) -> RunOwned {
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let run_root = std::env::temp_dir().join(format!(
+            "fireweed-release-lib-{label}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&run_root);
+        fs::create_dir_all(&run_root).unwrap();
+        RunOwned::new(repository_root, &run_root, format!("{label}.jsonl")).unwrap()
+    }
 
     fn row(suite: &str, exit: i32, evidence: &[&str]) -> LedgerRow {
         LedgerRow {
@@ -5024,16 +5054,14 @@ mod tests {
 
     #[test]
     fn smoke_tier_evidence_does_not_count_toward_the_headline() {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("fireweed-tier-{}.jsonl", std::process::id()));
-        let _ = fs::remove_file(&path);
+        let path = run_owned_temp("tier");
         // A release E2 row and a SMOKE E3 row.
         append_row(&path, &row("release_e2", 0, &["E2"])).unwrap();
         let mut smoke = row("smoke_e3", 0, &["E3"]);
         smoke.evidence_tier = "smoke".into();
         append_row(&path, &smoke).unwrap();
 
-        let s = verify_ledger(&path, true).unwrap();
+        let s = verify_ledger(path.path(), true).unwrap();
         // Only the release E2 counts as headline evidence; the smoke E3 is tracked separately.
         assert!(s.evidence_ids.contains("E2") && !s.evidence_ids.contains("E3"));
         assert!(s.smoke_evidence_ids.contains("E3"));
@@ -5046,7 +5074,7 @@ mod tests {
         let legacy = r#"{"suite":"s","command":"c","backend_profile":"memory","scale":"release","seed":1,"environment":"ci","exit_status":0,"pass_bar":"p","measurements":{"tp002_evidence_ids":["E0"]}}"#;
         let parsed: LedgerRow = serde_json::from_str(legacy).unwrap();
         assert_eq!(parsed.evidence_tier, "release");
-        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(path.run_root());
     }
 
     #[test]
@@ -5082,23 +5110,45 @@ mod tests {
     }
 
     #[test]
-    fn ledger_path_honors_env_override_and_default() {
-        // SAFETY: single-threaded test; we set then clear the override around the assertions.
-        unsafe { std::env::set_var("FIREWEED_LEDGER_DIR", "/tmp/fireweed-ledger") };
-        assert_eq!(
-            ledger_path("/repo/crates/x", "suite_a"),
-            std::path::PathBuf::from("/tmp/fireweed-ledger/suite_a.jsonl")
-        );
+    fn ledger_path_is_run_owned_and_rejects_tracked_evidence() {
+        let _environment_guard = LEDGER_ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("FIREWEED_LEDGER_DIR");
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let external =
+            std::env::temp_dir().join(format!("fireweed-ledger-override-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&external);
+        fs::create_dir_all(&external).unwrap();
+
+        // SAFETY: this module serializes access to the process environment variable.
+        unsafe { std::env::set_var("FIREWEED_LEDGER_DIR", &external) };
+        let explicit = ledger_path(manifest_dir, "suite_a").unwrap();
+        assert_eq!(explicit.path(), external.join("suite_a.jsonl"));
+
         unsafe { std::env::set_var("FIREWEED_LEDGER_DIR", "docs/perf/evidence") };
-        assert_eq!(
-            ledger_path("/repo/crates/x", "suite_a"),
-            std::path::PathBuf::from("/repo/crates/x/../../docs/perf/evidence/suite_a.jsonl")
-        );
+        assert!(matches!(
+            ledger_path(manifest_dir, "suite_a"),
+            Err(EvidenceIoError::TrackedEvidence(_))
+        ));
+
         unsafe { std::env::remove_var("FIREWEED_LEDGER_DIR") };
-        assert_eq!(
-            ledger_path("/repo/crates/x", "suite_a"),
-            std::path::PathBuf::from("/repo/crates/x/../../target/fireweed-ledger/suite_a.jsonl")
+        let default = ledger_path(manifest_dir, "suite_a").unwrap();
+        assert!(default.path().starts_with(std::env::temp_dir()));
+        assert!(
+            !default.path().starts_with(
+                Path::new(manifest_dir)
+                    .join("../..")
+                    .canonicalize()
+                    .unwrap()
+            )
         );
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("FIREWEED_LEDGER_DIR", value) },
+            None => unsafe { std::env::remove_var("FIREWEED_LEDGER_DIR") },
+        }
+
+        let _ = fs::remove_dir_all(external);
+        let _ = fs::remove_dir_all(default.run_root());
     }
 
     #[test]

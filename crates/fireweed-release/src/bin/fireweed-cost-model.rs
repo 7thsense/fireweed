@@ -7,34 +7,37 @@
 //! prices, sensitivity/crossover table) and appends the E3 **cost-model** ledger row.
 //!
 //! Usage:
-//!   fireweed-cost-model [--out <doc.md>] [--ledger <ledger.jsonl>] [--print] [--granularity-only]
+//!   fireweed-cost-model --out <run-dir/doc.md> [--ledger <run-dir/ledger.jsonl>]
+//!     [--e3-ledger <promoted-ledger.jsonl>] [--print] [--granularity-only]
 //!
-//! Defaults: `--out docs/perf/tp002-e3-cost-model.md` and consumes the governed live E3 ledger. With
-//! `--ledger` it writes the eight release-tier E3 cost rows.
+//! Output paths are mandatory run-owned artifacts. Full-model mode also requires an explicit promoted
+//! E3 ledger; repository history is never a live input. With `--ledger` it writes the eight release-tier
+//! E3 cost rows.
 //! The model is a deterministic calculation, so the doc + row regenerate identically. Reproducible command:
 //!   cargo run -p fireweed-release --bin fireweed-cost-model -- \
-//!     --out docs/perf/tp002-e3-cost-model.md --ledger docs/perf/evidence/tp002-e3-cost-model.jsonl
+//!     --e3-ledger <promoted-ledger.jsonl> --out <run-dir/cost-model.md> \
+//!     --ledger <run-dir/cost-model.jsonl>
 
 use std::fmt::Write as _;
 use std::io::{BufRead, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use fireweed_release::LedgerRow;
 use fireweed_release::cost::{
     CostComparison, GranularityAssumptions, ObjectLogCounts, PriceInputs, RecoveryMode,
     ReleaseCostInput, WorkloadAssumptions, build_release_cost_rows, compute_comparison,
     estimate_granularity, release_cost_inputs, validate_release_cost_rows,
 };
+use fireweed_release::{EvidenceOperation, LedgerRow, Promoted, RunOwned};
 
 const REPRO_COMMAND: &str = "cargo run -p fireweed-release --bin fireweed-cost-model -- \
-    --e3-ledger docs/perf/evidence/tp002-e3-objectlog-s3-release.jsonl \
-    --out docs/perf/tp002-e3-cost-model.md --ledger docs/perf/evidence/tp002-e3-cost-model.jsonl";
+    --e3-ledger <promoted-ledger.jsonl> --out <run-dir/cost-model.md> \
+    --ledger <run-dir/cost-model.jsonl>";
 
 fn main() -> ExitCode {
-    let mut out = PathBuf::from("docs/perf/tp002-e3-cost-model.md");
+    let mut out: Option<PathBuf> = None;
     let mut ledger: Option<PathBuf> = None;
-    let mut e3_ledger = PathBuf::from("docs/perf/evidence/tp002-e3-objectlog-s3-release.jsonl");
+    let mut e3_ledger: Option<PathBuf> = None;
     let mut print = false;
     let mut granularity_only = false;
 
@@ -42,7 +45,7 @@ fn main() -> ExitCode {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--out" => match args.next() {
-                Some(p) => out = PathBuf::from(p),
+                Some(p) => out = Some(PathBuf::from(p)),
                 None => return fail("--out requires a path"),
             },
             "--ledger" => match args.next() {
@@ -50,7 +53,7 @@ fn main() -> ExitCode {
                 None => return fail("--ledger requires a path"),
             },
             "--e3-ledger" => match args.next() {
-                Some(p) => e3_ledger = PathBuf::from(p),
+                Some(p) => e3_ledger = Some(PathBuf::from(p)),
                 None => return fail("--e3-ledger requires a path"),
             },
             "--print" => print = true,
@@ -58,6 +61,22 @@ fn main() -> ExitCode {
             other => return fail(&format!("unknown argument: {other}")),
         }
     }
+
+    let Some(out) = out else {
+        return fail("--out is required and must name a run-owned path");
+    };
+    let out = match run_owned_output(&out) {
+        Ok(out) => out,
+        Err(error) => return fail(&format!("invalid --out: {error}")),
+    };
+    let ledger = match ledger
+        .as_ref()
+        .map(|path| run_owned_output(path))
+        .transpose()
+    {
+        Ok(ledger) => ledger,
+        Err(error) => return fail(&format!("invalid --ledger: {error}")),
+    };
 
     let prices = PriceInputs::adr_001_us_east_1();
     if granularity_only {
@@ -69,14 +88,21 @@ fn main() -> ExitCode {
             println!("{doc}");
         }
         if let Err(error) = atomic_write(&out, doc.as_bytes()) {
-            return fail(&format!("cannot write {out:?}: {error}"));
+            return fail(&format!("cannot write {:?}: {error}", out.path()));
         }
         eprintln!(
             "wrote object-granularity economics artifact: {}",
-            out.display()
+            out.path().display()
         );
         return ExitCode::SUCCESS;
     }
+    let Some(e3_ledger) = e3_ledger else {
+        return fail("--e3-ledger is required outside --granularity-only mode");
+    };
+    let e3_ledger = match promoted_external_input(&e3_ledger) {
+        Ok(input) => input,
+        Err(error) => return fail(&format!("invalid --e3-ledger: {error}")),
+    };
     let workload = WorkloadAssumptions::tp002_e3_push_baseline();
     let source_rows = match read_rows(&e3_ledger) {
         Ok(rows) => rows,
@@ -129,16 +155,16 @@ fn main() -> ExitCode {
     if let Err(e) = atomic_write(&out, doc.as_bytes()) {
         return fail(&format!("cannot write {out:?}: {e}"));
     }
-    eprintln!("wrote cost-model artifact: {}", out.display());
+    eprintln!("wrote cost-model artifact: {}", out.path().display());
 
     if let Some(path) = ledger {
         if let Err(e) = atomic_write(&path, ledger_json.as_bytes()) {
-            return fail(&format!("cannot write ledger {path:?}: {e}"));
+            return fail(&format!("cannot write ledger {:?}: {e}", path.path()));
         }
         eprintln!(
             "wrote {} E3 cost-model rows (release-tier): {}",
             rows.len(),
-            path.display()
+            path.path().display()
         );
     }
 
@@ -166,7 +192,35 @@ fn serialize_rows(rows: &[LedgerRow]) -> Result<String, String> {
     Ok(output)
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+fn repository_root() -> Result<PathBuf, String> {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve repository root: {error}"))
+}
+
+fn run_owned_output(path: &Path) -> Result<RunOwned, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "output requires an existing external parent directory".to_string())?;
+    RunOwned::new(repository_root()?, parent, path).map_err(|error| error.to_string())
+}
+
+fn promoted_external_input(path: &Path) -> Result<Promoted, String> {
+    let input = Promoted::new(path).map_err(|error| error.to_string())?;
+    if input.path().starts_with(repository_root()?) {
+        return Err(format!(
+            "promoted input must be outside the repository: {}",
+            input.path().display()
+        ));
+    }
+    Ok(input)
+}
+
+fn atomic_write(path: &RunOwned, bytes: &[u8]) -> std::io::Result<()> {
+    let path = path
+        .authorize(EvidenceOperation::Write)
+        .map_err(std::io::Error::other)?;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
     let file_name = path
@@ -196,7 +250,10 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     result
 }
 
-fn read_rows(path: &std::path::Path) -> Result<Vec<LedgerRow>, String> {
+fn read_rows(input: &Promoted) -> Result<Vec<LedgerRow>, String> {
+    let path = input
+        .authorize(EvidenceOperation::Read)
+        .map_err(|error| error.to_string())?;
     let file = std::fs::File::open(path)
         .map_err(|error| format!("cannot open E3 ledger {}: {error}", path.display()))?;
     std::io::BufReader::new(file)
@@ -819,7 +876,7 @@ fn render_artifact(
 fn fail(msg: &str) -> ExitCode {
     eprintln!("fireweed-cost-model: {msg}");
     eprintln!(
-        "usage: fireweed-cost-model [--e3-ledger <source.jsonl>] [--out <doc.md>] [--ledger <ledger.jsonl>] [--print]"
+        "usage: fireweed-cost-model --out <run-dir/doc.md> [--e3-ledger <promoted.jsonl>] [--ledger <run-dir/ledger.jsonl>] [--print] [--granularity-only]"
     );
     ExitCode::FAILURE
 }
@@ -840,9 +897,10 @@ mod tests {
         let path = dir.join("ledger.jsonl");
         std::fs::write(&path, b"old\n").unwrap();
 
+        let path = RunOwned::new(repository_root().unwrap(), &dir, &path).unwrap();
         atomic_write(&path, b"row-1\nrow-2\n").unwrap();
 
-        assert_eq!(std::fs::read(&path).unwrap(), b"row-1\nrow-2\n");
+        assert_eq!(std::fs::read(path.path()).unwrap(), b"row-1\nrow-2\n");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -858,9 +916,13 @@ mod tests {
         std::fs::create_dir_all(&destination).unwrap();
         std::fs::write(destination.join("sentinel"), b"old").unwrap();
 
+        let destination = RunOwned::new(repository_root().unwrap(), &dir, &destination).unwrap();
         assert!(atomic_write(&destination, b"new\n").is_err());
 
-        assert_eq!(std::fs::read(destination.join("sentinel")).unwrap(), b"old");
+        assert_eq!(
+            std::fs::read(destination.path().join("sentinel")).unwrap(),
+            b"old"
+        );
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
     }

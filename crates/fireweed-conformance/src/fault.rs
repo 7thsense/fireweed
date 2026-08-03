@@ -51,7 +51,6 @@
 //! capability-N/A. This split is recorded per row in the evidence JSONL rather than papered over.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use bytes::Bytes;
 use fireweed_core::{ClientItemKey, GateKeyPolicy, GroupKey, LeaseToken, PriorityValue, RequestId};
@@ -2493,7 +2492,7 @@ pub async fn ac_txn_6_parity<A: ConformanceCore + LogRead, B: ConformanceCore + 
 // Evidence JSONL
 // ---------------------------------------------------------------------------
 
-/// One evidence record for TP-003 §3.10 (`docs/perf/evidence/tp003-ac-txn-matrix.jsonl`).
+/// One run-owned evidence record for TP-003 §3.10.
 #[derive(Debug)]
 pub struct AcEvidence {
     pub ac: &'static str,
@@ -2524,49 +2523,9 @@ impl AcEvidence {
     }
 }
 
-/// Resolve `docs/perf/evidence/` at the workspace root from this crate's manifest dir.
-pub fn evidence_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/perf/evidence")
-        .canonicalize()
-        .unwrap_or_else(|_| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/perf/evidence")
-        })
-}
-
-fn recorded_at_stamp(body: &str) -> Option<&str> {
-    const PREFIX: &str = "\"recorded_at\":\"";
-    let start = body.find(PREFIX)? + PREFIX.len();
-    let rest = &body[start..];
-    let end = rest.find('"')?;
-    Some(&rest[..end])
-}
-
-/// Write the evidence file, overwriting any prior run so the JSONL reflects exactly THIS run.
-pub fn write_evidence(file_name: &str, records: &[AcEvidence]) -> std::io::Result<PathBuf> {
-    let dir = evidence_dir();
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(file_name);
-
-    // Evidence is tracked in git and the workspace gate executes this test on every run. Preserve
-    // the previous observation time when the newly observed records are byte-for-byte identical;
-    // otherwise a successful `cargo test --workspace` dirties the worktree solely because the
-    // clock advanced, which makes DDx reject an otherwise valid implementation commit.
-    if let Ok(existing) = std::fs::read_to_string(&path)
-        && let Some(stamp) = recorded_at_stamp(&existing)
-    {
-        let unchanged = records
-            .iter()
-            .map(|r| r.to_json_line(stamp))
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n";
-        if unchanged == existing {
-            return Ok(path);
-        }
-    }
-
-    // A coarse recorded_at without pulling a time crate: seconds since the epoch, ISO-ish.
+/// Render fresh run-owned evidence. Persistence is deliberately left to the caller's typed output
+/// authority so this conformance crate cannot write repository history by construction.
+pub fn render_evidence(records: &[AcEvidence]) -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -2577,24 +2536,24 @@ pub fn write_evidence(file_name: &str, records: &[AcEvidence]) -> std::io::Resul
         .map(|r| r.to_json_line(&stamp))
         .collect::<Vec<_>>()
         .join("\n");
-    std::fs::write(&path, format!("{body}\n"))?;
-    Ok(path)
+    format!("{body}\n")
 }
 
 #[cfg(test)]
 mod evidence_jsonl_tests {
-    use super::recorded_at_stamp;
+    use super::{AcEvidence, render_evidence};
 
     #[test]
-    fn extracts_recorded_at_stamp() {
-        let body = r#"{"suite":"test","recorded_at":"epoch:123"}
-"#;
-        assert_eq!(recorded_at_stamp(body), Some("epoch:123"));
-    }
-
-    #[test]
-    fn rejects_missing_or_unterminated_recorded_at_stamp() {
-        assert_eq!(recorded_at_stamp("{}\n"), None);
-        assert_eq!(recorded_at_stamp(r#"{"recorded_at":"epoch:123}"#), None);
+    fn renders_fresh_run_rows_without_epoch_zero_placeholders() {
+        let body = render_evidence(&[AcEvidence {
+            ac: "AC-TXN-1",
+            backend: "sqlite×memory".into(),
+            result: "pass",
+            detail: "observed".into(),
+            assertions: vec!["committed".into()],
+        }]);
+        assert!(body.ends_with('\n'));
+        assert!(body.contains("\"backend\":\"sqlite×memory\""));
+        assert!(!body.contains("\"recorded_at\":\"epoch:0\""));
     }
 }

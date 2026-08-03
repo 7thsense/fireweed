@@ -20,7 +20,7 @@
 //!
 //! | Cell | T0–T2 | T3 TP-003 | T4 Helm |
 //! |------|-------|-----------|---------|
-//! | `sqlite×memory` | [`sqlite_log_three_cells_t0_t2`] | `docs/perf/evidence/tp003-ac-txn-matrix-sqlite-storage-pairs.jsonl` (+ legacy `sqlite_log`) | `ci/sqlite-memory-values.yaml` |
+//! | `sqlite×memory` | [`sqlite_log_three_cells_t0_t2`] | immutable axis fixture + separate run-owned TP-003 producer | `ci/sqlite-memory-values.yaml` |
 //! | `sqlite×sqlite` | same | axis `sqlite×sqlite` in that evidence file | `ci/sqlite-sqlite-values.yaml` |
 //! | `sqlite×postgres` | same (env-gated) | env-gated live DB | `ci/sqlite-postgres-values.yaml` |
 //!
@@ -1217,14 +1217,16 @@ async fn run_s3_cell_t0_t3(cell: MatrixCell) {
 /// T3/T4 linkage for s3 log cells: axis-named evidence file and Helm CI values exist.
 #[test]
 fn s3_log_t3_t4_evidence_and_helm_values_present() {
-    let evidence = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/perf/evidence/tp003-ac-txn-matrix-s3-storage-pairs.jsonl");
-    let body = std::fs::read_to_string(&evidence).unwrap_or_else(|_| {
-        panic!(
-            "TP-003 s3 pair evidence missing at {} — see scripts/ci/s3-matrix-job-requirements.md",
-            evidence.display()
-        )
-    });
+    let fixture = fireweed_release::Fixture::new(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tp003-s3-axis.jsonl"),
+    )
+    .expect("open immutable S3 axis fixture");
+    let body = std::fs::read_to_string(
+        fixture
+            .authorize(fireweed_release::EvidenceOperation::Read)
+            .expect("fixture authorizes reads"),
+    )
+    .expect("read S3 axis fixture");
     for axis in ["s3×memory", "s3×sqlite", "s3×postgres"] {
         assert!(
             body.contains(axis),
@@ -1259,30 +1261,16 @@ fn s3_log_t3_t4_evidence_and_helm_values_present() {
 /// T3/T4 linkage for sqlite log cells: axis-named evidence file and Helm CI values exist.
 #[test]
 fn sqlite_log_t3_t4_evidence_and_helm_values_present() {
-    let evidence = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/perf/evidence/tp003-ac-txn-matrix-sqlite-storage-pairs.jsonl");
-    let legacy = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/perf/evidence/tp003-ac-txn-matrix.jsonl");
-
-    if legacy.is_file() {
-        let body = std::fs::read_to_string(&legacy).expect("read legacy TP-003");
-        assert!(
-            body.contains("\"backend\":\"sqlite_log\""),
-            "legacy TP-003 matrix must retain sqlite_log rows for sqlite×memory"
-        );
-    }
-
-    if !evidence.is_file() {
-        if let Some(parent) = evidence.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let pointer = r#"{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"sqlite×memory","result":"pass","detail":"linked from legacy backend=sqlite_log in tp003-ac-txn-matrix.jsonl; refresh via fireweed-server sqlite_log_t3_tp003_ac_txn_exact_pairs","assertions":["linked sqlite_log AC-TXN evidence"],"recorded_at":"epoch:0"}
-{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"sqlite×sqlite","result":"n/a","detail":"refresh via cargo test -p fireweed-server --lib sqlite_log_t3_tp003_ac_txn_exact_pairs","assertions":[],"recorded_at":"epoch:0"}
-{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"sqlite×postgres","result":"n/a","detail":"refresh via cargo test -p fireweed-server --features postgres --lib sqlite_log_t3 with FIREWEED_PG_TEST_URL","assertions":[],"recorded_at":"epoch:0"}
-"#;
-        std::fs::write(&evidence, pointer).expect("seed sqlite axis evidence pointer");
-    }
-    let body = std::fs::read_to_string(&evidence).expect("read sqlite pair evidence");
+    let fixture = fireweed_release::Fixture::new(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tp003-sqlite-axis.jsonl"),
+    )
+    .expect("open immutable sqlite axis fixture");
+    let body = std::fs::read_to_string(
+        fixture
+            .authorize(fireweed_release::EvidenceOperation::Read)
+            .expect("fixture authorizes reads"),
+    )
+    .expect("read sqlite axis fixture");
     for axis in ["sqlite×memory", "sqlite×sqlite", "sqlite×postgres"] {
         assert!(
             body.contains(axis),
@@ -1358,56 +1346,22 @@ async fn postgres_log_three_cells_t0_t2() {
 /// T3/T4 linkage for postgres log cells: axis-named evidence file and Helm CI values exist.
 #[test]
 fn postgres_log_t3_t4_evidence_and_helm_values_present() {
-    let evidence = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl");
-    let legacy = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/perf/evidence/tp003-ac-txn-matrix-postgres.jsonl");
-    let parity = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/perf/evidence/tp003-ac-txn-parity-postgres-storage-pairs.jsonl");
-
-    if !evidence.is_file() {
-        if let Some(parent) = evidence.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let pointer = r#"{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"postgres×memory","result":"n/a","detail":"refresh via cargo test -p fireweed-server --features postgres --lib postgres_log_t3_tp003 with FIREWEED_PG_TEST_URL","assertions":[],"recorded_at":"epoch:0"}
-{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"postgres×sqlite","result":"n/a","detail":"refresh via cargo test -p fireweed-server --features postgres --lib postgres_log_t3_tp003 with FIREWEED_PG_TEST_URL","assertions":[],"recorded_at":"epoch:0"}
-{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"postgres×postgres","result":"n/a","detail":"refresh via cargo test -p fireweed-server --features postgres --lib postgres_log_t3_tp003 with FIREWEED_PG_TEST_URL","assertions":[],"recorded_at":"epoch:0"}
-"#;
-        std::fs::write(&evidence, pointer).expect("seed postgres axis evidence pointer");
-    }
-    let body = std::fs::read_to_string(&evidence).expect("read postgres pair evidence");
+    let fixture = fireweed_release::Fixture::new(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tp003-postgres-axis.jsonl"),
+    )
+    .expect("open immutable postgres axis fixture");
+    let body = std::fs::read_to_string(
+        fixture
+            .authorize(fireweed_release::EvidenceOperation::Read)
+            .expect("fixture authorizes reads"),
+    )
+    .expect("read postgres axis fixture");
     for axis in ["postgres×memory", "postgres×sqlite", "postgres×postgres"] {
         let escaped = axis.replace('×', "\\u00d7");
         let slash = axis.replace('×', "/");
         assert!(
             body.contains(axis) || body.contains(&escaped) || body.contains(&slash),
             "TP-003 postgres pair evidence must name axis {axis}"
-        );
-    }
-
-    if legacy.is_file() {
-        let legacy_body = std::fs::read_to_string(&legacy).expect("read legacy postgres TP-003");
-        assert!(
-            legacy_body.contains("postgres×memory")
-                || legacy_body.contains("postgres\\u00d7memory")
-                || legacy_body.contains("\"backend\":\"postgres\""),
-            "legacy TP-003 postgres matrix must name postgres×memory (or legacy backend=postgres)"
-        );
-    }
-
-    if parity.is_file() {
-        let parity_body = std::fs::read_to_string(&parity).expect("read parity evidence");
-        assert!(
-            parity_body.contains("postgres×sqlite")
-                || parity_body.contains("postgres/sqlite")
-                || parity_body.contains("postgres\\u00d7sqlite"),
-            "parity evidence must cover postgres×sqlite"
-        );
-        assert!(
-            parity_body.contains("postgres×postgres")
-                || parity_body.contains("postgres/postgres")
-                || parity_body.contains("postgres\\u00d7postgres"),
-            "parity evidence must cover postgres×postgres"
         );
     }
 

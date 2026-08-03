@@ -919,11 +919,12 @@ fn emit_and_verify(
     evidence_id: &str,
     release: bool,
 ) {
-    let path = fireweed_release::ledger_path(env!("CARGO_MANIFEST_DIR"), suite);
-    let _ = std::fs::remove_file(&path);
+    let path = fireweed_release::ledger_path(env!("CARGO_MANIFEST_DIR"), suite)
+        .expect("create run-owned multi-node ledger path");
+    path.delete().expect("clear run-owned E2 ledger");
     fireweed_release::append_row(&path, row).expect("emit ledger row");
-    let summary =
-        fireweed_release::verify_ledger(&path, true).expect("emitted row validates strict");
+    let summary = fireweed_release::verify_ledger(path.path(), true)
+        .expect("emitted row validates strict");
     let seen = if release {
         summary.evidence_ids.contains(evidence_id)
     } else {

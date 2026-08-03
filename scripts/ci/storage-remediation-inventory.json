@@ -119,19 +119,6 @@
       {
         "category": "harness_skip",
         "dependency_chain": [
-          "P0f"
-        ],
-        "detail": "early_success=true",
-        "id": "d3fd72a898b6506a2ca5",
-        "identity": "\"E3 transaction evidence skipped \u2014 set FIREWEED_E3_TRANSACTION_EVIDENCE_OUT for release emission\"",
-        "line": 223,
-        "owner": "P0f",
-        "path": "crates/fireweed-conformance/tests/e3_governed_transaction_evidence_matrix.rs",
-        "status": "debt"
-      },
-      {
-        "category": "harness_skip",
-        "dependency_chain": [
           "P10pp",
           "P2f"
         ],
@@ -990,20 +977,6 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "2197ca28e9915b3dea33",
-        "identity": "\"postgres_log T3 SKIPPED (FIREWEED_PG_TEST_URL unset); cells remain registered. \\",
-        "line": 5683,
-        "owner": "P10ps",
-        "path": "crates/fireweed-server/src/lib.rs",
-        "status": "debt"
-      },
-      {
-        "category": "harness_skip",
-        "dependency_chain": [
-          "P10ps",
-          "P2f"
-        ],
-        "detail": "early_success=true",
         "id": "d1c692f2fb455a734238",
         "identity": "let _ = result_tx.send(Err(EngineError::Unavailable));",
         "line": 327,
@@ -1074,9 +1047,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "f02dd48e7e96ae98efc0",
+        "id": "2804c4826a22999d020c",
         "identity": "TP-002 E3 LIVE OBJECT-LOG HARNESS SKIPPED (performance_object_log_e3_live_tests)\\n\\",
-        "line": 3494,
+        "line": 3509,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "debt"
@@ -1286,9 +1259,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "6d0ff482fd383d1d0d97",
+        "id": "7a9b9c947fd55eaf1ad4",
         "identity": "#[ignore = \"requires live S3 release-shape batching calibration\"]",
-        "line": 2263,
+        "line": 2278,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "debt"
@@ -1300,9 +1273,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "ea516f5a694462474188",
+        "id": "904b301ca5ed834d197a",
         "identity": "#[ignore = \"requires live S3 release-fence endpoint\"]",
-        "line": 3787,
+        "line": 3800,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "debt"
@@ -1510,9 +1483,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "5c69813cf263609e86b0",
+        "id": "c7dea19a8580835c3f9a",
         "identity": "#[ignore = \"objectlog profile rearm requires recurrence.mode=recurring (API-001); memory/sqlite paths skip validate_rearm \u2014 align product profile or restrict rearm coverage to jobs_connectors_recurring_e2e\"]",
-        "line": 566,
+        "line": 567,
         "owner": "P10pf",
         "path": "crates/fireweed/tests/product_validation_tests.rs",
         "status": "debt"
@@ -1524,9 +1497,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "299e78434c17e5c14fee",
+        "id": "fb568ef7e62c7c98583b",
         "identity": "#[ignore = \"LogEngine reopen does not yet rehydrate control-plane queue registry for metrics(queue) without create_queue; durable crash recovery proof blocked on catalog recovery\"]",
-        "line": 2337,
+        "line": 2338,
         "owner": "P10pf",
         "path": "crates/fireweed/tests/product_validation_tests.rs",
         "status": "debt"
@@ -1946,9 +1919,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "06bbfed7bd137ce1bd02",
+        "id": "345062572e77eee2456b",
         "identity": "/// restart-bound rows are skipped and recorded as N/A rather than asserted). Every durable",
-        "line": 96,
+        "line": 95,
         "owner": "P10pc",
         "path": "crates/fireweed-conformance/src/fault.rs",
         "status": "discovery_negative"
@@ -1960,9 +1933,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "3de7041bfb241ea6fcc4",
+        "id": "092cf3a4932612069636",
         "identity": "// Every current profile exercises both BatchUpdate and SetGates. No op is silently skipped.",
-        "line": 339,
+        "line": 338,
         "owner": "P10pc",
         "path": "crates/fireweed-conformance/src/fault.rs",
         "status": "debt"
@@ -1974,9 +1947,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "c3496b16d3d8f18ee067",
+        "id": "0f8510571c76ee87c6de",
         "identity": "\"capability-N/A: SetGates requires a gate-capable projection; this profile reports supports_gates()=false and refuses Se",
-        "line": 456,
+        "line": 455,
         "owner": "P10pc",
         "path": "crates/fireweed-conformance/src/fault.rs",
         "status": "debt"
@@ -1988,9 +1961,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "7921636fa2979546874c",
+        "id": "a2a3bce4ea31c481d90e",
         "identity": "// invalid/conflict/stale cases, capacity/unavailable paths, AND commit-timeout paths \u2014 each leaving 0",
-        "line": 703,
+        "line": 702,
         "owner": "P10pc",
         "path": "crates/fireweed-conformance/src/fault.rs",
         "status": "debt"
@@ -2002,9 +1975,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "8118bda9dd2b00b1dc73",
+        "id": "17c4cad8f002887556e3",
         "identity": "// operation surface, so AC-TXN-2 records the Unavailable subclass as N/A rather than manufacturing it by",
-        "line": 709,
+        "line": 708,
         "owner": "P10pc",
         "path": "crates/fireweed-conformance/src/fault.rs",
         "status": "debt"
@@ -2016,9 +1989,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "3dd2ba42cd21b89c7580",
+        "id": "141fa123a25148baee06",
         "identity": "asserts.extend(ac_txn_2_capacity_unavailable_path(&make, caps).await?);",
-        "line": 713,
+        "line": 712,
         "owner": "P10pc",
         "path": "crates/fireweed-conformance/src/fault.rs",
         "status": "debt"
@@ -2030,9 +2003,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "7440d3c6ceff731aff96",
+        "id": "dc8856b7e4d15b3a69ad",
         "identity": "/// **AC-TXN-2 / capacity / unavailable path** (TP-003 \u00a73.10 row 207): a capacity/batch-limit rejection",
-        "line": 1037,
+        "line": 1036,
         "owner": "P10pc",
         "path": "crates/fireweed-conformance/src/fault.rs",
         "status": "debt"
@@ -2044,9 +2017,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "7309450cf9ee6a057b28",
+        "id": "e2890c7a6f34ace13fcb",
         "identity": "/// durable effect on EVERY backend. The Unavailable rejection subclass is capability-N/A for the current",
-        "line": 1039,
+        "line": 1038,
         "owner": "P10pc",
         "path": "crates/fireweed-conformance/src/fault.rs",
         "status": "debt"
@@ -2058,9 +2031,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "cbe9dd7601a990513827",
+        "id": "12df79d1ac71fa6d5790",
         "identity": "/// operation. The test records that N/A explicitly rather than manufacturing `Unavailable` from a supported",
-        "line": 1041,
+        "line": 1040,
         "owner": "P10pc",
         "path": "crates/fireweed-conformance/src/fault.rs",
         "status": "debt"
@@ -2072,9 +2045,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "2c046772fc5c50d89f06",
+        "id": "d61b62d04fdb63735368",
         "identity": "pub async fn ac_txn_2_capacity_unavailable_path<B: ConformanceCore + LogRead>(",
-        "line": 1043,
+        "line": 1042,
         "owner": "P10pc",
         "path": "crates/fireweed-conformance/src/fault.rs",
         "status": "debt"
@@ -2086,9 +2059,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "9811376318724ad6fee3",
+        "id": "d7d1b360334b67e9ad34",
         "identity": "\"capability-N/A: no inherent Fireweed operation is specified to return Unavailable on any current storage profile; upser",
-        "line": 1079,
+        "line": 1078,
         "owner": "P10pc",
         "path": "crates/fireweed-conformance/src/fault.rs",
         "status": "debt"
@@ -2100,9 +2073,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "5c97ffaaa54f72c55c88",
+        "id": "87ef1e555735b9b466dd",
         "identity": "\"capacity/unavailable rejections appended durable commands ({before} -> {after})\"",
-        "line": 1085,
+        "line": 1084,
         "owner": "P10pc",
         "path": "crates/fireweed-conformance/src/fault.rs",
         "status": "debt"
@@ -2114,9 +2087,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "64b81c7c2490f91c6d4d",
+        "id": "8967361030744b4dd5be",
         "identity": "assert_only_sibling_pending(&a, \"capacity/unavailable\").await?;",
-        "line": 1087,
+        "line": 1086,
         "owner": "P10pc",
         "path": "crates/fireweed-conformance/src/fault.rs",
         "status": "debt"
@@ -2128,9 +2101,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "7d0cdc239b8fa66295ab",
+        "id": "dc1e486453d1cb3dff47",
         "identity": "\"capacity/unavailable restart-replay clause N/A (non-durable in-memory dev profile)\"",
-        "line": 1094,
+        "line": 1093,
         "owner": "P10pc",
         "path": "crates/fireweed-conformance/src/fault.rs",
         "status": "debt"
@@ -2142,9 +2115,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "387b8630589b4a3fa199",
+        "id": "98c8cef38ab5a08571b3",
         "identity": "assert_only_sibling_pending(&b, \"capacity/unavailable after restart\").await?;",
-        "line": 1101,
+        "line": 1100,
         "owner": "P10pc",
         "path": "crates/fireweed-conformance/src/fault.rs",
         "status": "debt"
@@ -2156,9 +2129,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "01b6633231cc3263c447",
+        "id": "7cc38696fcf48c8c5862",
         "identity": "\"capacity/unavailable path left 0 durable effect across restart+replay; accepted sibling survives\".into(),",
-        "line": 1113,
+        "line": 1112,
         "owner": "P10pc",
         "path": "crates/fireweed-conformance/src/fault.rs",
         "status": "debt"
@@ -2170,9 +2143,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "be3685771123ebe648da",
+        "id": "80033ca88d3aa48fb9a8",
         "identity": "\"apply was skipped, so the in-process projection has not applied the command\"",
-        "line": 1469,
+        "line": 1468,
         "owner": "P10pc",
         "path": "crates/fireweed-conformance/src/fault.rs",
         "status": "debt"
@@ -2184,9 +2157,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "68f18a1c35005d29d6d3",
+        "id": "8da34d05940e6f3a8f6c",
         "identity": "// The apply was skipped, so the valid input is NOT yet finalized in-process (both items still leased).",
-        "line": 2081,
+        "line": 2080,
         "owner": "P10pc",
         "path": "crates/fireweed-conformance/src/fault.rs",
         "status": "debt"
@@ -2198,9 +2171,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "4bc1c0b68a980cd91bb9",
+        "id": "8d6d6380c994d0ad8fab",
         "identity": "\"apply was skipped, so the in-process projection has finalized neither input\"",
-        "line": 2084,
+        "line": 2083,
         "owner": "P10pc",
         "path": "crates/fireweed-conformance/src/fault.rs",
         "status": "debt"
@@ -2287,19 +2260,6 @@
         "line": 4039,
         "owner": "P10pc",
         "path": "crates/fireweed-conformance/src/scenarios.rs",
-        "status": "debt"
-      },
-      {
-        "category": "loud_skip",
-        "dependency_chain": [
-          "P0f"
-        ],
-        "detail": "early_success=true",
-        "id": "bb69703d560c5cc28bd4",
-        "identity": "\"E3 transaction evidence skipped \u2014 set FIREWEED_E3_TRANSACTION_EVIDENCE_OUT for release emission\"",
-        "line": 223,
-        "owner": "P0f",
-        "path": "crates/fireweed-conformance/tests/e3_governed_transaction_evidence_matrix.rs",
         "status": "debt"
       },
       {
@@ -7517,9 +7477,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "1fc06ffd864e8bfcd7d6",
+        "id": "aa3abe95c6f629642a31",
         "identity": "let missing = Fixture::new();",
-        "line": 227,
+        "line": 232,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
         "status": "debt"
@@ -7531,9 +7491,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "ec49de08bc53adb2a234",
+        "id": "d45a9007fc90e0b81919",
         "identity": "let missing = Fixture::new();",
-        "line": 369,
+        "line": 374,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
         "status": "debt"
@@ -8371,9 +8331,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "a71d66b08b36944a2309",
+        "id": "dc783feadbda7af1f76e",
         "identity": "\"sqlite_log_postgres_lifecycle_and_reopen SKIPPED \u2014 set FIREWEED_PG_TEST_URL\"",
-        "line": 4751,
+        "line": 4766,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "discovery_negative"
@@ -8385,23 +8345,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "fec0594b90a3aa1bb4f7",
-        "identity": "\"sqlite_log T3 sqlite\u00d7postgres SKIPPED (FIREWEED_PG_TEST_URL unset); \\",
-        "line": 5087,
-        "owner": "P10ps",
-        "path": "crates/fireweed-server/src/lib.rs",
-        "status": "debt"
-      },
-      {
-        "category": "loud_skip",
-        "dependency_chain": [
-          "P10ps",
-          "P2f"
-        ],
-        "detail": "early_success=false",
-        "id": "12ce626bd9f65225b103",
+        "id": "a49b29725819bfa8861d",
         "identity": "\"sqlite_log T4 helm template skipped (helm not on PATH); values+gate checked\"",
-        "line": 5272,
+        "line": 5242,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8413,9 +8359,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "3affdf0068f7d5e19bda",
+        "id": "001e04e67898630491fc",
         "identity": "\"postgres_log_memory_lifecycle_and_reopen SKIPPED \u2014 set FIREWEED_PG_TEST_URL \\",
-        "line": 5423,
+        "line": 5408,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "discovery_negative"
@@ -8427,9 +8373,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "c6313b81de0b7aa9e66b",
+        "id": "c8d5adb650e2030bc7e6",
         "identity": "\"postgres_log_sqlite_lifecycle_and_reopen SKIPPED \u2014 set FIREWEED_PG_TEST_URL \\",
-        "line": 5492,
+        "line": 5477,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "discovery_negative"
@@ -8441,9 +8387,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "abc635323b2568eeb6bd",
+        "id": "1dd860311da0edfe468c",
         "identity": "\"postgres_log_postgres_lifecycle_and_reopen SKIPPED \u2014 set FIREWEED_PG_TEST_URL \\",
-        "line": 5573,
+        "line": 5558,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "discovery_negative"
@@ -8454,24 +8400,10 @@
           "P10ps",
           "P2f"
         ],
-        "detail": "early_success=true",
-        "id": "ae1526bc2eca0a85b37b",
-        "identity": "\"postgres_log T3 SKIPPED (FIREWEED_PG_TEST_URL unset); cells remain registered. \\",
-        "line": 5683,
-        "owner": "P10ps",
-        "path": "crates/fireweed-server/src/lib.rs",
-        "status": "debt"
-      },
-      {
-        "category": "loud_skip",
-        "dependency_chain": [
-          "P10ps",
-          "P2f"
-        ],
         "detail": "early_success=false",
-        "id": "1ad9a47f1024ee7a705b",
+        "id": "ae75bb37fd47a621d6f8",
         "identity": "\"postgres_log T4 helm template skipped (helm not on PATH); values+gate checked\"",
-        "line": 6074,
+        "line": 6041,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8595,9 +8527,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "30918e5dcb2953ceee73",
+        "id": "ec576d75a8b8aa8cb16f",
         "identity": "\"{test_name}: skipped under debug profile \u2014 run with `cargo test --release` \\",
-        "line": 1679,
+        "line": 1694,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "debt"
@@ -8609,9 +8541,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "25bcfa68757615e115a3",
+        "id": "8f3a156fc9d5880f0749",
         "identity": "TP-002 E3 LIVE OBJECT-LOG HARNESS SKIPPED (performance_object_log_e3_live_tests)\\n\\",
-        "line": 3494,
+        "line": 3509,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "debt"
@@ -8623,9 +8555,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "75d7eaaa10a2651eb1fe",
+        "id": "389f4639fe90e527c353",
         "identity": "eprintln!(\"TEST SKIPPED: FIREWEED_S3_TEST_ENDPOINT is required for live E3 recovery\");",
-        "line": 4206,
+        "line": 4220,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "debt"
@@ -10191,9 +10123,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "7bc5e507537eebab4bc4",
+        "id": "293863e2442225f87c53",
         "identity": "/// skipped (no partial-cohort leak, INV-7).",
-        "line": 1815,
+        "line": 1816,
         "owner": "P10pf",
         "path": "crates/fireweed/tests/product_validation_tests.rs",
         "status": "discovery_negative"
@@ -10205,9 +10137,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "f06184e713104a464df7",
+        "id": "0472cc7cf63d8cc5b418",
         "identity": "// incomplete cohort is skipped (all-or-nothing \u2014 no partial cohort leaks, INV-7).",
-        "line": 1954,
+        "line": 1955,
         "owner": "P10pf",
         "path": "crates/fireweed/tests/product_validation_tests.rs",
         "status": "discovery_negative"
@@ -10219,9 +10151,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "d9df8d5108de98dac71e",
+        "id": "2f7a863b137edab47462",
         "identity": "\"a cohort-enabled queue rejects items without group_key+cohort_size; whole_cohort compatibility errors remain distinct (",
-        "line": 1983,
+        "line": 1984,
         "owner": "P10pf",
         "path": "crates/fireweed/tests/product_validation_tests.rs",
         "status": "debt"
@@ -10233,9 +10165,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "bfdd39079c1eba638bf1",
+        "id": "f569d60cea52e450cbc2",
         "identity": "// Claim a fresh pending item to reassign (it is now leased). Non-conditional so the proof can't be skipped.",
-        "line": 2424,
+        "line": 2425,
         "owner": "P10pf",
         "path": "crates/fireweed/tests/product_validation_tests.rs",
         "status": "debt"
@@ -10513,9 +10445,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "5acf4f33884dbc907040",
+        "id": "4edf4df2591c59a3eef1",
         "identity": "let mut skipped = 0usize;",
-        "line": 1334,
+        "line": 1322,
         "owner": "P10pf",
         "path": "crates/fireweed/tests/storage_matrix_t0_t2.rs",
         "status": "debt"
@@ -10527,9 +10459,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "23570cfc0937a0fd98e9",
+        "id": "1d70cbddd4b827c1ecf8",
         "identity": "skipped += 1;",
-        "line": 1344,
+        "line": 1332,
         "owner": "P10pf",
         "path": "crates/fireweed/tests/storage_matrix_t0_t2.rs",
         "status": "debt"
@@ -10541,9 +10473,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "e6c38a171ae414caa83a",
+        "id": "82122ce6c103f5f86bbb",
         "identity": "ran + skipped,",
-        "line": 1351,
+        "line": 1339,
         "owner": "P10pf",
         "path": "crates/fireweed/tests/storage_matrix_t0_t2.rs",
         "status": "debt"
@@ -10555,9 +10487,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "bae82a50e5d786431417",
+        "id": "6092661ed180bc093f8f",
         "identity": "\"postgres log three cells must all be registered (ran={ran} skipped={skipped})\"",
-        "line": 1353,
+        "line": 1341,
         "owner": "P10pf",
         "path": "crates/fireweed/tests/storage_matrix_t0_t2.rs",
         "status": "debt"
@@ -10569,9 +10501,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "95adb62b97d020941ff9",
+        "id": "e458a10c3b8f8843416d",
         "identity": "eprintln!(\"postgres_log_three_cells_t0_t2: ran={ran} skipped={skipped}/3\");",
-        "line": 1355,
+        "line": 1343,
         "owner": "P10pf",
         "path": "crates/fireweed/tests/storage_matrix_t0_t2.rs",
         "status": "debt"
@@ -11159,9 +11091,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "af63cf1bbf472dc6097c",
+        "id": "a5ee3c897d8bf48471ac",
         "identity": "# FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1 is set (then missing fixtures fail the gate).",
-        "line": 127,
+        "line": 122,
         "owner": "P10px",
         "path": "scripts/ci/release-gate.sh",
         "status": "debt"
@@ -11173,9 +11105,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "bd676b571857f612405f",
+        "id": "da4358671253dfecec8f",
         "identity": "echo \"--- local performance execution skipped; exact-revision governed evidence is authoritative ---\"",
-        "line": 143,
+        "line": 138,
         "owner": "P10px",
         "path": "scripts/ci/release-gate.sh",
         "status": "debt"
@@ -11234,20 +11166,6 @@
         "line": 149,
         "owner": "P10px",
         "path": "scripts/ci/storage-matrix-gate.sh",
-        "status": "debt"
-      },
-      {
-        "category": "loud_skip",
-        "dependency_chain": [
-          "P15",
-          "P2f"
-        ],
-        "detail": "early_success=false",
-        "id": "d00e9dd03ff6b03cb04a",
-        "identity": "echo \"E3 note: e3_governed_transaction_evidence_matrix unavailable; seeding from docs/perf/evidence\" >&2",
-        "line": 181,
-        "owner": "P15",
-        "path": "scripts/perf/tp002-e3-s3.sh",
         "status": "debt"
       },
       {
@@ -11464,33 +11382,6 @@
       }
     ],
     "opt_ins": [
-      {
-        "category": "opt_in",
-        "dependency_chain": [
-          "P10pb",
-          "P2f"
-        ],
-        "detail": "early_success=false",
-        "id": "be8a18b3543f67d30cdd",
-        "identity": "\"LOUD-SKIP: postgres durable density point \u2014 set FIREWEED_PG_TEST_URL to a live DB to run the reduced 0->100 postgres la",
-        "line": 677,
-        "owner": "P10pb",
-        "path": "crates/fireweed-bench/tests/queue_density_single_node_tests.rs",
-        "status": "debt"
-      },
-      {
-        "category": "opt_in",
-        "dependency_chain": [
-          "P0f"
-        ],
-        "detail": "early_success=true",
-        "id": "905d22ac3f31e64c186e",
-        "identity": "\"E3 transaction evidence skipped \u2014 set FIREWEED_E3_TRANSACTION_EVIDENCE_OUT for release emission\"",
-        "line": 223,
-        "owner": "P0f",
-        "path": "crates/fireweed-conformance/tests/e3_governed_transaction_evidence_matrix.rs",
-        "status": "debt"
-      },
       {
         "category": "opt_in",
         "dependency_chain": [
@@ -11932,9 +11823,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "8e1c6f6c4f6f5fe3a135",
+        "id": "498defda88bbce64d307",
         "identity": "TP-002 E3 LIVE OBJECT-LOG HARNESS SKIPPED (performance_object_log_e3_live_tests)\\n\\",
-        "line": 3494,
+        "line": 3509,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "debt"
@@ -11946,9 +11837,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "a3287874c7201f901dc5",
+        "id": "b1bcd422748d6ea52973",
         "identity": "eprintln!(\"TEST SKIPPED: FIREWEED_S3_TEST_ENDPOINT is required for live E3 recovery\");",
-        "line": 4206,
+        "line": 4220,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "debt"
@@ -12847,9 +12738,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "54f170f8cfea8060c714",
+        "id": "1b4526df37bea8ab502b",
         "identity": "if evidence.git_commit.len() != 40",
-        "line": 399,
+        "line": 398,
         "owner": "P15",
         "path": "crates/fireweed-bench/src/performance_matrix_evidence.rs",
         "status": "debt"
@@ -12861,9 +12752,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "56799665f79b816d8a2b",
+        "id": "ed2af003e4fc9f15f946",
         "identity": ".git_commit",
-        "line": 401,
+        "line": 400,
         "owner": "P15",
         "path": "crates/fireweed-bench/src/performance_matrix_evidence.rs",
         "status": "debt"
@@ -12875,9 +12766,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "dda0f2af4773ecac860a",
+        "id": "08f372bd2dfe217aeb23",
         "identity": "if evidence.tier == \"full\" && evidence.provenance.remote_commit != evidence.git_commit {",
-        "line": 416,
+        "line": 415,
         "owner": "P15",
         "path": "crates/fireweed-bench/src/performance_matrix_evidence.rs",
         "status": "debt"
@@ -12889,9 +12780,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "2c5b0e941fddf108ac07",
+        "id": "cdfbf46eac30348cb798",
         "identity": "&evidence.git_commit[..12],",
-        "line": 714,
+        "line": 713,
         "owner": "P15",
         "path": "crates/fireweed-bench/src/performance_matrix_evidence.rs",
         "status": "debt"
@@ -12903,9 +12794,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "a61a40a816038559f8c2",
+        "id": "44848887eda81c5b6798",
         "identity": "&evidence.git_commit[..12],",
-        "line": 827,
+        "line": 826,
         "owner": "P15",
         "path": "crates/fireweed-bench/src/performance_matrix_evidence.rs",
         "status": "debt"
@@ -12917,9 +12808,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "b54aa3c197f06780233c",
+        "id": "37f039a575a5217fd40b",
         "identity": "git_commit: \"0\".repeat(40),",
-        "line": 929,
+        "line": 928,
         "owner": "P15",
         "path": "crates/fireweed-bench/src/performance_matrix_evidence.rs",
         "status": "debt"
@@ -12931,9 +12822,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "2fe0bba5d5be4c751116",
+        "id": "5ac23a581219c1fafe94",
         "identity": "source_revision: \"0123456789abcdef0123456789abcdef01234567\".into(),",
-        "line": 598,
+        "line": 610,
         "owner": "P15",
         "path": "crates/fireweed-bench/tests/performance_cross_queue_scale_out_tests.rs",
         "status": "debt"
@@ -12941,39 +12832,56 @@
       {
         "category": "source_guard",
         "dependency_chain": [
-          "P0f"
+          "P15",
+          "P2f"
         ],
         "detail": "",
-        "id": "1e3ec30f1cd10c30102a",
+        "id": "12ab11aeaa27671c69d8",
         "identity": "let revision = std::env::var(\"FIREWEED_E3_SOURCE_REVISION\")",
-        "line": 227,
-        "owner": "P0f",
+        "line": 219,
+        "owner": "P15",
         "path": "crates/fireweed-conformance/tests/e3_governed_transaction_evidence_matrix.rs",
         "status": "debt"
       },
       {
         "category": "source_guard",
         "dependency_chain": [
-          "P0f"
+          "P15",
+          "P2f"
         ],
         "detail": "",
-        "id": "164d04740fe5ffcf8a8d",
+        "id": "1dbe6bbaa267c9512ec3",
         "identity": ".expect(\"E3 transaction evidence requires FIREWEED_E3_SOURCE_REVISION\");",
-        "line": 228,
-        "owner": "P0f",
+        "line": 220,
+        "owner": "P15",
         "path": "crates/fireweed-conformance/tests/e3_governed_transaction_evidence_matrix.rs",
         "status": "debt"
       },
       {
         "category": "source_guard",
         "dependency_chain": [
-          "P0f"
+          "P15",
+          "P2f"
         ],
         "detail": "",
-        "id": "61e0266c0e16da882a7a",
+        "id": "eee5f0ca08cb9dd582cf",
         "identity": "source_revision: revision.clone(),",
-        "line": 319,
-        "owner": "P0f",
+        "line": 311,
+        "owner": "P15",
+        "path": "crates/fireweed-conformance/tests/e3_governed_transaction_evidence_matrix.rs",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P15",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "bb385f38a9cce52c88ab",
+        "identity": "\"FIREWEED_E3_SOURCE_REVISION\",",
+        "line": 383,
+        "owner": "P15",
         "path": "crates/fireweed-conformance/tests/e3_governed_transaction_evidence_matrix.rs",
         "status": "debt"
       },
@@ -12984,9 +12892,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "76c8ed8dc84e5def08c8",
+        "id": "52d259aca34a1f34cb3e",
         "identity": "headline_input.source_revision",
-        "line": 533,
+        "line": 590,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/bin/fireweed-cost-model.rs",
         "status": "debt"
@@ -12998,9 +12906,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "b89f3fd74a7fd56f3982",
+        "id": "956342980804593cc65d",
         "identity": "fn rendered_report_names_the_exact_measured_source_revision() {",
-        "line": 869,
+        "line": 931,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/bin/fireweed-cost-model.rs",
         "status": "debt"
@@ -13012,9 +12920,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "97a554a2713e8efed2f0",
+        "id": "e73ec3fed651024e5809",
         "identity": "source_revision: \"1111111111111111111111111111111111111111\".into(),",
-        "line": 877,
+        "line": 939,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/bin/fireweed-cost-model.rs",
         "status": "debt"
@@ -13040,9 +12948,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "e5d210de688f989c97f7",
+        "id": "37fc3945205b6b9803aa",
         "identity": "\"usage: fireweed-verify-e0-e1-evidence --e0 <jsonl> --e1 <jsonl> --expected-revision <sha>\"",
-        "line": 42,
+        "line": 48,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/bin/fireweed-verify-e0-e1-evidence.rs",
         "status": "debt"
@@ -13068,9 +12976,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "887ad1d004c25c39a600",
+        "id": "b6ffaa843a0f4720ab04",
         "identity": "eprintln!(\"usage: fireweed-verify-e2-scale-evidence <jsonl> --expected-revision <sha>\");",
-        "line": 38,
+        "line": 40,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/bin/fireweed-verify-e2-scale-evidence.rs",
         "status": "debt"
@@ -13082,9 +12990,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "a49fa3d58567eb9a4c94",
+        "id": "ef48ec2a3a7dc9368fcb",
         "identity": "\"usage: fireweed-verify-e3-contract --manifest <path> --expected-revision <40-char-sha>\"",
-        "line": 5,
+        "line": 7,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/bin/fireweed-verify-e3-contract.rs",
         "status": "debt"
@@ -13096,9 +13004,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "12c7d182e5fd5f1cff5b",
+        "id": "24959ff9fa2c54ad2176",
         "identity": "let Some(expected_revision) = args.next() else {",
-        "line": 19,
+        "line": 21,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/bin/fireweed-verify-e3-contract.rs",
         "status": "debt"
@@ -13110,9 +13018,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "208269eaf27757854186",
+        "id": "3ec08c0b8ec466624af3",
         "identity": "|| revision_flag != \"--expected-revision\"",
-        "line": 23,
+        "line": 25,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/bin/fireweed-verify-e3-contract.rs",
         "status": "debt"
@@ -13124,9 +13032,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "71e8468b11629faf2aac",
+        "id": "59fbbafbbf58d073d4be",
         "identity": "&expected_revision.to_string_lossy(),",
-        "line": 30,
+        "line": 37,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/bin/fireweed-verify-e3-contract.rs",
         "status": "debt"
@@ -13348,9 +13256,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "08f3e16621902b2553aa",
+        "id": "b0c865a723b5ac1e1844",
         "identity": "expected_revision: &str,",
-        "line": 446,
+        "line": 449,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/e3_contract.rs",
         "status": "debt"
@@ -13362,9 +13270,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "f1b146f4fa8f73bd6352",
+        "id": "524935d5d973a52edb28",
         "identity": "if !valid_revision(&manifest.source_revision) {",
-        "line": 473,
+        "line": 476,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/e3_contract.rs",
         "status": "debt"
@@ -13376,22 +13284,8 @@
           "P2f"
         ],
         "detail": "",
-        "id": "271a8b7cf83352b07316",
+        "id": "fc981d4cc1784d902a88",
         "identity": "\"source_revision must be a 40-character lowercase hex revision\".into(),",
-        "line": 475,
-        "owner": "P3-P9/P15",
-        "path": "crates/fireweed-release/src/e3_contract.rs",
-        "status": "debt"
-      },
-      {
-        "category": "source_guard",
-        "dependency_chain": [
-          "P3-P9/P15",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "c651a23aa9d10ea9e30d",
-        "identity": "if !valid_revision(expected_revision) {",
         "line": 478,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/e3_contract.rs",
@@ -13404,36 +13298,22 @@
           "P2f"
         ],
         "detail": "",
-        "id": "ee05b09e5aa962465846",
+        "id": "20165be3738b7154ebb2",
+        "identity": "if !valid_revision(expected_revision) {",
+        "line": 481,
+        "owner": "P3-P9/P15",
+        "path": "crates/fireweed-release/src/e3_contract.rs",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P3-P9/P15",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "6567c06320f6d493bbe9",
         "identity": "} else if manifest.source_revision != expected_revision {",
-        "line": 482,
-        "owner": "P3-P9/P15",
-        "path": "crates/fireweed-release/src/e3_contract.rs",
-        "status": "debt"
-      },
-      {
-        "category": "source_guard",
-        "dependency_chain": [
-          "P3-P9/P15",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "d58d3c0cc6143c23f766",
-        "identity": "\"contract source_revision {} does not match expected revision {expected_revision}\",",
-        "line": 484,
-        "owner": "P3-P9/P15",
-        "path": "crates/fireweed-release/src/e3_contract.rs",
-        "status": "debt"
-      },
-      {
-        "category": "source_guard",
-        "dependency_chain": [
-          "P3-P9/P15",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "fa96a3eb0f94a6522d2a",
-        "identity": "manifest.source_revision",
         "line": 485,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/e3_contract.rs",
@@ -13446,9 +13326,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "66af0345b9ed9cb58522",
-        "identity": "&manifest.source_revision,",
-        "line": 532,
+        "id": "7e028910816d68b6109c",
+        "identity": "\"contract source_revision {} does not match expected revision {expected_revision}\",",
+        "line": 487,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/e3_contract.rs",
         "status": "debt"
@@ -13460,9 +13340,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "b6a936b599089efa4b4c",
-        "identity": "&manifest.source_revision,",
-        "line": 546,
+        "id": "208932602bab77310433",
+        "identity": "manifest.source_revision",
+        "line": 488,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/e3_contract.rs",
         "status": "debt"
@@ -13474,9 +13354,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "47d6872b632d8f8f29bc",
+        "id": "43d7d8ffc945150d3b23",
         "identity": "&manifest.source_revision,",
-        "line": 555,
+        "line": 535,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/e3_contract.rs",
         "status": "debt"
@@ -13488,9 +13368,37 @@
           "P2f"
         ],
         "detail": "",
-        "id": "a0568471dcaf65d5f174",
+        "id": "ada71fcf318640d6cae6",
+        "identity": "&manifest.source_revision,",
+        "line": 549,
+        "owner": "P3-P9/P15",
+        "path": "crates/fireweed-release/src/e3_contract.rs",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P3-P9/P15",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "0e73a2456a82c777d420",
+        "identity": "&manifest.source_revision,",
+        "line": 558,
+        "owner": "P3-P9/P15",
+        "path": "crates/fireweed-release/src/e3_contract.rs",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P3-P9/P15",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "9b5c3d07875c057def27",
         "identity": "require_value(&row, \"source_revision\", serde_json::json!(revision), errors);",
-        "line": 705,
+        "line": 708,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/e3_contract.rs",
         "status": "debt"
@@ -13502,9 +13410,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "e11945dda951db252dc5",
+        "id": "65c06a1c43aa6d7123d3",
         "identity": "&& row.source_revision.as_deref() == Some(revision)",
-        "line": 1347,
+        "line": 1350,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/e3_contract.rs",
         "status": "debt"
@@ -13516,9 +13424,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "b6542f47606ae1969c93",
+        "id": "105a5e7873947b430749",
         "identity": "|| row.source_revision != revision",
-        "line": 1492,
+        "line": 1495,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/e3_contract.rs",
         "status": "debt"
@@ -13530,9 +13438,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "0ecf4b3cf002e9811c1f",
+        "id": "a192c0b68d603d13d56e",
         "identity": ".get(\"source_revision\")",
-        "line": 413,
+        "line": 416,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13544,9 +13452,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "9fec81607306df6ecbf3",
+        "id": "18931c199b572cb38d50",
         "identity": "errors.push(\"source_revision does not match expected revision\".into());",
-        "line": 417,
+        "line": 420,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13558,9 +13466,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "7ef3dd91d2dca6da1a6e",
+        "id": "49498714b296cc144077",
         "identity": "|| !true_value(row, \"source_root_explicit\")",
-        "line": 430,
+        "line": 433,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13572,9 +13480,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "69cbd4abae218f4a2929",
+        "id": "911866ec0cddb5918c92",
         "identity": "|| !true_value(row, \"compile_source_root_bound\")",
-        "line": 431,
+        "line": 434,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13586,9 +13494,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "bc2131488d92f6b2ee9a",
+        "id": "30d7fa21acddf29ceee8",
         "identity": ".get(\"compile_source_root\")",
-        "line": 441,
+        "line": 444,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13600,9 +13508,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "000c953830dfa9d74257",
+        "id": "486436dfe541e53c6132",
         "identity": "pub source_revision: String,",
-        "line": 1243,
+        "line": 1256,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13614,9 +13522,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "cbe792d1a6b1f9f7fea4",
+        "id": "de4bba5d653f8ad883a3",
         "identity": ".get(\"source_revision\")",
-        "line": 1332,
+        "line": 1345,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13628,9 +13536,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "33a7ac9c8a2c3a85cee9",
+        "id": "5486f932ed195da13df4",
         "identity": "errors.push(\"source_revision does not match expected revision\".into());",
-        "line": 1336,
+        "line": 1349,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13642,9 +13550,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "285c8e4657e020530412",
+        "id": "224196f1327f9d0bdfdd",
         "identity": "\"source_revision\",",
-        "line": 1401,
+        "line": 1414,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13656,9 +13564,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "740afbfef4fa6c036c49",
+        "id": "8abcd11bdacb6897621a",
         "identity": "\"source_revision\".to_string(),",
-        "line": 1689,
+        "line": 1702,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13670,9 +13578,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "e80974a789e8ad9194a3",
+        "id": "f2be519a54ae1355d871",
         "identity": "serde_json::json!(tuning.source_revision),",
-        "line": 1690,
+        "line": 1703,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13684,9 +13592,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "49877560a14219095230",
+        "id": "8faac34c97ec25a41b55",
         "identity": "pub const PRICE_SOURCE_REVISION: &str = \"aws-us-east-1-offers-2026-06-29\";",
-        "line": 2874,
+        "line": 2887,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13698,9 +13606,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "bb7859054af7cec7281f",
+        "id": "5b4f4dd421b59d712c82",
         "identity": "pub source_revision: String,",
-        "line": 2889,
+        "line": 2902,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13712,9 +13620,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "4905609a620f61f4df6f",
+        "id": "2e66bd1f5222a2b01e99",
         "identity": "let source_revision = row",
-        "line": 3041,
+        "line": 3054,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13726,9 +13634,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "d87f696a8e5c97f8c825",
+        "id": "06a6c957ad26a5fd74a5",
         "identity": ".get(\"source_revision\")",
-        "line": 3044,
+        "line": 3057,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13740,9 +13648,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "ac82d31b3aa8cadd89c2",
+        "id": "2462697fa861780c06c4",
         "identity": "if source_revision.len() != 40",
-        "line": 3047,
+        "line": 3060,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13754,9 +13662,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "9f9080bc9dd07b03654f",
+        "id": "9235a5d63134c1f5602f",
         "identity": "|| !source_revision.bytes().all(|byte| byte.is_ascii_hexdigit())",
-        "line": 3048,
+        "line": 3061,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13768,9 +13676,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "8c31bea7604df4f8bdb9",
+        "id": "5b788b7223b1fea1f5f0",
         "identity": "source_revision: source_revision.to_string(),",
-        "line": 3249,
+        "line": 3262,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13782,9 +13690,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "0b03bc783e62485ddc1e",
+        "id": "e33602ab9fa119ea364e",
         "identity": ".map(|input| input.source_revision.as_str())",
-        "line": 3261,
+        "line": 3274,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13796,9 +13704,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "cc2182fb5fc7e1f61c58",
+        "id": "e27798d224b017c26db6",
         "identity": "(\"source_revision\".into(), serde_json::json!(input.source_revision)),",
-        "line": 3720,
+        "line": 3733,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13810,9 +13718,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "d2410bdc31c6579f5b14",
+        "id": "24469ba05cabb5dae1e2",
         "identity": "(\"price_source_revision\".into(), serde_json::json!(PRICE_SOURCE_REVISION)),",
-        "line": 3762,
+        "line": 3775,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13824,9 +13732,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "b100675d24e29cdf302b",
+        "id": "db36712bf99e4e11f129",
         "identity": "let mut source_revisions = std::collections::BTreeSet::new();",
-        "line": 3792,
+        "line": 3805,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13838,9 +13746,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "077c2a7a7ff1724983a9",
+        "id": "0797e0a16cb67b81a481",
         "identity": "let source_revision = row",
-        "line": 3887,
+        "line": 3900,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13852,9 +13760,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "b3cc4ef7a0d3b7610335",
+        "id": "8428b6664c9bfe2b8cd2",
         "identity": ".get(\"source_revision\")",
-        "line": 3890,
+        "line": 3903,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13866,9 +13774,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "bf74e39e9840c829fc7d",
+        "id": "da41d392928fdba0fbd2",
         "identity": "source_revisions.insert(source_revision.to_string());",
-        "line": 3893,
+        "line": 3906,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13880,50 +13788,8 @@
           "P2f"
         ],
         "detail": "",
-        "id": "9f7c0ffe003082e5ebee",
+        "id": "a4fcf987ba64d87dc76e",
         "identity": "if source_revision.len() != 40",
-        "line": 3894,
-        "owner": "P3-P9/P15",
-        "path": "crates/fireweed-release/src/lib.rs",
-        "status": "debt"
-      },
-      {
-        "category": "source_guard",
-        "dependency_chain": [
-          "P3-P9/P15",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "f58dd1db7e9af9a945a8",
-        "identity": "|| !source_revision.bytes().all(|byte| byte.is_ascii_hexdigit())",
-        "line": 3895,
-        "owner": "P3-P9/P15",
-        "path": "crates/fireweed-release/src/lib.rs",
-        "status": "debt"
-      },
-      {
-        "category": "source_guard",
-        "dependency_chain": [
-          "P3-P9/P15",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "9a250e82e8582cc0fd78",
-        "identity": ".get(\"price_source_revision\")",
-        "line": 3905,
-        "owner": "P3-P9/P15",
-        "path": "crates/fireweed-release/src/lib.rs",
-        "status": "debt"
-      },
-      {
-        "category": "source_guard",
-        "dependency_chain": [
-          "P3-P9/P15",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "afbd9240642090bb6503",
-        "identity": "!= Some(PRICE_SOURCE_REVISION)",
         "line": 3907,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
@@ -13936,9 +13802,51 @@
           "P2f"
         ],
         "detail": "",
-        "id": "28455a809a961d03d59c",
+        "id": "cd5def7988d498e537d9",
+        "identity": "|| !source_revision.bytes().all(|byte| byte.is_ascii_hexdigit())",
+        "line": 3908,
+        "owner": "P3-P9/P15",
+        "path": "crates/fireweed-release/src/lib.rs",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P3-P9/P15",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "965ec8be847e52517c05",
+        "identity": ".get(\"price_source_revision\")",
+        "line": 3918,
+        "owner": "P3-P9/P15",
+        "path": "crates/fireweed-release/src/lib.rs",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P3-P9/P15",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "fcd05fe4002636e40979",
+        "identity": "!= Some(PRICE_SOURCE_REVISION)",
+        "line": 3920,
+        "owner": "P3-P9/P15",
+        "path": "crates/fireweed-release/src/lib.rs",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P3-P9/P15",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "f27390df68c45eec82ba",
         "identity": "if source_revisions.len() != 1 {",
-        "line": 4091,
+        "line": 4104,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13950,9 +13858,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "4cafe762083d64a75df1",
+        "id": "a40587a691fff789c7cd",
         "identity": "\"source_revision\".into(),",
-        "line": 4427,
+        "line": 4440,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13964,9 +13872,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "9df1dacb9bc1079c57bb",
+        "id": "d70ff230006d9d0d2460",
         "identity": ".insert(\"price_source_revision\".into(), serde_json::json!(\"stale\"));",
-        "line": 4686,
+        "line": 4699,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13978,9 +13886,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "b835b6e5d20efb597ab8",
+        "id": "89178561919bd78a7baf",
         "identity": ".insert(\"source_revision\".into(), serde_json::json!(\"dirty\"));",
-        "line": 4713,
+        "line": 4726,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -13992,9 +13900,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "4d21ba40d8d590fa8bfa",
+        "id": "7d4388d66cafa8894a2f",
         "identity": "fn release_cost_validator_rejects_mixed_source_revisions() {",
-        "line": 4733,
+        "line": 4746,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -14006,9 +13914,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "98f8a4d73cd7f3b6b479",
+        "id": "0f259219123c5a1b213d",
         "identity": "\"source_revision\".into(),",
-        "line": 4736,
+        "line": 4749,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -14020,9 +13928,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "c56b4646ded09c0b4058",
+        "id": "65fe5cc17ca52c43c83b",
         "identity": ".insert(\"source_revision\".into(), serde_json::json!(\"dirty\"));",
-        "line": 4927,
+        "line": 4940,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/src/lib.rs",
         "status": "debt"
@@ -14132,9 +14040,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "6e8cb6bcef2dbd151d72",
+        "id": "4a1fe08fe85c8819ee3c",
         "identity": "source_revision: \"abc\".into(),",
-        "line": 16,
+        "line": 17,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/tests/e2_failover_tests.rs",
         "status": "debt"
@@ -14202,9 +14110,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "05cf8472ce12a5df130e",
+        "id": "69c619e22869cc5db87d",
         "identity": "fn rejects_source_revision_mismatch() {",
-        "line": 663,
+        "line": 668,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
         "status": "debt"
@@ -14216,9 +14124,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "829c221816bbde1f68a0",
+        "id": "66a59618a95007b2fcf5",
         "identity": "value[\"source_revision\"] = serde_json::json!(\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\");",
-        "line": 666,
+        "line": 671,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
         "status": "debt"
@@ -14230,22 +14138,8 @@
           "P2f"
         ],
         "detail": "",
-        "id": "2a2bc3407e73cc020d78",
+        "id": "d85df0a74b1250a1ca4c",
         "identity": "assert!(errors.contains(\"requires source_revision\"));",
-        "line": 669,
-        "owner": "P3-P9/P15",
-        "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
-        "status": "debt"
-      },
-      {
-        "category": "source_guard",
-        "dependency_chain": [
-          "P3-P9/P15",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "703502890777459608ac",
-        "identity": "fn rejects_wrong_expected_revision() {",
         "line": 674,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
@@ -14258,9 +14152,23 @@
           "P2f"
         ],
         "detail": "",
-        "id": "269643d6214e2d4dbbf4",
+        "id": "9ad5708635ee06a472db",
+        "identity": "fn rejects_wrong_expected_revision() {",
+        "line": 679,
+        "owner": "P3-P9/P15",
+        "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P3-P9/P15",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "236e3ea03063bf5cf7d1",
         "identity": "source_revision: REVISION.into(),",
-        "line": 911,
+        "line": 915,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
         "status": "debt"
@@ -14272,9 +14180,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "bcf3111c1a4b9b8c0c8f",
+        "id": "c56ad46e1bb7d16ffcb8",
         "identity": "assert_eq!(row.source_revision.as_deref(), Some(REVISION));",
-        "line": 922,
+        "line": 926,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
         "status": "debt"
@@ -14286,9 +14194,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "c50b7dee605b7aa8a518",
+        "id": "2e4e2d3a0163f752a1a0",
         "identity": "source_revision: \"fixture\".into(),",
-        "line": 945,
+        "line": 949,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
         "status": "debt"
@@ -14398,9 +14306,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "0da5805ef83f573c8bc4",
-        "identity": "fn prove_native_create_only_fence(s3: &S3Env, source_revision: &str, output: &std::path::Path) {",
-        "line": 86,
+        "id": "533b4f51515c517737d8",
+        "identity": "source_revision: &str,",
+        "line": 88,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "debt"
@@ -14412,9 +14320,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "89c22493dc95c3b2f41b",
+        "id": "d846629df01e892bbeac",
         "identity": "source_revision: source_revision.to_owned(),",
-        "line": 178,
+        "line": 182,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "debt"
@@ -14426,9 +14334,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "158984b613f8ccbc3cf8",
+        "id": "19bebb5f87b2ee92134e",
         "identity": "let source_revision =",
-        "line": 3444,
+        "line": 3459,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "debt"
@@ -14440,9 +14348,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "3d489cf4f33a4bef3491",
+        "id": "edc63775c4711bf0e7e8",
         "identity": "std::env::var(\"FIREWEED_E3_SOURCE_REVISION\").unwrap_or_else(|_| \"undeclared\".into());",
-        "line": 3445,
+        "line": 3460,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "debt"
@@ -14454,9 +14362,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "595dd97f9f739b2b8cfb",
+        "id": "309db9415668d21c517c",
         "identity": "values.insert(\"source_revision\".into(), serde_json::json!(source_revision));",
-        "line": 3461,
+        "line": 3476,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "debt"
@@ -14468,9 +14376,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "053fcee60deba2721299",
+        "id": "7907725baf1b788547ae",
         "identity": "let source_revision = std::env::var(\"FIREWEED_E3_SOURCE_REVISION\")",
-        "line": 3536,
+        "line": 3551,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "debt"
@@ -14482,9 +14390,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "289a35f643d78f1e3935",
+        "id": "49fc8b26f78d8d31b600",
         "identity": "source_revision.len() == 40",
-        "line": 3539,
+        "line": 3554,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "debt"
@@ -14496,9 +14404,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "fe67eaf2a95a89a9ecb7",
+        "id": "a418dcd72a5facc823c6",
         "identity": "&& source_revision.bytes().all(|byte| byte.is_ascii_hexdigit()),",
-        "line": 3540,
+        "line": 3555,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "debt"
@@ -14510,9 +14418,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "b5ac6d16e7a4813f762c",
+        "id": "722257d43618fa069d9a",
         "identity": "let fence_revision = source_revision.clone();",
-        "line": 3564,
+        "line": 3580,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "debt"
@@ -14524,9 +14432,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "b41a82af1d32210ac14d",
+        "id": "540b0e63bcce7588492f",
         "identity": "let source_revision =",
-        "line": 3798,
+        "line": 3811,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "debt"
@@ -14538,9 +14446,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "1cc2444b797dd19a4ac5",
+        "id": "f26e8049ba0f4d9998b0",
         "identity": "std::env::var(\"FIREWEED_E3_SOURCE_REVISION\").expect(\"exact source revision\");",
-        "line": 3799,
+        "line": 3812,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "debt"
@@ -14552,9 +14460,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "fdd422997ce18198e04f",
-        "identity": "prove_native_create_only_fence(&s3, &source_revision, std::path::Path::new(&output));",
-        "line": 3801,
+        "id": "13c29a4e75648147be0c",
+        "identity": "prove_native_create_only_fence(&s3, &source_revision, &output);",
+        "line": 3815,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "debt"
@@ -15238,9 +15146,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "12367aea9766aa647496",
+        "id": "1ae4fdb052b2d6a408b8",
         "identity": "--contract \"${TP002_COMPOSITE_CONTRACT}\" --expected-revision \"${SOURCE_REVISION}\"",
-        "line": 148,
+        "line": 143,
         "owner": "P10px",
         "path": "scripts/ci/release-gate.sh",
         "status": "debt"
@@ -15546,6 +15454,20 @@
           "P2f"
         ],
         "detail": "",
+        "id": "559f8c455f3373632fc1",
+        "identity": "\"FIREWEED_E3_SOURCE_REVISION\",",
+        "line": 21,
+        "owner": "P15",
+        "path": "scripts/perf/tests/verify-e3-env-forwarding.py",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P15",
+          "P2f"
+        ],
+        "detail": "",
         "id": "239bdd5e49b97274b231",
         "identity": "\"image\":${IMAGE@Q},\"image_id\":${IMAGE_ID@Q},\"source_revision\":${SOURCE_REV@Q},",
         "line": 332,
@@ -15616,9 +15538,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "d19c5045f35ba0cdc2cb",
+        "id": "892c58a6cbc5ad8d5328",
         "identity": "FIREWEED_E3_SOURCE_REVISION=\"$SOURCE_REVISION\" \\",
-        "line": 167,
+        "line": 171,
         "owner": "P15",
         "path": "scripts/perf/tp002-e3-s3.sh",
         "status": "debt"
@@ -15630,9 +15552,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "7adf44889c1b140d2bf9",
+        "id": "a128081470006c1f0600",
         "identity": "FIREWEED_E3_SOURCE_REVISION=\"$SOURCE_REVISION\" \\",
-        "line": 208,
+        "line": 202,
         "owner": "P15",
         "path": "scripts/perf/tp002-e3-s3.sh",
         "status": "debt"
@@ -15644,9 +15566,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "8c383553c9239c7786ec",
+        "id": "c7ec4fb69f9a77d5131c",
         "identity": "if [ \"$(git -C \"$REPO_ROOT\" rev-parse HEAD)\" != \"$SOURCE_REVISION\" ]; then",
-        "line": 226,
+        "line": 221,
         "owner": "P15",
         "path": "scripts/perf/tp002-e3-s3.sh",
         "status": "debt"
@@ -15658,9 +15580,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "f0a406b9757aea9d4190",
+        "id": "dfc3099fdf262fc48863",
         "identity": "--source-revision \"$SOURCE_REVISION\" \\",
-        "line": 248,
+        "line": 243,
         "owner": "P15",
         "path": "scripts/perf/tp002-e3-s3.sh",
         "status": "debt"
@@ -15686,9 +15608,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "8a2c90d7ca6d0ec20dd5",
+        "id": "5e20c7754cb2aaa90f7a",
         "identity": "printf '{\"source_revision\":\"%s\",\"authority\":\"%s\"}\\n' \"$REVISION\" \"$name\" >\"$case_dir/source/$name.jsonl\"",
-        "line": 31,
+        "line": 30,
         "owner": "P10px",
         "path": "scripts/release/build-governed-evidence-bundle-test.sh",
         "status": "debt"
@@ -15700,8 +15622,22 @@
           "P2f"
         ],
         "detail": "",
-        "id": "e3dd4463c3dbe300fbd6",
+        "id": "3b61c1b63e98632c0efb",
         "identity": "printf '{\"source_revision\":\"%s\"}\\n' \"$REVISION\" >\"$case_dir/source/e2-failover.json\"",
+        "line": 33,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "ea28694502884d8d55fb",
+        "identity": "printf '{\"source_revision\":\"%s\",\"authority\":\"e3\"}\\n' \"$REVISION\" >\"$case_dir/e3/e3.jsonl\"",
         "line": 34,
         "owner": "P10px",
         "path": "scripts/release/build-governed-evidence-bundle-test.sh",
@@ -15714,8 +15650,8 @@
           "P2f"
         ],
         "detail": "",
-        "id": "ff10b7c7242fd65d9b6d",
-        "identity": "printf '{\"source_revision\":\"%s\",\"authority\":\"e3\"}\\n' \"$REVISION\" >\"$case_dir/e3/e3.jsonl\"",
+        "id": "9550f4af94574863f619",
+        "identity": "printf '{\"source_revision\":\"%s\",\"authority\":\"tp003\"}\\n' \"$REVISION\" >\"$case_dir/e3/tp003.jsonl\"",
         "line": 35,
         "owner": "P10px",
         "path": "scripts/release/build-governed-evidence-bundle-test.sh",
@@ -15728,23 +15664,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "f22a7cf2d939b4a8ba61",
-        "identity": "printf '{\"source_revision\":\"%s\",\"authority\":\"tp003\"}\\n' \"$REVISION\" >\"$case_dir/e3/tp003.jsonl\"",
-        "line": 36,
-        "owner": "P10px",
-        "path": "scripts/release/build-governed-evidence-bundle-test.sh",
-        "status": "debt"
-      },
-      {
-        "category": "source_guard",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "e76da35096212a3049c7",
+        "id": "4f4ce325c30e0436e4f7",
         "identity": "printf '{\"source_revision\":\"%s\",\"authority\":\"fencing\"}\\n' \"$REVISION\" >\"$case_dir/e3/fencing.json\"",
-        "line": 37,
+        "line": 36,
         "owner": "P10px",
         "path": "scripts/release/build-governed-evidence-bundle-test.sh",
         "status": "debt"
@@ -70429,22 +70351,22 @@
   "release_repeat_quarantine": {
     "callers": [
       {
-        "line": 585,
+        "line": 596,
         "path": "scripts/ci/inventory-storage-remediation.py",
         "text": "suite_path = ROOT / \"scripts/ci/release-repeat-suites.toml\""
       },
       {
-        "line": 603,
+        "line": 614,
         "path": "scripts/ci/inventory-storage-remediation.py",
         "text": "\"scripts/ci/release-repeat-suites.toml\","
       },
       {
-        "line": 613,
+        "line": 624,
         "path": "scripts/ci/inventory-storage-remediation.py",
         "text": "\"scripts/ci/release-repeat-suites.toml\","
       },
       {
-        "line": 625,
+        "line": 636,
         "path": "scripts/ci/inventory-storage-remediation.py",
         "text": "if \"release-repeat-suites.toml\" in line or \"verify-product-workflow-names.sh\" in line:"
       },
@@ -70706,7 +70628,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "a6108944dd725008a92b0be9b7e104126696b165a4e6d34f23e8e972c27b90d6",
+  "source_inventory_sha256": "e379b495fefe93d02df2b4a47dc7852f768ad5d1d9c4584a15ff67400c1520e2",
   "workspaces": [
     {
       "listing_error_sha256": "",

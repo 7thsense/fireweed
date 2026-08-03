@@ -15,8 +15,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use fireweed_release::{
-    LedgerSummary, missing_evidence, missing_smoke_evidence, verify_ledger, verify_ledger_dir,
-    verify_release_manifest,
+    LedgerSummary, Promoted, missing_evidence, missing_smoke_evidence, verify_ledger,
+    verify_ledger_dir, verify_release_manifest,
 };
 
 fn main() -> ExitCode {
@@ -71,11 +71,19 @@ fn main() -> ExitCode {
         );
     }
 
+    let promoted = |path: &PathBuf| {
+        Promoted::new(path).map_err(|error| {
+            vec![fireweed_release::LedgerError(format!(
+                "cannot authorize promoted evidence input {}: {error}",
+                path.display()
+            ))]
+        })
+    };
     let result: Result<LedgerSummary, Vec<fireweed_release::LedgerError>> =
         match (&ledger, &ledger_dir, &manifest) {
-            (Some(p), None, None) => verify_ledger(p, strict),
-            (None, Some(d), None) => verify_ledger_dir(d, strict),
-            (None, None, Some(m)) => verify_release_manifest(m),
+            (Some(p), None, None) => promoted(p).and_then(|p| verify_ledger(p.path(), strict)),
+            (None, Some(d), None) => promoted(d).and_then(|d| verify_ledger_dir(d.path(), strict)),
+            (None, None, Some(m)) => promoted(m).and_then(|m| verify_release_manifest(m.path())),
             (None, None, None) => {
                 return fail(
                     "one of --ledger <path>, --ledger-dir <dir>, or --manifest <path> is required",

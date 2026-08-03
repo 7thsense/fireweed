@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use fireweed_release::{EvidenceOperation, Promoted};
+
 fn main() {
     let path = std::env::args_os()
         .nth(1)
@@ -8,7 +10,17 @@ fn main() {
             eprintln!("usage: fireweed-verify-density-evidence <ledger.jsonl>");
             std::process::exit(2);
         });
-    let contents = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+    let input = Promoted::new(&path).unwrap_or_else(|error| {
+        eprintln!("{}: {error}", path.display());
+        std::process::exit(1);
+    });
+    let path = input
+        .authorize(EvidenceOperation::Read)
+        .unwrap_or_else(|error| {
+            eprintln!("{}: {error}", path.display());
+            std::process::exit(1);
+        });
+    let contents = std::fs::read_to_string(path).unwrap_or_else(|error| {
         eprintln!("{}: {error}", path.display());
         std::process::exit(1);
     });

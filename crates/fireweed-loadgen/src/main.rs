@@ -1027,10 +1027,10 @@ fn cmd_emit_row(args: &[String]) -> ! {
 
     let row = fireweed_release::e2::build_e2_row(&results, &tuning, &verdict);
 
-    let path = std::path::PathBuf::from(&out);
+    let path = run_owned_output(&out);
     fireweed_release::append_row(&path, &row).expect("emit ledger row");
-    let summary =
-        fireweed_release::verify_ledger(&path, true).expect("emitted ledger validates strict");
+    let summary = fireweed_release::verify_ledger(path.path(), true)
+        .expect("emitted ledger validates strict");
     let bucket_ok = if all_pass {
         summary.evidence_ids.contains("E2")
     } else {
@@ -1449,16 +1449,30 @@ fn cmd_density_emit_row(args: &[String]) -> ! {
     };
     let row = fireweed_release::density::build_release_row(&measurement, &metadata);
     let passed = fireweed_release::density::validate_release_row(&row).is_ok();
-    let path = std::path::PathBuf::from(&out);
-    let _ = std::fs::remove_file(&path);
+    let path = run_owned_output(&out);
+    path.delete().expect("clear run-owned density ledger");
     fireweed_release::append_row(&path, &row).expect("append density row");
-    fireweed_release::verify_ledger(&path, true).expect("density ledger strict-validates");
+    fireweed_release::verify_ledger(path.path(), true).expect("density ledger strict-validates");
     println!("DENSITY_ROW {}", row.to_jsonl());
     exit(if passed { 0 } else { 1 });
 }
 
 fn yn(b: bool) -> &'static str {
     if b { "PASS" } else { "FAIL" }
+}
+
+fn run_owned_output(output: &str) -> fireweed_release::RunOwned {
+    let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("resolve repository root for evidence output");
+    let path = std::path::PathBuf::from(output);
+    let run_root = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .expect("evidence output must have an existing external parent directory");
+    fireweed_release::RunOwned::new(repository_root, run_root, &path)
+        .expect("evidence output must be run-owned and outside the repository")
 }
 
 fn main() {

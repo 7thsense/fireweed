@@ -1,19 +1,23 @@
 use std::path::PathBuf;
 
-use fireweed_release::transaction::{evidence_paths, verify_transaction_evidence};
+use fireweed_release::Fixture;
+use fireweed_release::transaction::verify_transaction_evidence;
 
-fn fixture(path: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../scripts/ci/fixtures/transaction-evidence")
-        .join(path)
+fn fixture(path: &str) -> Fixture {
+    Fixture::new(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/ci/fixtures/transaction-evidence")
+            .join(path),
+    )
+    .expect("open immutable transaction evidence fixture")
 }
 
 #[test]
 fn transaction_evidence_accepts_both_profiles_and_all_required_acs() {
-    let summary = verify_transaction_evidence(&evidence_paths([
+    let summary = verify_transaction_evidence(&[
         fixture("valid/matrix.jsonl"),
         fixture("valid/parity.jsonl"),
-    ]))
+    ])
     .expect("valid exact-pair evidence passes");
     assert_eq!(summary.rows, 8);
     assert_eq!(summary.satisfied.len(), 8);
@@ -21,8 +25,7 @@ fn transaction_evidence_accepts_both_profiles_and_all_required_acs() {
 
 #[test]
 fn transaction_evidence_rejects_profile_omission() {
-    let errors = verify_transaction_evidence(&evidence_paths([fixture("profile-omission.jsonl")]))
-        .unwrap_err();
+    let errors = verify_transaction_evidence(&[fixture("profile-omission.jsonl")]).unwrap_err();
     assert!(
         errors
             .iter()
@@ -32,8 +35,7 @@ fn transaction_evidence_rejects_profile_omission() {
 
 #[test]
 fn transaction_evidence_rejects_ac_omission() {
-    let errors =
-        verify_transaction_evidence(&evidence_paths([fixture("ac-omission.jsonl")])).unwrap_err();
+    let errors = verify_transaction_evidence(&[fixture("ac-omission.jsonl")]).unwrap_err();
     assert!(
         errors
             .iter()
@@ -43,8 +45,7 @@ fn transaction_evidence_rejects_ac_omission() {
 
 #[test]
 fn transaction_evidence_rejects_non_pass_result() {
-    let errors =
-        verify_transaction_evidence(&evidence_paths([fixture("failure.jsonl")])).unwrap_err();
+    let errors = verify_transaction_evidence(&[fixture("failure.jsonl")]).unwrap_err();
     assert!(
         errors
             .iter()
@@ -54,8 +55,7 @@ fn transaction_evidence_rejects_non_pass_result() {
 
 #[test]
 fn transaction_evidence_rejects_unjustified_na() {
-    let errors = verify_transaction_evidence(&evidence_paths([fixture("unjustified-na.jsonl")]))
-        .unwrap_err();
+    let errors = verify_transaction_evidence(&[fixture("unjustified-na.jsonl")]).unwrap_err();
     assert!(
         errors
             .iter()
@@ -66,7 +66,7 @@ fn transaction_evidence_rejects_unjustified_na() {
 #[test]
 fn transaction_evidence_rejects_bogus_structured_na() {
     for name in ["bogus-covered-by-na.jsonl", "duplicate-field-na.jsonl"] {
-        let errors = verify_transaction_evidence(&evidence_paths([fixture(name)])).unwrap_err();
+        let errors = verify_transaction_evidence(&[fixture(name)]).unwrap_err();
         assert!(
             errors
                 .iter()
@@ -82,22 +82,23 @@ fn exact_pair_local_gate_requires_fresh_nonempty_evidence() {
     let source =
         std::fs::read_to_string(repo.join("scripts/ci/record-postgres-transaction-evidence.sh"))
             .unwrap();
-    let fresh = source
-        .find("rm -f \"$matrix_evidence\" \"$parity_evidence\"")
+    assert!(!source.contains("docs/perf/evidence"));
+    assert!(!source.contains("rm -f"));
+    let external = source
+        .find("TP-003 evidence directory must be outside the repository")
         .unwrap();
     let matrix_test = source
-        .find("ac_txn_contract_matrix_postgres_storage_pairs -- --exact --nocapture")
+        .find("postgres_log_matrix_tests::postgres_log_t3_tp003_ac_txn_exact_pairs -- --exact --nocapture")
         .unwrap();
-    let parity_test = source
-        .find("ac_txn_6_postgres_storage_pair_parity -- --exact --nocapture")
+    let promoted_parity = source
+        .find("TP-003 parity evidence must be promoted outside the repository")
         .unwrap();
     let matrix_nonempty = source.find("test -s \"$matrix_evidence\"").unwrap();
-    let parity_nonempty = source.find("test -s \"$parity_evidence\"").unwrap();
     let verify = source
         .find("--bin fireweed-verify-transaction-evidence")
         .unwrap();
-    assert!(fresh < matrix_test);
-    assert!(fresh < parity_test);
-    assert!(matrix_test < matrix_nonempty && parity_test < parity_nonempty);
-    assert!(matrix_nonempty < verify && parity_nonempty < verify);
+    assert!(external < matrix_test);
+    assert!(promoted_parity < matrix_test);
+    assert!(matrix_test < matrix_nonempty);
+    assert!(matrix_nonempty < verify);
 }

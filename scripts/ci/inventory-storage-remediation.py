@@ -488,9 +488,20 @@ def scan_source_debt(paths: list[str]) -> dict[str, list[dict[str, object]]]:
                     debt_row("quarantine", path, index, line_text.strip()[:120], performance=performance, e3=e3)
                 )
             if source_guard_pattern.search(line_text):
-                debt["source_guards"].append(
-                    debt_row("source_guard", path, index, line_text.strip()[:120], performance=performance, e3=e3)
+                row = debt_row(
+                    "source_guard",
+                    path,
+                    index,
+                    line_text.strip()[:120],
+                    performance=performance,
+                    e3=e3,
                 )
+                # P0f activates the conformance E3 producer and removes its early-success path.
+                # P15 owns the later performance/source-binding policy for that same producer.
+                if e3 and path.startswith("crates/fireweed-conformance/"):
+                    row["owner"] = "P15"
+                    row["dependency_chain"] = ["P15", "P2f"]
+                debt["source_guards"].append(row)
             if skip_pattern.search(line_text):
                 context = "\n".join(lines[index - 1 : min(len(lines), index + 24)])
                 lowered = context.lower()

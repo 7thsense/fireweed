@@ -681,19 +681,17 @@ fn queue_density_single_node_durable_tests() {
     };
 
     // ---- Emit durable-backend E2 density evidence (REAL measured numbers) ----
-    // Normal test and PR-gate runs validate a disposable ledger so timing noise does not
-    // dirty the tracked evidence artifact. Opt in when intentionally refreshing evidence.
-    let update_tracked_evidence = std::env::var("FIREWEED_UPDATE_PERF_EVIDENCE")
-        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
-    let evidence_path = if update_tracked_evidence {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../docs/perf/evidence/tp002-e2-density-durable.jsonl")
-    } else {
-        let path = durable_tmp("evidence.jsonl");
-        cleanup.push(path.clone());
-        path
-    };
-    let _ = std::fs::remove_file(&evidence_path);
+    // Ordinary and governed runs write only to a typed, external run-owned ledger. Promotion into
+    // historical documentation is a separate verified operation.
+    let evidence_path = fireweed_release::ledger_path(
+        env!("CARGO_MANIFEST_DIR"),
+        "queue_density_single_node_durable_tests",
+    )
+    .expect("create run-owned durable-density ledger path");
+    cleanup.push(evidence_path.run_root().to_path_buf());
+    evidence_path
+        .delete()
+        .expect("clear run-owned density ledger");
 
     let cmd = "cargo test --manifest-path crates/fireweed-bench/Cargo.toml --test queue_density_single_node_tests queue_density_single_node_durable_tests -- --nocapture";
     let full_bar = ">=1000 durable queues resident and intact on one node; hot push and claim progress at every density; measured rates are diagnostic only";
@@ -746,7 +744,7 @@ fn queue_density_single_node_durable_tests() {
     }
 
     // The emitted durable evidence must strict-validate and carry the E2 id under smoke_evidence_ids.
-    let summary = fireweed_release::verify_ledger(&evidence_path, true)
+    let summary = fireweed_release::verify_ledger(evidence_path.path(), true)
         .expect("durable evidence validates strict");
     assert!(
         summary.smoke_evidence_ids.contains("E2"),
@@ -818,11 +816,12 @@ fn durable_density_row(
 /// strict validation and carries `evidence_id`. (Structure only; the measured values are verified by the
 /// suite's own assertions above, which run before this emission.)
 fn emit_and_verify(suite: &str, row: &fireweed_release::LedgerRow, evidence_id: &str) {
-    let path = fireweed_release::ledger_path(env!("CARGO_MANIFEST_DIR"), suite);
-    let _ = std::fs::remove_file(&path);
+    let path = fireweed_release::ledger_path(env!("CARGO_MANIFEST_DIR"), suite)
+        .expect("create run-owned density ledger path");
+    path.delete().expect("clear run-owned density ledger");
     fireweed_release::append_row(&path, row).expect("emit ledger row");
-    let summary =
-        fireweed_release::verify_ledger(&path, true).expect("emitted row validates strict");
+    let summary = fireweed_release::verify_ledger(path.path(), true)
+        .expect("emitted row validates strict");
     // SMOKE-tier row: the id is recorded under smoke_evidence_ids (a release gate must NOT count it toward
     // the headline E2 requirement).
     assert!(

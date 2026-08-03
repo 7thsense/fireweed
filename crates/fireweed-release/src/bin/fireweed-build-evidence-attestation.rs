@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
 
+use fireweed_release::RunOwned;
 use fireweed_release::attestation::{
-    DigestBinding, EvidenceAttestation, InputBinding, InputKind, POLICY, SCHEMA_VERSION, SCOPE,
-    SourceBinding, digest_path,
+    DigestBinding, EvidenceAttestation, InputBinding, InputKind, POLICY, PROMOTED_EVIDENCE_PREFIX,
+    SCHEMA_VERSION, SCOPE, SourceBinding, digest_path,
 };
 
 fn main() {
@@ -15,7 +16,7 @@ fn main() {
         args.next().unwrap_or_else(|| usage())
     };
     let repo = PathBuf::from(value("--repo-root"));
-    let bundle = value("--bundle");
+    let bundle_root = PathBuf::from(value("--bundle-root"));
     let tag = value("--tag");
     let commit = value("--commit");
     let produced_at = value("--produced-at");
@@ -34,12 +35,13 @@ fn main() {
         "e2-failover.json",
         "e3",
     ]
-    .map(|name| format!("{bundle}/{name}"));
+    .map(str::to_string);
     let evidence = evidence_paths
         .into_iter()
-        .map(|path| DigestBinding {
-            sha256: digest(&repo, &path),
-            path,
+        .map(|relative| DigestBinding {
+            sha256: digest_path(&bundle_root.join(&relative))
+                .unwrap_or_else(|error| panic!("hash bundle input {relative}: {error}")),
+            path: format!("{PROMOTED_EVIDENCE_PREFIX}/{relative}"),
         })
         .collect();
     let inputs = [
@@ -70,8 +72,14 @@ fn main() {
         exception: None,
     };
     let body = serde_json::to_vec_pretty(&attestation).expect("attestation serializes");
-    std::fs::write(&out, body).unwrap_or_else(|error| panic!("write {}: {error}", out.display()));
-    println!("wrote {}", out.display());
+    let run_root = out
+        .parent()
+        .expect("attestation output requires a parent directory");
+    let out = RunOwned::new(&repo, run_root, &out)
+        .unwrap_or_else(|error| panic!("authorize run-owned attestation output: {error}"));
+    out.write(body)
+        .unwrap_or_else(|error| panic!("write {}: {error}", out.path().display()));
+    println!("wrote {}", out.path().display());
 }
 
 fn digest(repo: &Path, relative: &str) -> String {
@@ -80,7 +88,7 @@ fn digest(repo: &Path, relative: &str) -> String {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: fireweed-build-evidence-attestation --repo-root <dir> --bundle <repo-relative-dir> --tag <tag> --commit <sha> --produced-at <UTC> --reviewed-at <UTC> --out <path>"
+        "usage: fireweed-build-evidence-attestation --repo-root <dir> --bundle-root <external-dir> --tag <tag> --commit <sha> --produced-at <UTC> --reviewed-at <UTC> --out <external-path>"
     );
     std::process::exit(2)
 }

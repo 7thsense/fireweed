@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use fireweed_release::attestation::{
     DigestBinding, EvidenceAttestation, InputBinding, InputKind, ManualException, POLICY,
-    SCHEMA_VERSION, SCOPE, SourceBinding, digest_path, verify_attestation,
+    PROMOTED_EVIDENCE_PREFIX, SCHEMA_VERSION, SCOPE, SourceBinding, digest_path,
+    verify_attestation, verify_attestation_with_evidence_root,
 };
 
 const TAG: &str = "v9.8.7";
@@ -74,6 +75,36 @@ fn exact_tag_attestation_accepts_matching_source_and_digests() {
     let root = temp_repo("valid");
     verify_attestation(&manifest(&root), &root, TAG, COMMIT).unwrap();
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn unpromoted_run_owned_bundle_uses_pinned_v1_paths() {
+    let root = temp_repo("run-owned-bundle-source");
+    let bundle = std::env::temp_dir().join(format!(
+        "fireweed-attestation-run-owned-bundle-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&bundle);
+    fs::create_dir_all(&bundle).unwrap();
+    fs::write(bundle.join("e0-e3.jsonl"), "{\"bars_met\":true}\n").unwrap();
+
+    let mut attestation = manifest(&root);
+    attestation.evidence = vec![DigestBinding {
+        path: format!("{PROMOTED_EVIDENCE_PREFIX}/e0-e3.jsonl"),
+        sha256: digest_path(&bundle.join("e0-e3.jsonl")).unwrap(),
+    }];
+    verify_attestation_with_evidence_root(&attestation, &root, &bundle, TAG, COMMIT).unwrap();
+
+    attestation.evidence[0].path = "another-root/e0-e3.jsonl".into();
+    let errors = verify_attestation_with_evidence_root(&attestation, &root, &bundle, TAG, COMMIT)
+        .unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.0.contains("outside promoted prefix"))
+    );
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(bundle).unwrap();
 }
 
 #[test]
