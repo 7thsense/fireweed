@@ -1385,11 +1385,14 @@ impl fireweed_engine::HistoricalProjectionRead for AsyncObjectLogSqliteBackend {
     type AsOfProjection = fireweed_projection::InMemoryProjection;
     fn current_position(
         &self,
-        _shard: &QueueKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::CommandPosition>> + Send
     {
-        // Historical as-of reads remain Unavailable on LogEngine products for now.
-        std::future::ready(Err(EngineError::Unavailable))
+        async move {
+            AsyncLogStore::high_water(self.log.as_ref(), shard.clone())
+                .await?
+                .ok_or(EngineError::NotFound)
+        }
     }
     fn read_as_of<T, F>(
         &self,

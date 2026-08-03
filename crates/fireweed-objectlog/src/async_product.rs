@@ -1345,10 +1345,14 @@ impl fireweed_engine::HistoricalProjectionRead for AsyncObjectLogMemoryBackend {
     type AsOfProjection = fireweed_projection::InMemoryProjection;
     fn current_position(
         &self,
-        _shard: &QueueKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::CommandPosition>> + Send
     {
-        std::future::ready(Err(EngineError::Unavailable))
+        async move {
+            AsyncLogStore::high_water(self.log.as_ref(), shard.clone())
+                .await?
+                .ok_or(EngineError::NotFound)
+        }
     }
     fn read_as_of<T, F>(
         &self,
@@ -1647,9 +1651,9 @@ mod tests {
     };
     use fireweed_engine::{
         AddressedMutation, AsyncLogStore, ClaimCompatibility, ClaimPort, ClaimRequest,
-        ControlPlaneStore, FinalizeKind, FinalizeOutcome, FinalizePort, ItemMutationOperation,
-        ItemMutationPort, ItemMutationRequest, ItemMutationReturning, ItemPatch, ProjectionRead,
-        ProjectionStore, PushPort, PushSpec,
+        ControlPlaneStore, EngineError, FinalizeKind, FinalizeOutcome, FinalizePort,
+        HistoricalProjectionRead, ItemMutationOperation, ItemMutationPort, ItemMutationRequest,
+        ItemMutationReturning, ItemPatch, ProjectionRead, ProjectionStore, PushPort, PushSpec,
     };
     use object_log::FlushConfig;
 
@@ -1728,6 +1732,38 @@ mod tests {
         assert_eq!(claimed.items[0].item_id, ids[0]);
         let metrics = backend.metrics(&shard).await.unwrap();
         assert_eq!(metrics.leased, 1);
+    }
+
+    #[tokio::test]
+    async fn current_position_tracks_authoritative_high_water() {
+        let backend = backend().await;
+        let def = qdef();
+        let shard = fireweed_engine::QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        backend.create_queue(def).await.unwrap();
+        assert_eq!(
+            HistoricalProjectionRead::current_position(&backend, &shard).await,
+            Err(EngineError::NotFound)
+        );
+
+        backend
+            .push(
+                &shard,
+                vec![PushSpec::default()],
+                UtcTimestamp::new(1, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        let position = HistoricalProjectionRead::current_position(&backend, &shard)
+            .await
+            .unwrap();
+        assert_eq!(position.queue, shard);
+        assert_eq!(
+            Some(position),
+            AsyncLogStore::high_water(backend.log.as_ref(), shard)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
