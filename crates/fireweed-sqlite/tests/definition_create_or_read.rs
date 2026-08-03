@@ -117,13 +117,15 @@ fn sqlite_log_compatible_definition_race_has_one_winner_no_overwrite() {
     let _ = std::fs::remove_file(&path);
     let definition = rich_definition();
     let barrier = Arc::new(Barrier::new(4));
-    let handles = (0..4)
-        .map(|_| {
-            let path = path.clone();
+    let logs = (0..4)
+        .map(|_| SqliteLog::open(path.to_str().unwrap()).unwrap())
+        .collect::<Vec<_>>();
+    let handles = logs
+        .into_iter()
+        .map(|mut log| {
             let definition = definition.clone();
             let barrier = barrier.clone();
             std::thread::spawn(move || {
-                let mut log = SqliteLog::open(path.to_str().unwrap()).unwrap();
                 barrier.wait();
                 LogStore::create_or_read_definition(&mut log, &definition)
                     .unwrap()
@@ -161,16 +163,25 @@ fn sqlite_log_incompatible_definition_race_conflicts_and_caches_winner() {
     let mut second = first.clone();
     second.request_id_retention_ms += 1;
     let barrier = Arc::new(Barrier::new(2));
-    let handles = [first.clone(), second.clone()].map(|definition| {
-        let path = path.clone();
-        let barrier = barrier.clone();
-        std::thread::spawn(move || {
-            let mut log = SqliteLog::open(path.to_str().unwrap()).unwrap();
-            barrier.wait();
-            log.persist_definition(&definition)
+    let logs = [
+        SqliteLog::open(path.to_str().unwrap()).unwrap(),
+        SqliteLog::open(path.to_str().unwrap()).unwrap(),
+    ];
+    let handles = [first.clone(), second.clone()]
+        .into_iter()
+        .zip(logs)
+        .map(|(definition, mut log)| {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                log.persist_definition(&definition)
+            })
         })
-    });
-    let outcomes = handles.map(|handle| handle.join().unwrap());
+        .collect::<Vec<_>>();
+    let outcomes = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>();
     assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
     assert_eq!(
         outcomes
