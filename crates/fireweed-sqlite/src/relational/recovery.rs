@@ -1096,6 +1096,10 @@ pub(crate) fn apply_committed_batch_sql(
 /// Apply a contiguous run of already-validated `Push` envelopes as one multi-row insert + once-per-run
 /// high-water / claim-scan / group-summary maintenance. Positions with `sequence < cursor` are skipped
 /// (idempotent). Caller advances the relational cursor and request-outcome rows.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the recovery transaction and its derived indexes stay explicit at this SQL boundary"
+)]
 fn apply_push_run_sql(
     tx: &Transaction<'_>,
     queues: &HashMap<QueueKey, QueueDefinition>,

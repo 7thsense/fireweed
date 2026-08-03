@@ -4843,10 +4843,9 @@ mod tests {
         AdvanceInstanceFenceCommand, AsyncLogReplayBackend, ChangeRecordSink, ClaimCommand,
         ClaimCompatibility, ClaimPort, ClaimRequest, CohortClaimCommand, CommandChecksum,
         CommandId, ControlPlaneStore, FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort,
-        InProcessControlPlane, LogStore, PauseQueueCommand, ProjectionStore, PurgeItemsCommand,
-        PushCommand, PushPort, PushSpec, QueueKey, QueueMetrics, ReassignLeaseCommand,
-        RenewLeaseCommand, SideRecord, UpdateFieldsCommand, WriteSideRecordsCommand,
-        assemble_async_log_replay,
+        LogStore, PauseQueueCommand, ProjectionStore, PurgeItemsCommand, PushCommand, PushPort,
+        PushSpec, QueueKey, QueueMetrics, ReassignLeaseCommand, RenewLeaseCommand, SideRecord,
+        UpdateFieldsCommand, WriteSideRecordsCommand, assemble_async_log_replay,
     };
     use std::future::Future;
     use std::task::{Context, Poll, Waker};
