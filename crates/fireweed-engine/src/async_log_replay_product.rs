@@ -5,6 +5,11 @@
 //! [`InProcessProjectionStore`]. Adapter crates only open axes and call
 //! [`assemble_async_log_replay`] / [`AsyncLogReplayBackend::recover`].
 
+#![allow(
+    clippy::manual_async_fn,
+    reason = "port traits deliberately expose explicit Send future return types"
+)]
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -512,6 +517,10 @@ where
 }
 
 /// Assemble from already-shared axis handles (used by [`AsyncLogReplayBackend::with_node_id`]).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "assembly keeps each shared axis and idempotency cache explicit"
+)]
 pub fn assemble_async_log_replay_from_parts<L, P>(
     log: Arc<InProcessLogStore<L>>,
     projection: Arc<InProcessProjectionStore<P>>,

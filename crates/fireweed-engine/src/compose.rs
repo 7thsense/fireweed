@@ -3,8 +3,7 @@
 //! Product composition is **async-only**: [`crate::AsyncLogReplayBackend`] /
 //! [`crate::assemble_async_log_replay`] (and async family factories). This module still defines the
 //! sync axis traits ([`LogStore`], [`ProjectionStore`], [`ControlPlane`]) that
-//! [`crate::InProcessLogStore`] / [`crate::InProcessProjectionStore`] bridge into async products,
-//! plus a crate-private sync dual-stack orchestrator retained only for in-crate unit tests.
+//! [`crate::InProcessLogStore`] / [`crate::InProcessProjectionStore`] bridge into async products.
 //!
 //! ## The three axes
 //!
@@ -15,66 +14,43 @@
 //!   pre-commit validation helpers, and the `apply` seam.
 //! - [`ControlPlane`] — queue definitions + placement.
 //!
-//! ## Sync dual-stack residual
+//! ## Sync axis boundary
 //!
-//! `ComposedBackend` (crate-private) is the historical sync orchestrator. New product opens must not
-//! use it. Prefer expanding native [`crate::AsyncLogStore`] impls so sync axis bridges can shrink.
+//! The historical sync `ComposedBackend` orchestrator has been deleted. Prefer expanding native
+//! [`crate::AsyncLogStore`] implementations so these remaining axis bridges can shrink.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use fireweed_core::{
     BodyHash, BoundedMutationRequest, BoundedMutationResponse, ClaimByQueryRequest, ClientItemKey,
     CohortId, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, GateKeyPolicy, GroupKey,
     GroupedAggregateRequest, GroupedAggregateResponse, ItemId, ItemState, LeaseToken, Metadata,
-    MetricsByQueryRequest, OrderingMode, PriorityValue, QueryCapabilityFlags, QueueDefinition,
-    QueueId, RangeScanRequest, RangeScanResponse, RequestId, TenantId, UtcTimestamp,
+    MetricsByQueryRequest, PriorityValue, QueryCapabilityFlags, QueueDefinition, QueueId,
+    RangeScanRequest, RangeScanResponse, RequestId, TenantId, UtcTimestamp,
 };
 
 use crate::active_scope::{ActiveScope, DiscoveryGranularity};
-use crate::async_composed::validate_push_shape;
-use crate::claim_validation::{ClaimCompatibility, ClaimUnit, validate_claim_compatibility};
+use crate::claim_validation::{ClaimCompatibility, ClaimUnit};
 use crate::command::{
-    AdvanceInstanceFenceCommand, ClaimCommand, CohortClaimCommand, CommandChecksum,
-    CommandEnvelope, CommandId, CommitOutcomeEntry, FinalizeCommand, FinalizeKind, FinalizeOutcome,
-    LeaseExpiredCommand, MutateItemsCommand, PayloadUpdate, PurgeItemsCommand, PushCommand,
-    PushItem, QueueCommand, QueueCounters, ReassignLeaseCommand, RenewLeaseCommand,
-    ReplacePendingCommand, RequestOutcome, ScheduleUpdate, SetGatesCommand, UpdateFieldsCommand,
-    WriteSideRecordsCommand, build_push_items, command_envelope_change_records,
-    validate_gate_command, validate_gate_push, validate_request_replay_metadata,
+    CommandEnvelope, CommitOutcomeEntry, FinalizeOutcome, MutateItemsCommand, PayloadUpdate,
+    PushItem, QueueCommand, QueueCounters, ScheduleUpdate, UpdateFieldsCommand,
 };
 use crate::error::{CommitRejection, EngineError, EngineResult};
-use crate::finalize_validation::validate_purge_force;
-use crate::idempotency::{IdempotencyDecision, QueueIdempotencyCache};
-use crate::maintenance::{
-    MaintenanceAuthoritySnapshot, MaintenanceCandidate, MaintenanceDisposition, MaintenanceFilter,
-    MaintenanceObjectClass, MaintenancePolicy,
-};
 use crate::port::{
-    AsOfProjectionStore, Backend, BatchUpdateItemRef, BatchUpdateOutcome, BatchUpdatePort,
-    BatchUpdateRequest, BatchUpdateResponse, BatchUpdateValue, BoundedMutationContext, ClaimPort,
-    ClaimRef, ClaimRequest, Claimed, ClaimedItem, CommandPage, CommitCapabilities,
-    CommitEntryOutcome, CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionPort,
-    ControlPlaneStore, CreateQueueOutcome, EntryRecovery, FinalizePort, HistoricalProjectionRead,
-    IndexHit, IndexQueryPort, ItemMutationPort, ItemMutationRequest, ItemMutationResponse,
-    ItemView, LeaseView, LiveItemView, LogRead, MaintenanceStopReason, MaintenanceSummary,
-    PendingPage, PendingSummary, ProjectionRead, ProjectionSnapshot, PurgePort, PushPort, PushSpec,
-    QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort,
-    ReschedulePort, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
-    UpdateFieldsPort, UpsertOutcome, UpsertPort, generate_query_lease_token,
-    validate_api001_reserved_write_fields, validate_instance_fence,
+    BatchUpdateItemRef, BatchUpdateOutcome, BatchUpdateRequest, BatchUpdateResponse,
+    BatchUpdateValue, ClaimRef, ClaimedItem, CommandPage, CommitEntryOutcome, CommitEntryStatus,
+    CreateQueueOutcome, EntryRecovery, IndexHit, ItemMutationRequest, ItemMutationResponse,
+    ItemView, LeaseView, LiveItemView, MaintenanceSummary, PendingPage, PendingSummary,
+    ProjectionSnapshot, PushSpec, QueueMetrics, SnapshotRef, TerminalEmissionMetrics,
+    validate_api001_reserved_write_fields,
 };
-use crate::schema_validation::{compile_entity_schema, validate_entity};
-use crate::sequenced_metadata::{AdvanceThenDelete, RetainedAddress, RetentionFloorClass};
 use crate::types::{CommandPosition, DurabilityClass, QueueKey};
-use crate::{
-    BufferedByteBudget, ByteAdmissionError, OwnedBytePermit, retained_records_plus_frame_bytes,
-};
 
 /// Defer synchronous compatibility work until the returned future is polled.
 ///
@@ -111,51 +87,6 @@ where
     }
 }
 
-struct QueueSerialized<F> {
-    acquire: crate::QueueGateAcquire<QueueKey>,
-    operation: Option<F>,
-}
-
-impl<F> Unpin for QueueSerialized<F> {}
-
-impl<T, F> Future for QueueSerialized<F>
-where
-    F: FnOnce() -> EngineResult<T>,
-{
-    type Output = EngineResult<T>;
-
-    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        match Pin::new(&mut self.acquire).poll(context) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(_)) => Poll::Ready(Err(EngineError::Unavailable)),
-            Poll::Ready(Ok(permit)) => {
-                let operation = self
-                    .operation
-                    .take()
-                    .expect("queue-serialized future polled after completion");
-                let result = operation();
-                drop(permit);
-                Poll::Ready(result)
-            }
-        }
-    }
-}
-
-fn queue_serialized<T, F>(
-    gate: &crate::KeyedQueueGate<QueueKey>,
-    shard: QueueKey,
-    operation: F,
-) -> QueueSerialized<F>
-where
-    T: Send,
-    F: FnOnce() -> EngineResult<T> + Send,
-{
-    QueueSerialized {
-        acquire: gate.acquire(shard),
-        operation: Some(operation),
-    }
-}
-
 /// Opaque, storage-ordered durable queue-catalog cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefinitionCursor {
@@ -169,8 +100,6 @@ pub struct DefinitionPage {
     pub definitions: Vec<QueueDefinition>,
     pub next: Option<DefinitionCursor>,
 }
-
-const DEFINITION_PAGE_LIMIT: usize = 256;
 
 fn definition_storage_key(definition: &QueueDefinition) -> String {
     serde_json::to_string(&(definition.tenant_id.as_str(), definition.queue_id.as_str()))
@@ -389,10 +318,9 @@ pub trait LogStore: Send {
 
     /// Clone an owned maintenance handle whose provider I/O does not borrow the composed unit-of-work.
     ///
-    /// The normal log methods intentionally run while `ComposedBackend` holds its atomic append/apply lock.
-    /// Object-log retention is different: bounded LIST/GET/DELETE and manifest-CAS calls may wait on a remote
-    /// provider and therefore must execute after that lock is released. Implementations expose a handle only
-    /// when the underlying substrate is independently shared and every destructive operation is owner-fenced.
+    /// Object-log retention may perform bounded LIST/GET/DELETE and manifest-CAS calls against a remote
+    /// provider, so it must execute outside the caller's atomic append/apply unit. Implementations expose a
+    /// handle only when the substrate is independently shared and every destructive operation is owner-fenced.
     fn detached_maintenance(&self) -> Option<Arc<dyn DetachedLogMaintenance>> {
         None
     }
@@ -726,104 +654,6 @@ pub trait DetachedLogMaintenance: Send + Sync {
         expected_epoch: u64,
         now_ms: i64,
     ) -> EngineResult<MaintenanceSummary>;
-}
-
-// ---------------------------------------------------------------------------
-// Runtime-free seal-wait (group-commit ack-after-seal, ADR-012 P2)
-// ---------------------------------------------------------------------------
-
-/// A one-shot seal-result slot a group-commit waiter parks on until its co-buffered batch seals. Runtime-
-/// free: [`SealFuture`] polls the slot and registers a [`Waker`]; [`SealSlot::complete`] fills the slot and
-/// wakes the parked poller. `EngineError: Clone`, so one seal outcome fans out to every waiter on the batch.
-struct SealSlot {
-    result: Mutex<Option<EngineResult<()>>>,
-    waker: Mutex<Option<Waker>>,
-}
-
-impl SealSlot {
-    fn new() -> Self {
-        Self {
-            result: Mutex::new(None),
-            waker: Mutex::new(None),
-        }
-    }
-
-    /// Fill the slot with the seal outcome and wake any parked poller. The result lock is held while taking
-    /// the waker so a concurrent [`SealFuture::poll`] either observes the result on its next poll or has its
-    /// just-registered waker woken — no lost wakeup (poll registers its waker under the same result lock).
-    fn complete(&self, outcome: EngineResult<()>) {
-        let mut r = self.result.lock().expect("seal slot poisoned");
-        *r = Some(outcome);
-        let waker = self.waker.lock().expect("seal slot poisoned").take();
-        drop(r);
-        if let Some(w) = waker {
-            w.wake();
-        }
-    }
-}
-
-struct SealWait {
-    slot: Arc<SealSlot>,
-}
-
-impl SealWait {
-    fn new(slot: Arc<SealSlot>) -> Self {
-        Self { slot }
-    }
-}
-
-impl Future for SealWait {
-    type Output = EngineResult<()>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut r = self.slot.result.lock().expect("seal slot poisoned");
-        if let Some(outcome) = r.take() {
-            return Poll::Ready(outcome);
-        }
-        *self.slot.waker.lock().expect("seal slot poisoned") = Some(cx.waker().clone());
-        Poll::Pending
-    }
-}
-
-/// Per-queue group-commit coordination (ADR-012 P2): the engine-side mirror of the substrate's buffer. Held
-/// under the composition's existing `std::sync::Mutex<Inner>` — no async lock. `pending` mirrors the
-/// substrate's buffered envelopes 1:1 in arrival order (so a seal that drains the substrate buffer drains
-/// exactly the same `pending`/`waiters` prefix); each `waiters` slot is filled when its batch seals + applies.
-#[derive(Default)]
-struct ShardCoord {
-    /// Envelopes buffered-but-not-yet-acked, kept engine-side so `distribute` can apply them to the
-    /// projection on seal (the substrate's seal returns only positions).
-    pending: Vec<CommandEnvelope>,
-    permits: Vec<Option<OwnedBytePermit>>,
-    /// One seal slot per buffered envelope; completed (Ok/Err) when the envelope's segment seals + applies.
-    waiters: Vec<Arc<SealSlot>>,
-    /// The assignment epoch the buffered batch will seal under (set when the first command buffers).
-    seal_epoch: u64,
-    /// Claim commands that have selected candidates and are waiting for durable object-log seal. Until the
-    /// seal applies them to the projection, later claims must exclude these ids to avoid duplicate leases.
-    in_flight_claims: BTreeSet<ItemId>,
-    /// Last item reserved by an in-flight claim in strict eligibility order. Strict queues can resume
-    /// candidate selection after this key instead of rescanning and filtering the full reserved prefix.
-    in_flight_claim_tail: Option<ItemId>,
-}
-
-/// `UtcTimestamp` → epoch milliseconds (the substrate's latency-trigger clock unit).
-fn ts_to_ms(now: UtcTimestamp) -> i64 {
-    now.seconds
-        .saturating_mul(1000)
-        .saturating_add((now.nanoseconds / 1_000_000) as i64)
-}
-
-fn map_composed_byte_admission_error(error: ByteAdmissionError) -> EngineError {
-    match error {
-        ByteAdmissionError::Closed => EngineError::Unavailable,
-        ByteAdmissionError::Backpressure => EngineError::Backpressure {
-            resource: "buffered bytes",
-        },
-        ByteAdmissionError::Oversize {
-            requested, limit, ..
-        } => EngineError::RequestTooLarge { requested, limit },
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1723,35 +1553,9 @@ impl crate::AsyncControlPlane for InProcessControlPlane {
     }
 }
 
-pub const DEFAULT_RECOVERY_MAX_TAIL: u64 = 1_000_000;
-const RECOVERY_READ_PAGE_LIMIT: usize = 8_192;
-
-struct CommitRecoveryAccum {
-    fingerprint: u64,
-    created_at: UtcTimestamp,
-    pending_side_keys: Vec<Vec<u8>>,
-    pending_instance: Option<(Vec<u8>, u64)>,
-    pending_lifecycle_ids: Vec<ItemId>,
-    entries: Vec<EntryRecovery>,
-    durable_full: Option<Vec<EntryRecovery>>,
-}
-
-struct RecoveryIdempotencyCaches<'a> {
-    push: &'a mut HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>,
-    claim: &'a mut HashMap<QueueKey, QueueIdempotencyCache<(Vec<ItemId>, LeaseToken)>>,
-    commit: &'a mut HashMap<QueueKey, QueueIdempotencyCache<Vec<EntryRecovery>>>,
-    batch_update: &'a mut HashMap<QueueKey, QueueIdempotencyCache<BatchUpdateResponse>>,
-}
-
-/// A conservative cross-owner clock-skew guard band (ms) subtracted from the retention cutoff before a
-/// segment is eligible for object-log trimming (bead pqueue-b5cc2bc7, risk R4): a segment is trimmed only if
-/// its `committed_at_ms <= now - request_id_retention_ms - RETENTION_TRIM_SKEW_MARGIN_MS`, so a small clock
-/// skew between the sealing owner and the trimming owner can never trim a segment still within retention.
-const RETENTION_TRIM_SKEW_MARGIN_MS: i64 = 5_000;
-
-/// The two composed-layer projection-apply crash instants (TP-003 §3.10 AC-TXN-4, row 209). These live in
-/// the [`ComposedBackend`] apply step — ABOVE the [`LogStore`] substrate, whose own internal cut points
-/// ([`crate`]-external `fireweed_objectlog::FaultCutPoint`) cannot reach them — so they need this seam.
+/// The two composed-layer projection-apply crash instants (TP-003 §3.10 AC-TXN-4, row 209). These live
+/// above the [`LogStore`] substrate, whose own internal cut points
+/// (`fireweed_objectlog::FaultCutPoint`) cannot reach them, so they need this seam.
 ///
 /// A commit's durable append has already returned `Ok` by the time the
 /// projection apply runs; these instants strike that apply:
@@ -1769,10 +1573,10 @@ pub enum ComposeFaultPoint {
     AfterApplyBeforeResponse,
 }
 
-/// A TEST-ONLY composed-layer fault hook (TP-003 §3.10 AC-TXN-4): called at each [`ComposeFaultPoint`] the
-/// [`ComposedBackend`] projection-apply step passes through. Returning `Err` simulates a process death at that
-/// instant (the in-flight unit of work aborts there); `Ok(())` (the default when no hook is installed) lets
-/// the apply run normally. The analogue of `fireweed_objectlog::FaultHook` on the composed-apply boundary.
+/// A TEST-ONLY composed-layer fault hook (TP-003 §3.10 AC-TXN-4): called at each [`ComposeFaultPoint`] an
+/// adapter's projection-apply step passes through. Returning `Err` simulates a process death at that instant;
+/// `Ok(())` lets the apply run normally. This is the analogue of `fireweed_objectlog::FaultHook` on the
+/// composed-apply boundary.
 pub trait ComposeFaultHook: Send + Sync {
     fn fault_point(&self, cut: ComposeFaultPoint) -> EngineResult<()>;
 }
@@ -2036,10 +1840,6 @@ pub fn item_mutation_fingerprint(request: &ItemMutationRequest) -> EngineResult<
             .try_into()
             .expect("SHA-256 prefix is eight bytes"),
     ))
-}
-
-fn item_mutation_body_hash(request: &ItemMutationRequest) -> EngineResult<BodyHash> {
-    item_mutation_fingerprint(request).map(BodyHash)
 }
 
 /// Planner output for API-001 BatchUpdate (shared with async log-replay).
