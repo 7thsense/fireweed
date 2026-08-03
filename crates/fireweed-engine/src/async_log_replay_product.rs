@@ -728,12 +728,28 @@ where
     pub fn recover(self) -> EngineResult<Self> {
         use crate::{ControlPlane, LogStore, RequestOutcome, request_expires_at};
 
-        let definitions = self
+        let mut definitions = self
             .log
             .with_store(|log| LogStore::recover_definitions(log))?;
+        let projection_owns_catalog = definitions.is_empty();
+        if projection_owns_catalog {
+            definitions = self
+                .projection
+                .with_store(ProjectionStore::recover_definitions)?;
+        }
         for definition in definitions {
             let retention_ms = definition.request_id_retention_ms;
             let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            self.log
+                .with_store_mut(|log| LogStore::ensure_shard(log, &shard))?;
+            if projection_owns_catalog
+                && let Some(position) = self.projection.with_store(|projection| {
+                    ProjectionStore::recovery_high_water(projection, &shard)
+                })?
+            {
+                self.log
+                    .with_store_mut(|log| LogStore::set_high_water(log, &shard, position))?;
+            }
             let _ = ControlPlane::create_queue(self.control.as_ref(), definition.clone());
             self.projection
                 .with_store_mut(|p| ProjectionStore::ensure_shard(p, &definition))?;
