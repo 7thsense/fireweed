@@ -4342,7 +4342,7 @@ impl<B: LibBackend> RuntimeCore<B> {
         queue: &QueueKey,
         ids: impl IntoIterator<Item = ItemId>,
     ) -> EngineResult<()> {
-        self.finalize(queue, ids, FinalizeKind::Rearm, None).await
+        self.rearm_at(queue, ids, self.clock.now()).await
     }
 
     /// Re-arm a recurring item for its NEXT occurrence at `not_before` (the recurrence interval): completes

@@ -15,19 +15,28 @@ use fireweed::{
     NewItem, OrderField, OrderingMode, PayloadUpdate, PriorityDirection, PriorityModel,
     PriorityModelKind, PriorityTieBreaker, PriorityValue, QueryFilter, QueueCreationPolicy,
     QueueDefinition, QueueId, QueueIndex, QueueKey, QueueTemplate, RangeScanRequest,
-    RecurrencePolicy, RequestId, RetryPolicy, ScheduleUpdate, SelectedMutation, SideRecord,
-    SortDirection, TenantId, TypedValue, UtcTimestamp, WorkerId,
+    RecurrenceMode, RecurrencePolicy, RequestId, RetryPolicy, ScheduleUpdate, SelectedMutation,
+    SideRecord, SortDirection, TenantId, TypedValue, UtcTimestamp, WorkerId,
 };
 use serde_json::json;
 
 pub async fn run(cell: &str, fireweed: &Fireweed, expect_projection_control: bool) {
+    run_with_commit_boundary(cell, fireweed, expect_projection_control, true).await;
+}
+
+pub async fn run_with_commit_boundary(
+    cell: &str,
+    fireweed: &Fireweed,
+    expect_projection_control: bool,
+    expect_atomic_commit: bool,
+) {
     let mut failures = Vec::new();
     exercise_control(cell, fireweed, &mut failures).await;
     exercise_push_read_and_index(cell, fireweed, &mut failures).await;
     exercise_claim_and_finalize(cell, fireweed, &mut failures).await;
     exercise_rich_claims(cell, fireweed, &mut failures).await;
     exercise_mutation(cell, fireweed, &mut failures).await;
-    exercise_commit(cell, fireweed, &mut failures).await;
+    exercise_commit(cell, fireweed, expect_atomic_commit, &mut failures).await;
     exercise_queries(cell, fireweed, &mut failures).await;
     exercise_projection(cell, fireweed, expect_projection_control, &mut failures).await;
     if !failures.is_empty() {
@@ -242,6 +251,37 @@ async fn create(
             .as_ref()
             .is_some_and(|value| value.created && value.definition.queue_id == queue.queue_id),
         "did not report creation of the requested queue",
+    );
+    queue
+}
+
+async fn create_recurring(
+    cell: &str,
+    fireweed: &Fireweed,
+    failures: &mut Vec<String>,
+    name: &str,
+) -> QueueKey {
+    let queue = key(name);
+    let mut queue_definition = definition(name);
+    queue_definition.recurrence = RecurrencePolicy {
+        mode: RecurrenceMode::Recurring,
+        until: None,
+    };
+    let outcome = call(
+        cell,
+        &format!("create_queue[{name}]"),
+        failures,
+        fireweed.create_queue(queue_definition),
+    )
+    .await;
+    check(
+        cell,
+        &format!("create_queue[{name}]"),
+        failures,
+        outcome
+            .as_ref()
+            .is_some_and(|value| value.created && value.definition.queue_id == queue.queue_id),
+        "did not report creation of the requested recurring queue",
     );
     queue
 }
@@ -689,8 +729,13 @@ async fn seed_claim(
     fw: &Fireweed,
     failures: &mut Vec<String>,
     name: &str,
+    recurring: bool,
 ) -> (QueueKey, Option<fireweed::ClaimedItem>) {
-    let queue = create(cell, fw, failures, name).await;
+    let queue = if recurring {
+        create_recurring(cell, fw, failures, name).await
+    } else {
+        create(cell, fw, failures, name).await
+    };
     let _ = call(
         cell,
         &format!("push[{name}]"),
@@ -908,7 +953,7 @@ async fn exercise_claim_and_finalize(cell: &str, fw: &Fireweed, failures: &mut V
 
     for method in ["ack", "complete", "release", "fail", "rearm", "purge"] {
         let scenario = format!("finalize-{method}");
-        let (queue, claimed) = seed_claim(cell, fw, failures, &scenario).await;
+        let (queue, claimed) = seed_claim(cell, fw, failures, &scenario, method == "rearm").await;
         let Some(claimed) = claimed else { continue };
         match method {
             "ack" => {
@@ -989,7 +1034,8 @@ async fn exercise_claim_and_finalize(cell: &str, fw: &Fireweed, failures: &mut V
         ("rearm_after", Some(1)),
     ] {
         let scenario = format!("alias-{method}");
-        let (queue, claimed) = seed_claim(cell, fw, failures, &scenario).await;
+        let recurring = matches!(method, "rearm_at" | "rearm_after");
+        let (queue, claimed) = seed_claim(cell, fw, failures, &scenario, recurring).await;
         let Some(claimed) = claimed else { continue };
         match method {
             "nack" => {
@@ -1079,7 +1125,7 @@ async fn exercise_claim_and_finalize(cell: &str, fw: &Fireweed, failures: &mut V
         );
     }
 
-    let (queue, claimed) = seed_claim(cell, fw, failures, "lease-ops").await;
+    let (queue, claimed) = seed_claim(cell, fw, failures, "lease-ops", false).await;
     if let Some(claimed) = claimed {
         let renewed = call(
             cell,
@@ -1898,7 +1944,12 @@ async fn exercise_mutation(cell: &str, fw: &Fireweed, failures: &mut Vec<String>
     );
 }
 
-async fn exercise_commit(cell: &str, fw: &Fireweed, failures: &mut Vec<String>) {
+async fn exercise_commit(
+    cell: &str,
+    fw: &Fireweed,
+    expect_atomic_commit: bool,
+    failures: &mut Vec<String>,
+) {
     let queue = create(cell, fw, failures, "commit").await;
     let _ = call(
         cell,
@@ -2030,7 +2081,7 @@ async fn exercise_commit(cell: &str, fw: &Fireweed, failures: &mut Vec<String>) 
             cell,
             "commit_capabilities",
             failures,
-            capabilities.atomic_transition_commit
+            capabilities.atomic_transition_commit == expect_atomic_commit
                 && capabilities.vectorized_commit
                 && capabilities.lease_validation
                 && capabilities.retained_commit_idempotency

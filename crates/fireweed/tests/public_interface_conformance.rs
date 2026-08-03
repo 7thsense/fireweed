@@ -40,11 +40,22 @@ impl Drop for FixtureRoot {
 async fn assert_cell(
     cell: &str,
     expect_projection_control: bool,
+    expect_atomic_commit: bool,
     build: impl FnOnce(&Path) -> Fireweed,
 ) {
     let root = FixtureRoot::new(cell);
     let fireweed = build(root.path());
-    public_interface::run(cell, &fireweed, expect_projection_control).await;
+    if expect_atomic_commit {
+        public_interface::run(cell, &fireweed, expect_projection_control).await;
+    } else {
+        public_interface::run_with_commit_boundary(
+            cell,
+            &fireweed,
+            expect_projection_control,
+            expect_atomic_commit,
+        )
+        .await;
+    }
     drop(fireweed);
 }
 
@@ -103,7 +114,7 @@ fn objectlog_authority_validation_accepts_native_conditional_write() {
 
 #[tokio::test]
 async fn memory_public_interface() {
-    assert_cell("memory", false, |_| {
+    assert_cell("memory", false, true, |_| {
         fireweed::open_memory(Arc::new(SystemClock))
     })
     .await;
@@ -111,7 +122,7 @@ async fn memory_public_interface() {
 
 #[tokio::test]
 async fn sqlite_log_public_interface() {
-    assert_cell("sqlite-log", false, |root| {
+    assert_cell("sqlite-log", false, true, |root| {
         fireweed::open_sqlite(
             root.join("log.sqlite").to_str().unwrap(),
             Arc::new(SystemClock),
@@ -123,7 +134,7 @@ async fn sqlite_log_public_interface() {
 
 #[tokio::test]
 async fn sqlite_relational_public_interface() {
-    assert_cell("sqlite-relational", false, |root| {
+    assert_cell("sqlite-relational", false, true, |root| {
         fireweed::open_sqlite_relational(
             root.join("relational.sqlite").to_str().unwrap(),
             Arc::new(SystemClock),
@@ -135,7 +146,7 @@ async fn sqlite_relational_public_interface() {
 
 #[tokio::test]
 async fn objectlog_local_direct_public_interface() {
-    assert_cell("objectlog-local-direct", false, |root| {
+    assert_cell("objectlog-local-direct", false, true, |root| {
         fireweed::open_objectlog(root.join("object-log"), Arc::new(SystemClock)).unwrap()
     })
     .await;
@@ -143,7 +154,7 @@ async fn objectlog_local_direct_public_interface() {
 
 #[tokio::test]
 async fn objectlog_sqlite_strict_public_interface() {
-    assert_cell("objectlog-sqlite-strict", true, |root| {
+    assert_cell("objectlog-sqlite-strict", true, true, |root| {
         objectlog_sqlite(root, ResponseBarrier::Strict, "public-interface-strict")
     })
     .await;
@@ -151,7 +162,7 @@ async fn objectlog_sqlite_strict_public_interface() {
 
 #[tokio::test]
 async fn objectlog_sqlite_async_public_interface() {
-    assert_cell("objectlog-sqlite-async", true, |root| {
+    assert_cell("objectlog-sqlite-async", true, false, |root| {
         objectlog_sqlite(
             root,
             ResponseBarrier::AsyncProjection,
