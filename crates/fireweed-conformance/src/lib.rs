@@ -42,7 +42,7 @@
 //! | `fireweed_memory::composed_memory_backend` | in-memory log-replay | atomic | `conformance_suite!` = core@atomic + log-replay | `fireweed-memory/src/tests.rs` |
 //! | `fireweed_sqlite::composed_sqlite_backend` (log) | in-memory log-replay | atomic | `conformance_suite!` + `relational_reconnect_suite!` | `fireweed-sqlite/tests/{conformance,reconnect_smoke}.rs` |
 //! | `fireweed_postgres::PostgresBackend` (log) | in-memory log-replay | atomic | core@atomic + log (env-gated `pg_conformance!`) | `fireweed-postgres/tests/conformance.rs` |
-//! | `fireweed_objectlog` | log-bearing | eventual-apply | `eventual_apply_suite!` = core@eventual + log-replay | `fireweed-objectlog/tests/conformance.rs` |
+//! | `fireweed_objectlog::composed_objectlog_backend` | log-bearing, in-memory projection | atomic | `conformance_suite!` = core@atomic + log-replay | `fireweed-objectlog/tests/conformance.rs` |
 //! | `fireweed_sqlite::SqliteRelationalBackend` | relational (DB-authoritative) | atomic | `core_suite!(@atomic)` + `relational_reconnect_suite!` | `fireweed-sqlite/tests/relational_{conformance,reconnect}.rs` |
 //! | `fireweed_postgres::PostgresRelationalBackend` | relational (DB-authoritative) | atomic | core@atomic + relational-reconnect (env-gated) | `fireweed-postgres/tests/relational_conformance.rs` |
 //!
@@ -712,7 +712,7 @@ mod capability_gate_tests {
     }
 
     #[tokio::test]
-    async fn test_capability_gate_uses_atomic_probe() {
+    async fn test_capability_gate_uses_advertised_atomicity() {
         let composed = fireweed_memory::composed_memory_backend();
         assert!(composed.commit_capabilities().is_atomic());
 
@@ -722,6 +722,9 @@ mod capability_gate_tests {
                 .expect("compose objectlog backend")
         })
         .await;
-        assert!(!ran, "eventual-apply backends must stay excluded");
+        assert!(
+            ran,
+            "the native object-log strict response barrier must run atomic-only scenarios"
+        );
     }
 }
