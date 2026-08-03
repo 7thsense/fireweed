@@ -738,18 +738,21 @@ async fn background_reclaim_recovers_orphaned_lease_without_client_traffic() {
     let ticks_before = server.reclaim_stats().ticks;
     let mut observed = None;
     for _ in 0..100 {
-        // The background task may not have installed its next timer before the first advance.
-        // Advance one complete ticker interval per observation so a loaded parallel test run
-        // cannot strand the task behind paused virtual time.
-        tokio::time::advance(Duration::from_millis(5)).await;
-        tokio::task::yield_now().await;
-        let metrics = backend.metrics(&qkey()).await.unwrap();
+        // A paused-time sleep makes this observer genuinely pending. `yield_now()` alone may repoll
+        // the same task without scheduling the reclaim loop, which made the assertion flaky under
+        // load even when repeated virtual-time advances had made every ticker deadline ready.
+        tokio::time::sleep(Duration::from_millis(5)).await;
         let stats = server.reclaim_stats();
-        if metrics.leased == 0 && stats.leases_reclaimed >= 1 {
-            observed = Some((metrics, stats));
-            break;
+        // The counter is published only after the backend tick completes. Poll it before metrics so
+        // the observer cannot repeatedly acquire the queue operation path ahead of the reclaim task
+        // it is trying to observe under a loaded single-threaded test run.
+        if stats.leases_reclaimed >= 1 {
+            let metrics = backend.metrics(&qkey()).await.unwrap();
+            if metrics.leased == 0 {
+                observed = Some((metrics, stats));
+                break;
+            }
         }
-        tokio::task::yield_now().await;
     }
     assert!(
         observed.is_some(),
