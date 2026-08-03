@@ -127,9 +127,11 @@ Every storage backend must include `tenant_id` in durable records, projection
 records, idempotency records, metrics, and snapshots. Backend implementations
 must make cross-tenant access explicit enough to test.
 
-The first Postgres-native implementation uses shared tables with leading
-`tenant_id, queue_id` keys and mandatory tenant predicates. Stronger isolation
-is allowed by backend profile or deployment class:
+The Postgres implementation uses shared tables with leading
+`tenant_id, queue_id` keys and mandatory tenant predicates. Equivalent tenant
+scoping is required from every log, projection, and control-plane
+implementation. Stronger isolation is allowed by deployment policy without
+creating a separate storage product:
 
 | Isolation Level | Use |
 |-----------------|-----|
@@ -137,10 +139,12 @@ is allowed by backend profile or deployment class:
 | Shared database with tenant partitions/schemas | Hot tenants or stricter operational isolation. |
 | Dedicated database or cluster per tenant class | Large, regulated, or noisy tenants. |
 
-The control plane may assign queues or tenants to different Postgres databases,
-clusters, object buckets, or log partitions through backend profile and
-queue-owner assignment metadata. That placement is not visible in the native
-queue API.
+When a deployment uses an external control plane, it may assign queues or
+tenants to different Postgres databases, clusters, object buckets, or log
+partitions through queue-owner assignment metadata. Embedded and single-owner
+deployments may use the in-process control plane. The control plane is optional
+and orthogonal to the selected 5×3 log-by-projection cell; neither Postgres nor
+another external coordinator is implied by the native queue API.
 
 ## Noisy-Neighbor Controls
 
@@ -149,7 +153,7 @@ requires:
 
 - queue and tenant identifiers in metrics;
 - configurable max batch size and lease duration per queue;
-- backend profile per queue;
+- selected log, projection, and optional control-plane topology per queue;
 - fireweed deployment/tenant rate-limit and capacity outcomes in API-001 error
   semantics (the envelope rate-limit error and the per-item `rate_limited`
   partial-batch status protect the fireweed deployment, not a caller's downstream
@@ -220,7 +224,7 @@ Negative:
 - Storage queries include tenant scope for control plane, log, projection,
   idempotency, and metrics.
 - A hot tenant/queue load test does not break another queue's progress-bound
-  behavior under the same deployment profile.
+  behavior under the same declared composition and deployment topology.
 
 ## Status
 

@@ -15,11 +15,13 @@ ddx:
 # Architecture Decision Record
 
 **ADR ID**: ADR-012
-**Title**: The backend is the orthogonal product `LogStore × ProjectionStore × ControlPlane`, assembled by one generic `ComposedBackend`
+**Title**: The backend is the orthogonal product `LogStore × ProjectionStore × optional ControlPlane`
 **Status**: Accepted, superseded in part by ADR-015 (the synchronous `Backend::write(f)` and
-`std::sync::Mutex<Inner<L, P>>` mechanism only). The generic `ComposedBackend<L, P, C>` is
-implemented in `crates/fireweed-engine/src/compose.rs` and the `objectlog/hybrid` composition shipped;
-remaining phased work tracks as beads)
+`std::sync::Mutex<Inner<L, P>>` mechanism only). Product composition is now
+native async. Shared orchestration is implemented by the engine's async
+composition and log-replay products; inherently blocking stores may isolate a
+whole transaction behind a bounded adapter actor. Remaining facade and evidence
+closure tracks as beads.
 **Related**: ADR-001 (CQRS log/projection), ADR-007 (hexagonal & two interfaces), ADR-008 (queue as
 shard unit & two projection families — **superseded in part**, see below), ADR-009 (engine-enforced
 coordination), TD-001 (backend contracts / conformance capability classes), TD-003 (ownership & epoch
@@ -50,26 +52,53 @@ rebuildable cache) — a useful behavioral axis, but it described the families a
 A backend is the **orthogonal product of three independent axes**:
 
 ```
-Backend  =  LogStore  ×  ProjectionStore  ×  ControlPlane
+Backend  =  LogStore  ×  ProjectionStore  ×  optional ControlPlane
 ```
 
-assembled by exactly **one** generic struct, `ComposedBackend<L: LogStore, P: ProjectionStore, C: ControlPlane>`,
-which implements every engine port by delegating to L / P / C. There is no per-substrate backend type and no
-per-backend re-implementation of the orchestration ports — those live once, generically, on `ComposedBackend`.
+assembled through one public composition model. Shared engine orchestration is
+implemented by `AsyncComposedBackend` and the durable-log replay product, which
+delegate to the selected log, projection, and optional control-plane ports.
+Adapter-specific types may exist where I/O mechanics differ, but they do not
+define a second public method surface or a per-pair product contract.
 
 ### The axes
 
 | Axis | Responsibility | Options |
 |---|---|---|
-| **`LogStore`** | the durable command log + the **epoch/fence authority** (co-located with the log, TD-003) + replay cursor (`read_from`) + snapshots + `command_position` high-water | Memory (in-proc `LogData`), Sqlite (durable rows), ObjectLog (segmented; S3 or local), Postgres |
-| **`ProjectionStore`** | the materialized read model: the full `ProjectionRead` surface (`select_eligible`/`peek`/`pending`/`claimed_view`/`live_items`/`metrics`) + index queries + the pre-commit **validation** helpers + `apply(batch)` + snapshot/recovery | InMemory (`ProjectionData`), Sqlite, Postgres, Hybrid (in-mem + sqlite spill) |
-| **`ControlPlane`** | queue **definitions** + placement (`create_queue`/`queue_definition`/`list_queues`) | InMemory, Postgres |
+| **`LogStore`** | command ordering and the **epoch/fence authority** (co-located with the log, TD-003); Class A also owns durable replay, snapshots, and command high-water | `memory`, `sqlite`, `postgres`, `filesystem`, `s3` |
+| **`ProjectionStore`** | the materialized read model: full read/query/validation/apply and snapshot/recovery surface | `memory`, `sqlite`, `postgres` |
+| **`ControlPlane`** | optional queue definitions plus placement/membership/owner leases when the topology needs them | in-process, Postgres, or another separately qualified implementation |
 
-### `objectlog/hybrid-*` projection contracts
+The closed public set is the exact 5×3 product:
 
-`FIREWEED_LOG_BACKEND=objectlog` with a hybrid projection has two named contracts.
-The old unqualified `objectlog/hybrid` spelling is not precise enough for
-governing requirements:
+| Log \ Projection | `memory` | `sqlite` | `postgres` |
+|---|---|---|---|
+| `memory` | Class B | Class B | Class B |
+| `sqlite` | Class A | Class A | Class A |
+| `postgres` | Class A | Class A | Class A |
+| `filesystem` | Class A | Class A | Class A |
+| `s3` | Class A | Class A | Class A |
+
+Class A logs are durable authorities and projections are rebuildable by
+high-water plus tail replay. Class B's memory log is process-local; after
+process death only a durable SQLite/Postgres projection may remain, and no
+Class B cell claims log replay, branch, read-as-of, or log-derived history.
+
+### Strict and asynchronous projection barriers
+
+The public response-barrier values are `Strict` and `AsyncProjection`; they are
+execution characteristics, not projection backends or product profiles.
+`Strict` is required across all 15 cells. `AsyncProjection` is additionally
+applicable to the six filesystem/S3 object-log cells. The public log names are
+`filesystem` and `s3`, and the public projection names are `memory`, `sqlite`,
+and `postgres`.
+
+The remainder of this subsection preserves the design lineage under its former
+internal `objectlog/hybrid-*` terminology. Those spellings are not accepted
+public selectors. Read `objectlog` as the filesystem/S3 log family,
+`hybrid-strict` as the SQLite projection under `Strict`, and `hybrid-async` as
+the SQLite projection under `AsyncProjection`. This lineage does not restrict
+the provider-neutral `AsyncProjection` contract to SQLite:
 
 - `objectlog/hybrid-strict` is the synchronous hybrid contract. A successful
   response is legal only after manifest commit, durable SQLite projection apply,
@@ -272,7 +301,11 @@ they are one axis of a three-axis product, and "fused vs split" is precisely the
 write-seam distinction above. ADR-008's keystone decisions (queue as the unit of sharding; per-queue
 ownership; epoch fencing) are unchanged.
 
-## Phased rollout
+## Historical phased rollout
+
+The phases below record how the original synchronous design was introduced.
+They are not current product status; the native-async implementation and open
+evidence work are tracked by the storage-matrix completion brief.
 
 - **Phase 0 — this ADR.** The model, the axis traits, the write-seam design (separate + unified). *Proposed.*
 - **Phase 1 — this change.** The three traits + generic `ComposedBackend` (separate path) + the first axis
@@ -290,8 +323,9 @@ ownership; epoch fencing) are unchanged.
 
 ## Consequences
 
-- **+** The orchestration logic exists once. A new backend is a new axis impl (a log, a projection, or a
-  control plane), not a new monolith — and it inherits conformance for free.
+- **+** Shared orchestration is centralized. A new storage implementation adds
+  an axis implementation rather than a new public backend product, and must pass
+  the common conformance suite before it is supported.
 - **+** The "flat postgres" / relational case is a first-class member of the same `ComposedBackend`, not a
   special exception, because the write seam is designed for a unified transactional store from the start.
 - **−** The axis traits are wide (the `ProjectionStore` surface mirrors the full projection read +

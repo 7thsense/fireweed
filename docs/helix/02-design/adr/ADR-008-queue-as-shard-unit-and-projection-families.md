@@ -14,7 +14,7 @@ ddx:
 # Architecture Decision Record
 
 **ADR ID**: ADR-008
-**Title**: The queue is the unit of sharding; two projection families; a pluggable control plane
+**Title**: The queue is the unit of sharding; projections are an axis; the control plane is optional
 **Status**: accepted
 **Related**: PRD (FR-13), ADR-001 (CQRS log/projection), ADR-004 (granularity & claim domain),
 ADR-007 (hexagonal & two interfaces), TD-001 (backend contracts), TD-002 (relational `postgres_native`),
@@ -67,35 +67,44 @@ sharding, create more queues."**
    That is an internal TD-002 **storage** optimization, **not** an ownership, routing, or client-visible
    unit, and it does not bound how many nodes the queue population spreads across.)
 
-2. **Two projection families, one behavior and transaction contract.** The system supports (a) the **in-memory log-replay**
-   projection (embedded / object-log) and (b) the **relational / DB-resident** projection (`fireweed_items` +
-   SQL claim, sqlite/postgres). They share **behavior, not code**: the **conformance suite is the contract**
-   that holds them identical. Partition principle: the **core** suite is all observable queue behavior
+2. **One projection axis, one behavior and transaction contract.** The public
+   projection values are `memory`, `sqlite`, and `postgres`, independently
+   selectable across the five public logs: the exact 5×3 matrix.
+   Implementations may use in-memory
+   state machines or relational/DB-resident query paths; those are internal
+   strategies, not projection-family products. They share **behavior, not
+   necessarily code**: the **conformance suite is the contract** that holds them
+   interchangeable. Partition principle: the **core** suite is all observable queue behavior
    *independent of durability substrate* — ordering, eligibility, claim atomicity, idempotency, lease/epoch
    fencing, success/error/unknown-outcome semantics, read-after-success visibility, and the per-queue progress bound — which **every** projection passes; the **log** suite is
-   replay-from-log, snapshot+tail recovery, and segment/manifest commit, which only log-bearing backends run;
-   a relational backend substitutes a **reconnect-after-crash durability** test for replay-from-log. This
+   replay-from-log, snapshot+tail recovery, and segment/manifest commit, which
+   only Class A durable logs run; Class B proves only its declared projection
+   persistence boundary. A durable relational projection additionally runs a
+   **reconnect-after-crash durability** test. This
    **retracts** ADR-007's "fused vs split disappears" premise (ADR-007:71).
 
-3. **Ownership is per-queue single-writer with an epoch fence.** Retain TD-003's mechanism — a control-plane
-   lease, deterministic HRW/rendezvous owner placement over the live owner set, and the **Single Authoritative
-   Fencing Rule** (epoch allocated in the control plane, durably fenced into the log before the owner serves,
+3. **Ownership is per-queue single-writer with an epoch fence.** For multi-owner
+   deployments, retain TD-003's mechanism — a control-plane lease,
+   deterministic HRW/rendezvous owner placement over the live owner set, and
+   the **Single Authoritative Fencing Rule** (the durable log is the epoch/fence
+   authority; the selected owner must durably acquire/fence its epoch before it
+   serves,
    append rejects any non-current epoch) — **re-scoped from per-`(queue,shard)` to per-`(tenant,queue)`**: the
    owned unit is the whole queue, and the lease / epoch / HRW key is `(tenant_id, queue_id)`. There is **no
    cross-shard machinery**: no fan-out/k-way-merge claim, no cross-shard progress aggregation, no resharding/
    cohort-split. The progress bound — both `oldest_eligible_age_ms` and `progress_bound_risk_count` — is a
    **local per-queue property**, not a cross-shard aggregate or sum.
 
-4. **The control plane is pluggable, and the object log is the committed no-Postgres implementation.**
-   `ControlPlaneStore` (membership + leases + epoch) is a capability with a Postgres implementation
-   (default). The no-Postgres / object-store implementation (S3 conditional-PUT lease + heartbeat
-   membership + epoch CAS), enabling a pure object-log + local-projection deployment, is **committed
-   direction** (product-owner decision, 2026-07-05): the object log is intended to provide **multi-node
-   fencing and coordination at the per-queue level**, building on the manifest conditional-PUT series
-   that already serves as both CAS and epoch fence for appends (TD-004). The S3-CAS
-   multi-object-acquire→fence-atomicity design must still be proven before the implementation ships (it
-   has a real correctness cost the transactional Postgres path gets for free), but it is sequenced build
-   work, not an open question. This loop specs the pluggable **seam**.
+4. **The control plane is optional and pluggable.** `ControlPlaneStore`
+   provides queue definitions and, where the topology has multiple owners,
+   membership, placement, and owner leases. In-process and Postgres
+   implementations are valid choices; Postgres is not implied by any log or
+   projection cell. Epoch/fence authority remains with the selected log, even
+   when a unified Postgres transaction implements both facets. A future
+   object-store membership/lease implementation may support a no-Postgres
+   multi-owner topology, but its multi-object acquire/fence atomicity remains
+   unqualified until proven. That aspiration neither bans Postgres nor turns
+   S3 coordination into a present-tense product guarantee.
 
 ## Consequences
 
@@ -112,7 +121,8 @@ sharding, create more queues."**
   fencing, and bounded shared resources preserved as owner and queue counts rise.
 - **Gains:** claims are single-hop (no scatter-gather, no stalls); the relational projection removes the
   in-RAM ceiling; ownership/coordination collapses to one lease per queue — replacing the per-`(queue,shard)`
-  lease — which is what makes the no-Postgres option tractable.
+  lease, while keeping the external control-plane choice independent from the
+  public storage cell.
 - **Trade-off accepted:** a single queue cannot exceed one owner's capacity — mitigated by app-level
   multi-queue fan-out. E0 qualifies behavior under load; measured rates are
   capacity evidence for the declared owner topology, not a portable contract.
@@ -121,7 +131,7 @@ sharding, create more queues."**
   already states "Postgres is preferred; a backend-specific control plane may be supported later but must
   justify" — by **adding a concrete pluggable `ControlPlaneStore` seam** (the object-store impl is the
   deferred candidate that must clear ADR-001's justification bar, not a removal of the bar) and by
-  establishing the projection as a **family** with a behavior contract; ADR-001's `ControlPlaneStore`
+  establishing projection as an independent **axis** with a behavior contract; ADR-001's `ControlPlaneStore`
   capability row (shard assignment / shard-owner leases) is re-scoped per-queue. The PRD was amended first
   (FR-13, FR-11/12, FR-48, Success Metrics) so the source of truth leads the cascade.
 
@@ -131,12 +141,13 @@ sharding, create more queues."**
   shards — but pays the scatter-gather/stall cost on every queue-global claim, taxes priority, and mandates a
   transactional control plane. Rejected: consumer simplicity + no stalls + a no-Postgres option outweigh
   single-queue horizontal scale, which the floor math makes narrow.
-- **Async-behind projection (log leads, projection trails).** Deferred and benchmark-gated; it only pays off
-  when the log substrate is far cheaper than the projection AND any lag is hidden behind API-001's success
-  barrier. Exposing read-after-success lag, delayed claim visibility, or backend-specific caller repair is not
-  acceptable; it would break transaction integrity. (This bullet originally allowed a log-less relational
-  default; ADR-013 retired that — the durable log is mandatory in every production deployment, so the v1
-  relational mode is log + sync-projection.)
+- **Async-behind projection (log leads, projection trails).** Retained only as
+  the explicit `AsyncProjection` response barrier on applicable Class A
+  object-log cells. The operation's acknowledged result remains visible through
+  the serving projection; bounded durable-projection lag is internal and cannot
+  require caller repair. Class A requires its durable log. Class B deliberately
+  uses the memory log and may persist only through a durable projection; it does
+  not inherit Class A replay claims.
 - **Routing via a separately-distributed owner map.** Unnecessary: owner placement is deterministic (HRW over
   the live owner set), so the map is *computable*, and a stale route is safe (the fenced append rejects a
   deposed owner) — so a lazy `MOVED`-style redirect-on-miss suffices.
