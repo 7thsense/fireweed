@@ -89,7 +89,10 @@ fn density_objectlog_sqlite_backend_owns_bounded_recovery_on_open_and_create_que
         .expect("sqlite backend create_queue ends");
     assert!(create_queue_recovery.contains("replay_log_into_projection"));
     assert!(create_queue_recovery.contains("recovery_stats.get(&shard).is_none()"));
-    assert!(create_queue_recovery.contains("AsyncControlPlane::create_queue"));
+    assert!(create_queue_recovery.contains("create_or_read_definition"));
+    assert!(create_queue_recovery.contains("ControlPlane::cache_authoritative_definition"));
+    assert!(create_queue_recovery.contains("AsyncProjectionStore::ensure_shard"));
+    assert!(!create_queue_recovery.contains("AsyncControlPlane::create_queue"));
     assert!(!create_queue_recovery.contains("tokio::spawn"));
     assert!(!create_queue_recovery.contains("fireweed_resp::try_spawn_governed"));
 }

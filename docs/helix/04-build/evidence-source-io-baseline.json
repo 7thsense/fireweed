@@ -584,15 +584,15 @@
         "evidence"
       ],
       "lines": [
-        5938,
-        5949,
-        5959,
-        5967,
-        5972,
-        5982,
-        5990,
-        5995,
-        6005
+        5937,
+        5948,
+        5958,
+        5966,
+        5971,
+        5981,
+        5989,
+        5994,
+        6004
       ],
       "path": "crates/fireweed-projection/src/lib.rs",
       "symbol": "td008_observed_terminal_reap_frontier_run"
@@ -602,11 +602,11 @@
         "evidence"
       ],
       "lines": [
-        6024,
-        6030,
-        6040,
-        6045,
-        6055
+        6023,
+        6029,
+        6039,
+        6044,
+        6054
       ],
       "path": "crates/fireweed-projection/src/lib.rs",
       "symbol": "td008_observed_terminal_reap_no_premature_deletion"
@@ -616,11 +616,11 @@
         "evidence"
       ],
       "lines": [
-        6070,
-        6076,
-        6086,
-        6090,
-        6095
+        6069,
+        6075,
+        6085,
+        6089,
+        6094
       ],
       "path": "crates/fireweed-projection/src/lib.rs",
       "symbol": "td008_observed_retention_only_reap_run"
@@ -630,12 +630,12 @@
         "evidence"
       ],
       "lines": [
-        6110,
-        6114,
-        6121,
-        6130,
-        6140,
-        6144
+        6109,
+        6113,
+        6120,
+        6129,
+        6139,
+        6143
       ],
       "path": "crates/fireweed-projection/src/lib.rs",
       "symbol": "td008_observed_retention_only_ignores_emission_cursor"
@@ -645,16 +645,16 @@
         "evidence"
       ],
       "lines": [
+        6208,
         6209,
         6210,
         6211,
         6212,
         6213,
-        6214,
+        6217,
         6218,
-        6219,
-        6228,
-        6229
+        6227,
+        6228
       ],
       "path": "crates/fireweed-projection/src/lib.rs",
       "symbol": "projection_image_roundtrips_full_projection_state"
@@ -1189,8 +1189,8 @@
         "release"
       ],
       "lines": [
-        208,
-        209
+        211,
+        212
       ],
       "path": "crates/fireweed-release/tests/density_evidence_tests.rs",
       "symbol": "density_validator_rejects_inconsistent_or_nonpositive_comparison"
@@ -1200,8 +1200,8 @@
         "release"
       ],
       "lines": [
-        236,
-        237
+        239,
+        240
       ],
       "path": "crates/fireweed-release/tests/density_evidence_tests.rs",
       "symbol": "density_validator_rejects_incomplete_or_inconsistent_lifecycle_evidence"
@@ -1211,11 +1211,11 @@
         "release"
       ],
       "lines": [
-        267,
-        269,
         270,
-        271,
-        272
+        272,
+        273,
+        274,
+        275
       ],
       "path": "crates/fireweed-release/tests/density_evidence_tests.rs",
       "symbol": "density_validator_rejects_self_selected_resource_limits"
@@ -1225,9 +1225,9 @@
         "release"
       ],
       "lines": [
-        304,
-        305,
-        311
+        307,
+        308,
+        314
       ],
       "path": "crates/fireweed-release/tests/density_evidence_tests.rs",
       "symbol": "density_validator_rejects_every_noncanonical_run_parameter"
@@ -1237,9 +1237,9 @@
         "release"
       ],
       "lines": [
-        319,
-        320,
-        327
+        322,
+        323,
+        330
       ],
       "path": "crates/fireweed-release/tests/density_evidence_tests.rs",
       "symbol": "density_validator_requires_continuous_resource_enforcement_not_a_timed_sample"
@@ -1249,8 +1249,8 @@
         "release"
       ],
       "lines": [
-        336,
-        338
+        339,
+        341
       ],
       "path": "crates/fireweed-release/tests/density_evidence_tests.rs",
       "symbol": "density_validator_rejects_progress_semantics_substitution"
@@ -1260,8 +1260,8 @@
         "release"
       ],
       "lines": [
-        400,
-        402
+        403,
+        405
       ],
       "path": "crates/fireweed-release/tests/density_evidence_tests.rs",
       "symbol": "density_validator_rejects_direct_tampering_of_an_otherwise_valid_release_row"
@@ -1271,8 +1271,8 @@
         "release"
       ],
       "lines": [
-        409,
-        410
+        412,
+        413
       ],
       "path": "crates/fireweed-release/tests/density_evidence_tests.rs",
       "symbol": "semantic_density_validator_accepts_complete_release_row"
@@ -1282,9 +1282,9 @@
         "release"
       ],
       "lines": [
-        452,
-        453,
-        454
+        455,
+        456,
+        457
       ],
       "path": "crates/fireweed-release/tests/density_evidence_tests.rs",
       "symbol": "density_builder_never_promotes_a_failed_measurement"
@@ -2021,32 +2021,32 @@
         "server"
       ],
       "lines": [
-        5020,
+        4886,
+        4898,
+        4910,
+        4933,
+        4949,
+        4965,
+        4995,
+        4998,
+        5006,
+        5008,
+        5010,
+        5012,
         5032,
-        5044,
-        5067,
-        5083,
-        5099,
-        5129,
-        5132,
-        5140,
-        5142,
-        5144,
-        5146,
-        5166,
-        5169,
-        5177,
-        5179,
-        5181,
-        5183,
-        5203,
-        5206,
-        5214,
-        5216,
-        5218,
-        5220,
-        5257,
-        5264
+        5035,
+        5043,
+        5045,
+        5047,
+        5049,
+        5069,
+        5072,
+        5080,
+        5082,
+        5084,
+        5086,
+        5123,
+        5130
       ],
       "path": "crates/fireweed-server/src/lib.rs",
       "symbol": "sqlite_log_t3_tp003_ac_txn_exact_pairs"
@@ -2056,12 +2056,12 @@
         "server"
       ],
       "lines": [
-        5316,
-        5319,
-        5320,
-        5324,
-        5328,
-        5336
+        5182,
+        5185,
+        5186,
+        5190,
+        5194,
+        5202
       ],
       "path": "crates/fireweed-server/src/lib.rs",
       "symbol": "sqlite_log_t3_evidence_axis_names_file_contract"
@@ -2071,35 +2071,35 @@
         "server"
       ],
       "lines": [
-        5839,
+        5705,
+        5722,
+        5739,
+        5766,
+        5769,
+        5771,
+        5773,
+        5792,
+        5795,
+        5797,
+        5799,
+        5818,
+        5821,
+        5823,
+        5825,
         5856,
-        5873,
-        5900,
-        5903,
-        5905,
-        5907,
-        5926,
-        5929,
-        5931,
-        5933,
-        5952,
-        5955,
-        5957,
-        5959,
-        5990,
-        5993,
-        5995,
-        5997,
-        6021,
-        6024,
-        6026,
-        6028,
-        6052,
-        6055,
-        6057,
-        6059,
-        6085,
-        6092
+        5859,
+        5861,
+        5863,
+        5887,
+        5890,
+        5892,
+        5894,
+        5918,
+        5921,
+        5923,
+        5925,
+        5938,
+        5945
       ],
       "path": "crates/fireweed-server/src/lib.rs",
       "symbol": "postgres_log_t3_tp003_ac_txn_exact_pairs"
@@ -2109,10 +2109,10 @@
         "server"
       ],
       "lines": [
-        6120,
-        6123,
-        6127,
-        6141
+        5973,
+        5976,
+        5980,
+        5994
       ],
       "path": "crates/fireweed-server/src/lib.rs",
       "symbol": "postgres_log_t3_evidence_axis_names_file_contract"
@@ -2201,7 +2201,7 @@
         "server"
       ],
       "lines": [
-        546
+        533
       ],
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "projection_path"
@@ -2212,9 +2212,9 @@
         "server"
       ],
       "lines": [
-        1059,
-        1076,
-        1085
+        1039,
+        1056,
+        1065
       ],
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "run_ack_arm"
@@ -2225,10 +2225,10 @@
         "server"
       ],
       "lines": [
-        2096,
-        2128,
-        2130,
-        2139
+        2076,
+        2108,
+        2110,
+        2119
       ],
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "run_release_load_shape_calibration"
@@ -2239,12 +2239,12 @@
         "server"
       ],
       "lines": [
-        2149,
-        2150,
-        2151,
-        2152,
-        2210,
-        2214
+        2129,
+        2130,
+        2131,
+        2132,
+        2190,
+        2194
       ],
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "e3_release_load_shape_calibration"
@@ -2255,20 +2255,20 @@
         "server"
       ],
       "lines": [
-        2253,
-        2287,
-        2289,
-        2318,
-        2337,
-        2346,
-        2349,
-        2350,
-        2356,
+        2233,
+        2267,
+        2269,
+        2298,
+        2317,
+        2326,
+        2329,
+        2330,
+        2336,
+        2345,
+        2359,
         2365,
-        2379,
-        2385,
-        2386,
-        2391
+        2366,
+        2371
       ],
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "run_recovery"
@@ -2279,7 +2279,7 @@
         "server"
       ],
       "lines": [
-        3291
+        3271
       ],
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "profile_row"
@@ -2291,26 +2291,26 @@
         "server"
       ],
       "lines": [
+        3296,
+        3298,
+        3300,
         3316,
-        3318,
-        3320,
+        3317,
+        3323,
+        3325,
+        3327,
+        3330,
+        3331,
+        3332,
+        3333,
+        3334,
         3336,
-        3337,
-        3343,
-        3345,
-        3347,
-        3350,
-        3351,
+        3341,
         3352,
-        3353,
-        3354,
-        3356,
-        3361,
-        3372,
-        3414,
-        3532,
-        3535,
-        3541
+        3394,
+        3512,
+        3515,
+        3521
       ],
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "performance_object_log_e3_live_tests"
@@ -2321,12 +2321,12 @@
         "server"
       ],
       "lines": [
-        3553,
-        3554,
-        3555,
-        3556,
-        3562,
-        3563
+        3533,
+        3534,
+        3535,
+        3536,
+        3542,
+        3543
       ],
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "e3_release_fence_proofs_only"
@@ -2337,7 +2337,7 @@
         "server"
       ],
       "lines": [
-        3724
+        3704
       ],
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "e3_matrix_rejects_missing_profile"
@@ -2348,7 +2348,7 @@
         "server"
       ],
       "lines": [
-        3737
+        3717
       ],
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "e3_matrix_rejects_missing_bound"
@@ -2359,7 +2359,7 @@
         "server"
       ],
       "lines": [
-        3752
+        3732
       ],
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "e3_matrix_rejects_no_throughput_progress"
@@ -2370,7 +2370,7 @@
         "server"
       ],
       "lines": [
-        3767
+        3747
       ],
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "e3_matrix_rejects_invalid_latency_distribution"
@@ -2381,7 +2381,7 @@
         "server"
       ],
       "lines": [
-        3781
+        3761
       ],
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "e3_matrix_rejects_recorder_control_divergence"
@@ -2392,8 +2392,8 @@
         "server"
       ],
       "lines": [
-        3809,
-        3820
+        3789,
+        3800
       ],
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "e3_matrix_rejects_forged_or_lockstepped_recorder_distribution"
@@ -2404,7 +2404,7 @@
         "server"
       ],
       "lines": [
-        3856
+        3836
       ],
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "TestE3RecorderControlsRejectLocksteppedDistribution"
@@ -2415,8 +2415,8 @@
         "server"
       ],
       "lines": [
-        3870,
-        3880
+        3850,
+        3860
       ],
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "TestE3RecorderControlsRequireFinitePositiveMedianConsistentRatio"
@@ -2427,7 +2427,7 @@
         "server"
       ],
       "lines": [
-        3895
+        3875
       ],
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "e3_matrix_rejects_recovery_digest_drift"
@@ -2438,7 +2438,7 @@
         "server"
       ],
       "lines": [
-        3909
+        3889
       ],
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "e3_matrix_rejects_inexact_recovery_command_range"
@@ -2449,7 +2449,7 @@
         "server"
       ],
       "lines": [
-        3924
+        3904
       ],
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "e3_matrix_rejects_latency_driven_or_inexact_recovery_load_batching"
@@ -2460,9 +2460,9 @@
         "server"
       ],
       "lines": [
-        3974,
-        3975,
-        3976
+        3954,
+        3955,
+        3956
       ],
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "live_e3_s3_env"
@@ -2473,7 +2473,7 @@
         "server"
       ],
       "lines": [
-        4091
+        4071
       ],
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "TestE3RecoveryRejectsInexactCommandRange"
@@ -2484,7 +2484,7 @@
         "server"
       ],
       "lines": [
-        4106
+        4086
       ],
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "TestE3RecoveryRejectsChecksumDrift"
@@ -2945,29 +2945,29 @@
   "epoch_zero_writers": [
     {
       "epoch_literal_lines": [
-        6116,
-        6117,
-        6118
+        5969,
+        5970,
+        5971
       ],
       "path": "crates/fireweed-server/src/lib.rs",
       "symbol": "postgres_log_t3_evidence_axis_names_file_contract",
       "writer_lines": [
-        6114,
-        6120
+        5967,
+        5973
       ]
     },
     {
       "epoch_literal_lines": [
-        5306,
-        5311,
-        5314
+        5172,
+        5177,
+        5180
       ],
       "path": "crates/fireweed-server/src/lib.rs",
       "symbol": "sqlite_log_t3_evidence_axis_names_file_contract",
       "writer_lines": [
-        5274,
-        5291,
-        5316
+        5140,
+        5157,
+        5182
       ]
     },
     {
@@ -3061,7 +3061,7 @@
       "calls": [
         "write_evidence"
       ],
-      "line": 5004,
+      "line": 4870,
       "path": "crates/fireweed-server/src/lib.rs",
       "symbol": "sqlite_log_t3_tp003_ac_txn_exact_pairs"
     },
@@ -3070,17 +3070,16 @@
       "calls": [
         "evidence_dir"
       ],
-      "line": 5273,
+      "line": 5139,
       "path": "crates/fireweed-server/src/lib.rs",
       "symbol": "sqlite_log_t3_evidence_axis_names_file_contract"
     },
     {
       "call_depth": 1,
       "calls": [
-        "evidence_dir",
         "write_evidence"
       ],
-      "line": 5808,
+      "line": 5674,
       "path": "crates/fireweed-server/src/lib.rs",
       "symbol": "postgres_log_t3_tp003_ac_txn_exact_pairs"
     },
@@ -3089,7 +3088,7 @@
       "calls": [
         "evidence_dir"
       ],
-      "line": 6101,
+      "line": 5954,
       "path": "crates/fireweed-server/src/lib.rs",
       "symbol": "postgres_log_t3_evidence_axis_names_file_contract"
     },
@@ -3152,7 +3151,7 @@
       "calls": [
         "postgres_log_t3_evidence_axis_names_file_contract"
       ],
-      "line": 6230,
+      "line": 6083,
       "path": "crates/fireweed-server/src/lib.rs",
       "symbol": "postgres_log_cells_registered_without_postgres_feature"
     },
@@ -3170,7 +3169,7 @@
       "calls": [
         "run"
       ],
-      "line": 1213,
+      "line": 1193,
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "run_ack_config"
     },
@@ -3253,7 +3252,7 @@
       "calls": [
         "prove_native_create_only_fence"
       ],
-      "line": 3302,
+      "line": 3282,
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "performance_object_log_e3_live_tests"
     },
@@ -3262,7 +3261,7 @@
       "calls": [
         "prove_native_create_only_fence"
       ],
-      "line": 3551,
+      "line": 3531,
       "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
       "symbol": "e3_release_fence_proofs_only"
     },
@@ -3307,7 +3306,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "9f1309b3fb77f6cb6adc0cddcab3c79f5df80ebacf8cc78f91f74e16189c7321",
+  "scan_sha256": "8327686252022f8d73722170f92c79d9dbecb44c90fc2cf75654bb8425a71b7e",
   "schema_version": 1,
   "source_surfaces": [
     {
@@ -5090,12 +5089,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 217,
+      "first_match_line": 221,
       "groups": [
         "e3"
       ],
-      "last_match_line": 217,
-      "line": 213,
+      "last_match_line": 221,
+      "line": 217,
       "markers": [
         "e3"
       ],
@@ -5108,12 +5107,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1474,
+      "first_match_line": 1550,
       "groups": [
         "e3"
       ],
-      "last_match_line": 1474,
-      "line": 1470,
+      "last_match_line": 1550,
+      "line": 1546,
       "markers": [
         "e3"
       ],
@@ -5273,12 +5272,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 5930,
+      "first_match_line": 5929,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 5930,
-      "line": 5930,
+      "last_match_line": 5929,
+      "line": 5929,
       "markers": [
         "td008"
       ],
@@ -5291,12 +5290,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 6012,
+      "first_match_line": 6011,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 6012,
-      "line": 6012,
+      "last_match_line": 6011,
+      "line": 6011,
       "markers": [
         "td008"
       ],
@@ -5309,12 +5308,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 6062,
+      "first_match_line": 6061,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 6062,
-      "line": 6062,
+      "last_match_line": 6061,
+      "line": 6061,
       "markers": [
         "td008"
       ],
@@ -5327,12 +5326,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 6102,
+      "first_match_line": 6101,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 6102,
-      "line": 6102,
+      "last_match_line": 6101,
+      "line": 6101,
       "markers": [
         "td008"
       ],
@@ -5345,12 +5344,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 6232,
+      "first_match_line": 6231,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 6232,
-      "line": 6155,
+      "last_match_line": 6231,
+      "line": 6154,
       "markers": [
         "tp003"
       ],
@@ -8666,12 +8665,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 208,
+      "first_match_line": 211,
       "groups": [
         "release"
       ],
-      "last_match_line": 208,
-      "line": 199,
+      "last_match_line": 211,
+      "line": 202,
       "markers": [
         "evidence"
       ],
@@ -8684,12 +8683,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 214,
+      "first_match_line": 217,
       "groups": [
         "release"
       ],
-      "last_match_line": 236,
-      "line": 214,
+      "last_match_line": 239,
+      "line": 217,
       "markers": [
         "evidence"
       ],
@@ -8702,12 +8701,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 267,
+      "first_match_line": 270,
       "groups": [
         "release"
       ],
-      "last_match_line": 267,
-      "line": 260,
+      "last_match_line": 270,
+      "line": 263,
       "markers": [
         "evidence"
       ],
@@ -8720,12 +8719,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 304,
+      "first_match_line": 307,
       "groups": [
         "release"
       ],
-      "last_match_line": 304,
-      "line": 276,
+      "last_match_line": 307,
+      "line": 279,
       "markers": [
         "evidence"
       ],
@@ -8738,12 +8737,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 319,
+      "first_match_line": 322,
       "groups": [
         "release"
       ],
-      "last_match_line": 319,
-      "line": 315,
+      "last_match_line": 322,
+      "line": 318,
       "markers": [
         "evidence"
       ],
@@ -8756,12 +8755,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 336,
+      "first_match_line": 339,
       "groups": [
         "release"
       ],
-      "last_match_line": 336,
-      "line": 331,
+      "last_match_line": 339,
+      "line": 334,
       "markers": [
         "evidence"
       ],
@@ -8774,12 +8773,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 400,
+      "first_match_line": 403,
       "groups": [
         "release"
       ],
-      "last_match_line": 400,
-      "line": 371,
+      "last_match_line": 403,
+      "line": 374,
       "markers": [
         "evidence"
       ],
@@ -8792,12 +8791,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 409,
+      "first_match_line": 412,
       "groups": [
         "release"
       ],
-      "last_match_line": 409,
-      "line": 407,
+      "last_match_line": 412,
+      "line": 410,
       "markers": [
         "evidence"
       ],
@@ -8810,12 +8809,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 452,
+      "first_match_line": 455,
       "groups": [
         "release"
       ],
-      "last_match_line": 452,
-      "line": 448,
+      "last_match_line": 455,
+      "line": 451,
       "markers": [
         "evidence"
       ],
@@ -10569,12 +10568,12 @@
       "evidence_paths": [
         "docs/perf/evidence/tp003-ac-txn-matrix-sqlite-storage-pairs.jsonl"
       ],
-      "first_match_line": 4667,
+      "first_match_line": 4533,
       "groups": [
         "server"
       ],
-      "last_match_line": 4674,
-      "line": 4615,
+      "last_match_line": 4540,
+      "line": 4514,
       "markers": [
         "evidence",
         "tp003"
@@ -10589,12 +10588,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4968,
+      "first_match_line": 4834,
       "groups": [
         "server"
       ],
-      "last_match_line": 4998,
-      "line": 4966,
+      "last_match_line": 4864,
+      "line": 4832,
       "markers": [
         "evidence",
         "tp003"
@@ -10610,12 +10609,12 @@
       "evidence_paths": [
         "docs/perf/evidence/tp003-ac-txn-matrix-sqlite-storage-pairs.jsonl"
       ],
-      "first_match_line": 5004,
+      "first_match_line": 4870,
       "groups": [
         "server"
       ],
-      "last_match_line": 5271,
-      "line": 5004,
+      "last_match_line": 5137,
+      "line": 4870,
       "markers": [
         "evidence",
         "tp003",
@@ -10634,12 +10633,12 @@
         "docs/perf/evidence/tp003-ac-txn-matrix-sqlite-storage-pairs.jsonl",
         "docs/perf/evidence/tp003-ac-txn-matrix.jsonl"
       ],
-      "first_match_line": 5273,
+      "first_match_line": 5139,
       "groups": [
         "server"
       ],
-      "last_match_line": 5338,
-      "line": 5273,
+      "last_match_line": 5204,
+      "line": 5139,
       "markers": [
         "epoch_zero",
         "evidence",
@@ -10659,12 +10658,12 @@
       "evidence_paths": [
         "docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl"
       ],
-      "first_match_line": 5437,
+      "first_match_line": 5303,
       "groups": [
         "server"
       ],
-      "last_match_line": 5453,
-      "line": 5423,
+      "last_match_line": 5319,
+      "line": 5289,
       "markers": [
         "evidence",
         "tp003"
@@ -10679,12 +10678,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 5770,
+      "first_match_line": 5636,
       "groups": [
         "server"
       ],
-      "last_match_line": 5805,
-      "line": 5768,
+      "last_match_line": 5671,
+      "line": 5634,
       "markers": [
         "evidence",
         "tp003"
@@ -10700,22 +10699,20 @@
       "evidence_paths": [
         "docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl"
       ],
-      "first_match_line": 5808,
+      "first_match_line": 5674,
       "groups": [
         "server"
       ],
-      "last_match_line": 6099,
-      "line": 5808,
+      "last_match_line": 5952,
+      "line": 5674,
       "markers": [
         "evidence",
-        "evidence_dir",
         "tp003",
         "write_evidence"
       ],
-      "match_count": 11,
+      "match_count": 9,
       "operations": [
         "constant",
-        "reader",
         "writer"
       ],
       "path": "crates/fireweed-server/src/lib.rs",
@@ -10726,12 +10723,12 @@
         "docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl",
         "docs/perf/evidence/tp003-ac-txn-matrix-postgres.jsonl"
       ],
-      "first_match_line": 6101,
+      "first_match_line": 5954,
       "groups": [
         "server"
       ],
-      "last_match_line": 6145,
-      "line": 6101,
+      "last_match_line": 5998,
+      "line": 5954,
       "markers": [
         "epoch_zero",
         "evidence",
@@ -10749,12 +10746,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 6232,
+      "first_match_line": 6085,
       "groups": [
         "server"
       ],
-      "last_match_line": 6232,
-      "line": 6230,
+      "last_match_line": 6085,
+      "line": 6083,
       "markers": [
         "evidence"
       ],
@@ -10945,13 +10942,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 521,
+      "first_match_line": 508,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 521,
-      "line": 490,
+      "last_match_line": 508,
+      "line": 477,
       "markers": [
         "e3"
       ],
@@ -10964,13 +10961,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 542,
+      "first_match_line": 529,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 542,
-      "line": 533,
+      "last_match_line": 529,
+      "line": 520,
       "markers": [
         "e3"
       ],
@@ -10983,13 +10980,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 637,
+      "first_match_line": 624,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 637,
-      "line": 629,
+      "last_match_line": 624,
+      "line": 616,
       "markers": [
         "evidence"
       ],
@@ -11002,13 +10999,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 700,
+      "first_match_line": 686,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 700,
-      "line": 692,
+      "last_match_line": 686,
+      "line": 678,
       "markers": [
         "e3"
       ],
@@ -11021,13 +11018,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 719,
+      "first_match_line": 705,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 719,
-      "line": 708,
+      "last_match_line": 705,
+      "line": 694,
       "markers": [
         "e3"
       ],
@@ -11040,13 +11037,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 888,
+      "first_match_line": 874,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 889,
-      "line": 876,
+      "last_match_line": 875,
+      "line": 862,
       "markers": [
         "e3"
       ],
@@ -11059,13 +11056,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 946,
+      "first_match_line": 926,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 970,
-      "line": 934,
+      "last_match_line": 950,
+      "line": 914,
       "markers": [
         "e3"
       ],
@@ -11078,13 +11075,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1050,
+      "first_match_line": 1030,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 1050,
-      "line": 1031,
+      "last_match_line": 1030,
+      "line": 1011,
       "markers": [
         "e3"
       ],
@@ -11097,13 +11094,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1276,
+      "first_match_line": 1256,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 1276,
-      "line": 1213,
+      "last_match_line": 1256,
+      "line": 1193,
       "markers": [
         "e3"
       ],
@@ -11116,13 +11113,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2087,
+      "first_match_line": 2067,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 2088,
-      "line": 2078,
+      "last_match_line": 2068,
+      "line": 2058,
       "markers": [
         "e3"
       ],
@@ -11135,13 +11132,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2147,
+      "first_match_line": 2127,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 2194,
-      "line": 2147,
+      "last_match_line": 2174,
+      "line": 2127,
       "markers": [
         "e3"
       ],
@@ -11154,13 +11151,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2235,
+      "first_match_line": 2215,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 2241,
-      "line": 2221,
+      "last_match_line": 2221,
+      "line": 2201,
       "markers": [
         "e3"
       ],
@@ -11174,13 +11171,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2529,
+      "first_match_line": 2509,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 2530,
-      "line": 2512,
+      "last_match_line": 2510,
+      "line": 2492,
       "markers": [
         "e3"
       ],
@@ -11193,13 +11190,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2551,
+      "first_match_line": 2531,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 2732,
-      "line": 2550,
+      "last_match_line": 2712,
+      "line": 2530,
       "markers": [
         "e3",
         "evidence"
@@ -11213,13 +11210,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3249,
+      "first_match_line": 3229,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 3295,
-      "line": 2743,
+      "last_match_line": 3275,
+      "line": 2723,
       "markers": [
         "e3",
         "evidence",
@@ -11234,14 +11231,14 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3302,
+      "first_match_line": 3282,
       "groups": [
         "e3",
         "matrix",
         "server"
       ],
-      "last_match_line": 3543,
-      "line": 3302,
+      "last_match_line": 3523,
+      "line": 3282,
       "markers": [
         "e3",
         "evidence",
@@ -11263,13 +11260,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3551,
+      "first_match_line": 3531,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 3564,
-      "line": 3551,
+      "last_match_line": 3544,
+      "line": 3531,
       "markers": [
         "e3",
         "evidence",
@@ -11286,13 +11283,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3699,
+      "first_match_line": 3679,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 3699,
-      "line": 3693,
+      "last_match_line": 3679,
+      "line": 3673,
       "markers": [
         "e3"
       ],
@@ -11305,13 +11302,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3717,
+      "first_match_line": 3697,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 3723,
-      "line": 3717,
+      "last_match_line": 3703,
+      "line": 3697,
       "markers": [
         "e3"
       ],
@@ -11324,13 +11321,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3733,
+      "first_match_line": 3713,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 3736,
-      "line": 3733,
+      "last_match_line": 3716,
+      "line": 3713,
       "markers": [
         "e3"
       ],
@@ -11343,13 +11340,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3746,
+      "first_match_line": 3726,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 3751,
-      "line": 3746,
+      "last_match_line": 3731,
+      "line": 3726,
       "markers": [
         "e3"
       ],
@@ -11362,13 +11359,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3761,
+      "first_match_line": 3741,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 3766,
-      "line": 3761,
+      "last_match_line": 3746,
+      "line": 3741,
       "markers": [
         "e3"
       ],
@@ -11381,13 +11378,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3776,
+      "first_match_line": 3756,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 3780,
-      "line": 3776,
+      "last_match_line": 3760,
+      "line": 3756,
       "markers": [
         "e3"
       ],
@@ -11400,13 +11397,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3790,
+      "first_match_line": 3770,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 3794,
-      "line": 3790,
+      "last_match_line": 3774,
+      "line": 3770,
       "markers": [
         "e3"
       ],
@@ -11419,13 +11416,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3805,
+      "first_match_line": 3785,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 3819,
-      "line": 3805,
+      "last_match_line": 3799,
+      "line": 3785,
       "markers": [
         "e3"
       ],
@@ -11438,13 +11435,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3855,
+      "first_match_line": 3835,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 3855,
-      "line": 3851,
+      "last_match_line": 3835,
+      "line": 3831,
       "markers": [
         "e3"
       ],
@@ -11457,13 +11454,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3869,
+      "first_match_line": 3849,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 3879,
-      "line": 3866,
+      "last_match_line": 3859,
+      "line": 3846,
       "markers": [
         "e3"
       ],
@@ -11476,13 +11473,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3889,
+      "first_match_line": 3869,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 3894,
-      "line": 3889,
+      "last_match_line": 3874,
+      "line": 3869,
       "markers": [
         "e3"
       ],
@@ -11495,13 +11492,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3904,
+      "first_match_line": 3884,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 3908,
-      "line": 3904,
+      "last_match_line": 3888,
+      "line": 3884,
       "markers": [
         "e3"
       ],
@@ -11514,13 +11511,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3918,
+      "first_match_line": 3898,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 3923,
-      "line": 3918,
+      "last_match_line": 3903,
+      "line": 3898,
       "markers": [
         "e3"
       ],
@@ -11533,13 +11530,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3967,
+      "first_match_line": 3947,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 3977,
-      "line": 3966,
+      "last_match_line": 3957,
+      "line": 3946,
       "markers": [
         "e3"
       ],
@@ -11552,13 +11549,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4032,
+      "first_match_line": 4012,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 4032,
-      "line": 4028,
+      "last_match_line": 4012,
+      "line": 4008,
       "markers": [
         "e3"
       ],
@@ -11571,13 +11568,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4061,
+      "first_match_line": 4041,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 4061,
-      "line": 4057,
+      "last_match_line": 4041,
+      "line": 4037,
       "markers": [
         "e3"
       ],
@@ -11590,13 +11587,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4090,
+      "first_match_line": 4070,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 4090,
-      "line": 4086,
+      "last_match_line": 4070,
+      "line": 4066,
       "markers": [
         "e3"
       ],
@@ -11609,13 +11606,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4105,
+      "first_match_line": 4085,
       "groups": [
         "e3",
         "server"
       ],
-      "last_match_line": 4105,
-      "line": 4101,
+      "last_match_line": 4085,
+      "line": 4081,
       "markers": [
         "e3"
       ],
