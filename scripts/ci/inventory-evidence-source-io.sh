@@ -49,6 +49,8 @@ def read_text(relative: str) -> str:
 
 tracked = set(git_files())
 identity_path = "scripts/public-identity-allowlist.json"
+generator_path = "scripts/ci/inventory-evidence-source-io.sh"
+baseline_path = "docs/helix/04-build/evidence-source-io-baseline.json"
 identity = json.loads(read_text(identity_path))
 historical = next(
     entry
@@ -70,7 +72,7 @@ source_paths = [
     for path in tracked
     if path.startswith(source_prefixes)
     and Path(path).suffix in source_suffixes
-    and path != identity_path
+    and path not in {identity_path, generator_path, baseline_path}
     and not path.startswith("docs/perf/evidence/")
 ]
 
