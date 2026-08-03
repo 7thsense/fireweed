@@ -13,12 +13,14 @@ ddx:
 
 fireweed is a batch-centric state-machine queue engine for applications that need
 ordered, recoverable work execution at scale. It provides one external
-transaction contract across local memory, SQLite, Postgres, and object-log
-deployment profiles: accepted mutations are durable and visible, rejected
-mutations have no durable effect, and ambiguous retries are resolved by
-idempotency keys rather than by caller-side storage choreography. Seventh Sense
-is the first validation use case: timestamp-ordered delivery work with
-idempotent writes, durable claims, batch execution, and no lost work.
+transaction contract across an interchangeable log-by-projection storage
+matrix: accepted mutations are visible at the selected response barrier,
+rejected mutations have no committed effect, and ambiguous retries are resolved
+by request identity rather than by caller-side storage choreography. Durability
+after process death follows the selected log class instead of being overstated
+as uniform. Seventh Sense is the first validation use case: timestamp-ordered
+delivery work with idempotent writes, durable claims, batch execution, and no
+lost work.
 
 ## Positioning
 
@@ -34,9 +36,28 @@ transaction integrity part of the queue contract.
 When fireweed succeeds, applications have one dependable primitive for accepting,
 ordering, claiming, retrying, and completing work.
 
-**North Star**: Every accepted item is durably executed according to its queue's
-priority and progress guarantees, with no lost work, no concurrent execution of
-the same claim, and an explicit final state.
+**North Star**: Every accepted item is executed according to its queue's
+priority, progress, and selected durability-class guarantees, with no lost work
+inside that boundary, no concurrent execution of the same claim, and an
+explicit final state.
+
+### Storage product law
+
+The public storage product is exactly five log backends (`memory`, `sqlite`,
+`postgres`, `filesystem`, `s3`) crossed with three projections (`memory`,
+`sqlite`, `postgres`): 15 supported cells assembled through one typed
+composition model. The control plane is a separate optional topology choice,
+not a mandatory PostgreSQL tier or a bundled storage product. Public product paths
+use native-async composition; a blocking store may be isolated behind a bounded
+adapter actor without changing that public execution model.
+
+Logs define the cross-process durability class. `sqlite`, `postgres`,
+`filesystem`, and `s3` logs are Class A: the durable log is authoritative and a
+projection can be rebuilt by high-water plus tail replay. The `memory` log is
+Class B: after process death only a durable projection can remain, so the
+product makes no log-rebuild, branch, read-as-of, or log-derived change-record
+claim for those three cells. Filesystem and S3 are peer implementations of the
+same object-log protocol; Postgres is first-class on both public axes.
 
 ## User Experience
 
@@ -60,9 +81,9 @@ idempotently, claim compatible batches of eligible items, and record outcomes.
 | Bounded progress guarantees | Relaxed priority ordering can scale without starving eligible work |
 | Durable execution lifecycle | Work remains recoverable across worker and process failures |
 | Batch and group-aware claims | Workers can efficiently satisfy downstream API batch constraints |
-| Backend-independent transaction integrity | Callers see the same commit, visibility, idempotency, and recovery guarantees regardless of storage profile |
+| Composition-independent transaction integrity | All 15 cells preserve commit, visibility, rejection, and idempotency semantics; restart recovery follows the cell's explicit Class A or Class B boundary |
 | Tunable durability economics | Operators can choose a minimum/maximum commit latency bound that trades mutation latency against object-log request cost and batch density |
-| Redis-hot, S3-durable profile | Local memory or SQLite projections can serve hot queue operations while an object log provides durable replay and cluster-scale queue count |
+| Independent serving and durability choices | Operators select log durability independently from memory, SQLite, or Postgres serving projections without adopting a separate product profile |
 
 ## Success Definition
 
@@ -70,7 +91,7 @@ idempotently, claim compatible batches of eligible items, and record outcomes.
 |-----------|------------|
 | Priority correctness | Claims follow the queue's configured priority and progress contract |
 | Durable execution safety | No accepted item is lost or concurrently held by multiple active claims |
-| Transaction contract | Every implementation profile satisfies the same externally visible mutation contract: success means durable and visible, rejection means no committed effect, and unknown outcomes are resolvable by `request_id` without duplicate state-machine transitions |
+| Transaction contract | Every supported cell satisfies the same mutation, visibility, rejection, and request-replay contract; Class A success survives through the durable log, while Class B persistence is limited to the selected projection |
 | Scale readiness | Hot queues with 10M resident items remain writable, claimable, observable, and exactly recoverable under ordinary concurrent load. Horizontal deployments distribute **queues across independent owner nodes** while preserving queue-global progress, claim safety, and bounded shared resources. A node exercises at least 1000 concurrently active queues without lost or duplicate work. Same-run baseline/load comparisons detect material degradation; absolute rates and latency percentiles are capacity evidence tied to the declared host and topology, never portable release bars. Substantiated by TP-002 E1 single-deployment, E2 cross-queue and density, and E3 object-log evidence. |
 | Seventh Sense validation | Timestamp-ascending delivery queues meet Seventh Sense scheduling, idempotency, batch, and latency requirements |
 

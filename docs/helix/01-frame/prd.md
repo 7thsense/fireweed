@@ -20,13 +20,16 @@ lease, and claimed items are finalized as complete, failed, retryable, or
 released.
 
 fireweed is also the transaction mapping layer for this centralized state-machine
-workflow. The native interface is batch-centric, and every storage profile MUST
-present the same external mutation contract: a successful response means the
-mutation is durable and visible through subsequent reads/claims, a rejected
-mutation has no durable effect, and an interrupted or timed-out mutation can be
-resolved through `request_id` replay without duplicating state transitions.
-Storage choices may change latency, cost, scale envelope, and recovery time; they
-MUST NOT change transaction integrity.
+workflow. The native interface is batch-centric, and every supported storage
+cell MUST present the same mutation, visibility, rejection, and request-replay
+contract. A successful response is visible through subsequent reads and claims;
+a rejected mutation has no committed effect; and an interrupted or timed-out
+mutation can be resolved through `request_id` without duplicating state
+transitions. Cross-process durability follows the declared log class: Class A
+persists through its durable log, while Class B persistence is limited to the
+selected projection. Storage choices may change durability class, latency,
+cost, scale envelope, and recovery time; they MUST NOT silently change
+state-machine integrity.
 
 The product is general-purpose and may become open source. Seventh Sense is the
 first validation workload: several delivery, action, job, and connector queues
@@ -47,12 +50,31 @@ resource envelope; they are capacity observations, not host-independent pass bar
 Each measure references a recorded evidence artifact (see "Scale
 Substantiation").
 
-The primary high-scale value profile is local memory or SQLite serving
-projections backed by a durable object log, giving Redis-level hot-path behavior
-with object-store durability and queue count bounded by cluster capacity rather
-than by one database. A Postgres log backend remains a lower-latency option with
-different scaling and operational parameters, but it is not allowed to define a
-different client contract.
+One important high-scale topology uses memory or SQLite serving projections
+backed by a durable filesystem or S3 object log, giving a hot serving path with
+object-store durability and queue count bounded by cluster capacity rather than
+by one database. It is one selection from the product matrix, not a separate
+profile. A Postgres log is a first-class peer with different scaling and
+operational parameters; Postgres is also a first-class projection and optional
+control-plane choice.
+
+### Storage product boundary
+
+The public product is exactly the 5×3 product of five logs (`memory`, `sqlite`,
+`postgres`, `filesystem`, `s3`) and three projections (`memory`, `sqlite`,
+`postgres`). All 15 cells use one typed composition model and the same public
+queue surface. `filesystem` and `s3` are peer object-log providers. Public
+selectors do not include `objectlog`, `inmemory`, Hybrid, or Turso product
+aliases.
+
+The four durable logs are Class A: the log remains authoritative after restart
+and projections recover from high-water plus tail replay. The memory log is
+Class B: after process death only a durable SQLite or Postgres projection can
+remain, and no memory-log cell claims log rebuild, branch, read-as-of, or
+log-derived change records. The control plane is an optional composition axis,
+not a mandatory PostgreSQL dependency. Public composition is native async;
+inherently blocking adapters may isolate complete transactions behind bounded
+actors without defining a second facade or global blocking execution model.
 
 ## Problem and Goals
 
@@ -85,12 +107,12 @@ queue with timestamp ordering as a first-class validation case.
 5. Seventh Sense can replace or consolidate its scheduled delivery/action queues
    without losing timestamp scheduling, lifecycle safety, or operational
    visibility.
-6. Operators can configure a commit-latency bound for durable-log profiles and
+6. Operators can configure a commit-latency bound for applicable Class A logs and
    understand the resulting tradeoff between latency, batch density, and backing
    store request cost.
-7. Callers can depend on one transaction contract across all supported
-   implementation combinations without knowing whether fireweed uses memory,
-   SQLite, Postgres, or an object log internally.
+7. Callers can depend on one transaction contract across all 15 storage cells
+   without backend-specific choreography, while selecting the documented Class
+   A or Class B cross-process durability boundary explicitly.
 
 ### Success Metrics
 
@@ -101,8 +123,8 @@ queue with timestamp ordering as a first-class validation case.
 | Queue density | At least 1000 cold queues plus one designated hot queue are active concurrently; all queues become progress-eligible, the hot and cold phases complete exactly, and shared workers/connections/tasks remain bounded rather than growing per queue | Multi-queue density benchmark per the Tier-2 evidence record (TP-002 E2) |
 | Hot queue scale | At least 10M items resident in one active queue remain writable, claimable, observable, and exactly recoverable under the declared topology | Benchmark per TP-002 E1 and E3 |
 | Core operation capacity | Throughput and p50/p95/p99 for batch push, update, claim, and finalize are published with workload, host, topology, and resource limits; pass/fail uses correctness, progress, bounded resources, and same-run degradation rather than absolute speed | Benchmark harness under representative Seventh Sense and synthetic workloads |
-| External transaction integrity | 100% of supported implementation combinations satisfy the same success/error/unknown-outcome contract under retries, process crashes, projection rebuilds, and log replay | Backend conformance and fault-injection matrix per TP-003 |
-| Commit latency and cost dial | Durable-log profiles publish latency, throughput, and object-store request-cost curves for the configured commit-latency bound | Object-log latency/cost matrix per TP-002 E3 |
+| External transaction integrity | All 15 cells satisfy success/error/unknown-outcome semantics; all 12 Class A cells prove crash recovery from the durable log, while the three Class B cells prove only their declared projection-persistence boundary | Cell and durability-class conformance plus fault injection per TP-003 |
+| Commit latency and cost dial | Applicable Class A logs publish latency, throughput, and object-store request-cost curves for the configured commit-latency bound | Object-log latency/cost matrix per TP-002 E3 |
 | Progress bound compliance | 100% of eligible items claimed before their configured progress bound is exceeded | Queue metrics plus adversarial tests with skewed priority and group distributions |
 | Claim safety | Zero concurrent active leases for the same item | Concurrency stress test with worker crashes and lease expiry |
 
@@ -235,13 +257,15 @@ priority, retry, claim, and state logic with different table shapes.
     connection per queue.
     Aggregate single-node throughput is reported for the declared node;
     multi-node deployment provides aggregate headroom.
-15. Backend-independent transaction contract: every supported implementation
-    combination MUST preserve the same external semantics for batch mutation
+15. Composition-independent transaction contract: all 15 cells MUST preserve
+    the same external semantics for batch mutation
     success, structured rejection, unknown retry resolution, idempotency replay,
-    read-your-write visibility, claim exclusivity, and recovery from durable
-    state. No caller may need backend-specific write, flush, replay, or repair
-    choreography to preserve state-machine integrity.
-16. Durable-log profiles MUST expose an operator-configurable commit-latency
+    read-your-write visibility, and claim exclusivity. Recovery from durable
+    state MUST match the selected Class A or Class B boundary. No caller may
+    need backend-specific write, flush, replay, or repair choreography to
+    preserve state-machine integrity.
+16. Applicable Class A log configurations MUST expose an
+    operator-configurable commit-latency
     bound that controls group-commit cadence. Lower bounds reduce mutation
     latency and increase object-store/log request cost; higher bounds increase
     batch density and latency. The bound is a performance/cost dial only and
@@ -541,8 +565,9 @@ priority, retry, claim, and state logic with different table shapes.
 
 ## Technical Context
 
-This PRD records product requirements only. Storage engine, shard strategy,
-indexing, protocol, and deployment topology belong in later technical design.
+This PRD records product requirements, including the closed public storage axes
+and durability classes. Storage algorithms, shard strategy, indexing, protocol,
+and deployment topology belong in later technical design.
 
 Reference systems and interfaces to study:
 
@@ -593,9 +618,9 @@ Reference systems and interfaces to study:
 
 - Seventh Sense production workload data for realistic load profiles, group
   distributions, priority skew, and downstream API batch constraints.
-- The committed v1 technical designs for storage backends (including the second,
-  higher-scale backend) and queue ownership/assignment/fencing/rebalance across
-  nodes. These substantiate the horizontal envelope in Success Metrics.
+- The committed v1 technical designs for all five log backends, all three
+  projections, and queue ownership/assignment/fencing/rebalance across nodes.
+  These substantiate the horizontal envelope in Success Metrics.
 - API-001 for native fireweed operations. SQS-shaped compatibility remains a
   later adapter, not the native contract.
 - A later operator/retention contract for P1 redrive, purge, archive, and
