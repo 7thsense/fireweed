@@ -84,6 +84,29 @@ state transition") and preserves the engine's correctness invariants:
 | Idempotency | `request_id` deduplicates synchronous calls within `request_id_retention_ms`; for asynchronous operations the returned `operation_id` is the idempotency anchor (replay of the same `request_id` returns the same `operation_id`). |
 | Tenant isolation (ADR-002) | Every operation is authorized against `tenant_id`/`queue_id` before reading or mutating any control-plane, log, projection, or snapshot state. |
 
+### Storage-agnostic repair boundary
+
+Every supported `StorageConfig` tuple implements the complete API-002 method
+surface with the same authorization, audit, request-id, fencing, batching, and
+error semantics. Repair dispatch MUST NOT ask an operator to select a backend,
+expose backend choreography, or use an expected `unavailable` result as evidence
+of method parity. An optional projection-maintenance control may be absent when
+the composition owns no disposable projection, but that absence does not remove
+any operator operation in this contract.
+
+Durability class limits recovery mechanics, not the operator command model.
+Class A (durable-log) compositions may verify and rebuild a projection from the
+retained log. Class B (memory-log) compositions may repair the latest state
+available in their selected projection but have no durable log history to
+rebuild, branch, or inspect read-as-of; inspection MUST report that capability
+as unavailable without synthesizing history. Both classes preserve the same
+queue-epoch fencing and idempotent convergence for accepted operator commands.
+
+Storage configuration is validated before any storage I/O and before this
+surface exists. Startup-only configuration variants mirrored by an exhaustive
+engine `CommitRejection` conversion therefore MUST NOT be returned by an
+operator mutation, retry, or asynchronous-operation poll.
+
 ### Cohort and group targeting (normative)
 
 Operator mutations (`RepairItems`, `RedriveItems`, `PurgeQueueItems`,

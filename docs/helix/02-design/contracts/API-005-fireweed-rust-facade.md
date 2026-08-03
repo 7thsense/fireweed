@@ -159,7 +159,7 @@ pub struct StorageConfig {
     pub log: LogConfig,
     pub projection: ProjectionStoreConfig,
     pub control_plane: Option<ControlPlaneConfig>,
-    /// Object-log peers only (`Filesystem`, `S3`); ignored for other logs.
+    /// Required for object-log peers; invalid for non-object logs.
     pub authority: Option<ObjectLogAuthority>,
     pub response_barrier: ResponseBarrier,
     pub segments: SegmentConfig,
@@ -194,8 +194,27 @@ pub enum LogConfig {
 /// Public projection axis (three first-class values).
 pub enum ProjectionStoreConfig {
     Memory,
-    Sqlite { path: PathBuf },
+    Sqlite {
+        path: PathBuf,
+        /// SQLite apply batching; independent of response-barrier policy.
+        sqlite_projection_deferred_flush_chunk: Option<NonZeroUsize>,
+    },
     Postgres { url: ConfigSecret },
+}
+
+/// Provider-neutral bounds for returning before the selected projection has
+/// applied through the committed log position.
+pub struct AsyncProjectionSpec {
+    pub apply_lag_max_commands: u64,
+    pub apply_debt_max_bytes: u64,
+    pub apply_queue_depth_max: usize,
+    pub oldest_unapplied_max_ms: u64,
+    pub apply_poison_retry_threshold: u32,
+}
+
+pub enum ResponseBarrier {
+    Strict,
+    AsyncProjection(AsyncProjectionSpec),
 }
 
 pub fn open(
@@ -251,21 +270,43 @@ API.
 does not expose the selected log, projection, authority, barrier, or backend
 objects.
 
-Validation (normative intent; names may share helpers with object-log
-config):
+Validation is pure, fail-closed, and complete before any network connection,
+file open, directory creation, schema migration, or other storage I/O. When
+more than one defect exists, `StorageConfig` validation reports the first one
+in this fixed precedence:
 
-- `LogConfig::Filesystem` requires `ObjectLogAuthority::NativeConditionalWrite`
-  (or equivalent native conditional write) when authority is required for the
-  composition.
-- `LogConfig::S3` may use native conditional creation only when that operation
-  is atomic for the configured store; otherwise callers must select PostgreSQL
-  authority. Garage compositions use PostgreSQL authority regardless of
-  whether their disposable projection is SQLite or PostgreSQL.
-- Object-log compositions with a Postgres projection require
-  `ResponseBarrier::Strict` unless a later contract explicitly widens this.
-- Unsupported or mismatched field combinations return
-  `EngineError::Unavailable` (or `EngineError::Invalid` for clearly malformed
-  input) before opening either store; no partially opened `Fireweed` escapes.
+1. endpoint and location syntax;
+2. response-barrier shape and positive `AsyncProjectionSpec` bounds;
+3. tuple coherence (field applicability and canonical log/projection/control
+   selectors);
+4. compiled feature availability; then
+5. durability and provider-capability requirements.
+
+`LogConfig::Filesystem` and `LogConfig::S3` require
+`ObjectLogAuthority::NativeConditionalWrite`. The configured log provider MUST
+actually supply atomic conditional create/update publication; a provider that
+cannot do so is rejected. PostgreSQL is not an object-log manifest-publication
+fallback, and projection selection never supplies publication authority.
+`authority` on a non-object log is a tuple-coherence error rather than an
+ignored field.
+
+`Strict` and `AsyncProjection(AsyncProjectionSpec)` are provider-neutral
+response policies, not projection variants or public product profiles. All
+five limits in `AsyncProjectionSpec` MUST be positive. The separate
+`sqlite_projection_deferred_flush_chunk` is an optional positive SQLite apply
+batching capability; it is valid with either `Strict` or `AsyncProjection` and
+is a tuple-coherence error for non-SQLite projections. A barrier/cell whose
+durability or runtime capabilities cannot satisfy the external transaction
+contract is rejected at the final durability/capability step; constructors do
+not silently substitute a projection, authority, or barrier.
+
+Unsupported or mismatched configurations return a structured
+`EngineError::Invalid` or `EngineError::Unavailable` before storage I/O; no
+partially opened `Fireweed` escapes. These are startup-only outcomes. Although
+the engine's exhaustive `CommitRejection` conversion may mirror configuration
+error variants such as `ChangeRecordsRequireDurableLog`, validation proves that
+they cannot originate after a `Fireweed` is constructed and MUST NOT escape a
+queue method's commit path.
 
 `ConfigSecret::new`, `SegmentConfig::new`, and `RecoveryPolicy::default`
 preserve the corresponding current validation behavior. `ConfigSecret` exposes
@@ -367,7 +408,6 @@ pub struct ObjectLogRuntimeConfig {
 
 pub enum ObjectLogAuthority {
     NativeConditionalWrite,
-    Postgres { url: ConfigSecret },
 }
 
 /// Convenience object-log storage; maps to `LogConfig::Filesystem` / `S3`.
@@ -393,7 +433,6 @@ pub enum ProjectionConfig {
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct ConfigSecret(/* private String */);
-pub enum ResponseBarrier { Strict, AsyncProjection }
 pub struct SegmentConfig { pub target_bytes: usize, pub max_latency_ms: u64 }
 pub enum RecoveryAction { FailClosed, RebuildProjection }
 pub struct RecoveryPolicy {
@@ -405,19 +444,19 @@ pub struct RecoveryPolicy {
 
 Object storage, publication authority, and projection storage are independent
 construction axes. Local filesystem object logs require
-`NativeConditionalWrite`. S3-compatible stores may use native conditional
-creation only when that operation is atomic for the configured store; otherwise
-callers must select PostgreSQL authority. Garage compositions use PostgreSQL
-authority regardless of whether their disposable projection is SQLite or
-PostgreSQL. The selected authority remains private after construction.
+`NativeConditionalWrite`. S3-compatible stores require the same selector and
+are supported only when the configured provider implements atomic conditional
+publication. No PostgreSQL authority selector or fallback is public. The
+selected authority remains private after construction.
 
 `ObjectLogRuntimeConfig::validate` preserves the corresponding current
 validation behavior. `open_objectlog_sqlite` requires
 `ProjectionConfig::Sqlite`; the Postgres constructors require
 `ProjectionConfig::Postgres`; a mismatched variant returns
-`EngineError::Unavailable` before opening either store. The Postgres projection
-constructors additionally require `ResponseBarrier::Strict`; they return
-`EngineError::Unavailable` for `AsyncProjection`.
+`EngineError::Unavailable` before opening either store. Convenience
+constructors use the same validation precedence and barrier semantics as
+`StorageConfig`; they do not impose a provider-specific `Strict` rule or bypass
+tuple, feature, and durability checks.
 
 `EmbeddedSecret`, `EmbeddedObjectLogConfig`, `EmbeddedProjectionConfig`,
 `EmbeddedResponseBarrier`, `EmbeddedSegmentConfig`,
@@ -679,6 +718,8 @@ pub async fn declared_bucket_segment(&self, queue: &QueueKey, request: DeclaredB
 | Condition | Error / outcome | Retry | Recovery expectation |
 | --- | --- | --- | --- |
 | Supported composition lacks a core operation | Construction/release validation failure | No | Do not expose or release the incomplete composition |
+| Invalid endpoint, barrier, tuple, feature, or durability combination | Structured construction error before I/O | No until corrected | Fix `StorageConfig`; no partial resources or runtime handle exist |
+| History/change-record request uses Class B memory log | `EngineError::ChangeRecordsRequireDurableLog` | No | Select a Class A log at construction; no history is fabricated |
 | Core operation is transiently unavailable at runtime | Existing structured `EngineError::Unavailable` | Per API-001 | Retry without selecting a different storage implementation |
 | Projection maintenance is not owned | `projection_control()` returns `None` | No | Queue operations and hot-query capability checks remain independent |
 | Projection is offline or maintenance fails | Structured `EngineError` from the control operation | Per the existing recovery contract | Re-inspect or rebuild through the same borrowed control |
@@ -723,6 +764,12 @@ implementation strategy. It is not part of this contract.
       5×3 matrix; filesystem and s3 are first-class logs; no profile SKU model.
 - [ ] Durability Class A vs Class B is documented (memory log = Class B).
 - [ ] Environment variables are not the facade construction surface.
+- [ ] `AsyncProjectionSpec` is provider-neutral; SQLite deferred-flush chunking
+      is a separate projection option valid under both barriers.
+- [ ] Configuration validation follows endpoint → barrier → tuple coherence →
+      feature → durability precedence and performs no storage I/O.
+- [ ] Startup-only configuration errors cannot escape the commit path even when
+      exhaustively represented by `CommitRejection`.
 - [ ] `ObjectLogRuntimeConfig` and `open_*` conveniences map to / are described
       as conveniences over `StorageConfig`.
 - [ ] Every existing supported facade family is forwarded or explicitly

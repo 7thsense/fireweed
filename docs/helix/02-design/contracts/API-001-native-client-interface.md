@@ -88,6 +88,38 @@ following externally visible guarantees:
    duplicate active leases, lost accepted items, or backend-specific recovery
    instructions to callers.
 
+### Storage-composition invariance
+
+The complete API-001 operation surface applies to every supported
+`StorageConfig` log × projection tuple. A storage cell is releasable only when
+it implements every method and preserves the same request and response shapes;
+returning a backend-specific `unavailable` for a normally supported operation
+is not method parity. Projection maintenance is an optional control capability,
+not permission to omit a data-plane method.
+
+Storage selection changes only the documented durability envelope:
+
+- **Class A** uses a durable log (`sqlite`, `postgres`, `filesystem`, or `s3`).
+  It preserves history and can rebuild a disposable projection from the log.
+- **Class B** uses the memory log. A durable selected projection can preserve
+  the latest serving state across restart, but there is no retained log from
+  which to rebuild, branch, or answer read-as-of/history requests. A binding
+  MUST report that history capability as absent rather than fabricate it.
+
+Both classes otherwise preserve this contract's request-id replay, per-item and
+envelope outcomes, lease fencing, deterministic ordering, poison/fail-closed
+behavior, and backpressure semantics. In particular, a retryable capacity or
+commit-pressure outcome remains safe to retry with the same `request_id`, and
+an unknown commit outcome is resolved through the same replay contract rather
+than by selecting or exposing a backend-specific recovery route. A poisoned or
+lag-bound projection MUST fail closed before it can serve inconsistent reads or
+claims.
+
+Typed construction is outside the data plane. Endpoint, barrier, tuple,
+feature, and durability validation completes before storage I/O, so a
+startup-only configuration rejection cannot appear as a post-construction
+command or commit outcome.
+
 ## Scope and Boundaries
 
 - In scope: native client operations for queue creation, item write/update,
