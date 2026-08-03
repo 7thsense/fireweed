@@ -2,6 +2,23 @@
 
 **Status:** PARTIAL (exact 10M recovery contracts recorded; full cost/ack E3 ledger still open).
 
+### Long-run plan + progress (required)
+
+The release matrix is **2 profiles × (4 ack latency bounds × ~2×100k pushes + 10M recovery)**. A single
+10M recovery historically took ~1–3h wall; the **full** matrix has exceeded **40h**. That duration is
+only allowed when specifically planned:
+
+```bash
+# Plan record (not a kill timer). Scripts and the Rust harness refuse release shape without this.
+export FIREWEED_E3_PLANNED_WALL_HOURS=48
+# Optional: stderr progress cadence (default 5000 ack ops / 50000 load items)
+export FIREWEED_E3_PROGRESS_EVERY=5000
+```
+
+Live harness emits line-oriented `E3_PROGRESS ...` on **stderr** (phase, completed/total, elapsed_s)
+so `nohup` / durable runner logs stay alive. Do not re-launch release E3 without both the plan env
+and progress-capable binary.
+
 ### LogEngine port (fireweed-3aaa3ebc)
 
 The E3 harness no longer uses the retired FWSG `SegmentedObjectLog*` facades. It opens:

@@ -27,6 +27,17 @@ if [[ "$FIREWEED_E3_RESIDENT" != 10000000 || "$FIREWEED_E3_LOAD_BATCH" != 1000 \
   echo "E3 shape check failed: release requires resident=10000000 load_batch=1000 ack_pushes=100000 ack_concurrency=384 load_concurrency=8 recovery_max_tail_commands=1000000" >&2
   exit 2
 fi
+# Release shape is multi-hour (has run >40h). Refuse silent launches without an explicit plan.
+# FIREWEED_E3_PLANNED_WALL_HOURS is a plan record, not a kill timer. Live harness emits E3_PROGRESS lines.
+if [[ -z "${FIREWEED_E3_PLANNED_WALL_HOURS:-}" ]] || ! [[ "${FIREWEED_E3_PLANNED_WALL_HOURS}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "E3 long-run plan check failed: set FIREWEED_E3_PLANNED_WALL_HOURS=<positive integer hours>" >&2
+  echo "  This release matrix is 2 profiles × (4 ack bounds × ~2×100k pushes + 10M recovery)." >&2
+  echo "  Historical walls: single 10M recovery ~1–3h; full matrix has exceeded 40h." >&2
+  echo "  Example: FIREWEED_E3_PLANNED_WALL_HOURS=48 scripts/perf/tp002-e3-s3.sh" >&2
+  echo "  Progress: stderr lines matching E3_PROGRESS (FIREWEED_E3_PROGRESS_EVERY=N)." >&2
+  exit 2
+fi
+echo "E3 long-run plan: FIREWEED_E3_PLANNED_WALL_HOURS=${FIREWEED_E3_PLANNED_WALL_HOURS}" >&2
 
 : "${FIREWEED_S3_TEST_ENDPOINT:?set the S3-compatible endpoint}"
 : "${FIREWEED_S3_TEST_REGION:?set the S3 signing region}"

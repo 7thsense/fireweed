@@ -82,6 +82,14 @@ export FIREWEED_E3_ACK_PUSHES=100000
 export FIREWEED_E3_ACK_CONCURRENCY=384
 export FIREWEED_E3_LOAD_CONCURRENCY=8
 export FIREWEED_RECOVERY_MAX_TAIL_COMMANDS=1000000
+# Required plan record for multi-hour release matrix (not a kill timer). Refuse silent 40h runs.
+if [[ -z "${FIREWEED_E3_PLANNED_WALL_HOURS:-}" ]] || ! [[ "${FIREWEED_E3_PLANNED_WALL_HOURS}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "refusing durable E3 launch: set FIREWEED_E3_PLANNED_WALL_HOURS=<hours> (e.g. 48)" >&2
+  echo "  Full release matrix has exceeded 40h wall; only run when that budget is planned." >&2
+  echo "  Progress lines: E3_PROGRESS on runner.log (FIREWEED_E3_PROGRESS_EVERY=N)." >&2
+  exit 2
+fi
+export FIREWEED_E3_PLANNED_WALL_HOURS
 
 cat >"$RUN_DIR/launch.env" <<EOF
 # non-secret launch record
@@ -120,7 +128,9 @@ nohup bash -c "
   export FIREWEED_E3_ACK_CONCURRENCY=384
   export FIREWEED_E3_LOAD_CONCURRENCY=8
   export FIREWEED_RECOVERY_MAX_TAIL_COMMANDS=1000000
-  echo \"E3 start \$(date -u +%Y-%m-%dT%H:%M:%SZ)\" 
+  export FIREWEED_E3_PLANNED_WALL_HOURS='$FIREWEED_E3_PLANNED_WALL_HOURS'
+  export FIREWEED_E3_PROGRESS_EVERY='${FIREWEED_E3_PROGRESS_EVERY:-5000}'
+  echo \"E3 start \$(date -u +%Y-%m-%dT%H:%M:%SZ) planned_wall_hours=\$FIREWEED_E3_PLANNED_WALL_HOURS\" 
   '$REPO_ROOT/scripts/perf/tp002-e3-s3.sh'
   status=\$?
   echo \"E3 end \$(date -u +%Y-%m-%dT%H:%M:%SZ) status=\$status\"

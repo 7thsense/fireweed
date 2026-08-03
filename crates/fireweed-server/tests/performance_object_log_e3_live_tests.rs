@@ -229,6 +229,71 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+/// Line-oriented progress for long E3 runs (must stay on stderr so nohup/runner logs capture it).
+///
+/// Format: `E3_PROGRESS t=<unix_s> elapsed_s=<n> <k=v ...>`
+fn e3_progress(started: Instant, fields: impl std::fmt::Display) {
+    let elapsed_s = started.elapsed().as_secs();
+    let unix_s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    eprintln!("E3_PROGRESS t={unix_s} elapsed_s={elapsed_s} {fields}");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+}
+
+/// How often concurrent workers emit progress (ops completed since last report, per worker).
+fn e3_progress_every(default: u64) -> u64 {
+    env_u64("FIREWEED_E3_PROGRESS_EVERY", default).max(1)
+}
+
+/// Estimated push-ack operations for one profile (4 bounds × 2 recorder arms × ack_pushes).
+fn estimated_ack_ops_per_profile(ack_pushes: u64) -> u64 {
+    // Each bound runs RECORDER_CONTROL_BLOCKS enabled + disabled arms that together cover 2 * ack_pushes.
+    (E3_BOUND_CONFIGS.len() as u64).saturating_mul(ack_pushes.saturating_mul(2))
+}
+
+/// Release-shape workloads can take many hours. Refuse to start unless the operator recorded a plan.
+///
+/// Set `FIREWEED_E3_PLANNED_WALL_HOURS` to a positive integer (planned wall-clock budget). Without it,
+/// a silent multi-day run is forbidden. This is not a hard timeout — it is the explicit plan record.
+fn require_long_run_plan_if_release_shape(resident: u64, ack_pushes: u64, load_batch: u64) {
+    let release_shape = resident >= RELEASE_RESIDENT && ack_pushes >= RELEASE_ACK_PUSHES;
+    if !release_shape {
+        return;
+    }
+    let planned = std::env::var("FIREWEED_E3_PLANNED_WALL_HOURS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let ack_ops = estimated_ack_ops_per_profile(ack_pushes).saturating_mul(2); // two profiles
+    let load_cmds = resident.div_ceil(load_batch.max(1)).saturating_mul(2); // two recovery loads
+    if planned == 0 {
+        panic!(
+            "\n\
+             =================================================================\n\
+             E3 RELEASE SHAPE REFUSED: no planned wall-clock budget.\n\
+             \n\
+             This harness is 2 profiles × (4 latency bounds × ~2×{ack_pushes} ack pushes\n\
+             + ~{resident} resident recovery load/verify). Historical single 10M recovery\n\
+             walls were ~1–3h; the full matrix has run >40h without intermediate progress.\n\
+             \n\
+             That duration is only allowed when specifically planned. Export e.g.:\n\
+               FIREWEED_E3_PLANNED_WALL_HOURS=48\n\
+             (integer hours you are willing to spend; not a kill timer — a plan record).\n\
+             Progress lines emit as E3_PROGRESS on stderr (FIREWEED_E3_PROGRESS_EVERY=N).\n\
+             Estimated ops (order-of-magnitude): ack_pushes≈{ack_ops} recovery_batches≈{load_cmds}\n\
+             =================================================================\n"
+        );
+    }
+    eprintln!(
+        "E3_PROGRESS plan release_shape=1 planned_wall_hours={planned} \
+         estimated_ack_ops≈{ack_ops} estimated_recovery_batch_cmds≈{load_cmds} \
+         resident={resident} ack_pushes={ack_pushes}"
+    );
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+}
+
 fn qdef(tenant: &str, queue: &str) -> QueueDefinition {
     QueueDefinition {
         tenant_id: TenantId::new(tenant).unwrap(),
@@ -1039,6 +1104,16 @@ where
     backend.create_queue(def).await.expect("create queue");
     let flusher = backend.spawn_background_flusher();
     let started = Instant::now();
+    let run_started = started;
+    let done = Arc::new(AtomicU64::new(0));
+    let progress_every = e3_progress_every(5_000);
+    e3_progress(
+        run_started,
+        format_args!(
+            "phase=ack_arm profile={} bound={} arm={arm} block={} pushes={} concurrency={} status=start",
+            config.profile, config.bound.label, config.block, config.pushes, config.concurrency
+        ),
+    );
 
     let mut handles = Vec::new();
     for t in 0..config.concurrency {
@@ -1046,6 +1121,11 @@ where
         let end_index = (t + 1) * config.pushes / config.concurrency;
         let backend = backend.clone();
         let shard = shard.clone();
+        let done = Arc::clone(&done);
+        let total = config.pushes;
+        let profile = config.profile;
+        let bound = config.bound.label;
+        let block = config.block;
         handles.push(tokio::spawn(async move {
             let mut lat = Vec::with_capacity((end_index - start_index) as usize);
             for i in start_index..end_index {
@@ -1055,6 +1135,16 @@ where
                     .await
                     .expect("push acked after seal");
                 lat.push(start.elapsed().as_secs_f64() * 1000.0);
+                let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                if n.is_multiple_of(progress_every) || n == total {
+                    e3_progress(
+                        run_started,
+                        format_args!(
+                            "phase=ack_arm profile={profile} bound={bound} arm={arm} block={block} \
+                             completed={n} total={total} status=running"
+                        ),
+                    );
+                }
             }
             lat
         }));
@@ -1066,6 +1156,13 @@ where
     }
     flusher.abort();
     let wall_s = started.elapsed().as_secs_f64();
+    e3_progress(
+        run_started,
+        format_args!(
+            "phase=ack_arm profile={} bound={} arm={arm} block={} completed={} total={} wall_s={wall_s:.1} status=done",
+            config.profile, config.bound.label, config.block, config.pushes, config.pushes
+        ),
+    );
     let c = backend.snapshot_segment_counters();
     let pending = backend.metrics(&shard).await.unwrap().pending;
     let state_fingerprint =
@@ -1208,6 +1305,15 @@ where
     let mut enabled_blocks = Vec::with_capacity(RECORDER_CONTROL_BLOCKS);
     let mut disabled_blocks = Vec::with_capacity(RECORDER_CONTROL_BLOCKS);
     let mut overhead_samples = Vec::with_capacity(RECORDER_CONTROL_BLOCKS);
+    let bound_started = Instant::now();
+    e3_progress(
+        bound_started,
+        format_args!(
+            "phase=ack_bound profile={profile} bound={} pushes={pushes} concurrency={concurrency} \
+             blocks={RECORDER_CONTROL_BLOCKS} status=start",
+            bound.label
+        ),
+    );
     for block in 0..RECORDER_CONTROL_BLOCKS {
         let block_start = block as u64 * pushes / RECORDER_CONTROL_BLOCKS as u64;
         let block_end = (block as u64 + 1) * pushes / RECORDER_CONTROL_BLOCKS as u64;
@@ -1683,6 +1789,13 @@ async fn fingerprint_state<B: ProjectionRead + E3OrderProbe>(
     resident: u64,
     chunk_items: u64,
 ) -> StateFingerprint {
+    let verify_started = Instant::now();
+    e3_progress(
+        verify_started,
+        format_args!(
+            "phase=recovery_verify resident={resident} chunk_items={chunk_items} status=start"
+        ),
+    );
     let mut digest = StreamingDigest::new();
     let mut verified = 0u64;
     let mut missing = 0u64;
@@ -1693,6 +1806,7 @@ async fn fingerprint_state<B: ProjectionRead + E3OrderProbe>(
     let mut duplicates = 0u64;
     let mut invalid = 0u64;
     let mut start = 0u64;
+    let progress_every = e3_progress_every(100_000);
     while start < resident {
         let end = (start + chunk_items).min(resident);
         let keys = (start..end)
@@ -1750,6 +1864,14 @@ async fn fingerprint_state<B: ProjectionRead + E3OrderProbe>(
         }
         duplicates = duplicates.saturating_add(insert_identity_page(&mut identity, &identity_rows));
         start = end;
+        if start % progress_every < chunk_items || start >= resident {
+            e3_progress(
+                verify_started,
+                format_args!(
+                    "phase=recovery_verify live_items scanned={start} total={resident} verified={verified} status=running"
+                ),
+            );
+        }
     }
     let unique_ids = identity.len();
     if unique_ids != verified {
@@ -1757,6 +1879,10 @@ async fn fingerprint_state<B: ProjectionRead + E3OrderProbe>(
     }
     digest.update(&id_xor.to_le_bytes());
     digest.update(&id_sum.to_le_bytes());
+    e3_progress(
+        verify_started,
+        format_args!("phase=recovery_verify_order resident={resident} status=start"),
+    );
     let mut order_offset = 0usize;
     let mut order_cursor = None;
     while order_offset < resident as usize {
@@ -1785,6 +1911,13 @@ async fn fingerprint_state<B: ProjectionRead + E3OrderProbe>(
         order_offset += page.len();
     }
     invalid = invalid.saturating_add(finish_order_validation(&identity, resident));
+    e3_progress(
+        verify_started,
+        format_args!(
+            "phase=recovery_verify resident={resident} verified={verified} missing={missing} \
+             duplicates={duplicates} invalid={invalid} status=done"
+        ),
+    );
     StateFingerprint {
         digest: digest.finish(),
         verified,
@@ -2225,6 +2358,14 @@ where
     } else {
         resident
     };
+    let recovery_started = Instant::now();
+    e3_progress(
+        recovery_started,
+        format_args!(
+            "phase=recovery_load profile={profile} load_resident={load_resident} \
+             load_batch={load_batch} load_concurrency={load_concurrency} requires_snapshot={requires_snapshot} status=start"
+        ),
+    );
     let (command_count, load_task_count, load_counters, pending_loaded, baseline_state) = {
         let backend = Arc::new(open(proj.clone(), cfg).await);
         backend
@@ -2234,6 +2375,8 @@ where
         let flusher = backend.spawn_background_flusher();
 
         let share = load_resident.div_ceil(load_concurrency);
+        let items_done = Arc::new(AtomicU64::new(0));
+        let progress_every = e3_progress_every(50_000);
         let mut handles = Vec::new();
         for w in 0..load_concurrency {
             let start = w * share;
@@ -2243,6 +2386,7 @@ where
             let end = (start + share).min(load_resident);
             let backend = backend.clone();
             let shard = shard.clone();
+            let items_done = Arc::clone(&items_done);
             handles.push(tokio::spawn(async move {
                 let mut commands = 0u64;
                 let mut id = start;
@@ -2257,6 +2401,16 @@ where
                     push_with_retry(backend.as_ref(), &shard, items).await;
                     id += n;
                     commands += 1;
+                    let loaded = items_done.fetch_add(n, Ordering::Relaxed) + n;
+                    if loaded % progress_every < n || loaded >= load_resident {
+                        e3_progress(
+                            recovery_started,
+                            format_args!(
+                                "phase=recovery_load profile={profile} loaded_items={loaded} \
+                                 total_items={load_resident} status=running"
+                            ),
+                        );
+                    }
                 }
                 commands
             }));
@@ -2266,6 +2420,13 @@ where
         for h in handles {
             command_count += h.await.expect("load task joined");
         }
+        e3_progress(
+            recovery_started,
+            format_args!(
+                "phase=recovery_load profile={profile} commands={command_count} \
+                 loaded_items={load_resident} status=done"
+            ),
+        );
         assert_eq!(
             command_count,
             concurrent_load_command_count(load_resident, load_batch, load_concurrency),
@@ -2506,16 +2667,59 @@ where
     Fut: std::future::Future<Output = B>,
 {
     let started = Instant::now();
+    e3_progress(
+        started,
+        format_args!(
+            "phase=profile profile={profile} projection={projection_label} resident={resident} \
+             load_batch={load_batch} ack_pushes={ack_pushes} requires_snapshot={requires_snapshot} status=start"
+        ),
+    );
     let mut ack_results = Vec::with_capacity(E3_BOUND_CONFIGS.len());
-    for bound in E3_BOUND_CONFIGS {
+    for (bound_i, bound) in E3_BOUND_CONFIGS.iter().enumerate() {
+        e3_progress(
+            started,
+            format_args!(
+                "phase=profile_ack profile={profile} bound_index={} bound={} of={} status=start",
+                bound_i,
+                bound.label,
+                E3_BOUND_CONFIGS.len()
+            ),
+        );
         ack_results.push(
-            run_ack_config::<B, _, _>(s3, profile, bound, ack_pushes, ack_concurrency, &open).await,
+            run_ack_config::<B, _, _>(s3, profile, *bound, ack_pushes, ack_concurrency, &open)
+                .await,
+        );
+        e3_progress(
+            started,
+            format_args!(
+                "phase=profile_ack profile={profile} bound={} status=done bar_met={}",
+                bound.label,
+                ack_results.last().map(|r| r.bar_met).unwrap_or(false)
+            ),
         );
     }
+    e3_progress(
+        started,
+        format_args!("phase=profile_recovery profile={profile} status=start"),
+    );
     let recovery = Some(
         run_recovery::<B, _, _>(s3, profile, resident, load_batch, requires_snapshot, &open).await,
     );
+    e3_progress(
+        started,
+        format_args!(
+            "phase=profile_recovery profile={profile} status=done bar_met={}",
+            recovery.as_ref().map(|r| r.bar_met).unwrap_or(false)
+        ),
+    );
     let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
+    e3_progress(
+        started,
+        format_args!(
+            "phase=profile profile={profile} wall_ms={wall_ms:.0} bars_met={} status=done",
+            ack_results.iter().all(|r| r.bar_met) && recovery.as_ref().is_none_or(|r| r.bar_met)
+        ),
+    );
     let bars_met = ack_results.iter().all(|result| result.bar_met)
         && recovery.as_ref().is_none_or(|r| r.bar_met);
     ProfileRun {
@@ -3303,6 +3507,7 @@ async fn performance_object_log_e3_live_tests() {
     // Bucket lifecycle is owned by the provider adapter / operator; LogEngine S3BlobStore has no create_bucket.
     let _ = S3BlobStore::new(&s3.endpoint, &s3.region, &s3.bucket, &s3.access, &s3.secret);
 
+    let harness_started = Instant::now();
     let perf_env = std::env::var("FIREWEED_PERF_ENV").is_ok();
     let resident = env_u64("FIREWEED_E3_RESIDENT", 4_000);
     let load_batch = env_u64("FIREWEED_E3_LOAD_BATCH", 1_000).max(1);
@@ -3310,6 +3515,18 @@ async fn performance_object_log_e3_live_tests() {
     let ack_concurrency = env_u64("FIREWEED_E3_ACK_CONCURRENCY", 384).max(1);
     let load_concurrency = env_u64("FIREWEED_E3_LOAD_CONCURRENCY", 8).max(1);
     let release_shape = resident >= RELEASE_RESIDENT;
+    // Fail closed on multi-hour release shape unless the operator recorded a wall-hour plan.
+    require_long_run_plan_if_release_shape(resident, ack_pushes, load_batch);
+    e3_progress(
+        harness_started,
+        format_args!(
+            "phase=harness status=start endpoint={} resident={resident} load_batch={load_batch} \
+             ack_pushes={ack_pushes} ack_concurrency={ack_concurrency} load_concurrency={load_concurrency} \
+             perf_env={perf_env} release_shape={release_shape} profiles=2 bounds={}",
+            s3.endpoint,
+            E3_BOUND_CONFIGS.len()
+        ),
+    );
     let require_bars = perf_env && release_shape;
     if require_bars {
         let source_revision = std::env::var("FIREWEED_E3_SOURCE_REVISION")
@@ -3354,8 +3571,14 @@ async fn performance_object_log_e3_live_tests() {
 
     let runs = [
         {
+            e3_progress(
+                harness_started,
+                format_args!(
+                    "phase=harness profile_index=0 profile=object_log_inmemory_projection status=start"
+                ),
+            );
             let s3c = s3.clone();
-            run_profile_run::<E3Handle<AsyncObjectLogMemoryBackend>, _, _>(
+            let run = run_profile_run::<E3Handle<AsyncObjectLogMemoryBackend>, _, _>(
                 &s3,
                 "object_log_inmemory_projection",
                 "inmemory",
@@ -3369,11 +3592,25 @@ async fn performance_object_log_e3_live_tests() {
                     async move { E3Handle::new(s3c.open_memory(cfg).await) }
                 },
             )
-            .await
+            .await;
+            e3_progress(
+                harness_started,
+                format_args!(
+                    "phase=harness profile_index=0 profile=object_log_inmemory_projection bars_met={} status=done",
+                    run.bars_met
+                ),
+            );
+            run
         },
         {
+            e3_progress(
+                harness_started,
+                format_args!(
+                    "phase=harness profile_index=1 profile=object_log_sqlite_projection status=start"
+                ),
+            );
             let s3c = s3.clone();
-            run_profile_run::<E3Handle<AsyncObjectLogSqliteBackend>, _, _>(
+            let run = run_profile_run::<E3Handle<AsyncObjectLogSqliteBackend>, _, _>(
                 &s3,
                 "object_log_sqlite_projection",
                 "sqlite",
@@ -3387,11 +3624,27 @@ async fn performance_object_log_e3_live_tests() {
                     async move { E3Handle::new(s3c.open_sqlite(&projection_path, cfg).await) }
                 },
             )
-            .await
+            .await;
+            e3_progress(
+                harness_started,
+                format_args!(
+                    "phase=harness profile_index=1 profile=object_log_sqlite_projection bars_met={} status=done",
+                    run.bars_met
+                ),
+            );
+            run
         },
     ];
 
     validate_e3_profile_matrix(&runs, require_bars).expect("E3 profile matrix shape and bars");
+    e3_progress(
+        harness_started,
+        format_args!(
+            "phase=harness status=done bars_met={} wall_s={:.1}",
+            runs.iter().all(|r| r.bars_met),
+            harness_started.elapsed().as_secs_f64()
+        ),
+    );
 
     println!(
         "\nTP-002 E3 live object-log projection matrix over S3 ({}) — perf_env={perf_env}, resident={resident}:",
