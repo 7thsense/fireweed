@@ -750,7 +750,10 @@ impl Default for ProjectionRecoveryPolicy {
     }
 }
 
-#[cfg(feature = "postgres")]
+#[cfg(all(
+    feature = "postgres",
+    any(feature = "memory", feature = "sqlite", feature = "objectlog")
+))]
 use sha2::{Digest, Sha256};
 
 /// Hex encoding of a namespace string (object-log path segment safety).
@@ -765,7 +768,10 @@ fn object_log_namespace(namespace: &str) -> String {
 
 /// Deterministic, legal Postgres schema name derived from an isolation key.
 /// Used for object-log×postgres and other matrix cells that share a DSN.
-#[cfg(feature = "postgres")]
+#[cfg(all(
+    feature = "postgres",
+    any(feature = "memory", feature = "sqlite", feature = "objectlog")
+))]
 fn derived_postgres_schema_name(namespace: &str) -> String {
     const PREFIX: &str = "fireweed_";
     const HASH_BYTES: usize = 27;
