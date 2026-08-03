@@ -923,8 +923,7 @@ pub async fn ac_txn_2_stale_lease_conflict<B: ConformanceCore + LogRead>(
     // the lease/fence check rather than failing closed on Invalid("invalid lease renewal duration").
     ensure!(
         matches!(
-            a.renew(&shard(), vec![victim], ts(70), ts(21), None)
-                .await,
+            a.renew(&shard(), vec![victim], ts(70), ts(21), None).await,
             Err(EngineError::StaleLease)
         ),
         "renew of an operator-fenced lease must be StaleLease"

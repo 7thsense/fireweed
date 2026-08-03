@@ -823,11 +823,7 @@ impl ProjectionStore for InMemoryProjection {
 
     /// After full-log recovery into an empty in-memory image, seed mint counters past every
     /// materialised item id so a post-reopen push never re-mints a live id (fireweed-6e38e2b4).
-    fn restore_counters(
-        &self,
-        shard: &QueueKey,
-        counters: &QueueCounters,
-    ) -> EngineResult<()> {
+    fn restore_counters(&self, shard: &QueueKey, counters: &QueueCounters) -> EngineResult<()> {
         self.observe_item_counters(shard, counters)
     }
 

@@ -12,13 +12,13 @@ use fireweed_core::{
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
     UtcTimestamp,
 };
+use fireweed_engine::AsyncLogReplayBackend;
 use fireweed_engine::Clock;
 use fireweed_engine::{
     Backend, ClaimedItem, CommandChecksum, CommandEnvelope, CommandId, ControlPlaneStore,
     EngineError, FenceLeaseCommand, PayloadUpdate, ProjectionRead, QueueCommand, QueueKey,
     RawCommitRequest, UpdateFieldsPort,
 };
-use fireweed_engine::AsyncLogReplayBackend;
 use fireweed_memory::{InMemoryProjection, ManualClock, MemoryLog, composed_memory_backend};
 use fireweed_resp::{RespBackend, SystemClock, serve};
 use redis::Value;
@@ -596,12 +596,18 @@ async fn malformed_bulk_terminator_closes_after_valid_prefix_without_running_suf
 }
 
 struct LyingClaimedViewBackend {
-    inner: Arc<AsyncLogReplayBackend<fireweed_memory::MemoryLog, fireweed_memory::InMemoryProjection>>,
+    inner:
+        Arc<AsyncLogReplayBackend<fireweed_memory::MemoryLog, fireweed_memory::InMemoryProjection>>,
     push_batch_sizes: Mutex<Vec<usize>>,
 }
 
 impl LyingClaimedViewBackend {
-    fn new(inner: AsyncLogReplayBackend<fireweed_memory::MemoryLog, fireweed_memory::InMemoryProjection>) -> Self {
+    fn new(
+        inner: AsyncLogReplayBackend<
+            fireweed_memory::MemoryLog,
+            fireweed_memory::InMemoryProjection,
+        >,
+    ) -> Self {
         Self {
             inner: Arc::new(inner),
             push_batch_sizes: Mutex::new(Vec::new()),
@@ -1911,7 +1917,10 @@ async fn xclaim_first_delivery_pending_ids_without_xreadgroup() {
         .unwrap();
     let row = pend_c.iter().find(|r| r.0 == id_c).expect("id_c pending");
     assert_eq!(row.1, "holder");
-    assert_eq!(row.3, 1, "self-renew after first-delivery does not re-charge");
+    assert_eq!(
+        row.3, 1,
+        "self-renew after first-delivery does not re-charge"
+    );
 }
 
 /// XLEN / XDEL / XINFO over the stock client (owed-item E.2 / Chunk 6b). XLEN counts LIVE entries

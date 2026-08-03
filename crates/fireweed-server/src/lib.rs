@@ -2330,7 +2330,11 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         (LogSpec::ObjectLog(spec), ProjectionSpec::InMemory) => {
             // Program A: crates.io object-log LogEngine × in-memory projection (async composition).
             // LogEngine owns group-commit flush; no segmented flusher task.
-            let _ = (objectlog_byte_budget, config_objectlog_queue_limit, debug_segments);
+            let _ = (
+                objectlog_byte_budget,
+                config_objectlog_queue_limit,
+                debug_segments,
+            );
             let segment = spec.segment_config();
             let flush = fireweed_objectlog::flush_config_from_segment(
                 segment.target_bytes,
@@ -2347,10 +2351,11 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                     endpoint,
                     bucket,
                     region,
-                    credentials: S3CredentialSource::Static {
-                        access_key_id,
-                        secret_access_key,
-                    },
+                    credentials:
+                        S3CredentialSource::Static {
+                            access_key_id,
+                            secret_access_key,
+                        },
                     allow_insecure_http: _,
                     ..
                 } => {
@@ -2399,19 +2404,18 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             );
             let backend = match spec {
                 ObjectLogSpec::LocalFilesystem { root, .. } => {
-                    fireweed_objectlog::AsyncObjectLogSqliteBackend::open(
-                        root, &p, flush, node_id,
-                    )
-                    .await?
+                    fireweed_objectlog::AsyncObjectLogSqliteBackend::open(root, &p, flush, node_id)
+                        .await?
                 }
                 ObjectLogSpec::S3 {
                     endpoint,
                     bucket,
                     region,
-                    credentials: S3CredentialSource::Static {
-                        access_key_id,
-                        secret_access_key,
-                    },
+                    credentials:
+                        S3CredentialSource::Static {
+                            access_key_id,
+                            secret_access_key,
+                        },
                     ..
                 } => {
                     let log = fireweed_objectlog::ObjectLogEngineStore::open_s3(
@@ -2772,10 +2776,8 @@ async fn open_objectlog_hybrid_backend(
         .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?
         .to_string();
     let segment = spec.segment_config();
-    let flush = fireweed_objectlog::flush_config_from_segment(
-        segment.target_bytes,
-        segment.max_latency_ms,
-    );
+    let flush =
+        fireweed_objectlog::flush_config_from_segment(segment.target_bytes, segment.max_latency_ms);
     let hybrid = fireweed_objectlog::HybridProductConfig {
         deferred_flush_chunk,
         strict,
@@ -2790,10 +2792,11 @@ async fn open_objectlog_hybrid_backend(
             endpoint,
             bucket,
             region,
-            credentials: S3CredentialSource::Static {
-                access_key_id,
-                secret_access_key,
-            },
+            credentials:
+                S3CredentialSource::Static {
+                    access_key_id,
+                    secret_access_key,
+                },
             ..
         } => {
             let log = fireweed_objectlog::ObjectLogEngineStore::open_s3(
@@ -2828,22 +2831,21 @@ async fn open_objectlog_postgres_backend(
     node_id: u8,
 ) -> EngineResult<Arc<ObjectLogPostgresBackend>> {
     let segment = spec.segment_config();
-    let flush = fireweed_objectlog::flush_config_from_segment(
-        segment.target_bytes,
-        segment.max_latency_ms,
-    );
+    let flush =
+        fireweed_objectlog::flush_config_from_segment(segment.target_bytes, segment.max_latency_ms);
     let url = projection_url.to_string();
     let backend = match spec {
         ObjectLogSpec::LocalFilesystem { root, .. } => {
             // Postgres connect is blocking; open projection off-reactor then assemble with log.
-            let log =
-                fireweed_objectlog::ObjectLogEngineStore::open_local(root, flush).await?;
+            let log = fireweed_objectlog::ObjectLogEngineStore::open_local(root, flush).await?;
             let projection = tokio::task::spawn_blocking(move || {
                 fireweed_postgres::PostgresRelational::connect(&url)
             })
             .await
             .map_err(|e| {
-                EngineError::Storage(format!("object-log/postgres projection connect failed: {e}"))
+                EngineError::Storage(format!(
+                    "object-log/postgres projection connect failed: {e}"
+                ))
             })??;
             fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection(
                 log, projection, node_id,
@@ -2854,10 +2856,11 @@ async fn open_objectlog_postgres_backend(
             endpoint,
             bucket,
             region,
-            credentials: S3CredentialSource::Static {
-                access_key_id,
-                secret_access_key,
-            },
+            credentials:
+                S3CredentialSource::Static {
+                    access_key_id,
+                    secret_access_key,
+                },
             ..
         } => {
             let log = fireweed_objectlog::ObjectLogEngineStore::open_s3(
@@ -2874,7 +2877,9 @@ async fn open_objectlog_postgres_backend(
             })
             .await
             .map_err(|e| {
-                EngineError::Storage(format!("object-log/postgres projection connect failed: {e}"))
+                EngineError::Storage(format!(
+                    "object-log/postgres projection connect failed: {e}"
+                ))
             })??;
             fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection(
                 log, projection, node_id,
@@ -3739,7 +3744,6 @@ mod byte_admission_wiring_tests {
         }
     }
 
-
     #[cfg(feature = "postgres")]
     #[test]
     fn postgres_postgres_factory_selects_fixed_unified_atomic_pool() {
@@ -3886,7 +3890,8 @@ mod byte_admission_wiring_tests {
             fireweed_sqlite::SqliteLog::open(log_path.to_str().unwrap()).expect("open sqlite log");
         let projection = fireweed_postgres::PostgresRelational::connect(&scoped)
             .expect("connect postgres projection");
-        let backend = assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
+        let backend = assemble_async_log_replay(log, projection, 0)
+            .expect("assemble async log-replay")
             .recover()
             .expect("recover sqlite×postgres composition");
         drop(backend);
@@ -3911,7 +3916,6 @@ mod byte_admission_wiring_tests {
         std::fs::create_dir_all(&root).expect("create filesystem object-log root");
         root
     }
-
 
     /// BackendSpec + composition-root contract for filesystem × postgres.
     #[test]
@@ -4011,7 +4015,6 @@ mod byte_admission_wiring_tests {
             allow_insecure_http: true,
         }
     }
-
 
     /// BackendSpec + composition-root contract for s3 × postgres (shared ObjectLog arm).
     #[test]
@@ -5137,7 +5140,8 @@ mod sqlite_log_matrix_tests {
                     .expect("open sqlite log");
                 let projection = fireweed_postgres::PostgresRelational::connect(&scoped)
                     .expect("connect pg projection");
-                assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
+                assemble_async_log_replay(log, projection, 0)
+                    .expect("assemble async log-replay")
                     .recover()
                     .expect("recover sqlite×postgres")
             };
@@ -5173,7 +5177,8 @@ mod sqlite_log_matrix_tests {
                     .expect("open sqlite log");
                 let projection = fireweed_postgres::PostgresRelational::connect(&scoped)
                     .expect("connect pg projection");
-                assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
+                assemble_async_log_replay(log, projection, 0)
+                    .expect("assemble async log-replay")
                     .recover()
                     .expect("recover sqlite×postgres")
             };
@@ -5209,7 +5214,8 @@ mod sqlite_log_matrix_tests {
                     .expect("open sqlite log");
                 let projection = fireweed_postgres::PostgresRelational::connect(&scoped)
                     .expect("connect pg projection");
-                assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
+                assemble_async_log_replay(log, projection, 0)
+                    .expect("assemble async log-replay")
                     .recover()
                     .expect("recover sqlite×postgres")
             };
@@ -5640,7 +5646,8 @@ mod postgres_log_matrix_tests {
                 .expect("connect postgres log");
             let projection = fireweed_sqlite::SqliteProjectionStore::open(&proj_s)
                 .expect("open sqlite projection");
-            let backend = assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
+            let backend = assemble_async_log_replay(log, projection, 0)
+                .expect("assemble async log-replay")
                 .recover()
                 .unwrap_or_else(|e| panic!("{cell} T0 recover: {e:?}"));
             lifecycle_push_claim_complete(&backend, cell).await;
@@ -5658,7 +5665,8 @@ mod postgres_log_matrix_tests {
                 .expect("reconnect postgres log");
             let projection = fireweed_sqlite::SqliteProjectionStore::open(&proj_s)
                 .expect("reopen sqlite projection");
-            let reopened = assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
+            let reopened = assemble_async_log_replay(log, projection, 0)
+                .expect("assemble async log-replay")
                 .recover()
                 .unwrap_or_else(|e| panic!("{cell} T2 reopen: {e:?}"));
             assert_eq!(
@@ -5893,7 +5901,8 @@ mod postgres_log_matrix_tests {
                 let projection =
                     fireweed_sqlite::SqliteProjectionStore::open(proj.to_str().unwrap())
                         .expect("open sqlite projection");
-                assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
+                assemble_async_log_replay(log, projection, 0)
+                    .expect("assemble async log-replay")
                     .recover()
                     .expect("recover postgres×sqlite")
                     .with_node_id(1)
@@ -5918,7 +5927,8 @@ mod postgres_log_matrix_tests {
                 let projection =
                     fireweed_sqlite::SqliteProjectionStore::open(proj.to_str().unwrap())
                         .expect("open sqlite projection");
-                assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
+                assemble_async_log_replay(log, projection, 0)
+                    .expect("assemble async log-replay")
                     .recover()
                     .expect("recover postgres×sqlite")
                     .with_node_id(1)
@@ -5943,7 +5953,8 @@ mod postgres_log_matrix_tests {
                 let projection =
                     fireweed_sqlite::SqliteProjectionStore::open(proj.to_str().unwrap())
                         .expect("open sqlite projection");
-                assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
+                assemble_async_log_replay(log, projection, 0)
+                    .expect("assemble async log-replay")
                     .recover()
                     .expect("recover postgres×sqlite")
                     .with_node_id(1)
@@ -5980,7 +5991,8 @@ mod postgres_log_matrix_tests {
                 let projection =
                     fireweed_postgres::PostgresRelational::connect_in_schema(&url_c, &proj_schema)
                         .expect("connect postgres projection axis");
-                assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
+                assemble_async_log_replay(log, projection, 0)
+                    .expect("assemble async log-replay")
                     .recover()
                     .expect("recover postgres×postgres")
                     .with_node_id(1)
@@ -6010,7 +6022,8 @@ mod postgres_log_matrix_tests {
                 let projection =
                     fireweed_postgres::PostgresRelational::connect_in_schema(&url_c, &proj_schema)
                         .expect("connect postgres projection axis");
-                assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
+                assemble_async_log_replay(log, projection, 0)
+                    .expect("assemble async log-replay")
                     .recover()
                     .expect("recover postgres×postgres")
                     .with_node_id(1)
@@ -6040,7 +6053,8 @@ mod postgres_log_matrix_tests {
                 let projection =
                     fireweed_postgres::PostgresRelational::connect_in_schema(&url_c, &proj_schema)
                         .expect("connect postgres projection axis");
-                assemble_async_log_replay(log, projection, 0).expect("assemble async log-replay")
+                assemble_async_log_replay(log, projection, 0)
+                    .expect("assemble async log-replay")
                     .recover()
                     .expect("recover postgres×postgres")
                     .with_node_id(1)

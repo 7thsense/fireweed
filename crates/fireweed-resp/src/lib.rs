@@ -671,8 +671,7 @@ async fn handle_conn<B: RespBackend, H: RespHooks>(
                 PIPELINE_XADD_BYTE_LIMIT.saturating_sub(encoded_command_len(&commands[0]));
             // Coalesce an already-sent redis-py pipeline into one ordered-independent batch.
             // Never block indefinitely: a lone XADD client is waiting on our reply.
-            let deadline =
-                tokio::time::Instant::now() + std::time::Duration::from_millis(5);
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(5);
             while budget_cmds > 0 && budget_bytes > 0 {
                 let (extra, consumed) = buffered_xadd_window(
                     reader.buffer(),
@@ -696,11 +695,8 @@ async fn handle_conn<B: RespBackend, H: RespHooks>(
                 if tokio::time::Instant::now() >= deadline {
                     break;
                 }
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(1),
-                    reader.fill_buf(),
-                )
-                .await
+                match tokio::time::timeout(std::time::Duration::from_millis(1), reader.fill_buf())
+                    .await
                 {
                     Ok(Ok(buf)) if !buf.is_empty() => continue,
                     _ => break,
@@ -2218,8 +2214,7 @@ mod tests {
             let first = encode_command(&compatible);
             let mut bytes = first.clone();
             bytes.extend_from_slice(&encode_command(boundary));
-            let (commands, consumed) =
-                buffered_xadd_window(&bytes, &shard, 100, usize::MAX, false);
+            let (commands, consumed) = buffered_xadd_window(&bytes, &shard, 100, usize::MAX, false);
             assert_eq!(commands, vec![compatible.clone()]);
             assert_eq!(consumed, first.len(), "boundary must remain unconsumed");
         }
@@ -2228,8 +2223,7 @@ mod tests {
         let upsert2 = command(&[b"XADD", b"tenant:q", b"*", b"client_item_key", b"key2"]);
         let mut keyed_pair = encode_command(&upsert);
         keyed_pair.extend_from_slice(&encode_command(&upsert2));
-        let (commands, consumed) =
-            buffered_xadd_window(&keyed_pair, &shard, 100, usize::MAX, true);
+        let (commands, consumed) = buffered_xadd_window(&keyed_pair, &shard, 100, usize::MAX, true);
         assert_eq!(commands.len(), 2);
         assert_eq!(consumed, keyed_pair.len());
 

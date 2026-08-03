@@ -4840,13 +4840,13 @@ mod tests {
         RetryPolicy, TenantId, WorkerId,
     };
     use fireweed_engine::{
-        AdvanceInstanceFenceCommand, ChangeRecordSink, ClaimCommand, ClaimCompatibility, ClaimPort,
-        AsyncLogReplayBackend, ClaimRequest, CohortClaimCommand, CommandChecksum, CommandId,
-        assemble_async_log_replay,
-        ControlPlaneStore, FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort,
+        AdvanceInstanceFenceCommand, AsyncLogReplayBackend, ChangeRecordSink, ClaimCommand,
+        ClaimCompatibility, ClaimPort, ClaimRequest, CohortClaimCommand, CommandChecksum,
+        CommandId, ControlPlaneStore, FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort,
         InProcessControlPlane, LogStore, PauseQueueCommand, ProjectionStore, PurgeItemsCommand,
         PushCommand, PushPort, PushSpec, QueueKey, QueueMetrics, ReassignLeaseCommand,
         RenewLeaseCommand, SideRecord, UpdateFieldsCommand, WriteSideRecordsCommand,
+        assemble_async_log_replay,
     };
     use std::future::Future;
     use std::task::{Context, Poll, Waker};
@@ -5195,12 +5195,8 @@ mod tests {
     }
 
     fn observed_backend() -> ObservedBackend {
-        assemble_async_log_replay(
-            ObservedLog::default(),
-            InMemoryProjection::new(),
-            0,
-        )
-        .expect("assemble observed backend")
+        assemble_async_log_replay(ObservedLog::default(), InMemoryProjection::new(), 0)
+            .expect("assemble observed backend")
     }
 
     fn create_observed_queue_with_definition(

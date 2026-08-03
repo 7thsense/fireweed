@@ -236,13 +236,13 @@ where
                             !item_ids.is_empty()
                                 && item_ids.iter().all(|item_id| renewed.contains(item_id))
                         });
-                    claim_by_item_ids_cache.entry(shard.clone()).or_default().extend_expiry_matching(
-                        renew.lease_expires_at,
-                        |(item_ids, _, _)| {
+                    claim_by_item_ids_cache
+                        .entry(shard.clone())
+                        .or_default()
+                        .extend_expiry_matching(renew.lease_expires_at, |(item_ids, _, _)| {
                             !item_ids.is_empty()
                                 && item_ids.iter().all(|item_id| renewed.contains(item_id))
-                        },
-                    );
+                        });
                 }
 
                 let Some(request_id) = &env.request_id else {

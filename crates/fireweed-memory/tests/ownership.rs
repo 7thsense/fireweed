@@ -8,11 +8,11 @@
 
 use fireweed_conformance::{envelope, qdef, shard};
 use fireweed_core::{OwnerId, UtcTimestamp};
+use fireweed_engine::AsyncLogReplayBackend;
 use fireweed_engine::{
     Backend, ControlPlaneStore, EngineError, EngineResult, InMemoryControlPlane, OwnershipOutcome,
     PauseQueueCommand, QueueCommand, QueueControlPlane, RawCommitRequest, acquire_and_fence,
 };
-use fireweed_engine::AsyncLogReplayBackend;
 use fireweed_memory::{InMemoryProjection, MemoryLog, composed_memory_backend};
 
 fn ts(s: i64) -> UtcTimestamp {
@@ -23,7 +23,10 @@ fn owner(s: &str) -> OwnerId {
 }
 
 /// Append `PauseQueue` under `expected_epoch` through the typed raw commit; returns the fence outcome.
-async fn append_at(b: &AsyncLogReplayBackend<MemoryLog, InMemoryProjection>, epoch: u64) -> EngineResult<()> {
+async fn append_at(
+    b: &AsyncLogReplayBackend<MemoryLog, InMemoryProjection>,
+    epoch: u64,
+) -> EngineResult<()> {
     let env = envelope(
         QueueCommand::PauseQueue(PauseQueueCommand::default()),
         vec![],

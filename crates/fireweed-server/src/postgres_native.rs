@@ -26,12 +26,14 @@ use fireweed_core::{
     QueryCapabilityFlags, QueueDefinition, QueueId, RangeScanRequest, RangeScanResponse, RequestId,
     TenantId, UtcTimestamp,
 };
-use fireweed_engine::{Backend, BatchUpdatePort, BatchUpdateRequest, BatchUpdateResponse, BoundedMutationContext,
+use fireweed_engine::{
+    Backend, BatchUpdatePort, BatchUpdateRequest, BatchUpdateResponse, BoundedMutationContext,
     ClaimByQueryContext, CommitCapabilities, CommitEntryOutcome, CommitRecovery, CommitTransition,
     CommitTransitionPort, DiscoveryGranularity, DiscoveryPort, DurabilityClass,
     HistoricalProjectionRead, HotProjectionQueryPort, IndexHit, IndexQueryPort, PayloadUpdate,
     RawCommitOutcome, RawCommitRequest, ReclaimPort, RecoveryReadPort, ReschedulePort,
-    ScheduleUpdate, SetGatesCommand, SetGatesPort, UpdateFieldsPort,};
+    ScheduleUpdate, SetGatesCommand, SetGatesPort, UpdateFieldsPort,
+};
 use fireweed_engine::{
     ClaimPort, ClaimRequest, Claimed, ClaimedItem, CommandPosition, ControlPlaneStore,
     CreateQueueOutcome, EngineError, EngineResult, FinalizeOutcome, FinalizePort, ItemView,
@@ -1387,15 +1389,15 @@ mod tests {
         assert!(!tick.contains("tokio::spawn"));
         assert!(!tick.contains("for (index, inner)"));
     }
-        fn fault_point(&self, cut: ComposeFaultPoint) -> EngineResult<()> {
-            if cut == ComposeFaultPoint::DuringProjectionApply {
-                if let Some(entered) = self.entered.lock().unwrap().take() {
-                    let _ = entered.send(());
-                }
-                self.release.lock().unwrap().recv().unwrap();
+    fn fault_point(&self, cut: ComposeFaultPoint) -> EngineResult<()> {
+        if cut == ComposeFaultPoint::DuringProjectionApply {
+            if let Some(entered) = self.entered.lock().unwrap().take() {
+                let _ = entered.send(());
             }
-            Ok(())
+            self.release.lock().unwrap().recv().unwrap();
         }
+        Ok(())
+    }
     #[tokio::test(flavor = "current_thread")]
     async fn blocked_storage_does_not_block_runtime_or_another_queue() {
         let adapter = adapter(2, 2);
@@ -1479,33 +1481,35 @@ mod tests {
             raw.push(fireweed_sqlite::composed_sqlite_backend(&path).unwrap());
         }
         let mut a_name = "a0".to_string();
-        let a_index =
-            loop {
-                let key = QueueKey::new(
-                    TenantId::new("tenant").unwrap(),
-                    QueueId::new(&a_name).unwrap(),
-                );
-                let index = PostgresWholeOperationAdapter::<
+        let a_index = loop {
+            let key = QueueKey::new(
+                TenantId::new("tenant").unwrap(),
+                QueueId::new(&a_name).unwrap(),
+            );
+            let index = PostgresWholeOperationAdapter::<
                 fireweed_engine::AsyncLogReplayBackend<
                     fireweed_sqlite::SqliteLog,
                     fireweed_sqlite::InMemoryProjection,
                 >,
             >::pool_index(&key, raw.len());
-                if index == 0 {
-                    break index;
-                }
-                a_name.push('a');
-            };
+            if index == 0 {
+                break index;
+            }
+            a_name.push('a');
+        };
         let mut b_name = "b0".to_string();
         loop {
             let key = QueueKey::new(
                 TenantId::new("tenant").unwrap(),
                 QueueId::new(&b_name).unwrap(),
             );
-            if PostgresWholeOperationAdapter::<fireweed_engine::AsyncLogReplayBackend<fireweed_sqlite::SqliteLog, fireweed_sqlite::InMemoryProjection>>::pool_index(
-                &key,
-                raw.len(),
-            ) != a_index
+            if PostgresWholeOperationAdapter::<
+                fireweed_engine::AsyncLogReplayBackend<
+                    fireweed_sqlite::SqliteLog,
+                    fireweed_sqlite::InMemoryProjection,
+                >,
+            >::pool_index(&key, raw.len())
+                != a_index
             {
                 break;
             }

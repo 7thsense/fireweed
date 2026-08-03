@@ -194,9 +194,19 @@ fn fireweed_postgres_url_is_authoritative() {
 #[test]
 fn blocking_backend_pool_constructor_compiles_for_composed_postgres_backend() {
     let _ctor: fn(
-        Vec<Arc<AsyncLogReplayBackend<fireweed_postgres::PostgresLog, fireweed_projection::InMemoryProjection>>>,
+        Vec<
+            Arc<
+                AsyncLogReplayBackend<
+                    fireweed_postgres::PostgresLog,
+                    fireweed_projection::InMemoryProjection,
+                >,
+            >,
+        >,
     ) -> fireweed_server::PostgresWholeOperationAdapter<
-        AsyncLogReplayBackend<fireweed_postgres::PostgresLog, fireweed_projection::InMemoryProjection>,
+        AsyncLogReplayBackend<
+            fireweed_postgres::PostgresLog,
+            fireweed_projection::InMemoryProjection,
+        >,
     > = fireweed_server::PostgresWholeOperationAdapter::from_arcs;
 }
 

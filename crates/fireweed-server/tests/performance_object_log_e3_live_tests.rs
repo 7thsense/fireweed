@@ -107,12 +107,18 @@ fn prove_native_create_only_fence(s3: &S3Env, source_revision: &str, output: &st
         let owner_a = AsyncObjectLogMemoryBackend::from_log_store(log_a, 0)
             .await
             .expect("open memory product A");
-        owner_a.create_queue(definition.clone()).await.expect("create queue A");
+        owner_a
+            .create_queue(definition.clone())
+            .await
+            .expect("create queue A");
         assert_eq!(owner_a.fence_epoch(&shard, 0).await.unwrap(), 0);
         owner_a
             .push(
                 &shard,
-                vec![keyed_spec("1", Some(ClientItemKey::new("e3-fence-native-a").unwrap()))],
+                vec![keyed_spec(
+                    "1",
+                    Some(ClientItemKey::new("e3-fence-native-a").unwrap()),
+                )],
                 ts(),
                 Some(0),
             )
@@ -132,12 +138,18 @@ fn prove_native_create_only_fence(s3: &S3Env, source_revision: &str, output: &st
         let owner_b = AsyncObjectLogMemoryBackend::from_log_store(log_b, 1)
             .await
             .expect("open memory product B");
-        owner_b.create_queue(definition.clone()).await.expect("create queue B");
+        owner_b
+            .create_queue(definition.clone())
+            .await
+            .expect("create queue B");
         assert_eq!(owner_b.acquire_epoch(&shard).await.unwrap(), 1);
         owner_b
             .push(
                 &shard,
-                vec![keyed_spec("2", Some(ClientItemKey::new("e3-fence-native-b").unwrap()))],
+                vec![keyed_spec(
+                    "2",
+                    Some(ClientItemKey::new("e3-fence-native-b").unwrap()),
+                )],
                 ts(),
                 Some(1),
             )
@@ -147,7 +159,10 @@ fn prove_native_create_only_fence(s3: &S3Env, source_revision: &str, output: &st
         let stale = owner_a
             .push(
                 &shard,
-                vec![keyed_spec("3", Some(ClientItemKey::new("e3-fence-native-stale").unwrap()))],
+                vec![keyed_spec(
+                    "3",
+                    Some(ClientItemKey::new("e3-fence-native-stale").unwrap()),
+                )],
                 ts(),
                 Some(0),
             )
@@ -628,8 +643,7 @@ struct CommandAccounting {
 
 impl CommandAccounting {
     fn record(&self, batch: usize) {
-        self.commands
-            .fetch_add(1, Ordering::Relaxed);
+        self.commands.fetch_add(1, Ordering::Relaxed);
         self.batches.lock().expect("batches").push(batch);
     }
 
@@ -668,7 +682,9 @@ impl CommandAccounting {
     }
 }
 
-trait E3Backend: ControlPlaneStore + PushPort + ProjectionRead + E3Flusher + Backend + Send + Sync + 'static {
+trait E3Backend:
+    ControlPlaneStore + PushPort + ProjectionRead + E3Flusher + Backend + Send + Sync + 'static
+{
     fn snapshot_segment_counters(&self) -> SegmentCounters;
     fn resource_bounds(&self) -> ResourceBounds;
     fn command_accounting(&self) -> &CommandAccounting;
@@ -706,19 +722,25 @@ macro_rules! impl_e3_ports {
             fn create_queue(
                 &self,
                 definition: fireweed_core::QueueDefinition,
-            ) -> impl std::future::Future<Output = fireweed_engine::EngineResult<fireweed_engine::CreateQueueOutcome>> + Send {
+            ) -> impl std::future::Future<
+                Output = fireweed_engine::EngineResult<fireweed_engine::CreateQueueOutcome>,
+            > + Send {
                 self.backend.create_queue(definition)
             }
             fn queue_definition(
                 &self,
                 key: &QueueKey,
-            ) -> impl std::future::Future<Output = fireweed_engine::EngineResult<fireweed_core::QueueDefinition>> + Send {
+            ) -> impl std::future::Future<
+                Output = fireweed_engine::EngineResult<fireweed_core::QueueDefinition>,
+            > + Send {
                 self.backend.queue_definition(key)
             }
             fn list_queues(
                 &self,
                 tenant: &TenantId,
-            ) -> impl std::future::Future<Output = fireweed_engine::EngineResult<Vec<fireweed_core::QueueId>>> + Send {
+            ) -> impl std::future::Future<
+                Output = fireweed_engine::EngineResult<Vec<fireweed_core::QueueId>>,
+            > + Send {
                 self.backend.list_queues(tenant)
             }
             fn current_epoch(
@@ -749,7 +771,9 @@ macro_rules! impl_e3_ports {
                 items: Vec<PushSpec>,
                 now: UtcTimestamp,
                 expected_epoch: Option<u64>,
-            ) -> impl std::future::Future<Output = fireweed_engine::EngineResult<Vec<fireweed_core::ItemId>>> + Send {
+            ) -> impl std::future::Future<
+                Output = fireweed_engine::EngineResult<Vec<fireweed_core::ItemId>>,
+            > + Send {
                 let n = items.len();
                 let fut = self.backend.push(shard, items, now, expected_epoch);
                 async move {
@@ -765,7 +789,9 @@ macro_rules! impl_e3_ports {
                 items: Vec<PushSpec>,
                 now: UtcTimestamp,
                 expected_epoch: Option<u64>,
-            ) -> impl std::future::Future<Output = fireweed_engine::EngineResult<fireweed_engine::PushBatchOutcome>> + Send {
+            ) -> impl std::future::Future<
+                Output = fireweed_engine::EngineResult<fireweed_engine::PushBatchOutcome>,
+            > + Send {
                 self.backend
                     .push_with_request_id(shard, request_id, items, now, expected_epoch)
             }
@@ -775,7 +801,9 @@ macro_rules! impl_e3_ports {
             fn metrics(
                 &self,
                 shard: &QueueKey,
-            ) -> impl std::future::Future<Output = fireweed_engine::EngineResult<fireweed_engine::QueueMetrics>> + Send {
+            ) -> impl std::future::Future<
+                Output = fireweed_engine::EngineResult<fireweed_engine::QueueMetrics>,
+            > + Send {
                 self.backend.metrics(shard)
             }
             fn select_eligible(
@@ -783,34 +811,44 @@ macro_rules! impl_e3_ports {
                 shard: &QueueKey,
                 now: UtcTimestamp,
                 limit: usize,
-            ) -> impl std::future::Future<Output = fireweed_engine::EngineResult<Vec<fireweed_core::ItemId>>> + Send {
+            ) -> impl std::future::Future<
+                Output = fireweed_engine::EngineResult<Vec<fireweed_core::ItemId>>,
+            > + Send {
                 self.backend.select_eligible(shard, now, limit)
             }
             fn peek(
                 &self,
                 shard: &QueueKey,
                 limit: usize,
-            ) -> impl std::future::Future<Output = fireweed_engine::EngineResult<Vec<fireweed_engine::ItemView>>> + Send {
+            ) -> impl std::future::Future<
+                Output = fireweed_engine::EngineResult<Vec<fireweed_engine::ItemView>>,
+            > + Send {
                 self.backend.peek(shard, limit)
             }
             fn pending(
                 &self,
                 shard: &QueueKey,
-            ) -> impl std::future::Future<Output = fireweed_engine::EngineResult<Vec<fireweed_engine::LeaseView>>> + Send {
+            ) -> impl std::future::Future<
+                Output = fireweed_engine::EngineResult<Vec<fireweed_engine::LeaseView>>,
+            > + Send {
                 self.backend.pending(shard)
             }
             fn live_items(
                 &self,
                 shard: &QueueKey,
                 keys: &[ClientItemKey],
-            ) -> impl std::future::Future<Output = fireweed_engine::EngineResult<Vec<Option<fireweed_engine::LiveItemView>>>> + Send {
+            ) -> impl std::future::Future<
+                Output = fireweed_engine::EngineResult<Vec<Option<fireweed_engine::LiveItemView>>>,
+            > + Send {
                 self.backend.live_items(shard, keys)
             }
             fn claimed_view(
                 &self,
                 shard: &QueueKey,
                 ids: &[fireweed_core::ItemId],
-            ) -> impl std::future::Future<Output = fireweed_engine::EngineResult<Vec<fireweed_engine::ClaimedItem>>> + Send {
+            ) -> impl std::future::Future<
+                Output = fireweed_engine::EngineResult<Vec<fireweed_engine::ClaimedItem>>,
+            > + Send {
                 self.backend.claimed_view(shard, ids)
             }
             fn terminal_emission_metrics(
@@ -819,7 +857,9 @@ macro_rules! impl_e3_ports {
                 now: UtcTimestamp,
                 emit_change_records: bool,
                 emission_cursor: Option<&fireweed_engine::CommandPosition>,
-            ) -> impl std::future::Future<Output = fireweed_engine::EngineResult<fireweed_engine::TerminalEmissionMetrics>> + Send {
+            ) -> impl std::future::Future<
+                Output = fireweed_engine::EngineResult<fireweed_engine::TerminalEmissionMetrics>,
+            > + Send {
                 self.backend.terminal_emission_metrics(
                     shard,
                     now,
@@ -836,7 +876,9 @@ macro_rules! impl_e3_ports {
             fn commit_raw(
                 &self,
                 request: RawCommitRequest,
-            ) -> impl std::future::Future<Output = fireweed_engine::EngineResult<fireweed_engine::RawCommitOutcome>> + Send {
+            ) -> impl std::future::Future<
+                Output = fireweed_engine::EngineResult<fireweed_engine::RawCommitOutcome>,
+            > + Send {
                 self.backend.commit_raw(request)
             }
         }
@@ -900,7 +942,10 @@ async fn crash_append_push<B: Backend + ControlPlaneStore + PushPort>(
     let epoch = backend.current_epoch(shard).await?;
     let (push_items, ids) = build_push_items(items, 0, 0, 0, 1_000_000);
     let envelope = CommandEnvelope {
-        command_id: CommandId::new(format!("e3-crash-{}", ids.first().map(|i| i.as_u64()).unwrap_or(0))),
+        command_id: CommandId::new(format!(
+            "e3-crash-{}",
+            ids.first().map(|i| i.as_u64()).unwrap_or(0)
+        )),
         request_id: None,
         request_fingerprint: None,
         request_outcome: None,

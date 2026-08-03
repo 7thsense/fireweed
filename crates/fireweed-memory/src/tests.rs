@@ -141,7 +141,8 @@ mod composed_capability_parity {
         FinalizeKind, InstanceFence, LogRead, ProjectionRead, PushPort, PushSpec, QueueCommand,
         ReschedulePort, ScheduleUpdate, SetGatesCommand, SetGatesPort, SideRecord,
     };
-    pub(super) async fn seeded_commit_transition_memory_backend() -> AsyncLogReplayBackend<MemoryLog, InMemoryProjection> {
+    pub(super) async fn seeded_commit_transition_memory_backend()
+    -> AsyncLogReplayBackend<MemoryLog, InMemoryProjection> {
         let b = composed_memory_backend();
         b.create_queue(qdef()).await.unwrap();
         b.push(&shard(), vec![PushSpec::default()], ts(0), None)

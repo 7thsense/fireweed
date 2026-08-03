@@ -241,13 +241,9 @@ impl AsyncObjectLogSqliteBackend {
                 let mut from = None;
                 let mut envelopes = Vec::new();
                 loop {
-                    let page = AsyncLogStore::read_from(
-                        log.as_ref(),
-                        shard.clone(),
-                        from.clone(),
-                        256,
-                    )
-                    .await?;
+                    let page =
+                        AsyncLogStore::read_from(log.as_ref(), shard.clone(), from.clone(), 256)
+                            .await?;
                     if page.entries.is_empty() {
                         break;
                     }
