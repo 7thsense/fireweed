@@ -5,11 +5,11 @@ use fireweed_release::density::{
 
 const DENSITY_KIND_HARNESS: &str = include_str!("../../../scripts/perf/tp002-e2-density-kind.sh");
 const DENSITY_LOADGEN: &str = include_str!("../../fireweed-loadgen/src/main.rs");
+const OBJECT_LOG_SQLITE_BACKEND: &str =
+    include_str!("../../fireweed-objectlog/src/async_product_sqlite.rs");
 const RESP_SERVER: &str = include_str!("../../fireweed-resp/src/lib.rs");
 const SERVICE_MAIN: &str = include_str!("../../fireweed-server/src/bin/fireweed-service.rs");
 const SERVER_LIB: &str = include_str!("../../fireweed-server/src/lib.rs");
-const OBJECT_LOG_SQLITE_ADAPTER: &str =
-    include_str!("../../fireweed-server/src/object_log_sqlite.rs");
 const POSTGRES_WHOLE_OPERATION_ADAPTER: &str =
     include_str!("../../fireweed-server/src/postgres_native.rs");
 
@@ -35,15 +35,6 @@ fn density_loadgen_contains_fail_closed_shape_lifecycle_and_active_load_guards()
     assert!(RESP_SERVER.contains("let _task_guard = task_guard"));
     assert!(!SERVICE_MAIN.contains("metrics.num_alive_tasks()"));
     assert!(SERVICE_MAIN.contains("runtime_task_resource_counts()"));
-    let recovery_maintenance = OBJECT_LOG_SQLITE_ADAPTER
-        .split("while let Some(shard) = shards.next()")
-        .nth(1)
-        .expect("recovery maintenance dispatch exists")
-        .split("match first_error")
-        .next()
-        .expect("recovery maintenance dispatch ends");
-    assert!(recovery_maintenance.contains("fireweed_resp::try_spawn_governed"));
-    assert!(!recovery_maintenance.contains("tokio::spawn"));
     let control_plane_execute = SERVER_LIB
         .split("async fn execute<T, F>")
         .nth(1)
@@ -72,6 +63,35 @@ fn density_loadgen_contains_fail_closed_shape_lifecycle_and_active_load_guards()
     assert!(dispatch.contains("resource: \"runtime task slots\""));
     assert!(!dispatch.contains("fireweed_resp::spawn_governed"));
     assert!(!dispatch.contains("tokio::spawn"));
+}
+
+#[test]
+fn density_objectlog_sqlite_backend_owns_bounded_recovery_on_open_and_create_queue() {
+    let open_recovery = OBJECT_LOG_SQLITE_BACKEND
+        .split("async fn from_parts(")
+        .nth(1)
+        .expect("sqlite backend open/recovery exists")
+        .split("async fn resolve_epoch(")
+        .next()
+        .expect("sqlite backend open/recovery ends");
+    assert!(open_recovery.contains("replay_log_into_projection"));
+    assert!(open_recovery.contains("rebuild_process_idempotency_from_log"));
+    assert!(open_recovery.contains("AsyncControlPlane::create_queue"));
+    assert!(!open_recovery.contains("tokio::spawn"));
+    assert!(!open_recovery.contains("fireweed_resp::try_spawn_governed"));
+
+    let create_queue_recovery = OBJECT_LOG_SQLITE_BACKEND
+        .split("fn create_queue(")
+        .nth(1)
+        .expect("sqlite backend create_queue exists")
+        .split("fn queue_definition(")
+        .next()
+        .expect("sqlite backend create_queue ends");
+    assert!(create_queue_recovery.contains("replay_log_into_projection"));
+    assert!(create_queue_recovery.contains("recovery_stats.get(&shard).is_none()"));
+    assert!(create_queue_recovery.contains("AsyncControlPlane::create_queue"));
+    assert!(!create_queue_recovery.contains("tokio::spawn"));
+    assert!(!create_queue_recovery.contains("fireweed_resp::try_spawn_governed"));
 }
 
 #[test]
