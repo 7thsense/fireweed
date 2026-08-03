@@ -2,11 +2,14 @@
 
 use std::sync::Arc;
 
+use fireweed_core::ItemId;
+
 use crate::{
     AsyncControlPlane, AsyncFinalizeRequest, AsyncLifecyclePlan, AsyncLifecyclePlanner,
-    AsyncLogStore, AsyncProjectionStore, AsyncPurgeRequest, AsyncRenewRequest, CommandChecksum,
-    CommandEnvelope, EngineError, EngineResult, FinalizeCommand, FinalizeKind, FinalizeOutcome,
-    IdGen, OwnedTask, PurgeItemsCommand, QueueCommand, RawCommitRequest, RenewLeaseCommand,
+    AsyncLogStore, AsyncProjectionStore, AsyncPurgeRequest, AsyncReassignRequest,
+    AsyncRenewRequest, CommandChecksum, CommandEnvelope, EngineError, EngineResult,
+    FinalizeCommand, FinalizeKind, FinalizeOutcome, IdGen, OwnedTask, PurgeItemsCommand,
+    QueueCommand, QueueKey, RawCommitRequest, ReassignLeaseCommand, RenewLeaseCommand,
     validate_rearm,
 };
 
@@ -51,6 +54,15 @@ where
     P: AsyncProjectionStore + 'static,
     I: IdGen + 'static,
 {
+    fn resolve_lease_targets(
+        &self,
+        shard: QueueKey,
+        item_ids: Vec<ItemId>,
+    ) -> OwnedTask<EngineResult<Vec<crate::ClaimedItem>>> {
+        let projection = Arc::clone(&self.projection);
+        Box::pin(async move { projection.resolve_lease_targets(shard, item_ids).await })
+    }
+
     fn plan_renew(
         &self,
         request: AsyncRenewRequest,
@@ -106,6 +118,71 @@ where
                 created_at: request.now,
             };
             Ok(AsyncLifecyclePlan::renew(RawCommitRequest::new(
+                request.shard,
+                vec![envelope],
+                epoch,
+            )))
+        })
+    }
+
+    fn plan_reassign(
+        &self,
+        request: AsyncReassignRequest,
+    ) -> OwnedTask<EngineResult<AsyncLifecyclePlan>> {
+        let control = Arc::clone(&self.control);
+        let log = Arc::clone(&self.log);
+        let projection = Arc::clone(&self.projection);
+        let ids = Arc::clone(&self.ids);
+        Box::pin(async move {
+            if request.targets.is_empty() {
+                return Err(EngineError::Invalid(
+                    "reassign item batch must not be empty",
+                ));
+            }
+            let definition = control.queue_definition(request.shard.clone()).await?;
+            if definition.tenant_id != request.shard.tenant_id
+                || definition.queue_id != request.shard.queue_id
+            {
+                return Err(EngineError::Storage(
+                    "async lifecycle planner returned the wrong queue definition".to_string(),
+                ));
+            }
+            validate_renew_duration(
+                request.now,
+                request.new_lease_expires_at,
+                definition.max_lease_duration_ms,
+            )?;
+            projection.admit_mutation(request.shard.clone()).await?;
+            projection
+                .renew_validate(request.shard.clone(), request.targets.clone(), request.now)
+                .await?;
+            let epoch = log.current_epoch(request.shard.clone()).await?;
+            if request
+                .expected_epoch
+                .is_some_and(|expected| expected != epoch)
+            {
+                return Err(EngineError::EpochFenced);
+            }
+            let item_ids = request
+                .targets
+                .iter()
+                .map(|target| target.item_id)
+                .collect::<Vec<_>>();
+            let envelope = CommandEnvelope {
+                command_id: ids.next_command_id(),
+                request_id: None,
+                request_fingerprint: None,
+                request_outcome: None,
+                item_ids: item_ids.clone(),
+                command: QueueCommand::ReassignLease(ReassignLeaseCommand {
+                    item_ids,
+                    lease_token: request.new_lease_token,
+                    lease_expires_at: request.new_lease_expires_at,
+                }),
+                checksum: CommandChecksum(0),
+                created_at: request.now,
+            };
+            Ok(AsyncLifecyclePlan::reassign(RawCommitRequest::new(
                 request.shard,
                 vec![envelope],
                 epoch,

@@ -57,8 +57,9 @@ pub use async_composed::{
     AsyncCommitSubmitError, AsyncComposedBackend, AsyncFinalizeRequest, AsyncLifecycleError,
     AsyncLifecyclePlan, AsyncLifecyclePlanner, AsyncLifecyclePostCommitStage, AsyncPurgeRequest,
     AsyncPushError, AsyncPushPlan, AsyncPushPlanner, AsyncPushPostCommitStage, AsyncPushRequest,
-    AsyncRenewRequest, FinalizeTarget, NoAsyncClaimPlanner, NoAsyncLifecyclePlanner,
-    NoAsyncPushPlanner, NoAsyncReclaimPlanner, PushFingerprint, RenewTarget,
+    AsyncReassignRequest, AsyncRenewRequest, FinalizeTarget, NoAsyncClaimPlanner,
+    NoAsyncLifecyclePlanner, NoAsyncPushPlanner, NoAsyncReclaimPlanner, PushFingerprint,
+    RenewTarget,
 };
 pub use async_lifecycle_planner::ProjectionLifecyclePlanner;
 pub use async_log_replay_product::{

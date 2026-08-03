@@ -20,14 +20,13 @@ use fireweed_core::{
 use fireweed_engine::{
     AsyncClaimError, AsyncCommitStrategy, AsyncComposedBackend, AsyncControlPlane, AsyncLogStore,
     AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError, AsyncPushRequest, Backend, ClaimPort,
-    ClaimRequest, Claimed, CommandChecksum, CommandEnvelope, ControlPlaneStore, CreateQueueOutcome,
-    DurabilityClass, EngineError, EngineResult, FinalizeOutcome, FinalizePort, IdGen,
-    InProcessControlPlane, InProcessProjectionStore, OwnedTask, ProjectionClaimPlanner,
-    ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner,
-    ProjectionStore, PurgePort, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey,
-    RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
-    ReclaimPort, RenewLeasePort, SeparateReplayCommit, SeparateReplayCommitter, TickReport,
-    UpsertOutcome, UpsertPort,
+    ClaimRequest, Claimed, CommandEnvelope, ControlPlaneStore, CreateQueueOutcome, DurabilityClass,
+    EngineError, EngineResult, FinalizeOutcome, FinalizePort, InProcessControlPlane,
+    InProcessProjectionStore, OwnedTask, ProjectionClaimPlanner, ProjectionLifecyclePlanner,
+    ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner, ProjectionStore, PurgePort,
+    PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, RawCommitOutcome, RawCommitRequest,
+    ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort, SeparateReplayCommit,
+    SeparateReplayCommitter, TickReport, UpsertOutcome, UpsertPort,
 };
 use fireweed_sqlite::{HybridAsyncThresholds, HybridProjectionStore};
 use object_log::FlushConfig;
@@ -372,23 +371,6 @@ impl AsyncObjectLogHybridBackend {
             }
         }
     }
-
-    async fn claimed_targets(
-        &self,
-        shard: &QueueKey,
-        ids: &[ItemId],
-    ) -> EngineResult<Vec<fireweed_engine::ClaimedItem>> {
-        let claimed = AsyncProjectionStore::render_claimed(
-            self.projection.as_ref(),
-            shard.clone(),
-            ids.to_vec(),
-        )
-        .await?;
-        if claimed.len() != ids.len() {
-            return Err(EngineError::StaleLease);
-        }
-        Ok(claimed)
-    }
 }
 
 impl Backend for AsyncObjectLogHybridBackend {
@@ -589,32 +571,17 @@ impl ReassignLeasePort for AsyncObjectLogHybridBackend {
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         async move {
-            self.claimed_targets(shard, &item_ids).await?;
-            let epoch = match expected_epoch {
-                Some(epoch) => epoch,
-                None => AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?,
-            };
-            let envelope = CommandEnvelope {
-                command_id: self.ids.next_command_id(),
-                request_id: None,
-                request_fingerprint: None,
-                request_outcome: None,
-                item_ids: item_ids.clone(),
-                command: QueueCommand::ReassignLease(ReassignLeaseCommand {
-                    item_ids,
-                    lease_token: new_lease_token,
-                    lease_expires_at: new_lease_expires_at,
-                }),
-                checksum: CommandChecksum(0),
-                created_at: now,
-            };
             self.engine
-                .submit_commit(RawCommitRequest::new(shard.clone(), vec![envelope], epoch))
+                .reassign_item_ids(
+                    shard.clone(),
+                    item_ids,
+                    new_lease_token,
+                    new_lease_expires_at,
+                    now,
+                    expected_epoch,
+                )
                 .await
-                .map_err(|error| {
-                    EngineError::Storage(format!("async reassign submission failed: {error:?}"))
-                })??;
-            Ok(())
+                .map_err(Self::map_lifecycle)
         }
     }
 }

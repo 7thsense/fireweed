@@ -225,6 +225,16 @@ pub struct AsyncRenewRequest {
     pub expected_epoch: Option<u64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct AsyncReassignRequest {
+    pub shard: QueueKey,
+    pub targets: Vec<RenewTarget>,
+    pub new_lease_token: LeaseToken,
+    pub new_lease_expires_at: UtcTimestamp,
+    pub now: UtcTimestamp,
+    pub expected_epoch: Option<u64>,
+}
+
 /// Typed lifecycle planner output. Construction is engine-private so injected planners cannot bypass
 /// the composed backend's exact-envelope validation.
 pub struct AsyncLifecyclePlan {
@@ -234,6 +244,13 @@ pub struct AsyncLifecyclePlan {
 
 impl AsyncLifecyclePlan {
     pub(crate) fn renew(request: RawCommitRequest) -> Self {
+        Self {
+            request,
+            expected_finalize_outcomes: None,
+        }
+    }
+
+    pub(crate) fn reassign(request: RawCommitRequest) -> Self {
         Self {
             request,
             expected_finalize_outcomes: None,
@@ -266,8 +283,23 @@ impl AsyncLifecyclePlan {
 /// Construction-injected preparation for typed lifecycle mutations. It owns validation and envelope
 /// construction, but never durable commit authority.
 pub trait AsyncLifecyclePlanner: Send + Sync + 'static {
+    /// Resolve item-id lifecycle targets inside the same queue permit that owns planning and commit.
+    fn resolve_lease_targets(
+        &self,
+        _shard: QueueKey,
+        _item_ids: Vec<ItemId>,
+    ) -> OwnedTask<EngineResult<Vec<ClaimedItem>>> {
+        Box::pin(async { Err(EngineError::Unavailable) })
+    }
+
     fn plan_renew(&self, request: AsyncRenewRequest)
     -> OwnedTask<EngineResult<AsyncLifecyclePlan>>;
+    fn plan_reassign(
+        &self,
+        _request: AsyncReassignRequest,
+    ) -> OwnedTask<EngineResult<AsyncLifecyclePlan>> {
+        Box::pin(async { Err(EngineError::Unavailable) })
+    }
     fn plan_finalize(
         &self,
         _request: AsyncFinalizeRequest,
@@ -1150,6 +1182,48 @@ fn validate_renew_plan(
     Ok(())
 }
 
+fn validate_reassign_plan(
+    requested: &AsyncReassignRequest,
+    planned: &RawCommitRequest,
+) -> EngineResult<()> {
+    let requested_ids = requested
+        .targets
+        .iter()
+        .map(|target| target.item_id)
+        .collect::<Vec<_>>();
+    let unique: HashSet<_> = requested_ids.iter().copied().collect();
+    if requested_ids.is_empty() || unique.len() != requested_ids.len() {
+        return Err(EngineError::Invalid("invalid reassign item batch"));
+    }
+    if planned.shard() != &requested.shard
+        || requested
+            .expected_epoch
+            .is_some_and(|epoch| epoch != planned.expected_epoch())
+        || planned.commands().len() != 1
+        || planned.fault() != RawCommitFault::None
+    {
+        return Err(EngineError::Invalid("invalid async reassign plan"));
+    }
+    let envelope = &planned.commands()[0];
+    let QueueCommand::ReassignLease(command) = &envelope.command else {
+        return Err(EngineError::Invalid("invalid async reassign plan"));
+    };
+    if command.item_ids != requested_ids
+        || command.lease_token != requested.new_lease_token
+        || command.lease_expires_at != requested.new_lease_expires_at
+        || envelope.item_ids != requested_ids
+        || envelope.command_id.0.is_empty()
+        || envelope.created_at != requested.now
+        || envelope.request_id.is_some()
+        || envelope.request_fingerprint.is_some()
+        || envelope.request_outcome.is_some()
+        || envelope.checksum != CommandChecksum(0)
+    {
+        return Err(EngineError::Invalid("invalid async reassign plan"));
+    }
+    Ok(())
+}
+
 fn validate_lifecycle_commit_outcome(
     queue: &QueueKey,
     expected_epoch: u64,
@@ -1326,24 +1400,20 @@ where
         outcomes: Vec<crate::FinalizeOutcome>,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
-    ) -> Result<(), AsyncLifecycleError>
-    where
-        P: AsyncClaimPlanner,
-    {
+    ) -> Result<(), AsyncLifecycleError> {
         if outcomes.is_empty() {
             return Err(AsyncLifecycleError::BeforeCommit(EngineError::Invalid(
                 "finalize item batch must not be empty",
             )));
         }
         let queue = shard.clone();
-        let claim_planner = Arc::clone(&self.claim_planner);
         let lifecycle = Arc::clone(&self.lifecycle_planner);
         let strategy = Arc::clone(&self.strategy);
         self.submit_operation(queue.clone(), move || {
             Box::pin(async move {
                 let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id).collect();
-                let claimed = claim_planner
-                    .render_claimed(shard.clone(), item_ids.clone())
+                let claimed = lifecycle
+                    .resolve_lease_targets(shard.clone(), item_ids.clone())
                     .await
                     .map_err(LifecycleExecutionError::BeforeCommit)?;
                 if claimed.len() != outcomes.len() {
@@ -1405,23 +1475,19 @@ where
         new_lease_expires_at: UtcTimestamp,
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
-    ) -> Result<(), AsyncLifecycleError>
-    where
-        P: AsyncClaimPlanner,
-    {
+    ) -> Result<(), AsyncLifecycleError> {
         if item_ids.is_empty() {
             return Err(AsyncLifecycleError::BeforeCommit(EngineError::Invalid(
                 "renew item batch must not be empty",
             )));
         }
         let queue = shard.clone();
-        let claim_planner = Arc::clone(&self.claim_planner);
         let lifecycle = Arc::clone(&self.lifecycle_planner);
         let strategy = Arc::clone(&self.strategy);
         self.submit_operation(queue.clone(), move || {
             Box::pin(async move {
-                let claimed = claim_planner
-                    .render_claimed(shard.clone(), item_ids.clone())
+                let claimed = lifecycle
+                    .resolve_lease_targets(shard.clone(), item_ids.clone())
                     .await
                     .map_err(LifecycleExecutionError::BeforeCommit)?;
                 if claimed.len() != item_ids.len() {
@@ -1493,6 +1559,74 @@ where
                 validate_lifecycle_commit_outcome(&queue, epoch, &outcome)
                     .map_err(LifecycleExecutionError::AfterCommit)?;
                 Ok::<u64, LifecycleExecutionError>(count)
+            })
+        })
+        .await
+        .map_err(AsyncLifecycleError::Submit)?
+        .map_err(AsyncLifecycleError::from)
+    }
+
+    /// Reassign item-id leases under one queue permit, preserving projection-owned rejection
+    /// precedence before constructing the replacement lease command.
+    pub async fn reassign_item_ids(
+        &self,
+        shard: QueueKey,
+        item_ids: Vec<ItemId>,
+        new_lease_token: LeaseToken,
+        new_lease_expires_at: UtcTimestamp,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> Result<(), AsyncLifecycleError> {
+        if item_ids.is_empty() {
+            return Err(AsyncLifecycleError::BeforeCommit(EngineError::Invalid(
+                "reassign item batch must not be empty",
+            )));
+        }
+        let queue = shard.clone();
+        let lifecycle = Arc::clone(&self.lifecycle_planner);
+        let strategy = Arc::clone(&self.strategy);
+        self.submit_operation(queue.clone(), move || {
+            Box::pin(async move {
+                let claimed = lifecycle
+                    .resolve_lease_targets(shard.clone(), item_ids.clone())
+                    .await
+                    .map_err(LifecycleExecutionError::BeforeCommit)?;
+                if claimed.len() != item_ids.len() {
+                    return Err(LifecycleExecutionError::BeforeCommit(
+                        EngineError::StaleLease,
+                    ));
+                }
+                let targets = claimed
+                    .into_iter()
+                    .map(|item| {
+                        Ok(RenewTarget {
+                            item_id: item.item_id,
+                            lease_token: item.lease_token.ok_or(EngineError::StaleLease)?,
+                        })
+                    })
+                    .collect::<EngineResult<Vec<_>>>()
+                    .map_err(LifecycleExecutionError::BeforeCommit)?;
+                let request = AsyncReassignRequest {
+                    shard,
+                    targets,
+                    new_lease_token,
+                    new_lease_expires_at,
+                    now,
+                    expected_epoch,
+                };
+                let plan = lifecycle
+                    .plan_reassign(request.clone())
+                    .await
+                    .map_err(LifecycleExecutionError::BeforeCommit)?;
+                validate_reassign_plan(&request, &plan.request)
+                    .map_err(LifecycleExecutionError::BeforeCommit)?;
+                let epoch = plan.request.expected_epoch();
+                let outcome = strategy
+                    .commit(plan.request)
+                    .await
+                    .map_err(LifecycleExecutionError::Commit)?;
+                validate_lifecycle_commit_outcome(&queue, epoch, &outcome)
+                    .map_err(LifecycleExecutionError::AfterCommit)
             })
         })
         .await
@@ -2667,6 +2801,29 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct RejectingLeaseResolver {
+        error: EngineError,
+    }
+
+    impl AsyncLifecyclePlanner for RejectingLeaseResolver {
+        fn resolve_lease_targets(
+            &self,
+            _shard: QueueKey,
+            _item_ids: Vec<ItemId>,
+        ) -> OwnedTask<EngineResult<Vec<ClaimedItem>>> {
+            let error = self.error.clone();
+            Box::pin(async move { Err(error) })
+        }
+
+        fn plan_renew(
+            &self,
+            _request: AsyncRenewRequest,
+        ) -> OwnedTask<EngineResult<AsyncLifecyclePlan>> {
+            panic!("rejected lease targets must not reach lifecycle planning")
+        }
+    }
+
     type PushBackend = AsyncComposedBackend<
         UnifiedAtomicCommit<ClaimCommitter>,
         ControlledDispatcher,
@@ -3281,6 +3438,51 @@ mod tests {
             commits,
             completed,
             plans,
+        }
+    }
+
+    #[test]
+    fn item_id_finalize_preserves_lease_rejection_precedence_before_commit() {
+        for expected in [
+            EngineError::NotFound,
+            EngineError::StaleLease,
+            EngineError::Terminal,
+            EngineError::Superseded,
+            EngineError::Invalid("item is not leased"),
+        ] {
+            let commits = Arc::new(AtomicUsize::new(0));
+            let strategy = UnifiedAtomicCommit::for_profile(
+                DurabilityClass::Atomic,
+                ClaimCommitter {
+                    calls: Arc::clone(&commits),
+                    completed: Arc::new(AtomicBool::new(false)),
+                    phase: Phase::new(true),
+                },
+            )
+            .unwrap();
+            let dispatcher = ControlledDispatcher::new(1);
+            let backend = AsyncComposedBackend::new(strategy, dispatcher.clone(), 1)
+                .with_lifecycle_planner(RejectingLeaseResolver {
+                    error: expected.clone(),
+                });
+            let shard = queue("lease-rejection");
+            let mut finalize = Box::pin(backend.finalize_outcomes(
+                shard,
+                vec![FinalizeOutcome::new(
+                    ItemId::from_u64(1),
+                    FinalizeKind::Complete,
+                )],
+                UtcTimestamp::new(10, 0).unwrap(),
+                None,
+            ));
+
+            assert!(matches!(poll_once(finalize.as_mut()), Poll::Pending));
+            assert!(dispatcher.drive_next());
+            assert_eq!(
+                poll_once(finalize.as_mut()),
+                Poll::Ready(Err(AsyncLifecycleError::BeforeCommit(expected)))
+            );
+            assert_eq!(commits.load(Ordering::Acquire), 0);
         }
     }
 

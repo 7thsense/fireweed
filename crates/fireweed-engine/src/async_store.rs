@@ -843,6 +843,23 @@ pub trait AsyncProjectionStore: Send + Sync {
         std::future::ready(Err(EngineError::Unavailable))
     }
 
+    /// Resolve item-id lifecycle targets while preserving projection-owned rejection precedence.
+    /// Implementations with a lock or transaction should override this so validation and rendering
+    /// observe one projection image.
+    fn resolve_lease_targets(
+        &self,
+        shard: QueueKey,
+        ids: Vec<ItemId>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
+        async move {
+            let items = self.render_claimed(shard, ids.clone()).await?;
+            if items.len() != ids.len() {
+                return Err(EngineError::StaleLease);
+            }
+            Ok(items)
+        }
+    }
+
     fn finalize_validate(
         &self,
         shard: QueueKey,
@@ -1167,6 +1184,23 @@ where
     ) -> impl Future<Output = EngineResult<()>> + Send {
         let ids = targets.iter().map(|t| t.item_id).collect::<Vec<_>>();
         self.run_with_store(move |store| store.renew_validate(&shard, &ids))
+    }
+
+    fn resolve_lease_targets(
+        &self,
+        shard: QueueKey,
+        ids: Vec<ItemId>,
+    ) -> impl Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
+        self.run_with_store(move |store| {
+            store.renew_validate(&shard, &ids)?;
+            let items = store.render_claimed(&shard, &ids)?;
+            if items.len() != ids.len() {
+                return Err(EngineError::Storage(
+                    "validated lease targets were not renderable".into(),
+                ));
+            }
+            Ok(items)
+        })
     }
 
     fn finalize_validate(
@@ -1605,6 +1639,23 @@ where
         ids: Vec<ItemId>,
     ) -> impl Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
         self.run_sync(move |store: &mut S| store.render_claimed(&shard, &ids))
+    }
+
+    fn resolve_lease_targets(
+        &self,
+        shard: QueueKey,
+        ids: Vec<ItemId>,
+    ) -> impl Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
+        self.run_sync(move |store: &mut S| {
+            store.renew_validate(&shard, &ids)?;
+            let items = store.render_claimed(&shard, &ids)?;
+            if items.len() != ids.len() {
+                return Err(EngineError::Storage(
+                    "validated lease targets were not renderable".into(),
+                ));
+            }
+            Ok(items)
+        })
     }
 
     fn item_state(

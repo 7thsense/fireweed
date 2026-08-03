@@ -2779,7 +2779,7 @@ pub async fn renew_extends_lease_and_rejects<B: ConformanceCore>(make: impl Fn()
         ),
     )
     .await;
-    b.claim(claim_req(1, 500, 10)).await.unwrap(); // "1" leased, expires at ts(500)
+    b.claim(claim_req(1, 50, 10)).await.unwrap(); // "1" leased, expires at ts(50)
     let id = ItemId::new("1").unwrap();
 
     // Unknown id -> NotFound, and NOTHING appended (reject before commit, B1).
@@ -2787,7 +2787,7 @@ pub async fn renew_extends_lease_and_rejects<B: ConformanceCore>(make: impl Fn()
         b.renew(
             &shard(),
             vec![ItemId::new("90").unwrap()],
-            ts(2000),
+            ts(60),
             ts(20),
             None
         )
@@ -2795,13 +2795,13 @@ pub async fn renew_extends_lease_and_rejects<B: ConformanceCore>(make: impl Fn()
         Err(EngineError::NotFound)
     );
 
-    // Happy path: extend the lease to ts(2000). Ticking PAST the old expiry (500) reclaims nothing,
+    // Happy path: extend the lease to ts(60). Ticking PAST the old expiry (50) reclaims nothing,
     // and the attempt_count is unchanged (renew does not charge a delivery).
-    b.renew(&shard(), vec![id], ts(2000), ts(20), None)
+    b.renew(&shard(), vec![id], ts(60), ts(20), None)
         .await
         .unwrap();
     assert_eq!(
-        b.tick(ts(600)).await.unwrap().leases_reclaimed,
+        b.tick(ts(51)).await.unwrap().leases_reclaimed,
         0,
         "extended lease must not be reclaimed past the OLD expiry"
     );
@@ -2816,7 +2816,7 @@ pub async fn renew_extends_lease_and_rejects<B: ConformanceCore>(make: impl Fn()
     assert_eq!(lease.attempt_count, 1, "renew does not charge a delivery");
     assert_eq!(
         lease.lease_expires_at,
-        ts(2000),
+        ts(60),
         "renew extended the lease deadline"
     );
 
@@ -2835,7 +2835,7 @@ pub async fn renew_extends_lease_and_rejects<B: ConformanceCore>(make: impl Fn()
         b.renew(
             &shard(),
             vec![ItemId::new("4").unwrap()],
-            ts(2000),
+            ts(60),
             ts(21),
             None
         )
@@ -2853,7 +2853,7 @@ pub async fn renew_extends_lease_and_rejects<B: ConformanceCore>(make: impl Fn()
     )
     .await;
     assert_eq!(
-        b.renew(&shard(), vec![id], ts(3000), ts(30), None).await,
+        b.renew(&shard(), vec![id], ts(70), ts(30), None).await,
         Err(EngineError::StaleLease)
     );
 }
@@ -2874,7 +2874,7 @@ pub async fn reassign_swaps_token_and_charges_attempt<B: ConformanceCore>(make: 
         ),
     )
     .await;
-    b.claim(claim_req(1, 500, 10)).await.unwrap(); // "1" leased by "lease-1", attempt_count = 1
+    b.claim(claim_req(1, 50, 10)).await.unwrap(); // "1" leased by "lease-1", attempt_count = 1
     let id = ItemId::new("1").unwrap();
     let new_token = LeaseToken::new("lease-2").unwrap();
 
@@ -2884,7 +2884,7 @@ pub async fn reassign_swaps_token_and_charges_attempt<B: ConformanceCore>(make: 
             &shard(),
             vec![ItemId::new("90").unwrap()],
             new_token.clone(),
-            ts(2000),
+            ts(60),
             ts(20),
             None
         )
@@ -2892,17 +2892,10 @@ pub async fn reassign_swaps_token_and_charges_attempt<B: ConformanceCore>(make: 
         Err(EngineError::NotFound)
     );
 
-    // Happy path: transfer the lease to "lease-2", extend to ts(2000), charge exactly one delivery.
-    b.reassign(
-        &shard(),
-        vec![id],
-        new_token.clone(),
-        ts(2000),
-        ts(20),
-        None,
-    )
-    .await
-    .unwrap();
+    // Happy path: transfer the lease to "lease-2", extend to ts(60), charge exactly one delivery.
+    b.reassign(&shard(), vec![id], new_token.clone(), ts(60), ts(20), None)
+        .await
+        .unwrap();
     let lease = b
         .pending(&shard())
         .await
@@ -2920,11 +2913,11 @@ pub async fn reassign_swaps_token_and_charges_attempt<B: ConformanceCore>(make: 
     );
     assert_eq!(
         lease.lease_expires_at,
-        ts(2000),
+        ts(60),
         "reassign extended the deadline"
     );
-    // The new lease is live: ticking past the OLD expiry (500) reclaims nothing.
-    assert_eq!(b.tick(ts(600)).await.unwrap().leases_reclaimed, 0);
+    // The new lease is live: ticking past the OLD expiry (50) reclaims nothing.
+    assert_eq!(b.tick(ts(51)).await.unwrap().leases_reclaimed, 0);
     assert_eq!(b.metrics(&qkey()).await.unwrap().leased, 1);
 
     // Fenced lease -> StaleLease, exactly as renew/finalize reject it.
@@ -2937,7 +2930,7 @@ pub async fn reassign_swaps_token_and_charges_attempt<B: ConformanceCore>(make: 
     )
     .await;
     assert_eq!(
-        b.reassign(&shard(), vec![id], new_token, ts(3000), ts(30), None)
+        b.reassign(&shard(), vec![id], new_token, ts(70), ts(30), None)
             .await,
         Err(EngineError::StaleLease)
     );
