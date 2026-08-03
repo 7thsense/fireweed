@@ -705,9 +705,13 @@ impl ReclaimDriver for AsyncObjectLogMemoryBackend {
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<TickReport>> + Send {
         async move {
-            // Reclaim is queue-scoped via ReclaimPort; driver tick is a no-op report for this product.
-            let _ = now;
-            Ok(TickReport::default())
+            crate::reclaim_tick::tick_expired_leases(
+                self.projection.as_ref(),
+                self.control.as_ref(),
+                self,
+                now,
+            )
+            .await
         }
     }
 }
