@@ -616,6 +616,7 @@ fn run_sync_constructor(cell: &str, open: impl Fn() -> Fireweed) {
 }
 
 #[test]
+#[ignore = "requires live PostgreSQL; P10 executes the full external matrix"]
 fn postgres_convenience_sync_public_interface() {
     let postgres_url = required_env("FIREWEED_PG_TEST_URL");
     let schema_name = unique_name("postgres_convenience_sync");
@@ -635,6 +636,7 @@ fn postgres_convenience_sync_public_interface() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires live PostgreSQL; P10 executes the full external matrix"]
 async fn postgres_convenience_async_public_interface() {
     let postgres_url = required_env("FIREWEED_PG_TEST_URL");
     let schema_name = unique_name("postgres_convenience_async");
@@ -667,6 +669,7 @@ async fn postgres_convenience_async_public_interface() {
 }
 
 #[test]
+#[ignore = "requires live PostgreSQL; P10 executes the full external matrix"]
 fn postgres_coordinated_constructor_public_interface() {
     let postgres_url = required_env("FIREWEED_PG_TEST_URL");
     let schema_name = unique_name("postgres_coordinated_constructor");
@@ -693,6 +696,7 @@ fn postgres_coordinated_constructor_public_interface() {
 }
 
 #[test]
+#[ignore = "requires live PostgreSQL; P10 executes the full external matrix"]
 fn postgres_runtime_sync_public_interface() {
     let postgres_url = required_env("FIREWEED_PG_TEST_URL");
     let schema_name = unique_name("postgres_runtime_sync");
@@ -714,6 +718,7 @@ fn postgres_runtime_sync_public_interface() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires live PostgreSQL; P10 executes the full external matrix"]
 async fn postgres_relational_coordinated_node_public_interface() {
     let postgres_url = required_env("FIREWEED_PG_TEST_URL");
     let schema_name = unique_name("postgres_relational_coordinated_node");
@@ -756,21 +761,25 @@ async fn postgres_relational_coordinated_node_public_interface() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires live PostgreSQL; P10 executes the full external matrix"]
 async fn postgres_log_replay_public_interface() {
     run_postgres_runtime("postgres-log-replay", PostgresMode::LogReplay, false).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires live PostgreSQL; P10 executes the full external matrix"]
 async fn postgres_relational_public_interface() {
     run_postgres_runtime("postgres-relational", PostgresMode::Relational, false).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires live PostgreSQL; P10 executes the full external matrix"]
 async fn postgres_coordinated_public_interface() {
     run_postgres_runtime("postgres-coordinated", PostgresMode::LogReplay, true).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires live PostgreSQL; P10 executes the full external matrix"]
 async fn objectlog_local_postgres_strict_public_interface() {
     let postgres_url = required_env("FIREWEED_PG_TEST_URL");
     let root = FixtureRoot::new("objectlog_local_postgres");
@@ -809,6 +818,7 @@ async fn objectlog_local_postgres_strict_public_interface() {
 }
 
 #[test]
+#[ignore = "requires live PostgreSQL; P10 executes the full external matrix"]
 fn objectlog_local_postgres_sync_constructor_public_interface() {
     let postgres_url = required_env("FIREWEED_PG_TEST_URL");
     let root = FixtureRoot::new("objectlog_local_postgres_sync");
@@ -859,6 +869,7 @@ fn objectlog_local_postgres_sync_constructor_public_interface() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires live S3 and PostgreSQL; P10 executes the full external matrix"]
 async fn garage_s3_postgres_strict_public_interface() {
     let config = S3Config::load();
     let postgres_url = required_env("FIREWEED_PG_TEST_URL");
@@ -932,11 +943,13 @@ async fn run_s3_sqlite(cell: &str, barrier: ResponseBarrier) {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires live S3; P10 executes the full external matrix"]
 async fn garage_s3_sqlite_strict_public_interface() {
     run_s3_sqlite("garage-s3-sqlite-strict", ResponseBarrier::Strict).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires live S3; P10 executes the full external matrix"]
 async fn garage_s3_sqlite_async_public_interface() {
     run_s3_sqlite("garage-s3-sqlite-async", ResponseBarrier::AsyncProjection).await;
 }
