@@ -675,6 +675,51 @@ where
         Ok(records.len())
     }
 
+    /// Reap terminal projection rows only after their retention and emission
+    /// barriers are both satisfied.
+    ///
+    /// This synchronous orchestration seam is retained for maintenance callers
+    /// over in-process axes. It does not activate reaping from [`ReclaimDriver::tick`].
+    pub fn reap_terminal_items(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        terminal_retention_ms: u64,
+        emit_change_records: bool,
+    ) -> EngineResult<usize> {
+        use crate::{ControlPlane, LogStore};
+
+        ControlPlane::queue_definition(self.control.as_ref(), shard)?;
+        if !self
+            .projection
+            .with_store(|projection| ProjectionStore::retention_may_advance(projection, shard))
+        {
+            return Ok(0);
+        }
+
+        let emission_cursor = if emit_change_records {
+            self.log
+                .with_store(|log| LogStore::emission_cursor(log, shard))?
+        } else {
+            None
+        };
+        if emit_change_records && emission_cursor.is_none() {
+            return Ok(0);
+        }
+
+        self.projection.with_store_mut(|projection| {
+            ProjectionStore::reap_terminal_items(
+                projection,
+                shard,
+                now,
+                terminal_retention_ms,
+                emit_change_records,
+                emission_cursor.as_ref(),
+            )
+            .map(|ids| ids.len())
+        })
+    }
+
     /// Replay the durable log into the in-memory projection and control plane (ADR-012 recovery-on-open).
     ///
     /// When the log has no durable catalog (Class B memory log) but the projection does, queue
