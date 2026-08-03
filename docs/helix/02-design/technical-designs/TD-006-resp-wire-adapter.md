@@ -28,6 +28,10 @@ ddx:
 **Status**: draft (v3, refolded against hexagonal migration plan v4)
 **Related**: API-001, API-002, ADR-007, ADR-008, TD-003 (queue ownership/routing), TD-007, `docs/helix/04-build/hexagonal-migration-plan.md`
 
+TD-006 remains Draft because its full wire surface still requires conformance closure. The storage
+reconciliation below is normative: it removes retired profile names and pins the error vocabulary shared
+by every supported storage cell.
+
 ## Purpose
 
 Define the launch RESP surface for fireweed after the hexagonal cutover.
@@ -93,7 +97,7 @@ begins redirecting. Within that window:
 | Command class | On a deposed/stale owner, within the renew window |
 |---|---|
 | **Durable writes** (`XADD`; the `append_batch` of any mutating command) | **Cannot corrupt state.** The TD-003 Single Authoritative Fencing Rule rejects an append whose `expected_epoch` is not the current control-plane epoch, the instant the epoch advances — so a misrouted write is rejected and the client retries against the current owner. `client_item_key` makes the `XADD` retry converge. |
-| **Claims / delivery** (`XREADGROUP >`; cross-consumer `XCLAIM`) | **May redundantly deliver before commit, but cannot durably double-claim.** On an atomic backend (TD-007) select+append commit together, so a deposed owner's claim is fenced atomically and hands out nothing. On a log-then-apply backend (`objectlog`) any tentative delivery before the claim command commits is non-authoritative: if the `BatchClaim` append is fenced, **no durable lease is created**, and the worker's later `XACK`/finalize on the deposed owner is epoch-fenced -> `-ERR fireweed stale_lease` (§3). In `objectlog/hybrid-strict` and `objectlog/hybrid-async`, the hot projection is current on the success path, so the claim/upsert race can be closed by the backend's own response barrier; stock `XREADGROUP` still carries no `request_id`, so convergence on the stock path rests on the fence + at-least-once + the `stale_lease` ack rejection, while library/native paths use `request_id` replay (§4). |
+| **Claims / delivery** (`XREADGROUP >`; cross-consumer `XCLAIM`) | **Cannot durably double-claim.** Atomic cells fence select+append together. Log-then-apply cells must not expose a tentative delivery: their configured response barrier must complete the authoritative append and the serving-projection visibility needed by the claim before success. If the append is fenced, no durable lease exists; a stale `XACK`/finalize returns `-ERR fireweed stale_lease`. Stock `XREADGROUP` carries no `request_id`, so the stock path relies on fencing plus at-least-once delivery, while library/native paths also use request replay (§4). |
 | **Pure reads** (`XLEN`, `XINFO`, `XPENDING`, `XRANGE`) | **Bounded-stale, never authoritative.** A read has no `append_batch` and is not epoch-fenced; a deposed owner that has not yet failed a renew MAY serve a read from its frozen local projection. Such reads are best-effort and bounded-stale by the lease/renew interval and any documented unrelated-operation apply budget. A client needing an authoritative read MUST reach the current owner (follow the redirect). The read guarantee is "bounded staleness," not "fresh-or-fenced"; a node MUST still redirect once it has learned it is not the owner. |
 
 ### Reassignment (drain) on the wire
@@ -162,11 +166,10 @@ Rules:
 - If the key collides with **claimed (leased, non-terminal)** work, the call returns
   `-ERR fireweed invalid` (no lifecycle transition on in-flight work). If it collides with **terminal**
   work, the call returns `-ERR fireweed terminal`. (Mapping pinned in TD-007 §2.3.)
-- On pure lagging-projection log-then-apply backends, replacement is unavailable and returns
-  `-ERR fireweed unavailable`.
-- On `objectlog/hybrid-strict` and `objectlog/hybrid-async`, replacement MAY be enabled only after
-  TD-004 proves deterministic apply-time re-validation with ack-after-apply. Until that proof lands,
-  they also return `-ERR fireweed unavailable`.
+- Pending replacement is required on all 15 supported cells. Each cell must perform deterministic
+  commit-time revalidation and satisfy its response barrier before returning success. A cell that returns
+  `-ERR fireweed unavailable` for this required method is not conformant and cannot be advertised as
+  supported.
 - Non-reserved field/value pairs are stored as structured item fields. `payload` is stored separately as
   the existing opaque payload slot. Claims and `FW.*` reads return both.
 
@@ -297,7 +300,7 @@ interface. The RESP launch contract is the stock worker hot path.
 | Operation | RESP stock | Rust library |
 |---|---:|---:|
 | Push append | pass (`XADD`) | pass |
-| Pending-item replacement | pass on atomic backends (`XADD` with `client_item_key`); pass on `objectlog/hybrid-strict` and `objectlog/hybrid-async` once TD-004 proves deterministic apply-time re-validation with ack-after-apply | pass |
+| Pending-item replacement | pass on all 15 cells (`XADD` with `client_item_key`), with deterministic commit-time revalidation and the cell's response barrier | pass |
 | Claim item, unfiltered | pass (`XREADGROUP >`) | pass |
 | Claim by identity (pending eligible ids) | pass (`XCLAIM` first-delivery disposition → API-001 `BatchClaimByItemIds`) | pass (`claim_by_item_ids`, full per-id outcomes) |
 | Claim filtered by group or metadata | library-only-intentional | pass |
@@ -330,10 +333,9 @@ Launch custom RESP commands are read-only and scoped to live item access.
 4. **Fenced `XACK`.** A stale lease returns `-ERR fireweed stale_lease`; it does not silently return `0`.
 5. **Superseded ids are explicit failures.** `XACK`/`XCLAIM` of a superseded id returns
    `-ERR fireweed superseded`.
-6. **Log-then-apply backends preserve the same durable queue contract through a response barrier.**
-   Pure lagging-projection profiles still return `-ERR fireweed unavailable` for pending-item
-   replacement; `objectlog/hybrid-strict` and `objectlog/hybrid-async` lift that ban only after they
-   prove deterministic apply-time re-validation with ack-after-apply in TD-004.
+6. **Log-then-apply cells preserve the same queue contract through a response barrier.** Pending-item
+   replacement and every other required method use deterministic commit-time revalidation; storage
+   class changes durability and latency boundaries, not method availability or client choreography.
 7. **`FW.H*` commands are fireweed live-item reads, not Redis hashes.** They emulate Redis hash read
    response shapes over fireweed's structured item fields. They do not create independent hash keys, and
    data disappears from the live view when the queue item completes, fails, is purged, or is superseded.
@@ -349,7 +351,20 @@ Conformance tests assert these exact error prefixes:
 | unsupported on backend durability class | `-ERR fireweed unavailable` |
 | terminal lifecycle state | `-ERR fireweed terminal` |
 | invalid command or lifecycle transition | `-ERR fireweed invalid` |
+| incompatible queue re-create (`QueueDefinitionConflict`) | `-ERR fireweed queue_conflict` |
+| change-record delivery requested without a Class A durable log (`ChangeRecordsRequireDurableLog`) | `-ERR fireweed change_records_require_durable_log` |
 | authorization failure | `-NOPERM` |
+
+`ChangeRecordsRequireDurableLog` is the sole new `EngineError`/RESP token introduced by the storage
+reconciliation. It is a startup-only configuration error and must be unreachable from a commit path.
+`QueueDefinitionConflict` retains its existing token rather than falling through to an internal error.
+
+`CommitRejection` remains an exhaustive semantic-class mirror of `EngineError`, not a promise of
+identical Rust payload shapes. In particular, the existing
+`EngineError::Backpressure { resource: &'static str }` to `CommitRejection::Backpressure(String)`
+normalization remains valid. `ChangeRecordsRequireDurableLog` appears in the durable mirror only so
+serde/mapping tables stay exhaustive; mapping fixtures may round-trip it, but production commit outcomes
+must never contain it. Generic token-table tests must prove the engine and RESP mappings agree.
 
 ## 8. Required Conformance Tests
 

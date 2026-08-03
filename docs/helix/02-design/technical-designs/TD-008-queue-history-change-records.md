@@ -7,6 +7,7 @@ ddx:
     - adr-fjord-embedded-change-log-consumer-surface
     - td-storage-architecture-backend-contracts
     - td-s3-object-log-sqlite-projection-mode
+  status: accepted
   review:
     self_hash: 1a69a5ebd1be38b7f17c3be7a1f1319dc6111581fc905fec2c7a894bb3b77bf0
     deps:
@@ -20,40 +21,59 @@ ddx:
 
 # TD-008: Queue history via change-record emission, plus longer terminal retention
 
-**Status**: Draft
+**Status**: Accepted for Class A durable-log cells; unavailable for Class B memory-log cells
 **Decision authority**: ADR-013 (log as single source of truth)
 **Cross-repo**: niflheim durable-ingest HTTP endpoint (consumer); cayce CONTRACT-013 uses the same
 ingest path for SES exhaust, so delivery history lands beside delivery exhaust; fjord, embedded in
 fireweed-server, as the Kafka-protocol change-log interface provider (see "Delivery interfaces" and
 ADR-014).
 
-> **Reviewed against ADR-014 revision (2026-07): no change to this design.** ADR-014 now specifies
+> **Reconciled with the 5×3 storage product (2026-08-03).** ADR-014 specifies
 > that fjord delivery is an **in-process** append to the embedded broker's Rust log (librdkafka
-> removed; the optional external-Kafka producer is pure-Rust `rskafka`). That is a delivery-mechanism
-> change only — the `ChangeRecord` shape, idempotency key, headers, per-queue ordering (CL-1..CL-8),
-> and the retention/emission-cursor frontier defined here are **unaffected**.
+> removed; the optional external-Kafka producer is pure-Rust `rskafka`). The record and delivery
+> invariants remain unchanged, but they apply only where a Class A log can reconstruct the tail.
 
 ## Scope
 
-fireweed emits **item-lifecycle change records** derived from the committed log — the change log. The
-first consumer binding is at-least-once delivery to niflheim's durable-ingest endpoint, default-on
-with per-queue opt-out; a Kafka-protocol consumer interface is a required second binding (see
+For Class A cells, Fireweed emits **item-lifecycle change records** derived from the committed durable
+log — the change log. The first consumer binding is at-least-once delivery to niflheim's durable-ingest
+endpoint, default-on with per-queue opt-out; a Kafka-protocol consumer interface is a required second binding (see
 "Delivery interfaces"). niflheim owns history and Delta projection. fireweed does **not** write
 Parquet/Delta. The terminal retention default rises so items linger long enough to (a) satisfy
 idempotency windows and (b) guarantee a terminal item is never reaped before its terminal change
 record is durably emitted.
 
+## Storage-class eligibility
+
+| Class | Cells | Change-record/history contract |
+|---|---|---|
+| **Class A** | `sqlite`, `postgres`, `filesystem`, or `s3` log × any public projection | Available when the deployment sink is enabled; the durable log tail and durable emission cursor are authoritative. |
+| **Class B** | `memory` log × `memory`, `sqlite`, or `postgres` projection | Unavailable. A surviving durable projection is not a reconstructible command log and cannot provide log-derived history, branch, read-as-of, or backfill. |
+
+`emit_change_records` is a per-queue opt-out only inside an eligible Class A deployment; it cannot grant
+the capability to Class B. Enabling a deployment change-record sink for a Class B cell fails during
+configuration validation, before any storage I/O, with
+`EngineError::ChangeRecordsRequireDurableLog`. Its exact RESP token is
+`-ERR fireweed change_records_require_durable_log`.
+
+This error is startup-only: it must never escape a mutation or appear in a production commit outcome.
+`CommitRejection::ChangeRecordsRequireDurableLog` exists only as a name-level exhaustive serde/mapping
+mirror. The generic mapping retains existing semantic normalizations, including
+`EngineError::Backpressure { .. }` to `CommitRejection::Backpressure(String)` and the existing
+`QueueDefinitionConflict` semantic class/token. Changing a queue from Class B to Class A starts an
+eligible history at the new durable-log frontier; it does not synthesize or claim a Class B backfill.
+
 ## Change-log requirements (normative)
 
 These hold for **every** delivery binding, current and future:
 
-- **CL-1 Completeness**: on every queue with `emit_change_records = true` (CL-7), every committed
+- **CL-1 Completeness**: on every Class A queue with `emit_change_records = true` (CL-7), every committed
   mutating command produces its change records ("Which transitions emit"); no acknowledged transition
   on such a queue may be absent from the change log. Opting out (CL-7) disables **delivery** for that
   queue entirely — no records are produced and no emission cursor advances for it; the committed
-  command log itself (ADR-013, mandatory) remains complete, so opting back in guarantees records only
-  from the opt-in position forward, not retroactively. CL-1 is only possible because the durable
-  command log is mandatory — the change log is a pure derivation of the committed log tail.
+  Class A command log remains complete, so opting back in guarantees records only from the opt-in
+  position forward, not retroactively. CL-1 is possible because that class has a durable command log;
+  Class B makes no completeness or history claim.
 - **CL-2 Off-commit-path**: emission never blocks, observes, or fails the commit path. Bounded,
   telemetry-surfaced lag is the accepted cost (`emission_lag_commands`,
   `emission_oldest_unemitted_age_ms`).
@@ -61,15 +81,15 @@ These hold for **every** delivery binding, current and future:
   backend_epoch, sequence)`; consumers dedupe. Exactly-once is never claimed.
 - **CL-4 Per-queue order**: records for one queue are delivered in `CommandPosition` order; no
   cross-queue ordering exists or is implied.
-- **CL-5 Durable resumability**: the emission cursor is durable per queue; crash/failover re-emits
+- **CL-5 Durable resumability**: on Class A, the emission cursor is durable per queue; crash/failover re-emits
   from the last durable cursor (never skips), and post-failover re-emission under a new epoch still
   dedupes via CL-3.
-- **CL-6 Reap/emission frontier coupling**: on a queue with `emit_change_records = true`, a terminal
+- **CL-6 Reap/emission frontier coupling**: on an eligible Class A queue with `emit_change_records = true`, a terminal
   item may be reaped only when **both** hold: (a) its retention time has elapsed
   (`now >= terminal_at + terminal_retention_ms`), and (b) the durable `emission_cursor` is at or past
   the item's terminal record `CommandPosition`. On an opted-out queue only (a) applies.
-- **CL-7 Per-queue opt-out**: `emit_change_records` (default `true`; branches default `false`,
-  TD-009).
+- **CL-7 Per-queue opt-out**: within Class A, `emit_change_records` defaults to `true`; branches default
+  to `false` (TD-009). In Class B the field is inert because deployment delivery must be disabled.
 - **CL-8 Tenant isolation**: a consumer binding must be scopeable to `(tenant_id, queue_id)` and
   must not leak other tenants' records (ADR-002 deny-by-default applies to the change log too).
 
@@ -78,8 +98,8 @@ These hold for **every** delivery binding, current and future:
 **Not** on the commit path. `commit_locked_batch` (`crates/fireweed-engine/src/compose.rs:1346-1366`)
 never blocks on, observes, or fails because of emission. Emission is a **committed-log tail consumer
 with its own durable cursor**, structurally identical to recovery replay (`compose.rs:1207` reads
-`LogStore::read_from`) and the hybrid-async SQLite apply worker (TD-004 §"Ordered batching and SQLite
-high-water").
+`LogStore::read_from`) and an `AsyncProjection` apply worker (TD-004 §"Ordered batching and SQLite
+high-water"). This seam is not constructed for Class B.
 
 New engine port, minimal and runtime-free like the group-commit facet:
 
@@ -105,8 +125,9 @@ existing tokio `net` stack. No heavy SDK.
 
 ## Which transitions emit
 
-Every mutating `QueueCommand` is already in the log (`crates/fireweed-engine/src/command.rs:49-60`), so
-the tail consumer sees all of them. Emit one `ChangeRecord` per affected item for: `Push` (→Pending),
+Every mutating `QueueCommand` in an eligible Class A cell is in the durable log
+(`crates/fireweed-engine/src/command.rs:49-60`), so the tail consumer sees all of them. Emit one
+`ChangeRecord` per affected item for: `Push` (→Pending),
 `Claim` (→Leased), `RenewLease`, `Finalize` (→Terminal complete/fail — the high-value record for cayce
 delivery history), `LeaseExpired`, retry/release/rearm (→Pending), `UpdateFields`, `PurgeItems`
 (tombstone). Queue-scoped `SetGates`/`PauseQueue`/`ResumeQueue` emit a queue-level record with a null
@@ -136,7 +157,7 @@ that references the same logical work still dedupes correctly.
 
 ## Delivery interfaces
 
-The change log has one seam (`ChangeRecordSink` over the committed-log tail) and multiple consumer
+The Class A change log has one seam (`ChangeRecordSink` over the committed-log tail) and multiple consumer
 bindings. Two are in contract:
 
 1. **niflheim durable-ingest (HTTP push)** — the current binding, specified throughout this TD: a
@@ -146,7 +167,7 @@ bindings. Two are in contract:
    Kafka clients, and **fireweed must own the surface**. ADR-014 settles the provider/shape choice:
    **fjord, embedded** in `fireweed-server` behind the delivery seam, serves the change topics
    (metadata, fetch, consumer groups, committed offsets, fan-out) so the surface exists in every
-   deployment without operating a second system. Each `(tenant_id, queue_id)` change stream is a
+   eligible Class A deployment without operating a second system. Each `(tenant_id, queue_id)` change stream is a
    single-partition topic so per-queue order is preserved (CL-4). The normative record contract
    (record key = `"{item_id}:{backend_epoch}:{sequence}"` — unique across fan-out; `fireweed-*` headers;
    `ChangeRecord` payload; consumer dedupe-window and offset-commit obligations) is pinned in
@@ -171,7 +192,7 @@ bindings. Two are in contract:
 - Sink errors advance nothing; retry next tick with backoff. Emission lag is a bounded,
   telemetry-surfaced metric (`emission_lag_commands`, `emission_oldest_unemitted_age_ms`), modeled on
   the TD-004 async-apply debt metrics.
-- **Default-on with opt-out**: `emit_change_records: bool` (default `true`) on `QueueDefinition`
+- **Default-on with opt-out inside Class A**: `emit_change_records: bool` (default `true`) on `QueueDefinition`
   (`crates/fireweed-core/src/domain.rs:629-632` region, `#[serde(default)]` for back-compat like
   `terminal_retention_ms`). Branches default to `false` (TD-009).
 
@@ -185,12 +206,13 @@ linearly (in-RAM `ProjectionData` for the log-replay family; table+index rows fo
 niflheim owning long-term history, fireweed needs only a short operational tail. Per-queue override
 remains.
 
-**Reap/emission frontier coupling (the subtlest rule in this TD)**: on a queue with
+**Reap/emission frontier coupling (the subtlest rule in this TD)**: on an eligible Class A queue with
 `emit_change_records = true`, a terminal item MUST NOT be reaped until **both** conditions hold —
 retention elapsed (`now >= terminal_at + terminal_retention_ms`) **and** the durable `emission_cursor`
 at or past the item's terminal record `CommandPosition` (CL-6). Retention elapsing never overrides the
 emission condition. Otherwise a crash between reap and emit silently drops the terminal transition
-from history. On an opted-out queue only the retention condition applies.
+from history. On an opted-out Class A queue and on every Class B queue only the retention condition
+applies; neither path claims a change-record history.
 
 ## Risks
 
@@ -206,8 +228,8 @@ from history. On an opted-out queue only the retention condition applies.
 ## Kafka interface decision
 
 The change-log Kafka surface is provided by **fjord, embedded in fireweed-server**
-(product-owner decision 2026-07-06): fireweed owns the interface, so the surface
-exists in every deployment. The load-bearing rules are the boundary invariants
+(product-owner decision 2026-07-06): Fireweed owns the interface, so the surface
+exists in every eligible Class A deployment. The load-bearing rules are the boundary invariants
 (feed-forward only, never on the commit path, separate storage namespace,
 swappable at the seam with fjord idling when an external Kafka is used), the
 offset-to-`CommandPosition` mapping, the pinned per-record consumer contract,

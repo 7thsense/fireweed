@@ -48,6 +48,11 @@ internal, experimental `fireweed-turso` adapter and its focused compatibility te
 - No `objectlog`, `inmemory`, `turso`, `hybrid`, or combined-profile alias is supported.
 - Public selection of `turso` must return a configuration error in both feature-disabled and
   feature-enabled builds. Feature enablement exposes internal tests, not a public positive path.
+- The internal adapter consumes the provider-neutral `EngineError` and `CommitRejection` vocabulary; it
+  defines no Turso-specific public error, capability, or RESP token.
+- While legacy programmatic projection variants remain, enabling change-record delivery on a Turso
+  composition fails startup as retired legacy configuration; it does not create a public Turso history
+  surface or reuse the Class B durability error.
 - Historical `object-log + Turso` and `objectlog/turso` wording below describes design lineage only where
   it is not explicitly replaced by this disposition.
 
@@ -177,7 +182,7 @@ upgrade refuses a newer/unknown schema until the compatibility probe and migrati
 | `AsyncComposedBackend` / segmented backend | `SeparateReplayCommit` + async storage axes | owned dispatched task | typed commands, positions, expected epoch, replay outcome |
 | `fireweed-turso` | Turso 0.7 local database | async driver | relational schema, transactions, queries |
 | object log | Turso projection | ordered replay/apply | sealed committed batches |
-| server config | feature-gated composition | validated construction | projection kind and local path |
+| internal test config | feature-gated composition | validated construction | adapter path and test fixture |
 
 ### External Dependencies
 
