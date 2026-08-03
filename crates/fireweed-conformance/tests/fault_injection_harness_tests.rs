@@ -16,11 +16,11 @@ use fireweed_conformance::fault::{CutPoint, durable_command_count, inject_commit
 use fireweed_conformance::{envelope, item, qdef, qkey, shard, ts};
 use fireweed_engine::{
     AsyncLogReplayBackend, Backend, CommandPosition, ControlPlaneStore, DurabilityClass,
-    EngineError, EngineResult, LogStore, ProjectionRead, ProjectionSnapshot, PushCommand,
-    QueueCommand, RawCommitFault, RawCommitOutcome, RawCommitRequest,
+    EngineError, EngineResult, ProjectionRead, PushCommand, QueueCommand, RawCommitFault,
+    RawCommitOutcome, RawCommitRequest,
 };
 use fireweed_objectlog::{
-    AsyncObjectLogHybridBackend, FlushConfig, HybridProductConfig, flush_config_from_segment,
+    AsyncObjectLogHybridBackend, HybridProductConfig, flush_config_from_segment,
 };
 use tokio::sync::{Notify, oneshot};
 
@@ -332,7 +332,7 @@ async fn after_append_before_apply_replays_once_objectlog() {
     assert_after_append_replays_once(&objectlog_factory()).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn after_append_before_apply_replays_once_objectlog_sqlite() {
     assert_after_append_replays_once(&objectlog_sqlite_factory()).await;
 }
@@ -417,8 +417,10 @@ where
         .push_with_request_id(&shard(), rid, body, ts(2), None)
         .await
         .unwrap();
+    assert!(committed.is_fresh(), "the original request commits freshly");
+    assert!(replay.is_replayed(), "the retry is identified as a replay");
     assert_eq!(
-        replay, committed,
+        replay.item_ids, committed.item_ids,
         "lost-response retry replays the committed ids"
     );
     assert_eq!(
@@ -428,7 +430,7 @@ where
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lost_response_replays_once_objectlog_sqlite() {
     assert_lost_response_replays_once(&objectlog_sqlite_factory()).await;
 }

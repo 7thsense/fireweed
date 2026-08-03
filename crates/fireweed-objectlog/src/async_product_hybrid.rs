@@ -1548,6 +1548,17 @@ impl fireweed_engine::HistoricalProjectionRead for AsyncObjectLogHybridBackend {
     }
 }
 
+impl fireweed_engine::LogRead for AsyncObjectLogHybridBackend {
+    fn read_from(
+        &self,
+        shard: &QueueKey,
+        from: Option<fireweed_engine::CommandPosition>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::CommandPage>> + Send {
+        crate::request_id_probe::read_from_log(self.log.as_ref(), shard.clone(), from, limit)
+    }
+}
+
 impl fireweed_engine::SnapshotStore for AsyncObjectLogHybridBackend {
     fn write_snapshot(
         &self,
