@@ -123,6 +123,48 @@
           "P2f"
         ],
         "detail": "early_success=true",
+        "id": "cf4cbf02b081ba86811a",
+        "identity": "\"POSTGRES ASYNC PROJECTION SKIPPED (barriers/catch-up) \u2014 set FIREWEED_PG_TEST_URL\"",
+        "line": 1730,
+        "owner": "P10pp",
+        "path": "crates/fireweed-postgres/src/async_objectlog_postgres.rs",
+        "status": "debt"
+      },
+      {
+        "category": "harness_skip",
+        "dependency_chain": [
+          "P10pp",
+          "P2f"
+        ],
+        "detail": "early_success=true",
+        "id": "0ff42b7af0646c1b5229",
+        "identity": "\"POSTGRES ASYNC PROJECTION SKIPPED (bounds/poison) \u2014 set FIREWEED_PG_TEST_URL\"",
+        "line": 1790,
+        "owner": "P10pp",
+        "path": "crates/fireweed-postgres/src/async_objectlog_postgres.rs",
+        "status": "debt"
+      },
+      {
+        "category": "harness_skip",
+        "dependency_chain": [
+          "P10pp",
+          "P2f"
+        ],
+        "detail": "early_success=true",
+        "id": "bb5b11772c4cfff28f20",
+        "identity": "eprintln!(\"POSTGRES ASYNC PROJECTION SKIPPED (reopen) \u2014 set FIREWEED_PG_TEST_URL\");",
+        "line": 1889,
+        "owner": "P10pp",
+        "path": "crates/fireweed-postgres/src/async_objectlog_postgres.rs",
+        "status": "debt"
+      },
+      {
+        "category": "harness_skip",
+        "dependency_chain": [
+          "P10pp",
+          "P2f"
+        ],
+        "detail": "early_success=true",
         "id": "0e4c3605a2dfbcdaabb6",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (projection_store_exposes_indexes_and_exact_discovery) \u2014 set FIREWEED_PG_TEST_URL\"",
         "line": 11627,
@@ -5293,9 +5335,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "5d9f74e89524293da80c",
+        "id": "3e9601582c1aad75efcc",
         "identity": "std::future::ready(Err(EngineError::Unavailable))",
-        "line": 534,
+        "line": 752,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/async_objectlog_postgres.rs",
         "status": "debt"
@@ -5307,9 +5349,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "25332b0e42f15bf58b11",
+        "id": "9d8a1f09011080e17b46",
         "identity": "// LibBackend / facade ports: defaults where available; explicit Unavailable for required methods.",
-        "line": 747,
+        "line": 915,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/async_objectlog_postgres.rs",
         "status": "discovery_negative"
@@ -5321,9 +5363,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "873f853eb9dbc46dd4f4",
+        "id": "e351e5652dcde09b597c",
         "identity": "std::future::ready(Err(EngineError::Unavailable))",
-        "line": 760,
+        "line": 928,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/async_objectlog_postgres.rs",
         "status": "debt"
@@ -5335,9 +5377,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "04be12d6dadc5b4d2ec3",
+        "id": "79bd10a1ed4b4ca1811d",
         "identity": "std::future::ready(Err(EngineError::Unavailable))",
-        "line": 981,
+        "line": 1144,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/async_objectlog_postgres.rs",
         "status": "debt"
@@ -5349,9 +5391,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "9f57adacf5a7bf0a572f",
+        "id": "8b65147b63a48772f4cc",
         "identity": "std::future::ready(Err(EngineError::Unavailable))",
-        "line": 990,
+        "line": 1153,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/async_objectlog_postgres.rs",
         "status": "debt"
@@ -5363,9 +5405,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "709a87caa901fc6a3708",
+        "id": "e9a8900463049ef0d70d",
         "identity": "std::future::ready(Err(EngineError::Unavailable))",
-        "line": 1320,
+        "line": 1491,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/async_objectlog_postgres.rs",
         "status": "debt"
@@ -5377,9 +5419,51 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "1602043fb7a8d42f6012",
+        "id": "1a8cf402b29d17baf7ab",
         "identity": "std::future::ready(Err(EngineError::Unavailable))",
-        "line": 1332,
+        "line": 1503,
+        "owner": "P10pp",
+        "path": "crates/fireweed-postgres/src/async_objectlog_postgres.rs",
+        "status": "debt"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10pp",
+          "P2f"
+        ],
+        "detail": "early_success=true",
+        "id": "8e1fd31d023d5749fa3e",
+        "identity": "\"POSTGRES ASYNC PROJECTION SKIPPED (barriers/catch-up) \u2014 set FIREWEED_PG_TEST_URL\"",
+        "line": 1730,
+        "owner": "P10pp",
+        "path": "crates/fireweed-postgres/src/async_objectlog_postgres.rs",
+        "status": "debt"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10pp",
+          "P2f"
+        ],
+        "detail": "early_success=true",
+        "id": "4fcb68f33ccf21e6d60d",
+        "identity": "\"POSTGRES ASYNC PROJECTION SKIPPED (bounds/poison) \u2014 set FIREWEED_PG_TEST_URL\"",
+        "line": 1790,
+        "owner": "P10pp",
+        "path": "crates/fireweed-postgres/src/async_objectlog_postgres.rs",
+        "status": "debt"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10pp",
+          "P2f"
+        ],
+        "detail": "early_success=true",
+        "id": "a41b983d6242aba487bb",
+        "identity": "eprintln!(\"POSTGRES ASYNC PROJECTION SKIPPED (reopen) \u2014 set FIREWEED_PG_TEST_URL\");",
+        "line": 1889,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/async_objectlog_postgres.rs",
         "status": "debt"
@@ -44885,6 +44969,118 @@
         "-p",
         "fireweed-postgres",
         "--lib",
+        "async_objectlog_postgres::async_projection::async_projection_all_five_bounds_are_required_without_a_live_fixture",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_objectlog_postgres::async_projection::async_projection_all_five_bounds_are_required_without_a_live_fixture",
+      "id": "Cargo.toml::fireweed-postgres::fireweed_postgres::test::async_objectlog_postgres::async_projection::async_projection_all_five_bounds_are_required_without_a_live_fixture",
+      "listed_kind": "test",
+      "package": "fireweed-postgres",
+      "target": "fireweed_postgres",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-postgres",
+        "--lib",
+        "async_objectlog_postgres::async_projection::async_projection_both_barriers_and_ordered_watermark_catch_up",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_objectlog_postgres::async_projection::async_projection_both_barriers_and_ordered_watermark_catch_up",
+      "id": "Cargo.toml::fireweed-postgres::fireweed_postgres::test::async_objectlog_postgres::async_projection::async_projection_both_barriers_and_ordered_watermark_catch_up",
+      "listed_kind": "test",
+      "package": "fireweed-postgres",
+      "target": "fireweed_postgres",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-postgres",
+        "--lib",
+        "async_objectlog_postgres::async_projection::async_projection_common_bounds_and_poison_fail_closed",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_objectlog_postgres::async_projection::async_projection_common_bounds_and_poison_fail_closed",
+      "id": "Cargo.toml::fireweed-postgres::fireweed_postgres::test::async_objectlog_postgres::async_projection::async_projection_common_bounds_and_poison_fail_closed",
+      "listed_kind": "test",
+      "package": "fireweed-postgres",
+      "target": "fireweed_postgres",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-postgres",
+        "--lib",
+        "async_objectlog_postgres::async_projection::async_projection_reopen_resumes_transactional_cursor_without_duplicates",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_objectlog_postgres::async_projection::async_projection_reopen_resumes_transactional_cursor_without_duplicates",
+      "id": "Cargo.toml::fireweed-postgres::fireweed_postgres::test::async_objectlog_postgres::async_projection::async_projection_reopen_resumes_transactional_cursor_without_duplicates",
+      "listed_kind": "test",
+      "package": "fireweed-postgres",
+      "target": "fireweed_postgres",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-postgres",
+        "--lib",
         "async_projection::tests::accepted_operation_survives_reply_cancellation",
         "--",
         "--exact"
@@ -82200,7 +82396,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "bb519d7a11619403a05d73e2896ed42c458f0dc4fd76bb40efc06c4c47eeb271",
+  "source_inventory_sha256": "58febf95581cb51175ff78cfd0fd73dbb908ea2fb977d86a0efadc029e56c25f",
   "workspaces": [
     {
       "listing_error_sha256": "",

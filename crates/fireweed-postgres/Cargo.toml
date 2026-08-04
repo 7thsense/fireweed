@@ -39,6 +39,7 @@ default = []
 tls = ["dep:native-tls", "dep:postgres-native-tls"]
 
 [dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "time"] }
 # The library facade, driven as a COORDINATED owner over the postgres backend + control plane for the B5
 # durable multi-instance competition test. `default-features = false` so we don't pull the other adapters.
 fireweed = { path = "../fireweed", default-features = false, features = ["postgres"] }
