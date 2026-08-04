@@ -129,3 +129,7 @@ path = "tests/request_id_idempotency.rs"
 [[test]]
 name = "storage_matrix_t0_t2"
 path = "tests/storage_matrix_t0_t2.rs"
+
+[[test]]
+name = "p3i_async_selection_ledger"
+path = "tests/p3i_async_selection_ledger.rs"

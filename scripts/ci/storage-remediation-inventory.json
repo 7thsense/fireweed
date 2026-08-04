@@ -1,5 +1,5 @@
 {
-  "authority_manifest_sha256": "17a2a31f4078a8c46f4b59e6730ea4b485d85c977c503b2733b11d74d9991384",
+  "authority_manifest_sha256": "de79922428babfed3fa969b8fb64e5c94f3a497c7e6a0bb29009b4f0302d0dca",
   "debt_registries": {
     "cargo_machete_exceptions": [
       {
@@ -1896,6 +1896,104 @@
         "line": 677,
         "owner": "P10pb",
         "path": "crates/fireweed-bench/tests/queue_density_single_node_tests.rs",
+        "status": "debt"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10pc",
+          "P2f"
+        ],
+        "detail": "early_success=false",
+        "id": "f8352008fdedad9fc57c",
+        "identity": "// These seams are also unavailable on the async SQLite reference. Qualification requires the",
+        "line": 132,
+        "owner": "P10pc",
+        "path": "crates/fireweed-conformance/src/async_projection.rs",
+        "status": "discovery_negative"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10pc",
+          "P2f"
+        ],
+        "detail": "early_success=false",
+        "id": "10b1092aa63d60132777",
+        "identity": "Err(EngineError::Unavailable)",
+        "line": 144,
+        "owner": "P10pc",
+        "path": "crates/fireweed-conformance/src/async_projection.rs",
+        "status": "debt"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10pc",
+          "P2f"
+        ],
+        "detail": "early_success=false",
+        "id": "1ecbb71bed483e85dde6",
+        "identity": "Err(EngineError::Unavailable)",
+        "line": 148,
+        "owner": "P10pc",
+        "path": "crates/fireweed-conformance/src/async_projection.rs",
+        "status": "debt"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10pc",
+          "P2f"
+        ],
+        "detail": "early_success=false",
+        "id": "927253c7145d6c67a510",
+        "identity": "Err(EngineError::Unavailable)",
+        "line": 152,
+        "owner": "P10pc",
+        "path": "crates/fireweed-conformance/src/async_projection.rs",
+        "status": "debt"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10pc",
+          "P2f"
+        ],
+        "detail": "early_success=false",
+        "id": "a04886c0dd912cb9341d",
+        "identity": "Err(EngineError::Unavailable)",
+        "line": 156,
+        "owner": "P10pc",
+        "path": "crates/fireweed-conformance/src/async_projection.rs",
+        "status": "debt"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10pc",
+          "P2f"
+        ],
+        "detail": "early_success=false",
+        "id": "9087a2b6c33b4b5f7607",
+        "identity": "Err(EngineError::Unavailable)",
+        "line": 165,
+        "owner": "P10pc",
+        "path": "crates/fireweed-conformance/src/async_projection.rs",
+        "status": "debt"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10pc",
+          "P2f"
+        ],
+        "detail": "early_success=false",
+        "id": "a2060c73b4902717a011",
+        "identity": "Err(EngineError::Unavailable)",
+        "line": 175,
+        "owner": "P10pc",
+        "path": "crates/fireweed-conformance/src/async_projection.rs",
         "status": "debt"
       },
       {
@@ -9409,9 +9507,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "8cdf34f474a75e19e00a",
+        "id": "38765f52aab1e2a3f0e8",
         "identity": "return Err(EngineError::Unavailable);",
-        "line": 2168,
+        "line": 2582,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-turso/src/projection.rs",
         "status": "debt"
@@ -9423,9 +9521,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "61c608410cb5836419a0",
+        "id": "e0257d06f346489553d8",
         "identity": "return Err(EngineError::Unavailable);",
-        "line": 3943,
+        "line": 4408,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-turso/src/projection.rs",
         "status": "discovery_negative"
@@ -18350,6 +18448,24 @@
         "test_id": "public_s3_sqlite_delete_and_rebuild"
       },
       {
+        "baseline": false,
+        "boundary_kind": "public_external",
+        "boundary_owners": [
+          "P7"
+        ],
+        "final_id": "Cargo.toml::fireweed::p3i_async_selection_ledger::test::p3i_non_object_async_selection_ledger",
+        "key": "p3i_async_selection_ledger.rs::p3i_non_object_async_selection_ledger",
+        "observed_count": 1,
+        "observed_ids": [
+          "Cargo.toml::fireweed::p3i_async_selection_ledger::test::p3i_non_object_async_selection_ledger"
+        ],
+        "old_id": "Cargo.toml::fireweed::p3i_async_selection_ledger::test::p3i_non_object_async_selection_ledger",
+        "private_refs": [],
+        "source": "p3i_async_selection_ledger.rs",
+        "temporary_id": "Cargo.toml::fireweed::p3i_async_selection_ledger::test::p3i_non_object_async_selection_ledger",
+        "test_id": "p3i_non_object_async_selection_ledger"
+      },
+      {
         "baseline": true,
         "boundary_kind": "public_external",
         "boundary_owners": [
@@ -20178,7 +20294,7 @@
     "cargo_status": "listed",
     "errors": [],
     "generated_by": "scripts/ci/fireweed_test_placement.py",
-    "input_sha256": "126441595a3835ebf0dbc7c3d68e27a541ec1b5c857f4b2faf778675a1a1e93a",
+    "input_sha256": "e0fefebfb4d1f2555dd97ab34263cff52926feb0f620cf988cbfc0b6351ad121",
     "private_surface": [
       {
         "declaration_kind": "fn",
@@ -24207,6 +24323,27 @@
           "fireweed",
           "--all-features",
           "--test",
+          "p3i_async_selection_ledger",
+          "p3i_non_object_async_selection_ledger",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::p3i_async_selection_ledger::test::p3i_non_object_async_selection_ledger",
+        "target": "p3i_async_selection_ledger",
+        "test_id": "p3i_non_object_async_selection_ledger"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.92.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--test",
           "postgres_constructors",
           "open_postgres_coordinated_builds_a_working_owner",
           "--",
@@ -25294,6 +25431,24 @@
         ],
         "private_refs": [],
         "source": "crates/fireweed/tests/objectlog_postgres_composition.rs"
+      },
+      {
+        "exists": true,
+        "listed_test_count": 1,
+        "listed_test_ids": [
+          "Cargo.toml::fireweed::p3i_async_selection_ledger::test::p3i_non_object_async_selection_ledger"
+        ],
+        "logical_source": "p3i_async_selection_ledger.rs",
+        "placement": "external",
+        "placement_count": 1,
+        "placements": [
+          {
+            "kind": "external",
+            "target": "p3i_async_selection_ledger"
+          }
+        ],
+        "private_refs": [],
+        "source": "crates/fireweed/tests/p3i_async_selection_ledger.rs"
       },
       {
         "exists": true,
@@ -26739,13 +26894,13 @@
         "-p",
         "fireweed-conformance",
         "--lib",
-        "matrix_classes::tests::matrix_has_exactly_fifteen_cells",
+        "matrix_classes::tests::matrix_has_exactly_twenty_cells",
         "--",
         "--exact"
       ],
       "expected_ran": 1,
-      "harness_id": "matrix_classes::tests::matrix_has_exactly_fifteen_cells",
-      "id": "Cargo.toml::fireweed-conformance::fireweed_conformance::test::matrix_classes::tests::matrix_has_exactly_fifteen_cells",
+      "harness_id": "matrix_classes::tests::matrix_has_exactly_twenty_cells",
+      "id": "Cargo.toml::fireweed-conformance::fireweed_conformance::test::matrix_classes::tests::matrix_has_exactly_twenty_cells",
       "listed_kind": "test",
       "package": "fireweed-conformance",
       "target": "fireweed_conformance",
@@ -79365,6 +79520,35 @@
         "-p",
         "fireweed",
         "--test",
+        "p3i_async_selection_ledger",
+        "p3i_non_object_async_selection_ledger",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "p3i_non_object_async_selection_ledger",
+      "id": "Cargo.toml::fireweed::p3i_async_selection_ledger::test::p3i_non_object_async_selection_ledger",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "p3i_async_selection_ledger",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--test",
         "postgres_constructors",
         "open_postgres_coordinated_builds_a_working_owner",
         "--",
@@ -80938,7 +81122,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "84659703bc226edb607faa74837745b600dc8085d6b1e52f46e8d9e8a83c8331",
+  "source_inventory_sha256": "8c582d1e89a20ab956c37a168d6e7324b232f1a9aea00536f3c0c2a4d06a8fad",
   "workspaces": [
     {
       "listing_error_sha256": "",
