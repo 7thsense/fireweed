@@ -2343,53 +2343,23 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             )
             .await
         }
-        (LogSpec::ObjectLog(spec), ProjectionSpec::InMemory) => {
-            // Program A: crates.io object-log LogEngine × in-memory projection (async composition).
-            // LogEngine owns group-commit flush; no segmented flusher task.
+        (
+            LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem {
+                root,
+                segment_config,
+            }),
+            ProjectionSpec::InMemory,
+        ) => {
+            // Canonical filesystem object-log × in-memory projection (async composition).
             let _ = (
                 objectlog_byte_budget,
                 config_objectlog_queue_limit,
                 debug_segments,
             );
-            let segment = spec.segment_config();
-            let flush = fireweed_objectlog::flush_config_from_segment(
-                segment.target_bytes,
-                segment.max_latency_ms,
-            );
-            let backend = match spec {
-                ObjectLogSpec::LocalFilesystem { root, .. } => {
-                    fireweed_objectlog::AsyncObjectLogMemoryBackend::open_local_with_node_id(
-                        root, flush, node_id,
-                    )
-                    .await?
-                }
-                ObjectLogSpec::S3 {
-                    endpoint,
-                    bucket,
-                    region,
-                    credentials:
-                        S3CredentialSource::Static {
-                            access_key_id,
-                            secret_access_key,
-                        },
-                    ..
-                } => {
-                    let log = fireweed_objectlog::ObjectLogEngineStore::open_s3(
-                        &endpoint,
-                        &region,
-                        &bucket,
-                        &access_key_id,
-                        &secret_access_key,
-                        flush,
-                    )
-                    .await?;
-                    fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store(log, node_id)
-                        .await?
-                }
-            };
-            let backend = Arc::new(backend);
-            run_owned(
-                backend,
+            let backend =
+                open_objectlog_filesystem_memory_backend(root, segment_config, node_id).await?;
+            finalize_objectlog_async_owned(
+                Arc::new(backend),
                 control_plane,
                 advertise_addr.as_deref(),
                 owner_id.clone(),
@@ -2400,8 +2370,57 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             )
             .await
         }
-        (LogSpec::ObjectLog(spec), ProjectionSpec::Sqlite { path }) => {
-            // Program A: LogEngine × durable sqlite projection (async composition).
+        (
+            LogSpec::ObjectLog(ObjectLogSpec::S3 {
+                endpoint,
+                bucket,
+                region,
+                credentials:
+                    S3CredentialSource::Static {
+                        access_key_id,
+                        secret_access_key,
+                    },
+                segment_config,
+                ..
+            }),
+            ProjectionSpec::InMemory,
+        ) => {
+            // Canonical S3 object-log × in-memory projection (async composition).
+            let _ = (
+                objectlog_byte_budget,
+                config_objectlog_queue_limit,
+                debug_segments,
+            );
+            let backend = open_objectlog_s3_memory_backend(
+                endpoint,
+                region,
+                bucket,
+                access_key_id,
+                secret_access_key,
+                segment_config,
+                node_id,
+            )
+            .await?;
+            finalize_objectlog_async_owned(
+                Arc::new(backend),
+                control_plane,
+                advertise_addr.as_deref(),
+                owner_id.clone(),
+                clock,
+                &listen,
+                interval,
+                &queues,
+            )
+            .await
+        }
+        (
+            LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem {
+                root,
+                segment_config,
+            }),
+            ProjectionSpec::Sqlite { path },
+        ) => {
+            // Canonical filesystem object-log × durable sqlite projection (async composition).
             let _ = (
                 objectlog_byte_budget,
                 config_objectlog_queue_limit,
@@ -2412,44 +2431,58 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 .into_os_string()
                 .into_string()
                 .map_err(|_| EngineError::Storage("non-utf8 path".into()))?;
-            let segment = spec.segment_config();
-            let flush = fireweed_objectlog::flush_config_from_segment(
-                segment.target_bytes,
-                segment.max_latency_ms,
+            let backend =
+                open_objectlog_filesystem_sqlite_backend(root, &p, segment_config, node_id).await?;
+            finalize_objectlog_async_owned(
+                Arc::new(backend),
+                control_plane,
+                advertise_addr.as_deref(),
+                owner_id.clone(),
+                clock,
+                &listen,
+                interval,
+                &queues,
+            )
+            .await
+        }
+        (
+            LogSpec::ObjectLog(ObjectLogSpec::S3 {
+                endpoint,
+                bucket,
+                region,
+                credentials:
+                    S3CredentialSource::Static {
+                        access_key_id,
+                        secret_access_key,
+                    },
+                segment_config,
+                ..
+            }),
+            ProjectionSpec::Sqlite { path },
+        ) => {
+            // Canonical S3 object-log × durable sqlite projection (async composition).
+            let _ = (
+                objectlog_byte_budget,
+                config_objectlog_queue_limit,
+                debug_segments,
+                recovery_max_tail,
             );
-            let backend = match spec {
-                ObjectLogSpec::LocalFilesystem { root, .. } => {
-                    fireweed_objectlog::AsyncObjectLogSqliteBackend::open(root, &p, flush, node_id)
-                        .await?
-                }
-                ObjectLogSpec::S3 {
-                    endpoint,
-                    bucket,
-                    region,
-                    credentials:
-                        S3CredentialSource::Static {
-                            access_key_id,
-                            secret_access_key,
-                        },
-                    ..
-                } => {
-                    let log = fireweed_objectlog::ObjectLogEngineStore::open_s3(
-                        &endpoint,
-                        &region,
-                        &bucket,
-                        &access_key_id,
-                        &secret_access_key,
-                        flush,
-                    )
-                    .await?;
-                    let projection = fireweed_sqlite::SqliteProjectionStore::open(&p)?;
-                    fireweed_objectlog::AsyncObjectLogSqliteBackend::from_log_and_projection(
-                        log, projection, node_id,
-                    )
-                    .await?
-                }
-            };
-            run_owned(
+            let p = path
+                .into_os_string()
+                .into_string()
+                .map_err(|_| EngineError::Storage("non-utf8 path".into()))?;
+            let backend = open_objectlog_s3_sqlite_backend(
+                endpoint,
+                region,
+                bucket,
+                access_key_id,
+                secret_access_key,
+                &p,
+                segment_config,
+                node_id,
+            )
+            .await?;
+            finalize_objectlog_async_owned(
                 Arc::new(backend),
                 control_plane,
                 advertise_addr.as_deref(),
@@ -2622,21 +2655,73 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             Ok(server)
         }
         #[cfg(feature = "postgres")]
-        (LogSpec::ObjectLog(spec), ProjectionSpec::Postgres { url }) => {
-            // Class A: filesystem|s3 LogEngine × durable Postgres projection (async product).
-            // Sync Postgres client work is confined inside projection applies; open uses spawn_blocking
-            // for the connect half via the product factory. LogEngine owns flush (no segmented flusher).
+        (
+            LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem {
+                root,
+                segment_config,
+            }),
+            ProjectionSpec::Postgres { url },
+        ) => {
+            // Canonical filesystem object-log × durable Postgres projection (async product).
+            // Sync Postgres client work is confined inside projection applies. LogEngine owns flush.
             let _ = (
                 objectlog_byte_budget,
                 config_objectlog_queue_limit,
                 recovery_max_tail,
                 debug_segments,
             );
-            let backend = open_objectlog_postgres_backend(spec, &url, node_id).await?;
-            let (backend, lifecycle) = blocking_backend(backend);
-            run_owned_with_blocking_lifecycle(
+            let backend =
+                open_objectlog_filesystem_postgres_backend(root, &url, segment_config, node_id)
+                    .await?;
+            finalize_objectlog_blocking_owned(
                 backend,
-                lifecycle,
+                control_plane,
+                advertise_addr.as_deref(),
+                owner_id.clone(),
+                clock,
+                &listen,
+                interval,
+                &queues,
+            )
+            .await
+        }
+        #[cfg(feature = "postgres")]
+        (
+            LogSpec::ObjectLog(ObjectLogSpec::S3 {
+                endpoint,
+                bucket,
+                region,
+                credentials:
+                    S3CredentialSource::Static {
+                        access_key_id,
+                        secret_access_key,
+                    },
+                segment_config,
+                ..
+            }),
+            ProjectionSpec::Postgres { url },
+        ) => {
+            // Canonical S3 object-log × durable Postgres projection (async product).
+            // Sync Postgres client work is confined inside projection applies. LogEngine owns flush.
+            let _ = (
+                objectlog_byte_budget,
+                config_objectlog_queue_limit,
+                recovery_max_tail,
+                debug_segments,
+            );
+            let backend = open_objectlog_s3_postgres_backend(
+                endpoint,
+                region,
+                bucket,
+                access_key_id,
+                secret_access_key,
+                &url,
+                segment_config,
+                node_id,
+            )
+            .await?;
+            finalize_objectlog_blocking_owned(
+                backend,
                 control_plane,
                 advertise_addr.as_deref(),
                 owner_id.clone(),
@@ -2806,7 +2891,192 @@ fn legacy_hybrid_product_config(
     })
 }
 
-/// Open LogEngine × hybrid projection for `objectlog/hybrid{,-strict,-async}` product cells.
+fn objectlog_flush_from_segment(segment: &SegmentConfig) -> fireweed_objectlog::FlushConfig {
+    fireweed_objectlog::flush_config_from_segment(segment.target_bytes, segment.max_latency_ms)
+}
+
+/// Canonical filesystem object-log × in-memory projection open (P3d / P8c / P3v owner surface).
+async fn open_objectlog_filesystem_memory_backend(
+    root: PathBuf,
+    segment_config: SegmentConfig,
+    node_id: u8,
+) -> EngineResult<fireweed_objectlog::AsyncObjectLogMemoryBackend> {
+    let flush = objectlog_flush_from_segment(&segment_config);
+    fireweed_objectlog::AsyncObjectLogMemoryBackend::open_local_with_node_id(root, flush, node_id)
+        .await
+}
+
+/// Canonical S3 object-log × in-memory projection open (P3d / P8cs / P3vs owner surface).
+#[allow(clippy::too_many_arguments)]
+async fn open_objectlog_s3_memory_backend(
+    endpoint: String,
+    region: String,
+    bucket: String,
+    access_key_id: String,
+    secret_access_key: String,
+    segment_config: SegmentConfig,
+    node_id: u8,
+) -> EngineResult<fireweed_objectlog::AsyncObjectLogMemoryBackend> {
+    let flush = objectlog_flush_from_segment(&segment_config);
+    let log = fireweed_objectlog::ObjectLogEngineStore::open_s3(
+        &endpoint,
+        &region,
+        &bucket,
+        &access_key_id,
+        &secret_access_key,
+        flush,
+    )
+    .await?;
+    fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store(log, node_id).await
+}
+
+/// Canonical filesystem object-log × sqlite projection open (P3d / P8c / P3v owner surface).
+async fn open_objectlog_filesystem_sqlite_backend(
+    root: PathBuf,
+    projection_path: &str,
+    segment_config: SegmentConfig,
+    node_id: u8,
+) -> EngineResult<fireweed_objectlog::AsyncObjectLogSqliteBackend> {
+    let flush = objectlog_flush_from_segment(&segment_config);
+    fireweed_objectlog::AsyncObjectLogSqliteBackend::open(root, projection_path, flush, node_id)
+        .await
+}
+
+/// Canonical S3 object-log × sqlite projection open (P3d / P8cs / P3vs owner surface).
+#[allow(clippy::too_many_arguments)]
+async fn open_objectlog_s3_sqlite_backend(
+    endpoint: String,
+    region: String,
+    bucket: String,
+    access_key_id: String,
+    secret_access_key: String,
+    projection_path: &str,
+    segment_config: SegmentConfig,
+    node_id: u8,
+) -> EngineResult<fireweed_objectlog::AsyncObjectLogSqliteBackend> {
+    let flush = objectlog_flush_from_segment(&segment_config);
+    let log = fireweed_objectlog::ObjectLogEngineStore::open_s3(
+        &endpoint,
+        &region,
+        &bucket,
+        &access_key_id,
+        &secret_access_key,
+        flush,
+    )
+    .await?;
+    let projection = fireweed_sqlite::SqliteProjectionStore::open(projection_path)?;
+    fireweed_objectlog::AsyncObjectLogSqliteBackend::from_log_and_projection(
+        log, projection, node_id,
+    )
+    .await
+}
+
+/// Canonical filesystem object-log × Postgres projection open (P3d / P8c / P3v owner surface).
+#[cfg(feature = "postgres")]
+async fn open_objectlog_filesystem_postgres_backend(
+    root: PathBuf,
+    projection_url: &str,
+    segment_config: SegmentConfig,
+    node_id: u8,
+) -> EngineResult<Arc<ObjectLogPostgresBackend>> {
+    let flush = objectlog_flush_from_segment(&segment_config);
+    let log = fireweed_objectlog::ObjectLogEngineStore::open_local(root, flush).await?;
+    let projection =
+        fireweed_postgres::AsyncPostgresRelationalProjection::connect(projection_url).await?;
+    let backend = fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection(
+        log, projection, node_id,
+    )
+    .await?;
+    Ok(Arc::new(backend))
+}
+
+/// Canonical S3 object-log × Postgres projection open (P3d / P8cs / P3vs owner surface).
+#[cfg(feature = "postgres")]
+#[allow(clippy::too_many_arguments)]
+async fn open_objectlog_s3_postgres_backend(
+    endpoint: String,
+    region: String,
+    bucket: String,
+    access_key_id: String,
+    secret_access_key: String,
+    projection_url: &str,
+    segment_config: SegmentConfig,
+    node_id: u8,
+) -> EngineResult<Arc<ObjectLogPostgresBackend>> {
+    let flush = objectlog_flush_from_segment(&segment_config);
+    let log = fireweed_objectlog::ObjectLogEngineStore::open_s3(
+        &endpoint,
+        &region,
+        &bucket,
+        &access_key_id,
+        &secret_access_key,
+        flush,
+    )
+    .await?;
+    let projection =
+        fireweed_postgres::AsyncPostgresRelationalProjection::connect(projection_url).await?;
+    let backend = fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection(
+        log, projection, node_id,
+    )
+    .await?;
+    Ok(Arc::new(backend))
+}
+
+/// Provider-invariant finalization for async object-log product cells (memory/sqlite projections).
+#[allow(clippy::too_many_arguments)]
+async fn finalize_objectlog_async_owned<B: RespBackend + 'static>(
+    backend: Arc<B>,
+    control_plane: Arc<dyn QueueControlPlane>,
+    advertise_addr: Option<&str>,
+    owner_id: OwnerId,
+    clock: Arc<dyn Clock>,
+    listen: &str,
+    reclaim_interval: Duration,
+    queues: &[QueueDefinition],
+) -> EngineResult<Server> {
+    run_owned(
+        backend,
+        control_plane,
+        advertise_addr,
+        owner_id,
+        clock,
+        listen,
+        reclaim_interval,
+        queues,
+    )
+    .await
+}
+
+/// Provider-invariant finalization for blocking object-log×postgres product cells.
+#[cfg(feature = "postgres")]
+#[allow(clippy::too_many_arguments)]
+async fn finalize_objectlog_blocking_owned<B: RespBackend + 'static>(
+    backend: Arc<B>,
+    control_plane: Arc<dyn QueueControlPlane>,
+    advertise_addr: Option<&str>,
+    owner_id: OwnerId,
+    clock: Arc<dyn Clock>,
+    listen: &str,
+    reclaim_interval: Duration,
+    queues: &[QueueDefinition],
+) -> EngineResult<Server> {
+    let (backend, lifecycle) = blocking_backend(backend);
+    run_owned_with_blocking_lifecycle(
+        backend,
+        lifecycle,
+        control_plane,
+        advertise_addr,
+        owner_id,
+        clock,
+        listen,
+        reclaim_interval,
+        queues,
+    )
+    .await
+}
+
+/// Open LogEngine × hybrid projection for legacy `objectlog/hybrid{,-strict,-async}` product cells.
+/// Provider selection remains shared here until P8c/P8cs replace Hybrid with canonical helpers.
 async fn open_objectlog_hybrid_backend(
     spec: ObjectLogSpec,
     path: &std::path::Path,
@@ -2818,8 +3088,7 @@ async fn open_objectlog_hybrid_backend(
         .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?
         .to_string();
     let segment = spec.segment_config();
-    let flush =
-        fireweed_objectlog::flush_config_from_segment(segment.target_bytes, segment.max_latency_ms);
+    let flush = objectlog_flush_from_segment(&segment);
     let backend = match spec {
         ObjectLogSpec::LocalFilesystem { root, .. } => {
             fireweed_objectlog::AsyncObjectLogHybridBackend::open(root, &p, flush, node_id, hybrid)
@@ -2852,58 +3121,6 @@ async fn open_objectlog_hybrid_backend(
                 projection = projection.with_async_monitor(thresholds);
             }
             fireweed_objectlog::AsyncObjectLogHybridBackend::from_log_and_projection(
-                log, projection, node_id,
-            )
-            .await?
-        }
-    };
-    Ok(Arc::new(backend))
-}
-
-/// Open LogEngine × Postgres relational projection for the objectlog/postgres product cell.
-#[cfg(feature = "postgres")]
-async fn open_objectlog_postgres_backend(
-    spec: ObjectLogSpec,
-    projection_url: &str,
-    node_id: u8,
-) -> EngineResult<Arc<ObjectLogPostgresBackend>> {
-    let segment = spec.segment_config();
-    let flush =
-        fireweed_objectlog::flush_config_from_segment(segment.target_bytes, segment.max_latency_ms);
-    let url = projection_url.to_string();
-    let backend = match spec {
-        ObjectLogSpec::LocalFilesystem { root, .. } => {
-            let log = fireweed_objectlog::ObjectLogEngineStore::open_local(root, flush).await?;
-            let projection =
-                fireweed_postgres::AsyncPostgresRelationalProjection::connect(&url).await?;
-            fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection(
-                log, projection, node_id,
-            )
-            .await?
-        }
-        ObjectLogSpec::S3 {
-            endpoint,
-            bucket,
-            region,
-            credentials:
-                S3CredentialSource::Static {
-                    access_key_id,
-                    secret_access_key,
-                },
-            ..
-        } => {
-            let log = fireweed_objectlog::ObjectLogEngineStore::open_s3(
-                &endpoint,
-                &region,
-                &bucket,
-                &access_key_id,
-                &secret_access_key,
-                flush,
-            )
-            .await?;
-            let projection =
-                fireweed_postgres::AsyncPostgresRelationalProjection::connect(&url).await?;
-            fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection(
                 log, projection, node_id,
             )
             .await?
@@ -3324,8 +3541,76 @@ mod byte_admission_wiring_tests {
             "no object-log projection arm may bypass the S3 authority boundary"
         );
         assert!(
-            production_start.contains("ObjectLogEngineStore::open_s3"),
+            production_start.contains("ObjectLogEngineStore::open_s3")
+                || production_start.contains("open_objectlog_s3_"),
             "object-log product cells must open S3 through ObjectLogEngineStore::open_s3"
+        );
+    }
+
+    #[test]
+    fn six_canonical_objectlog_arms_each_call_one_provider_specific_helper() {
+        let source = include_str!("lib.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source boundary");
+        // Bound start to its body only — helper definitions follow and would double-count names.
+        let production_start = production_source
+            .split("pub async fn start(config: Config)")
+            .nth(1)
+            .expect("Config-consuming startup API")
+            .split("fn objectlog_flush_from_segment")
+            .next()
+            .expect("start function ends before provider-specific helpers");
+
+        let filesystem_helpers = [
+            "open_objectlog_filesystem_memory_backend",
+            "open_objectlog_filesystem_sqlite_backend",
+            "open_objectlog_filesystem_postgres_backend",
+        ];
+        let s3_helpers = [
+            "open_objectlog_s3_memory_backend",
+            "open_objectlog_s3_sqlite_backend",
+            "open_objectlog_s3_postgres_backend",
+        ];
+        for helper in filesystem_helpers.iter().chain(s3_helpers.iter()) {
+            assert_eq!(
+                production_start.matches(&format!("{helper}(")).count(),
+                1,
+                "start must invoke each canonical helper exactly once: {helper}"
+            );
+            assert!(
+                production_source.contains(&format!("async fn {helper}")),
+                "production source must define helper {helper}"
+            );
+        }
+
+        // No shared provider-selecting open remains for the six canonical product cells.
+        assert!(
+            !production_start.contains("open_objectlog_postgres_backend("),
+            "shared open_objectlog_postgres_backend must not remain on the start path"
+        );
+        // Hybrid may still share provider selection until P8c/P8cs retire it.
+        assert!(
+            production_start.contains("open_objectlog_hybrid_backend("),
+            "legacy hybrid arms retain the shared hybrid open helper"
+        );
+
+        // Each memory/sqlite arm finalizes through the provider-invariant async helper;
+        // postgres arms use the blocking finalizer.
+        assert_eq!(
+            production_start
+                .matches("finalize_objectlog_async_owned(")
+                .count(),
+            4,
+            "four async object-log arms (fs/s3 × memory/sqlite) must share finalize_objectlog_async_owned"
+        );
+        assert_eq!(
+            production_start
+                .matches("finalize_objectlog_blocking_owned(")
+                .count(),
+            2,
+            "two object-log×postgres arms must share finalize_objectlog_blocking_owned"
         );
     }
 
@@ -4173,8 +4458,8 @@ mod byte_admission_wiring_tests {
 
         let source = include_str!("lib.rs");
         assert!(
-            source.contains("open_objectlog_postgres_backend"),
-            "server must own open_objectlog_postgres_backend for filesystem|s3 × postgres"
+            source.contains("open_objectlog_filesystem_postgres_backend"),
+            "server must own open_objectlog_filesystem_postgres_backend for filesystem × postgres"
         );
         assert!(
             source.contains("ObjectLogEngineStore::open_local")
@@ -4183,8 +4468,9 @@ mod byte_admission_wiring_tests {
             "object-log×postgres must open LogEngine (or legacy authoritative group-commit ObjectLog)"
         );
         assert!(
-            source.contains("PostgresRelational::connect"),
-            "object-log×postgres must compose with PostgresRelational"
+            source.contains("AsyncPostgresRelationalProjection::connect")
+                || source.contains("PostgresRelational::connect"),
+            "object-log×postgres must compose with a Postgres relational projection"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -4217,13 +4503,17 @@ mod byte_admission_wiring_tests {
 
         let root = filesystem_tmp_root(&schema);
         let segment_config = SegmentConfig::new(262_144, 20).unwrap();
-        let log_spec = ObjectLogSpec::local(&root, segment_config);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("build object-log PostgreSQL operation runtime");
         let backend = runtime
-            .block_on(open_objectlog_postgres_backend(log_spec, &scoped, 0))
+            .block_on(open_objectlog_filesystem_postgres_backend(
+                root.clone(),
+                &scoped,
+                segment_config,
+                0,
+            ))
             .expect("construct filesystem×postgres");
         drop(backend);
         drop(runtime);
@@ -4285,12 +4575,12 @@ mod byte_admission_wiring_tests {
 
         let source = include_str!("lib.rs");
         assert!(
-            source.contains("open_objectlog_postgres_backend"),
-            "server must own open_objectlog_postgres_backend for filesystem|s3 × postgres"
+            source.contains("open_objectlog_s3_postgres_backend"),
+            "server must own open_objectlog_s3_postgres_backend for s3 × postgres"
         );
         assert!(
-            source.contains("Class A: filesystem|s3 object-log × durable Postgres projection"),
-            "postgres composition arm documents shared filesystem|s3 coverage"
+            source.contains("Canonical S3 object-log × durable Postgres projection"),
+            "postgres S3 composition arm documents provider-specific coverage"
         );
         assert!(
             source.contains("ObjectLogEngineStore::open_local")
@@ -4299,8 +4589,9 @@ mod byte_admission_wiring_tests {
             "object-log×postgres must open LogEngine (or legacy authoritative group-commit ObjectLog)"
         );
         assert!(
-            source.contains("PostgresRelational::connect"),
-            "object-log×postgres must compose with PostgresRelational"
+            source.contains("AsyncPostgresRelationalProjection::connect")
+                || source.contains("PostgresRelational::connect"),
+            "object-log×postgres must compose with a Postgres relational projection"
         );
     }
 
@@ -4353,20 +4644,18 @@ mod byte_admission_wiring_tests {
 
         // S3 requires native create-only (If-None-Match / equivalent); open probes the endpoint.
         let segment_config = SegmentConfig::new(262_144, 20).unwrap();
-        let log_spec = ObjectLogSpec::S3 {
-            endpoint: lookup("FIREWEED_S3_TEST_ENDPOINT").to_owned(),
-            bucket: lookup("FIREWEED_S3_TEST_BUCKET").to_owned(),
-            region: lookup("FIREWEED_S3_TEST_REGION").to_owned(),
-            credentials: S3CredentialSource::Static {
-                access_key_id: lookup("FIREWEED_S3_TEST_ACCESS_KEY").to_owned(),
-                secret_access_key: lookup("FIREWEED_S3_TEST_SECRET_KEY").to_owned(),
-            },
+        let backend = open_objectlog_s3_postgres_backend(
+            lookup("FIREWEED_S3_TEST_ENDPOINT").to_owned(),
+            lookup("FIREWEED_S3_TEST_REGION").to_owned(),
+            lookup("FIREWEED_S3_TEST_BUCKET").to_owned(),
+            lookup("FIREWEED_S3_TEST_ACCESS_KEY").to_owned(),
+            lookup("FIREWEED_S3_TEST_SECRET_KEY").to_owned(),
+            &scoped,
             segment_config,
-            allow_insecure_http: lookup("FIREWEED_S3_TEST_ENDPOINT").starts_with("http://"),
-        };
-        let backend = open_objectlog_postgres_backend(log_spec, &scoped, 0)
-            .await
-            .expect("construct s3×postgres");
+            0,
+        )
+        .await
+        .expect("construct s3×postgres");
         drop(backend);
 
         if let Ok(mut client) =

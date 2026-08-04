@@ -963,9 +963,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "ee003e34c846cb75cd36",
+        "id": "62195b491d21d8ffadb2",
         "identity": "eprintln!(\"SQLITE/POSTGRES CONSTRUCT SKIPPED \u2014 set FIREWEED_PG_TEST_URL to a live DB\");",
-        "line": 4095,
+        "line": 4380,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -977,9 +977,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "f1a02a53c6d1f8f13beb",
+        "id": "1a74d78e664670f3d7ed",
         "identity": "\"FILESYSTEM/POSTGRES CONSTRUCT SKIPPED \u2014 set FIREWEED_PG_TEST_URL to a live DB\"",
-        "line": 4199,
+        "line": 4485,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -991,9 +991,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "8cd9105ebf221e04bd40",
+        "id": "ac1d5fbb59c66a30d108",
         "identity": "\"S3/POSTGRES CONSTRUCT SKIPPED \u2014 set {} for live s3\u00d7postgres open\",",
-        "line": 4326,
+        "line": 4617,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -1005,9 +1005,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "3d93660db716621b5a5f",
+        "id": "fa15babefca0d49f5d70",
         "identity": "\"class_b T0-T3: {cell_id} skipped (FIREWEED_PG_TEST_URL unset; rebuild with --features postgres when live PG is availabl",
-        "line": 4596,
+        "line": 4885,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -1019,9 +1019,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "b510cb7e770062b39bb8",
+        "id": "5b3250fc8c3c10c7e757",
         "identity": "\"sqlite_log_postgres_lifecycle_and_reopen SKIPPED \u2014 set FIREWEED_PG_TEST_URL\"",
-        "line": 5117,
+        "line": 5406,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8261,9 +8261,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "978d3980cb2a826a1915",
+        "id": "f57260a7bb7f4347491a",
         "identity": "Ok(()) | Err(EngineError::Unavailable) => {}",
-        "line": 3199,
+        "line": 3416,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "discovery_negative"
@@ -8275,9 +8275,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "c3bea36d9971ef0bdde8",
+        "id": "6aabee828dfb95709ecb",
         "identity": "Err(EngineError::Unavailable)",
-        "line": 3583,
+        "line": 3868,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "discovery_negative"
@@ -8289,9 +8289,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "5d0026e46f37d12f6d1a",
+        "id": "d2c7d0d2c15340fca499",
         "identity": "eprintln!(\"SQLITE/POSTGRES CONSTRUCT SKIPPED \u2014 set FIREWEED_PG_TEST_URL to a live DB\");",
-        "line": 4095,
+        "line": 4380,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8303,9 +8303,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "ff338df1fbb3da1037f4",
+        "id": "6e45df725eabfc63a5cc",
         "identity": "\"FILESYSTEM/POSTGRES CONSTRUCT SKIPPED \u2014 set FIREWEED_PG_TEST_URL to a live DB\"",
-        "line": 4199,
+        "line": 4485,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8317,9 +8317,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "2ea3b750ddc176fdd137",
+        "id": "8bd6c33414758f873bf3",
         "identity": "\"S3/POSTGRES CONSTRUCT SKIPPED \u2014 set {} for live s3\u00d7postgres open\",",
-        "line": 4326,
+        "line": 4617,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8331,9 +8331,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "f69b6ab34d7aa2517b5e",
+        "id": "e421cd9a8144b97582ea",
         "identity": "/// otherwise it is skipped with an explicit `eprintln!`.",
-        "line": 4392,
+        "line": 4681,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8345,9 +8345,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "efea2a98385d0abfb7bc",
+        "id": "81d57a35ef3adf835d0c",
         "identity": "\"class_b T0-T3: {cell_id} skipped (FIREWEED_PG_TEST_URL unset; rebuild with --features postgres when live PG is availabl",
-        "line": 4596,
+        "line": 4885,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8359,9 +8359,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "cf0c102a66203806228d",
+        "id": "a927a2e2bd389d81f795",
         "identity": "\"sqlite_log_postgres_lifecycle_and_reopen SKIPPED \u2014 set FIREWEED_PG_TEST_URL\"",
-        "line": 5117,
+        "line": 5406,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8373,9 +8373,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "dc177086c178248190fd",
+        "id": "dbf774cfe4d3ace02d80",
         "identity": "\"sqlite_log T4 helm template skipped (helm not on PATH); values+gate checked\"",
-        "line": 5595,
+        "line": 5884,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8387,9 +8387,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "0fc0f7359f96954786c2",
+        "id": "c29a39eb088d0a4d3b86",
         "identity": "\"postgres_log_memory_lifecycle_and_reopen SKIPPED \u2014 set FIREWEED_PG_TEST_URL \\",
-        "line": 5761,
+        "line": 6050,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "discovery_negative"
@@ -8401,9 +8401,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "a27ff2b609d19184a9b9",
+        "id": "e09b7faf806fa0e78765",
         "identity": "\"postgres_log_sqlite_lifecycle_and_reopen SKIPPED \u2014 set FIREWEED_PG_TEST_URL \\",
-        "line": 5830,
+        "line": 6119,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "discovery_negative"
@@ -8415,9 +8415,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "29045f6266c018daaf7d",
+        "id": "bc12edb87507c9620134",
         "identity": "\"postgres_log_postgres_lifecycle_and_reopen SKIPPED \u2014 set FIREWEED_PG_TEST_URL \\",
-        "line": 5911,
+        "line": 6200,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "discovery_negative"
@@ -8429,9 +8429,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "51c5308bc175398747d5",
+        "id": "acbd374773b6cb005708",
         "identity": "\"postgres_log T4 helm template skipped (helm not on PATH); values+gate checked\"",
-        "line": 6394,
+        "line": 6683,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -11935,9 +11935,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "75fe2db6e6ecb5fcbeff",
+        "id": "d3bfa2b28c71bf781122",
         "identity": "eprintln!(\"SQLITE/POSTGRES CONSTRUCT SKIPPED \u2014 set FIREWEED_PG_TEST_URL to a live DB\");",
-        "line": 4095,
+        "line": 4380,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -82801,7 +82801,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "68a626712bf07f471424bd48a5a8f6940636366a604db3c365b1eb8169abbbb6",
+  "source_inventory_sha256": "91c53651fab854b2339acd4cef0a779c04634619ee06e778c3feddc6d2b2d801",
   "workspaces": [
     {
       "listing_error_sha256": "",
