@@ -1703,13 +1703,89 @@ async fn change_record_sink_rejected_on_unwired_profile() {
         ..ChangeRecordSinkConfig::default()
     };
 
-    match start(config).await {
-        Ok(_) => panic!("memory backend must refuse sink startup"),
-        Err(err) => assert!(
-            err.to_string().contains("only wired for objectlog/hybrid"),
-            "{}",
-            err
-        ),
+    assert_eq!(
+        start(config)
+            .await
+            .err()
+            .expect("memory backend must refuse sink startup"),
+        EngineError::Invalid(
+            "change record sink is only wired for objectlog/hybrid, objectlog/hybrid-strict, and objectlog/hybrid-async",
+        )
+    );
+}
+
+#[cfg(feature = "env-config")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn env_and_programmatic_sink_configs_share_the_typed_startup_validation_boundary() {
+    fn direct_config(endpoint: &str, enabled: bool) -> Config {
+        let mut config = Config::new(
+            BackendSpec {
+                log: LogSpec::Memory,
+                projection: ProjectionSpec::InMemory,
+                control_plane: ControlPlaneSpec::InProcess,
+                async_projection: None,
+                sqlite_projection_deferred_flush_chunk: None,
+            },
+            0,
+            "127.0.0.1:0".to_owned(),
+            Duration::from_secs(60),
+            vec![qdef()],
+        );
+        config.change_record_sink = ChangeRecordSinkConfig {
+            enabled,
+            endpoint: Some(endpoint.to_owned()),
+            ..ChangeRecordSinkConfig::default()
+        };
+        config
+    }
+
+    fn env_config(endpoint: &str, enabled: bool) -> Config {
+        let values = [
+            ("FIREWEED_LOG_BACKEND", "memory"),
+            ("FIREWEED_PROJECTION_BACKEND", "memory"),
+            ("FIREWEED_BOOTSTRAP_QUEUES", "t1:q1"),
+            (
+                "FIREWEED_CHANGE_RECORD_SINK_ENABLED",
+                if enabled { "true" } else { "false" },
+            ),
+            ("FIREWEED_CHANGE_RECORD_SINK_ENDPOINT", endpoint),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
+        Config::from_env(&values).expect("env adaptation must defer endpoint validation to start")
+    }
+
+    let malformed = EngineError::Invalid(
+        "change record sink endpoint must use an explicit scheme: `kafka://host:port` for external Kafka or `http://host:port` for durable-ingest; a schemeless `host:port` is rejected",
+    );
+    for config in [
+        direct_config("not-a-url", false),
+        env_config("not-a-url", false),
+    ] {
+        assert_eq!(
+            start(config)
+                .await
+                .err()
+                .expect("malformed endpoint must fail at qualified startup"),
+            malformed
+        );
+    }
+
+    let invalid_composition = EngineError::Invalid(
+        "change record sink is only wired for objectlog/hybrid, objectlog/hybrid-strict, and objectlog/hybrid-async",
+    );
+    for config in [
+        direct_config("http://127.0.0.1:8080", true),
+        env_config("http://127.0.0.1:8080", true),
+    ] {
+        assert_eq!(
+            start(config)
+                .await
+                .err()
+                .expect("valid endpoint must reach the later composition hook"),
+            invalid_composition
+        );
     }
 }
 

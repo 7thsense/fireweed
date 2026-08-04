@@ -977,6 +977,50 @@ impl Config {
             change_record_sink: ChangeRecordSinkConfig::default(),
         }
     }
+
+    /// Validate every selector and bound that can fail without constructing a runtime resource.
+    ///
+    /// The hook order is intentional: endpoint syntax is independent of whether delivery is enabled,
+    /// the response barrier owns the second slot for its later typed selector, and only then may
+    /// composition/durability rules inspect the selected backend tuple.
+    fn validate_for_start(&self) -> EngineResult<()> {
+        self.validate_change_record_endpoint_syntax()?;
+        self.validate_response_barrier()?;
+        self.validate_change_record_sink_composition()?;
+
+        if !(1..=MAX_POSTGRES_POOL_SIZE).contains(&self.postgres_pool_size) {
+            return Err(EngineError::Invalid(
+                "postgres pool size must be between 1 and 64",
+            ));
+        }
+        if let LogSpec::ObjectLog(spec) = &self.backend.log {
+            spec.validate()?;
+            self.objectlog_byte_limits
+                .validate(spec.segment_config().target_bytes)
+                .map_err(EngineError::Invalid)?;
+        }
+        Ok(())
+    }
+
+    fn validate_change_record_endpoint_syntax(&self) -> EngineResult<()> {
+        self.change_record_sink.validate()
+    }
+
+    fn validate_response_barrier(&self) -> EngineResult<()> {
+        Ok(())
+    }
+
+    fn validate_change_record_sink_composition(&self) -> EngineResult<()> {
+        if self.change_record_sink.enabled
+            && self.queues.iter().any(|queue| queue.emit_change_records)
+            && !change_record_sink_profile_is_wired(&self.backend.log, &self.backend.projection)
+        {
+            return Err(EngineError::Invalid(
+                "change record sink is only wired for objectlog/hybrid, objectlog/hybrid-strict, and objectlog/hybrid-async",
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub struct OwnershipRuntime<B, CP: ?Sized> {
@@ -2066,18 +2110,7 @@ pub fn resolve_node_id(configured: &str) -> u8 {
 /// Construct the configured backend + a `SystemClock`, provision the config's queues, then run the
 /// server. After this returns the server is ready to serve requests against the provisioned queues.
 pub async fn start(config: Config) -> EngineResult<Server> {
-    if !(1..=MAX_POSTGRES_POOL_SIZE).contains(&config.postgres_pool_size) {
-        return Err(EngineError::Invalid(
-            "postgres pool size must be between 1 and 64",
-        ));
-    }
-    if let LogSpec::ObjectLog(spec) = &config.backend.log {
-        spec.validate()?;
-        config
-            .objectlog_byte_limits
-            .validate(spec.segment_config().target_bytes)
-            .map_err(EngineError::Invalid)?;
-    }
+    config.validate_for_start()?;
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let node_id = config.node_id;
     let owner_id = config.owner_id.clone();
@@ -2122,15 +2155,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             })??,
         ),
     };
-    if config.change_record_sink.enabled
-        && config.queues.iter().any(|queue| queue.emit_change_records)
-        && !change_record_sink_profile_is_wired(&log, &projection)
-    {
-        return Err(EngineError::Invalid(
-            "change record sink is only wired for objectlog/hybrid, objectlog/hybrid-strict, and objectlog/hybrid-async",
-        ));
-    }
-
     // ADR-012 P2: the server selects on the two-axis [`BackendSpec`] and assembles every wired family from
     // the ONE generic recovery-capable `ComposedBackend` (the monoliths are gone). The memory family needs
     // no crash recovery; the durable sqlite/postgres families run `ComposedBackend::recover` on open. The
@@ -3039,7 +3063,15 @@ async fn run_owned_with_fjord_task<B: RespBackend>(
 }
 
 /// Run the server over an already-constructed backend + clock (the generic core; tests inject a
-/// controllable clock and keep a handle to the backend). `queues` are created before serving.
+/// controllable clock and keep a handle to the backend). This is a backend-injection API, not a
+/// [`Config`] startup path: delivery is implicitly disabled and no log, projection, response-barrier,
+/// or sink selector is accepted. `queues` are created before serving.
+///
+/// ```compile_fail
+/// async fn config_cannot_bypass_qualified_start(config: fireweed_server::Config) {
+///     let _ = fireweed_server::start_with(config).await;
+/// }
+/// ```
 pub async fn start_with<B: RespBackend>(
     backend: Arc<B>,
     clock: Arc<dyn Clock>,
@@ -3084,6 +3116,14 @@ pub async fn start_with<B: RespBackend>(
     })
 }
 
+/// Run the preconstructed-backend injection path with an explicit ownership control plane.
+/// Delivery is implicitly disabled; this API accepts no [`Config`] or storage/barrier/sink selector.
+///
+/// ```compile_fail
+/// async fn config_cannot_enter_the_ownership_injection_path(config: fireweed_server::Config) {
+///     let _ = fireweed_server::start_with_ownership(config).await;
+/// }
+/// ```
 pub async fn start_with_ownership<B, CP>(
     backend: Arc<B>,
     control_plane: Arc<CP>,
@@ -3287,6 +3327,211 @@ mod byte_admission_wiring_tests {
             production_start.contains("ObjectLogEngineStore::open_s3"),
             "object-log product cells must open S3 through ObjectLogEngineStore::open_s3"
         );
+    }
+
+    #[test]
+    fn startup_validation_has_one_ordered_pre_io_choke_point() {
+        let source = include_str!("lib.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source boundary");
+        assert_eq!(
+            production_source
+                .matches("pub async fn start(config: Config)")
+                .count(),
+            1,
+            "there must be exactly one Config-consuming startup API"
+        );
+
+        let production_start = production_source
+            .split("pub async fn start(config: Config)")
+            .nth(1)
+            .expect("Config-consuming startup API");
+        let start_body = production_start
+            .split_once('{')
+            .expect("start function body")
+            .1
+            .trim_start();
+        assert!(
+            start_body.starts_with("config.validate_for_start()?;"),
+            "qualified validation must be the first startup statement"
+        );
+        assert_eq!(
+            production_start
+                .matches("config.validate_for_start()?")
+                .count(),
+            1,
+            "qualified startup must invoke the choke point exactly once"
+        );
+        assert!(
+            !production_start.contains("change_record_sink_profile_is_wired(&log, &projection)"),
+            "the retired post-control-plane sink guard must not return"
+        );
+
+        let validation = source
+            .split("fn validate_for_start(&self) -> EngineResult<()> {")
+            .nth(1)
+            .expect("validation choke point")
+            .split("fn validate_change_record_endpoint_syntax")
+            .next()
+            .expect("validation method boundary");
+        let syntax = validation
+            .find("self.validate_change_record_endpoint_syntax()?")
+            .expect("endpoint syntax hook");
+        let barrier = validation
+            .find("self.validate_response_barrier()?")
+            .expect("response barrier hook");
+        let composition = validation
+            .find("self.validate_change_record_sink_composition()?")
+            .expect("sink composition hook");
+        let durability = validation
+            .find("if !(1..=MAX_POSTGRES_POOL_SIZE)")
+            .expect("remaining pure durability validation");
+        assert!(
+            syntax < barrier && barrier < composition && composition < durability,
+            "startup hooks must retain syntax -> barrier -> composition -> durability order"
+        );
+
+        let env_source = include_str!("env_config.rs");
+        let env_sink_adapter = env_source
+            .split("fn change_record_sink_config(")
+            .nth(1)
+            .expect("env sink adapter")
+            .split("fn unsupported_storage")
+            .next()
+            .expect("env sink adapter boundary");
+        assert!(
+            !env_sink_adapter.contains(".validate()"),
+            "the env adapter must construct the typed sink config without validating endpoints"
+        );
+    }
+
+    fn startup_validation_config(
+        log: LogSpec,
+        projection: ProjectionSpec,
+        async_projection: Option<AsyncProjectionSpec>,
+    ) -> Config {
+        let mut queue = queue_definition();
+        queue.emit_change_records = true;
+        Config::new(
+            BackendSpec {
+                log,
+                projection,
+                control_plane: ControlPlaneSpec::InProcess,
+                async_projection,
+                sqlite_projection_deferred_flush_chunk: None,
+            },
+            0,
+            "127.0.0.1:0".to_owned(),
+            Duration::from_secs(1),
+            vec![queue],
+        )
+    }
+
+    fn validation_object_log(tag: &str) -> LogSpec {
+        LogSpec::ObjectLog(ObjectLogSpec::local(
+            std::env::temp_dir().join(format!("fireweed-p3c-{tag}")),
+            SegmentConfig::new(262_144, 20).expect("valid grouped segment config"),
+        ))
+    }
+
+    #[test]
+    fn validate_for_start_rejects_endpoint_syntax_before_profile_and_barrier_dimensions() {
+        for endpoint in ["not-a-url", "tcp://127.0.0.1:8080"] {
+            let cases = vec![
+                (
+                    "class-a-strict-disabled",
+                    false,
+                    startup_validation_config(
+                        LogSpec::ObjectLog(ObjectLogSpec::local(
+                            std::env::temp_dir().join("fireweed-p3c-class-a-strict"),
+                            SegmentConfig::new(1, 20)
+                                .expect("structurally valid but production-unsafe segment config"),
+                        )),
+                        ProjectionSpec::Hybrid {
+                            path: std::env::temp_dir().join("fireweed-p3c-strict.sqlite"),
+                        },
+                        None,
+                    ),
+                ),
+                (
+                    "class-a-async-enabled",
+                    true,
+                    startup_validation_config(
+                        validation_object_log("class-a-async"),
+                        ProjectionSpec::HybridAsync {
+                            path: std::env::temp_dir().join("fireweed-p3c-async.sqlite"),
+                        },
+                        Some(AsyncProjectionSpec::default()),
+                    ),
+                ),
+                (
+                    "class-b-strict-disabled",
+                    false,
+                    startup_validation_config(
+                        LogSpec::Memory,
+                        ProjectionSpec::Sqlite {
+                            path: std::env::temp_dir().join("fireweed-p3c-class-b.sqlite"),
+                        },
+                        None,
+                    ),
+                ),
+                (
+                    "class-b-async-enabled",
+                    true,
+                    startup_validation_config(
+                        LogSpec::Memory,
+                        ProjectionSpec::Sqlite {
+                            path: std::env::temp_dir().join("fireweed-p3c-class-b-async.sqlite"),
+                        },
+                        Some(AsyncProjectionSpec::default()),
+                    ),
+                ),
+            ];
+
+            for (name, enabled, mut config) in cases {
+                config.change_record_sink.enabled = enabled;
+                config.change_record_sink.endpoint = Some(endpoint.to_owned());
+                assert_eq!(
+                    config.validate_for_start(),
+                    Err(EngineError::Invalid(
+                        "change record sink endpoint must use an explicit scheme: `kafka://host:port` for external Kafka or `http://host:port` for durable-ingest; a schemeless `host:port` is rejected",
+                    )),
+                    "{name} with {endpoint}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn validate_for_start_sends_valid_endpoints_to_later_composition_hooks() {
+        let mut invalid_composition =
+            startup_validation_config(LogSpec::Memory, ProjectionSpec::InMemory, None);
+        invalid_composition.change_record_sink.enabled = true;
+        invalid_composition.change_record_sink.endpoint = Some("http://127.0.0.1:8080".to_owned());
+        assert_eq!(
+            invalid_composition.validate_for_start(),
+            Err(EngineError::Invalid(
+                "change record sink is only wired for objectlog/hybrid, objectlog/hybrid-strict, and objectlog/hybrid-async",
+            ))
+        );
+
+        let mut disabled =
+            startup_validation_config(LogSpec::Memory, ProjectionSpec::InMemory, None);
+        disabled.change_record_sink.endpoint = Some("http://127.0.0.1:8080".to_owned());
+        assert_eq!(disabled.validate_for_start(), Ok(()));
+
+        let mut wired = startup_validation_config(
+            validation_object_log("wired"),
+            ProjectionSpec::Hybrid {
+                path: std::env::temp_dir().join("fireweed-p3c-wired.sqlite"),
+            },
+            None,
+        );
+        wired.change_record_sink.enabled = true;
+        wired.change_record_sink.endpoint = Some("http://127.0.0.1:8080".to_owned());
+        assert_eq!(wired.validate_for_start(), Ok(()));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

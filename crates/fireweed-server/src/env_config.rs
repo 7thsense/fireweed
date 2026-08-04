@@ -350,9 +350,6 @@ fn change_record_sink_config(
             "FIREWEED_CHANGE_RECORD_SINK_TICK_INTERVAL_MS must be greater than 0",
         ));
     }
-    config
-        .validate()
-        .map_err(|e| ConfigError::new(e.to_string()))?;
     Ok(config)
 }
 
@@ -1633,6 +1630,43 @@ mod tests {
             panic!("missing colon must fail");
         };
         assert!(err.0.contains("FIREWEED_BOOTSTRAP_QUEUES"), "{}", err.0);
+    }
+
+    #[test]
+    fn sink_endpoint_validation_is_deferred_for_enabled_and_disabled_env_configs() {
+        for enabled in ["false", "true"] {
+            let config = Config::from_env(&map(&[
+                ("FIREWEED_CHANGE_RECORD_SINK_ENABLED", enabled),
+                ("FIREWEED_CHANGE_RECORD_SINK_ENDPOINT", "not-a-url"),
+            ]))
+            .expect("the env adapter must not validate endpoint syntax");
+            assert_eq!(
+                config.change_record_sink.endpoint.as_deref(),
+                Some("not-a-url")
+            );
+        }
+    }
+
+    #[test]
+    fn enabled_sink_scalar_zero_bounds_remain_env_config_errors() {
+        for (key, expected) in [
+            (
+                "FIREWEED_CHANGE_RECORD_SINK_BATCH_SIZE",
+                "FIREWEED_CHANGE_RECORD_SINK_BATCH_SIZE must be greater than 0",
+            ),
+            (
+                "FIREWEED_CHANGE_RECORD_SINK_TICK_INTERVAL_MS",
+                "FIREWEED_CHANGE_RECORD_SINK_TICK_INTERVAL_MS must be greater than 0",
+            ),
+        ] {
+            let error = Config::from_env(&map(&[
+                ("FIREWEED_CHANGE_RECORD_SINK_ENABLED", "true"),
+                (key, "0"),
+            ]))
+            .err()
+            .expect("zero scalar bound must remain an env syntax error");
+            assert_eq!(error.0, expected);
+        }
     }
 
     // The Lakebase DSN carries `sslmode=require`, which only resolves on a `tls` build (a `postgres`-only
