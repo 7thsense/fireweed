@@ -5027,9 +5027,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "ecf37504cf1c4877d180",
+        "id": "6db99484a639ade38f67",
         "identity": "std::future::ready(Err(EngineError::Unavailable))",
-        "line": 1371,
+        "line": 1567,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-objectlog/src/async_product.rs",
         "status": "debt"
@@ -5041,9 +5041,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "58de220956f0c20f3d0f",
+        "id": "5b3037e37062983f138b",
         "identity": "std::future::ready(Err(EngineError::Unavailable))",
-        "line": 1533,
+        "line": 1536,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-objectlog/src/async_product_hybrid.rs",
         "status": "debt"
@@ -5055,23 +5055,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "fd6fa9a4040df6ea9f6a",
+        "id": "c9e40d8847511a29b3fa",
         "identity": "std::future::ready(Err(EngineError::Unavailable))",
-        "line": 1053,
-        "owner": "P3-P9/P15",
-        "path": "crates/fireweed-objectlog/src/async_product_sqlite.rs",
-        "status": "debt"
-      },
-      {
-        "category": "loud_skip",
-        "dependency_chain": [
-          "P3-P9/P15",
-          "P2f"
-        ],
-        "detail": "early_success=false",
-        "id": "e68832740b794fd15a6c",
-        "identity": "std::future::ready(Err(EngineError::Unavailable))",
-        "line": 1411,
+        "line": 1763,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-objectlog/src/async_product_sqlite.rs",
         "status": "debt"
@@ -8877,9 +8863,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "6549bcc9b14444840349",
+        "id": "6547f74f6deca39f625f",
         "identity": "return Err(EngineError::Unavailable);",
-        "line": 296,
+        "line": 323,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-sqlite/src/async_projection.rs",
         "status": "debt"
@@ -8891,9 +8877,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "75c613dff90c66782c39",
+        "id": "1386e5660f00dbd505ae",
         "identity": "Err(TrySendError::Full(_)) => Err(EngineError::Unavailable),",
-        "line": 300,
+        "line": 327,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-sqlite/src/async_projection.rs",
         "status": "debt"
@@ -8905,9 +8891,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "e66184f02b8621ae623c",
+        "id": "a46945172e2803448a16",
         "identity": "Err(EngineError::Unavailable)",
-        "line": 303,
+        "line": 330,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-sqlite/src/async_projection.rs",
         "status": "debt"
@@ -8919,9 +8905,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "462fa3bcd5787faa44d6",
+        "id": "53a4c615338ad660759e",
         "identity": "Err(EngineError::Unavailable)",
-        "line": 1567,
+        "line": 1634,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-sqlite/src/async_projection.rs",
         "status": "debt"
@@ -8933,9 +8919,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "bd2be82d1fb4da71bb13",
+        "id": "daebc08fda8f41df3721",
         "identity": "Err(EngineError::Unavailable)",
-        "line": 1638,
+        "line": 1705,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-sqlite/src/async_projection.rs",
         "status": "debt"
@@ -9045,9 +9031,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "5f27e29a2a303c6760a0",
+        "id": "cd93bcdb3a0a090d044f",
         "identity": "return Err(EngineError::Unavailable);",
-        "line": 585,
+        "line": 591,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-sqlite/src/relational/hybrid.rs",
         "status": "discovery_negative"
@@ -9059,9 +9045,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "dd6f274e6ca21caef5a8",
+        "id": "064802b9ef9399cc323e",
         "identity": "\"memory apply skipped after durable SQLite commit (fault injected): {e}\"",
-        "line": 598,
+        "line": 604,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-sqlite/src/relational/hybrid.rs",
         "status": "discovery_negative"
@@ -9073,9 +9059,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "cd84cf6a0e09cd5bc172",
+        "id": "9e841afef165acb00af0",
         "identity": "// hot memory stay in lockstep (idempotent \u2014 already-applied prefixes are skipped by both stores).",
-        "line": 749,
+        "line": 755,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-sqlite/src/relational/hybrid.rs",
         "status": "debt"
@@ -9087,9 +9073,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "6243a2d382e70ed350cf",
+        "id": "f06d36caff58df9c0776",
         "identity": "/// mutating admission CLOSED \u2014 with the typed retryable [`EngineError::Unavailable`] backpressure error",
-        "line": 974,
+        "line": 980,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-sqlite/src/relational/hybrid.rs",
         "status": "discovery_negative"
@@ -9101,9 +9087,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "8d8589ce7fa6f7993042",
+        "id": "5a77c814302c72844844",
         "identity": "return Err(EngineError::Unavailable);",
-        "line": 982,
+        "line": 988,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-sqlite/src/relational/hybrid.rs",
         "status": "debt"
@@ -9115,9 +9101,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "430aaa5d686af95ad54e",
+        "id": "d6c02413cdf1084ea9b8",
         "identity": "/// Latest observed SQLite WAL size in bytes (0 when unavailable / non-WAL).",
-        "line": 155,
+        "line": 160,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-sqlite/src/relational/monitor.rs",
         "status": "discovery_negative"
@@ -9129,9 +9115,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "719e30677147285fef19",
+        "id": "5dd872f96da8fa519c31",
         "identity": "/// `Unavailable` error until ordered apply reduces debt below the clear band; otherwise mutations are",
-        "line": 325,
+        "line": 330,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-sqlite/src/relational/monitor.rs",
         "status": "discovery_negative"
@@ -9143,9 +9129,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "5dbdc873b058f85fc224",
+        "id": "0abb238f12515c937bc7",
         "identity": "return Err(EngineError::Unavailable);",
-        "line": 334,
+        "line": 339,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-sqlite/src/relational/monitor.rs",
         "status": "discovery_negative"
@@ -9353,11 +9339,11 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "1d2280e6617264e16fcf",
+        "id": "e9b421789a5fb88234e8",
         "identity": "matches!(monitor.admit_mutation(), Err(EngineError::Unavailable)),",
-        "line": 85,
+        "line": 87,
         "owner": "P3-P9/P15",
-        "path": "crates/fireweed-sqlite/tests/hybrid_async_backpressure.rs",
+        "path": "crates/fireweed-sqlite/tests/async_projection_backpressure.rs",
         "status": "debt"
       },
       {
@@ -9367,11 +9353,11 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "69ced4fe8942959b02cb",
+        "id": "e6f230aaf4f522210bbc",
         "identity": "//!   * crash after the high-water commit \u2014 a re-delivered committed batch is skipped idempotently (no",
-        "line": 14,
+        "line": 16,
         "owner": "P3-P9/P15",
-        "path": "crates/fireweed-sqlite/tests/hybrid_async_chaos.rs",
+        "path": "crates/fireweed-sqlite/tests/async_projection_chaos.rs",
         "status": "discovery_negative"
       },
       {
@@ -9381,11 +9367,11 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "e7e8629ebbd05112111e",
+        "id": "d76a1892283d4af2cc2e",
         "identity": "/// re-deliver the already-applied batch. The applied prefix is skipped idempotently: no item is inserted",
-        "line": 393,
+        "line": 395,
         "owner": "P3-P9/P15",
-        "path": "crates/fireweed-sqlite/tests/hybrid_async_chaos.rs",
+        "path": "crates/fireweed-sqlite/tests/async_projection_chaos.rs",
         "status": "discovery_negative"
       },
       {
@@ -9395,11 +9381,11 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "8a27f5459c720a40b37e",
+        "id": "ffe881b80ae1833f439c",
         "identity": "// cursor, so the whole prefix is skipped: no double-apply.",
-        "line": 424,
+        "line": 426,
         "owner": "P3-P9/P15",
-        "path": "crates/fireweed-sqlite/tests/hybrid_async_chaos.rs",
+        "path": "crates/fireweed-sqlite/tests/async_projection_chaos.rs",
         "status": "debt"
       },
       {
@@ -9409,11 +9395,11 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "70eac9aeae600699c90c",
+        "id": "f486f2124a3373632f95",
         "identity": "matches!(monitor.admit_mutation(), Err(EngineError::Unavailable)),",
-        "line": 673,
+        "line": 675,
         "owner": "P3-P9/P15",
-        "path": "crates/fireweed-sqlite/tests/hybrid_async_chaos.rs",
+        "path": "crates/fireweed-sqlite/tests/async_projection_chaos.rs",
         "status": "debt"
       },
       {
@@ -9423,11 +9409,11 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "e1cbbb9c907ab36644ca",
+        "id": "2ad8ec150346d918de6c",
         "identity": "// Re-checkpoint an overlapping [0,1] batch: position 0 is skipped idempotently, only 1 applies.",
-        "line": 220,
+        "line": 222,
         "owner": "P3-P9/P15",
-        "path": "crates/fireweed-sqlite/tests/hybrid_async_checkpoint.rs",
+        "path": "crates/fireweed-sqlite/tests/async_projection_checkpoint.rs",
         "status": "debt"
       },
       {
@@ -40143,6 +40129,230 @@
         "-p",
         "fireweed-objectlog",
         "--lib",
+        "async_product::tests::async_projection_memory::debt_byte_bound_rejects_before_append",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_product::tests::async_projection_memory::debt_byte_bound_rejects_before_append",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::async_product::tests::async_projection_memory::debt_byte_bound_rejects_before_append",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--lib",
+        "async_product::tests::async_projection_memory::lag_command_bound_rejects_before_append",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_product::tests::async_projection_memory::lag_command_bound_rejects_before_append",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::async_product::tests::async_projection_memory::lag_command_bound_rejects_before_append",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--lib",
+        "async_product::tests::async_projection_memory::oldest_unapplied_age_bound_rejects_before_append",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_product::tests::async_projection_memory::oldest_unapplied_age_bound_rejects_before_append",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::async_product::tests::async_projection_memory::oldest_unapplied_age_bound_rejects_before_append",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--lib",
+        "async_product::tests::async_projection_memory::paused_selected_projection_is_stale_until_ordered_watermark_catch_up",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_product::tests::async_projection_memory::paused_selected_projection_is_stale_until_ordered_watermark_catch_up",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::async_product::tests::async_projection_memory::paused_selected_projection_is_stale_until_ordered_watermark_catch_up",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--lib",
+        "async_product::tests::async_projection_memory::queue_depth_bound_rejects_before_append",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_product::tests::async_projection_memory::queue_depth_bound_rejects_before_append",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::async_product::tests::async_projection_memory::queue_depth_bound_rejects_before_append",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--lib",
+        "async_product::tests::async_projection_memory::repeated_apply_failure_poisons_and_fails_closed",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_product::tests::async_projection_memory::repeated_apply_failure_poisons_and_fails_closed",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::async_product::tests::async_projection_memory::repeated_apply_failure_poisons_and_fails_closed",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--lib",
+        "async_product::tests::async_projection_memory::restart_replays_selected_projection_without_loss_or_duplicate_apply",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_product::tests::async_projection_memory::restart_replays_selected_projection_without_loss_or_duplicate_apply",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::async_product::tests::async_projection_memory::restart_replays_selected_projection_without_loss_or_duplicate_apply",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--lib",
+        "async_product::tests::async_projection_memory::strict_constructor_preserves_response_after_apply_contract",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_product::tests::async_projection_memory::strict_constructor_preserves_response_after_apply_contract",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::async_product::tests::async_projection_memory::strict_constructor_preserves_response_after_apply_contract",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--lib",
         "async_product::tests::concurrent_item_mutation_request_id_commits_once",
         "--",
         "--exact"
@@ -40402,6 +40612,286 @@
       "expected_ran": 1,
       "harness_id": "async_product_hybrid::tests::tick_reclaims_multiple_queues_exactly_once_at_half_open_boundary",
       "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::async_product_hybrid::tests::tick_reclaims_multiple_queues_exactly_once_at_half_open_boundary",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--lib",
+        "async_product_sqlite::tests::async_projection_sqlite::both_barriers_preserve_independent_sqlite_chunk_tuning",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_product_sqlite::tests::async_projection_sqlite::both_barriers_preserve_independent_sqlite_chunk_tuning",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::async_product_sqlite::tests::async_projection_sqlite::both_barriers_preserve_independent_sqlite_chunk_tuning",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--lib",
+        "async_product_sqlite::tests::async_projection_sqlite::complete_item_mutation_surface_updates_serving_and_selected_projection",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_product_sqlite::tests::async_projection_sqlite::complete_item_mutation_surface_updates_serving_and_selected_projection",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::async_product_sqlite::tests::async_projection_sqlite::complete_item_mutation_surface_updates_serving_and_selected_projection",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--lib",
+        "async_product_sqlite::tests::async_projection_sqlite::debt_byte_bound_rejects_before_append",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_product_sqlite::tests::async_projection_sqlite::debt_byte_bound_rejects_before_append",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::async_product_sqlite::tests::async_projection_sqlite::debt_byte_bound_rejects_before_append",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--lib",
+        "async_product_sqlite::tests::async_projection_sqlite::lag_command_bound_rejects_before_append",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_product_sqlite::tests::async_projection_sqlite::lag_command_bound_rejects_before_append",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::async_product_sqlite::tests::async_projection_sqlite::lag_command_bound_rejects_before_append",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--lib",
+        "async_product_sqlite::tests::async_projection_sqlite::oldest_unapplied_age_bound_rejects_before_append",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_product_sqlite::tests::async_projection_sqlite::oldest_unapplied_age_bound_rejects_before_append",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::async_product_sqlite::tests::async_projection_sqlite::oldest_unapplied_age_bound_rejects_before_append",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--lib",
+        "async_product_sqlite::tests::async_projection_sqlite::paused_sqlite_is_stale_until_ordered_watermark_catch_up",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_product_sqlite::tests::async_projection_sqlite::paused_sqlite_is_stale_until_ordered_watermark_catch_up",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::async_product_sqlite::tests::async_projection_sqlite::paused_sqlite_is_stale_until_ordered_watermark_catch_up",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--lib",
+        "async_product_sqlite::tests::async_projection_sqlite::queue_depth_bound_rejects_before_append",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_product_sqlite::tests::async_projection_sqlite::queue_depth_bound_rejects_before_append",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::async_product_sqlite::tests::async_projection_sqlite::queue_depth_bound_rejects_before_append",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--lib",
+        "async_product_sqlite::tests::async_projection_sqlite::repeated_sqlite_apply_failure_poisons_reads_and_writes",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_product_sqlite::tests::async_projection_sqlite::repeated_sqlite_apply_failure_poisons_reads_and_writes",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::async_product_sqlite::tests::async_projection_sqlite::repeated_sqlite_apply_failure_poisons_reads_and_writes",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--lib",
+        "async_product_sqlite::tests::async_projection_sqlite::restart_resumes_from_sqlite_high_water_without_loss_or_duplicate_apply",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_product_sqlite::tests::async_projection_sqlite::restart_resumes_from_sqlite_high_water_without_loss_or_duplicate_apply",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::async_product_sqlite::tests::async_projection_sqlite::restart_resumes_from_sqlite_high_water_without_loss_or_duplicate_apply",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--lib",
+        "async_product_sqlite::tests::async_projection_sqlite::strict_sqlite_success_then_serving_apply_failure_poisons_fail_closed",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_product_sqlite::tests::async_projection_sqlite::strict_sqlite_success_then_serving_apply_failure_poisons_fail_closed",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::async_product_sqlite::tests::async_projection_sqlite::strict_sqlite_success_then_serving_apply_failure_poisons_fail_closed",
       "listed_kind": "test",
       "package": "fireweed-objectlog",
       "target": "fireweed_objectlog",
@@ -62808,6 +63298,1050 @@
         "-p",
         "fireweed-sqlite",
         "--test",
+        "async_projection_assertion_map",
+        "async_projection_assertion_map_binds_every_migrated_assertion_exactly_once",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_assertion_map_binds_every_migrated_assertion_exactly_once",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_assertion_map::test::async_projection_assertion_map_binds_every_migrated_assertion_exactly_once",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_assertion_map",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_assertion_map",
+        "async_projection_canonical_paths_contain_no_retired_hybrid_nomenclature",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_canonical_paths_contain_no_retired_hybrid_nomenclature",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_assertion_map::test::async_projection_canonical_paths_contain_no_retired_hybrid_nomenclature",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_assertion_map",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_backpressure",
+        "async_projection_backpressure_a_clean_batch_resets_the_consecutive_retry_count_before_poison",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_backpressure_a_clean_batch_resets_the_consecutive_retry_count_before_poison",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_backpressure::test::async_projection_backpressure_a_clean_batch_resets_the_consecutive_retry_count_before_poison",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_backpressure",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_backpressure",
+        "async_projection_backpressure_admission_gate_rejects_mutations_only_under_hard_backpressure",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_backpressure_admission_gate_rejects_mutations_only_under_hard_backpressure",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_backpressure::test::async_projection_backpressure_admission_gate_rejects_mutations_only_under_hard_backpressure",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_backpressure",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_backpressure",
+        "async_projection_backpressure_any_single_metric_at_its_hard_limit_trips_backpressure",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_backpressure_any_single_metric_at_its_hard_limit_trips_backpressure",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_backpressure::test::async_projection_backpressure_any_single_metric_at_its_hard_limit_trips_backpressure",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_backpressure",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_backpressure",
+        "async_projection_backpressure_backpressure_count_and_duration_are_tracked",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_backpressure_backpressure_count_and_duration_are_tracked",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_backpressure::test::async_projection_backpressure_backpressure_count_and_duration_are_tracked",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_backpressure",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_backpressure",
+        "async_projection_backpressure_checkpoint_store_reports_wal_size_and_apply_lag",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_backpressure_checkpoint_store_reports_wal_size_and_apply_lag",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_backpressure::test::async_projection_backpressure_checkpoint_store_reports_wal_size_and_apply_lag",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_backpressure",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_backpressure",
+        "async_projection_backpressure_debt_crosses_soft_then_hard_bands",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_backpressure_debt_crosses_soft_then_hard_bands",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_backpressure::test::async_projection_backpressure_debt_crosses_soft_then_hard_bands",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_backpressure",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_backpressure",
+        "async_projection_backpressure_hard_backpressure_holds_until_debt_clears_below_half_after_a_clean_batch",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_backpressure_hard_backpressure_holds_until_debt_clears_below_half_after_a_clean_batch",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_backpressure::test::async_projection_backpressure_hard_backpressure_holds_until_debt_clears_below_half_after_a_clean_batch",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_backpressure",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_backpressure",
+        "async_projection_backpressure_metrics_snapshot_exposes_the_full_observability_surface",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_backpressure_metrics_snapshot_exposes_the_full_observability_surface",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_backpressure::test::async_projection_backpressure_metrics_snapshot_exposes_the_full_observability_surface",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_backpressure",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_backpressure",
+        "async_projection_backpressure_non_contiguous_apply_poisons_immediately",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_backpressure_non_contiguous_apply_poisons_immediately",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_backpressure::test::async_projection_backpressure_non_contiguous_apply_poisons_immediately",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_backpressure",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_backpressure",
+        "async_projection_backpressure_recovery_high_water_is_withheld_under_hard_backpressure_and_poison",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_backpressure_recovery_high_water_is_withheld_under_hard_backpressure_and_poison",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_backpressure::test::async_projection_backpressure_recovery_high_water_is_withheld_under_hard_backpressure_and_poison",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_backpressure",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_backpressure",
+        "async_projection_backpressure_repeated_apply_failure_poisons_and_fails_closed",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_backpressure_repeated_apply_failure_poisons_and_fails_closed",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_backpressure::test::async_projection_backpressure_repeated_apply_failure_poisons_and_fails_closed",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_backpressure",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_backpressure",
+        "async_projection_backpressure_retention_advances_only_when_clear_and_healthy",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_backpressure_retention_advances_only_when_clear_and_healthy",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_backpressure::test::async_projection_backpressure_retention_advances_only_when_clear_and_healthy",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_backpressure",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_backpressure",
+        "async_projection_backpressure_zero_threshold_is_rejected",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_backpressure_zero_threshold_is_rejected",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_backpressure::test::async_projection_backpressure_zero_threshold_is_rejected",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_backpressure",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_chaos",
+        "async_projection_chaos_apply_backlog_gates_mutations_and_withholds_high_water_until_drained",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_chaos_apply_backlog_gates_mutations_and_withholds_high_water_until_drained",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_chaos::test::async_projection_chaos_apply_backlog_gates_mutations_and_withholds_high_water_until_drained",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_chaos",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_chaos",
+        "async_projection_chaos_crash_after_high_water_replays_committed_batch_idempotently",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_chaos_crash_after_high_water_replays_committed_batch_idempotently",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_chaos::test::async_projection_chaos_crash_after_high_water_replays_committed_batch_idempotently",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_chaos",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_chaos",
+        "async_projection_chaos_crash_after_memory_apply_before_sqlite_apply_resumes_at_prefix",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_chaos_crash_after_memory_apply_before_sqlite_apply_resumes_at_prefix",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_chaos::test::async_projection_chaos_crash_after_memory_apply_before_sqlite_apply_resumes_at_prefix",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_chaos",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_chaos",
+        "async_projection_chaos_crash_after_objectlog_commit_before_apply_replays_full_tail",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_chaos_crash_after_objectlog_commit_before_apply_replays_full_tail",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_chaos::test::async_projection_chaos_crash_after_objectlog_commit_before_apply_replays_full_tail",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_chaos",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_chaos",
+        "async_projection_chaos_crash_before_response_delivery_replays_request_id",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_chaos_crash_before_response_delivery_replays_request_id",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_chaos::test::async_projection_chaos_crash_before_response_delivery_replays_request_id",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_chaos",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_chaos",
+        "async_projection_chaos_crash_during_sqlite_txn_leaves_no_partial_apply_or_orphan_lease",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_chaos_crash_during_sqlite_txn_leaves_no_partial_apply_or_orphan_lease",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_chaos::test::async_projection_chaos_crash_during_sqlite_txn_leaves_no_partial_apply_or_orphan_lease",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_chaos",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_chaos",
+        "async_projection_chaos_disk_full_apply_failure_poisons_and_never_advances_past_poison",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_chaos_disk_full_apply_failure_poisons_and_never_advances_past_poison",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_chaos::test::async_projection_chaos_disk_full_apply_failure_poisons_and_never_advances_past_poison",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_chaos",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_chaos",
+        "async_projection_chaos_disk_loss_resets_high_water_and_rebuilds_from_log",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_chaos_disk_loss_resets_high_water_and_rebuilds_from_log",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_chaos::test::async_projection_chaos_disk_loss_resets_high_water_and_rebuilds_from_log",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_chaos",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_chaos",
+        "async_projection_chaos_projection_poison_withholds_advanced_high_water",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_chaos_projection_poison_withholds_advanced_high_water",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_chaos::test::async_projection_chaos_projection_poison_withholds_advanced_high_water",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_chaos",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_chaos",
+        "async_projection_chaos_rolled_back_finalize_keeps_recoverable_inflight_lease",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_chaos_rolled_back_finalize_keeps_recoverable_inflight_lease",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_chaos::test::async_projection_chaos_rolled_back_finalize_keeps_recoverable_inflight_lease",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_chaos",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_checkpoint",
+        "async_projection_checkpoint_applies_ordered_batches_and_advances_logical_high_water",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_checkpoint_applies_ordered_batches_and_advances_logical_high_water",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_checkpoint::test::async_projection_checkpoint_applies_ordered_batches_and_advances_logical_high_water",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_checkpoint",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_checkpoint",
+        "async_projection_checkpoint_distinguishes_logical_high_water_from_wal_checkpoint",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_checkpoint_distinguishes_logical_high_water_from_wal_checkpoint",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_checkpoint::test::async_projection_checkpoint_distinguishes_logical_high_water_from_wal_checkpoint",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_checkpoint",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_checkpoint",
+        "async_projection_checkpoint_persists_idempotency_rows_through_high_water",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_checkpoint_persists_idempotency_rows_through_high_water",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_checkpoint::test::async_projection_checkpoint_persists_idempotency_rows_through_high_water",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_checkpoint",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_checkpoint",
+        "async_projection_checkpoint_records_object_log_lineage",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_checkpoint_records_object_log_lineage",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_checkpoint::test::async_projection_checkpoint_records_object_log_lineage",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_checkpoint",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_checkpoint",
+        "async_projection_checkpoint_skips_already_applied_prefix_idempotently",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_checkpoint_skips_already_applied_prefix_idempotently",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_checkpoint::test::async_projection_checkpoint_skips_already_applied_prefix_idempotently",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_checkpoint",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_checkpoint",
+        "async_projection_checkpoint_survives_reopen_and_rehydrates_memory",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_checkpoint_survives_reopen_and_rehydrates_memory",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_checkpoint::test::async_projection_checkpoint_survives_reopen_and_rehydrates_memory",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_checkpoint",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_checkpoint",
+        "async_projection_checkpoint_wraps_an_existing_projection_store",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_checkpoint_wraps_an_existing_projection_store",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_checkpoint::test::async_projection_checkpoint_wraps_an_existing_projection_store",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_checkpoint",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_recovery",
+        "async_projection_recovery_fails_closed_on_newer_lineage_epoch",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_recovery_fails_closed_on_newer_lineage_epoch",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_recovery::test::async_projection_recovery_fails_closed_on_newer_lineage_epoch",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_recovery",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_recovery",
+        "async_projection_recovery_fails_closed_when_sqlite_ahead_of_log",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_recovery_fails_closed_when_sqlite_ahead_of_log",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_recovery::test::async_projection_recovery_fails_closed_when_sqlite_ahead_of_log",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_recovery",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_recovery",
+        "async_projection_recovery_hydrates_validates_and_advertises_high_water",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_recovery_hydrates_validates_and_advertises_high_water",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_recovery::test::async_projection_recovery_hydrates_validates_and_advertises_high_water",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_recovery",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
+        "async_projection_recovery",
+        "async_projection_recovery_no_lineage_still_checks_high_water",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "async_projection_recovery_no_lineage_still_checks_high_water",
+      "id": "Cargo.toml::fireweed-sqlite::async_projection_recovery::test::async_projection_recovery_no_lineage_still_checks_high_water",
+      "listed_kind": "test",
+      "package": "fireweed-sqlite",
+      "target": "async_projection_recovery",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-sqlite",
+        "--test",
         "claim_by_query_eligibility",
         "claim_by_query_excludes_leased_terminal_superseded_and_future_rows",
         "--",
@@ -67254,992 +68788,6 @@
       "target": "fireweed_sqlite",
       "target_kind": [
         "lib"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_backpressure",
-        "hybrid_async_backpressure_a_clean_batch_resets_the_consecutive_retry_count_before_poison",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_backpressure_a_clean_batch_resets_the_consecutive_retry_count_before_poison",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_backpressure::test::hybrid_async_backpressure_a_clean_batch_resets_the_consecutive_retry_count_before_poison",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_backpressure",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_backpressure",
-        "hybrid_async_backpressure_admission_gate_rejects_mutations_only_under_hard_backpressure",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_backpressure_admission_gate_rejects_mutations_only_under_hard_backpressure",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_backpressure::test::hybrid_async_backpressure_admission_gate_rejects_mutations_only_under_hard_backpressure",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_backpressure",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_backpressure",
-        "hybrid_async_backpressure_any_single_metric_at_its_hard_limit_trips_backpressure",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_backpressure_any_single_metric_at_its_hard_limit_trips_backpressure",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_backpressure::test::hybrid_async_backpressure_any_single_metric_at_its_hard_limit_trips_backpressure",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_backpressure",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_backpressure",
-        "hybrid_async_backpressure_backpressure_count_and_duration_are_tracked",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_backpressure_backpressure_count_and_duration_are_tracked",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_backpressure::test::hybrid_async_backpressure_backpressure_count_and_duration_are_tracked",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_backpressure",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_backpressure",
-        "hybrid_async_backpressure_checkpoint_store_reports_wal_size_and_apply_lag",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_backpressure_checkpoint_store_reports_wal_size_and_apply_lag",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_backpressure::test::hybrid_async_backpressure_checkpoint_store_reports_wal_size_and_apply_lag",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_backpressure",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_backpressure",
-        "hybrid_async_backpressure_debt_crosses_soft_then_hard_bands",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_backpressure_debt_crosses_soft_then_hard_bands",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_backpressure::test::hybrid_async_backpressure_debt_crosses_soft_then_hard_bands",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_backpressure",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_backpressure",
-        "hybrid_async_backpressure_hard_backpressure_holds_until_debt_clears_below_half_after_a_clean_batch",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_backpressure_hard_backpressure_holds_until_debt_clears_below_half_after_a_clean_batch",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_backpressure::test::hybrid_async_backpressure_hard_backpressure_holds_until_debt_clears_below_half_after_a_clean_batch",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_backpressure",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_backpressure",
-        "hybrid_async_backpressure_metrics_snapshot_exposes_the_full_observability_surface",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_backpressure_metrics_snapshot_exposes_the_full_observability_surface",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_backpressure::test::hybrid_async_backpressure_metrics_snapshot_exposes_the_full_observability_surface",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_backpressure",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_backpressure",
-        "hybrid_async_backpressure_non_contiguous_apply_poisons_immediately",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_backpressure_non_contiguous_apply_poisons_immediately",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_backpressure::test::hybrid_async_backpressure_non_contiguous_apply_poisons_immediately",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_backpressure",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_backpressure",
-        "hybrid_async_backpressure_recovery_high_water_is_withheld_under_hard_backpressure_and_poison",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_backpressure_recovery_high_water_is_withheld_under_hard_backpressure_and_poison",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_backpressure::test::hybrid_async_backpressure_recovery_high_water_is_withheld_under_hard_backpressure_and_poison",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_backpressure",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_backpressure",
-        "hybrid_async_backpressure_repeated_apply_failure_poisons_and_fails_closed",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_backpressure_repeated_apply_failure_poisons_and_fails_closed",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_backpressure::test::hybrid_async_backpressure_repeated_apply_failure_poisons_and_fails_closed",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_backpressure",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_backpressure",
-        "hybrid_async_backpressure_retention_advances_only_when_clear_and_healthy",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_backpressure_retention_advances_only_when_clear_and_healthy",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_backpressure::test::hybrid_async_backpressure_retention_advances_only_when_clear_and_healthy",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_backpressure",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_backpressure",
-        "hybrid_async_backpressure_zero_threshold_is_rejected",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_backpressure_zero_threshold_is_rejected",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_backpressure::test::hybrid_async_backpressure_zero_threshold_is_rejected",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_backpressure",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_chaos",
-        "hybrid_async_chaos_apply_backlog_gates_mutations_and_withholds_high_water_until_drained",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_chaos_apply_backlog_gates_mutations_and_withholds_high_water_until_drained",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_chaos::test::hybrid_async_chaos_apply_backlog_gates_mutations_and_withholds_high_water_until_drained",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_chaos",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_chaos",
-        "hybrid_async_chaos_crash_after_high_water_replays_committed_batch_idempotently",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_chaos_crash_after_high_water_replays_committed_batch_idempotently",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_chaos::test::hybrid_async_chaos_crash_after_high_water_replays_committed_batch_idempotently",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_chaos",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_chaos",
-        "hybrid_async_chaos_crash_after_memory_apply_before_sqlite_apply_resumes_at_prefix",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_chaos_crash_after_memory_apply_before_sqlite_apply_resumes_at_prefix",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_chaos::test::hybrid_async_chaos_crash_after_memory_apply_before_sqlite_apply_resumes_at_prefix",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_chaos",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_chaos",
-        "hybrid_async_chaos_crash_after_objectlog_commit_before_apply_replays_full_tail",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_chaos_crash_after_objectlog_commit_before_apply_replays_full_tail",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_chaos::test::hybrid_async_chaos_crash_after_objectlog_commit_before_apply_replays_full_tail",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_chaos",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_chaos",
-        "hybrid_async_chaos_crash_before_response_delivery_replays_request_id",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_chaos_crash_before_response_delivery_replays_request_id",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_chaos::test::hybrid_async_chaos_crash_before_response_delivery_replays_request_id",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_chaos",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_chaos",
-        "hybrid_async_chaos_crash_during_sqlite_txn_leaves_no_partial_apply_or_orphan_lease",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_chaos_crash_during_sqlite_txn_leaves_no_partial_apply_or_orphan_lease",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_chaos::test::hybrid_async_chaos_crash_during_sqlite_txn_leaves_no_partial_apply_or_orphan_lease",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_chaos",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_chaos",
-        "hybrid_async_chaos_disk_full_apply_failure_poisons_and_never_advances_past_poison",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_chaos_disk_full_apply_failure_poisons_and_never_advances_past_poison",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_chaos::test::hybrid_async_chaos_disk_full_apply_failure_poisons_and_never_advances_past_poison",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_chaos",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_chaos",
-        "hybrid_async_chaos_disk_loss_resets_high_water_and_rebuilds_from_log",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_chaos_disk_loss_resets_high_water_and_rebuilds_from_log",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_chaos::test::hybrid_async_chaos_disk_loss_resets_high_water_and_rebuilds_from_log",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_chaos",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_chaos",
-        "hybrid_async_chaos_projection_poison_withholds_advanced_high_water",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_chaos_projection_poison_withholds_advanced_high_water",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_chaos::test::hybrid_async_chaos_projection_poison_withholds_advanced_high_water",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_chaos",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_chaos",
-        "hybrid_async_chaos_rolled_back_finalize_keeps_recoverable_inflight_lease",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_chaos_rolled_back_finalize_keeps_recoverable_inflight_lease",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_chaos::test::hybrid_async_chaos_rolled_back_finalize_keeps_recoverable_inflight_lease",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_chaos",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_checkpoint",
-        "hybrid_async_checkpoint_applies_ordered_batches_and_advances_logical_high_water",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_checkpoint_applies_ordered_batches_and_advances_logical_high_water",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_checkpoint::test::hybrid_async_checkpoint_applies_ordered_batches_and_advances_logical_high_water",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_checkpoint",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_checkpoint",
-        "hybrid_async_checkpoint_distinguishes_logical_high_water_from_wal_checkpoint",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_checkpoint_distinguishes_logical_high_water_from_wal_checkpoint",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_checkpoint::test::hybrid_async_checkpoint_distinguishes_logical_high_water_from_wal_checkpoint",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_checkpoint",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_checkpoint",
-        "hybrid_async_checkpoint_persists_idempotency_rows_through_high_water",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_checkpoint_persists_idempotency_rows_through_high_water",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_checkpoint::test::hybrid_async_checkpoint_persists_idempotency_rows_through_high_water",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_checkpoint",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_checkpoint",
-        "hybrid_async_checkpoint_records_object_log_lineage",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_checkpoint_records_object_log_lineage",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_checkpoint::test::hybrid_async_checkpoint_records_object_log_lineage",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_checkpoint",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_checkpoint",
-        "hybrid_async_checkpoint_skips_already_applied_prefix_idempotently",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_checkpoint_skips_already_applied_prefix_idempotently",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_checkpoint::test::hybrid_async_checkpoint_skips_already_applied_prefix_idempotently",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_checkpoint",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_checkpoint",
-        "hybrid_async_checkpoint_survives_reopen_and_rehydrates_memory",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_checkpoint_survives_reopen_and_rehydrates_memory",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_checkpoint::test::hybrid_async_checkpoint_survives_reopen_and_rehydrates_memory",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_checkpoint",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_checkpoint",
-        "hybrid_async_checkpoint_wraps_an_existing_projection_store",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_checkpoint_wraps_an_existing_projection_store",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_checkpoint::test::hybrid_async_checkpoint_wraps_an_existing_projection_store",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_checkpoint",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_recovery",
-        "hybrid_async_recovery_fails_closed_on_newer_lineage_epoch",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_recovery_fails_closed_on_newer_lineage_epoch",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_recovery::test::hybrid_async_recovery_fails_closed_on_newer_lineage_epoch",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_recovery",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_recovery",
-        "hybrid_async_recovery_fails_closed_when_sqlite_ahead_of_log",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_recovery_fails_closed_when_sqlite_ahead_of_log",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_recovery::test::hybrid_async_recovery_fails_closed_when_sqlite_ahead_of_log",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_recovery",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_recovery",
-        "hybrid_async_recovery_hydrates_validates_and_advertises_high_water",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_recovery_hydrates_validates_and_advertises_high_water",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_recovery::test::hybrid_async_recovery_hydrates_validates_and_advertises_high_water",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_recovery",
-      "target_kind": [
-        "test"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.92.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-sqlite",
-        "--test",
-        "hybrid_async_recovery",
-        "hybrid_async_recovery_no_lineage_still_checks_high_water",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "harness_id": "hybrid_async_recovery_no_lineage_still_checks_high_water",
-      "id": "Cargo.toml::fireweed-sqlite::hybrid_async_recovery::test::hybrid_async_recovery_no_lineage_still_checks_high_water",
-      "listed_kind": "test",
-      "package": "fireweed-sqlite",
-      "target": "hybrid_async_recovery",
-      "target_kind": [
-        "test"
       ],
       "workspace": "Cargo.toml"
     },
@@ -81652,7 +82200,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "6f2d94a3cdbdf3ca94167e8021926735481a7f0211e239fef4d0909e64fa7ee4",
+  "source_inventory_sha256": "bb519d7a11619403a05d73e2896ed42c458f0dc4fd76bb40efc06c4c47eeb271",
   "workspaces": [
     {
       "listing_error_sha256": "",

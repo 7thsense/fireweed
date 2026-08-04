@@ -1,5 +1,8 @@
 //! Async object-log × hybrid projection over crates.io [`object_log::LogEngine`].
 //!
+//! LEGACY COMPATIBILITY BOUNDARY: retained only for the pre-cutover server arms owned by P12a.
+//! Canonical Strict / AsyncProjection SQLite composition is [`crate::AsyncObjectLogSqliteBackend`].
+//!
 //! LogEngine append then [`fireweed_sqlite::HybridProjectionStore`] apply (hot memory + durable
 //! SQLite checkpoint). Under `HybridProductConfig::strict` / projection `is_strict()` (the public
 //! `ResponseBarrier::Strict` path), success is atomic response-after-apply and the product

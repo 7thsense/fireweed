@@ -1,3 +1,5 @@
+//! Legacy-compatibility assertions migrated to the provider-neutral AsyncProjection test ledger.
+//!
 //! Bounded async-apply debt, backpressure, and fail-closed poison for the `objectlog/hybrid-async`
 //! profile (bead pqueue-6da52695; TD-004 §"Async apply debt, backpressure, and poison thresholds").
 //!
@@ -28,7 +30,7 @@ fn lag(commands: u64) -> HybridAsyncDebt {
 }
 
 #[test]
-fn hybrid_async_backpressure_zero_threshold_is_rejected() {
+fn async_projection_backpressure_zero_threshold_is_rejected() {
     // A zero bound would leave a queue instantly and permanently backpressured.
     assert!(HybridAsyncThresholds::new(0, 1, 1, 1, 1).is_err());
     assert!(HybridAsyncThresholds::new(1, 0, 1, 1, 1).is_err());
@@ -39,7 +41,7 @@ fn hybrid_async_backpressure_zero_threshold_is_rejected() {
 }
 
 #[test]
-fn hybrid_async_backpressure_debt_crosses_soft_then_hard_bands() {
+fn async_projection_backpressure_debt_crosses_soft_then_hard_bands() {
     let mut monitor = HybridAsyncMonitor::new(thresholds());
     assert_eq!(monitor.observe(lag(10), 0), BackpressureLevel::Clear);
     assert_eq!(monitor.observe(lag(80), 1), BackpressureLevel::Soft);
@@ -47,7 +49,7 @@ fn hybrid_async_backpressure_debt_crosses_soft_then_hard_bands() {
 }
 
 #[test]
-fn hybrid_async_backpressure_any_single_metric_at_its_hard_limit_trips_backpressure() {
+fn async_projection_backpressure_any_single_metric_at_its_hard_limit_trips_backpressure() {
     let mut monitor = HybridAsyncMonitor::new(thresholds());
     // Queue depth alone at its hard limit is enough even when every other metric is quiet.
     let debt = HybridAsyncDebt {
@@ -58,7 +60,7 @@ fn hybrid_async_backpressure_any_single_metric_at_its_hard_limit_trips_backpress
 }
 
 #[test]
-fn hybrid_async_backpressure_hard_backpressure_holds_until_debt_clears_below_half_after_a_clean_batch()
+fn async_projection_backpressure_hard_backpressure_holds_until_debt_clears_below_half_after_a_clean_batch()
  {
     let mut monitor = HybridAsyncMonitor::new(thresholds());
     assert_eq!(monitor.observe(lag(100), 0), BackpressureLevel::Hard);
@@ -72,7 +74,7 @@ fn hybrid_async_backpressure_hard_backpressure_holds_until_debt_clears_below_hal
 }
 
 #[test]
-fn hybrid_async_backpressure_admission_gate_rejects_mutations_only_under_hard_backpressure() {
+fn async_projection_backpressure_admission_gate_rejects_mutations_only_under_hard_backpressure() {
     let mut monitor = HybridAsyncMonitor::new(thresholds());
     assert!(monitor.admit_mutation().is_ok(), "clear admits mutations");
     monitor.observe(lag(80), 0);
@@ -88,7 +90,7 @@ fn hybrid_async_backpressure_admission_gate_rejects_mutations_only_under_hard_ba
 }
 
 #[test]
-fn hybrid_async_backpressure_repeated_apply_failure_poisons_and_fails_closed() {
+fn async_projection_backpressure_repeated_apply_failure_poisons_and_fails_closed() {
     let mut monitor = HybridAsyncMonitor::new(thresholds());
     assert!(!monitor.record_checkpoint_error("io error"));
     assert!(!monitor.record_checkpoint_error("io error"));
@@ -104,7 +106,7 @@ fn hybrid_async_backpressure_repeated_apply_failure_poisons_and_fails_closed() {
 }
 
 #[test]
-fn hybrid_async_backpressure_a_clean_batch_resets_the_consecutive_retry_count_before_poison() {
+fn async_projection_backpressure_a_clean_batch_resets_the_consecutive_retry_count_before_poison() {
     let mut monitor = HybridAsyncMonitor::new(thresholds());
     monitor.record_checkpoint_error("blip");
     monitor.record_checkpoint_error("blip");
@@ -117,7 +119,7 @@ fn hybrid_async_backpressure_a_clean_batch_resets_the_consecutive_retry_count_be
 }
 
 #[test]
-fn hybrid_async_backpressure_non_contiguous_apply_poisons_immediately() {
+fn async_projection_backpressure_non_contiguous_apply_poisons_immediately() {
     let mut monitor = HybridAsyncMonitor::new(thresholds());
     monitor.poison("non-contiguous apply: expected sequence 42, got 44");
     assert!(monitor.is_poisoned());
@@ -125,7 +127,8 @@ fn hybrid_async_backpressure_non_contiguous_apply_poisons_immediately() {
 }
 
 #[test]
-fn hybrid_async_backpressure_recovery_high_water_is_withheld_under_hard_backpressure_and_poison() {
+fn async_projection_backpressure_recovery_high_water_is_withheld_under_hard_backpressure_and_poison()
+ {
     let mut monitor = HybridAsyncMonitor::new(thresholds());
     let hw = fireweed_engine::CommandPosition::new(shard(), 0, 41);
     // Clear: the recorded high-water is a safe replay-skip point.
@@ -142,7 +145,7 @@ fn hybrid_async_backpressure_recovery_high_water_is_withheld_under_hard_backpres
 }
 
 #[test]
-fn hybrid_async_backpressure_retention_advances_only_when_clear_and_healthy() {
+fn async_projection_backpressure_retention_advances_only_when_clear_and_healthy() {
     let mut monitor = HybridAsyncMonitor::new(thresholds());
     assert!(monitor.retention_may_advance());
     monitor.observe(lag(80), 0);
@@ -157,7 +160,7 @@ fn hybrid_async_backpressure_retention_advances_only_when_clear_and_healthy() {
 }
 
 #[test]
-fn hybrid_async_backpressure_backpressure_count_and_duration_are_tracked() {
+fn async_projection_backpressure_backpressure_count_and_duration_are_tracked() {
     let mut monitor = HybridAsyncMonitor::new(thresholds());
     // Enter Hard at t=100, leave at t=250 (150ms). record_apply_success lets it release below the band.
     monitor.observe(lag(100), 100);
@@ -175,7 +178,7 @@ fn hybrid_async_backpressure_backpressure_count_and_duration_are_tracked() {
 }
 
 #[test]
-fn hybrid_async_backpressure_metrics_snapshot_exposes_the_full_observability_surface() {
+fn async_projection_backpressure_metrics_snapshot_exposes_the_full_observability_surface() {
     let mut monitor = HybridAsyncMonitor::new(thresholds());
     monitor.set_wal_size_bytes(4096);
     monitor.observe(
@@ -201,7 +204,7 @@ fn hybrid_async_backpressure_metrics_snapshot_exposes_the_full_observability_sur
 }
 
 #[test]
-fn hybrid_async_backpressure_checkpoint_store_reports_wal_size_and_apply_lag() {
+fn async_projection_backpressure_checkpoint_store_reports_wal_size_and_apply_lag() {
     let store = SqliteCheckpointStore::in_memory().expect("open in-memory checkpoint store");
     let sh = shard();
     store

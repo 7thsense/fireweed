@@ -1,8 +1,7 @@
 //! Async object-log × sqlite projection over crates.io [`object_log::LogEngine`].
 //!
-//! SQLite apply is always durable on the success path, so this product is Strict-equivalent
-//! (atomic response-after-apply) and advertises full commit-transition capabilities
-//! (see [`crate::commit_surface`]).
+//! Strict waits for durable SQLite and serving-memory apply. AsyncProjection synchronously updates
+//! serving memory and defers bounded, ordered SQLite apply through the shared coordinator.
 
 #![allow(
     clippy::manual_async_fn,
@@ -18,23 +17,30 @@ use fireweed_core::{
 };
 use fireweed_engine::{
     AsyncClaimError, AsyncCommitStrategy, AsyncComposedBackend, AsyncControlPlane, AsyncLogStore,
-    AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError, AsyncPushRequest, Backend, ClaimPort,
-    ClaimRequest, Claimed, CommandEnvelope, ControlPlane, ControlPlaneStore, CreateQueueOutcome,
-    DurabilityClass, EngineError, EngineResult, FinalizeOutcome, FinalizePort,
-    InProcessControlPlane, InProcessProjectionStore, OwnedTask, ProjectionClaimPlanner,
-    ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner,
-    ProjectionStore, PurgePort, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey,
-    RawCommitOutcome, RawCommitRequest, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RenewLeasePort, SeparateReplayCommit, SeparateReplayCommitter, TickReport, UpsertOutcome,
-    UpsertPort,
+    AsyncProjectionSpec, AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError, AsyncPushRequest,
+    Backend, ClaimPort, ClaimRequest, Claimed, CommandEnvelope, ControlPlane, ControlPlaneStore,
+    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeOutcome, FinalizePort,
+    InProcessControlPlane, OwnedTask, ProjectionClaimPlanner, ProjectionLifecyclePlanner,
+    ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner, ProjectionStore, PurgePort,
+    PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, RawCommitOutcome, RawCommitRequest,
+    ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort, SeparateReplayCommit,
+    SeparateReplayCommitter, TickReport, UpsertOutcome, UpsertPort,
 };
-use fireweed_sqlite::SqliteProjectionStore;
+use fireweed_projection::{AsyncInMemoryProjection, InMemoryProjection};
+use fireweed_sqlite::{
+    AsyncSqliteProjectionStore, DEFAULT_ASYNC_PROJECTION_MAILBOX_CAPACITY,
+    DEFAULT_DEFERRED_FLUSH_CHUNK, SqliteProjectionStore,
+};
 use object_log::FlushConfig;
 
 use crate::ObjectLogEngineStore;
 use crate::async_product::SeqIdGen;
+use crate::async_projection_apply::{
+    AsyncProjectionApplyCoordinator, AsyncProjectionApplySnapshot,
+};
 use crate::commit_surface::{
-    self, CommitIdempotency, new_commit_idempotency, strict_commit_capabilities,
+    self, CommitIdempotency, eventual_commit_capabilities, new_commit_idempotency,
+    strict_commit_capabilities,
 };
 use crate::port_surface::{
     self, BatchUpdateIdempotency, ClaimByItemIdsIdempotency, ClaimByQueryIdempotency,
@@ -47,12 +53,17 @@ use crate::recovery_stats::{
     replay_log_into_projection,
 };
 
-type Proj = InProcessProjectionStore<SqliteProjectionStore>;
+type Proj = AsyncInMemoryProjection;
 
 #[derive(Clone)]
 struct Committer {
     log: Arc<ObjectLogEngineStore>,
     projection: Arc<Proj>,
+    sqlite_projection: Arc<AsyncSqliteProjectionStore>,
+    async_apply: Option<AsyncProjectionApplyCoordinator<AsyncSqliteProjectionStore>>,
+    strict_poison: Arc<std::sync::RwLock<std::collections::HashMap<QueueKey, String>>>,
+    #[cfg(test)]
+    strict_memory_failures: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl SeparateReplayCommitter for Committer {
@@ -77,6 +88,11 @@ impl SeparateReplayCommitter for Committer {
     fn commit_replayable(&self, request: Self::Request) -> OwnedTask<Self::Output> {
         let log = Arc::clone(&self.log);
         let projection = Arc::clone(&self.projection);
+        let sqlite_projection = Arc::clone(&self.sqlite_projection);
+        let async_apply = self.async_apply.clone();
+        let strict_poison = Arc::clone(&self.strict_poison);
+        #[cfg(test)]
+        let strict_memory_failures = Arc::clone(&self.strict_memory_failures);
         Box::pin(async move {
             let (shard, commands, expected_epoch, fault) = request.into_parts();
             match fault {
@@ -86,17 +102,94 @@ impl SeparateReplayCommitter for Committer {
                 fireweed_engine::RawCommitFault::None
                 | fireweed_engine::RawCommitFault::AfterAppendBeforeApply => {}
             }
-            let positions =
-                AsyncLogStore::append(log.as_ref(), shard, commands.clone(), expected_epoch)
-                    .await?;
+            let reservation = match &async_apply {
+                Some(coordinator) => Some(coordinator.reserve(shard.clone(), &commands).await?),
+                None => None,
+            };
+            let positions = match AsyncLogStore::append(
+                log.as_ref(),
+                shard.clone(),
+                commands.clone(),
+                expected_epoch,
+            )
+            .await
+            {
+                Ok(positions) => positions,
+                Err(error) => {
+                    if let (Some(coordinator), Some(reservation)) = (&async_apply, reservation) {
+                        coordinator.cancel(reservation).await;
+                    }
+                    return Err(error);
+                }
+            };
             if matches!(
                 fault,
                 fireweed_engine::RawCommitFault::AfterAppendBeforeApply
             ) {
+                if let (Some(coordinator), Some(reservation)) = (&async_apply, reservation) {
+                    coordinator.cancel(reservation).await;
+                }
                 return Ok(RawCommitOutcome::appended(positions));
             }
-            AsyncProjectionStore::apply_live(projection.as_ref(), positions.clone(), commands)
+            if let Some(coordinator) = &async_apply {
+                if let Err(error) = AsyncProjectionStore::apply_live(
+                    projection.as_ref(),
+                    positions.clone(),
+                    commands.clone(),
+                )
+                .await
+                {
+                    if let Some(reservation) = reservation {
+                        coordinator.cancel(reservation).await;
+                    }
+                    return Err(error);
+                }
+                if let Some(reservation) = reservation {
+                    coordinator
+                        .enqueue_reserved(reservation, positions.clone(), commands)
+                        .await?;
+                }
+            } else {
+                AsyncProjectionStore::apply_live(
+                    sqlite_projection.as_ref(),
+                    positions.clone(),
+                    commands.clone(),
+                )
                 .await?;
+                #[cfg(test)]
+                let injected_memory_failure = strict_memory_failures
+                    .fetch_update(
+                        std::sync::atomic::Ordering::AcqRel,
+                        std::sync::atomic::Ordering::Acquire,
+                        |remaining| remaining.checked_sub(1),
+                    )
+                    .is_ok();
+                #[cfg(not(test))]
+                let injected_memory_failure = false;
+                let memory_result = if injected_memory_failure {
+                    Err(EngineError::Storage(
+                        "injected serving memory apply failure".into(),
+                    ))
+                } else {
+                    AsyncProjectionStore::apply_live(
+                        projection.as_ref(),
+                        positions.clone(),
+                        commands,
+                    )
+                    .await
+                };
+                if let Err(error) = memory_result {
+                    if let Ok(mut poisoned) = strict_poison.write() {
+                        poisoned.insert(
+                            shard,
+                            format!(
+                                "serving memory apply failed after durable SQLite apply: {error}"
+                            ),
+                        );
+                    }
+                    return Err(error);
+                }
+            }
             Ok(RawCommitOutcome::applied(positions))
         })
     }
@@ -117,6 +210,11 @@ pub struct AsyncObjectLogSqliteBackend {
     engine: Engine,
     log: Arc<ObjectLogEngineStore>,
     projection: Arc<Proj>,
+    sqlite_projection: Arc<AsyncSqliteProjectionStore>,
+    async_apply: Option<AsyncProjectionApplyCoordinator<AsyncSqliteProjectionStore>>,
+    strict_poison: Arc<std::sync::RwLock<std::collections::HashMap<QueueKey, String>>>,
+    #[cfg(test)]
+    strict_memory_failures: Arc<std::sync::atomic::AtomicU32>,
     control: Arc<InProcessControlPlane>,
     ids: Arc<SeqIdGen>,
     counters: Arc<QueueCounters>,
@@ -137,7 +235,46 @@ impl AsyncObjectLogSqliteBackend {
     ) -> EngineResult<Self> {
         let log = Arc::new(ObjectLogEngineStore::open_local(log_root, flush).await?);
         let projection_store = SqliteProjectionStore::open(projection_path)?;
-        Self::from_parts(log, projection_store, node_id).await
+        Self::from_parts(
+            log,
+            projection_store,
+            node_id,
+            None,
+            DEFAULT_DEFERRED_FLUSH_CHUNK,
+        )
+        .await
+    }
+
+    pub async fn open_with_async_projection(
+        log_root: impl AsRef<std::path::Path>,
+        projection_path: &str,
+        flush: FlushConfig,
+        node_id: u8,
+        spec: AsyncProjectionSpec,
+        deferred_flush_chunk: usize,
+    ) -> EngineResult<Self> {
+        let log = Arc::new(ObjectLogEngineStore::open_local(log_root, flush).await?);
+        let projection_store = SqliteProjectionStore::open(projection_path)?;
+        Self::from_parts(
+            log,
+            projection_store,
+            node_id,
+            Some(spec),
+            deferred_flush_chunk,
+        )
+        .await
+    }
+
+    pub async fn open_with_deferred_flush_chunk(
+        log_root: impl AsRef<std::path::Path>,
+        projection_path: &str,
+        flush: FlushConfig,
+        node_id: u8,
+        deferred_flush_chunk: usize,
+    ) -> EngineResult<Self> {
+        let log = Arc::new(ObjectLogEngineStore::open_local(log_root, flush).await?);
+        let projection_store = SqliteProjectionStore::open(projection_path)?;
+        Self::from_parts(log, projection_store, node_id, None, deferred_flush_chunk).await
     }
 
     pub async fn open_memory_log(
@@ -151,7 +288,52 @@ impl AsyncObjectLogSqliteBackend {
         } else {
             SqliteProjectionStore::open(projection_path)?
         };
-        Self::from_parts(log, projection_store, node_id).await
+        Self::from_parts(
+            log,
+            projection_store,
+            node_id,
+            None,
+            DEFAULT_DEFERRED_FLUSH_CHUNK,
+        )
+        .await
+    }
+
+    pub async fn open_memory_log_with_async_projection(
+        projection_path: &str,
+        flush: FlushConfig,
+        node_id: u8,
+        spec: AsyncProjectionSpec,
+        deferred_flush_chunk: usize,
+    ) -> EngineResult<Self> {
+        let log = Arc::new(ObjectLogEngineStore::open_memory(flush).await?);
+        let projection_store = if projection_path == ":memory:" {
+            SqliteProjectionStore::in_memory()?
+        } else {
+            SqliteProjectionStore::open(projection_path)?
+        };
+        Self::from_parts(
+            log,
+            projection_store,
+            node_id,
+            Some(spec),
+            deferred_flush_chunk,
+        )
+        .await
+    }
+
+    pub async fn open_memory_log_with_deferred_flush_chunk(
+        projection_path: &str,
+        flush: FlushConfig,
+        node_id: u8,
+        deferred_flush_chunk: usize,
+    ) -> EngineResult<Self> {
+        let log = Arc::new(ObjectLogEngineStore::open_memory(flush).await?);
+        let projection_store = if projection_path == ":memory:" {
+            SqliteProjectionStore::in_memory()?
+        } else {
+            SqliteProjectionStore::open(projection_path)?
+        };
+        Self::from_parts(log, projection_store, node_id, None, deferred_flush_chunk).await
     }
 
     pub async fn from_log_and_projection(
@@ -159,15 +341,76 @@ impl AsyncObjectLogSqliteBackend {
         projection_store: SqliteProjectionStore,
         node_id: u8,
     ) -> EngineResult<Self> {
-        Self::from_parts(Arc::new(log), projection_store, node_id).await
+        Self::from_parts(
+            Arc::new(log),
+            projection_store,
+            node_id,
+            None,
+            DEFAULT_DEFERRED_FLUSH_CHUNK,
+        )
+        .await
+    }
+
+    pub async fn from_log_and_projection_with_async_projection(
+        log: ObjectLogEngineStore,
+        projection_store: SqliteProjectionStore,
+        node_id: u8,
+        spec: AsyncProjectionSpec,
+        deferred_flush_chunk: usize,
+    ) -> EngineResult<Self> {
+        Self::from_parts(
+            Arc::new(log),
+            projection_store,
+            node_id,
+            Some(spec),
+            deferred_flush_chunk,
+        )
+        .await
+    }
+
+    pub async fn from_log_and_projection_with_deferred_flush_chunk(
+        log: ObjectLogEngineStore,
+        projection_store: SqliteProjectionStore,
+        node_id: u8,
+        deferred_flush_chunk: usize,
+    ) -> EngineResult<Self> {
+        Self::from_parts(
+            Arc::new(log),
+            projection_store,
+            node_id,
+            None,
+            deferred_flush_chunk,
+        )
+        .await
     }
 
     async fn from_parts(
         log: Arc<ObjectLogEngineStore>,
         projection_store: SqliteProjectionStore,
         node_id: u8,
+        async_spec: Option<AsyncProjectionSpec>,
+        deferred_flush_chunk: usize,
     ) -> EngineResult<Self> {
-        let projection = Arc::new(InProcessProjectionStore::new(projection_store));
+        if deferred_flush_chunk == 0 {
+            return Err(EngineError::Invalid(
+                "SQLite projection apply chunk must be positive",
+            ));
+        }
+        let projection = Arc::new(AsyncInMemoryProjection::new(InMemoryProjection::new()));
+        let sqlite_projection = Arc::new(
+            AsyncSqliteProjectionStore::from_store_with_apply_chunk(
+                projection_store,
+                DEFAULT_ASYNC_PROJECTION_MAILBOX_CAPACITY,
+                deferred_flush_chunk,
+            )
+            .await?,
+        );
+        let async_apply = async_spec
+            .map(|spec| AsyncProjectionApplyCoordinator::new(Arc::clone(&sqlite_projection), spec))
+            .transpose()?;
+        let strict_poison = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        #[cfg(test)]
+        let strict_memory_failures = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let control = Arc::new(InProcessControlPlane::new());
         let ids = Arc::new(SeqIdGen::default());
         let counters = Arc::new(QueueCounters::default());
@@ -178,6 +421,11 @@ impl AsyncObjectLogSqliteBackend {
         let committer = Committer {
             log: Arc::clone(&log),
             projection: Arc::clone(&projection),
+            sqlite_projection: Arc::clone(&sqlite_projection),
+            async_apply: async_apply.clone(),
+            strict_poison: Arc::clone(&strict_poison),
+            #[cfg(test)]
+            strict_memory_failures: Arc::clone(&strict_memory_failures),
         };
         let strategy = SeparateReplayCommit::for_profile(DurabilityClass::EventualApply, committer)
             .map_err(|e| EngineError::Storage(e.to_string()))?;
@@ -221,11 +469,15 @@ impl AsyncObjectLogSqliteBackend {
         let definitions = AsyncLogStore::recover_definitions(log.as_ref()).await?;
         for definition in definitions {
             let _ = AsyncControlPlane::create_queue(control.as_ref(), definition.clone()).await;
+            AsyncProjectionStore::ensure_shard(sqlite_projection.as_ref(), definition.clone())
+                .await?;
             AsyncProjectionStore::ensure_shard(projection.as_ref(), definition.clone()).await?;
             let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             // Durable SQLite projection: snapshot high-water + bounded tail replay.
             let stats =
-                replay_log_into_projection(log.as_ref(), projection.as_ref(), &shard, true).await?;
+                replay_log_into_projection(log.as_ref(), sqlite_projection.as_ref(), &shard, true)
+                    .await?;
+            replay_log_into_projection(log.as_ref(), projection.as_ref(), &shard, false).await?;
             recovery_stats.insert(shard.clone(), stats);
             projection
                 .with_store(|p| ProjectionStore::restore_counters(p, &shard, counters.as_ref()))?;
@@ -240,38 +492,28 @@ impl AsyncObjectLogSqliteBackend {
                 &claim_by_item_ids_idempotency,
             )
             .await?;
-            // High-water open never re-applies historical commands into process-local caches:
-            // lease cleartext (hashes only in SQLite) and push request-id maps on the wrapper.
-            {
-                let mut from = None;
-                let mut envelopes = Vec::new();
-                loop {
-                    let page =
-                        AsyncLogStore::read_from(log.as_ref(), shard.clone(), from.clone(), 256)
-                            .await?;
-                    if page.entries.is_empty() {
-                        break;
-                    }
-                    for (_, env) in page.entries {
-                        envelopes.push(env);
-                    }
-                    match page.next {
-                        Some(next) => from = Some(next),
-                        None => break,
-                    }
-                }
-                projection.with_store(|p| p.rehydrate_lease_cleartext(&shard, &envelopes))?;
-                projection.rehydrate_push_idempotency(
-                    &shard,
-                    &envelopes,
-                    definition.request_id_retention_ms,
-                )?;
+            if let Some(coordinator) = &async_apply {
+                coordinator
+                    .seed_high_water(
+                        shard.clone(),
+                        AsyncProjectionStore::recovery_high_water(
+                            sqlite_projection.as_ref(),
+                            shard.clone(),
+                        )
+                        .await?,
+                    )
+                    .await;
             }
         }
         Ok(Self {
             engine,
             log,
             projection,
+            sqlite_projection,
+            async_apply,
+            strict_poison,
+            #[cfg(test)]
+            strict_memory_failures,
             control,
             ids,
             counters,
@@ -289,11 +531,36 @@ impl AsyncObjectLogSqliteBackend {
         shard: &QueueKey,
         expected_epoch: Option<u64>,
     ) -> EngineResult<u64> {
+        self.ensure_projection_healthy(shard)?;
         let epoch = AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?;
         if expected_epoch.is_some_and(|expected| expected != epoch) {
             return Err(EngineError::EpochFenced);
         }
         Ok(epoch)
+    }
+
+    fn ensure_projection_healthy(&self, shard: &QueueKey) -> EngineResult<()> {
+        if let Some(coordinator) = &self.async_apply {
+            coordinator.ensure_healthy(shard)?;
+        }
+        let poisoned = self.strict_poison.read().map_err(|_| {
+            EngineError::Storage("SQLite projection poison registry lock failed".into())
+        })?;
+        match poisoned.get(shard) {
+            Some(reason) => Err(EngineError::Storage(format!(
+                "SQLite projection poisoned: {reason}"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    fn read_healthy_projection<T>(
+        &self,
+        shard: &QueueKey,
+        query: impl FnOnce(&InMemoryProjection) -> EngineResult<T>,
+    ) -> EngineResult<T> {
+        self.ensure_projection_healthy(shard)?;
+        self.projection.with_store(query)
     }
 
     async fn submit_envelopes(
@@ -348,16 +615,25 @@ impl AsyncObjectLogSqliteBackend {
 
 impl Backend for AsyncObjectLogSqliteBackend {
     fn durability_class(&self) -> DurabilityClass {
-        DurabilityClass::Atomic
+        if self.async_apply.is_some() {
+            DurabilityClass::EventualApply
+        } else {
+            DurabilityClass::Atomic
+        }
     }
     fn supports_gates(&self) -> bool {
         self.projection.supports_gates()
     }
     fn commit_capabilities(&self) -> fireweed_engine::CommitCapabilities {
-        // Durable SQLite apply completes before success — Strict-equivalent response-after-apply.
-        strict_commit_capabilities(
-            "Strict: object-log append then durable sqlite projection apply (response-after-apply, LogEngine)",
-        )
+        if self.async_apply.is_some() {
+            eventual_commit_capabilities(
+                "AsyncProjection: object-log append plus serving-memory apply, then bounded durable SQLite apply (LogEngine)",
+            )
+        } else {
+            strict_commit_capabilities(
+                "Strict: object-log append then durable sqlite plus serving-memory apply (response-after-apply, LogEngine)",
+            )
+        }
     }
     fn commit_raw(
         &self,
@@ -378,6 +654,7 @@ impl ControlPlaneStore for AsyncObjectLogSqliteBackend {
     ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
         async move {
             let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            self.ensure_projection_healthy(&shard)?;
             let outcome = self
                 .log
                 .create_or_read_definition(definition.clone())
@@ -391,6 +668,11 @@ impl ControlPlaneStore for AsyncObjectLogSqliteBackend {
             }
             AsyncLogStore::ensure_shard(self.log.as_ref(), shard.clone()).await?;
             AsyncProjectionStore::ensure_shard(
+                self.sqlite_projection.as_ref(),
+                outcome.definition.clone(),
+            )
+            .await?;
+            AsyncProjectionStore::ensure_shard(
                 self.projection.as_ref(),
                 outcome.definition.clone(),
             )
@@ -399,9 +681,16 @@ impl ControlPlaneStore for AsyncObjectLogSqliteBackend {
             if self.recovery_stats.get(&shard).is_none() {
                 let stats = replay_log_into_projection(
                     self.log.as_ref(),
-                    self.projection.as_ref(),
+                    self.sqlite_projection.as_ref(),
                     &shard,
                     true,
+                )
+                .await?;
+                replay_log_into_projection(
+                    self.log.as_ref(),
+                    self.projection.as_ref(),
+                    &shard,
+                    false,
                 )
                 .await?;
                 self.projection.with_store(|projection| {
@@ -417,33 +706,18 @@ impl ControlPlaneStore for AsyncObjectLogSqliteBackend {
                     &self.claim_by_item_ids_idempotency,
                 )
                 .await?;
-                let mut from = None;
-                let mut envelopes = Vec::new();
-                loop {
-                    let page = AsyncLogStore::read_from(
-                        self.log.as_ref(),
-                        shard.clone(),
-                        from.clone(),
-                        256,
-                    )
-                    .await?;
-                    if page.entries.is_empty() {
-                        break;
-                    }
-                    envelopes.extend(page.entries.into_iter().map(|(_, envelope)| envelope));
-                    match page.next {
-                        Some(next) => from = Some(next),
-                        None => break,
-                    }
+                if let Some(coordinator) = &self.async_apply {
+                    coordinator
+                        .seed_high_water(
+                            shard.clone(),
+                            AsyncProjectionStore::recovery_high_water(
+                                self.sqlite_projection.as_ref(),
+                                shard.clone(),
+                            )
+                            .await?,
+                        )
+                        .await;
                 }
-                self.projection.with_store(|projection| {
-                    projection.rehydrate_lease_cleartext(&shard, &envelopes)
-                })?;
-                self.projection.rehydrate_push_idempotency(
-                    &shard,
-                    &envelopes,
-                    outcome.definition.request_id_retention_ms,
-                )?;
                 self.recovery_stats.insert(shard, stats);
             }
             Ok(outcome)
@@ -501,6 +775,7 @@ impl PushPort for AsyncObjectLogSqliteBackend {
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         async move {
+            self.ensure_projection_healthy(shard)?;
             let outcome = self
                 .engine
                 .push(AsyncPushRequest {
@@ -525,6 +800,7 @@ impl PushPort for AsyncObjectLogSqliteBackend {
     ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::PushBatchOutcome>> + Send
     {
         async move {
+            self.ensure_projection_healthy(shard)?;
             self.engine
                 .push(AsyncPushRequest {
                     shard: shard.clone(),
@@ -544,7 +820,10 @@ impl ClaimPort for AsyncObjectLogSqliteBackend {
         &self,
         request: ClaimRequest,
     ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
-        async move { self.engine.claim(request).await.map_err(Self::map_claim) }
+        async move {
+            self.ensure_projection_healthy(&request.shard)?;
+            self.engine.claim(request).await.map_err(Self::map_claim)
+        }
     }
 }
 
@@ -559,6 +838,7 @@ impl FinalizePort for AsyncObjectLogSqliteBackend {
         // fireweed-c8e0a7a5 / fireweed-2be744bd: resolve leases under the same queue permit as
         // plan+commit so a concurrent reclaim/claim cannot invalidate a freshly observed token.
         async move {
+            self.ensure_projection_healthy(shard)?;
             self.engine
                 .finalize_outcomes(shard.clone(), outcomes, now, expected_epoch)
                 .await
@@ -577,6 +857,7 @@ impl RenewLeasePort for AsyncObjectLogSqliteBackend {
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         async move {
+            self.ensure_projection_healthy(shard)?;
             self.engine
                 .renew_item_ids(
                     shard.clone(),
@@ -602,6 +883,7 @@ impl ReassignLeasePort for AsyncObjectLogSqliteBackend {
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         async move {
+            self.ensure_projection_healthy(shard)?;
             self.engine
                 .reassign_item_ids(
                     shard.clone(),
@@ -627,6 +909,7 @@ impl PurgePort for AsyncObjectLogSqliteBackend {
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         async move {
+            self.ensure_projection_healthy(shard)?;
             self.engine
                 .purge(AsyncPurgeRequest {
                     shard: shard.clone(),
@@ -694,6 +977,7 @@ impl ReclaimPort for AsyncObjectLogSqliteBackend {
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         async move {
+            self.ensure_projection_healthy(shard)?;
             self.engine
                 .reclaim_expired(fireweed_engine::AsyncReclaimRequest {
                     shard: shard.clone(),
@@ -730,8 +1014,7 @@ impl ProjectionRead for AsyncObjectLogSqliteBackend {
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::QueueMetrics>> + Send {
         std::future::ready(
-            self.projection
-                .with_store(|p| ProjectionStore::metrics(p, shard)),
+            self.read_healthy_projection(shard, |p| ProjectionStore::metrics(p, shard)),
         )
     }
     fn select_eligible(
@@ -740,10 +1023,9 @@ impl ProjectionRead for AsyncObjectLogSqliteBackend {
         now: UtcTimestamp,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
-        std::future::ready(
-            self.projection
-                .with_store(|p| ProjectionStore::select_eligible(p, shard, now, limit)),
-        )
+        std::future::ready(self.read_healthy_projection(shard, |p| {
+            ProjectionStore::select_eligible(p, shard, now, limit)
+        }))
     }
     fn peek(
         &self,
@@ -752,8 +1034,7 @@ impl ProjectionRead for AsyncObjectLogSqliteBackend {
     ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::ItemView>>> + Send
     {
         std::future::ready(
-            self.projection
-                .with_store(|p| ProjectionStore::peek(p, shard, limit)),
+            self.read_healthy_projection(shard, |p| ProjectionStore::peek(p, shard, limit)),
         )
     }
     fn pending(
@@ -762,8 +1043,7 @@ impl ProjectionRead for AsyncObjectLogSqliteBackend {
     ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::LeaseView>>> + Send
     {
         std::future::ready(
-            self.projection
-                .with_store(|p| ProjectionStore::pending(p, shard)),
+            self.read_healthy_projection(shard, |p| ProjectionStore::pending(p, shard)),
         )
     }
     fn pending_summary(
@@ -772,8 +1052,7 @@ impl ProjectionRead for AsyncObjectLogSqliteBackend {
     ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::PendingSummary>> + Send
     {
         std::future::ready(
-            self.projection
-                .with_store(|p| ProjectionStore::pending_summary(p, shard)),
+            self.read_healthy_projection(shard, |p| ProjectionStore::pending_summary(p, shard)),
         )
     }
     fn pending_page(
@@ -782,10 +1061,9 @@ impl ProjectionRead for AsyncObjectLogSqliteBackend {
         start: Option<ItemId>,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::PendingPage>> + Send {
-        std::future::ready(
-            self.projection
-                .with_store(|p| ProjectionStore::pending_page(p, shard, start, limit)),
-        )
+        std::future::ready(self.read_healthy_projection(shard, |p| {
+            ProjectionStore::pending_page(p, shard, start, limit)
+        }))
     }
     fn pending_range(
         &self,
@@ -797,7 +1075,7 @@ impl ProjectionRead for AsyncObjectLogSqliteBackend {
     ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::LeaseView>>> + Send
     {
         let consumer = consumer.cloned();
-        std::future::ready(self.projection.with_store(|p| {
+        std::future::ready(self.read_healthy_projection(shard, |p| {
             ProjectionStore::pending_range(p, shard, start, end, consumer.as_ref(), limit)
         }))
     }
@@ -809,8 +1087,9 @@ impl ProjectionRead for AsyncObjectLogSqliteBackend {
     {
         let ids = ids.to_vec();
         std::future::ready(
-            self.projection
-                .with_store(|p| ProjectionStore::pending_by_ids(p, shard, &ids)),
+            self.read_healthy_projection(shard, |p| {
+                ProjectionStore::pending_by_ids(p, shard, &ids)
+            }),
         )
     }
     fn claimed_view(
@@ -821,8 +1100,9 @@ impl ProjectionRead for AsyncObjectLogSqliteBackend {
     {
         let ids = ids.to_vec();
         std::future::ready(
-            self.projection
-                .with_store(|p| ProjectionStore::render_claimed(p, shard, &ids)),
+            self.read_healthy_projection(shard, |p| {
+                ProjectionStore::render_claimed(p, shard, &ids)
+            }),
         )
     }
     fn live_items(
@@ -833,8 +1113,7 @@ impl ProjectionRead for AsyncObjectLogSqliteBackend {
     {
         let keys = keys.to_vec();
         std::future::ready(
-            self.projection
-                .with_store(|p| ProjectionStore::live_items(p, shard, &keys)),
+            self.read_healthy_projection(shard, |p| ProjectionStore::live_items(p, shard, &keys)),
         )
     }
     fn terminal_emission_metrics(
@@ -846,7 +1125,7 @@ impl ProjectionRead for AsyncObjectLogSqliteBackend {
     ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::TerminalEmissionMetrics>> + Send
     {
         let emission_cursor = emission_cursor.cloned();
-        std::future::ready(self.projection.with_store(|p| {
+        std::future::ready(self.read_healthy_projection(shard, |p| {
             ProjectionStore::terminal_emission_metrics(
                 p,
                 shard,
@@ -903,6 +1182,7 @@ impl fireweed_engine::CommitTransitionPort for AsyncObjectLogSqliteBackend {
     {
         let shard = shard.clone();
         async move {
+            self.ensure_projection_healthy(&shard)?;
             let epoch = match expected_epoch {
                 Some(epoch) => {
                     let current =
@@ -971,6 +1251,7 @@ impl fireweed_engine::RecoveryReadPort for AsyncObjectLogSqliteBackend {
         let commit_idempotency = Arc::clone(&self.commit_idempotency);
         let shard = shard.clone();
         async move {
+            self.ensure_projection_healthy(&shard)?;
             commit_surface::explain_commit_if_authoritative(
                 true,
                 projection.as_ref(),
@@ -990,7 +1271,10 @@ impl fireweed_engine::RecoveryReadPort for AsyncObjectLogSqliteBackend {
         let projection = Arc::clone(&self.projection);
         let shard = shard.clone();
         let key = key.to_vec();
-        async move { commit_surface::side_record(projection.as_ref(), &shard, &key).await }
+        async move {
+            self.ensure_projection_healthy(&shard)?;
+            commit_surface::side_record(projection.as_ref(), &shard, &key).await
+        }
     }
 }
 
@@ -1044,13 +1328,93 @@ impl fireweed_engine::BatchUpdatePort for AsyncObjectLogSqliteBackend {
 impl fireweed_engine::ItemMutationPort for AsyncObjectLogSqliteBackend {
     fn mutate_items(
         &self,
-        _shard: &QueueKey,
-        _request: fireweed_engine::ItemMutationRequest,
-        _expected_epoch: Option<u64>,
+        shard: &QueueKey,
+        request: fireweed_engine::ItemMutationRequest,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::ItemMutationResponse>> + Send
     {
-        // ItemMutationPort remains un-wired (selector evaluation / dry-run plan); not in AC.
-        std::future::ready(Err(EngineError::Unavailable))
+        let shard = shard.clone();
+        async move {
+            use fireweed_engine::{RequestOutcome, item_mutation_fingerprint};
+
+            self.ensure_projection_healthy(&shard)?;
+            let fingerprint = fireweed_core::BodyHash(item_mutation_fingerprint(&request)?);
+            let request_id = request.request_id.clone();
+            let evaluated_at = request.evaluated_at;
+            let projection = Arc::clone(&self.projection);
+            let log = Arc::clone(&self.log);
+            let ids = Arc::clone(&self.ids);
+            let strategy = self.engine.commit_strategy();
+            let queue = shard.clone();
+            self.engine
+                .submit_operation(queue, move || {
+                    Box::pin(async move {
+                        if let Some(response) = projection.with_store_mut(|projection| {
+                            ProjectionStore::replay_durable_item_mutation(
+                                projection,
+                                &shard,
+                                &request_id,
+                                fingerprint.0,
+                                evaluated_at,
+                            )
+                        })? {
+                            return Ok(response);
+                        }
+                        if let Some(response) = port_surface::retained_item_mutation_response(
+                            log.as_ref(),
+                            &shard,
+                            &request_id,
+                            fingerprint.0,
+                        )
+                        .await?
+                        {
+                            return Ok(response);
+                        }
+                        if request.dry_run {
+                            let plan = projection.with_store_mut(|projection| {
+                                ProjectionStore::plan_item_mutation(projection, &shard, &request)
+                            })?;
+                            return Ok(plan.response);
+                        }
+                        let epoch =
+                            AsyncLogStore::current_epoch(log.as_ref(), shard.clone()).await?;
+                        if expected_epoch.is_some_and(|expected| expected != epoch) {
+                            return Err(EngineError::EpochFenced);
+                        }
+                        let mut plan = projection.with_store_mut(|projection| {
+                            ProjectionStore::plan_item_mutation(projection, &shard, &request)
+                        })?;
+                        let response_payload = serde_json::to_string(&plan.response)
+                            .map_err(|error| EngineError::Storage(error.to_string()))?;
+                        let item_ids = plan
+                            .command
+                            .items
+                            .iter()
+                            .map(|item| item.item_id)
+                            .collect::<Vec<_>>();
+                        let mut envelope = port_surface::make_envelope(
+                            ids.as_ref(),
+                            QueueCommand::MutateItems(plan.command),
+                            item_ids,
+                            evaluated_at,
+                        );
+                        envelope.request_id = Some(request_id);
+                        envelope.request_fingerprint = Some(fingerprint.0);
+                        envelope.request_outcome =
+                            Some(RequestOutcome::ItemMutation { response_payload });
+                        strategy
+                            .commit(RawCommitRequest::new(shard.clone(), vec![envelope], epoch))
+                            .await?;
+                        plan.response.position =
+                            AsyncLogStore::high_water(log.as_ref(), shard.clone()).await?;
+                        Ok(plan.response)
+                    })
+                })
+                .await
+                .map_err(|error| {
+                    EngineError::Storage(format!("async mutate_items submission failed: {error:?}"))
+                })?
+        }
     }
 }
 impl fireweed_engine::SetGatesPort for AsyncObjectLogSqliteBackend {
@@ -1111,11 +1475,9 @@ impl fireweed_engine::DiscoveryPort for AsyncObjectLogSqliteBackend {
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::ActiveScope>>> + Send
     {
-        std::future::ready(
-            self.projection.with_store(|p| {
-                ProjectionStore::discover_active_scopes(p, shard, granularity, now)
-            }),
-        )
+        std::future::ready(self.read_healthy_projection(shard, |projection| {
+            ProjectionStore::discover_active_scopes(projection, shard, granularity, now)
+        }))
     }
 }
 impl fireweed_engine::IndexQueryPort for AsyncObjectLogSqliteBackend {
@@ -1126,12 +1488,9 @@ impl fireweed_engine::IndexQueryPort for AsyncObjectLogSqliteBackend {
         key: &[Vec<u8>],
     ) -> impl std::future::Future<Output = EngineResult<Option<fireweed_engine::IndexHit>>> + Send
     {
-        std::future::ready(port_surface::index_get_unique(
-            self.projection.as_ref(),
-            shard,
-            index,
-            key,
-        ))
+        std::future::ready(self.ensure_projection_healthy(shard).and_then(|()| {
+            port_surface::index_get_unique(self.projection.as_ref(), shard, index, key)
+        }))
     }
     fn index_lookup(
         &self,
@@ -1140,12 +1499,11 @@ impl fireweed_engine::IndexQueryPort for AsyncObjectLogSqliteBackend {
         key: &[Vec<u8>],
     ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::IndexHit>>> + Send
     {
-        std::future::ready(port_surface::index_lookup(
-            self.projection.as_ref(),
-            shard,
-            index,
-            key,
-        ))
+        std::future::ready(
+            self.ensure_projection_healthy(shard).and_then(|()| {
+                port_surface::index_lookup(self.projection.as_ref(), shard, index, key)
+            }),
+        )
     }
 }
 impl fireweed_engine::HotProjectionQueryPort for AsyncObjectLogSqliteBackend {
@@ -1159,11 +1517,10 @@ impl fireweed_engine::HotProjectionQueryPort for AsyncObjectLogSqliteBackend {
         request: fireweed_core::RangeScanRequest,
     ) -> impl std::future::Future<Output = EngineResult<fireweed_core::RangeScanResponse>> + Send
     {
-        std::future::ready(port_surface::range_scan(
-            self.projection.as_ref(),
-            shard,
-            request,
-        ))
+        std::future::ready(
+            self.ensure_projection_healthy(shard)
+                .and_then(|()| port_surface::range_scan(self.projection.as_ref(), shard, request)),
+        )
     }
 
     fn grouped_aggregate(
@@ -1172,11 +1529,9 @@ impl fireweed_engine::HotProjectionQueryPort for AsyncObjectLogSqliteBackend {
         request: fireweed_core::GroupedAggregateRequest,
     ) -> impl std::future::Future<Output = EngineResult<fireweed_core::GroupedAggregateResponse>> + Send
     {
-        std::future::ready(port_surface::grouped_aggregate(
-            self.projection.as_ref(),
-            shard,
-            request,
-        ))
+        std::future::ready(self.ensure_projection_healthy(shard).and_then(|()| {
+            port_surface::grouped_aggregate(self.projection.as_ref(), shard, request)
+        }))
     }
 
     fn metrics_by_query(
@@ -1184,11 +1539,9 @@ impl fireweed_engine::HotProjectionQueryPort for AsyncObjectLogSqliteBackend {
         shard: &QueueKey,
         request: fireweed_core::MetricsByQueryRequest,
     ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::QueueMetrics>> + Send {
-        std::future::ready(port_surface::metrics_by_query(
-            self.projection.as_ref(),
-            shard,
-            request,
-        ))
+        std::future::ready(self.ensure_projection_healthy(shard).and_then(|()| {
+            port_surface::metrics_by_query(self.projection.as_ref(), shard, request)
+        }))
     }
 
     fn declared_bucket_segment(
@@ -1198,11 +1551,9 @@ impl fireweed_engine::HotProjectionQueryPort for AsyncObjectLogSqliteBackend {
     ) -> impl std::future::Future<
         Output = EngineResult<fireweed_core::DeclaredBucketSegmentResponse>,
     > + Send {
-        std::future::ready(port_surface::declared_bucket_segment(
-            self.projection.as_ref(),
-            shard,
-            request,
-        ))
+        std::future::ready(self.ensure_projection_healthy(shard).and_then(|()| {
+            port_surface::declared_bucket_segment(self.projection.as_ref(), shard, request)
+        }))
     }
 
     fn bounded_mutation(
@@ -1393,6 +1744,7 @@ impl fireweed_engine::HistoricalProjectionRead for AsyncObjectLogSqliteBackend {
     ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::CommandPosition>> + Send
     {
         async move {
+            self.ensure_projection_healthy(shard)?;
             AsyncLogStore::high_water(self.log.as_ref(), shard.clone())
                 .await?
                 .ok_or(EngineError::NotFound)
@@ -1540,13 +1892,59 @@ impl AsyncObjectLogSqliteBackend {
     }
 
     /// Borrow the projection axis (lifecycle / diagnostics).
-    pub fn with_projection<R>(&self, f: impl FnOnce(&SqliteProjectionStore) -> R) -> R {
+    pub fn with_projection<R>(&self, f: impl FnOnce(&InMemoryProjection) -> R) -> R {
         self.projection.with_store(f)
     }
 
-    /// Mutably borrow the projection axis (lifecycle rebuild / delete).
-    pub fn with_projection_mut<R>(&self, f: impl FnOnce(&mut SqliteProjectionStore) -> R) -> R {
+    /// Mutably borrow the serving projection axis (lifecycle diagnostics).
+    pub fn with_projection_mut<R>(&self, f: impl FnOnce(&mut InMemoryProjection) -> R) -> R {
         self.projection.with_store_mut(f)
+    }
+
+    pub fn pause_async_projection_apply(&self) -> EngineResult<()> {
+        let coordinator = self.async_apply.as_ref().ok_or(EngineError::Invalid(
+            "async-projection-control-requires-async-barrier",
+        ))?;
+        coordinator.pause();
+        Ok(())
+    }
+
+    pub fn resume_async_projection_apply(&self) -> EngineResult<()> {
+        let coordinator = self.async_apply.as_ref().ok_or(EngineError::Invalid(
+            "async-projection-control-requires-async-barrier",
+        ))?;
+        coordinator.resume();
+        Ok(())
+    }
+
+    pub async fn async_projection_snapshot(
+        &self,
+        shard: &QueueKey,
+    ) -> EngineResult<AsyncProjectionApplySnapshot> {
+        let coordinator = self.async_apply.as_ref().ok_or(EngineError::Invalid(
+            "async-projection-control-requires-async-barrier",
+        ))?;
+        Ok(coordinator.snapshot(shard).await)
+    }
+
+    pub async fn wait_for_async_projection_catch_up(&self, shard: &QueueKey) -> EngineResult<()> {
+        let coordinator = self.async_apply.as_ref().ok_or(EngineError::Invalid(
+            "async-projection-control-requires-async-barrier",
+        ))?;
+        coordinator.wait_for_catch_up(shard).await
+    }
+
+    pub async fn export_sqlite_projection_image(
+        &self,
+        shard: &QueueKey,
+    ) -> EngineResult<fireweed_projection::ProjectionImage> {
+        self.sqlite_projection
+            .export_projection_image(shard.clone())
+            .await
+    }
+
+    pub fn sqlite_projection_apply_chunk_size(&self) -> usize {
+        self.sqlite_projection.apply_chunk_size()
     }
 
     /// Production recovery telemetry captured at open / first create_queue for `shard`.
@@ -1576,10 +1974,11 @@ mod tests {
         RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
     };
     use fireweed_engine::{
-        ClaimCompatibility, ClaimPort, ClaimRef, ClaimRequest, CommitEntryOutcome,
-        CommitTransition, CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore,
-        EngineError, FinalizeKind, FinalizeOutcome, FinalizePort, InstanceFence, ProjectionRead,
-        ProjectionStore, PushPort, PushSpec, ReclaimDriver, RecoveryReadPort, SideRecord,
+        AsyncProjectionSpec, Backend, ClaimCompatibility, ClaimPort, ClaimRef, ClaimRequest,
+        CommitEntryOutcome, CommitTransition, CommitTransitionEntry, CommitTransitionPort,
+        ControlPlaneStore, DurabilityClass, EngineError, FinalizeKind, FinalizeOutcome,
+        FinalizePort, InstanceFence, ProjectionRead, ProjectionStore, PushPort, PushSpec,
+        ReclaimDriver, RecoveryReadPort, SideRecord,
     };
     use object_log::FlushConfig;
 
@@ -2206,5 +2605,423 @@ mod tests {
             .with_projection(|p| ProjectionStore::instance_fence(p, &shard, &instance_key))
             .unwrap();
         assert_eq!(fence, Some(2));
+    }
+
+    mod async_projection_sqlite {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        use super::*;
+
+        fn flush() -> FlushConfig {
+            FlushConfig {
+                linger: std::time::Duration::ZERO,
+                ..FlushConfig::default()
+            }
+        }
+
+        fn spec() -> AsyncProjectionSpec {
+            AsyncProjectionSpec::new(32, 1024 * 1024, 16, 30_000, 3).unwrap()
+        }
+
+        async fn async_backend(
+            spec: AsyncProjectionSpec,
+            chunk: usize,
+        ) -> AsyncObjectLogSqliteBackend {
+            AsyncObjectLogSqliteBackend::open_memory_log_with_async_projection(
+                ":memory:",
+                flush(),
+                0,
+                spec,
+                chunk,
+            )
+            .await
+            .unwrap()
+        }
+
+        async fn create(backend: &AsyncObjectLogSqliteBackend) -> fireweed_engine::QueueKey {
+            let definition = qdef();
+            let shard = fireweed_engine::QueueKey::new(
+                definition.tenant_id.clone(),
+                definition.queue_id.clone(),
+            );
+            backend.create_queue(definition).await.unwrap();
+            shard
+        }
+
+        async fn push_one(
+            backend: &AsyncObjectLogSqliteBackend,
+            shard: &fireweed_engine::QueueKey,
+            timestamp: i64,
+        ) -> fireweed_engine::EngineResult<Vec<fireweed_core::ItemId>> {
+            backend
+                .push(
+                    shard,
+                    vec![PushSpec::default()],
+                    UtcTimestamp::new(timestamp, 0).unwrap(),
+                    None,
+                )
+                .await
+        }
+
+        fn assert_backpressure(error: EngineError, expected_resource: &'static str) {
+            assert!(matches!(
+                error,
+                EngineError::Backpressure { resource } if resource == expected_resource
+            ));
+        }
+
+        #[tokio::test]
+        async fn both_barriers_preserve_independent_sqlite_chunk_tuning() {
+            let strict = AsyncObjectLogSqliteBackend::open_memory_log_with_deferred_flush_chunk(
+                ":memory:",
+                flush(),
+                0,
+                7,
+            )
+            .await
+            .unwrap();
+            let strict_shard = create(&strict).await;
+            push_one(&strict, &strict_shard, 1).await.unwrap();
+            assert_eq!(strict.sqlite_projection_apply_chunk_size(), 7);
+            assert_eq!(strict.durability_class(), DurabilityClass::Atomic);
+            assert_eq!(
+                strict
+                    .export_sqlite_projection_image(&strict_shard)
+                    .await
+                    .unwrap()
+                    .metrics
+                    .pending,
+                1
+            );
+
+            let asynchronous = async_backend(spec(), 3).await;
+            assert_eq!(asynchronous.sqlite_projection_apply_chunk_size(), 3);
+            assert_eq!(
+                asynchronous.durability_class(),
+                DurabilityClass::EventualApply
+            );
+        }
+
+        #[tokio::test]
+        async fn strict_sqlite_success_then_serving_apply_failure_poisons_fail_closed() {
+            let backend = AsyncObjectLogSqliteBackend::open_memory_log_with_deferred_flush_chunk(
+                ":memory:",
+                flush(),
+                0,
+                1,
+            )
+            .await
+            .unwrap();
+            let shard = create(&backend).await;
+            backend
+                .strict_memory_failures
+                .store(1, std::sync::atomic::Ordering::Release);
+            assert!(matches!(
+                push_one(&backend, &shard, 1).await.unwrap_err(),
+                EngineError::Storage(message) if message.contains("injected serving memory apply failure")
+            ));
+            assert_eq!(
+                backend
+                    .export_sqlite_projection_image(&shard)
+                    .await
+                    .unwrap()
+                    .metrics
+                    .pending,
+                1,
+                "SQLite commit is durable before the injected serving-memory failure"
+            );
+            assert!(matches!(
+                backend.metrics(&shard).await.unwrap_err(),
+                EngineError::Storage(message) if message.contains("SQLite projection poisoned")
+            ));
+            assert!(matches!(
+                push_one(&backend, &shard, 2).await.unwrap_err(),
+                EngineError::Storage(message) if message.contains("SQLite projection poisoned")
+            ));
+        }
+
+        #[tokio::test]
+        async fn paused_sqlite_is_stale_until_ordered_watermark_catch_up() {
+            let backend = async_backend(spec(), 2).await;
+            let shard = create(&backend).await;
+            backend.pause_async_projection_apply().unwrap();
+            let first = push_one(&backend, &shard, 1).await.unwrap()[0];
+            let second = push_one(&backend, &shard, 2).await.unwrap()[0];
+
+            assert_eq!(backend.metrics(&shard).await.unwrap().pending, 2);
+            let stale = backend
+                .export_sqlite_projection_image(&shard)
+                .await
+                .unwrap();
+            assert_eq!(stale.metrics.pending, 0);
+            let debt = backend.async_projection_snapshot(&shard).await.unwrap();
+            assert_eq!(debt.apply_lag_commands, 2);
+            assert_eq!(debt.apply_queue_depth, 2);
+
+            backend.resume_async_projection_apply().unwrap();
+            backend
+                .wait_for_async_projection_catch_up(&shard)
+                .await
+                .unwrap();
+            let caught_up = backend
+                .export_sqlite_projection_image(&shard)
+                .await
+                .unwrap();
+            assert_eq!(caught_up.metrics.pending, 2);
+            assert_eq!(
+                caught_up
+                    .items
+                    .into_iter()
+                    .map(|item| item.item_id)
+                    .collect::<Vec<_>>(),
+                vec![first, second]
+            );
+            assert_eq!(caught_up.high_water.unwrap().sequence, 1);
+        }
+
+        #[tokio::test]
+        async fn lag_command_bound_rejects_before_append() {
+            let backend = async_backend(
+                AsyncProjectionSpec::new(1, 1024 * 1024, 16, 30_000, 3).unwrap(),
+                1,
+            )
+            .await;
+            let shard = create(&backend).await;
+            backend.pause_async_projection_apply().unwrap();
+            push_one(&backend, &shard, 1).await.unwrap();
+            assert_backpressure(
+                push_one(&backend, &shard, 2).await.unwrap_err(),
+                "async-projection-apply-lag-commands",
+            );
+        }
+
+        #[tokio::test]
+        async fn debt_byte_bound_rejects_before_append() {
+            let backend =
+                async_backend(AsyncProjectionSpec::new(32, 1, 16, 30_000, 3).unwrap(), 1).await;
+            let shard = create(&backend).await;
+            backend.pause_async_projection_apply().unwrap();
+            assert_backpressure(
+                push_one(&backend, &shard, 1).await.unwrap_err(),
+                "async-projection-apply-debt-bytes",
+            );
+        }
+
+        #[tokio::test]
+        async fn queue_depth_bound_rejects_before_append() {
+            let backend = async_backend(
+                AsyncProjectionSpec::new(32, 1024 * 1024, 1, 30_000, 3).unwrap(),
+                1,
+            )
+            .await;
+            let shard = create(&backend).await;
+            backend.pause_async_projection_apply().unwrap();
+            push_one(&backend, &shard, 1).await.unwrap();
+            assert_backpressure(
+                push_one(&backend, &shard, 2).await.unwrap_err(),
+                "async-projection-apply-queue-depth",
+            );
+        }
+
+        #[tokio::test]
+        async fn oldest_unapplied_age_bound_rejects_before_append() {
+            let backend = async_backend(
+                AsyncProjectionSpec::new(32, 1024 * 1024, 16, 1, 3).unwrap(),
+                1,
+            )
+            .await;
+            let shard = create(&backend).await;
+            backend.pause_async_projection_apply().unwrap();
+            push_one(&backend, &shard, 1).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            assert_backpressure(
+                push_one(&backend, &shard, 2).await.unwrap_err(),
+                "async-projection-oldest-unapplied-age",
+            );
+        }
+
+        #[tokio::test]
+        async fn repeated_sqlite_apply_failure_poisons_reads_and_writes() {
+            let backend = async_backend(
+                AsyncProjectionSpec::new(32, 1024 * 1024, 16, 30_000, 2).unwrap(),
+                1,
+            )
+            .await;
+            let shard = create(&backend).await;
+            backend
+                .async_apply
+                .as_ref()
+                .unwrap()
+                .inject_apply_failures(2);
+            push_one(&backend, &shard, 1).await.unwrap();
+            assert!(matches!(
+                backend
+                    .wait_for_async_projection_catch_up(&shard)
+                    .await
+                    .unwrap_err(),
+                EngineError::Storage(_)
+            ));
+            let poisoned = backend.async_projection_snapshot(&shard).await.unwrap();
+            assert_eq!(poisoned.apply_retry_count, 2);
+            assert!(poisoned.poison_reason.is_some());
+            assert!(matches!(
+                backend.metrics(&shard).await.unwrap_err(),
+                EngineError::Storage(message) if message.contains("async projection poisoned")
+            ));
+            assert!(matches!(
+                push_one(&backend, &shard, 2).await.unwrap_err(),
+                EngineError::Storage(message) if message.contains("async projection poisoned")
+            ));
+        }
+
+        #[tokio::test]
+        async fn complete_item_mutation_surface_updates_serving_and_selected_projection() {
+            let backend = async_backend(spec(), 1).await;
+            let shard = create(&backend).await;
+            let item_id = push_one(&backend, &shard, 1).await.unwrap()[0];
+            let before = backend
+                .with_projection(|projection| {
+                    ProjectionStore::item_version(projection, &shard, &item_id)
+                })
+                .unwrap()
+                .unwrap();
+            let response = fireweed_engine::ItemMutationPort::mutate_items(
+                &backend,
+                &shard,
+                fireweed_engine::ItemMutationRequest {
+                    request_id: fireweed_core::RequestId::new("sqlite-async-mutation").unwrap(),
+                    evaluated_at: UtcTimestamp::new(2, 0).unwrap(),
+                    dry_run: false,
+                    returning: fireweed_engine::ItemMutationReturning::Identity,
+                    gate_changes: Vec::new(),
+                    operation: fireweed_engine::ItemMutationOperation::Addressed {
+                        entries: vec![fireweed_engine::AddressedMutation {
+                            item_id,
+                            expected_item_version: Some(before),
+                            predicates: Vec::new(),
+                            lease_guard: Default::default(),
+                            patch: fireweed_engine::ItemPatch {
+                                field_edits: std::collections::BTreeMap::from([(
+                                    "owner".into(),
+                                    Some(bytes::Bytes::from_static(b"worker-7")),
+                                )]),
+                                ..Default::default()
+                            },
+                        }],
+                    },
+                },
+                None,
+            )
+            .await
+            .unwrap();
+            assert!(response.position.is_some());
+            assert_eq!(
+                backend
+                    .with_projection(|projection| {
+                        ProjectionStore::item_version(projection, &shard, &item_id)
+                    })
+                    .unwrap(),
+                Some(before + 1)
+            );
+            backend
+                .wait_for_async_projection_catch_up(&shard)
+                .await
+                .unwrap();
+            let image = backend
+                .export_sqlite_projection_image(&shard)
+                .await
+                .unwrap();
+            let item = image
+                .items
+                .into_iter()
+                .find(|item| item.item_id == item_id)
+                .unwrap();
+            assert_eq!(item.item_version, before + 1);
+            assert_eq!(item.fields.get("owner").unwrap().as_ref(), b"worker-7");
+        }
+
+        #[tokio::test]
+        async fn restart_resumes_from_sqlite_high_water_without_loss_or_duplicate_apply() {
+            static NEXT_DIR: AtomicU64 = AtomicU64::new(1);
+            let base = std::env::temp_dir().join(format!(
+                "fireweed-async-projection-sqlite-{}-{}",
+                std::process::id(),
+                NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+            ));
+            let log_root = base.join("log");
+            let sqlite_path = base.join("projection.sqlite");
+            let backend = AsyncObjectLogSqliteBackend::open_with_async_projection(
+                &log_root,
+                sqlite_path.to_str().unwrap(),
+                flush(),
+                0,
+                spec(),
+                1,
+            )
+            .await
+            .unwrap();
+            let shard = create(&backend).await;
+            let first = push_one(&backend, &shard, 1).await.unwrap()[0];
+            let second = push_one(&backend, &shard, 2).await.unwrap()[0];
+            backend
+                .wait_for_async_projection_catch_up(&shard)
+                .await
+                .unwrap();
+            backend.sqlite_projection.close_and_drain().await.unwrap();
+            drop(backend);
+
+            let reopened = AsyncObjectLogSqliteBackend::open_with_async_projection(
+                &log_root,
+                sqlite_path.to_str().unwrap(),
+                flush(),
+                0,
+                spec(),
+                1,
+            )
+            .await
+            .unwrap();
+            let image = reopened
+                .export_sqlite_projection_image(&shard)
+                .await
+                .unwrap();
+            assert_eq!(image.metrics.pending, 2);
+            assert_eq!(
+                image
+                    .items
+                    .into_iter()
+                    .map(|item| item.item_id)
+                    .collect::<Vec<_>>(),
+                vec![first, second]
+            );
+            assert_eq!(
+                reopened
+                    .async_projection_snapshot(&shard)
+                    .await
+                    .unwrap()
+                    .apply_queue_depth,
+                0
+            );
+            let third = push_one(&reopened, &shard, 3).await.unwrap()[0];
+            reopened
+                .wait_for_async_projection_catch_up(&shard)
+                .await
+                .unwrap();
+            let final_image = reopened
+                .export_sqlite_projection_image(&shard)
+                .await
+                .unwrap();
+            assert_eq!(final_image.metrics.pending, 3);
+            assert_eq!(
+                final_image
+                    .items
+                    .into_iter()
+                    .map(|item| item.item_id)
+                    .collect::<Vec<_>>(),
+                vec![first, second, third]
+            );
+            reopened.sqlite_projection.close_and_drain().await.unwrap();
+            drop(reopened);
+            std::fs::remove_dir_all(base).unwrap();
+        }
     }
 }

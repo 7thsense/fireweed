@@ -1,3 +1,5 @@
+//! Legacy-compatibility assertions migrated to the provider-neutral AsyncProjection test ledger.
+//!
 //! Async SQLite logical checkpoint store for the `objectlog/hybrid-async` profile (bead pqueue-16b85e28).
 //!
 //! These tests exercise [`SqliteCheckpointStore`], the off-hot-path worker that consumes committed
@@ -90,7 +92,7 @@ fn temp_path(tag: &str) -> std::path::PathBuf {
 }
 
 #[tokio::test]
-async fn hybrid_async_checkpoint_applies_ordered_batches_and_advances_logical_high_water() {
+async fn async_projection_checkpoint_applies_ordered_batches_and_advances_logical_high_water() {
     let store = SqliteCheckpointStore::in_memory().unwrap();
     store.create_queue_projection(qdef()).unwrap();
     let item_id = ItemId::new("1").unwrap();
@@ -189,7 +191,7 @@ async fn hybrid_async_checkpoint_applies_ordered_batches_and_advances_logical_hi
 }
 
 #[tokio::test]
-async fn hybrid_async_checkpoint_skips_already_applied_prefix_idempotently() {
+async fn async_projection_checkpoint_skips_already_applied_prefix_idempotently() {
     let store = SqliteCheckpointStore::in_memory().unwrap();
     store.create_queue_projection(qdef()).unwrap();
     let first = ItemId::new("1").unwrap();
@@ -236,7 +238,7 @@ async fn hybrid_async_checkpoint_skips_already_applied_prefix_idempotently() {
 }
 
 #[tokio::test]
-async fn hybrid_async_checkpoint_persists_idempotency_rows_through_high_water() {
+async fn async_projection_checkpoint_persists_idempotency_rows_through_high_water() {
     let store = SqliteCheckpointStore::in_memory().unwrap();
     store.create_queue_projection(qdef()).unwrap();
     let item_id = ItemId::new("1").unwrap();
@@ -269,7 +271,7 @@ async fn hybrid_async_checkpoint_persists_idempotency_rows_through_high_water() 
 }
 
 #[tokio::test]
-async fn hybrid_async_checkpoint_records_object_log_lineage() {
+async fn async_projection_checkpoint_records_object_log_lineage() {
     let store = SqliteCheckpointStore::in_memory().unwrap();
     store.create_queue_projection(qdef()).unwrap();
     let first = ItemId::new("1").unwrap();
@@ -326,7 +328,7 @@ async fn hybrid_async_checkpoint_records_object_log_lineage() {
 }
 
 #[tokio::test]
-async fn hybrid_async_checkpoint_distinguishes_logical_high_water_from_wal_checkpoint() {
+async fn async_projection_checkpoint_distinguishes_logical_high_water_from_wal_checkpoint() {
     // A file-backed store so the WAL is real (in-memory databases have no WAL).
     let path = temp_path("wal-distinct");
     let store = SqliteCheckpointStore::open(path.to_str().unwrap()).unwrap();
@@ -372,7 +374,7 @@ async fn hybrid_async_checkpoint_distinguishes_logical_high_water_from_wal_check
 }
 
 #[test]
-fn hybrid_async_checkpoint_survives_reopen_and_rehydrates_memory() {
+fn async_projection_checkpoint_survives_reopen_and_rehydrates_memory() {
     let path = temp_path("reopen");
     let item_id = ItemId::new("1").unwrap();
     let request = RequestId::new("req-1").unwrap();
@@ -436,7 +438,7 @@ fn hybrid_async_checkpoint_survives_reopen_and_rehydrates_memory() {
 /// The checkpoint store is constructible from an existing projection store, so a running hybrid can hand
 /// its durable SQLite projection to the async worker without reopening the file.
 #[test]
-fn hybrid_async_checkpoint_wraps_an_existing_projection_store() {
+fn async_projection_checkpoint_wraps_an_existing_projection_store() {
     let projection = SqliteProjectionStore::in_memory().unwrap();
     projection.create_queue_projection(qdef()).unwrap();
     let store = SqliteCheckpointStore::new(projection);

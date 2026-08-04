@@ -1,3 +1,5 @@
+//! Legacy-compatibility assertions migrated to the provider-neutral AsyncProjection test ledger.
+//!
 //! Recovery-on-open for the `objectlog/hybrid-async` profile (bead pqueue-45cbb98e).
 //!
 //! These tests exercise the projection-side recovery contract [`HybridProjectionStore`] enforces before a
@@ -109,7 +111,7 @@ fn seed_checkpoint(
 /// recorded lineage against a matching log identity, then advertise the high-water as a replay-skip point.
 /// The durably persisted request-id outcome survives so a committed-but-unreturned push converges.
 #[test]
-fn hybrid_async_recovery_hydrates_validates_and_advertises_high_water() {
+fn async_projection_recovery_hydrates_validates_and_advertises_high_water() {
     let path = temp_path("happy");
     let item_id = ItemId::new("1").unwrap();
     let request = RequestId::new("req-1").unwrap();
@@ -167,7 +169,7 @@ fn hybrid_async_recovery_hydrates_validates_and_advertises_high_water() {
 /// image cannot descend from this log (a rolled-back or foreign log, or an image restored over the wrong
 /// namespace). The mismatch poisons the projection so subsequent reads also fail closed.
 #[test]
-fn hybrid_async_recovery_fails_closed_on_newer_lineage_epoch() {
+fn async_projection_recovery_fails_closed_on_newer_lineage_epoch() {
     let path = temp_path("newer-epoch");
     let item_id = ItemId::new("1").unwrap();
 
@@ -204,7 +206,7 @@ fn hybrid_async_recovery_fails_closed_on_newer_lineage_epoch() {
 /// absorbed commands the durable log does not contain, so its high-water can never be a safe replay-skip
 /// point.
 #[test]
-fn hybrid_async_recovery_fails_closed_when_sqlite_ahead_of_log() {
+fn async_projection_recovery_fails_closed_when_sqlite_ahead_of_log() {
     let path = temp_path("sqlite-ahead");
     let first = ItemId::new("1").unwrap();
     let second = ItemId::new("2").unwrap();
@@ -243,7 +245,7 @@ fn hybrid_async_recovery_fails_closed_when_sqlite_ahead_of_log() {
 /// epoch to cross-check, but the high-water identity check still guards against a SQLite image ahead of the
 /// log. A caught-up, fully-covered image validates cleanly.
 #[test]
-fn hybrid_async_recovery_no_lineage_still_checks_high_water() {
+fn async_projection_recovery_no_lineage_still_checks_high_water() {
     let path = temp_path("no-lineage");
 
     // A never-checkpointed queue: only the projection row exists, no lineage, no commands.

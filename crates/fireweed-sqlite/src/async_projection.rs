@@ -201,6 +201,7 @@ impl Drop for Actor {
 #[derive(Clone)]
 pub struct AsyncSqliteProjectionStore {
     actor: Arc<Actor>,
+    apply_chunk_size: usize,
 }
 
 impl AsyncSqliteProjectionStore {
@@ -210,8 +211,9 @@ impl AsyncSqliteProjectionStore {
 
     pub async fn open_with_capacity(path: &str, mailbox_capacity: usize) -> EngineResult<Self> {
         let path = path.to_string();
-        let (actor, opened) =
-            Self::spawn(mailbox_capacity, move || SqliteProjectionStore::open(&path))?;
+        let (actor, opened) = Self::spawn(mailbox_capacity, usize::MAX, move || {
+            SqliteProjectionStore::open(&path)
+        })?;
         opened.await?;
         Ok(actor)
     }
@@ -221,12 +223,36 @@ impl AsyncSqliteProjectionStore {
     }
 
     pub async fn in_memory_with_capacity(mailbox_capacity: usize) -> EngineResult<Self> {
-        let (actor, opened) = Self::spawn(mailbox_capacity, SqliteProjectionStore::in_memory)?;
+        let (actor, opened) = Self::spawn(
+            mailbox_capacity,
+            usize::MAX,
+            SqliteProjectionStore::in_memory,
+        )?;
         opened.await?;
         Ok(actor)
     }
 
-    fn spawn<F>(mailbox_capacity: usize, open: F) -> EngineResult<(Self, Reply<()>)>
+    /// Move an already-open store onto its dedicated actor and bound each apply transaction.
+    pub async fn from_store_with_apply_chunk(
+        store: SqliteProjectionStore,
+        mailbox_capacity: usize,
+        apply_chunk_size: usize,
+    ) -> EngineResult<Self> {
+        if apply_chunk_size == 0 {
+            return Err(EngineError::Invalid(
+                "SQLite projection apply chunk must be positive",
+            ));
+        }
+        let (actor, opened) = Self::spawn(mailbox_capacity, apply_chunk_size, move || Ok(store))?;
+        opened.await?;
+        Ok(actor)
+    }
+
+    fn spawn<F>(
+        mailbox_capacity: usize,
+        apply_chunk_size: usize,
+        open: F,
+    ) -> EngineResult<(Self, Reply<()>)>
     where
         F: FnOnce() -> EngineResult<SqliteProjectionStore> + Send + 'static,
     {
@@ -275,6 +301,7 @@ impl AsyncSqliteProjectionStore {
                     completion,
                     _worker: worker,
                 }),
+                apply_chunk_size,
             },
             opened,
         ))
@@ -333,6 +360,11 @@ impl AsyncSqliteProjectionStore {
     pub async fn export_projection_image(&self, shard: QueueKey) -> EngineResult<ProjectionImage> {
         self.execute(move |store| store.export_projection_image(&shard))
             .await
+    }
+
+    /// Maximum commands committed by one selected-projection apply transaction.
+    pub fn apply_chunk_size(&self) -> usize {
+        self.apply_chunk_size
     }
 }
 
@@ -485,9 +517,12 @@ impl AsyncProjectionStore for AsyncSqliteProjectionStore {
         commands: Vec<CommandEnvelope>,
     ) -> impl Future<Output = EngineResult<()>> + Send {
         let actor = self.clone();
+        let apply_chunk_size = self.apply_chunk_size;
         async move {
             actor
-                .execute(move |store| ProjectionStore::apply_live_owned(store, positions, commands))
+                .execute(move |store| {
+                    apply_in_chunks(store, positions, commands, apply_chunk_size, false)
+                })
                 .await
         }
     }
@@ -498,9 +533,12 @@ impl AsyncProjectionStore for AsyncSqliteProjectionStore {
         commands: Vec<CommandEnvelope>,
     ) -> impl Future<Output = EngineResult<()>> + Send {
         let actor = self.clone();
+        let apply_chunk_size = self.apply_chunk_size;
         async move {
             actor
-                .execute(move |store| ProjectionStore::apply_recovery(store, &positions, &commands))
+                .execute(move |store| {
+                    apply_in_chunks(store, positions, commands, apply_chunk_size, true)
+                })
                 .await
         }
     }
@@ -597,6 +635,35 @@ impl AsyncProjectionStore for AsyncSqliteProjectionStore {
                 .await
         }
     }
+}
+
+fn apply_in_chunks(
+    store: &mut SqliteProjectionStore,
+    positions: Vec<CommandPosition>,
+    commands: Vec<CommandEnvelope>,
+    apply_chunk_size: usize,
+    recovery: bool,
+) -> EngineResult<()> {
+    if positions.len() != commands.len() {
+        return Err(EngineError::Storage(
+            "SQLite projection positions/commands length mismatch".into(),
+        ));
+    }
+    for (position_chunk, command_chunk) in positions
+        .chunks(apply_chunk_size)
+        .zip(commands.chunks(apply_chunk_size))
+    {
+        if recovery {
+            ProjectionStore::apply_recovery(store, position_chunk, command_chunk)?;
+        } else {
+            ProjectionStore::apply_live_owned(
+                store,
+                position_chunk.to_vec(),
+                command_chunk.to_vec(),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

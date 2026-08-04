@@ -1,3 +1,5 @@
+//! Legacy-compatibility assertions migrated to the provider-neutral AsyncProjection test ledger.
+//!
 //! Crash / chaos coverage for the `objectlog/hybrid-async` converged plan (bead pqueue-fed791af,
 //! parent pqueue-b207e65d; TD-004).
 //!
@@ -27,7 +29,7 @@
 //! `fireweed-objectlog` (which this crate deliberately does not depend on), so the log side is presented here
 //! through the crate-boundary [`LogLineageIdentity`] value the composition builds during `recover`;
 //! end-to-end crash coverage over the real `ObjectLog` substrate lives in
-//! `fireweed-objectlog/tests/hybrid_async_chaos.rs` and `fireweed-server/tests/server.rs`.
+//! `fireweed-objectlog/tests/async_projection_chaos.rs` and `fireweed-server/tests/server.rs`.
 
 use fireweed_conformance::{item, qdef, shard, ts};
 use fireweed_core::{ItemId, LeaseToken, RequestId};
@@ -42,7 +44,7 @@ use fireweed_sqlite::{
 };
 
 // ---------------------------------------------------------------------------
-// Fixtures — mirror `hybrid_async_checkpoint.rs` / `hybrid_async_recovery.rs`.
+// Fixtures — mirror `async_projection_checkpoint.rs` / `async_projection_recovery.rs`.
 // ---------------------------------------------------------------------------
 
 fn envelope(
@@ -210,7 +212,7 @@ fn pending(store: &SqliteCheckpointStore) -> u64 {
 /// it. On restart the SQLite image is empty, so the whole committed log tail is un-applied lag and recovery
 /// replays it from genesis — nothing is lost, nothing is duplicated.
 #[test]
-fn hybrid_async_chaos_crash_after_objectlog_commit_before_apply_replays_full_tail() {
+fn async_projection_chaos_crash_after_objectlog_commit_before_apply_replays_full_tail() {
     let path = temp_path("commit-before-apply");
     let committed_head = 2u64; // log durably committed seq 0,1,2 → next_seq 3.
 
@@ -259,7 +261,7 @@ fn hybrid_async_chaos_crash_after_objectlog_commit_before_apply_replays_full_tai
 /// prefix as the skip-point, and the un-checkpointed tail replays. The checkpointed request-id converges
 /// from the durable table.
 #[tokio::test]
-async fn hybrid_async_chaos_crash_after_memory_apply_before_sqlite_apply_resumes_at_prefix() {
+async fn async_projection_chaos_crash_after_memory_apply_before_sqlite_apply_resumes_at_prefix() {
     let path = temp_path("memory-before-sqlite");
     let first = ItemId::new("1").unwrap();
     let req1 = RequestId::new("req-1").unwrap();
@@ -317,7 +319,7 @@ async fn hybrid_async_chaos_crash_after_memory_apply_before_sqlite_apply_resumes
 /// atomic: NOTHING is applied and the logical high-water is untouched. Critically, a claim inside the failed
 /// batch does NOT leave an orphaned in-flight lease behind.
 #[tokio::test]
-async fn hybrid_async_chaos_crash_during_sqlite_txn_leaves_no_partial_apply_or_orphan_lease() {
+async fn async_projection_chaos_crash_during_sqlite_txn_leaves_no_partial_apply_or_orphan_lease() {
     let store = SqliteCheckpointStore::in_memory().unwrap();
     store.create_queue_projection(qdef()).unwrap();
     let one = ItemId::new("1").unwrap();
@@ -393,7 +395,7 @@ async fn hybrid_async_chaos_crash_during_sqlite_txn_leaves_no_partial_apply_or_o
 /// re-deliver the already-applied batch. The applied prefix is skipped idempotently: no item is inserted
 /// twice, no lease is minted twice.
 #[tokio::test]
-async fn hybrid_async_chaos_crash_after_high_water_replays_committed_batch_idempotently() {
+async fn async_projection_chaos_crash_after_high_water_replays_committed_batch_idempotently() {
     let store = SqliteCheckpointStore::in_memory().unwrap();
     store.create_queue_projection(qdef()).unwrap();
     let one = ItemId::new("1").unwrap();
@@ -448,7 +450,7 @@ async fn hybrid_async_chaos_crash_after_high_water_replays_committed_batch_idemp
 /// received the response. On restart the durable request-id outcome is replayed: the SAME item ids come back
 /// and NO second item / second lease is minted.
 #[tokio::test]
-async fn hybrid_async_chaos_crash_before_response_delivery_replays_request_id() {
+async fn async_projection_chaos_crash_before_response_delivery_replays_request_id() {
     let path = temp_path("before-response");
     let item_id = ItemId::new("1").unwrap();
     let request = RequestId::new("req-1").unwrap();
@@ -495,7 +497,7 @@ async fn hybrid_async_chaos_crash_before_response_delivery_replays_request_id() 
 /// batch (the log replay) rebuilds identical state: same resident set, request-id still converges, no
 /// duplicate.
 #[tokio::test]
-async fn hybrid_async_chaos_disk_loss_resets_high_water_and_rebuilds_from_log() {
+async fn async_projection_chaos_disk_loss_resets_high_water_and_rebuilds_from_log() {
     let path = temp_path("disk-loss");
     let one = ItemId::new("1").unwrap();
     let two = ItemId::new("2").unwrap();
@@ -567,7 +569,7 @@ async fn hybrid_async_chaos_disk_loss_resets_high_water_and_rebuilds_from_log() 
 /// mutations CLOSED, halts retention, and — the load-bearing invariant — WITHHOLDS the recovery high-water
 /// so no reader skips past the un-applied poison.
 #[test]
-fn hybrid_async_chaos_disk_full_apply_failure_poisons_and_never_advances_past_poison() {
+fn async_projection_chaos_disk_full_apply_failure_poisons_and_never_advances_past_poison() {
     let mut monitor = HybridAsyncMonitor::new(thresholds());
     // A healthy skip-point is advertised while clear.
     let hw = CommandPosition::new(shard(), 0, 41);
@@ -600,7 +602,7 @@ fn hybrid_async_chaos_disk_full_apply_failure_poisons_and_never_advances_past_po
 /// closed on the recovery high-water once the hybrid projection is poisoned (here by a lineage mismatch), so
 /// the divergent-but-advanced image is never advertised as a replay-skip point.
 #[test]
-fn hybrid_async_chaos_projection_poison_withholds_advanced_high_water() {
+fn async_projection_chaos_projection_poison_withholds_advanced_high_water() {
     let path = temp_path("proj-poison");
     let item_id = ItemId::new("1").unwrap();
     {
@@ -651,7 +653,7 @@ fn hybrid_async_chaos_projection_poison_withholds_advanced_high_water() {
 /// mutations with a retryable error and withholds the recovery skip-point, and the queue only clears once
 /// the backlog drains below the clear band AND a clean batch has applied (hysteresis).
 #[test]
-fn hybrid_async_chaos_apply_backlog_gates_mutations_and_withholds_high_water_until_drained() {
+fn async_projection_chaos_apply_backlog_gates_mutations_and_withholds_high_water_until_drained() {
     let mut monitor = HybridAsyncMonitor::new(thresholds());
     let hw = CommandPosition::new(shard(), 0, 41);
 
@@ -698,7 +700,7 @@ fn hybrid_async_chaos_apply_backlog_gates_mutations_and_withholds_high_water_unt
 /// restart the leased record is recoverable and a correct finalize checkpoint drives it terminal exactly
 /// once. This is the "no orphaned in-flight record" invariant across a rolled-back finalize window.
 #[tokio::test]
-async fn hybrid_async_chaos_rolled_back_finalize_keeps_recoverable_inflight_lease() {
+async fn async_projection_chaos_rolled_back_finalize_keeps_recoverable_inflight_lease() {
     let path = temp_path("rolled-back-finalize");
     let one = ItemId::new("1").unwrap();
     let lease = LeaseToken::new("lease-1").unwrap();

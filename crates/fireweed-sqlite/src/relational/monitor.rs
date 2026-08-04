@@ -1,3 +1,8 @@
+//! LEGACY COMPATIBILITY BOUNDARY for the retired Hybrid selector.
+//!
+//! The provider-neutral runtime policy is `fireweed_engine::AsyncProjectionSpec`; this monitor remains
+//! solely to preserve the pre-cutover server/test behavior until P12a removes that adapter arm.
+
 use fireweed_engine::{CommandPosition, EngineError, EngineResult};
 
 // ---------------------------------------------------------------------------

@@ -1,3 +1,9 @@
+//! LEGACY COMPATIBILITY BOUNDARY.
+//!
+//! Retained only for pre-cutover server arms until P12a migrates them to the provider-neutral
+//! `AsyncProjectionSpec` product. Canonical object-log × SQLite composition lives in
+//! `fireweed-objectlog::async_product_sqlite`; new production call sites must not use these names.
+
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
