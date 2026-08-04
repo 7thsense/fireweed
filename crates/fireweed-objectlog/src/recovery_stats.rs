@@ -98,7 +98,7 @@ fn record_replay_progress(samples: &mut Vec<u64>, sequence: u64) {
 
 /// Replay durable log pages into `projection`, optionally starting after a snapshot high-water.
 ///
-/// When `use_projection_high_water` is true (durable sqlite/hybrid projections), recovery resumes
+/// When `use_projection_high_water` is true (durable selected projections), recovery resumes
 /// after the projection's high-water and reports `snapshot_used`. Ephemeral in-memory projections
 /// always genesis-replay (`start_seq = 0`).
 pub async fn replay_log_into_projection<L, P>(

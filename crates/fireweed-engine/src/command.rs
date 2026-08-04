@@ -1091,10 +1091,10 @@ pub struct CommandEnvelope {
     pub request_id: Option<RequestId>,
     /// Stable fingerprint of the request body for `request_id` replay/conflict decisions.
     ///
-    /// This is durable log metadata, not projection state. Hybrid object-log modes can rebuild
-    /// replay-response idempotency from committed envelopes even when the SQLite projection has not yet
-    /// applied the request-id row. `None` is allowed for legacy log entries and for commands with no
-    /// `request_id`.
+    /// This is durable log metadata, not projection state. Async-projection object-log modes can
+    /// rebuild replay-response idempotency from committed envelopes even when the SQLite projection
+    /// has not yet applied the request-id row. `None` is allowed for legacy log entries and for
+    /// commands with no `request_id`.
     #[serde(default)]
     pub request_fingerprint: Option<u64>,
     /// Replayable response material for the request-id-bearing command. The first supported family is push:
@@ -1172,10 +1172,10 @@ pub struct CommitOutcomeEntry {
     pub rejection: Option<crate::error::CommitRejection>,
 }
 
-/// Fail closed when a hybrid/object-log request-id command is missing the metadata required to replay a
-/// committed-but-unreturned outcome. Callers use this on hybrid-async admission paths where the protocol
-/// must not accept a request-id-bearing mutation unless the committed envelope can reconstruct both the
-/// fingerprint and the response.
+/// Fail closed when an object-log request-id command is missing the metadata required to replay a
+/// committed-but-unreturned outcome. Callers use this on async-projection admission paths where the
+/// protocol must not accept a request-id-bearing mutation unless the committed envelope can
+/// reconstruct both the fingerprint and the response.
 pub fn validate_request_replay_metadata(env: &CommandEnvelope) -> EngineResult<()> {
     if env.request_id.is_some()
         && (env.request_fingerprint.is_none() || env.request_outcome.is_none())
@@ -1376,7 +1376,7 @@ mod serde_tests {
     }
 
     #[test]
-    fn hybrid_request_id_envelopes_require_replay_metadata() {
+    fn async_projection_request_id_envelopes_require_replay_metadata() {
         let mut env = envelope(QueueCommand::PauseQueue(PauseQueueCommand::default()));
         assert_eq!(
             validate_request_replay_metadata(&env),

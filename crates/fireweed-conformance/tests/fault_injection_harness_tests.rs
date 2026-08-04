@@ -20,7 +20,7 @@ use fireweed_engine::{
     RawCommitOutcome, RawCommitRequest,
 };
 use fireweed_objectlog::{
-    AsyncObjectLogHybridBackend, HybridProductConfig, flush_config_from_segment,
+    LegacyObjectLogSqliteBackend, LegacyObjectLogSqliteConfig, flush_config_from_segment,
 };
 use tokio::sync::{Notify, oneshot};
 
@@ -121,18 +121,18 @@ fn objectlog_factory() -> impl Fn() -> fireweed_objectlog::ComposedObjectLogBack
     }
 }
 
-type HybridBackend = AsyncObjectLogHybridBackend;
+type LegacySqliteBackend = LegacyObjectLogSqliteBackend;
 
-fn open_hybrid_sync(root: &std::path::Path) -> HybridBackend {
+fn open_legacy_sqlite_sync(root: &std::path::Path) -> LegacySqliteBackend {
     let sqlite = root.join("projection.sqlite");
     let path = sqlite.to_str().unwrap();
-    let hybrid = HybridProductConfig {
+    let config = LegacyObjectLogSqliteConfig {
         deferred_flush_chunk: 1,
         strict: false,
         async_monitor: None,
     };
     let flush = flush_config_from_segment(1, 1);
-    let open = AsyncObjectLogHybridBackend::open(root, path, flush, 0, hybrid);
+    let open = LegacyObjectLogSqliteBackend::open(root, path, flush, 0, config);
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => tokio::task::block_in_place(|| handle.block_on(open)),
         Err(_) => {
@@ -143,12 +143,12 @@ fn open_hybrid_sync(root: &std::path::Path) -> HybridBackend {
             rt.block_on(open)
         }
     }
-    .expect("recover objectlog/hybrid")
+    .expect("recover objectlog/legacy-sqlite compatibility product")
 }
 
-fn objectlog_sqlite_factory() -> impl Fn() -> HybridBackend {
+fn objectlog_sqlite_factory() -> impl Fn() -> LegacySqliteBackend {
     let root = unique_dir("objectlog-sqlite");
-    move || open_hybrid_sync(&root)
+    move || open_legacy_sqlite_sync(&root)
 }
 
 // ---------------------------------------------------------------------------

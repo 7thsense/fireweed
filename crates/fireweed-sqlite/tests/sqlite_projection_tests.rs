@@ -16,8 +16,8 @@ use fireweed_engine::{
 };
 use fireweed_projection::InMemoryProjection;
 use fireweed_sqlite::{
-    BackpressureLevel, HybridAsyncThresholds, HybridFaultCutPoint, HybridFaultHook,
-    HybridProjectionStore, SqliteProjectionStore,
+    AsyncProjectionFaultCutPoint, AsyncProjectionFaultHook, AsyncProjectionThresholds,
+    BackpressureLevel, LegacySqliteProjectionStore, SqliteProjectionStore,
 };
 use rusqlite::Connection;
 
@@ -596,8 +596,8 @@ async fn sqlite_projection_image_exports_hydratable_recovery_image() {
 }
 
 #[test]
-fn hybrid_projection_applies_sqlite_first_and_serves_memory_parity() {
-    let mut store = HybridProjectionStore::in_memory().unwrap();
+fn legacy_async_projection_projection_applies_sqlite_first_and_serves_memory_parity() {
+    let mut store = LegacySqliteProjectionStore::in_memory().unwrap();
     let definition = qdef();
     fireweed_engine::ProjectionStore::ensure_shard(&mut store, &definition).unwrap();
     let item_id = ItemId::new("1").unwrap();
@@ -653,7 +653,7 @@ fn hybrid_projection_applies_sqlite_first_and_serves_memory_parity() {
 }
 
 #[test]
-fn hybrid_projection_hydrates_from_sqlite_before_returning_high_water() {
+fn legacy_async_projection_projection_hydrates_from_sqlite_before_returning_high_water() {
     let sqlite = SqliteProjectionStore::in_memory().unwrap();
     let definition = qdef();
     sqlite.create_queue_projection(definition.clone()).unwrap();
@@ -668,10 +668,10 @@ fn hybrid_projection_hydrates_from_sqlite_before_returning_high_water() {
     );
     sqlite.apply_committed_batch(&[pos(0)], &[push]).unwrap();
 
-    let mut store = HybridProjectionStore::new(sqlite);
+    let mut store = LegacySqliteProjectionStore::new(sqlite);
     assert!(
         fireweed_engine::ProjectionStore::recovery_high_water(&store, &shard()).is_err(),
-        "unhydrated hybrid must not expose sqlite high-water"
+        "unhydrated projection must not expose sqlite high-water"
     );
 
     fireweed_engine::ProjectionStore::ensure_shard(&mut store, &definition).unwrap();
@@ -693,10 +693,10 @@ fn hybrid_projection_hydrates_from_sqlite_before_returning_high_water() {
 }
 
 #[test]
-fn hybrid_projection_poisoned_after_sqlite_commit_memory_apply_failure() {
+fn legacy_async_projection_projection_poisoned_after_sqlite_commit_memory_apply_failure() {
     let sqlite = SqliteProjectionStore::in_memory().unwrap();
     sqlite.create_queue_projection(qdef()).unwrap();
-    let mut store = HybridProjectionStore::from_parts(sqlite, InMemoryProjection::new());
+    let mut store = LegacySqliteProjectionStore::from_parts(sqlite, InMemoryProjection::new());
     let item_id = ItemId::new("1").unwrap();
     let push = envelope(
         "push-1",
@@ -711,7 +711,7 @@ fn hybrid_projection_poisoned_after_sqlite_commit_memory_apply_failure() {
         fireweed_engine::ProjectionStore::apply(&mut store, &[pos(0)], std::slice::from_ref(&push))
             .unwrap_err();
     assert!(
-        matches!(err, EngineError::Storage(ref msg) if msg.contains("hybrid projection poisoned")),
+        matches!(err, EngineError::Storage(ref msg) if msg.contains("projection projection poisoned")),
         "unexpected error: {err:?}"
     );
     assert_eq!(
@@ -728,12 +728,12 @@ fn hybrid_projection_poisoned_after_sqlite_commit_memory_apply_failure() {
 }
 
 #[test]
-fn hybrid_chaos_sqlite_commit_before_memory_failure_poisons_and_recovers() {
-    let path = temp_projection_path("hybrid-chaos-poison");
+fn legacy_async_projection_chaos_sqlite_commit_before_memory_failure_poisons_and_recovers() {
+    let path = temp_projection_path("async-projection-chaos-poison");
     let sqlite = SqliteProjectionStore::open(path.to_str().unwrap()).unwrap();
     let definition = qdef();
     sqlite.create_queue_projection(definition.clone()).unwrap();
-    let mut store = HybridProjectionStore::from_parts(sqlite, InMemoryProjection::new());
+    let mut store = LegacySqliteProjectionStore::from_parts(sqlite, InMemoryProjection::new());
     let item_id = ItemId::new("1").unwrap();
     let push = envelope(
         "push-1",
@@ -748,7 +748,7 @@ fn hybrid_chaos_sqlite_commit_before_memory_failure_poisons_and_recovers() {
         fireweed_engine::ProjectionStore::apply(&mut store, &[pos(0)], std::slice::from_ref(&push))
             .unwrap_err();
     assert!(
-        matches!(err, EngineError::Storage(ref msg) if msg.contains("hybrid projection poisoned")),
+        matches!(err, EngineError::Storage(ref msg) if msg.contains("projection projection poisoned")),
         "unexpected poison error: {err:?}"
     );
     assert_eq!(
@@ -760,7 +760,7 @@ fn hybrid_chaos_sqlite_commit_before_memory_failure_poisons_and_recovers() {
 
     drop(store);
     let sqlite = SqliteProjectionStore::open(path.to_str().unwrap()).unwrap();
-    let mut recovered = HybridProjectionStore::new(sqlite);
+    let mut recovered = LegacySqliteProjectionStore::new(sqlite);
     fireweed_engine::ProjectionStore::ensure_shard(&mut recovered, &definition).unwrap();
     assert_eq!(
         fireweed_engine::ProjectionStore::metrics(&recovered, &shard())
@@ -777,8 +777,8 @@ fn hybrid_chaos_sqlite_commit_before_memory_failure_poisons_and_recovers() {
 }
 
 #[test]
-fn hybrid_chaos_replay_overlap_skips_idempotent_prefix_and_applies_tail() {
-    let mut store = HybridProjectionStore::in_memory().unwrap();
+fn legacy_async_projection_chaos_replay_overlap_skips_idempotent_prefix_and_applies_tail() {
+    let mut store = LegacySqliteProjectionStore::in_memory().unwrap();
     fireweed_engine::ProjectionStore::ensure_shard(&mut store, &qdef()).unwrap();
     let first = ItemId::new("1").unwrap();
     let second = ItemId::new("2").unwrap();
@@ -817,8 +817,8 @@ fn hybrid_chaos_replay_overlap_skips_idempotent_prefix_and_applies_tail() {
 }
 
 #[test]
-fn hybrid_chaos_secondary_index_and_metrics_match_sqlite_image() {
-    let mut store = HybridProjectionStore::in_memory().unwrap();
+fn legacy_async_projection_chaos_secondary_index_and_metrics_match_sqlite_image() {
+    let mut store = LegacySqliteProjectionStore::in_memory().unwrap();
     let definition = indexed_qdef();
     fireweed_engine::ProjectionStore::ensure_shard(&mut store, &definition).unwrap();
     let mut item_a = rich_item("1", "k1");
@@ -914,9 +914,9 @@ fn reset_projection_preserves_unrelated_shared_database_tables() {
 
 struct AsyncCheckpointFailure;
 
-impl HybridFaultHook for AsyncCheckpointFailure {
-    fn fault_point(&self, cut: HybridFaultCutPoint) -> fireweed_engine::EngineResult<()> {
-        if cut == HybridFaultCutPoint::DuringAsyncSqliteApply {
+impl AsyncProjectionFaultHook for AsyncCheckpointFailure {
+    fn fault_point(&self, cut: AsyncProjectionFaultCutPoint) -> fireweed_engine::EngineResult<()> {
+        if cut == AsyncProjectionFaultCutPoint::DuringAsyncSqliteApply {
             Err(EngineError::Storage("checkpoint worker failed".into()))
         } else {
             Ok(())
@@ -926,9 +926,9 @@ impl HybridFaultHook for AsyncCheckpointFailure {
 
 #[test]
 fn async_checkpoint_worker_failure_is_visible_and_fails_closed() {
-    let mut store = HybridProjectionStore::in_memory()
+    let mut store = LegacySqliteProjectionStore::in_memory()
         .unwrap()
-        .with_async_monitor(HybridAsyncThresholds::new(10, 10, 10, 10, 1).unwrap());
+        .with_async_monitor(AsyncProjectionThresholds::new(10, 10, 10, 10, 1).unwrap());
     fireweed_engine::ProjectionStore::ensure_shard(&mut store, &qdef()).unwrap();
     let id = ItemId::new("1").unwrap();
     fireweed_engine::ProjectionStore::apply_live(
@@ -962,9 +962,9 @@ fn async_debt_uses_real_encoded_bytes_and_oldest_queue_age() {
         0,
     );
 
-    let mut byte_limited = HybridProjectionStore::in_memory()
+    let mut byte_limited = LegacySqliteProjectionStore::in_memory()
         .unwrap()
-        .with_async_monitor(HybridAsyncThresholds::new(100, 1, 100, 10_000, 3).unwrap());
+        .with_async_monitor(AsyncProjectionThresholds::new(100, 1, 100, 10_000, 3).unwrap());
     fireweed_engine::ProjectionStore::ensure_shard(&mut byte_limited, &qdef()).unwrap();
     byte_limited.set_async_debt_now_ms_for_test(Some(1_000));
     fireweed_engine::ProjectionStore::apply_live(
@@ -981,9 +981,9 @@ fn async_debt_uses_real_encoded_bytes_and_oldest_queue_age() {
         "the real encoded-byte bound must reject subsequent mutations"
     );
 
-    let mut age_limited = HybridProjectionStore::in_memory()
+    let mut age_limited = LegacySqliteProjectionStore::in_memory()
         .unwrap()
-        .with_async_monitor(HybridAsyncThresholds::new(100, u64::MAX, 100, 50, 3).unwrap());
+        .with_async_monitor(AsyncProjectionThresholds::new(100, u64::MAX, 100, 50, 3).unwrap());
     fireweed_engine::ProjectionStore::ensure_shard(&mut age_limited, &qdef()).unwrap();
     age_limited.set_async_debt_now_ms_for_test(Some(2_000));
     fireweed_engine::ProjectionStore::apply_live(&mut age_limited, &[pos(0)], &[command]).unwrap();
@@ -1003,9 +1003,9 @@ fn async_debt_uses_real_encoded_bytes_and_oldest_queue_age() {
 
 #[test]
 fn async_debt_is_per_queue_and_depth_counts_sealed_batches() {
-    let mut store = HybridProjectionStore::in_memory()
+    let mut store = LegacySqliteProjectionStore::in_memory()
         .unwrap()
-        .with_async_monitor(HybridAsyncThresholds::new(100, u64::MAX, 2, 10_000, 3).unwrap());
+        .with_async_monitor(AsyncProjectionThresholds::new(100, u64::MAX, 2, 10_000, 3).unwrap());
     fireweed_engine::ProjectionStore::ensure_shard(&mut store, &named_qdef("debt-a")).unwrap();
     fireweed_engine::ProjectionStore::ensure_shard(&mut store, &named_qdef("debt-b")).unwrap();
     store.set_async_debt_now_ms_for_test(Some(1_000));
@@ -1080,9 +1080,9 @@ fn async_debt_is_per_queue_and_depth_counts_sealed_batches() {
 
 #[test]
 fn failed_flush_resamples_quiet_oldest_age_before_returning() {
-    let mut store = HybridProjectionStore::in_memory()
+    let mut store = LegacySqliteProjectionStore::in_memory()
         .unwrap()
-        .with_async_monitor(HybridAsyncThresholds::new(100, u64::MAX, 100, 50, 3).unwrap());
+        .with_async_monitor(AsyncProjectionThresholds::new(100, u64::MAX, 100, 50, 3).unwrap());
     fireweed_engine::ProjectionStore::ensure_shard(&mut store, &qdef()).unwrap();
     store.set_async_debt_now_ms_for_test(Some(5_000));
     let command = envelope(
@@ -1104,9 +1104,9 @@ fn failed_flush_resamples_quiet_oldest_age_before_returning() {
 
 #[test]
 fn async_poison_rejects_future_admission_but_not_an_already_admitted_apply() {
-    let mut store = HybridProjectionStore::in_memory()
+    let mut store = LegacySqliteProjectionStore::in_memory()
         .unwrap()
-        .with_async_monitor(HybridAsyncThresholds::new(100, u64::MAX, 100, 10_000, 1).unwrap());
+        .with_async_monitor(AsyncProjectionThresholds::new(100, u64::MAX, 100, 10_000, 1).unwrap());
     fireweed_engine::ProjectionStore::ensure_shard(&mut store, &qdef()).unwrap();
     let first = envelope(
         "poison-race-first",
@@ -1236,9 +1236,9 @@ fn lease_clearing_transitions_remove_worker_attribution_from_export_and_recovery
 }
 #[test]
 fn poisoned_head_shard_does_not_block_healthy_tail_checkpoint_progress() {
-    let mut store = HybridProjectionStore::in_memory()
+    let mut store = LegacySqliteProjectionStore::in_memory()
         .unwrap()
-        .with_async_monitor(HybridAsyncThresholds::new(100, u64::MAX, 100, 10_000, 1).unwrap());
+        .with_async_monitor(AsyncProjectionThresholds::new(100, u64::MAX, 100, 10_000, 1).unwrap());
     let poisoned = named_shard("poisoned-head");
     let healthy = named_shard("healthy-tail");
     fireweed_engine::ProjectionStore::ensure_shard(&mut store, &named_qdef("poisoned-head"))

@@ -1,8 +1,8 @@
 //! Legacy-compatibility assertions migrated to the provider-neutral AsyncProjection test ledger.
 //!
-//! Recovery-on-open for the `objectlog/hybrid-async` profile (bead pqueue-45cbb98e).
+//! Recovery-on-open for the `objectlog/async projection` profile (bead pqueue-45cbb98e).
 //!
-//! These tests exercise the projection-side recovery contract [`HybridProjectionStore`] enforces before a
+//! These tests exercise the projection-side recovery contract [`LegacySqliteProjectionStore`] enforces before a
 //! reopened composition may serve: it hydrates hot memory from the durable SQLite image, cross-validates the
 //! image's recorded object-log lineage against the log's identity (namespace / manifest-generation epoch /
 //! segment-chain high-water), advertises its high-water as a replay-skip point ONLY after hydration, and
@@ -11,7 +11,7 @@
 //! The object-log substrate lives in `fireweed-objectlog` (which `fireweed-sqlite` deliberately does not depend
 //! on), so these tests present the log's identity through the crate-boundary [`LogLineageIdentity`] value the
 //! composition builds during `recover`. End-to-end recovery over the real `ObjectLog` substrate is covered by
-//! `fireweed-conformance/tests/objectlog_hybrid.rs` and `fireweed-objectlog/tests/hybrid_request_id.rs`.
+//! the object-log product's async-projection tests and the Fireweed facade composition suite.
 
 use fireweed_conformance::{item, qdef, shard, ts};
 use fireweed_core::{ItemId, RequestId};
@@ -19,7 +19,7 @@ use fireweed_engine::{
     CommandChecksum, CommandEnvelope, CommandId, CommandPosition, EngineError, LogLineageIdentity,
     ProjectionStore, PushCommand, QueueCommand, RequestOutcome,
 };
-use fireweed_sqlite::{CheckpointLineage, HybridProjectionStore, SqliteCheckpointStore};
+use fireweed_sqlite::{CheckpointLineage, LegacySqliteProjectionStore, SqliteCheckpointStore};
 
 /// A push carrying the full request-id replay metadata the async checkpoint worker persists into the durable
 /// idempotency table, so a committed-but-unreturned retry converges after restart.
@@ -71,7 +71,7 @@ fn identity(epoch: u64, next_seq: u64) -> LogLineageIdentity {
 
 fn temp_path(tag: &str) -> std::path::PathBuf {
     let p = std::env::temp_dir().join(format!(
-        "fireweed-hybrid-async-recovery-{tag}-{}.db",
+        "fireweed-async projection-recovery-{tag}-{}.db",
         std::process::id()
     ));
     for suffix in ["", "-wal", "-shm"] {
@@ -125,30 +125,32 @@ fn async_projection_recovery_hydrates_validates_and_advertises_high_water() {
         &lineage(3, "s3://log/seg-00000003-0000"),
     );
 
-    let mut hybrid = HybridProjectionStore::open(path.to_str().unwrap()).unwrap();
+    let mut projection = LegacySqliteProjectionStore::open(path.to_str().unwrap()).unwrap();
 
     // High-water barrier (TD-004): before the shard is hydrated, recovery_high_water fails closed rather than
     // advertise a skip point the composition would use to skip un-replayed log history.
     assert!(
-        ProjectionStore::recovery_high_water(&hybrid, &shard()).is_err(),
+        ProjectionStore::recovery_high_water(&projection, &shard()).is_err(),
         "recovery_high_water must fail closed before hydration"
     );
 
     // Hydrate memory from the durable SQLite image.
-    ProjectionStore::ensure_shard(&mut hybrid, &qdef()).unwrap();
+    ProjectionStore::ensure_shard(&mut projection, &qdef()).unwrap();
 
     // Lineage validation against a log at epoch 3 with the same single-command head — it descends cleanly.
-    ProjectionStore::validate_recovery_lineage(&mut hybrid, &identity(3, 1)).unwrap();
+    ProjectionStore::validate_recovery_lineage(&mut projection, &identity(3, 1)).unwrap();
     // A log re-acquired at a HIGHER epoch (owner handoff) is also fine: the projection is merely behind.
-    ProjectionStore::validate_recovery_lineage(&mut hybrid, &identity(5, 1)).unwrap();
+    ProjectionStore::validate_recovery_lineage(&mut projection, &identity(5, 1)).unwrap();
 
     // After hydration the high-water is the last absorbed command (seq 0), the replay-skip point.
     assert_eq!(
-        ProjectionStore::recovery_high_water(&hybrid, &shard()).unwrap(),
+        ProjectionStore::recovery_high_water(&projection, &shard()).unwrap(),
         Some(CommandPosition::new(shard(), 3, 0)),
     );
     assert_eq!(
-        ProjectionStore::metrics(&hybrid, &shard()).unwrap().pending,
+        ProjectionStore::metrics(&projection, &shard())
+            .unwrap()
+            .pending,
         1,
         "memory hydrated the pending item from the durable image"
     );
@@ -182,18 +184,19 @@ fn async_projection_recovery_fails_closed_on_newer_lineage_epoch() {
         &lineage(5, "s3://log/seg-00000005-0000"),
     );
 
-    let mut hybrid = HybridProjectionStore::open(path.to_str().unwrap()).unwrap();
-    ProjectionStore::ensure_shard(&mut hybrid, &qdef()).unwrap();
+    let mut projection = LegacySqliteProjectionStore::open(path.to_str().unwrap()).unwrap();
+    ProjectionStore::ensure_shard(&mut projection, &qdef()).unwrap();
 
     // The log presented at recovery is only at epoch 3 — older than the recorded lineage.
-    let err = ProjectionStore::validate_recovery_lineage(&mut hybrid, &identity(3, 1)).unwrap_err();
+    let err =
+        ProjectionStore::validate_recovery_lineage(&mut projection, &identity(3, 1)).unwrap_err();
     assert!(
         matches!(err, EngineError::Storage(ref m) if m.contains("newer than")),
         "expected fail-closed epoch mismatch, got {err:?}"
     );
 
     // Poisoned: the projection refuses to serve from an image that does not descend from the log.
-    let poisoned = ProjectionStore::metrics(&hybrid, &shard()).unwrap_err();
+    let poisoned = ProjectionStore::metrics(&projection, &shard()).unwrap_err();
     assert!(
         matches!(poisoned, EngineError::Storage(ref m) if m.contains("poisoned")),
         "reads must fail closed after a lineage mismatch, got {poisoned:?}"
@@ -223,18 +226,19 @@ fn async_projection_recovery_fails_closed_when_sqlite_ahead_of_log() {
         &lineage(0, "seg-0001"),
     );
 
-    let mut hybrid = HybridProjectionStore::open(path.to_str().unwrap()).unwrap();
-    ProjectionStore::ensure_shard(&mut hybrid, &qdef()).unwrap();
+    let mut projection = LegacySqliteProjectionStore::open(path.to_str().unwrap()).unwrap();
+    ProjectionStore::ensure_shard(&mut projection, &qdef()).unwrap();
 
     // The log only durably committed ONE command (head at seq 0, next_seq 1) — the SQLite image at next_seq 2
     // is ahead of the durable log.
-    let err = ProjectionStore::validate_recovery_lineage(&mut hybrid, &identity(0, 1)).unwrap_err();
+    let err =
+        ProjectionStore::validate_recovery_lineage(&mut projection, &identity(0, 1)).unwrap_err();
     assert!(
         matches!(err, EngineError::Storage(ref m) if m.contains("ahead of the object-log head")),
         "expected fail-closed high-water mismatch, got {err:?}"
     );
     assert!(
-        ProjectionStore::metrics(&hybrid, &shard()).is_err(),
+        ProjectionStore::metrics(&projection, &shard()).is_err(),
         "reads must fail closed after a high-water mismatch"
     );
 
@@ -255,15 +259,15 @@ fn async_projection_recovery_no_lineage_still_checks_high_water() {
         assert!(store.progress(&shard()).unwrap().lineage.is_none());
     }
 
-    let mut hybrid = HybridProjectionStore::open(path.to_str().unwrap()).unwrap();
-    ProjectionStore::ensure_shard(&mut hybrid, &qdef()).unwrap();
+    let mut projection = LegacySqliteProjectionStore::open(path.to_str().unwrap()).unwrap();
+    ProjectionStore::ensure_shard(&mut projection, &qdef()).unwrap();
 
     // No lineage + empty log: validates cleanly (nothing absorbed, nothing ahead).
-    ProjectionStore::validate_recovery_lineage(&mut hybrid, &identity(0, 0)).unwrap();
+    ProjectionStore::validate_recovery_lineage(&mut projection, &identity(0, 0)).unwrap();
     // A non-empty log with an empty projection is the normal genesis-tail case — still valid.
-    ProjectionStore::validate_recovery_lineage(&mut hybrid, &identity(2, 8)).unwrap();
+    ProjectionStore::validate_recovery_lineage(&mut projection, &identity(2, 8)).unwrap();
     assert_eq!(
-        ProjectionStore::recovery_high_water(&hybrid, &shard()).unwrap(),
+        ProjectionStore::recovery_high_water(&projection, &shard()).unwrap(),
         None,
         "an empty projection advertises genesis, so the whole log tail is replayed"
     );

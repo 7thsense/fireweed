@@ -1,7 +1,7 @@
 //! Shared [`RequestIdReplayProbe`] + [`LogRead`] helpers for LogEngine objectlog products.
 //!
 //! Harness-only mid-pipeline probe for AC-TXN-3 (append→apply window). Used by memory, sqlite,
-//! and hybrid products so TP-003 / E3 matrix cells can strike the same durable envelope shapes.
+//! and selected-projection products so TP-003 / E3 cells can strike the same durable envelope shapes.
 
 use std::sync::Arc;
 

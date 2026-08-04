@@ -142,3 +142,8 @@ path = "tests/p3b_async_config_validation.rs"
 name = "p3b_filesystem_barriers"
 path = "tests/p3b_filesystem_barriers.rs"
 required-features = ["objectlog", "sqlite", "postgres"]
+
+[[test]]
+name = "p3b_non_s3_barrier_conformance"
+path = "tests/p3b_non_s3_barrier_conformance.rs"
+required-features = ["memory", "objectlog", "sqlite", "postgres"]

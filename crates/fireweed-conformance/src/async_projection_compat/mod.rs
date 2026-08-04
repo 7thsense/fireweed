@@ -1,7 +1,7 @@
-// Shared hybrid-async test fixtures for behind-image fail-closed and recovery conformance tests.
+// Shared async-projection fixtures for behind-image fail-closed and recovery conformance tests.
 //
-// Product path: [`fireweed_objectlog::AsyncObjectLogHybridBackend`] (LogEngine × hybrid projection).
-// The retired dual-stack `ComposedBackend<ObjectLog, HybridProjectionStore, …>` surface is gone.
+// Product path: [`fireweed_objectlog::LegacyObjectLogSqliteBackend`] (LogEngine × legacy SQLite projection).
+// The retired dual-stack `ComposedBackend<ObjectLog, legacy SQLite compatibility store, …>` surface is gone.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,9 +11,10 @@ use fireweed_engine::{
     CommandPosition, EngineError, ProjectionRead, ProjectionStore, PushPort, PushSpec, QueueKey,
 };
 use fireweed_objectlog::{
-    AsyncObjectLogHybridBackend, FlushConfig, HybridProductConfig, flush_config_from_segment,
+    FlushConfig, LegacyObjectLogSqliteBackend, LegacyObjectLogSqliteConfig,
+    flush_config_from_segment,
 };
-use fireweed_sqlite::HybridAsyncThresholds;
+use fireweed_sqlite::AsyncProjectionThresholds;
 
 use super::{qdef, shard as crate_shard, ts};
 
@@ -21,8 +22,8 @@ use super::{qdef, shard as crate_shard, ts};
 // Type alias
 // ---------------------------------------------------------------------------
 
-/// The hybrid product type for objectlog/hybrid-async and objectlog/hybrid-strict tests.
-pub type HybridBackend = AsyncObjectLogHybridBackend;
+/// The legacy SQLite product type for objectlog/async projection and objectlog/strict projection tests.
+pub type LegacySqliteBackend = LegacyObjectLogSqliteBackend;
 
 // ---------------------------------------------------------------------------
 // Counter + temp directories
@@ -34,7 +35,7 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 pub fn base_dir(tag: &str) -> std::path::PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     std::env::temp_dir().join(format!(
-        "fireweed-hybrid-async-{tag}-{}-{n}",
+        "fireweed-async-projection-{tag}-{}-{n}",
         std::process::id()
     ))
 }
@@ -53,8 +54,8 @@ pub fn shard() -> QueueKey {
 // ---------------------------------------------------------------------------
 
 /// Generous debt thresholds that keep the async-apply backpressure at `Clear`.
-pub fn clear_thresholds() -> HybridAsyncThresholds {
-    HybridAsyncThresholds::new(10_000, 1_000_000_000, 1_000_000_000, 3_600_000_000, 3)
+pub fn clear_thresholds() -> AsyncProjectionThresholds {
+    AsyncProjectionThresholds::new(10_000, 1_000_000_000, 1_000_000_000, 3_600_000_000, 3)
         .expect("thresholds")
 }
 
@@ -71,11 +72,11 @@ fn flush_one() -> FlushConfig {
     flush_config_from_segment(1, 1)
 }
 
-fn open_sync(root: &Path, hybrid: HybridProductConfig) -> HybridBackend {
+fn open_sync(root: &Path, config: LegacyObjectLogSqliteConfig) -> LegacySqliteBackend {
     std::fs::create_dir_all(root).ok();
     let sqlite = root.join("projection.sqlite");
     let path = sqlite.to_str().expect("utf8 projection path");
-    let open = AsyncObjectLogHybridBackend::open(root, path, flush_one(), 0, hybrid);
+    let open = LegacyObjectLogSqliteBackend::open(root, path, flush_one(), 0, config);
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => tokio::task::block_in_place(|| handle.block_on(open)),
         Err(_) => {
@@ -86,18 +87,21 @@ fn open_sync(root: &Path, hybrid: HybridProductConfig) -> HybridBackend {
             rt.block_on(open)
         }
     }
-    .expect("open AsyncObjectLogHybridBackend")
+    .expect("open LegacyObjectLogSqliteBackend")
 }
 
 // ---------------------------------------------------------------------------
 // Backend construction
 // ---------------------------------------------------------------------------
 
-/// Open the hybrid-async product at `root` with `thresholds`.
-pub fn open_hybrid(root: &Path, thresholds: HybridAsyncThresholds) -> HybridBackend {
+/// Open the async projection product at `root` with `thresholds`.
+pub fn open_async_projection(
+    root: &Path,
+    thresholds: AsyncProjectionThresholds,
+) -> LegacySqliteBackend {
     open_sync(
         root,
-        HybridProductConfig {
+        LegacyObjectLogSqliteConfig {
             deferred_flush_chunk: 1,
             strict: false,
             async_monitor: Some(thresholds),
@@ -105,12 +109,12 @@ pub fn open_hybrid(root: &Path, thresholds: HybridAsyncThresholds) -> HybridBack
     )
 }
 
-/// Open the hybrid-strict product at `root`.
+/// Open the strict projection product at `root`.
 #[allow(dead_code)]
-pub fn open_hybrid_strict(root: &Path) -> HybridBackend {
+pub fn open_strict_projection(root: &Path) -> LegacySqliteBackend {
     open_sync(
         root,
-        HybridProductConfig {
+        LegacyObjectLogSqliteConfig {
             deferred_flush_chunk: 1,
             strict: true,
             async_monitor: None,
@@ -118,11 +122,14 @@ pub fn open_hybrid_strict(root: &Path) -> HybridBackend {
     )
 }
 
-/// Open the hybrid-async product with a small flush window (LogEngine owns co-buffering).
+/// Open the async projection product with a small flush window (LogEngine owns co-buffering).
 #[allow(dead_code)]
-pub fn open_hybrid_raw(root: &Path, thresholds: HybridAsyncThresholds) -> HybridBackend {
+pub fn open_async_projection_raw(
+    root: &Path,
+    thresholds: AsyncProjectionThresholds,
+) -> LegacySqliteBackend {
     // LogEngine products always use FlushConfig; "raw" maps to the same open with unit flush knobs.
-    open_hybrid(root, thresholds)
+    open_async_projection(root, thresholds)
 }
 
 // ---------------------------------------------------------------------------
@@ -133,18 +140,18 @@ pub fn open_hybrid_raw(root: &Path, thresholds: HybridAsyncThresholds) -> Hybrid
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum ProjectionMode {
-    /// Hybrid-async: SQLite deferred apply with async-apply debt monitor.
-    HybridAsync,
-    /// Hybrid-strict: SQLite-first synchronous apply (strict ordering).
-    HybridStrict,
+    /// AsyncProjection: SQLite deferred apply with async-apply debt monitor.
+    AsyncProjection,
+    /// Strict: SQLite-first synchronous apply (strict ordering).
+    Strict,
 }
 
 /// Open a backend by projection mode, using [`clear_thresholds`] for the async variant.
 #[allow(dead_code)]
-pub fn open_mode(root: &Path, mode: ProjectionMode) -> HybridBackend {
+pub fn open_mode(root: &Path, mode: ProjectionMode) -> LegacySqliteBackend {
     match mode {
-        ProjectionMode::HybridAsync => open_hybrid(root, clear_thresholds()),
-        ProjectionMode::HybridStrict => open_hybrid_strict(root),
+        ProjectionMode::AsyncProjection => open_async_projection(root, clear_thresholds()),
+        ProjectionMode::Strict => open_strict_projection(root),
     }
 }
 
@@ -153,7 +160,11 @@ pub fn open_mode(root: &Path, mode: ProjectionMode) -> HybridBackend {
 // ---------------------------------------------------------------------------
 
 /// Push a default [`PushSpec`] under `key` at logical timestamp `at_s`. Panics on error.
-pub async fn push(backend: &HybridBackend, key: &str, at_s: i64) -> Vec<fireweed_core::ItemId> {
+pub async fn push(
+    backend: &LegacySqliteBackend,
+    key: &str,
+    at_s: i64,
+) -> Vec<fireweed_core::ItemId> {
     backend
         .push(&shard(), vec![PushSpec::default()], ts(at_s), None)
         .await
@@ -163,7 +174,7 @@ pub async fn push(backend: &HybridBackend, key: &str, at_s: i64) -> Vec<fireweed
 /// Push under `rid` with a default [`PushSpec`] at `at_s`.
 #[allow(dead_code)]
 pub async fn push_rid(
-    backend: &HybridBackend,
+    backend: &LegacySqliteBackend,
     rid: &str,
     _key: &str,
     at_s: i64,
@@ -185,7 +196,7 @@ pub async fn push_rid(
 // ---------------------------------------------------------------------------
 
 /// Fully drain the deferred projection backlog.
-pub fn drain(backend: &HybridBackend) {
+pub fn drain(backend: &LegacySqliteBackend) {
     while backend.with_projection(|p| p.deferred_command_count()) > 0 {
         backend
             .try_flush_deferred_projection()
@@ -199,34 +210,34 @@ pub fn drain(backend: &HybridBackend) {
 
 /// The SQLite checkpoint high-water sequence.
 #[allow(dead_code)]
-pub fn checkpoint_seq(backend: &HybridBackend) -> Option<u64> {
+pub fn checkpoint_seq(backend: &LegacySqliteBackend) -> Option<u64> {
     backend
         .with_projection(|p| ProjectionStore::recovery_high_water(p, &shard()))
         .expect("recovery_high_water")
         .map(|p| p.sequence)
 }
 
-/// Retention floor sequence — not yet exposed on LogEngine hybrid product; always `None`.
+/// Retention floor sequence — not yet exposed on LogEngine legacy SQLite product; always `None`.
 #[allow(dead_code)]
-pub fn floor_seq(_backend: &HybridBackend) -> Option<u64> {
+pub fn floor_seq(_backend: &LegacySqliteBackend) -> Option<u64> {
     None
 }
 
-/// Retention floor position — not yet exposed on LogEngine hybrid product; always `None`.
+/// Retention floor position — not yet exposed on LogEngine legacy SQLite product; always `None`.
 #[allow(dead_code)]
-pub fn floor_pos(_backend: &HybridBackend) -> Option<CommandPosition> {
+pub fn floor_pos(_backend: &LegacySqliteBackend) -> Option<CommandPosition> {
     None
 }
 
-/// Segment delete count — not yet exposed on LogEngine hybrid product; always `0`.
+/// Segment delete count — not yet exposed on LogEngine legacy SQLite product; always `0`.
 #[allow(dead_code)]
-pub fn delete_count(_backend: &HybridBackend) -> u64 {
+pub fn delete_count(_backend: &LegacySqliteBackend) -> u64 {
     0
 }
 
-/// Segment object count — not yet exposed on LogEngine hybrid product; always `0`.
+/// Segment object count — not yet exposed on LogEngine legacy SQLite product; always `0`.
 #[allow(dead_code)]
-pub fn object_count(_backend: &HybridBackend) -> u64 {
+pub fn object_count(_backend: &LegacySqliteBackend) -> u64 {
     0
 }
 
@@ -269,6 +280,6 @@ pub fn walk_has_file(root: &Path, name: &str) -> bool {
 
 /// Return the current `pending` count from `QueueMetrics`.
 #[allow(dead_code)]
-pub async fn pending(backend: &HybridBackend) -> u64 {
+pub async fn pending(backend: &LegacySqliteBackend) -> u64 {
     backend.metrics(&shard()).await.expect("metrics").pending
 }

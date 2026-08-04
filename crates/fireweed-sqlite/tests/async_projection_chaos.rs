@@ -1,9 +1,9 @@
 //! Legacy-compatibility assertions migrated to the provider-neutral AsyncProjection test ledger.
 //!
-//! Crash / chaos coverage for the `objectlog/hybrid-async` converged plan (bead pqueue-fed791af,
+//! Crash / chaos coverage for the `objectlog/async projection` converged plan (bead pqueue-fed791af,
 //! parent pqueue-b207e65d; TD-004).
 //!
-//! The hybrid-async success barrier is: object-log manifest commit (durable) → synchronous in-memory
+//! The async projection success barrier is: object-log manifest commit (durable) → synchronous in-memory
 //! apply/render (the client-visible barrier) → ASYNCHRONOUS SQLite checkpoint that advances the LOGICAL
 //! high-water off the hot path. These tests inject a simulated crash at each window along that path and
 //! assert the recovery contract holds:
@@ -39,8 +39,8 @@ use fireweed_engine::{
     PushCommand, QueueCommand, RequestOutcome,
 };
 use fireweed_sqlite::{
-    BackpressureLevel, CheckpointLineage, HybridAsyncDebt, HybridAsyncMonitor,
-    HybridAsyncThresholds, HybridProjectionStore, SqliteCheckpointStore,
+    AsyncProjectionDebt, AsyncProjectionMonitor, AsyncProjectionThresholds, BackpressureLevel,
+    CheckpointLineage, LegacySqliteProjectionStore, SqliteCheckpointStore,
 };
 
 // ---------------------------------------------------------------------------
@@ -148,13 +148,13 @@ fn identity(epoch: u64, next_seq: u64) -> LogLineageIdentity {
     }
 }
 
-fn thresholds() -> HybridAsyncThresholds {
+fn thresholds() -> AsyncProjectionThresholds {
     // Lag hard-limit 100 (soft 75, clear 50); poison after 3 consecutive apply failures.
-    HybridAsyncThresholds::new(100, 1_000_000, 100, 60_000, 3).expect("valid thresholds")
+    AsyncProjectionThresholds::new(100, 1_000_000, 100, 60_000, 3).expect("valid thresholds")
 }
 
-fn lag(commands: u64) -> HybridAsyncDebt {
-    HybridAsyncDebt {
+fn lag(commands: u64) -> AsyncProjectionDebt {
+    AsyncProjectionDebt {
         apply_lag_commands: commands,
         ..Default::default()
     }
@@ -162,7 +162,7 @@ fn lag(commands: u64) -> HybridAsyncDebt {
 
 fn temp_path(tag: &str) -> std::path::PathBuf {
     let p = std::env::temp_dir().join(format!(
-        "fireweed-hybrid-async-chaos-{tag}-{}.db",
+        "fireweed-async projection-chaos-{tag}-{}.db",
         std::process::id()
     ));
     for suffix in ["", "-wal", "-shm"] {
@@ -234,17 +234,19 @@ fn async_projection_chaos_crash_after_objectlog_commit_before_apply_replays_full
 
     // Recovery reopens the (empty) SQLite image: it advertises genesis, so the composition replays the whole
     // durable log tail rather than skipping un-applied history. A caught-up log validates cleanly.
-    let mut hybrid = HybridProjectionStore::open(path.to_str().unwrap()).unwrap();
-    ProjectionStore::ensure_shard(&mut hybrid, &qdef()).unwrap();
-    ProjectionStore::validate_recovery_lineage(&mut hybrid, &identity(0, committed_head + 1))
+    let mut projection = LegacySqliteProjectionStore::open(path.to_str().unwrap()).unwrap();
+    ProjectionStore::ensure_shard(&mut projection, &qdef()).unwrap();
+    ProjectionStore::validate_recovery_lineage(&mut projection, &identity(0, committed_head + 1))
         .unwrap();
     assert_eq!(
-        ProjectionStore::recovery_high_water(&hybrid, &shard()).unwrap(),
+        ProjectionStore::recovery_high_water(&projection, &shard()).unwrap(),
         None,
         "an un-applied image advertises genesis; the full log tail is replayed (nothing lost)"
     );
     assert_eq!(
-        ProjectionStore::metrics(&hybrid, &shard()).unwrap().pending,
+        ProjectionStore::metrics(&projection, &shard())
+            .unwrap()
+            .pending,
         0,
         "no half-applied state before replay: no orphaned in-flight records"
     );
@@ -286,16 +288,18 @@ async fn async_projection_chaos_crash_after_memory_apply_before_sqlite_apply_res
 
     // Restart: recovery hydrates the prefix, validates against the full log, and advertises seq 0 as the
     // skip-point so only seq 1,2 replay.
-    let mut hybrid = HybridProjectionStore::open(path.to_str().unwrap()).unwrap();
-    ProjectionStore::ensure_shard(&mut hybrid, &qdef()).unwrap();
-    ProjectionStore::validate_recovery_lineage(&mut hybrid, &identity(0, 3)).unwrap();
+    let mut projection = LegacySqliteProjectionStore::open(path.to_str().unwrap()).unwrap();
+    ProjectionStore::ensure_shard(&mut projection, &qdef()).unwrap();
+    ProjectionStore::validate_recovery_lineage(&mut projection, &identity(0, 3)).unwrap();
     assert_eq!(
-        ProjectionStore::recovery_high_water(&hybrid, &shard()).unwrap(),
+        ProjectionStore::recovery_high_water(&projection, &shard()).unwrap(),
         Some(CommandPosition::new(shard(), 0, 0)),
         "resume replay at the checkpointed prefix, not genesis and not past the log"
     );
     assert_eq!(
-        ProjectionStore::metrics(&hybrid, &shard()).unwrap().pending,
+        ProjectionStore::metrics(&projection, &shard())
+            .unwrap()
+            .pending,
         1,
         "only the checkpointed prefix is resident before tail replay"
     );
@@ -570,7 +574,7 @@ async fn async_projection_chaos_disk_loss_resets_high_water_and_rebuilds_from_lo
 /// so no reader skips past the un-applied poison.
 #[test]
 fn async_projection_chaos_disk_full_apply_failure_poisons_and_never_advances_past_poison() {
-    let mut monitor = HybridAsyncMonitor::new(thresholds());
+    let mut monitor = AsyncProjectionMonitor::new(thresholds());
     // A healthy skip-point is advertised while clear.
     let hw = CommandPosition::new(shard(), 0, 41);
     assert_eq!(
@@ -599,7 +603,7 @@ fn async_projection_chaos_disk_full_apply_failure_poisons_and_never_advances_pas
 }
 
 /// The projection-side counterpart: a checkpoint store that advanced its logical high-water to N still fails
-/// closed on the recovery high-water once the hybrid projection is poisoned (here by a lineage mismatch), so
+/// closed on the recovery high-water once the projection projection is poisoned (here by a lineage mismatch), so
 /// the divergent-but-advanced image is never advertised as a replay-skip point.
 #[test]
 fn async_projection_chaos_projection_poison_withholds_advanced_high_water() {
@@ -628,18 +632,19 @@ fn async_projection_chaos_projection_poison_withholds_advanced_high_water() {
         assert_eq!(store.logical_high_water(&shard()).unwrap(), Some(1));
     }
 
-    let mut hybrid = HybridProjectionStore::open(path.to_str().unwrap()).unwrap();
-    ProjectionStore::ensure_shard(&mut hybrid, &qdef()).unwrap();
+    let mut projection = LegacySqliteProjectionStore::open(path.to_str().unwrap()).unwrap();
+    ProjectionStore::ensure_shard(&mut projection, &qdef()).unwrap();
     // The log presented at recovery is only at epoch 3 — older than the recorded lineage: the image cannot
     // descend from this log. Validation poisons.
-    let err = ProjectionStore::validate_recovery_lineage(&mut hybrid, &identity(3, 1)).unwrap_err();
+    let err =
+        ProjectionStore::validate_recovery_lineage(&mut projection, &identity(3, 1)).unwrap_err();
     assert!(
         matches!(err, EngineError::Storage(ref m) if m.contains("newer than")),
         "expected fail-closed epoch mismatch, got {err:?}"
     );
     // Even though the durable logical high-water is 1, the poisoned projection withholds it (fails closed).
     assert!(
-        ProjectionStore::recovery_high_water(&hybrid, &shard()).is_err(),
+        ProjectionStore::recovery_high_water(&projection, &shard()).is_err(),
         "a poisoned projection must not advertise its advanced high-water"
     );
     cleanup(&path);
@@ -654,7 +659,7 @@ fn async_projection_chaos_projection_poison_withholds_advanced_high_water() {
 /// the backlog drains below the clear band AND a clean batch has applied (hysteresis).
 #[test]
 fn async_projection_chaos_apply_backlog_gates_mutations_and_withholds_high_water_until_drained() {
-    let mut monitor = HybridAsyncMonitor::new(thresholds());
+    let mut monitor = AsyncProjectionMonitor::new(thresholds());
     let hw = CommandPosition::new(shard(), 0, 41);
 
     // Clear: mutations admitted, skip-point advertised.

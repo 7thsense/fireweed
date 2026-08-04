@@ -26,6 +26,16 @@ pub use relational::{
     composed_sqlite_relational, composed_sqlite_relational_in_memory,
 };
 
+// Neutral compatibility names used while the legacy server selectors still consume the retired
+// hot-memory-plus-SQLite implementation. New composition paths use `AsyncSqliteProjectionStore`.
+pub type AsyncProjectionDebt = HybridAsyncDebt;
+pub type AsyncProjectionMetrics = HybridAsyncMetrics;
+pub type AsyncProjectionMonitor = HybridAsyncMonitor;
+pub type AsyncProjectionThresholds = HybridAsyncThresholds;
+pub type AsyncProjectionFaultCutPoint = HybridFaultCutPoint;
+pub use HybridFaultHook as AsyncProjectionFaultHook;
+pub type LegacySqliteProjectionStore = HybridProjectionStore;
+
 use fireweed_engine::{
     AsyncLogReplayBackend, EngineResult, assemble_async_log_replay_with_axis_offload,
 };

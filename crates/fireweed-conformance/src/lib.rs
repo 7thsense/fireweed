@@ -92,7 +92,8 @@ pub mod matrix_classes;
 pub mod scenarios;
 
 #[cfg(test)]
-pub mod hybrid_async;
+#[path = "async_projection_compat/mod.rs"]
+pub mod async_projection_compat;
 
 /// The **core** conformance bound: the engine ports the substrate-independent scenarios exercise. Every
 /// projection family implements these — ordering, eligibility, claim atomicity, idempotency, lease/epoch

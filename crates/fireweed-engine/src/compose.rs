@@ -661,7 +661,7 @@ pub trait DetachedLogMaintenance: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// The object-log's durable identity for one shard, presented to the projection during recovery-on-open so a
-/// hybrid projection can cross-validate its own durably recorded lineage against the log it is about to
+/// selected projection can cross-validate its durably recorded lineage against the log it is about to
 /// replay from (TD-004 "Async lineage validation": manifest/segment/high-water identity). The composition
 /// builds this from the [`LogStore`] axis ([`LogStore::current_epoch`] + [`LogStore::high_water`]) after the
 /// projection has been hydrated but BEFORE any tail replay; a projection whose recorded lineage does not
@@ -710,7 +710,7 @@ pub fn resolve_recovery_start(
 ) -> EngineResult<RecoveryStart> {
     if let Some(reason) = poison {
         return Err(EngineError::Storage(format!(
-            "recovery refused: hybrid-async projection is poisoned and must not advance past the poison \
+            "recovery refused: async projection is poisoned and must not advance past the poison \
              point: {reason}"
         )));
     }
@@ -855,7 +855,7 @@ pub trait ProjectionStore: Send {
     ) -> EngineResult<()>;
 
     /// Apply committed commands to the live serving image. Durable projections use the same implementation
-    /// by default; hybrid async projections may return after memory apply and queue durable checkpoint work.
+    /// by default; async projections may return after memory apply and queue durable checkpoint work.
     fn apply_live(
         &mut self,
         positions: &[CommandPosition],
@@ -865,7 +865,7 @@ pub trait ProjectionStore: Send {
     }
 
     /// Owned variant of [`Self::apply_live`] for group-commit paths that already own the sealed envelopes.
-    /// Most projections can borrow and drop the owned values; hybrid async projections override this to move
+    /// Most projections can borrow and drop the owned values; async projections override this to move
     /// envelopes into their deferred durable-apply queue without cloning large push batches on the ack path.
     fn apply_live_owned(
         &mut self,
@@ -925,12 +925,12 @@ pub trait ProjectionStore: Send {
     /// budget, lineage validation is incomplete, or the async SQLite worker is poisoned — a lagging local
     /// `sqlite_high_water` alone never authorizes deletion. The composition consults this on the real
     /// terminal-reap path and withholds reaping when it returns `false`. Default: `true` — only the
-    /// `objectlog/hybrid-async` projection (with an armed monitor) withholds retention.
+    /// `objectlog/async-projection` projection (with an armed monitor) withholds retention.
     fn retention_may_advance(&self, _shard: &QueueKey) -> bool {
         true
     }
 
-    /// Hybrid-async profiles require the complete TD-004 five-way frontier rather than the legacy
+    /// AsyncProjection profiles require the complete TD-004 five-way frontier rather than the legacy
     /// checkpoint/time horizon. Default profiles keep their established safe reclamation behavior.
     fn requires_complete_retention_frontier(&self) -> bool {
         false
@@ -1376,7 +1376,7 @@ pub trait ProjectionStore: Send {
     /// Cross-validate this projection's durably recorded object-log lineage against the log's actual
     /// `identity` (TD-004 "Async lineage validation") BEFORE the composition advertises this projection's
     /// high-water as a safe replay-skip point. Called once per durable shard during recovery-on-open, after
-    /// the shard is hydrated but before any object-log tail replay. A hybrid projection whose recorded
+    /// the shard is hydrated but before any object-log tail replay. A selected projection whose recorded
     /// lineage does not descend from the log it is about to replay from — a recorded source epoch newer than
     /// the log currently records, or a logical high-water ahead of the log's committed head — MUST fail
     /// closed here (poison + `Storage` error) so the composition never serves from a projection image that

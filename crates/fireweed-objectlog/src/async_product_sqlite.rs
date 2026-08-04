@@ -9,6 +9,7 @@
 )]
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use fireweed_core::{
@@ -61,6 +62,8 @@ struct Committer {
     projection: Arc<Proj>,
     sqlite_projection: Arc<AsyncSqliteProjectionStore>,
     async_apply: Option<AsyncProjectionApplyCoordinator<AsyncSqliteProjectionStore>>,
+    projection_offline: Arc<AtomicBool>,
+    projection_lifecycle_gate: Arc<tokio::sync::RwLock<()>>,
     strict_poison: Arc<std::sync::RwLock<std::collections::HashMap<QueueKey, String>>>,
     #[cfg(test)]
     strict_memory_failures: Arc<std::sync::atomic::AtomicU32>,
@@ -90,10 +93,16 @@ impl SeparateReplayCommitter for Committer {
         let projection = Arc::clone(&self.projection);
         let sqlite_projection = Arc::clone(&self.sqlite_projection);
         let async_apply = self.async_apply.clone();
+        let projection_offline = Arc::clone(&self.projection_offline);
+        let projection_lifecycle_gate = Arc::clone(&self.projection_lifecycle_gate);
         let strict_poison = Arc::clone(&self.strict_poison);
         #[cfg(test)]
         let strict_memory_failures = Arc::clone(&self.strict_memory_failures);
         Box::pin(async move {
+            let _lifecycle_guard = projection_lifecycle_gate.read_owned().await;
+            if projection_offline.load(Ordering::Acquire) {
+                return Err(EngineError::Unavailable);
+            }
             let (shard, commands, expected_epoch, fault) = request.into_parts();
             match fault {
                 fireweed_engine::RawCommitFault::BeforeAppend => {
@@ -212,6 +221,8 @@ pub struct AsyncObjectLogSqliteBackend {
     projection: Arc<Proj>,
     sqlite_projection: Arc<AsyncSqliteProjectionStore>,
     async_apply: Option<AsyncProjectionApplyCoordinator<AsyncSqliteProjectionStore>>,
+    projection_offline: Arc<AtomicBool>,
+    projection_lifecycle_gate: Arc<tokio::sync::RwLock<()>>,
     strict_poison: Arc<std::sync::RwLock<std::collections::HashMap<QueueKey, String>>>,
     #[cfg(test)]
     strict_memory_failures: Arc<std::sync::atomic::AtomicU32>,
@@ -408,6 +419,8 @@ impl AsyncObjectLogSqliteBackend {
         let async_apply = async_spec
             .map(|spec| AsyncProjectionApplyCoordinator::new(Arc::clone(&sqlite_projection), spec))
             .transpose()?;
+        let projection_offline = Arc::new(AtomicBool::new(false));
+        let projection_lifecycle_gate = Arc::new(tokio::sync::RwLock::new(()));
         let strict_poison = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         #[cfg(test)]
         let strict_memory_failures = Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -423,6 +436,8 @@ impl AsyncObjectLogSqliteBackend {
             projection: Arc::clone(&projection),
             sqlite_projection: Arc::clone(&sqlite_projection),
             async_apply: async_apply.clone(),
+            projection_offline: Arc::clone(&projection_offline),
+            projection_lifecycle_gate: Arc::clone(&projection_lifecycle_gate),
             strict_poison: Arc::clone(&strict_poison),
             #[cfg(test)]
             strict_memory_failures: Arc::clone(&strict_memory_failures),
@@ -511,6 +526,8 @@ impl AsyncObjectLogSqliteBackend {
             projection,
             sqlite_projection,
             async_apply,
+            projection_offline,
+            projection_lifecycle_gate,
             strict_poison,
             #[cfg(test)]
             strict_memory_failures,
@@ -551,6 +568,14 @@ impl AsyncObjectLogSqliteBackend {
                 "SQLite projection poisoned: {reason}"
             ))),
             None => Ok(()),
+        }
+    }
+
+    fn ensure_projection_writable(&self) -> EngineResult<()> {
+        if self.projection_offline.load(Ordering::Acquire) {
+            Err(EngineError::Unavailable)
+        } else {
+            Ok(())
         }
     }
 
@@ -653,7 +678,9 @@ impl ControlPlaneStore for AsyncObjectLogSqliteBackend {
         definition: QueueDefinition,
     ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
         async move {
+            let _lifecycle_guard = self.projection_lifecycle_gate.read().await;
             let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            self.ensure_projection_writable()?;
             self.ensure_projection_healthy(&shard)?;
             let outcome = self
                 .log
@@ -745,7 +772,12 @@ impl ControlPlaneStore for AsyncObjectLogSqliteBackend {
         &self,
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
-        AsyncLogStore::acquire_epoch(self.log.as_ref(), shard.clone())
+        let shard = shard.clone();
+        async move {
+            let _lifecycle_guard = self.projection_lifecycle_gate.read().await;
+            self.ensure_projection_writable()?;
+            AsyncLogStore::acquire_epoch(self.log.as_ref(), shard).await
+        }
     }
     fn fence_epoch(
         &self,
@@ -753,6 +785,8 @@ impl ControlPlaneStore for AsyncObjectLogSqliteBackend {
         target_epoch: u64,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         async move {
+            let _lifecycle_guard = self.projection_lifecycle_gate.read().await;
+            self.ensure_projection_writable()?;
             let mut current =
                 AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?;
             if current > target_epoch {
@@ -1925,9 +1959,65 @@ impl AsyncObjectLogSqliteBackend {
             .await
     }
 
+    /// Whether this backend returns after bounded admission rather than durable SQLite apply.
+    pub fn uses_async_projection(&self) -> bool {
+        self.async_apply.is_some()
+    }
+
     /// Delete the disposable projection through the owned adapter thread.
+    ///
+    /// New commits fail closed before authoritative append while deletion/rebuild owns the selected
+    /// projection. Async apply is drained before the file is reset and remains paused until rebuild
+    /// publishes a recovered high-water.
     pub async fn delete_projection(&self) -> EngineResult<()> {
-        self.sqlite_projection.delete_projection().await
+        let _lifecycle_guard = self.projection_lifecycle_gate.write().await;
+        self.projection_offline.store(true, Ordering::Release);
+        if let Some(coordinator) = &self.async_apply {
+            let definitions = AsyncLogStore::recover_definitions(self.log.as_ref()).await?;
+            for definition in definitions {
+                let shard = QueueKey::new(definition.tenant_id, definition.queue_id);
+                coordinator.wait_for_catch_up(&shard).await?;
+            }
+            coordinator.pause();
+        }
+        match self.sqlite_projection.delete_projection().await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if let Some(coordinator) = &self.async_apply {
+                    coordinator.resume();
+                }
+                self.projection_offline.store(false, Ordering::Release);
+                Err(error)
+            }
+        }
+    }
+
+    /// Publish successful lifecycle recovery and reopen projection-backed writes.
+    pub async fn finish_projection_rebuild(
+        &self,
+        definitions: &[QueueDefinition],
+    ) -> EngineResult<()> {
+        if let Some(coordinator) = &self.async_apply {
+            for definition in definitions {
+                let shard =
+                    QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+                let high_water = AsyncProjectionStore::recovery_high_water(
+                    self.sqlite_projection.as_ref(),
+                    shard.clone(),
+                )
+                .await?;
+                coordinator.reset_after_rebuild(shard, high_water).await;
+            }
+            coordinator.resume();
+        }
+        self.strict_poison
+            .write()
+            .map_err(|_| {
+                EngineError::Storage("SQLite projection poison registry lock failed".into())
+            })?
+            .clear();
+        self.projection_offline.store(false, Ordering::Release);
+        Ok(())
     }
 
     /// Borrow the projection axis (lifecycle / diagnostics).

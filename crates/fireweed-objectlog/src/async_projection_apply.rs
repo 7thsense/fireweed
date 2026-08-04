@@ -380,6 +380,29 @@ where
         state.shards.entry(shard).or_default().applied_high_water = high_water;
     }
 
+    /// Reset one shard after an operator-driven projection rebuild.
+    ///
+    /// The lifecycle boundary first prevents new admissions and drains admitted work. Rebuild can
+    /// then replace the selected projection and clear any prior apply poison without allowing a
+    /// stale queued batch to race the recovered image.
+    pub async fn reset_after_rebuild(&self, shard: QueueKey, high_water: Option<CommandPosition>) {
+        let mut state = self.inner.state.lock().await;
+        state.entries.retain(|entry| entry.shard() != &shard);
+        state.shards.insert(
+            shard.clone(),
+            ShardApplyState {
+                retry_count: 0,
+                applied_high_water: high_water,
+                poison_reason: None,
+            },
+        );
+        drop(state);
+        if let Ok(mut poisoned) = self.inner.poisoned.write() {
+            poisoned.remove(&shard);
+        }
+        self.inner.changed.notify_waiters();
+    }
+
     #[cfg(test)]
     pub(crate) fn inject_apply_failures(&self, count: u32) {
         self.inner

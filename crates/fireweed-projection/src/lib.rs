@@ -3976,8 +3976,8 @@ impl ProjectionData {
         ClaimByItemIdClass::Claimable
     }
 
-    /// Seed restart item-id counters from this already-materialized projection. Hybrid recovery has just
-    /// hydrated memory from SQLite, so this avoids a second full durable-store item scan.
+    /// Seed restart item-id counters from an already-materialized SQLite checkpoint so recovery
+    /// avoids a second full durable-store item scan.
     pub fn observe_item_counters(&self, shard: &QueueKey, counters: &QueueCounters) {
         for id in self.items.keys() {
             counters.observe(shard, *id);

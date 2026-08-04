@@ -1,6 +1,6 @@
 //! Legacy-compatibility assertions migrated to the provider-neutral AsyncProjection test ledger.
 //!
-//! Async SQLite logical checkpoint store for the `objectlog/hybrid-async` profile (bead pqueue-16b85e28).
+//! Async SQLite logical checkpoint store for the `objectlog/async projection` profile (bead pqueue-16b85e28).
 //!
 //! These tests exercise [`SqliteCheckpointStore`], the off-hot-path worker that consumes committed
 //! object-log entries in order and, per batch in ONE SQLite transaction: applies the commands, persists
@@ -82,7 +82,7 @@ fn lineage(epoch: u64, segment: &str) -> CheckpointLineage {
 
 fn temp_path(tag: &str) -> std::path::PathBuf {
     let p = std::env::temp_dir().join(format!(
-        "fireweed-hybrid-async-checkpoint-{tag}-{}.db",
+        "fireweed-async projection-checkpoint-{tag}-{}.db",
         std::process::id()
     ));
     for suffix in ["", "-wal", "-shm"] {
@@ -435,7 +435,7 @@ fn async_projection_checkpoint_survives_reopen_and_rehydrates_memory() {
     }
 }
 
-/// The checkpoint store is constructible from an existing projection store, so a running hybrid can hand
+/// The checkpoint store is constructible from an existing projection store, so a running projection can hand
 /// its durable SQLite projection to the async worker without reopening the file.
 #[test]
 fn async_projection_checkpoint_wraps_an_existing_projection_store() {

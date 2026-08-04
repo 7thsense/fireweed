@@ -42,9 +42,9 @@ use super::*;
 ///
 /// pqueue-8e5e7846: the original `2_000` default never actually bound anything at release scale. Each
 /// deferred entry is one committed push/claim/finalize *call* (which may itself batch up to
-/// `FIREWEED_HYBRID_LOAD_BATCH` items), not one item — so the 100k-resident release lane's whole
+/// one async-projection apply batch of items), not one item — so the 100k-resident release lane's whole
 /// push+claim+finalize backlog tops out at `3 * (resident / release_default_batch) = 600` deferred entries
-/// (with the 500-item release default at `FIREWEED_HYBRID_RESIDENT=100000`), comfortably under the
+/// (with a 500-item release batch and 100,000-item selected-projection target), comfortably under the
 /// old chunk. `flush_deferred` therefore always drained the entire backlog in one composed-backend-mutex
 /// hold, exactly the unbounded-batch problem the chunking mechanism was meant to prevent.
 ///

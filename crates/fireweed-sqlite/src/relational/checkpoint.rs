@@ -6,7 +6,7 @@ use fireweed_engine::{
 use super::*;
 
 // ---------------------------------------------------------------------------
-// Async SQLite logical checkpoint store (bead pqueue-16b85e28, backend:objectlog-hybrid-async)
+// Async SQLite logical checkpoint store (bead pqueue-16b85e28, backend:objectlog-async projection)
 // ---------------------------------------------------------------------------
 
 /// Object-log lineage for one async checkpoint: which committed object-log segment/manifest the durable
@@ -47,7 +47,7 @@ pub struct WalCheckpointStats {
     pub checkpointed_frames: i64,
 }
 
-/// The async SQLite **logical checkpoint** store for the `objectlog/hybrid-async` profile.
+/// The async SQLite **logical checkpoint** store for the `objectlog/async-projection` profile.
 ///
 /// The object log is the durability authority; this store is the owner-local restart accelerator. Off the
 /// hot request path, the checkpoint worker consumes committed object-log entries IN ORDER and, for each
@@ -191,7 +191,7 @@ impl SqliteCheckpointStore {
     /// object-log command sequences are covered by the log but not yet by `sqlite_high_water`. Given the
     /// log's committed head sequence (`log_head_seq`, the highest committed command sequence, `None` for an
     /// empty log), lag `= (log_head_seq + 1) - logical_high_water` (clamped at 0). This is the
-    /// `hybrid_async_sqlite_apply_lag` metric (TD-004).
+    /// `async_projection_sqlite_apply_lag` metric (TD-004).
     pub fn apply_lag_commands(
         &self,
         shard: &QueueKey,

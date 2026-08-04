@@ -735,7 +735,7 @@ impl SqliteProjectionStore {
     /// Export the durable SQLite projection rows for `shard` as a typed in-memory projection image.
     pub fn export_projection_image(&self, shard: &QueueKey) -> EngineResult<ProjectionImage> {
         let g = self.inner.lock().expect("projection store poisoned");
-        // Durable rows carry only lease hashes; overlay process-local cleartext so hybrid
+        // Durable rows carry only lease hashes; overlay process-local cleartext so selected-projection
         // rehydrate / recovery images retain claim authority (fireweed-2ad3a030).
         let mut image = export_projection_image_sql(&g.conn, shard)?;
         if let Some(tokens) = g.live_tokens.get(shard) {
@@ -753,7 +753,7 @@ impl SqliteProjectionStore {
     /// The object-log lineage the async checkpoint worker durably recorded for `shard`, or `None` if no
     /// lineage row exists (a queue whose projection was materialized synchronously, or never checkpointed).
     /// Recovery cross-validates this against the log identity via
-    /// [`HybridProjectionStore::validate_recovery_lineage`].
+    /// [`LegacySqliteProjectionStore::validate_recovery_lineage`].
     pub fn checkpoint_lineage(&self, shard: &QueueKey) -> EngineResult<Option<CheckpointLineage>> {
         let g = self.inner.lock().expect("projection store poisoned");
         Ok(read_checkpoint_lineage_sql(&g.conn, shard)?.map(|(l, _)| l))
@@ -774,7 +774,7 @@ impl SqliteProjectionStore {
     }
 
     /// Restore ONLY the durable item-id high-water (ADR-009 mint-counter recovery floor) into `counters`. The
-    /// `objectlog/hybrid-async` store seeds counters from its hydrated hot memory (the surviving rows), so it
+    /// `objectlog/async-projection` store seeds counters from its hydrated hot memory (the surviving rows), so it
     /// calls this separately to also fold in the ceiling of any REAPED rows the survivors no longer carry.
     pub fn observe_id_high_water(
         &self,

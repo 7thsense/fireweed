@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS relational_cursor (
     PRIMARY KEY (tenant, queue)
 );
 -- Durable item-id high-water (ADR-009 mint-counter recovery floor). Terminal-item retention reaping now
--- DELETES item rows (objectlog/hybrid-async), so the surviving `fireweed_items` rows are no longer the complete
+-- DELETES item rows (objectlog/async-projection), so the surviving `fireweed_items` rows are no longer the complete
 -- minted set — a reopen that seeded `QueueCounters` only from survivors could re-mint a reaped id. Every reap
 -- advances this MONOTONIC per-queue high-water past the greatest id it deletes, and recovery observes it, so a
 -- push after reaping ALL rows still mints strictly past every previously-minted id. Stored as the raw
@@ -237,7 +237,7 @@ CREATE INDEX IF NOT EXISTS fireweed_item_index_key_item_asc_idx
     ON fireweed_item_index (tenant_id, queue_id, index_name, index_key ASC, item_id ASC);
 CREATE INDEX IF NOT EXISTS fireweed_item_index_key_item_desc_idx
     ON fireweed_item_index (tenant_id, queue_id, index_name, index_key DESC, item_id ASC);
--- objectlog/hybrid-async logical checkpoint lineage (bead pqueue-16b85e28, plan §Snapshot Authority).
+-- objectlog/async-projection logical checkpoint lineage (bead pqueue-16b85e28, plan §Snapshot Authority).
 -- The async SQLite checkpoint worker records, per queue, the object-log lineage the durable SQLite
 -- projection was last advanced from: the LOGICAL high-water it reached (relational_cursor.next_seq at
 -- checkpoint time), the object-log assignment epoch, and an opaque object-log segment/manifest reference

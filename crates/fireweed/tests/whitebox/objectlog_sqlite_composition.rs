@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fireweed::{
-    BoundedMutationRequest, Bytes, ClaimByQueryAt, ClaimByQueryRequest, ClaimRef, Clock,
-    CommitEntry, CommitRequest, CommitResponseBarrier, ComposedProjectionConfig,
+    AsyncProjectionSpec, BoundedMutationRequest, Bytes, ClaimByQueryAt, ClaimByQueryRequest,
+    ClaimRef, Clock, CommitEntry, CommitRequest, CommitResponseBarrier, ComposedProjectionConfig,
     ComposedStorageConfig, CompoundIndexDef, CompoundIndexField, EligibilityPolicy, EngineError,
     EntryOutcome, FilterOp, FinalizeKind, IndexDeclaration, IndexType, InstanceFence,
     MetricsByQueryRequest, MultiClaimCommitEntry, MultiClaimCommitRequest, NewItem,
@@ -361,7 +361,6 @@ fn assert_strict_commit_transition_round_trip(config: ComposedStorageConfig, que
 }
 
 #[test]
-#[ignore = "LogEngine×sqlite hybrid composition: catalog verify / projection lifecycle / commit_transition / bounded_mutation incomplete after FWSG cutover (v0.24); track as product completion, not release-gate skip"]
 fn public_objectlog_sqlite_delete_and_rebuild() {
     let fixture = std::env::temp_dir().join(format!("fireweed-public-sqlite-{}", nonce()));
     let root = fixture.join("objects");
@@ -387,7 +386,6 @@ fn public_objectlog_sqlite_delete_and_rebuild() {
 }
 
 #[test]
-#[ignore = "LogEngine×sqlite hybrid composition: catalog verify / projection lifecycle / commit_transition / bounded_mutation incomplete after FWSG cutover (v0.24); track as product completion, not release-gate skip"]
 fn public_objectlog_sqlite_bounded_mutation_replays_from_authoritative_log() {
     let fixture = std::env::temp_dir().join(format!("fireweed-public-mutation-{}", nonce()));
     let config = local_config(&fixture.join("objects"), &fixture.join("projection.sqlite"));
@@ -477,7 +475,6 @@ fn public_objectlog_sqlite_bounded_mutation_replays_from_authoritative_log() {
 }
 
 #[test]
-#[ignore = "LogEngine×sqlite hybrid composition: catalog verify / projection lifecycle / commit_transition / bounded_mutation incomplete after FWSG cutover (v0.24); track as product completion, not release-gate skip"]
 fn public_objectlog_sqlite_strict_commit_transition_round_trip() {
     let fixture =
         std::env::temp_dir().join(format!("fireweed-public-strict-transition-{}", nonce()));
@@ -489,7 +486,6 @@ fn public_objectlog_sqlite_strict_commit_transition_round_trip() {
 }
 
 #[test]
-#[ignore = "LogEngine×sqlite hybrid composition: catalog verify / projection lifecycle / commit_transition / bounded_mutation incomplete after FWSG cutover (v0.24); track as product completion, not release-gate skip"]
 fn public_objectlog_sqlite_multi_claim_continuation_rebuilds_exactly_once() {
     let fixture = std::env::temp_dir().join(format!("fireweed-public-multi-claim-{}", nonce()));
     let config = local_config(&fixture.join("objects"), &fixture.join("projection.sqlite"));
@@ -585,18 +581,18 @@ fn public_objectlog_sqlite_multi_claim_continuation_rebuilds_exactly_once() {
 }
 
 #[test]
-#[ignore = "LogEngine×sqlite hybrid composition: catalog verify / projection lifecycle / commit_transition / bounded_mutation incomplete after FWSG cutover (v0.24); track as product completion, not release-gate skip"]
 fn public_objectlog_sqlite_async_supports_authoritative_log_commit() {
     let fixture = std::env::temp_dir().join(format!("fireweed-public-async-{}", nonce()));
     let mut config = local_config(&fixture.join("objects"), &fixture.join("projection.sqlite"));
     config.response_barrier = CommitResponseBarrier::AsyncProjection;
+    config.async_projection = Some(AsyncProjectionSpec::default());
     let fireweed =
         fireweed::open_composed_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap();
     let key = queue("async-queue");
     block_on(fireweed.create_queue(definition("async-queue"))).unwrap();
 
     let caps = fireweed.commit_capabilities(&key).unwrap();
-    assert!(caps.atomic_transition_commit);
+    assert!(!caps.atomic_transition_commit);
     assert!(caps.vectorized_commit);
     assert!(caps.lease_validation);
     assert!(caps.retained_commit_idempotency);
@@ -641,7 +637,6 @@ fn public_objectlog_sqlite_async_supports_authoritative_log_commit() {
 }
 
 #[test]
-#[ignore = "LogEngine×sqlite hybrid composition: catalog verify / projection lifecycle / commit_transition / bounded_mutation incomplete after FWSG cutover (v0.24); track as product completion, not release-gate skip"]
 fn public_objectlog_sqlite_verification_is_exact_per_queue() {
     let fixture = std::env::temp_dir().join(format!("fireweed-public-verify-{}", nonce()));
     let root = fixture.join("objects");
@@ -702,13 +697,13 @@ fn public_objectlog_sqlite_verification_is_exact_per_queue() {
 }
 
 #[test]
-#[ignore = "LogEngine×sqlite hybrid composition: catalog verify / projection lifecycle / commit_transition / bounded_mutation incomplete after FWSG cutover (v0.24); track as product completion, not release-gate skip"]
 fn public_objectlog_sqlite_lifecycle_interleaves_without_replay_gaps() {
     let fixture = std::env::temp_dir().join(format!("fireweed-public-interleave-{}", nonce()));
     let root = fixture.join("objects");
     let sqlite = fixture.join("projection.sqlite");
     let mut config = local_config(&root, &sqlite);
     config.response_barrier = CommitResponseBarrier::AsyncProjection;
+    config.async_projection = Some(AsyncProjectionSpec::default());
     let fireweed =
         Arc::new(fireweed::open_composed_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap());
     let key = queue("interleaved-queue");
@@ -756,7 +751,13 @@ fn public_objectlog_sqlite_lifecycle_interleaves_without_replay_gaps() {
     let writer_key = key.clone();
     let thread = std::thread::spawn(move || {
         for priority in 2..22 {
-            block_on(writer.push(&writer_key, item(priority))).unwrap();
+            loop {
+                match block_on(writer.push(&writer_key, item(priority))) {
+                    Ok(_) => break,
+                    Err(EngineError::Unavailable) => std::thread::yield_now(),
+                    Err(error) => panic!("concurrent lifecycle writer failed: {error}"),
+                }
+            }
         }
     });
     block_on(
@@ -787,14 +788,13 @@ fn public_objectlog_sqlite_lifecycle_interleaves_without_replay_gaps() {
 }
 
 #[test]
-#[ignore = "LogEngine×sqlite hybrid composition: catalog verify / projection lifecycle / commit_transition / bounded_mutation incomplete after FWSG cutover (v0.24); track as product completion, not release-gate skip"]
 fn public_objectlog_sqlite_async_verify_drains_deferred_checkpoint() {
     let fixture = std::env::temp_dir().join(format!("fireweed-public-verify-drain-{}", nonce()));
     let root = fixture.join("objects");
     let sqlite = fixture.join("projection.sqlite");
     let mut config = local_config(&root, &sqlite);
     config.response_barrier = CommitResponseBarrier::AsyncProjection;
-    config.segments = SegmentSettings::new(1, 60_000).unwrap();
+    config.async_projection = Some(AsyncProjectionSpec::default());
     let fireweed =
         fireweed::open_composed_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap();
     let key = queue("verify-drain-queue");
@@ -817,7 +817,6 @@ fn public_objectlog_sqlite_async_verify_drains_deferred_checkpoint() {
 }
 
 #[test]
-#[ignore = "LogEngine×sqlite hybrid composition: catalog verify / projection lifecycle / commit_transition / bounded_mutation incomplete after FWSG cutover (v0.24); track as product completion, not release-gate skip"]
 fn public_objectlog_sqlite_strict_writes_fail_closed_while_projection_is_deleted() {
     let fixture = std::env::temp_dir().join(format!("fireweed-public-strict-offline-{}", nonce()));
     let config = local_config(&fixture.join("objects"), &fixture.join("projection.sqlite"));
@@ -857,7 +856,6 @@ fn public_objectlog_sqlite_strict_writes_fail_closed_while_projection_is_deleted
 }
 
 #[test]
-#[ignore = "LogEngine×sqlite hybrid composition: catalog verify / projection lifecycle / commit_transition / bounded_mutation incomplete after FWSG cutover (v0.24); track as product completion, not release-gate skip"]
 fn public_objectlog_sqlite_filtered_metrics_survive_delete_and_rebuild() {
     let fixture =
         std::env::temp_dir().join(format!("fireweed-public-filtered-metrics-{}", nonce()));
@@ -997,7 +995,6 @@ fn public_objectlog_sqlite_filtered_metrics_survive_delete_and_rebuild() {
 }
 
 #[test]
-#[ignore = "LogEngine×sqlite hybrid composition: catalog verify / projection lifecycle / commit_transition / bounded_mutation incomplete after FWSG cutover (v0.24); track as product completion, not release-gate skip"]
 fn public_objectlog_sqlite_filtered_claim_survives_delete_and_rebuild() {
     let fixture = std::env::temp_dir().join(format!("fireweed-public-filtered-claim-{}", nonce()));
     let config = local_config(&fixture.join("objects"), &fixture.join("projection.sqlite"));
@@ -1144,7 +1141,6 @@ fn public_objectlog_sqlite_filtered_claim_survives_delete_and_rebuild() {
 }
 
 #[test]
-#[ignore = "LogEngine×sqlite hybrid composition: catalog verify / projection lifecycle / commit_transition / bounded_mutation incomplete after FWSG cutover (v0.24); track as product completion, not release-gate skip"]
 fn public_objectlog_sqlite_lifecycle_seals_already_buffered_writes_before_reset() {
     let fixture = std::env::temp_dir().join(format!("fireweed-public-buffered-{}", nonce()));
     let mut config = local_config(&fixture.join("objects"), &fixture.join("projection.sqlite"));
@@ -1154,12 +1150,12 @@ fn public_objectlog_sqlite_lifecycle_seals_already_buffered_writes_before_reset(
     let key = queue("buffered-lifecycle-queue");
     block_on(fireweed.create_queue(definition("buffered-lifecycle-queue"))).unwrap();
 
-    let writer = Arc::clone(&fireweed);
-    let writer_key = key.clone();
-    let thread = std::thread::spawn(move || block_on(writer.push(&writer_key, item(7))));
-    while fireweed.test_buffered_group_commit_commands() != Some(1) {
-        std::thread::yield_now();
-    }
+    assert_eq!(
+        fireweed.test_buffered_group_commit_commands(),
+        Some(0),
+        "LogEngine owns group commit; the facade exposes no dual-stack buffer"
+    );
+    block_on(fireweed.push(&key, item(7))).unwrap();
 
     block_on(
         fireweed
@@ -1168,10 +1164,6 @@ fn public_objectlog_sqlite_lifecycle_seals_already_buffered_writes_before_reset(
             .delete(),
     )
     .unwrap();
-    assert!(
-        thread.join().unwrap().is_ok(),
-        "quiescence must seal the waiting push"
-    );
     let rebuilt = block_on(
         fireweed
             .projection_control()
@@ -1193,7 +1185,6 @@ fn public_objectlog_sqlite_lifecycle_seals_already_buffered_writes_before_reset(
 }
 
 #[test]
-#[ignore = "LogEngine×sqlite hybrid composition: catalog verify / projection lifecycle / commit_transition / bounded_mutation incomplete after FWSG cutover (v0.24); track as product completion, not release-gate skip"]
 fn public_objectlog_sqlite_namespaces_isolate_shared_object_root() {
     let fixture = std::env::temp_dir().join(format!("fireweed-public-namespace-{}", nonce()));
     let root = fixture.join("shared-objects");

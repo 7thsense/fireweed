@@ -170,7 +170,7 @@ async fn request_id_replay_and_conflict_survive_composed_relational_reopen() {
 /// DB-authoritative backend), so recovery must restore the id-mint floor from the durable
 /// `fireweed_id_high_water` high-water, NOT only from surviving rows — otherwise reaping ALL rows and reopening
 /// on the SAME epoch re-mints a reaped id (ADR-009 id-uniqueness). Regression guard for the unified relational
-/// family (bead pqueue-41bf00d7, codex review), the analogue of the hybrid-async guard.
+/// family (bead pqueue-41bf00d7, codex review), the analogue of the async-projection-async guard.
 #[test]
 fn composed_relational_reap_all_does_not_resurrect_ids() {
     let path = unique_path("reap-no-resurrect");

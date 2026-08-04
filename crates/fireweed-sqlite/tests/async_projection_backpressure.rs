@@ -1,10 +1,10 @@
 //! Legacy-compatibility assertions migrated to the provider-neutral AsyncProjection test ledger.
 //!
-//! Bounded async-apply debt, backpressure, and fail-closed poison for the `objectlog/hybrid-async`
+//! Bounded async-apply debt, backpressure, and fail-closed poison for the `objectlog/async projection`
 //! profile (bead pqueue-6da52695; TD-004 §"Async apply debt, backpressure, and poison thresholds").
 //!
-//! These tests exercise the runtime debt controller ([`HybridAsyncMonitor`]) and its configured bounds
-//! ([`HybridAsyncThresholds`]): the typed backpressure level with the normative 75%/50% hysteresis, the
+//! These tests exercise the runtime debt controller ([`AsyncProjectionMonitor`]) and its configured bounds
+//! ([`AsyncProjectionThresholds`]): the typed backpressure level with the normative 75%/50% hysteresis, the
 //! mutation-admission gate, the fail-closed poison latch on repeated apply failure, the recovery
 //! high-water backpressure rule, and the exported observability surface — plus the SQLite WAL-size gauge
 //! and the apply-lag-in-commands metric on [`SqliteCheckpointStore`].
@@ -12,18 +12,18 @@
 use fireweed_conformance::{qdef, shard};
 use fireweed_engine::EngineError;
 use fireweed_sqlite::{
-    BackpressureLevel, HybridAsyncDebt, HybridAsyncMonitor, HybridAsyncThresholds,
+    AsyncProjectionDebt, AsyncProjectionMonitor, AsyncProjectionThresholds, BackpressureLevel,
     SqliteCheckpointStore,
 };
 
 /// Thresholds with a lag hard-limit of 100 commands (soft at 75, clear at 50) and a poison retry
 /// threshold of 3, so the level transitions are easy to reason about.
-fn thresholds() -> HybridAsyncThresholds {
-    HybridAsyncThresholds::new(100, 1_000_000, 100, 60_000, 3).expect("valid thresholds")
+fn thresholds() -> AsyncProjectionThresholds {
+    AsyncProjectionThresholds::new(100, 1_000_000, 100, 60_000, 3).expect("valid thresholds")
 }
 
-fn lag(commands: u64) -> HybridAsyncDebt {
-    HybridAsyncDebt {
+fn lag(commands: u64) -> AsyncProjectionDebt {
+    AsyncProjectionDebt {
         apply_lag_commands: commands,
         ..Default::default()
     }
@@ -32,17 +32,17 @@ fn lag(commands: u64) -> HybridAsyncDebt {
 #[test]
 fn async_projection_backpressure_zero_threshold_is_rejected() {
     // A zero bound would leave a queue instantly and permanently backpressured.
-    assert!(HybridAsyncThresholds::new(0, 1, 1, 1, 1).is_err());
-    assert!(HybridAsyncThresholds::new(1, 0, 1, 1, 1).is_err());
-    assert!(HybridAsyncThresholds::new(1, 1, 0, 1, 1).is_err());
-    assert!(HybridAsyncThresholds::new(1, 1, 1, 0, 1).is_err());
-    assert!(HybridAsyncThresholds::new(1, 1, 1, 1, 0).is_err());
-    assert!(HybridAsyncThresholds::new(1, 1, 1, 1, 1).is_ok());
+    assert!(AsyncProjectionThresholds::new(0, 1, 1, 1, 1).is_err());
+    assert!(AsyncProjectionThresholds::new(1, 0, 1, 1, 1).is_err());
+    assert!(AsyncProjectionThresholds::new(1, 1, 0, 1, 1).is_err());
+    assert!(AsyncProjectionThresholds::new(1, 1, 1, 0, 1).is_err());
+    assert!(AsyncProjectionThresholds::new(1, 1, 1, 1, 0).is_err());
+    assert!(AsyncProjectionThresholds::new(1, 1, 1, 1, 1).is_ok());
 }
 
 #[test]
 fn async_projection_backpressure_debt_crosses_soft_then_hard_bands() {
-    let mut monitor = HybridAsyncMonitor::new(thresholds());
+    let mut monitor = AsyncProjectionMonitor::new(thresholds());
     assert_eq!(monitor.observe(lag(10), 0), BackpressureLevel::Clear);
     assert_eq!(monitor.observe(lag(80), 1), BackpressureLevel::Soft);
     assert_eq!(monitor.observe(lag(100), 2), BackpressureLevel::Hard);
@@ -50,9 +50,9 @@ fn async_projection_backpressure_debt_crosses_soft_then_hard_bands() {
 
 #[test]
 fn async_projection_backpressure_any_single_metric_at_its_hard_limit_trips_backpressure() {
-    let mut monitor = HybridAsyncMonitor::new(thresholds());
+    let mut monitor = AsyncProjectionMonitor::new(thresholds());
     // Queue depth alone at its hard limit is enough even when every other metric is quiet.
-    let debt = HybridAsyncDebt {
+    let debt = AsyncProjectionDebt {
         apply_queue_depth: 100,
         ..Default::default()
     };
@@ -62,7 +62,7 @@ fn async_projection_backpressure_any_single_metric_at_its_hard_limit_trips_backp
 #[test]
 fn async_projection_backpressure_hard_backpressure_holds_until_debt_clears_below_half_after_a_clean_batch()
  {
-    let mut monitor = HybridAsyncMonitor::new(thresholds());
+    let mut monitor = AsyncProjectionMonitor::new(thresholds());
     assert_eq!(monitor.observe(lag(100), 0), BackpressureLevel::Hard);
     // Down to 60 (still >= 50% clear band) — hysteresis holds Hard.
     assert_eq!(monitor.observe(lag(60), 1), BackpressureLevel::Hard);
@@ -75,7 +75,7 @@ fn async_projection_backpressure_hard_backpressure_holds_until_debt_clears_below
 
 #[test]
 fn async_projection_backpressure_admission_gate_rejects_mutations_only_under_hard_backpressure() {
-    let mut monitor = HybridAsyncMonitor::new(thresholds());
+    let mut monitor = AsyncProjectionMonitor::new(thresholds());
     assert!(monitor.admit_mutation().is_ok(), "clear admits mutations");
     monitor.observe(lag(80), 0);
     assert!(
@@ -91,7 +91,7 @@ fn async_projection_backpressure_admission_gate_rejects_mutations_only_under_har
 
 #[test]
 fn async_projection_backpressure_repeated_apply_failure_poisons_and_fails_closed() {
-    let mut monitor = HybridAsyncMonitor::new(thresholds());
+    let mut monitor = AsyncProjectionMonitor::new(thresholds());
     assert!(!monitor.record_checkpoint_error("io error"));
     assert!(!monitor.record_checkpoint_error("io error"));
     assert!(!monitor.is_poisoned());
@@ -107,7 +107,7 @@ fn async_projection_backpressure_repeated_apply_failure_poisons_and_fails_closed
 
 #[test]
 fn async_projection_backpressure_a_clean_batch_resets_the_consecutive_retry_count_before_poison() {
-    let mut monitor = HybridAsyncMonitor::new(thresholds());
+    let mut monitor = AsyncProjectionMonitor::new(thresholds());
     monitor.record_checkpoint_error("blip");
     monitor.record_checkpoint_error("blip");
     monitor.record_apply_success();
@@ -120,7 +120,7 @@ fn async_projection_backpressure_a_clean_batch_resets_the_consecutive_retry_coun
 
 #[test]
 fn async_projection_backpressure_non_contiguous_apply_poisons_immediately() {
-    let mut monitor = HybridAsyncMonitor::new(thresholds());
+    let mut monitor = AsyncProjectionMonitor::new(thresholds());
     monitor.poison("non-contiguous apply: expected sequence 42, got 44");
     assert!(monitor.is_poisoned());
     assert!(monitor.poison_reason().unwrap().contains("non-contiguous"));
@@ -129,7 +129,7 @@ fn async_projection_backpressure_non_contiguous_apply_poisons_immediately() {
 #[test]
 fn async_projection_backpressure_recovery_high_water_is_withheld_under_hard_backpressure_and_poison()
  {
-    let mut monitor = HybridAsyncMonitor::new(thresholds());
+    let mut monitor = AsyncProjectionMonitor::new(thresholds());
     let hw = fireweed_engine::CommandPosition::new(shard(), 0, 41);
     // Clear: the recorded high-water is a safe replay-skip point.
     assert_eq!(
@@ -146,7 +146,7 @@ fn async_projection_backpressure_recovery_high_water_is_withheld_under_hard_back
 
 #[test]
 fn async_projection_backpressure_retention_advances_only_when_clear_and_healthy() {
-    let mut monitor = HybridAsyncMonitor::new(thresholds());
+    let mut monitor = AsyncProjectionMonitor::new(thresholds());
     assert!(monitor.retention_may_advance());
     monitor.observe(lag(80), 0);
     assert!(
@@ -161,7 +161,7 @@ fn async_projection_backpressure_retention_advances_only_when_clear_and_healthy(
 
 #[test]
 fn async_projection_backpressure_backpressure_count_and_duration_are_tracked() {
-    let mut monitor = HybridAsyncMonitor::new(thresholds());
+    let mut monitor = AsyncProjectionMonitor::new(thresholds());
     // Enter Hard at t=100, leave at t=250 (150ms). record_apply_success lets it release below the band.
     monitor.observe(lag(100), 100);
     monitor.record_apply_success();
@@ -179,10 +179,10 @@ fn async_projection_backpressure_backpressure_count_and_duration_are_tracked() {
 
 #[test]
 fn async_projection_backpressure_metrics_snapshot_exposes_the_full_observability_surface() {
-    let mut monitor = HybridAsyncMonitor::new(thresholds());
+    let mut monitor = AsyncProjectionMonitor::new(thresholds());
     monitor.set_wal_size_bytes(4096);
     monitor.observe(
-        HybridAsyncDebt {
+        AsyncProjectionDebt {
             apply_lag_commands: 30,
             apply_debt_bytes: 2048,
             apply_queue_depth: 5,

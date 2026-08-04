@@ -2637,6 +2637,7 @@ type ObjectLogSqliteBackend = fireweed_objectlog::AsyncObjectLogSqliteBackend;
 #[cfg(all(feature = "objectlog", feature = "sqlite"))]
 struct ObjectLogSqliteLifecycle {
     backend: Arc<ObjectLogSqliteBackend>,
+    executor: blocking_backend::OwnedBlockingExecutor,
     max_tail_commands: u64,
 }
 
@@ -2701,6 +2702,12 @@ async fn verify_objectlog_sqlite_axes(
 
     let log = backend.log_store();
     let definitions = AsyncLogStore::recover_definitions(log.as_ref()).await?;
+    if backend.uses_async_projection() {
+        for definition in &definitions {
+            let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            backend.wait_for_async_projection_catch_up(&shard).await?;
+        }
+    }
     let authoritative: HashMap<QueueKey, QueueDefinition> = definitions
         .iter()
         .cloned()
@@ -2766,7 +2773,7 @@ impl ObjectLogSqliteLifecycle {
         verify_objectlog_sqlite_axes(backend).await
     }
 
-    async fn rebuilde_backend(
+    async fn rebuild_backend(
         backend: &ObjectLogSqliteBackend,
         max_tail_commands: u64,
     ) -> EngineResult<ProjectionRebuildState> {
@@ -2786,7 +2793,7 @@ impl ObjectLogSqliteLifecycle {
                 replayed = replayed.saturating_add(page.entries.len() as u64);
                 if replayed > max_tail_commands {
                     return Err(EngineError::Storage(format!(
-                        "projection rebuilde exceeds configured tail bound {}",
+                        "projection rebuild exceeds configured tail bound {}",
                         max_tail_commands
                     )));
                 }
@@ -2812,6 +2819,7 @@ impl ObjectLogSqliteLifecycle {
             }
         }
         let verification = verify_objectlog_sqlite_axes(backend).await?;
+        backend.finish_projection_rebuild(&definitions).await?;
         Ok(ProjectionRebuildState {
             snapshot_used: false,
             tail_commands_replayed: replayed,
@@ -2837,18 +2845,28 @@ impl ProjectionLifecycle for ObjectLogSqliteLifecycle {
 
     fn verify_projection(&self) -> ProjectionLifecycleFuture<'_, ProjectionVerificationState> {
         let backend = Arc::clone(&self.backend);
-        Box::pin(async move { Self::verify_backend(backend.as_ref()).await })
+        Box::pin(self.executor.run(move || {
+            fireweed_objectlog::block_on_objectlog(Self::verify_backend(backend.as_ref()))
+        }))
     }
 
     fn delete_projection(&self) -> ProjectionLifecycleFuture<'_, ()> {
         let backend = Arc::clone(&self.backend);
-        Box::pin(async move { backend.delete_projection().await })
+        Box::pin(
+            self.executor
+                .run(move || fireweed_objectlog::block_on_objectlog(backend.delete_projection())),
+        )
     }
 
     fn rebuild_projection(&self) -> ProjectionLifecycleFuture<'_, ProjectionRebuildState> {
         let backend = Arc::clone(&self.backend);
         let max_tail_commands = self.max_tail_commands;
-        Box::pin(async move { Self::rebuilde_backend(backend.as_ref(), max_tail_commands).await })
+        Box::pin(self.executor.run(move || {
+            fireweed_objectlog::block_on_objectlog(Self::rebuild_backend(
+                backend.as_ref(),
+                max_tail_commands,
+            ))
+        }))
     }
 
     fn shutdown(&mut self) {}
@@ -6216,17 +6234,22 @@ fn finish_composed_sqlite(
         )?,
     };
     let backend = Arc::new(backend);
+    let runtime_backend = Arc::new(blocking_backend::BlockingLibBackend::new(Arc::clone(
+        &backend,
+    ))?);
+    let lifecycle_executor = blocking_backend::shared_executor()?;
     let lifecycle = ProjectionLifecycleHandle {
         inner: Arc::new(ProjectionLifecycleHandleInner {
             _config: config.clone(),
             lifecycle: Box::new(ObjectLogSqliteLifecycle {
                 backend: Arc::clone(&backend),
+                executor: lifecycle_executor,
                 max_tail_commands: config.recovery.max_tail_commands,
             }),
         }),
     };
     Ok(ComposedRuntime {
-        runtime: RuntimeCore::new(backend, clock),
+        runtime: RuntimeCore::new(runtime_backend, clock),
         lifecycle,
     }
     .into_fireweed())
@@ -6947,7 +6970,7 @@ mod tests {
     }
 
     /// fireweed-2ad3a030 / snorri: object-log × sqlite Strict claim_by_query → commit must
-    /// not reject the just-issued ClaimRef as a stale lease (hybrid product path).
+    /// not reject the just-issued ClaimRef as a stale lease (async projection path).
     #[cfg(all(feature = "objectlog", feature = "sqlite"))]
     #[tokio::test(flavor = "current_thread")]
     async fn public_open_objectlog_sqlite_claim_by_query_then_commit() -> EngineResult<()> {
@@ -7025,7 +7048,7 @@ mod tests {
             .await?;
         assert_eq!(claimed.items.len(), 1, "claim_by_query must lease the row");
         let item = &claimed.items[0];
-        // Snorri calls create_queue again immediately before commit; hybrid must not rehydrate
+        // Snorri calls create_queue again immediately before commit; selected projection must not rehydrate
         // from SQLite and drop the process-local lease cleartext.
         fireweed.create_queue(query_definition()).await?;
         let outcomes = fireweed
@@ -7053,7 +7076,7 @@ mod tests {
             .await?;
         assert!(
             matches!(outcomes.as_slice(), [EntryOutcome::Committed { .. }]),
-            "claim_by_query ClaimRef must commit under Strict hybrid, got {outcomes:?}"
+            "claim_by_query ClaimRef must commit under Strict selected projection, got {outcomes:?}"
         );
         assert_eq!(fireweed.metrics(&queue).await?.complete, 1);
 

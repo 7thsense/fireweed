@@ -1032,7 +1032,7 @@ where
         Ok(())
     }
 
-    /// Drain deferred projection work when the projection axis supports it (hybrid checkpoint).
+    /// Drain deferred projection work when the projection axis supports it (async checkpoint).
     pub fn flush_deferred_projection(&self) -> EngineResult<()> {
         self.projection
             .with_store_mut(|p| ProjectionStore::flush_deferred(p))
