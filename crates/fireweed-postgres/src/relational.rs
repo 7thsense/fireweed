@@ -12475,7 +12475,13 @@ mod gated_group_summary_tests {
                 &[&existing_ids[2].to_string()],
             )
             .unwrap();
-        let migration_url = url.clone();
+        let application_name = format!("fireweed_metrics_migration_{}", std::process::id());
+        let migration_url = if url.contains("://") {
+            let separator = if url.contains('?') { '&' } else { '?' };
+            format!("{url}{separator}application_name={application_name}")
+        } else {
+            format!("{url} application_name={application_name}")
+        };
         let migration_schema = schema.clone();
         let migrator = std::thread::spawn(move || {
             PostgresRelationalBackend::migrate_metrics_batch_in_schema(
@@ -12494,9 +12500,9 @@ mod gated_group_summary_tests {
             let waiting: bool = inserter
                 .query_one(
                     "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
-                     WHERE wait_event_type='Lock' AND query LIKE \
+                     WHERE application_name=$1 AND wait_event_type='Lock' AND query LIKE \
                        'SELECT tenant_id,queue_id,item_id,lifecycle_state,superseded,%')",
-                    &[],
+                    &[&application_name],
                 )
                 .unwrap()
                 .get(0);
