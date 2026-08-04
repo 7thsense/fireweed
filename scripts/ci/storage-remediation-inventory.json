@@ -8849,9 +8849,51 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "be931f726a095efae27c",
+        "id": "2f01a2b97eb171e12df8",
+        "identity": "// public bounded-admission contract by accepting only transient Unavailable until that job becomes",
+        "line": 1679,
+        "owner": "P3-P9/P15",
+        "path": "crates/fireweed-sqlite/src/async_projection.rs",
+        "status": "debt"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P3-P9/P15",
+          "P2f"
+        ],
+        "detail": "early_success=false",
+        "id": "2a80b5be269a8e2a985c",
+        "identity": "Err(EngineError::Unavailable) if std::time::Instant::now() < deadline => {",
+        "line": 1685,
+        "owner": "P3-P9/P15",
+        "path": "crates/fireweed-sqlite/src/async_projection.rs",
+        "status": "debt"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P3-P9/P15",
+          "P2f"
+        ],
+        "detail": "early_success=false",
+        "id": "48c0ff2a51a0703e0ea2",
+        "identity": "Err(EngineError::Unavailable) => {",
+        "line": 1688,
+        "owner": "P3-P9/P15",
+        "path": "crates/fireweed-sqlite/src/async_projection.rs",
+        "status": "debt"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P3-P9/P15",
+          "P2f"
+        ],
+        "detail": "early_success=false",
+        "id": "c5ba7ce51fae52d92203",
         "identity": "Err(EngineError::Unavailable)",
-        "line": 1710,
+        "line": 1727,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-sqlite/src/async_projection.rs",
         "status": "debt"
@@ -82759,7 +82801,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "7172a04e7de391cda5d2b84afd81e078389111b947a0c9a01be55098f050c204",
+  "source_inventory_sha256": "83d9fdc396423089128269088adb083d06689d315be7fd693ed189d01c983964",
   "workspaces": [
     {
       "listing_error_sha256": "",
