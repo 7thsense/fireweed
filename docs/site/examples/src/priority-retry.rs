@@ -1,4 +1,4 @@
-// Provenance: crates/fireweed/tests/facade.rs::push_claim_ack_nack_lifecycle_over_memory
+// Provenance: crates/fireweed/tests/whitebox/facade.rs::push_claim_ack_nack_lifecycle_over_memory
 // Do not edit by hand — regenerate with scripts/site/extract_examples.py
 async fn push_claim_ack_nack_lifecycle_over_memory() {
     let backend = Arc::new(composed_memory_backend());

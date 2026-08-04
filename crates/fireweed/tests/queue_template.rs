@@ -1,16 +1,10 @@
+#![allow(dead_code, unused_imports)]
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use fireweed::{
-    CohortOnIncomplete, CohortPolicy, CommitResponseBarrier, ComposedProjectionConfig,
-    ComposedStorageConfig, CreateQueue, EligibilityPolicy, EnsureQueueError, EntitySchemaDocument,
-    Fireweed, GateKeyPolicy, IndexDeclaration, IndexDef, IndexSpec, IndexType, MetadataValue,
-    ObjectLogConfig, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-    PriorityTieBreaker, ProjectionRecoveryPolicy, QueueCreationPolicy, QueueDefinition, QueueId,
-    QueueIndex, QueueKey, QueueTemplate, RecurrenceMode, RecurrencePolicy, RetryPolicy,
-    SegmentSettings, TenantId, UtcTimestamp,
-};
+use fireweed::*;
 use fireweed_memory::ManualClock;
 
 fn key(tenant: &str, queue: &str) -> QueueKey {
@@ -89,6 +83,7 @@ fn template() -> QueueTemplate {
 
 // Intentionally exhaustive and separate from QueueTemplate's CreateQueue destructure: a new durable
 // definition field must be considered by drift coverage independently from template mapping.
+
 fn create_from_definition(definition: QueueDefinition) -> CreateQueue {
     let QueueDefinition {
         tenant_id,
@@ -302,159 +297,4 @@ async fn validation_and_policy_divergence_are_caller_visible() {
             ..
         }) if desired != stored
     ));
-}
-
-async fn assert_ensure(fireweed: &Fireweed, queue: &QueueKey, created: bool) {
-    let outcome = fireweed.ensure_queue(queue, &template()).await.unwrap();
-    assert_eq!(outcome.created, created);
-    assert_eq!(outcome.definition, template().resolve(queue).unwrap());
-}
-
-fn temporary_path(tag: &str) -> PathBuf {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "fireweed-template-{tag}-{}-{nonce}",
-        std::process::id()
-    ))
-}
-
-#[tokio::test]
-#[ignore = "objectlog/composed reopen reports created=true (create_or_read / recover_definitions gap on LogEngine catalog); sqlite legs may pass in isolation"]
-async fn durable_public_constructors_reopen_idempotently() {
-    let queue = key("tenant", "durable");
-
-    let sqlite = temporary_path("sqlite");
-    let handle =
-        fireweed::open_sqlite(sqlite.to_str().unwrap(), Arc::new(ManualClock::at(10))).unwrap();
-    assert_ensure(&handle, &queue, true).await;
-    drop(handle);
-    let handle =
-        fireweed::open_sqlite(sqlite.to_str().unwrap(), Arc::new(ManualClock::at(20))).unwrap();
-    assert_ensure(&handle, &queue, false).await;
-    drop(handle);
-
-    let relational = temporary_path("relational");
-    let handle = fireweed::open_sqlite_relational(
-        relational.to_str().unwrap(),
-        Arc::new(ManualClock::at(10)),
-    )
-    .unwrap();
-    assert_ensure(&handle, &queue, true).await;
-    drop(handle);
-    let handle = fireweed::open_sqlite_relational(
-        relational.to_str().unwrap(),
-        Arc::new(ManualClock::at(20)),
-    )
-    .unwrap();
-    assert_ensure(&handle, &queue, false).await;
-    drop(handle);
-
-    let objectlog = temporary_path("objectlog");
-    let handle = fireweed::open_objectlog(&objectlog, Arc::new(ManualClock::at(10))).unwrap();
-    assert_ensure(&handle, &queue, true).await;
-    drop(handle);
-    let handle = fireweed::open_objectlog(&objectlog, Arc::new(ManualClock::at(20))).unwrap();
-    assert_ensure(&handle, &queue, false).await;
-    drop(handle);
-
-    let composed_root = temporary_path("composed-root");
-    let composed_sqlite = temporary_path("composed.sqlite");
-    let composed_config = composed_config(&composed_root, &composed_sqlite);
-    let handle =
-        fireweed::open_composed_sqlite(composed_config.clone(), Arc::new(ManualClock::at(10)))
-            .unwrap();
-    assert_ensure(&handle, &queue, true).await;
-    drop(handle);
-    let handle =
-        fireweed::open_composed_sqlite(composed_config, Arc::new(ManualClock::at(20))).unwrap();
-    assert_ensure(&handle, &queue, false).await;
-    drop(handle);
-
-    std::fs::remove_file(sqlite).unwrap();
-    std::fs::remove_file(relational).unwrap();
-    std::fs::remove_dir_all(objectlog).unwrap();
-    std::fs::remove_dir_all(composed_root).unwrap();
-    std::fs::remove_file(composed_sqlite).unwrap();
-}
-
-fn composed_config(root: &Path, sqlite: &Path) -> ComposedStorageConfig {
-    ComposedStorageConfig {
-        object_log: ObjectLogConfig::Local {
-            root: root.to_path_buf(),
-        },
-        object_log_authority: fireweed::ObjectLogAuthorityConfig::NativeConditionalWrite,
-        projection: ComposedProjectionConfig::Sqlite {
-            path: sqlite.to_path_buf(),
-        },
-        response_barrier: CommitResponseBarrier::Strict,
-        segments: SegmentSettings::new(64 * 1024, 5).unwrap(),
-        namespace: "queue-template-reopen".to_string(),
-        recovery: ProjectionRecoveryPolicy::default(),
-    }
-}
-
-#[cfg(feature = "postgres")]
-#[test]
-fn postgres_public_constructors_and_composed_reopen_idempotently() {
-    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-        eprintln!("queue template PostgreSQL checks skipped: FIREWEED_PG_TEST_URL is unset");
-        return;
-    };
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-
-    let sole_queue = key("template-live", &format!("sole-{nonce}"));
-    let handle = fireweed::open_postgres(&url, Arc::new(ManualClock::at(10))).unwrap();
-    futures::executor::block_on(assert_ensure(&handle, &sole_queue, true));
-    drop(handle);
-    let handle = fireweed::open_postgres(&url, Arc::new(ManualClock::at(20))).unwrap();
-    futures::executor::block_on(assert_ensure(&handle, &sole_queue, false));
-    drop(handle);
-
-    let coordinated_queue = key("template-live", &format!("coordinated-{nonce}"));
-    let handle = fireweed::open_postgres_coordinated(
-        &url,
-        Arc::new(ManualClock::at(10)),
-        fireweed::OwnerId::new(format!("template-owner-{nonce}")).unwrap(),
-        fireweed::ControlPlaneConfig::default(),
-    )
-    .unwrap();
-    futures::executor::block_on(assert_ensure(&handle, &coordinated_queue, true));
-    futures::executor::block_on(assert_ensure(&handle, &coordinated_queue, false));
-    drop(handle);
-
-    let composed_root = temporary_path("composed-postgres-root");
-    let composed_config = ComposedStorageConfig {
-        object_log: ObjectLogConfig::Local {
-            root: composed_root.clone(),
-        },
-        object_log_authority: fireweed::ObjectLogAuthorityConfig::NativeConditionalWrite,
-        projection: ComposedProjectionConfig::Postgres {
-            url: fireweed::SecretValue::new(url),
-        },
-        response_barrier: CommitResponseBarrier::Strict,
-        segments: SegmentSettings::new(64 * 1024, 5).unwrap(),
-        namespace: format!("queue-template-{nonce}"),
-        recovery: ProjectionRecoveryPolicy::default(),
-    };
-    let composed_queue = key("template-live", &format!("composed-{nonce}"));
-    let composed_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("build object-log PostgreSQL operation runtime");
-    let handle =
-        fireweed::open_composed_postgres(composed_config.clone(), Arc::new(ManualClock::at(10)))
-            .unwrap();
-    composed_runtime.block_on(assert_ensure(&handle, &composed_queue, true));
-    drop(handle);
-    let handle =
-        fireweed::open_composed_postgres(composed_config, Arc::new(ManualClock::at(20))).unwrap();
-    composed_runtime.block_on(assert_ensure(&handle, &composed_queue, false));
-    drop(handle);
-    std::fs::remove_dir_all(composed_root).unwrap();
 }

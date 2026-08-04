@@ -684,7 +684,7 @@ async fn draining_owner_refuses_new_claim_but_serves_inflight_epoch() {
     assert_eq!(in_flight, Some(1));
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn background_reclaim_recovers_orphaned_lease_without_client_traffic() {
     let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(1_000)); // t = 1000s
@@ -733,32 +733,29 @@ async fn background_reclaim_recovers_orphaned_lease_without_client_traffic() {
 
     // The worker "crashes": no renew, no ack. Advance the clock past the lease — and DO NOTHING ELSE.
     clock.set(1_061); // 1s past expiry
-    // Advance Tokio's virtual clock instead of waiting for host scheduling. Observe the complete outcome:
-    // the backend mutation and the counter publication are consecutive operations, not one atomic snapshot.
+    // Observe the complete outcome: the backend mutation and the counter publication are consecutive
+    // operations, not one atomic snapshot. This test deliberately uses a multi-thread runtime and a
+    // bounded wall-clock timeout: paused-time auto-advance can outrun backend work under a loaded
+    // workspace run, making the observer consume many virtual ticker intervals before that work is
+    // scheduled even though the same test passes in isolation.
     let ticks_before = server.reclaim_stats().ticks;
-    let mut observed = None;
-    for _ in 0..100 {
-        // A paused-time sleep makes this observer genuinely pending. `yield_now()` alone may repoll
-        // the same task without scheduling the reclaim loop, which made the assertion flaky under
-        // load even when repeated virtual-time advances had made every ticker deadline ready.
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        let stats = server.reclaim_stats();
-        // The counter is published only after the backend tick completes. Poll it before metrics so
-        // the observer cannot repeatedly acquire the queue operation path ahead of the reclaim task
-        // it is trying to observe under a loaded single-threaded test run.
-        if stats.leases_reclaimed >= 1 {
-            let metrics = backend.metrics(&qkey()).await.unwrap();
-            if metrics.leased == 0 {
-                observed = Some((metrics, stats));
-                break;
+    let observed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let stats = server.reclaim_stats();
+            // The counter is published only after the backend tick completes. Poll it before metrics
+            // so the observer does not contend with an in-progress reclaim for the queue operation path.
+            if stats.leases_reclaimed >= 1 {
+                let metrics = backend.metrics(&qkey()).await.unwrap();
+                if metrics.leased == 0 {
+                    break (metrics, stats);
+                }
             }
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
-    }
-    assert!(
-        observed.is_some(),
-        "the background task must publish both the reclaim and its observability counter"
-    );
-    let (m, stats) = observed.unwrap();
+    })
+    .await
+    .expect("the background task must publish both the reclaim and its observability counter");
+    let (m, stats) = observed;
     assert_eq!((m.pending, m.leased), (1, 0));
     assert!(stats.ticks > ticks_before);
     assert_eq!(stats.errors, 0);

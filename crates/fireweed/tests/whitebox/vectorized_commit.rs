@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports)]
+
 //! Contract test for the authoritative vectorized claimed-work commit (Snorri StateStore boundary, epic
 //! pqueue-2201fd37), exercised over the MemoryBackend through the internal runtime core.
 //!

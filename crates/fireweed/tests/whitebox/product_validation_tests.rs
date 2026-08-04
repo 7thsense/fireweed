@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports)]
+
 //! TP-003 **product validation** (AC-E2E-*) — the P0/core product workflows driven through the current
 //! library facade ([`fireweed::RuntimeCore`]) over the in-memory backend, at SMOKE scale. This rebuilds the
 //! `product_validation_tests` suite that lived in the removed `fireweed-service` crate.

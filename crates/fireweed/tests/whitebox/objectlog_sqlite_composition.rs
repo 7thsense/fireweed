@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 #![cfg(all(feature = "objectlog", feature = "sqlite"))]
 
 use std::collections::BTreeMap;

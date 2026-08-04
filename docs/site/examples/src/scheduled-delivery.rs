@@ -1,4 +1,4 @@
-// Provenance: crates/fireweed/tests/product_validation_tests.rs::scheduled_batch_delivery_profile
+// Provenance: crates/fireweed/tests/whitebox/product_validation_tests.rs::scheduled_batch_delivery_profile
 // Do not edit by hand — regenerate with scripts/site/extract_examples.py
 async fn scheduled_batch_delivery_profile<B: LibBackend>(
     fireweed: &RuntimeCore<B>,

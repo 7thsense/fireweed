@@ -72,8 +72,29 @@ name = "concrete_fireweed"
 path = "tests/concrete_fireweed.rs"
 
 [[test]]
+name = "active_scope_routing"
+path = "tests/active_scope_routing.rs"
+
+[[test]]
+name = "encapsulation"
+path = "tests/encapsulation.rs"
+
+[[test]]
+name = "facade"
+path = "tests/facade.rs"
+
+[[test]]
 name = "item_mutation"
 path = "tests/item_mutation.rs"
+
+[[test]]
+name = "multi_queue_claim"
+path = "tests/multi_queue_claim.rs"
+
+[[test]]
+name = "objectlog_postgres_composition"
+path = "tests/objectlog_postgres_composition.rs"
+required-features = ["objectlog", "postgres"]
 
 [[test]]
 name = "sqlite_create_or_read"
@@ -91,6 +112,19 @@ required-features = ["postgres", "objectlog", "sqlite"]
 [[test]]
 name = "public_durability_matrix"
 path = "tests/public_durability_matrix.rs"
+
+[[test]]
+name = "postgres_constructors"
+path = "tests/postgres_constructors.rs"
+required-features = ["postgres"]
+
+[[test]]
+name = "queue_template"
+path = "tests/queue_template.rs"
+
+[[test]]
+name = "request_id_idempotency"
+path = "tests/request_id_idempotency.rs"
 
 [[test]]
 name = "storage_matrix_t0_t2"

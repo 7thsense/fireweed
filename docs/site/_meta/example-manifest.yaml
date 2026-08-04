@@ -24,7 +24,7 @@ examples:
     tags: [embed, priority, retry]
     category: lifecycle
     sources:
-      - path: crates/fireweed/tests/facade.rs
+      - path: crates/fireweed/tests/whitebox/facade.rs
         symbol: push_claim_ack_nack_lifecycle_over_memory
 
   - slug: scheduled-delivery
@@ -35,7 +35,7 @@ examples:
     tags: [eligibility, scheduling, product-ac]
     category: eligibility
     sources:
-      - path: crates/fireweed/tests/product_validation_tests.rs
+      - path: crates/fireweed/tests/whitebox/product_validation_tests.rs
         symbol: scheduled_batch_delivery_profile
 
   - slug: retry-delays
@@ -46,7 +46,7 @@ examples:
     tags: [retry, leases]
     category: lifecycle
     sources:
-      - path: crates/fireweed/tests/facade.rs
+      - path: crates/fireweed/tests/whitebox/facade.rs
         symbol: retry_aliases_match_absolute_relative_and_exhaustion_behavior
 
   - slug: lease-ops
@@ -57,11 +57,11 @@ examples:
     tags: [leases, finalize]
     category: lifecycle
     sources:
-      - path: crates/fireweed/tests/facade.rs
+      - path: crates/fireweed/tests/whitebox/facade.rs
         symbol: renew_extends_lease_without_charging_a_delivery
-      - path: crates/fireweed/tests/facade.rs
+      - path: crates/fireweed/tests/whitebox/facade.rs
         symbol: fail_dead_letters_a_claimed_item
-      - path: crates/fireweed/tests/facade.rs
+      - path: crates/fireweed/tests/whitebox/facade.rs
         symbol: reclaim_expired_convenience_uses_handle_clock
 
   - slug: scheduler-boundary

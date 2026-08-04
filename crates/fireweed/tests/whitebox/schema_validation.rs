@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports)]
+
 //! ADR-011 schema validation integration tests over the composed memory backend.
 //!
 //! Proves that entity schema violations are rejected BEFORE log append, idempotency recording,

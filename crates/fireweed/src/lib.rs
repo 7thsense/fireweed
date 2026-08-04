@@ -111,49 +111,46 @@ pub struct ActiveScopeDiscovery {
 extern crate self as fireweed;
 
 #[cfg(test)]
-#[path = "../tests/active_scope_routing.rs"]
+#[path = "../tests/whitebox/active_scope_routing.rs"]
 mod test_active_scope_routing;
 #[cfg(test)]
-#[path = "../tests/coordination.rs"]
+#[path = "../tests/whitebox/coordination.rs"]
 mod test_coordination;
 #[cfg(test)]
-#[path = "../tests/encapsulation.rs"]
+#[path = "../tests/whitebox/encapsulation.rs"]
 mod test_encapsulation;
 #[cfg(test)]
-#[path = "../tests/facade.rs"]
+#[path = "../tests/whitebox/facade.rs"]
 mod test_facade;
 #[cfg(test)]
-#[path = "../tests/hot_projection_queries.rs"]
+#[path = "../tests/whitebox/hot_projection_queries.rs"]
 mod test_hot_projection_queries;
 #[cfg(test)]
-#[path = "../tests/multi_queue_claim.rs"]
+#[path = "../tests/whitebox/multi_queue_claim.rs"]
 mod test_multi_queue_claim;
 #[cfg(test)]
-#[path = "../tests/objectlog_postgres_composition.rs"]
+#[path = "../tests/whitebox/objectlog_postgres_composition.rs"]
 mod test_objectlog_postgres_composition;
 #[cfg(test)]
-#[path = "../tests/objectlog_sqlite_composition.rs"]
+#[path = "../tests/whitebox/objectlog_sqlite_composition.rs"]
 mod test_objectlog_sqlite_composition;
 #[cfg(test)]
-#[path = "../tests/postgres_constructors.rs"]
-mod test_postgres_constructors;
-#[cfg(test)]
-#[path = "../tests/product_validation_tests.rs"]
+#[path = "../tests/whitebox/product_validation_tests.rs"]
 mod test_product_validation;
 #[cfg(test)]
-#[path = "../tests/queue_template.rs"]
+#[path = "../tests/whitebox/queue_template.rs"]
 mod test_queue_template;
 #[cfg(test)]
-#[path = "../tests/request_id_idempotency.rs"]
+#[path = "../tests/whitebox/request_id_idempotency.rs"]
 mod test_request_id_idempotency;
 #[cfg(test)]
-#[path = "../tests/schema_validation.rs"]
+#[path = "../tests/whitebox/schema_validation.rs"]
 mod test_schema_validation;
 #[cfg(test)]
-#[path = "../tests/secondary_indexes.rs"]
+#[path = "../tests/whitebox/secondary_indexes.rs"]
 mod test_secondary_indexes;
 #[cfg(test)]
-#[path = "../tests/vectorized_commit.rs"]
+#[path = "../tests/whitebox/vectorized_commit.rs"]
 mod test_vectorized_commit;
 
 /// A caller-attested, unfiltered leading prefix of one queue's group-granularity active-scope

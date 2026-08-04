@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports)]
+
 //! API-004 hot projection query surface: typed range/group/bucket queries are exercised over the
 //! scheduled-action fixture, and bounded mutation is verified against the same typed index surface.
 

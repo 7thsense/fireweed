@@ -8,7 +8,10 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import tomllib
+
+from fireweed_test_placement import generate as generate_fireweed_test_placement
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -19,11 +22,12 @@ WORKSPACES = [
     "crates/fireweed-bench/Cargo.toml",
     "tools/fireweed-turso-compat-probe/Cargo.toml",
 ]
-SOURCE_SUFFIXES = {".rs", ".sh", ".py", ".toml", ".yml", ".yaml", ".lock"}
+SOURCE_SUFFIXES = {".rs", ".sh", ".py", ".toml", ".tsv", ".yml", ".yaml", ".lock"}
 EXCLUDED_DIGEST_PATHS = {
     "scripts/ci/storage-remediation-inventory.json",
 }
 META_POLICY_SOURCES = {
+    "scripts/ci/fireweed_test_placement.py",
     "scripts/ci/inventory-storage-remediation.py",
     "scripts/ci/storage-remediation-policy.py",
 }
@@ -361,24 +365,55 @@ def cargo_routes(
     return routes, doc_routes, None
 
 
-def fireweed_registration_debt() -> list[dict[str, object]]:
-    manifest_path = ROOT / "crates/fireweed/Cargo.toml"
-    manifest = tomllib.loads(manifest_path.read_text())
-    registered = {entry["path"] for entry in manifest.get("test", [])}
-    rows = []
-    for source in sorted((ROOT / "crates/fireweed/tests").glob("*.rs")):
-        relative = source.relative_to(ROOT / "crates/fireweed").as_posix()
-        if relative not in registered:
-            rows.append(
-                debt_row(
-                    "source_registration",
-                    source.relative_to(ROOT).as_posix(),
-                    1,
-                    relative,
-                    detail="top-level source lacks adjacent [[test]] registration while autotests=false",
-                )
+def fireweed_placement_debt(
+    placement: dict[str, object],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    registration_rows = []
+    boundary_rows = []
+    bindings_by_source: dict[str, list[dict[str, object]]] = {}
+    for binding in placement["assertion_bindings"]:
+        bindings_by_source.setdefault(str(binding["source"]), []).append(binding)
+    for source in placement["sources"]:
+        path = str(source["source"])
+        if source["placement_count"] != 1 or not source["exists"]:
+            row = debt_row(
+                "source_registration",
+                path,
+                1,
+                path.removeprefix("crates/fireweed/"),
+                detail="test source must exist and have exactly one Cargo [[test]] or internal #[path] placement",
             )
-    return rows
+            row["owner"] = "P2a"
+            row["dependency_chain"] = ["P2a", "P2r", "P2f"]
+            registration_rows.append(row)
+            continue
+        if source["placement"] != "internal":
+            continue
+        logical_source = str(source["logical_source"])
+        owners = sorted(
+            {
+                owner
+                for binding in bindings_by_source.get(logical_source, [])
+                if binding["boundary_kind"] != "public_external"
+                for owner in binding["boundary_owners"]
+            }
+        )
+        row = debt_row(
+            "test_boundary_debt",
+            path,
+            1,
+            logical_source,
+            detail=(
+                "temporary crate-internal white-box placement; final public re-expression owners="
+                + ",".join(owners)
+            ),
+        )
+        row["owner"] = "/".join(owners)
+        row["dependency_chain"] = ["P2a", *owners, "P2r", "P2f"]
+        row["boundary_owners"] = owners
+        row["private_refs"] = source["private_refs"]
+        boundary_rows.append(row)
+    return registration_rows, boundary_rows
 
 
 def cargo_machete_exception_debt(paths: list[str]) -> list[dict[str, object]]:
@@ -423,9 +458,13 @@ def cargo_machete_exception_debt(paths: list[str]) -> list[dict[str, object]]:
     return rows
 
 
-def scan_source_debt(paths: list[str]) -> dict[str, list[dict[str, object]]]:
+def scan_source_debt(
+    paths: list[str], placement: dict[str, object]
+) -> dict[str, list[dict[str, object]]]:
+    registration_debt, boundary_debt = fireweed_placement_debt(placement)
     debt: dict[str, list[dict[str, object]]] = {
-        "source_registration": fireweed_registration_debt(),
+        "source_registration": registration_debt,
+        "test_boundary_debt": boundary_debt,
         "cargo_machete_exceptions": cargo_machete_exception_debt(paths),
         "ignored_tests": [],
         "harness_skips": [],
@@ -552,14 +591,34 @@ def scan_source_debt(paths: list[str]) -> dict[str, list[dict[str, object]]]:
 
 
 def public_release_gate_failures() -> list[dict[str, object]]:
-    completed = subprocess.run(
-        ["bash", "scripts/verify-public-identity.sh"],
-        cwd=ROOT,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        check=False,
-    )
+    # The generated inventory contains diagnostics verbatim. Scanning it as a
+    # fresh public-identity source recursively manufactures and duplicates its
+    # own prior failures on every regeneration.
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as files_from:
+        files_from.write(
+            "\n".join(
+                path
+                for path in tracked_files()
+                if path != OUTPUT.relative_to(ROOT).as_posix()
+                and not path.startswith(".ddx/")
+                and (ROOT / path).exists()
+            )
+            + "\n"
+        )
+        files_from.flush()
+        completed = subprocess.run(
+            [
+                "bash",
+                "scripts/verify-public-identity.sh",
+                "--files-from",
+                files_from.name,
+            ],
+            cwd=ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
     if completed.returncode == 0:
         return []
     rows = []
@@ -646,6 +705,12 @@ def add_release_repeat_debt(debt: dict[str, list[dict[str, object]]]) -> dict[st
 
 def inventory(with_cargo: bool) -> dict[str, object]:
     paths = source_files()
+    prior = json.loads(OUTPUT.read_text()) if OUTPUT.is_file() else {}
+    fireweed_test_placement = generate_fireweed_test_placement(
+        ROOT,
+        with_cargo=with_cargo,
+        prior=prior.get("fireweed_test_placement"),
+    )
     harness_routes: list[dict[str, object]] = []
     rustdoc_routes: list[dict[str, object]] = []
     workspace_rows = []
@@ -671,7 +736,7 @@ def inventory(with_cargo: bool) -> dict[str, object]:
                 workspace_row["listing_status"] = "compile_failure_debt"
                 workspace_row["listing_error_sha256"] = failure["stderr_sha256"]
                 workspace_failures.append(failure)
-    debt = scan_source_debt(paths)
+    debt = scan_source_debt(paths, fireweed_test_placement)
     if with_cargo:
         debt["public_release_gate_failures"] = public_release_gate_failures()
     for route in rustdoc_routes:
@@ -700,7 +765,6 @@ def inventory(with_cargo: bool) -> dict[str, object]:
         )
     repeat_contract = add_release_repeat_debt(debt)
     if not with_cargo and OUTPUT.is_file():
-        prior = json.loads(OUTPUT.read_text())
         harness_routes = prior.get("harness_routes", [])
         rustdoc_routes = prior.get("rustdoc_routes", [])
         prior_workspaces = {
@@ -731,6 +795,7 @@ def inventory(with_cargo: bool) -> dict[str, object]:
         "workspaces": workspace_rows,
         "harness_routes": sorted(harness_routes, key=lambda row: row["id"]),
         "rustdoc_routes": sorted(rustdoc_routes, key=lambda row: row["id"]),
+        "fireweed_test_placement": fireweed_test_placement,
         "debt_registries": debt,
         "release_repeat_quarantine": repeat_contract,
         "discovery_negatives": [

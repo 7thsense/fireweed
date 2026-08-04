@@ -1,4 +1,4 @@
-// Provenance: crates/fireweed/tests/facade.rs::retry_aliases_match_absolute_relative_and_exhaustion_behavior
+// Provenance: crates/fireweed/tests/whitebox/facade.rs::retry_aliases_match_absolute_relative_and_exhaustion_behavior
 // Do not edit by hand — regenerate with scripts/site/extract_examples.py
 async fn retry_aliases_match_absolute_relative_and_exhaustion_behavior() {
     let clock = Arc::new(ManualClock::at(100));

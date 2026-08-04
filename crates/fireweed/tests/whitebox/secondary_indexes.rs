@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports)]
+
 //! Typed secondary-index behavior exercised through the public `fireweed` facade:
 //! numeric ordering, boolean and datetime encoding, compound keys, sparse omission,
 //! unique-conflict atomicity, key moves on update/replace, and purge removal.

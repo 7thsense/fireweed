@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports)]
+
 //! B2a (ADR-009 / TD-003 In-Process Library Owner-Runtime): the library as a **coordinated owner**.
 //!
 //! A `RuntimeCore::with_control_plane` handle acquires-and-fences before each queue-addressed op and stamps its

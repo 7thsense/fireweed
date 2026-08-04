@@ -1,4 +1,4 @@
-// Provenance: crates/fireweed/tests/facade.rs::renew_extends_lease_without_charging_a_delivery
+// Provenance: crates/fireweed/tests/whitebox/facade.rs::renew_extends_lease_without_charging_a_delivery
 // Do not edit by hand — regenerate with scripts/site/extract_examples.py
 async fn renew_extends_lease_without_charging_a_delivery() {
     let backend = Arc::new(composed_memory_backend());
@@ -26,7 +26,7 @@ async fn renew_extends_lease_without_charging_a_delivery() {
     );
 }
 
-// Provenance: crates/fireweed/tests/facade.rs::fail_dead_letters_a_claimed_item
+// Provenance: crates/fireweed/tests/whitebox/facade.rs::fail_dead_letters_a_claimed_item
 // Do not edit by hand — regenerate with scripts/site/extract_examples.py
 async fn fail_dead_letters_a_claimed_item() {
     let backend = Arc::new(composed_memory_backend());
@@ -47,7 +47,7 @@ async fn fail_dead_letters_a_claimed_item() {
     );
 }
 
-// Provenance: crates/fireweed/tests/facade.rs::reclaim_expired_convenience_uses_handle_clock
+// Provenance: crates/fireweed/tests/whitebox/facade.rs::reclaim_expired_convenience_uses_handle_clock
 // Do not edit by hand — regenerate with scripts/site/extract_examples.py
 async fn reclaim_expired_convenience_uses_handle_clock() {
     let clock = Arc::new(ManualClock::at(0));

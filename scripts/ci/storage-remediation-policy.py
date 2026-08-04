@@ -9,6 +9,10 @@ import re
 import subprocess
 import sys
 
+from fireweed_test_placement import PlacementError
+from fireweed_test_placement import self_test as fireweed_placement_self_test
+from fireweed_test_placement import validate as validate_fireweed_test_placement
+
 
 ROOT = Path(__file__).resolve().parents[2]
 INVENTORY = ROOT / "scripts/ci/storage-remediation-inventory.json"
@@ -66,6 +70,7 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool)
         "workspaces",
         "harness_routes",
         "rustdoc_routes",
+        "fireweed_test_placement",
         "debt_registries",
         "release_repeat_quarantine",
         "discovery_negatives",
@@ -91,6 +96,7 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool)
         all(row["routing"] == "independent" for row in document["workspaces"][1:]),
         "independent workspace classification",
     )
+    validate_fireweed_test_placement(document["fireweed_test_placement"])
     for workspace in document["workspaces"]:
         require(
             workspace["listing_status"] in {"listed", "compile_failure_debt"},
@@ -116,6 +122,10 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool)
             document["release_repeat_quarantine"] == refreshed["release_repeat_quarantine"],
             "release-repeat quarantine changed; regenerate remediation inventory",
         )
+        require(
+            document["fireweed_test_placement"] == refreshed["fireweed_test_placement"],
+            "Fireweed test placement changed; regenerate remediation inventory with --with-cargo",
+        )
 
     route_ids = [route["id"] for route in document["harness_routes"]]
     require(len(route_ids) == len(set(route_ids)), "duplicate harness route")
@@ -137,6 +147,7 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool)
     registries = document["debt_registries"]
     required_registries = {
         "source_registration",
+        "test_boundary_debt",
         "cargo_machete_exceptions",
         "ignored_tests",
         "harness_skips",
@@ -227,6 +238,7 @@ def validate_shape() -> None:
 
 def self_test(document: dict[str, object]) -> None:
     validate_shape()
+    fireweed_placement_self_test(document["fireweed_test_placement"])
     try:
         validate_cargo_scope(
             "# No crate is excluded, so cargo test covers everything\n[workspace]\nmembers=[]\n"
@@ -280,7 +292,7 @@ def main() -> int:
         else:
             print("storage remediation policy: zero debt; closure enabled")
         return 0
-    except (PolicyError, json.JSONDecodeError, KeyError, TypeError) as error:
+    except (PolicyError, PlacementError, json.JSONDecodeError, KeyError, TypeError) as error:
         print(f"storage remediation policy failed: {error}", file=sys.stderr)
         return 1
 
