@@ -11,6 +11,7 @@
 mod async_product;
 mod async_product_hybrid;
 mod async_product_sqlite;
+mod async_projection_apply;
 pub mod commit_surface;
 pub mod compose_log;
 mod log_engine_store;
@@ -26,6 +27,10 @@ pub mod storage_generation;
 pub use async_product::{AsyncObjectLogMemoryBackend, SeqIdGen, composed_objectlog_memory_async};
 pub use async_product_hybrid::{AsyncObjectLogHybridBackend, HybridProductConfig};
 pub use async_product_sqlite::AsyncObjectLogSqliteBackend;
+#[doc(hidden)]
+pub use async_projection_apply::{
+    AsyncProjectionApplyCoordinator, AsyncProjectionApplyReservation, AsyncProjectionApplySnapshot,
+};
 pub use commit_surface::{
     CommitIdempotency, PreparedCommitTransition, durability_for_strict,
     eventual_commit_capabilities, explain_commit_if_authoritative,

@@ -32,7 +32,7 @@ pub type ComposedObjectLogBackend = AsyncObjectLogMemoryBackend;
 /// ops failed closed (`Unavailable`). One long-lived multi-thread runtime hosts open + all
 /// later `block_on` traffic (including the library BlockingLibBackend workers) and the
 /// [`ObjectLogTaskDispatcher`] that owns typed queue operations.
-fn objectlog_shared_runtime() -> &'static tokio::runtime::Runtime {
+pub(crate) fn objectlog_shared_runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
     RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
