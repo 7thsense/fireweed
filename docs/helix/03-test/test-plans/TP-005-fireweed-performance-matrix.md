@@ -10,6 +10,17 @@ ddx:
     - td-storage-architecture-backend-contracts
     - tp-scale-substantiation
   status: accepted
+  review:
+    self_hash: af91841838128efbd8aec308c20b127aef0fbc4f50e328b6a210674b9ba73080
+    deps:
+      adr-cqrs-log-projection-storage-model: 63ed2521bc7d0e785529aafbd179b3ef22d51cbf3897d51c511540be52ee9ba3
+      adr-orthogonal-log-projection-composition: 5e35283d3ad0cc38c61d57aac7a63ce7c5fc8028bc8ff5f51a2bb4c28a1f13e6
+      api-fireweed-rust-facade: 26104ab47a5ecfa0f2fea739303d599d3a414461770f73e48a87a14dd48cba37
+      prd: cd3004bd0dc9ac531d1cd2596e875e51c2de4601e330007fee60da1ea7b3d5ce
+      td-storage-architecture-backend-contracts: 2d88d342aac82f23616fdff6d94f4ac88701ab6e70c80a0315003c5e66432c74
+      tp-fireweed-facade-and-snorri-acceptance: b0646721bd9f5ec8bdcdf1698ff07fa03fe167f0bcd8991d57c35fcbb79493cc
+      tp-scale-substantiation: 23f20e8dab88330e4ddd165a0d2230151b7ef0f99ca16c016671558ed5719686
+    reviewed_at: "2026-08-04T04:50:53Z"
 ---
 
 # TP-005: Fireweed performance matrix
@@ -59,7 +70,7 @@ recovery, or exact-tag release requirements.
 | `recovery` | Close, reopen, rebuild, and verify durable state | Only among cells with the same recovery contract | Host-bound recovery record |
 | `maintenance` | Verify, delete, and rebuild disposable projections | Only among cells exposing `projection_control()` | Host-bound maintenance record |
 | `smoke` | Fast runner and schema validation | No | None |
-| `million-cycle-v1` | Insert 1M, modify 500K, read and verify 1M through all 15 cells | No; each cell is reported independently | P0 fixed-work functionality plus host-bound timing observations |
+| `million-cycle-v1` | Insert 1M, modify 500K, read and verify 1M through all 20 cells | No; each cell is reported independently | P0 fixed-work functionality plus host-bound timing observations |
 
 ### Targeted million-item lifecycle gate
 
@@ -95,22 +106,23 @@ release performance threshold for its declared, attested topology.
 ### Matrix
 
 Each cell identifier is the canonical `log--projection` pair. A full run has
-exactly 15 required rows; a missing service is a qualification failure, not a
+exactly 20 required rows; a missing service is a qualification failure, not a
 conditional pass or silent skip.
 
-| Log \ Projection | `memory` | `sqlite` | `postgres` |
-| --- | --- | --- | --- |
-| `memory` | `memory--memory` | `memory--sqlite` | `memory--postgres` |
-| `sqlite` | `sqlite--memory` | `sqlite--sqlite` | `sqlite--postgres` |
-| `postgres` | `postgres--memory` | `postgres--sqlite` | `postgres--postgres` |
-| `filesystem` | `filesystem--memory` | `filesystem--sqlite` | `filesystem--postgres` |
-| `s3` | `s3--memory` | `s3--sqlite` | `s3--postgres` |
+| Log \ Projection | `memory` | `sqlite` | `turso` (default) | `postgres` |
+| --- | --- | --- | --- | --- |
+| `memory` | `memory--memory` | `memory--sqlite` | `memory--turso` | `memory--postgres` |
+| `sqlite` | `sqlite--memory` | `sqlite--sqlite` | `sqlite--turso` | `sqlite--postgres` |
+| `postgres` | `postgres--memory` | `postgres--sqlite` | `postgres--turso` | `postgres--postgres` |
+| `filesystem` | `filesystem--memory` | `filesystem--sqlite` | `filesystem--turso` | `filesystem--postgres` |
+| `s3` | `s3--memory` | `s3--sqlite` | `s3--turso` | `s3--postgres` |
 
 Every row constructs through `open(StorageConfig)` or `open_async(StorageConfig)`
 and performs identical fixed work. Convenience constructors may be measured as
 additional aliases only after configuration equivalence is proved; they do not
-add cells or replace a canonical row. Retired profile names and Turso/Hybrid
-selectors are absent from the result count.
+add cells or replace a canonical row. Retired profile names and Hybrid selectors
+are absent from the result count. Omitted/default projection construction must
+be proved equivalent to the canonical `turso` row for each log.
 
 ### Response-barrier classes
 
@@ -119,7 +131,7 @@ classes together but computes comparative verdicts only inside a class.
 
 | Class | Rows | Success boundary |
 | --- | --- | --- |
-| `Strict` | All 15 cells | The selected projection has applied the accepted effect before success. |
+| `Strict` | All 20 cells | The selected projection has applied the accepted effect before success. |
 | `AsyncProjection` | Every cell whose explicit TP-003 AC-TXN-5A disposition is valid | The class authority and replay-resolvable serving state satisfy success while selected-projection lag remains within `AsyncProjectionSpec`; an invalid durability tuple is a pre-I/O configuration result, not a benchmark skip. |
 
 Cross-class ratios are descriptive only and carry `comparison_status =
@@ -161,7 +173,7 @@ before warm-up.
 | Contract | 100% of matrix cell IDs, evidence fields, and failure semantics | P0 |
 | Integration | Every configured cell constructs through API-005 and reconciles exact state | P0 |
 | Performance | Five measured repetitions per common-path workload after warm-up | P0 |
-| Targeted lifecycle | Exact 1M/500K/1M cycle with recorded phase durations on all 15 cells | P0 |
+| Targeted lifecycle | Exact 1M/500K/1M cycle with recorded phase durations on all 20 cells | P0 |
 | Recovery | Every durable configured cell reopens and reconciles exact state | P0 |
 | Maintenance | Every configured disposable-projection cell verifies and rebuilds | P0 |
 | Smoke | One small repetition over local cells for developer feedback | P1 |
@@ -208,7 +220,7 @@ percentiles.
 
 | Metric | Target | Minimum | Enforcement |
 | --- | --- | --- | --- |
-| Full-tier matrix cells completed | Exact canonical 15-cell register | 15/15; zero skips | Runner exits non-zero |
+| Full-tier matrix cells completed | Exact canonical 20-cell register | 20/20; zero skips | Runner exits non-zero |
 | Common operations per cell/shape | append, claim, finalize | 100% | Semantic verifier |
 | Accepted/claimed/finalized reconciliation | exact | exact | Runner and verifier |
 | Measured repetitions | 5 | 5 | Semantic verifier |
@@ -218,7 +230,7 @@ percentiles.
 | Environment provenance | complete required fields | 100% | Semantic verifier |
 | Source provenance | clean pushed commit | exact | Launch wrapper and verifier |
 | Secret leakage | zero credential values | zero | Redaction test and evidence scan |
-| Million-cycle functionality | insert + `batch_update` + `live_items` on all 15 cells | 100%, zero `Unavailable` | Runner exits non-zero |
+| Million-cycle functionality | insert + `batch_update` + `live_items` on all 20 cells | 100%, zero `Unavailable` | Runner exits non-zero |
 | Million-cycle phase observations | insert, modify, and read+verify duration | recorded for all three phases in every cell; no TP-005 ceiling | Semantic verifier |
 | Million-cycle reopen | exact class-appropriate final digest/capability boundary after close/reopen | 100% | Runner and semantic verifier |
 
@@ -333,7 +345,7 @@ remove the row's common or reopen work.
 shape, 512 items, batch 64, one warm-up, and one measured repetition. Its
 verifier expects exactly eight samples per operation and never applies the full
 tier's repetition or sample counts. It is always non-authoritative. `full`
-requires attested live PostgreSQL and S3 services and all 15 matrix cells;
+requires attested live PostgreSQL and S3 services and all 20 matrix cells;
 missing configuration or attestation exits before creating storage. A supplied
 but unreachable service is `failed`, never `not_configured`. A future `local` tier
 may omit external cells but cannot call itself full.
@@ -397,7 +409,7 @@ document contains:
   exact enabled features/rustflags, build profile, and benchmark lockfile hash;
 - workload parameters, seed, cell order per repetition, shape definitions, and
   redacted service topology;
-- all 15 canonical cells plus every response-barrier disposition, with passed
+- all 20 canonical cells plus every response-barrier disposition, with passed
   or failed status and a reason; full-tier `not_configured`, `unsupported`, and
   skipped rows are invalid;
 - raw request durations, per-repetition totals, derived summaries, exact
@@ -454,7 +466,7 @@ output are recorded; raw output is retained separately after value redaction.
 | Requirement source | Primary layer | Blocking evidence |
 | --- | --- | --- |
 | API-005 opaque facade | Contract/integration | All cells are constructed publicly and timed through `Fireweed` |
-| ADR-001 durability classes | Performance matrix | Every canonical composition is classified and all 15 cells execute |
+| ADR-001 durability classes | Performance matrix | Every canonical composition is classified and all 20 cells execute |
 | ADR-012 orthogonal composition | Matrix completeness | Public embedding log, projection, and barrier choices are explicit; control-plane/topology variants remain TP-002 scope |
 | TD-001 shared semantics | Common protocol | Exact accepted/claimed/finalized reconciliation for every row |
 | TP-002 evidence honesty | Evidence verifier | Host-bound claims, exact revision, raw samples, and no silent skips |
@@ -504,7 +516,7 @@ output are recorded; raw output is retained separately after value redaction.
 **Known boundaries**: This baseline is single-caller and does not establish
 saturation capacity, multi-client fairness, multi-node scaling, or certification
 of every S3 provider. Those require distinct workload IDs or remain governed by
-TP-002. Functional support is nevertheless complete: all 15 public cells must
+TP-002. Functional support is nevertheless complete: all 20 public cells must
 run here, while provider certification remains outside scope.
 
 ## Build handoff
@@ -527,7 +539,7 @@ scripts/perf/verify-fireweed-matrix.sh \
 local cells; provisioned PostgreSQL/S3 cells; recovery and maintenance.
 
 **Blocking gate**: The full matrix refuses missing PostgreSQL or S3
-configuration/attestation; all 15 cells execute with zero skips; exact reconciliation, async
+configuration/attestation; all 20 cells execute with zero skips; exact reconciliation, async
 catch-up, recovery, maintenance, and cleanup pass; the verifier independently
 recomputes the artifact and comparison labels; the sidecar matches; and no
 credential value is present.
@@ -535,7 +547,7 @@ credential value is present.
 ## Review checklist
 
 - [ ] Every API-005-supported storage/projection/barrier composition is present.
-- [ ] Full-tier registry is exactly 15/15 with zero skips; missing live services
+- [ ] Full-tier registry is exactly 20/20 with zero skips; missing live services
       fail before timing.
 - [ ] Common-path measurements use identical operations and workload parameters.
 - [ ] Comparisons never cross response-barrier classes.

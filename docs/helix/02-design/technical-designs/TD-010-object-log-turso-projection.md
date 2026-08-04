@@ -19,71 +19,75 @@ ddx:
     - {kind: informed_by, to: td-s3-object-log-sqlite-projection-mode}
     - {kind: informed_by, to: api-native-client-interface}
     - {kind: informed_by, to: concerns}
-  status: superseded
+  status: accepted
   review:
-    self_hash: 1e3623771c800e9d2c6874c19e94103d00c165f1afdd27ece4760fb43f6f7f69
+    self_hash: d05ba185fd6e0be01855a97f39abbce04a486adf4a6f2c69f14e236befecc25f
     deps:
-      adr-async-commit-strategy-and-dispatch: 61bf761b8f8b84581b174eb8f1c64a8893ede0dce9353707fb284f751fb82b5e
-      adr-full-async-storage-boundaries: 26d2c37c96eb0801dbb99e4a02213ecfa747aa533572acde3917801a13cebfcd
-      adr-log-single-source-of-truth: 35052eb1b94371aa8abb8e8b348a21b459522c7d5feaba04b7146745a04bda62
-      adr-turso-derived-projection: 76ec5fe8523c4fe831441229aa5f09f0bf966ac3849174764a7ba2c2d805f22a
-      api-native-client-interface: ae6c682dbf6e269b6792351f1677477f2324fb24cb4cc4f85392f6369fd43b0b
-      concerns: 52b6bbb92cff001a75227115afb20f4d0a73781ec98f49ab446a6866c17284dc
-      td-s3-object-log-sqlite-projection-mode: 56d80c3e6ad5ab54460e300fdf4ddfe535dc75a47b0a2a0e32d0de46c38c7e49
-      td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
-    reviewed_at: "2026-07-20T00:01:28Z"
+      adr-async-commit-strategy-and-dispatch: 6daa55d01fce58248b5b607c3015ed0600d23ff123912e2bc1fd63a484a8ab49
+      adr-full-async-storage-boundaries: 0543121229a415143387307275263908017b43697ddac970d54d6d30a2c7ccaa
+      adr-log-single-source-of-truth: c88063a069f43bd90f31e4875ad8b35fca9876de5b52cb777908d314d46abd1b
+      adr-turso-derived-projection: b93a1a9c4ba242940b86878551dddd35f9aa4e399357417c620e66f5ab2a7b67
+      api-native-client-interface: b99403ef55afffd134ac3ef1a71065c497558c94de379c2b257b119000a0f488
+      concerns: d00e29334f99ed2fe3c9151bacb107255a3d7add89606949e409eb6614382d6c
+      td-s3-object-log-sqlite-projection-mode: 7770bb133f4ace189bfc715e3be6472f894f7c62d52adfc051540fea97c6a4b2
+      td-storage-architecture-backend-contracts: 2d88d342aac82f23616fdff6d94f4ac88701ab6e70c80a0315003c5e66432c74
+    reviewed_at: "2026-08-04T04:50:53Z"
 ---
 
-# Technical Design: TD-010 Internal Object-log + Turso Compatibility Projection
+# Technical Design: TD-010 Default local Turso derived projection
 
-**Contract**: API-001 | **ADR**: ADR-012, ADR-015, ADR-016, ADR-017 | **Scope**: internal native-async compatibility projection
+**Contract**: API-001 | **ADR**: ADR-012, ADR-015, ADR-016, ADR-017 | **Scope**: supported native-async local projection
 
 ## Disposition
 
-This design is superseded as a public server profile. It remains implementation guidance for the
-internal, experimental `fireweed-turso` adapter and its focused compatibility tests only.
+This design governs the public `fireweed-turso` projection adapter. Turso is the
+default projection, while storage remains an orthogonal log × projection
+composition rather than a combined profile.
 
 - Public log selectors are exactly `memory`, `sqlite`, `postgres`, `filesystem`, and `s3`.
-- Public projection selectors are exactly `memory`, `sqlite`, and `postgres`.
-- No `objectlog`, `inmemory`, `turso`, `hybrid`, or combined-profile alias is supported.
-- Public selection of `turso` must return a configuration error in both feature-disabled and
-  feature-enabled builds. Feature enablement exposes internal tests, not a public positive path.
-- The internal adapter consumes the provider-neutral `EngineError` and `CommitRejection` vocabulary; it
+- Public projection selectors are exactly `memory`, `sqlite`, `turso`, and
+  `postgres`; `turso` is the default.
+- No `objectlog`, `inmemory`, `hybrid`, or combined-profile alias is supported.
+- A qualifying distribution enables Turso. A build that omits the feature rejects
+  explicit or default `turso` selection as feature-unavailable before storage I/O;
+  it never silently falls back to another projection.
+- The adapter consumes the provider-neutral `EngineError` and `CommitRejection` vocabulary; it
   defines no Turso-specific public error, capability, or RESP token.
-- While legacy programmatic projection variants remain, enabling change-record delivery on a Turso
-  composition fails startup as retired legacy configuration; it does not create a public Turso history
-  surface or reuse the Class B durability error.
-- Historical `object-log + Turso` and `objectlog/turso` wording below describes design lineage only where
-  it is not explicitly replaced by this disposition.
+- Change-record and history capability is determined by the selected log, never
+  by Turso. A memory-log × Turso cell remains Class B; a durable-log × Turso
+  cell may expose the durable log's qualified history surface.
 
 ## Scope
 
-This design retains Turso Database as a local, rebuildable relational projection used by internal
-compatibility tests with the segmented object log. It defines the experimental adapter, shared
-relational substrate, recovery, failure behavior, and validation gates without adding a public profile.
+This design defines Turso Database as the supported default local, rebuildable
+relational projection across all five logs. It defines the adapter, shared
+relational substrate, recovery, failure behavior, and validation gates without
+adding a combined profile.
 
 In scope:
 
 - async storage-axis migration required to call a native-async projection without blocking;
 - a driver-neutral relational schema/codec/query substrate shared by SQLite and Turso;
 - `fireweed-turso`, pinned to Turso 0.7.0 in ordinary local WAL mode;
-- feature-gated internal object-log/Turso composition;
-- full relational differential, cancellation, replay, and reopen conformance.
+- feature-gated Turso composition with memory, SQLite, Postgres, filesystem, and
+  S3 logs;
+- full relational differential, cancellation, replay, reopen, conformance, and
+  performance qualification.
 
 Out of scope:
 
 - Turso as command-log authority, control plane, remote database, or embedded replica;
-- replacing the standalone SQLite durable profile;
+- removing SQLite as an explicit supported projection and differential reference;
 - experimental Turso MVCC, sync, FTS, or remote/cloud features;
-- Niflheim changes and deployment-capacity benchmarks;
-- a new broad GitHub Actions matrix dimension.
-- any public Turso selector, alias, server profile, or support commitment.
+- Niflheim changes;
+- remote, sync, embedded-replica, or MVCC Turso support.
 
 ## Technical Approach
 
 **Strategy**: complete the async storage boundary from ADR-015, extract driver-neutral relational facts,
-then implement Turso directly against the async projection axis. Compose it only behind the object log,
-whose manifest remains the acknowledged-command authority.
+then implement Turso directly against the async projection axis. Compose it
+with each public log. The selected log remains the command authority; a durable
+object-log manifest remains authoritative when filesystem or S3 is selected.
 
 **Key decisions**:
 
@@ -101,8 +105,10 @@ whose manifest remains the acknowledged-command authority.
   shutdown drains started tasks and replay resolves any process-loss outcome.
 - Every applied batch uses one immediate transaction. Projection rows, indexes, replay outcome, counters,
   and applied cursor commit together; an overlapping prefix is idempotent and a gap is rejected.
-- Public server selection does not exist. The experimental feature gates adapter code and focused tests;
-  public parsing rejects `turso` with the same typed configuration error in all builds.
+- Public server and facade selection use the canonical `turso` projection value.
+  It is the default in typed config, service config, and deployment config. The
+  feature gates adapter availability, not the public name; omitted support
+  fails closed before I/O.
 
 **Trade-offs**: preserving relational SQL minimizes semantic porting risk, but Turso's pre-1.0 API and
 build size require an exact pin and a focused validation lane.
@@ -138,16 +144,17 @@ row APIs remain in their adapter crates.
 timeout `5000`. It does not send the rusqlite PRAGMA batch through `execute_batch`, because the probe proved
 that call can report failure after changing journal mode.
 
-### Internal: segmented object-log compatibility composition
+### Modified: public 5×4 composition
 
-- Exercise the segmented object log over the async derived-projection contract in internal tests without
-  preserving or introducing a combined public alias.
-- Add a feature-gated Turso test composition that awaits create, replay, apply, read, recovery, and
-  shutdown without entering server configuration.
-- Ack only after object-log manifest commit and the internal composition's Turso response barrier. A lost
-  response is resolved from the durable log/request outcome.
-- **Files**: internal composition and focused adapter tests; public server configuration is unchanged
-  except for explicit rejection coverage.
+- Add Turso to the public projection enum and dispatch it through the common
+  facade/server composition with every log; do not introduce a combined alias.
+- Await create, replay, apply, read, recovery, and shutdown through the same
+  public interfaces as the other projections.
+- Under `Strict`, acknowledge only after the selected log's commit barrier and
+  Turso apply. Under object-log `AsyncProjection`, use the provider-neutral
+  ordered apply, poison, debt, and backpressure contract.
+- **Files**: public facade and server configuration, common composition, adapter
+  conformance, and focused Turso tests.
 
 ### Modified: blocking reference adapters
 
@@ -161,13 +168,14 @@ that call can report failure after changing journal mode.
 | Surface | Governing Contract | Story-Level Usage |
 |---------|--------------------|-------------------|
 | Queue operations and transaction outcomes | API-001 | No client-visible semantic change. |
-| Backend profile selection | TD-001 / ADR-012 | No Turso profile; `turso` fails public configuration explicitly in every build. |
+| Projection selection | TD-001 / ADR-012 | `turso` is the canonical default projection; no combined Turso profile or alias exists. |
 | Storage traits | ADR-015 / TD-001 | Runtime-neutral `Send` futures; no Tokio type crosses into domain ports. |
 
-The public server configuration must reject `FIREWEED_PROJECTION_BACKEND=turso`; it must not silently
-map that value to another projection or condition acceptance on a compile feature.
-`FIREWEED_TURSO_PROJECTION_PATH`, if retained at all, is internal test configuration and is not a public
-operator contract.
+The public server configuration accepts
+`FIREWEED_PROJECTION_BACKEND=turso` and selects it when that key is omitted.
+`FIREWEED_TURSO_PROJECTION_PATH` is the public local database-path setting. A
+feature-disabled build returns a typed availability error before I/O and never
+maps Turso to SQLite or memory.
 
 ## Data Model Changes
 
@@ -182,7 +190,7 @@ upgrade refuses a newer/unknown schema until the compatibility probe and migrati
 | `AsyncComposedBackend` / segmented backend | `SeparateReplayCommit` + async storage axes | owned dispatched task | typed commands, positions, expected epoch, replay outcome |
 | `fireweed-turso` | Turso 0.7 local database | async driver | relational schema, transactions, queries |
 | object log | Turso projection | ordered replay/apply | sealed committed batches |
-| internal test config | feature-gated composition | validated construction | adapter path and test fixture |
+| public typed/service config | feature-gated composition | validated construction | adapter path and common storage settings |
 
 ### External Dependencies
 
@@ -204,10 +212,11 @@ upgrade refuses a newer/unknown schema until the compatibility probe and migrati
 - No blocking driver call on a Tokio worker; a single-thread heartbeat must advance throughout DB work.
 - No connection, task, or loop per queue. Connections and background apply are bounded shared resources.
 - Turso must preserve exact operation outcomes, monotonic progress, structural
-  query bounds, and declared resource ceilings under internal validation;
+  query bounds, and declared resource ceilings under public qualification;
   throughput and latency are compared with interleaved same-run SQLite controls
-  and reported as experimental evidence. No production status or public performance claim follows.
-- CI adds one focused/path-filtered Turso job, not a projection-by-kind matrix multiplication.
+  and reported for every log composition with explicit workload and host bounds.
+- CI retains one focused/path-filtered adapter job and includes Turso in the
+  manifest-driven 20-cell matrix.
 
 ## Testing
 
@@ -222,19 +231,31 @@ upgrade refuses a newer/unknown schema until the compatibility probe and migrati
 - [ ] **Dispatch/strategy**: atomic profiles cannot construct with separate append/apply; object-log uses
   `SeparateReplayCommit`; submitted tasks survive caller drop; a stalled queue does not stall another.
 - [ ] **Runtime**: blocking-reference wrappers and Turso both keep a single-thread heartbeat alive.
-- [ ] **Configuration**: feature-disabled and feature-enabled builds both reject the public `turso`
-  selector; internal tests cover create/push/claim/finalize/renew/reassign/read/reopen directly.
+- [ ] **Configuration**: feature-enabled builds select public `turso` explicitly
+  and by default; feature-disabled builds reject it before I/O without fallback.
+  Both paths cover create/push/claim/finalize/renew/reassign/read/reopen through
+  public composition.
 - [ ] **Concurrency**: 16 disjoint writers and deterministic same-active-key conflict.
 - [ ] **Security**: tenant isolation and corrupted-local-projection fail-closed behavior.
 
 ## Migration & Rollback
 
-- **Backward compatibility**: client operations are unchanged; there is no new public profile or alias.
+- **Backward compatibility**: client operations are unchanged; `turso` is a
+  projection-axis value, not a new profile or alias. Omitted projection settings
+  now resolve to Turso.
 - **Data migration**: none from SQLite is required. A Turso projection rebuilds from the object log into a
   fresh file and becomes eligible only after frontier/image verification.
-- **Feature toggle**: compile feature for the internal adapter and validation lane only.
-- **Rollback**: disable the experimental feature or discard its local Turso test state; supported public
-  configurations are unaffected.
+- **Feature toggle**: a compile feature controls adapter availability. Default
+  distributions enable it; minimal custom builds may omit it and fail closed.
+- **Migration to default**: changing an omitted/default selection from another
+  projection to Turso creates or opens the configured Turso file. Class A cells
+  rebuild from the authoritative log before serving. Class B operators who need
+  existing projection state must keep their prior projection explicit or
+  perform an export/import outside this design; Fireweed does not pretend a
+  memory log can rebuild lost history.
+- **Rollback**: set the prior projection explicitly and, for Class A, rebuild it
+  from the authoritative log. Preserve the Turso file until verification passes.
+  Do not disable the feature while any deployment still relies on the default.
 
 ## Implementation Sequence
 
@@ -244,12 +265,14 @@ upgrade refuses a newer/unknown schema until the compatibility probe and migrati
 3. Wrap blocking SQLite/object-log/Postgres transactions and remove composition-root blocking shims.
 4. Extract the driver-neutral relational substrate with SQLite parity.
 5. Implement and differentially test `fireweed-turso`.
-6. Wire feature-gated internal object-log + Turso validation and verify public selector rejection in
-   both feature modes.
-7. Remove the remaining legacy synchronous axes after repository-wide conformance passes.
+6. Wire Turso through all five public log compositions, public configuration,
+   and the default-selection path; verify feature-disabled fail-closed behavior.
+7. Add focused adapter CI plus manifest-driven 20-cell correctness and
+   performance qualification.
+8. Remove the remaining legacy synchronous axes after repository-wide conformance passes.
 
-**Prerequisites**: ADR-015 accepted; ADR-016 retained as superseded experimental evidence; exact Turso
-0.7 probe preserved; ADR-013 response and rebuild rules unchanged.
+**Prerequisites**: ADR-015 and ADR-016 accepted; exact Turso 0.7 probe preserved;
+ADR-013 response and rebuild rules unchanged.
 
 ## Risks
 
@@ -257,6 +280,6 @@ upgrade refuses a newer/unknown schema until the compatibility probe and migrati
 |------|------|--------|------------|
 | Async migration becomes a flag-day rewrite | M | H | Additive traits, explicit wrappers, dependency-ordered beads, removal last. |
 | Relational extraction changes SQLite behavior | M | H | Land extraction with SQLite-only parity before Turso code. |
-| Full command corpus exposes unsupported Turso behavior | M | H | Differential failure blocks the internal validation lane; public profiles are unaffected. |
+| Full command corpus exposes unsupported Turso behavior | M | H | Differential or common-conformance failure blocks default/public qualification and release. |
 | Cancellation leaves waiter or transaction stranded | M | H | Owned commit and lock-wait cancellation tests. |
-| New CI work is over-scaled | M | M | One focused job; no broad matrix expansion. |
+| New CI work is over-scaled | M | M | Cache the focused adapter job and generate the required 20-cell matrix from one manifest. |

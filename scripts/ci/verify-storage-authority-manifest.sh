@@ -257,21 +257,24 @@ def validate_document(document: object, *, check_repository: bool) -> None:
     logs = unique_strings(axes["logs"], "canonical_axes.logs")
     projections = unique_strings(axes["projections"], "canonical_axes.projections")
     require(logs == ["memory", "sqlite", "postgres", "filesystem", "s3"], "log axis drift")
-    require(projections == ["memory", "sqlite", "postgres"], "projection axis drift")
+    require(
+        projections == ["memory", "sqlite", "turso", "postgres"],
+        "projection axis drift",
+    )
     require(
         axes["control_planes"] == ["in_process", "postgres"],
         "control-plane axis drift",
     )
     require(axes["cell_id_separator"] == "--", "cell separator drift")
     cells = {f"{log}--{projection}" for log in logs for projection in projections}
-    require(len(cells) == axes["required_cell_count"] == 15, "matrix must contain 15 cells")
+    require(len(cells) == axes["required_cell_count"] == 20, "matrix must contain 20 cells")
     require(axes["profile_skus_are_public"] is False, "profile SKUs cannot be public")
 
     durability = document["durability"]
     require(durability["class_a_logs"] == logs[1:], "Class A log set drift")
     require(durability["class_b_logs"] == ["memory"], "Class B log set drift")
-    require(durability["class_a_cell_count"] == 12, "Class A cell count drift")
-    require(durability["class_b_cell_count"] == 3, "Class B cell count drift")
+    require(durability["class_a_cell_count"] == 16, "Class A cell count drift")
+    require(durability["class_b_cell_count"] == 4, "Class B cell count drift")
     require(durability["history_requires_class_a"] is True, "history must require Class A")
     require(durability["silent_null_log_forbidden"] is True, "silent null log forbidden")
 
@@ -280,13 +283,13 @@ def validate_document(document: object, *, check_repository: bool) -> None:
     async_projection = barriers["async_projection"]
     deferred = barriers["sqlite_projection_deferred_flush"]
     require(strict["applicable_logs"] == logs, "Strict applicability drift")
-    require(strict["required_cell_count"] == 15, "Strict count drift")
+    require(strict["required_cell_count"] == 20, "Strict count drift")
     require(
         async_projection["applicable_logs"] == ["filesystem", "s3"],
         "AsyncProjection applicability drift",
     )
-    require(async_projection["required_positive_cell_count"] == 6, "async positive count")
-    require(async_projection["required_pre_io_rejection_count"] == 9, "async rejection count")
+    require(async_projection["required_positive_cell_count"] == 8, "async positive count")
+    require(async_projection["required_pre_io_rejection_count"] == 12, "async rejection count")
     require(
         len(unique_strings(async_projection["bounds"], "AsyncProjectionSpec.bounds")) == 5,
         "AsyncProjectionSpec must have five bounds",
@@ -332,6 +335,18 @@ def validate_document(document: object, *, check_repository: bool) -> None:
     )
 
     config = document["configuration_surface"]
+    require(config["default_projection"] == "turso", "default projection drift")
+    turso = config["turso_supported_boundary"]
+    require(turso["version"] == "0.7.0", "Turso version boundary drift")
+    require(
+        turso["mode"] == "embedded_local_ordinary_wal",
+        "Turso supported mode drift",
+    )
+    require(
+        turso["unsupported_modes"] == ["remote", "sync", "embedded_replica", "mvcc"],
+        "Turso unsupported mode drift",
+    )
+    require(turso["sqlite_is_differential_reference"] is True, "SQLite reference drift")
     require(
         len(unique_strings(config["async_projection_environment_keys"], "async env keys")) == 5,
         "five async environment keys required",
@@ -346,7 +361,7 @@ def validate_document(document: object, *, check_repository: bool) -> None:
         require(axis["parser_values"] == expected, f"{axis_name} parser drift")
     rejected = set(bijections["projection"]["rejected_legacy_values"])
     require(
-        rejected == {"inmemory", "hybrid", "hybrid-strict", "hybrid-async", "turso"},
+        rejected == {"inmemory", "hybrid", "hybrid-strict", "hybrid-async"},
         "projection legacy rejection drift",
     )
     require(
@@ -358,11 +373,11 @@ def validate_document(document: object, *, check_repository: bool) -> None:
     require(delivery["modes"] == ["Disabled", "Embedded", "ExternalKafka", "Http"], "delivery modes")
     require(delivery["enabled_modes"] == delivery["modes"][1:], "enabled delivery modes")
     formula = delivery["positive_profile_formula"]
-    require(formula["sqlite_or_postgres_log_strict_enabled"] == 6 * 1 * 3, "relational profile count")
-    require(formula["filesystem_or_s3_log_both_barriers_enabled"] == 6 * 2 * 3, "object profile count")
-    require(formula["total"] == 54, "TD-008 positive profile count")
-    require(delivery["class_b_strict_enabled_durability_negatives"] == 9, "Class B negatives")
-    require(delivery["class_b_strict_disabled_positives"] == 3, "Class B disabled positives")
+    require(formula["sqlite_or_postgres_log_strict_enabled"] == 8 * 1 * 3, "relational profile count")
+    require(formula["filesystem_or_s3_log_both_barriers_enabled"] == 8 * 2 * 3, "object profile count")
+    require(formula["total"] == 72, "TD-008 positive profile count")
+    require(delivery["class_b_strict_enabled_durability_negatives"] == 12, "Class B negatives")
+    require(delivery["class_b_strict_disabled_positives"] == 4, "Class B disabled positives")
 
     errors = document["error_vocabulary"]
     require(errors["new_startup_only_engine_error"] == "ChangeRecordsRequireDurableLog", "new error")
@@ -535,6 +550,22 @@ try:
         expect_rejection(
             lambda: validate_document(retired_current, check_repository=False),
             "retired requirement presented as current",
+        )
+
+        turso_rejected = copy.deepcopy(manifest)
+        turso_rejected["help_parser_bijections"]["projection"][
+            "rejected_legacy_values"
+        ].append("turso")
+        expect_rejection(
+            lambda: validate_document(turso_rejected, check_repository=False),
+            "Turso classified as a rejected selector",
+        )
+
+        turso_not_default = copy.deepcopy(manifest)
+        turso_not_default["configuration_surface"]["default_projection"] = "sqlite"
+        expect_rejection(
+            lambda: validate_document(turso_not_default, check_repository=False),
+            "Turso removed as default projection",
         )
 
     print("storage authority manifest verified")

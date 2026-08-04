@@ -5,11 +5,11 @@ ddx:
     - adr-cqrs-log-projection-storage-model
     - adr-queue-as-shard-unit-and-projection-families
   review:
-    self_hash: 778fdbadeadce6b52e101bda39921f88b193c5737ea96d4b8ae8e8a424a4e743
+    self_hash: 5e35283d3ad0cc38c61d57aac7a63ce7c5fc8028bc8ff5f51a2bb4c28a1f13e6
     deps:
-      adr-cqrs-log-projection-storage-model: 849c0bd7e15200ab056c2e5fcedb4b04a116aba520993fb4bab63b1195146107
-      adr-queue-as-shard-unit-and-projection-families: 50fb11c85cbf40fa182469b036ef5210b304f330171a17ab371ae485524cb924
-    reviewed_at: "2026-07-20T00:01:21Z"
+      adr-cqrs-log-projection-storage-model: 63ed2521bc7d0e785529aafbd179b3ef22d51cbf3897d51c511540be52ee9ba3
+      adr-queue-as-shard-unit-and-projection-families: 64a7c7b0e2e5f4caa2c7d775b84c87a9a1e4484ae3df9dccbe3d145d22681a7e
+    reviewed_at: "2026-08-04T04:50:53Z"
 ---
 
 # Architecture Decision Record
@@ -66,18 +66,21 @@ define a second public method surface or a per-pair product contract.
 | Axis | Responsibility | Options |
 |---|---|---|
 | **`LogStore`** | command ordering and the **epoch/fence authority** (co-located with the log, TD-003); Class A also owns durable replay, snapshots, and command high-water | `memory`, `sqlite`, `postgres`, `filesystem`, `s3` |
-| **`ProjectionStore`** | the materialized read model: full read/query/validation/apply and snapshot/recovery surface | `memory`, `sqlite`, `postgres` |
+| **`ProjectionStore`** | the materialized read model: full read/query/validation/apply and snapshot/recovery surface | `memory`, `sqlite`, `turso`, `postgres`; `turso` is the default |
 | **`ControlPlane`** | optional queue definitions plus placement/membership/owner leases when the topology needs them | in-process, Postgres, or another separately qualified implementation |
 
-The closed public set is the exact 5×3 product:
+The closed public set is the exact 5×4 product. Public `turso` means the
+embedded/local Turso 0.7 adapter in ordinary WAL mode; remote, sync, and MVCC
+modes are outside the decision boundary. SQLite remains a supported explicit
+projection and the differential relational reference.
 
-| Log \ Projection | `memory` | `sqlite` | `postgres` |
-|---|---|---|---|
-| `memory` | Class B | Class B | Class B |
-| `sqlite` | Class A | Class A | Class A |
-| `postgres` | Class A | Class A | Class A |
-| `filesystem` | Class A | Class A | Class A |
-| `s3` | Class A | Class A | Class A |
+| Log \ Projection | `memory` | `sqlite` | `turso` (default) | `postgres` |
+|---|---|---|---|---|
+| `memory` | Class B | Class B | Class B | Class B |
+| `sqlite` | Class A | Class A | Class A | Class A |
+| `postgres` | Class A | Class A | Class A | Class A |
+| `filesystem` | Class A | Class A | Class A | Class A |
+| `s3` | Class A | Class A | Class A | Class A |
 
 Class A logs are durable authorities and projections are rebuildable by
 high-water plus tail replay. Class B's memory log is process-local; after
@@ -88,10 +91,10 @@ Class B cell claims log replay, branch, read-as-of, or log-derived history.
 
 The public response-barrier values are `Strict` and `AsyncProjection`; they are
 execution characteristics, not projection backends or product profiles.
-`Strict` is required across all 15 cells. `AsyncProjection` is additionally
-applicable to the six filesystem/S3 object-log cells. The public log names are
+`Strict` is required across all 20 cells. `AsyncProjection` is additionally
+applicable to the eight filesystem/S3 object-log cells. The public log names are
 `filesystem` and `s3`, and the public projection names are `memory`, `sqlite`,
-and `postgres`.
+`turso`, and `postgres`.
 
 The remainder of this subsection preserves the design lineage under its former
 internal `objectlog/hybrid-*` terminology. Those spellings are not accepted

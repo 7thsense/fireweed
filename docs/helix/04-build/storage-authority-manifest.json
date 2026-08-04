@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "spec_id": "storage-matrix-completion-brief",
-  "authority_revision": "P1-2026-08-03",
+  "authority_revision": "P1-2026-08-04-turso-default",
   "governed_documents": [
     {
       "path": "docs/helix/00-discover/product-vision.md",
@@ -9,11 +9,11 @@
     },
     {
       "path": "docs/helix/01-frame/prd.md",
-      "sha256": "40c2e8c18484e0517a8d5e06325a33c560a9cc62c481b552e57bb3dadfbd9729"
+      "sha256": "87eb8310f626cbe3d858c5ce62d5ad605c6ce38a0dce419ca90f01df09177aa2"
     },
     {
       "path": "docs/helix/02-design/orthogonal-storage-matrix-brief.md",
-      "sha256": "7abf4ba4c991df857b52c18e71fac6c5ac77c6dfbd968fcf4e77c671804bf68f"
+      "sha256": "ff6fa2ab77718ccad4e40a66169547fa60383eb17d8d9db424d187137d9279ca"
     },
     {
       "path": "docs/helix/02-design/adr/ADR-002-auth-tenancy-and-storage-isolation.md",
@@ -25,7 +25,7 @@
     },
     {
       "path": "docs/helix/02-design/adr/ADR-012-orthogonal-log-projection-composition.md",
-      "sha256": "f133596e3c06a6468b88d2a96f7ccd925f0fdd66f1796e5f4c091855ad8e9e13"
+      "sha256": "7b76f286ac066b113d1f5f64f9a54a3c90ef8b544140e8ad88abbfb08b6afa0f"
     },
     {
       "path": "docs/helix/02-design/adr/ADR-014-fjord-embedded-change-log-consumer-surface.md",
@@ -37,7 +37,7 @@
     },
     {
       "path": "docs/helix/02-design/adr/ADR-016-turso-derived-projection.md",
-      "sha256": "5d9116299c46105916763d89a9a4c24020b4e6d14faf8904792ad8e0b8810fbb"
+      "sha256": "b2a0bd258956b65384090ebeb2f963c26f34adc0a099dba25918d1054da3ca78"
     },
     {
       "path": "docs/helix/02-design/adr/ADR-017-async-commit-strategy-and-dispatch.md",
@@ -61,7 +61,7 @@
     },
     {
       "path": "docs/helix/02-design/technical-designs/TD-001-storage-architecture-backend-contracts.md",
-      "sha256": "b534bc14812f46a22f430cb29b1ef134dac05b5bf68f0940adba55cfa1c36e6b"
+      "sha256": "c2eca14942523b67738e550aa906c399ebda3a18a9c122c7e3c69ce3d5c0605a"
     },
     {
       "path": "docs/helix/02-design/technical-designs/TD-003-sharding-and-shard-ownership.md",
@@ -81,7 +81,7 @@
     },
     {
       "path": "docs/helix/02-design/technical-designs/TD-010-object-log-turso-projection.md",
-      "sha256": "0054d8027eb49bf407815707611923004cbc23163588742a4bafca9d339f4d34"
+      "sha256": "ae3a3176f144a7987be2d726ddec0de8beb2dbcd0d4fe45ab6afab686d4fbd58"
     },
     {
       "path": "docs/helix/03-test/test-plans/TP-001-governing-test-traceability.md",
@@ -89,11 +89,11 @@
     },
     {
       "path": "docs/helix/03-test/test-plans/TP-002-scale-substantiation.md",
-      "sha256": "d1e5f795c4cbd7d806582d27558090448589c569ace8c564f6971db7d02bf253"
+      "sha256": "a65c5180c05ebae5ee31c2d2ab54d111549b7f7991dd81cfd678a83172e16966"
     },
     {
       "path": "docs/helix/03-test/test-plans/TP-003-verification-acceptance-criteria.md",
-      "sha256": "097bb76402d1e750c1be0c726980928072ef9678e30d829b3cf0d006768373f5"
+      "sha256": "7b89ff4ca981ef793b86b4ac5c59e7141a79a92f17e9729fdd577e391778e9b7"
     },
     {
       "path": "docs/helix/03-test/test-plans/TP-004-fireweed-facade-and-snorri-acceptance.md",
@@ -101,7 +101,7 @@
     },
     {
       "path": "docs/helix/03-test/test-plans/TP-005-fireweed-performance-matrix.md",
-      "sha256": "7126a21c9b591571a8284c680a83059bb8b637875ef04a23b289641ecf7590d3"
+      "sha256": "0d76cab4966389ab9f184d97cb8ad6721b3a0f7caeb2c8409f9258afeb21e848"
     }
   ],
   "canonical_axes": {
@@ -115,6 +115,7 @@
     "projections": [
       "memory",
       "sqlite",
+      "turso",
       "postgres"
     ],
     "control_planes": [
@@ -122,7 +123,7 @@
       "postgres"
     ],
     "cell_id_separator": "--",
-    "required_cell_count": 15,
+    "required_cell_count": 20,
     "profile_skus_are_public": false
   },
   "durability": {
@@ -135,8 +136,8 @@
     "class_b_logs": [
       "memory"
     ],
-    "class_a_cell_count": 12,
-    "class_b_cell_count": 3,
+    "class_a_cell_count": 16,
+    "class_b_cell_count": 4,
     "history_requires_class_a": true,
     "silent_null_log_forbidden": true
   },
@@ -150,7 +151,7 @@
         "filesystem",
         "s3"
       ],
-      "required_cell_count": 15
+      "required_cell_count": 20
     },
     "async_projection": {
       "public_name": "AsyncProjection",
@@ -159,8 +160,8 @@
         "filesystem",
         "s3"
       ],
-      "required_positive_cell_count": 6,
-      "required_pre_io_rejection_count": 9,
+      "required_positive_cell_count": 8,
+      "required_pre_io_rejection_count": 12,
       "bounds": [
         "apply_lag_max_commands",
         "apply_debt_max_bytes",
@@ -218,6 +219,18 @@
     "provider_without_native_conditional_write": "reject_before_io"
   },
   "configuration_surface": {
+    "default_projection": "turso",
+    "turso_supported_boundary": {
+      "version": "0.7.0",
+      "mode": "embedded_local_ordinary_wal",
+      "unsupported_modes": [
+        "remote",
+        "sync",
+        "embedded_replica",
+        "mvcc"
+      ],
+      "sqlite_is_differential_reference": true
+    },
     "async_projection_environment_keys": [
       "FIREWEED_ASYNC_PROJECTION_APPLY_LAG_MAX_COMMANDS",
       "FIREWEED_ASYNC_PROJECTION_APPLY_DEBT_MAX_BYTES",
@@ -253,19 +266,20 @@
       "help_values": [
         "memory",
         "sqlite",
+        "turso",
         "postgres"
       ],
       "parser_values": [
         "memory",
         "sqlite",
+        "turso",
         "postgres"
       ],
       "rejected_legacy_values": [
         "inmemory",
         "hybrid",
         "hybrid-strict",
-        "hybrid-async",
-        "turso"
+        "hybrid-async"
       ]
     },
     "response_barrier": {
@@ -293,12 +307,12 @@
       "Http"
     ],
     "positive_profile_formula": {
-      "sqlite_or_postgres_log_strict_enabled": 18,
-      "filesystem_or_s3_log_both_barriers_enabled": 36,
-      "total": 54
+      "sqlite_or_postgres_log_strict_enabled": 24,
+      "filesystem_or_s3_log_both_barriers_enabled": 48,
+      "total": 72
     },
-    "class_b_strict_enabled_durability_negatives": 9,
-    "class_b_strict_disabled_positives": 3,
+    "class_b_strict_enabled_durability_negatives": 12,
+    "class_b_strict_disabled_positives": 4,
     "disabled_with_endpoint": "tuple_coherence_rejection",
     "feature_unavailable_precedes_durability": true,
     "class_b_async_precedes_delivery_validation": true
@@ -369,54 +383,63 @@
     },
     {
       "id": "AC-TURSO-1",
-      "disposition": "internal",
+      "disposition": "retained",
       "current_requirement_ids": [
         "AC-TURSO-1"
       ],
       "semantic_owners": [
+        "P3t",
         "P13t"
       ],
-      "qualifies_current_product": false
+      "qualifies_current_product": true
     },
     {
       "id": "AC-TURSO-2",
-      "disposition": "internal",
+      "disposition": "retained",
       "current_requirement_ids": [
         "AC-TURSO-2"
       ],
       "semantic_owners": [
+        "P3t",
         "P13t"
       ],
-      "qualifies_current_product": false
+      "qualifies_current_product": true
     },
     {
       "id": "AC-TURSO-3",
-      "disposition": "internal",
+      "disposition": "retained",
       "current_requirement_ids": [
         "AC-TURSO-3"
       ],
       "semantic_owners": [
+        "P3t",
+        "P10",
         "P13t"
       ],
-      "qualifies_current_product": false
+      "qualifies_current_product": true
     },
     {
       "id": "AC-TURSO-4",
-      "disposition": "internal",
+      "disposition": "retained",
       "current_requirement_ids": [
         "AC-TURSO-4"
       ],
       "semantic_owners": [
+        "P3t",
         "P13t"
       ],
-      "qualifies_current_product": false
+      "qualifies_current_product": true
     },
     {
       "id": "AC-TURSO-5.ENABLED",
-      "disposition": "retired",
-      "current_requirement_ids": [],
-      "semantic_owners": [],
-      "qualifies_current_product": false
+      "disposition": "retained",
+      "current_requirement_ids": [
+        "AC-TURSO-5.ENABLED"
+      ],
+      "semantic_owners": [
+        "P12a"
+      ],
+      "qualifies_current_product": true
     },
     {
       "id": "AC-TURSO-5.DISABLED",
@@ -431,14 +454,14 @@
     },
     {
       "id": "AC-TURSO-6",
-      "disposition": "internal",
+      "disposition": "retained",
       "current_requirement_ids": [
         "AC-TURSO-6"
       ],
       "semantic_owners": [
         "P13t"
       ],
-      "qualifies_current_product": false
+      "qualifies_current_product": true
     },
     {
       "id": "AC-TXN-5-HYBRID-SELECTOR",

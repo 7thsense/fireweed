@@ -2,9 +2,9 @@
 ddx:
   id: prd
   review:
-    self_hash: 2d97b05f9c0c0db576149bdfef21c729d66e07dbb674c95f6b7135ddcffa3b91
+    self_hash: cd3004bd0dc9ac531d1cd2596e875e51c2de4601e330007fee60da1ea7b3d5ce
     deps: {}
-    reviewed_at: "2026-07-20T00:01:20Z"
+    reviewed_at: "2026-08-04T04:50:53Z"
 kind: product
 ---
 
@@ -60,16 +60,18 @@ control-plane choice.
 
 ### Storage product boundary
 
-The public product is exactly the 5×3 product of five logs (`memory`, `sqlite`,
-`postgres`, `filesystem`, `s3`) and three projections (`memory`, `sqlite`,
-`postgres`). All 15 cells use one typed composition model and the same public
-queue surface. `filesystem` and `s3` are peer object-log providers. Public
-selectors do not include `objectlog`, `inmemory`, Hybrid, or Turso product
-aliases.
+The public product is exactly the 5×4 product of five logs (`memory`, `sqlite`,
+`postgres`, `filesystem`, `s3`) and four projections (`memory`, `sqlite`,
+`turso`, `postgres`). All 20 cells use one typed composition model and the same
+public queue surface. `filesystem` and `s3` are peer object-log providers.
+Turso is the default projection; it means the embedded/local Turso 0.7 adapter
+in ordinary WAL mode. SQLite remains a supported explicit projection and the
+differential relational reference. Public selectors do not include
+`objectlog`, `inmemory`, or Hybrid product aliases.
 
 The four durable logs are Class A: the log remains authoritative after restart
 and projections recover from high-water plus tail replay. The memory log is
-Class B: after process death only a durable SQLite or Postgres projection can
+Class B: after process death only a durable SQLite, Turso, or Postgres projection can
 remain, and no memory-log cell claims log rebuild, branch, read-as-of, or
 log-derived change records. The control plane is an optional composition axis,
 not a mandatory PostgreSQL dependency. Public composition is native async;
@@ -110,7 +112,7 @@ queue with timestamp ordering as a first-class validation case.
 6. Operators can configure a commit-latency bound for applicable Class A logs and
    understand the resulting tradeoff between latency, batch density, and backing
    store request cost.
-7. Callers can depend on one transaction contract across all 15 storage cells
+7. Callers can depend on one transaction contract across all 20 storage cells
    without backend-specific choreography, while selecting the documented Class
    A or Class B cross-process durability boundary explicitly.
 
@@ -123,7 +125,7 @@ queue with timestamp ordering as a first-class validation case.
 | Queue density | At least 1000 cold queues plus one designated hot queue are active concurrently; all queues become progress-eligible, the hot and cold phases complete exactly, and shared workers/connections/tasks remain bounded rather than growing per queue | Multi-queue density benchmark per the Tier-2 evidence record (TP-002 E2) |
 | Hot queue scale | At least 10M items resident in one active queue remain writable, claimable, observable, and exactly recoverable under the declared topology | Benchmark per TP-002 E1 and E3 |
 | Core operation capacity | Throughput and p50/p95/p99 for batch push, update, claim, and finalize are published with workload, host, topology, and resource limits; pass/fail uses correctness, progress, bounded resources, and same-run degradation rather than absolute speed | Benchmark harness under representative Seventh Sense and synthetic workloads |
-| External transaction integrity | All 15 cells satisfy success/error/unknown-outcome semantics; all 12 Class A cells prove crash recovery from the durable log, while the three Class B cells prove only their declared projection-persistence boundary | Cell and durability-class conformance plus fault injection per TP-003 |
+| External transaction integrity | All 20 cells satisfy success/error/unknown-outcome semantics; all 16 Class A cells prove crash recovery from the durable log, while the four Class B cells prove only their declared projection-persistence boundary | Cell and durability-class conformance plus fault injection per TP-003 |
 | Commit latency and cost dial | Applicable Class A logs publish latency, throughput, and object-store request-cost curves for the configured commit-latency bound | Object-log latency/cost matrix per TP-002 E3 |
 | Progress bound compliance | 100% of eligible items claimed before their configured progress bound is exceeded | Queue metrics plus adversarial tests with skewed priority and group distributions |
 | Claim safety | Zero concurrent active leases for the same item | Concurrency stress test with worker crashes and lease expiry |
@@ -257,7 +259,7 @@ priority, retry, claim, and state logic with different table shapes.
     connection per queue.
     Aggregate single-node throughput is reported for the declared node;
     multi-node deployment provides aggregate headroom.
-15. Composition-independent transaction contract: all 15 cells MUST preserve
+15. Composition-independent transaction contract: all 20 cells MUST preserve
     the same external semantics for batch mutation
     success, structured rejection, unknown retry resolution, idempotency replay,
     read-your-write visibility, and claim exclusivity. Recovery from durable

@@ -12,15 +12,17 @@ ddx:
     - api-operator-repair-contract
   status: draft
   review:
-    self_hash: 120af49601b28d4388b5b394d729eb75d23c8c6a93d92104a2ff06c9a405c1b4
+    self_hash: 47c90c2097342fd89c99586a1d53e2ebbc3088d22146da1087fb4afc921d0769
     deps:
-      adr-cqrs-log-projection-storage-model: 849c0bd7e15200ab056c2e5fcedb4b04a116aba520993fb4bab63b1195146107
-      adr-hexagonal-architecture-and-two-interfaces: 02e04b32110f57e05ea80a7b6ce642cba655866e14302db6a8b0d1de0f62d012
-      adr-queue-as-shard-unit-and-projection-families: 50fb11c85cbf40fa182469b036ef5210b304f330171a17ab371ae485524cb924
-      api-native-client-interface: ae6c682dbf6e269b6792351f1677477f2324fb24cb4cc4f85392f6369fd43b0b
-      api-operator-repair-contract: 92d0dae8debf7fc9ac68fae06fdbe6d9a330f2914a58329c046331da9d5b4c6e
-      td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
-    reviewed_at: "2026-07-20T00:01:28Z"
+      adr-cqrs-log-projection-storage-model: 63ed2521bc7d0e785529aafbd179b3ef22d51cbf3897d51c511540be52ee9ba3
+      adr-hexagonal-architecture-and-two-interfaces: 17fdf3b7bea7e211c40026f52d01b5d5a667d5c84fcc0dcbbff6ee6dbbb47124
+      adr-log-single-source-of-truth: c88063a069f43bd90f31e4875ad8b35fca9876de5b52cb777908d314d46abd1b
+      adr-queue-as-shard-unit-and-projection-families: 64a7c7b0e2e5f4caa2c7d775b84c87a9a1e4484ae3df9dccbe3d145d22681a7e
+      api-native-client-interface: b99403ef55afffd134ac3ef1a71065c497558c94de379c2b257b119000a0f488
+      api-operator-repair-contract: f4fdf0e4e8e29431d8ff2f89a8bc843497dca743ad5e32439996a4ad7c611197
+      orthogonal-storage-matrix-brief: 170b24ca9791ae59d5ab7d2f986b0dce93fce092d4d5da7dd896b50ffd67eaae
+      td-storage-architecture-backend-contracts: 2d88d342aac82f23616fdff6d94f4ac88701ab6e70c80a0315003c5e66432c74
+    reviewed_at: "2026-08-04T04:50:53Z"
 ---
 
 # Technical Design
@@ -38,7 +40,7 @@ Specify the engine-side contracts the hexagonal cutover depends on, so backends 
 adapters can be built against fixed semantics:
 
 1. the **persistence durability classes (Class A / Class B)** and the **internal append/apply
-   classes (atomic / log-then-apply)** that implement them across the 5×3 matrix;
+   classes (atomic / log-then-apply)** that implement them across the 5×4 matrix;
 2. the **unit-of-work / claim / upsert** atomicity model (`Backend`, `ClaimPort`, `UpsertPort`);
 3. the **ReclaimDriver** (timed lifecycle transitions);
 4. the **durable-state** design for logic migrated off the in-memory HTTP service
@@ -51,8 +53,10 @@ state below is **per-`(tenant, queue)`** on that single owner. Horizontal scale 
 
 Public storage remains axes, not profile SKUs: log ∈
 {`memory`, `sqlite`, `postgres`, `filesystem`, `s3`} × projection ∈
-{`memory`, `sqlite`, `postgres`} (TD-001, matrix brief). Hybrid and turso are not public
-projection axis values.
+{`memory`, `sqlite`, `turso`, `postgres`} (TD-001, matrix brief). Turso is the
+default public projection; Hybrid is not a public projection axis value. Turso
+is local/embedded ordinary-WAL projection state, and durability continues to
+follow the selected log.
 
 ## 1. Durability classes
 

@@ -16,19 +16,21 @@ ddx:
     - prd
   status: accepted
   review:
-    self_hash: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
+    self_hash: 2d88d342aac82f23616fdff6d94f4ac88701ab6e70c80a0315003c5e66432c74
     deps:
-      adr-async-commit-strategy-and-dispatch: 61bf761b8f8b84581b174eb8f1c64a8893ede0dce9353707fb284f751fb82b5e
-      adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
-      adr-cqrs-log-projection-storage-model: 849c0bd7e15200ab056c2e5fcedb4b04a116aba520993fb4bab63b1195146107
-      adr-full-async-storage-boundaries: 26d2c37c96eb0801dbb99e4a02213ecfa747aa533572acde3917801a13cebfcd
-      adr-granularity-mapping-and-claim-domain: 29444ade97bb5bce95a3f9d3c8878f5dc1ec2ea0bfe562f914ae17ff84984a18
-      adr-queue-as-shard-unit-and-projection-families: 50fb11c85cbf40fa182469b036ef5210b304f330171a17ab371ae485524cb924
-      adr-turso-derived-projection: 76ec5fe8523c4fe831441229aa5f09f0bf966ac3849174764a7ba2c2d805f22a
-      api-native-client-interface: ae6c682dbf6e269b6792351f1677477f2324fb24cb4cc4f85392f6369fd43b0b
-      concerns: 52b6bbb92cff001a75227115afb20f4d0a73781ec98f49ab446a6866c17284dc
-      prd: 2d97b05f9c0c0db576149bdfef21c729d66e07dbb674c95f6b7135ddcffa3b91
-    reviewed_at: "2026-07-20T00:01:24Z"
+      adr-async-commit-strategy-and-dispatch: 6daa55d01fce58248b5b607c3015ed0600d23ff123912e2bc1fd63a484a8ab49
+      adr-auth-tenancy-and-storage-isolation: 1d4296498a187d4d4c3bb4a4e37647f7193036c3a20ab2a8b66154a45937ece2
+      adr-cqrs-log-projection-storage-model: 63ed2521bc7d0e785529aafbd179b3ef22d51cbf3897d51c511540be52ee9ba3
+      adr-full-async-storage-boundaries: 0543121229a415143387307275263908017b43697ddac970d54d6d30a2c7ccaa
+      adr-granularity-mapping-and-claim-domain: c44740df25ed32569e86f4c3459ed07839d33325367cdafc49fb1317deab606d
+      adr-log-single-source-of-truth: c88063a069f43bd90f31e4875ad8b35fca9876de5b52cb777908d314d46abd1b
+      adr-orthogonal-log-projection-composition: 5e35283d3ad0cc38c61d57aac7a63ce7c5fc8028bc8ff5f51a2bb4c28a1f13e6
+      adr-queue-as-shard-unit-and-projection-families: 64a7c7b0e2e5f4caa2c7d775b84c87a9a1e4484ae3df9dccbe3d145d22681a7e
+      api-native-client-interface: b99403ef55afffd134ac3ef1a71065c497558c94de379c2b257b119000a0f488
+      concerns: d00e29334f99ed2fe3c9151bacb107255a3d7add89606949e409eb6614382d6c
+      orthogonal-storage-matrix-brief: 170b24ca9791ae59d5ab7d2f986b0dce93fce092d4d5da7dd896b50ffd67eaae
+      prd: cd3004bd0dc9ac531d1cd2596e875e51c2de4601e330007fee60da1ea7b3d5ce
+    reviewed_at: "2026-08-04T04:50:53Z"
 ---
 
 # Technical Design: TD-001 Storage Architecture and Backend Contracts
@@ -54,7 +56,7 @@ In scope:
 - Queue-to-owner assignment, execution epochs, and fencing requirements
   (per-queue; the mechanism is TD-003).
 - The two projection families and conformance as the behavior contract.
-- **Orthogonal public axes** (log × projection × control plane), the 5×3
+- **Orthogonal public axes** (log × projection × control plane), the 5×4
   matrix, durability Class A / Class B, and conformance requirements.
 - Runtime-neutral full-async storage boundaries, typed commit operations,
   blocking-adapter rules, commit-strategy/dispatcher injection, and cancellation outcomes (ADR-015,
@@ -130,19 +132,20 @@ deployment may host log and projection together when both axes select `postgres`
   - **Class B** (`log` = `memory`): in-process `LogStore` for ordering and fencing
     while alive; after process death only the projection remains. Success ⇒
     visible in projection; durable **iff** the projection is durable
-    (`sqlite` / `postgres`). No log rebuild, branch, read-as-of, or
+    (`sqlite` / `turso` / `postgres`). No log rebuild, branch, read-as-of, or
     change-record-from-log. Class B MUST be explicitly selectable; silent
     null-log / absent-log composition is forbidden. Must not claim Class A
     guarantees.
 - **The projection is a family, held by conformance (ADR-008)**: fireweed supports
   two projection families — an **in-memory log-replay** projection
   (embedded / disposable serving views) and a **relational/DB-resident** projection
-  (`fireweed_items` + SQL `FOR UPDATE SKIP LOCKED` claim, sqlite/postgres). They
+  (`fireweed_items` plus substrate-appropriate atomic claim, sqlite/turso/postgres). They
   share **behavior, not code**; the conformance suite is the contract that holds
   them identical (see "Projection Families and Conformance as Contract"). Public
-  projection **axis** values remain only `memory`, `sqlite`, and `postgres`.
-  Hybrid apply strategies and Turso adapters are not public projection axis
-  values (see matrix non-goals).
+  projection **axis** values are `memory`, `sqlite`, `turso`, and `postgres`.
+  Turso is the default public projection; SQLite remains an explicit supported
+  projection and the differential relational reference. Hybrid apply strategies
+  are not public projection axis values (see matrix non-goals).
 - **The queue is the unit of sharding (ADR-008)**: a whole queue is owned by
   exactly one node at a time; there is no intra-queue sharding, no cross-owner
   claim fan-out, and no cross-owner progress aggregation. Horizontal scale is
@@ -233,7 +236,7 @@ composition root:
 - **`fireweed-server`**: the composition root binary — dependency injection,
   ReclaimDriver ticker, ownership renewal loop, health probe.
 
-### Public storage axes (5×3 matrix)
+### Public storage axes (5×4 matrix)
 
 Public storage is the orthogonal product of log and projection axes
 (`orthogonal-storage-matrix-brief`, ADR-012, API-005 `StorageConfig`). There is
@@ -242,26 +245,26 @@ Public storage is the orthogonal product of log and projection axes
 | Axis | Public values | Responsibility |
 |------|---------------|----------------|
 | **Log** | `memory`, `sqlite`, `postgres`, `filesystem`, `s3` | Command append, epoch/fence authority, replay when durable (Class A) |
-| **Projection** | `memory`, `sqlite`, `postgres` | Serving, claim selection, validation, apply |
+| **Projection** | `memory`, `sqlite`, `turso`, `postgres` | Serving, claim selection, validation, apply; `turso` is the default |
 | **Control plane** | `in_process` or optional `postgres` | Queue definitions, placement, ownership — independently composed, not a log/projection prerequisite |
 
 **Not public product values:** `hybrid`, `hybrid-async`, `hybrid-strict`,
-`turso`, `objectlog/*` profile names, `postgres/*` wildcards. Hybrid/async apply
-knobs and Turso adapters, if retained as implementation detail, are not matrix
-rows and MUST NOT be advertised as public projection axis values.
+`objectlog/*` profile names, `postgres/*` wildcards. Hybrid/async apply knobs are
+not matrix rows. Public `turso` is specifically the embedded/local Turso 0.7
+ordinary-WAL adapter; remote, sync, and MVCC modes are out of scope.
 
-#### Full matrix (15 cells)
+#### Full matrix (20 cells)
 
 Every cell is a valid selection. Semantics differ only by **durability class**
 (ADR-013):
 
-| Log \ Projection | `memory` | `sqlite` | `postgres` |
-|------------------|----------|----------|------------|
-| `memory` | Class B | Class B | Class B |
-| `sqlite` | Class A | Class A | Class A |
-| `postgres` | Class A | Class A | Class A |
-| `filesystem` | Class A | Class A | Class A |
-| `s3` | Class A | Class A | Class A |
+| Log \ Projection | `memory` | `sqlite` | `turso` (default) | `postgres` |
+|------------------|----------|----------|-------------------|------------|
+| `memory` | Class B | Class B | Class B | Class B |
+| `sqlite` | Class A | Class A | Class A | Class A |
+| `postgres` | Class A | Class A | Class A | Class A |
+| `filesystem` | Class A | Class A | Class A | Class A |
+| `s3` | Class A | Class A | Class A | Class A |
 
 #### Object-log peers (`filesystem` and `s3`)
 
@@ -998,7 +1001,7 @@ duplicated here; they come from the single `fireweed_group_summary`.
    assignment, epoch fence, drain, reassignment, recovery).
 6. Implement object-log peers per TD-004: `filesystem` and `s3` `LogStore`
    (group-commit segments + manifest with current-epoch fencing), pairable with
-   each public projection (`memory`, `sqlite`, `postgres`), including
+   each public projection (`memory`, `sqlite`, `turso`, `postgres`), including
    in-flight claim reservations for durable projections, `SnapshotStore`,
    bounded replay, and the per-queue epoch binding to TD-003 (horizontal envelope
    cost/scale). Wire Class B (`memory` log × each projection) via the same
@@ -1014,9 +1017,9 @@ duplicated here; they come from the single `fireweed_group_summary`.
 8. Migrate storage axes to ADR-015 in dependency order: typed commit/fault seam,
    reference composition and memory, whole-transaction blocking adapters, then
    removal of legacy synchronous traits and composition-root wrappers.
-9. Optional derived projections (e.g. Turso) remain non-public axis values;
-   SQLite remains the differential reference. TD-010 covers any gated Turso
-   adapter work without promoting Turso to a public projection axis.
+9. Complete Turso as the supported default derived projection across all five
+   logs. SQLite remains the explicit differential reference. TD-010 defines the
+   local-WAL support boundary and Turso-specific qualification.
 
 **Prerequisites**: API-001 complete; ADR-001, ADR-002, ADR-003, ADR-004, and
 ADR-008 accepted; TD-002, TD-003, and TD-004 accepted; TP-002 available for test
@@ -1039,9 +1042,10 @@ traceability; Rust workspace setup bead filed from ADR-003.
 
 - [x] Governing API-001 operations map to storage flows.
 - [x] ADR-001 CQRS/log-projection decision is preserved.
-- [x] Orthogonal 5×3 matrix (logs: memory, sqlite, postgres, filesystem, s3;
-      projections: memory, sqlite, postgres); no public profile SKU; hybrid/turso
-      not public projection axes (`orthogonal-storage-matrix-brief`).
+- [x] Orthogonal 5×4 matrix (logs: memory, sqlite, postgres, filesystem, s3;
+      projections: memory, sqlite, turso, postgres); Turso default; no public
+      profile SKU; Hybrid not a public projection axis
+      (`orthogonal-storage-matrix-brief`).
 - [x] Durability Class A vs Class B documented (ADR-013); silent null-log
       forbidden; Class B does not claim Class A guarantees.
 - [x] Control plane is a pluggable capability; `in_process` is the single-node
