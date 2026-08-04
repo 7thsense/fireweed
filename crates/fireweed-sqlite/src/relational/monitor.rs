@@ -332,7 +332,7 @@ impl HybridAsyncMonitor {
     pub fn admit_mutation(&self) -> EngineResult<()> {
         if let Some(reason) = &self.poisoned {
             return Err(EngineError::Storage(format!(
-                "hybrid-async projection poisoned: {reason}"
+                "async projection poisoned: {reason}"
             )));
         }
         if self.level == BackpressureLevel::Hard {

@@ -711,7 +711,7 @@ fn legacy_async_projection_projection_poisoned_after_sqlite_commit_memory_apply_
         fireweed_engine::ProjectionStore::apply(&mut store, &[pos(0)], std::slice::from_ref(&push))
             .unwrap_err();
     assert!(
-        matches!(err, EngineError::Storage(ref msg) if msg.contains("projection projection poisoned")),
+        matches!(err, EngineError::Storage(ref msg) if msg.contains("async projection poisoned")),
         "unexpected error: {err:?}"
     );
     assert_eq!(
@@ -748,7 +748,7 @@ fn legacy_async_projection_chaos_sqlite_commit_before_memory_failure_poisons_and
         fireweed_engine::ProjectionStore::apply(&mut store, &[pos(0)], std::slice::from_ref(&push))
             .unwrap_err();
     assert!(
-        matches!(err, EngineError::Storage(ref msg) if msg.contains("projection projection poisoned")),
+        matches!(err, EngineError::Storage(ref msg) if msg.contains("async projection poisoned")),
         "unexpected poison error: {err:?}"
     );
     assert_eq!(

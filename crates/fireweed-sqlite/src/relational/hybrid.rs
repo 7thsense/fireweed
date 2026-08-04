@@ -484,7 +484,7 @@ impl HybridProjectionStore {
     }
 
     fn poison_error(reason: &str) -> EngineError {
-        EngineError::Storage(format!("hybrid projection poisoned: {reason}"))
+        EngineError::Storage(format!("async projection poisoned: {reason}"))
     }
 
     fn check_healthy(&self) -> EngineResult<()> {
