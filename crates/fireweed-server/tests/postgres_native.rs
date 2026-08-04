@@ -31,6 +31,8 @@ fn pg_spec(url: String, credentials: Option<fireweed_postgres::CredentialProvide
         log: LogSpec::Postgres { url, credentials },
         projection: ProjectionSpec::InMemory,
         control_plane: ControlPlaneSpec::InProcess,
+        async_projection: None,
+        sqlite_projection_deferred_flush_chunk: None,
     }
 }
 

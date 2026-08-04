@@ -10,8 +10,8 @@ use fireweed_core::{
     RecurrencePolicy, RequestId, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
 };
 use fireweed_engine::{
-    ChangeRecord, ChangeRecordKind, ChangeRecordSink, ClaimPort, ClaimRequest, Clock,
-    ControlPlaneConfig, ControlPlaneStore, EngineError, FinalizeKind, FinalizeOutcome,
+    AsyncProjectionSpec, ChangeRecord, ChangeRecordKind, ChangeRecordSink, ClaimPort, ClaimRequest,
+    Clock, ControlPlaneConfig, ControlPlaneStore, EngineError, FinalizeKind, FinalizeOutcome,
     FinalizePort, InMemoryControlPlane, LogStore, ProjectionRead, PushPort, PushSpec,
     QueueControlPlane, QueueKey, ReclaimDriver,
 };
@@ -40,6 +40,8 @@ fn objectlog_sqlite_spec(root: std::path::PathBuf, projection: std::path::PathBu
         )),
         projection: ProjectionSpec::Sqlite { path: projection },
         control_plane: ControlPlaneSpec::InProcess,
+        async_projection: None,
+        sqlite_projection_deferred_flush_chunk: None,
     }
 }
 
@@ -51,6 +53,8 @@ fn objectlog_hybrid_spec(root: std::path::PathBuf, projection: std::path::PathBu
         )),
         projection: ProjectionSpec::Hybrid { path: projection },
         control_plane: ControlPlaneSpec::InProcess,
+        async_projection: None,
+        sqlite_projection_deferred_flush_chunk: Some(fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK),
     }
 }
 
@@ -65,6 +69,8 @@ fn objectlog_hybrid_async_spec(
         )),
         projection: ProjectionSpec::HybridAsync { path: projection },
         control_plane: ControlPlaneSpec::InProcess,
+        async_projection: Some(AsyncProjectionSpec::default()),
+        sqlite_projection_deferred_flush_chunk: Some(fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK),
     }
 }
 
@@ -1335,9 +1341,10 @@ async fn objectlog_hybrid_async_push_claim_finalize_and_recovers_on_reopen() {
             SegmentConfig::new(1024 * 1024, 5).expect("valid segment config"),
         );
         // A non-default threshold config the async profile carries into `start`.
-        config.hybrid_async =
-            fireweed_server::HybridAsyncThresholds::new(4096, 8 * 1024 * 1024, 64, 30_000, 5)
-                .expect("valid hybrid-async thresholds");
+        config.backend.async_projection = Some(
+            AsyncProjectionSpec::new(4096, 8 * 1024 * 1024, 64, 30_000, 5)
+                .expect("valid hybrid-async thresholds"),
+        );
         let server = start(config).await.unwrap();
         let mut con = redis_test_connection(server.addr()).await;
 
@@ -1430,9 +1437,10 @@ fn objectlog_hybrid_async_config(
         &mut config,
         SegmentConfig::new(1024 * 1024, 5).expect("valid segment config"),
     );
-    config.hybrid_async =
-        fireweed_server::HybridAsyncThresholds::new(4096, 8 * 1024 * 1024, 64, 30_000, 5)
-            .expect("valid hybrid-async thresholds");
+    config.backend.async_projection = Some(
+        AsyncProjectionSpec::new(4096, 8 * 1024 * 1024, 64, 30_000, 5)
+            .expect("valid hybrid-async thresholds"),
+    );
     config
 }
 
@@ -1680,6 +1688,8 @@ async fn change_record_sink_rejected_on_unwired_profile() {
             log: LogSpec::Memory,
             projection: ProjectionSpec::InMemory,
             control_plane: ControlPlaneSpec::InProcess,
+            async_projection: None,
+            sqlite_projection_deferred_flush_chunk: None,
         },
         0,
         "127.0.0.1:0".to_string(),

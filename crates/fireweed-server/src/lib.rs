@@ -17,25 +17,22 @@ use std::time::Duration;
 
 use fireweed_core::{OwnerId, QueueDefinition, QueueId, TenantId, UtcTimestamp};
 use fireweed_engine::{
-    AcquireOutcome, AuthContext, BufferedByteBudget, BufferedByteBudgetConfig, Clock,
-    ControlPlaneConfig, EngineError, EngineResult, InMemoryControlPlane, LeaseState, OwnedSession,
-    QueueControlPlane, QueueKey, assemble_async_log_replay,
+    AcquireOutcome, AsyncProjectionSpec, AuthContext, BufferedByteBudget, BufferedByteBudgetConfig,
+    Clock, ControlPlaneConfig, EngineError, EngineResult, InMemoryControlPlane, LeaseState,
+    OwnedSession, QueueControlPlane, QueueKey, assemble_async_log_replay,
 };
 use fireweed_memory::composed_memory_backend;
 use fireweed_resp::{
     RespBackend, RespHooks, RouteDecision, SystemClock, route, serve_with_shutdown,
     serve_with_shutdown_and_hooks,
 };
-use fireweed_sqlite::HybridProjectionStore;
+use fireweed_sqlite::{HybridAsyncThresholds, HybridProjectionStore};
 use fjord::{
     FjordClusterView, FjordGroupCoordinator, FjordLog, FjordOffsetStore, FjordTopicRegistry,
 };
 use heimq::config::Config as HeimqConfig;
 use heimq::server::Server as HeimqServer;
 use heimq_broker::storage::{ClusterView, LogBackend, OffsetStore, RecordBatchView};
-// Re-exported: it is the type of the public `Config::hybrid_async` field, so composition-root callers and
-// tests that construct a `Config` directly can name the async-apply threshold config.
-pub use fireweed_sqlite::HybridAsyncThresholds;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -309,7 +306,7 @@ pub enum ProjectionSpec {
     /// The `objectlog/hybrid-async` profile (TD-004): the SAME hot-in-memory serving + durable SQLite
     /// projection image at `path` as [`Self::Hybrid`], selected under its canonical `hybrid-async` name so
     /// the deployment carries the async-apply debt/backpressure/poison threshold config
-    /// ([`Config::hybrid_async`]). Manifest commit + synchronous in-memory apply/render is the success
+    /// ([`BackendSpec::async_projection`]). Manifest commit + synchronous in-memory apply/render is the success
     /// barrier; the durable SQLite image is an asynchronous checkpoint that MAY lag and is caught up by
     /// object-log tail replay on recovery.
     HybridAsync { path: PathBuf },
@@ -778,6 +775,12 @@ pub struct BackendSpec {
     pub log: LogSpec,
     pub projection: ProjectionSpec,
     pub control_plane: ControlPlaneSpec,
+    /// Provider-neutral async response-policy bounds. Canonical barrier validation and consumption is
+    /// added by P3b/P3v; the three transitional Hybrid-family arms consume it through one private
+    /// SQLite adapter until P12a removes those profiles.
+    pub async_projection: Option<AsyncProjectionSpec>,
+    /// Optional SQLite projection apply-batch bound, independent of response-barrier policy.
+    pub sqlite_projection_deferred_flush_chunk: Option<usize>,
 }
 
 impl BackendSpec {
@@ -787,6 +790,8 @@ impl BackendSpec {
             log: LogSpec::Memory,
             projection: ProjectionSpec::InMemory,
             control_plane: ControlPlaneSpec::InProcess,
+            async_projection: None,
+            sqlite_projection_deferred_flush_chunk: None,
         }
     }
 }
@@ -936,19 +941,6 @@ pub struct Config {
     /// Optional path for the service binary's atomic Tokio worker/live-task gauge snapshot. `None`
     /// disables the reporter. The env-config form requires an absolute, non-empty path.
     pub runtime_resource_metrics_path: Option<std::path::PathBuf>,
-    /// Per-queue bounds on `objectlog/hybrid-async` async SQLite apply debt (bead pqueue-6da52695): the
-    /// hard lag/bytes/depth/age limits and the apply-retry poison threshold that drive backpressure and
-    /// fail-closed poison (TD-004 §"Async apply debt, backpressure, and poison thresholds"). The typed form
-    /// of the `FIREWEED_HYBRID_ASYNC_*` env names; applied by the hybrid-async projection's apply pipeline.
-    pub hybrid_async: HybridAsyncThresholds,
-    /// Cap on how many deferred SQLite-checkpoint commands one `objectlog/hybrid` or
-    /// `objectlog/hybrid-async` deferred-flush call applies (bead pqueue-8e5e7846). `flush_deferred` runs
-    /// under the composed backend's unit-of-work mutex, so bounding this bounds the worst-case time one
-    /// call can block concurrent push/claim callers; the periodic flusher's 250ms cadence drains a larger
-    /// backlog over several calls instead of one unbounded transaction. The typed form of
-    /// `FIREWEED_HYBRID_DEFERRED_FLUSH_CHUNK`, defaulting to
-    /// [`fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK`]; applied to the hybrid projection store on open.
-    pub deferred_flush_chunk: usize,
     // Background change-record emission settings (TD-008). Disabled by default; enabled deployments
     // can point at a niflheim durable-ingest endpoint and configure tick/batch cadence.
     pub change_record_sink: ChangeRecordSinkConfig,
@@ -982,8 +974,6 @@ impl Config {
             worker_threads: None,
             postgres_pool_size: DEFAULT_POSTGRES_POOL_SIZE,
             runtime_resource_metrics_path: None,
-            hybrid_async: HybridAsyncThresholds::default(),
-            deferred_flush_chunk: fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK,
             change_record_sink: ChangeRecordSinkConfig::default(),
         }
     }
@@ -2105,8 +2095,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
     let queues = config.queues.clone();
     let recovery_max_tail = config.recovery_max_tail;
     let debug_segments = config.debug_segments;
-    let hybrid_async = config.hybrid_async;
-    let deferred_flush_chunk = config.deferred_flush_chunk;
     let config_objectlog_queue_limit = config.objectlog_byte_limits.queue_waiting;
     let objectlog_byte_budget = build_objectlog_byte_budget(config.objectlog_byte_limits)?;
     let change_record_sink = config.change_record_sink.clone();
@@ -2116,6 +2104,8 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         log,
         projection,
         control_plane,
+        async_projection,
+        sqlite_projection_deferred_flush_chunk,
     } = config.backend;
     // The sync Postgres client owns an internal runtime, so connect off the Tokio reactor. Erase the
     // concrete implementation only after construction; every backend arm receives this same selected
@@ -2462,9 +2452,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 spec,
                 &path,
                 node_id,
-                deferred_flush_chunk,
-                false,
-                None,
+                legacy_hybrid_product_config(sqlite_projection_deferred_flush_chunk, false, None)?,
             )
             .await?;
             let flusher = spawn_hybrid_flusher(&backend, debug_segments);
@@ -2512,9 +2500,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 spec,
                 &path,
                 node_id,
-                deferred_flush_chunk,
-                true,
-                None,
+                legacy_hybrid_product_config(sqlite_projection_deferred_flush_chunk, true, None)?,
             )
             .await?;
             let flusher = spawn_hybrid_flusher(&backend, debug_segments);
@@ -2552,14 +2538,15 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         }
         (LogSpec::ObjectLog(spec), ProjectionSpec::HybridAsync { path }) => {
             // The `objectlog/hybrid-async` profile: LogEngine × hybrid with async-apply debt monitor.
+            let async_projection = async_projection.unwrap_or_else(AsyncProjectionSpec::default);
             eprintln!(
                 "[objectlog/hybrid-async] async-apply thresholds: lag_max_commands={} debt_max_bytes={} \
                  queue_depth_max={} oldest_unapplied_max_ms={} poison_retry_threshold={}",
-                hybrid_async.apply_lag_max_commands,
-                hybrid_async.apply_debt_max_bytes,
-                hybrid_async.apply_queue_depth_max,
-                hybrid_async.oldest_unapplied_max_ms,
-                hybrid_async.apply_poison_retry_threshold,
+                async_projection.apply_lag_max_commands,
+                async_projection.apply_debt_max_bytes,
+                async_projection.apply_queue_depth_max,
+                async_projection.oldest_unapplied_max_ms,
+                async_projection.apply_poison_retry_threshold,
             );
             let _ = (
                 objectlog_byte_budget,
@@ -2570,9 +2557,11 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 spec,
                 &path,
                 node_id,
-                deferred_flush_chunk,
-                false,
-                Some(hybrid_async),
+                legacy_hybrid_product_config(
+                    sqlite_projection_deferred_flush_chunk,
+                    false,
+                    Some(async_projection),
+                )?,
             )
             .await?;
             let flusher = spawn_hybrid_flusher(&backend, debug_segments);
@@ -2763,14 +2752,42 @@ pub async fn start(config: Config) -> EngineResult<Server> {
     }
 }
 
+/// Transitional bridge used only by the three legacy Hybrid-family server arms. Canonical storage paths
+/// consume [`AsyncProjectionSpec`] directly; P12a removes this conversion with the legacy projections.
+fn legacy_hybrid_product_config(
+    deferred_flush_chunk: Option<usize>,
+    strict: bool,
+    async_projection: Option<AsyncProjectionSpec>,
+) -> EngineResult<fireweed_objectlog::HybridProductConfig> {
+    let async_monitor = async_projection
+        .map(|spec| {
+            let apply_queue_depth_max =
+                u64::try_from(spec.apply_queue_depth_max).map_err(|_| {
+                    EngineError::Storage("async projection queue-depth bound exceeds u64".into())
+                })?;
+            HybridAsyncThresholds::new(
+                spec.apply_lag_max_commands,
+                spec.apply_debt_max_bytes,
+                apply_queue_depth_max,
+                spec.oldest_unapplied_max_ms,
+                spec.apply_poison_retry_threshold,
+            )
+        })
+        .transpose()?;
+    Ok(fireweed_objectlog::HybridProductConfig {
+        deferred_flush_chunk: deferred_flush_chunk
+            .unwrap_or(fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK),
+        strict,
+        async_monitor,
+    })
+}
+
 /// Open LogEngine × hybrid projection for `objectlog/hybrid{,-strict,-async}` product cells.
 async fn open_objectlog_hybrid_backend(
     spec: ObjectLogSpec,
     path: &std::path::Path,
     node_id: u8,
-    deferred_flush_chunk: usize,
-    strict: bool,
-    async_monitor: Option<HybridAsyncThresholds>,
+    hybrid: fireweed_objectlog::HybridProductConfig,
 ) -> EngineResult<Arc<ObjectLogHybridBackend>> {
     let p = path
         .to_str()
@@ -2779,11 +2796,6 @@ async fn open_objectlog_hybrid_backend(
     let segment = spec.segment_config();
     let flush =
         fireweed_objectlog::flush_config_from_segment(segment.target_bytes, segment.max_latency_ms);
-    let hybrid = fireweed_objectlog::HybridProductConfig {
-        deferred_flush_chunk,
-        strict,
-        async_monitor,
-    };
     let backend = match spec {
         ObjectLogSpec::LocalFilesystem { root, .. } => {
             fireweed_objectlog::AsyncObjectLogHybridBackend::open(root, &p, flush, node_id, hybrid)
@@ -3395,9 +3407,7 @@ mod byte_admission_wiring_tests {
             ObjectLogSpec::local(&root, SegmentConfig::new(1_024, 100).unwrap()),
             &path,
             0,
-            fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK,
-            false,
-            None,
+            fireweed_objectlog::HybridProductConfig::default(),
         )
         .await
         .expect("open hybrid LogEngine product");
@@ -3429,9 +3439,7 @@ mod byte_admission_wiring_tests {
             ObjectLogSpec::local(&root, SegmentConfig::new(8_192, 60_000).unwrap()),
             &path,
             0,
-            fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK,
-            false,
-            None,
+            fireweed_objectlog::HybridProductConfig::default(),
         )
         .await
         .expect("open hybrid product");
@@ -3493,6 +3501,8 @@ mod byte_admission_wiring_tests {
                 )),
                 projection: ProjectionSpec::InMemory,
                 control_plane: ControlPlaneSpec::InProcess,
+                async_projection: None,
+                sqlite_projection_deferred_flush_chunk: None,
             },
             0,
             "127.0.0.1:0".to_string(),
@@ -3519,6 +3529,8 @@ mod byte_admission_wiring_tests {
                     log: LogSpec::ObjectLog(log),
                     projection: ProjectionSpec::InMemory,
                     control_plane: ControlPlaneSpec::InProcess,
+                    async_projection: None,
+                    sqlite_projection_deferred_flush_chunk: None,
                 },
                 0,
                 "127.0.0.1:0".to_owned(),
@@ -3766,6 +3778,8 @@ mod byte_admission_wiring_tests {
                 path: proj_path.clone(),
             },
             control_plane: ControlPlaneSpec::InProcess,
+            async_projection: None,
+            sqlite_projection_deferred_flush_chunk: None,
         };
         match (&spec.log, &spec.projection) {
             (LogSpec::Sqlite { path: lp }, ProjectionSpec::Sqlite { path: pp }) => {
@@ -3901,6 +3915,8 @@ mod byte_admission_wiring_tests {
             #[cfg(not(feature = "postgres"))]
             projection: ProjectionSpec::InMemory,
             control_plane: ControlPlaneSpec::InProcess,
+            async_projection: None,
+            sqlite_projection_deferred_flush_chunk: None,
         };
         assert_eq!(spec.log.label(), "filesystem");
         match &spec.log {
@@ -4004,6 +4020,8 @@ mod byte_admission_wiring_tests {
             #[cfg(not(feature = "postgres"))]
             projection: ProjectionSpec::InMemory,
             control_plane: ControlPlaneSpec::InProcess,
+            async_projection: None,
+            sqlite_projection_deferred_flush_chunk: None,
         };
         assert_eq!(spec.log.label(), "s3");
         match &spec.log {
@@ -6138,3 +6156,6 @@ mod postgres_log_matrix_tests {
         postgres_log_t4_helm_ci_values_and_gate();
     }
 }
+
+#[cfg(test)]
+mod p3m_config_migration_tests;

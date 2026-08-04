@@ -24,7 +24,8 @@ use fireweed_core::{
     EligibilityPolicy, OrderingMode, OwnerId, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
 };
-use fireweed_sqlite::{DEFAULT_DEFERRED_FLUSH_CHUNK, HybridAsyncThresholds};
+use fireweed_engine::AsyncProjectionSpec;
+use fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK;
 
 use crate::{
     BackendSpec, ChangeRecordSinkConfig, Config, ControlPlaneSpec, DEFAULT_RECOVERY_MAX_TAIL,
@@ -240,40 +241,57 @@ fn parse_u32(env: &BTreeMap<String, String>, key: &str, default: u32) -> u32 {
 
 /// The `objectlog/hybrid-async` async-apply debt bounds (bead pqueue-6da52695): hard lag/bytes/depth/age
 /// limits and the apply-retry poison threshold that drive backpressure and fail-closed poison, from the
-/// `FIREWEED_HYBRID_ASYNC_*` env names. A zero bound is rejected by [`HybridAsyncThresholds::new`] (it would
-/// leave the queue instantly backpressured), surfaced here as a [`ConfigError`].
+/// `FIREWEED_HYBRID_ASYNC_*` env names. These names are transitional debt; P12a replaces them after the
+/// response-barrier selector lands. A zero bound retains the legacy [`ConfigError`] fingerprint.
 fn hybrid_async_thresholds(
     env: &BTreeMap<String, String>,
-) -> Result<HybridAsyncThresholds, ConfigError> {
-    let d = HybridAsyncThresholds::default();
-    HybridAsyncThresholds::new(
-        parse_u64(
+) -> Result<AsyncProjectionSpec, ConfigError> {
+    let d = AsyncProjectionSpec::default();
+    let spec = AsyncProjectionSpec {
+        apply_lag_max_commands: parse_u64(
             env,
             "FIREWEED_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS",
             d.apply_lag_max_commands,
         ),
-        parse_u64(
+        apply_debt_max_bytes: parse_u64(
             env,
             "FIREWEED_HYBRID_ASYNC_APPLY_DEBT_MAX_BYTES",
             d.apply_debt_max_bytes,
         ),
-        parse_u64(
+        apply_queue_depth_max: parse_usize(
             env,
             "FIREWEED_HYBRID_ASYNC_APPLY_QUEUE_DEPTH_MAX",
             d.apply_queue_depth_max,
         ),
-        parse_u64(
+        oldest_unapplied_max_ms: parse_u64(
             env,
             "FIREWEED_HYBRID_ASYNC_OLDEST_UNAPPLIED_MAX_MS",
             d.oldest_unapplied_max_ms,
         ),
-        parse_u32(
+        apply_poison_retry_threshold: parse_u32(
             env,
             "FIREWEED_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD",
             d.apply_poison_retry_threshold,
         ),
-    )
-    .map_err(|e| ConfigError::new(format!("invalid hybrid-async threshold configuration: {e}")))
+    };
+    let zero_name = [
+        (spec.apply_lag_max_commands == 0, "apply_lag_max_commands"),
+        (spec.apply_debt_max_bytes == 0, "apply_debt_max_bytes"),
+        (spec.apply_queue_depth_max == 0, "apply_queue_depth_max"),
+        (spec.oldest_unapplied_max_ms == 0, "oldest_unapplied_max_ms"),
+        (
+            spec.apply_poison_retry_threshold == 0,
+            "apply_poison_retry_threshold",
+        ),
+    ]
+    .into_iter()
+    .find_map(|(zero, name)| zero.then_some(name));
+    if let Some(name) = zero_name {
+        return Err(ConfigError::new(format!(
+            "invalid hybrid-async threshold configuration: hybrid-async threshold {name} must be > 0 (a zero bound is instantly backpressured)"
+        )));
+    }
+    Ok(spec)
 }
 
 fn parse_bool(env: &BTreeMap<String, String>, key: &str, default: bool) -> bool {
@@ -589,6 +607,14 @@ fn parse_backend(
         log: log_spec,
         projection: projection_spec,
         control_plane: parse_control_plane(env, replicas)?,
+        // Preserve the six legacy tuning names by relocating their values into the backend-owned fields.
+        // P12a replaces these names and supplies barrier-aware Option semantics.
+        async_projection: Some(hybrid_async_thresholds(env)?),
+        sqlite_projection_deferred_flush_chunk: Some(parse_usize(
+            env,
+            "FIREWEED_HYBRID_DEFERRED_FLUSH_CHUNK",
+            DEFAULT_DEFERRED_FLUSH_CHUNK,
+        )),
     })
 }
 
@@ -794,12 +820,6 @@ impl Config {
                     Some(path)
                 }
             },
-            hybrid_async: hybrid_async_thresholds(env)?,
-            deferred_flush_chunk: parse_usize(
-                env,
-                "FIREWEED_HYBRID_DEFERRED_FLUSH_CHUNK",
-                DEFAULT_DEFERRED_FLUSH_CHUNK,
-            ),
             change_record_sink: change_record_sink_config(env)?,
         })
     }
@@ -1451,7 +1471,14 @@ mod tests {
     #[test]
     fn hybrid_async_thresholds_default_when_env_absent() {
         let config = Config::from_env(&BTreeMap::new()).expect("empty env yields defaults");
-        assert_eq!(config.hybrid_async, HybridAsyncThresholds::default());
+        assert_eq!(
+            config.backend.async_projection,
+            Some(AsyncProjectionSpec::default())
+        );
+        assert_eq!(
+            config.backend.sqlite_projection_deferred_flush_chunk,
+            Some(DEFAULT_DEFERRED_FLUSH_CHUNK)
+        );
     }
 
     #[test]
@@ -1462,13 +1489,22 @@ mod tests {
             ("FIREWEED_HYBRID_ASYNC_APPLY_QUEUE_DEPTH_MAX", "64"),
             ("FIREWEED_HYBRID_ASYNC_OLDEST_UNAPPLIED_MAX_MS", "30000"),
             ("FIREWEED_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD", "5"),
+            ("FIREWEED_HYBRID_DEFERRED_FLUSH_CHUNK", "17"),
         ]))
         .expect("valid hybrid-async env");
-        assert_eq!(config.hybrid_async.apply_lag_max_commands, 5000);
-        assert_eq!(config.hybrid_async.apply_debt_max_bytes, 1_048_576);
-        assert_eq!(config.hybrid_async.apply_queue_depth_max, 64);
-        assert_eq!(config.hybrid_async.oldest_unapplied_max_ms, 30_000);
-        assert_eq!(config.hybrid_async.apply_poison_retry_threshold, 5);
+        let spec = config
+            .backend
+            .async_projection
+            .expect("legacy async settings populate BackendSpec");
+        assert_eq!(spec.apply_lag_max_commands, 5000);
+        assert_eq!(spec.apply_debt_max_bytes, 1_048_576);
+        assert_eq!(spec.apply_queue_depth_max, 64);
+        assert_eq!(spec.oldest_unapplied_max_ms, 30_000);
+        assert_eq!(spec.apply_poison_retry_threshold, 5);
+        assert_eq!(
+            config.backend.sqlite_projection_deferred_flush_chunk,
+            Some(17)
+        );
     }
 
     #[test]

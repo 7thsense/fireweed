@@ -12,6 +12,7 @@ mod async_commit;
 mod async_composed;
 mod async_lifecycle_planner;
 mod async_log_replay_product;
+mod async_projection_spec;
 mod async_push_planner;
 mod async_reclaim_planner;
 mod async_store;
@@ -67,6 +68,7 @@ pub use async_log_replay_product::{
     AsyncLogReplayBackend, AtomicLogReplayCommitter, SeqIdGen, assemble_async_log_replay,
     assemble_async_log_replay_from_parts, assemble_async_log_replay_with_axis_offload,
 };
+pub use async_projection_spec::AsyncProjectionSpec;
 pub use async_push_planner::ProjectionPushPlanner;
 pub use async_reclaim_planner::{
     AsyncReclaimPlan, AsyncReclaimPlanner, AsyncReclaimRequest, ProjectionReclaimPlanner,
