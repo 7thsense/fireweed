@@ -1674,7 +1674,24 @@ mod tests {
         release_sender.send(()).unwrap();
         stalled.await.unwrap();
 
-        assert_eq!(store.recover_definitions().await.unwrap().len(), 1);
+        // Awaiting the stalled predecessor does not imply the capacity-one actor has already run the
+        // accepted ensure_shard job behind it. Its caller is gone, but the job is actor-owned. Preserve the
+        // public bounded-admission contract by accepting only transient Unavailable until that job becomes
+        // observable; any other error or a bounded timeout still fails the proof.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let definitions = loop {
+            match store.recover_definitions().await {
+                Ok(definitions) => break definitions,
+                Err(EngineError::Unavailable) if std::time::Instant::now() < deadline => {
+                    tokio::task::yield_now().await;
+                }
+                Err(EngineError::Unavailable) => {
+                    panic!("accepted ensure_shard did not become observable")
+                }
+                Err(error) => panic!("accepted ensure_shard failed: {error}"),
+            }
+        };
+        assert_eq!(definitions.len(), 1);
         store.close_and_drain().await.unwrap();
     }
 
