@@ -100,6 +100,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # embedded broker's real TCP Kafka fetch surface (verifying HeimqServer serves the in-process appends, not
 # just the stored bytes). Dev-only so it always runs under default `cargo test`; no C dependency.
 rskafka = { version = "0.6", default-features = false }
+# rskafka record timestamps (also used by the ExternalKafka hermetic fixture preflight).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [[test]]
 name = "performance_object_log_e3_live_tests"
