@@ -333,9 +333,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "bcd8c614c8e56ea42ad7",
+        "id": "caae39caf7d8f62ada24",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (compound_later_field_metrics_range_uses_normalized_components)\"",
-        "line": 12791,
+        "line": 12797,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -347,9 +347,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "09306e2c000a16bd77e7",
+        "id": "b3186e4f9d9232df0da9",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (future_grouped_replacement_moves_the_due_frontier)\"",
-        "line": 12900,
+        "line": 12906,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -361,9 +361,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "6ac40a0859e9127a5549",
+        "id": "115a8eab25bf687c68be",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (million_due_items_in_one_hot_group_advance_in_bounded_chunks)\"",
-        "line": 12988,
+        "line": 12994,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -375,9 +375,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "5285521ba07e79053a39",
+        "id": "712de04ffcbebf9c1dfe",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (oversized_group_locks_only_max_items_plus_one)\"",
-        "line": 13342,
+        "line": 13348,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -389,9 +389,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "912d203b4b656f6035c2",
+        "id": "9f004ac7de34acea9726",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (group_member_lock_budget_is_global_across_candidates)\"",
-        "line": 13412,
+        "line": 13418,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -403,9 +403,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "3238ffac6dc0112ff21a",
+        "id": "556025a3085e032040c1",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (group_batching_refills_past_metadata_mismatch_before_limit)\"",
-        "line": 13488,
+        "line": 13494,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -417,9 +417,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "5ef823bdc6db429103b7",
+        "id": "70737a84136415c432a5",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (commit_transition_rejects_bad_token_bad_version_and_writes_nothing) \u2014 set FIREWEED_PG_TEST",
-        "line": 13943,
+        "line": 13949,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -431,9 +431,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "d7af255aefd1553acff2",
+        "id": "ea2f1352456b87152e7f",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (commit_transition_request_id_replays_without_double_write) \u2014 set FIREWEED_PG_TEST_URL\"",
-        "line": 14005,
+        "line": 14011,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -445,9 +445,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "cea22bf090aa33c17444",
+        "id": "dc367bf958607dbb984a",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (commit_transition_without_expected_epoch_mints_lifecycle_ids_at_locked_cursor_epoch) \u2014 set",
-        "line": 14056,
+        "line": 14062,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -459,9 +459,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "5b657e9dd24a7d64d1d1",
+        "id": "5e4bf3a50a3bbb5f2584",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (commit_transition_atomically_finalizes_multiple_claims) \u2014 set FIREWEED_PG_TEST_URL\"",
-        "line": 14098,
+        "line": 14104,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -473,9 +473,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "8213cc56712dd130cfbb",
+        "id": "d08e59aa3f25a82cbba7",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (commit_transition_conflict_is_per_entry_during_race) \u2014 set FIREWEED_PG_TEST_URL\"",
-        "line": 14169,
+        "line": 14175,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -487,9 +487,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "192367564e2a5c6c3115",
+        "id": "c722100a56c91b505e5c",
         "identity": "eprintln!(\"POSTGRES COMMAND LOG TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14345,
+        "line": 14351,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -501,9 +501,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "380a1aabea62dcb7bdb5",
+        "id": "33c896b96685dc92ce26",
         "identity": "assert_eq!(result, Err(EngineError::Unavailable));",
-        "line": 14431,
+        "line": 14437,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -515,9 +515,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "62f84445866df5a84043",
+        "id": "5cfdce8bc803cd57d2fb",
         "identity": "eprintln!(\"POSTGRES COMMAND LOG TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14445,
+        "line": 14451,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -529,9 +529,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "125f219eb59280a872e8",
+        "id": "3148d98a8f425b4ea59d",
         "identity": "eprintln!(\"POSTGRES COMMAND LOG TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14487,
+        "line": 14493,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -543,9 +543,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "95abb451a3ddbdb5bddc",
+        "id": "4dab4f5e871eb859ac65",
         "identity": "eprintln!(\"POSTGRES BATCH UPDATE TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14586,
+        "line": 14592,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -557,9 +557,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "5f7d0dac8e328e0625e8",
+        "id": "f9fd508e84b5f72f2db7",
         "identity": "eprintln!(\"POSTGRES COMMAND LOG TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14649,
+        "line": 14655,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -6175,9 +6175,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "6b8d1f293b4486bf34f9",
+        "id": "0948437b0e3deaeebb50",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (migration_marker_serializes_waiting_update_and_delete)\"",
-        "line": 12569,
+        "line": 12575,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -6189,9 +6189,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "16e75011c041cf1e052f",
+        "id": "cd0c6d0f4738d7d7b5fe",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (migration_seeds_authority_without_double_counting_preexisting_counters)\"",
-        "line": 12711,
+        "line": 12717,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -6203,9 +6203,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "bd72100d4a46177e65c7",
+        "id": "8179058298f700d74385",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (compound_later_field_metrics_range_uses_normalized_components)\"",
-        "line": 12791,
+        "line": 12797,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -6217,9 +6217,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "5da61f6f17f096d18eeb",
+        "id": "aa05a071232c6287cb6e",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (future_grouped_replacement_moves_the_due_frontier)\"",
-        "line": 12900,
+        "line": 12906,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -6231,9 +6231,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "471bdb6c972182a8c518",
+        "id": "61e7b1e9c318e9fb1720",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (million_due_items_in_one_hot_group_advance_in_bounded_chunks)\"",
-        "line": 12988,
+        "line": 12994,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -6245,9 +6245,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "c8a7032aea2868b9b6f5",
+        "id": "d07f9023f9d5b5200e2e",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (grouped_lifecycle_is_exact_at_1_100_and_1000_items)\"",
-        "line": 13047,
+        "line": 13053,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -6259,9 +6259,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "a33b70685c9bf3c7e6c1",
+        "id": "47f7d64ee4d8160780e1",
         "identity": "eprintln!(\"POSTGRES RELATIONAL SKIPPED (ungrouped_push_has_zero_summary_work)\");",
-        "line": 13108,
+        "line": 13114,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -6273,9 +6273,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "3ee9e301032efc22ad70",
+        "id": "9fa3d57b7df04643f0af",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (request_replay_and_failed_push_do_not_double_apply_summary_delta)\"",
-        "line": 13133,
+        "line": 13139,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -6287,9 +6287,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "71051baad63b4c8afc73",
+        "id": "0f88529787a6b5dcc2b3",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (bounded_group_queries_use_required_partial_indexes)\"",
-        "line": 13183,
+        "line": 13189,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -6301,9 +6301,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "b5b4e14af405aff32961",
+        "id": "a741c18f4d213b5812c8",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (group_batching_leases_whole_groups) \u2014 set FIREWEED_PG_TEST_URL\"",
-        "line": 13285,
+        "line": 13291,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -6315,9 +6315,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "f37bfa1dad766a10ee3e",
+        "id": "8233c4e87fcad756a402",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (oversized_group_locks_only_max_items_plus_one)\"",
-        "line": 13342,
+        "line": 13348,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -6329,9 +6329,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "1fe224a3c39266ec3f86",
+        "id": "90180182ca3aa41a5f45",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (group_member_lock_budget_is_global_across_candidates)\"",
-        "line": 13412,
+        "line": 13418,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -6343,9 +6343,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "9d1940e74a7c23495dd7",
+        "id": "69ed8c4ce35981d05a5f",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (group_batching_refills_past_metadata_mismatch_before_limit)\"",
-        "line": 13488,
+        "line": 13494,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -6357,9 +6357,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "43b03abb53be150622f7",
+        "id": "3767ab5be74706b7ba62",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (group_candidate_locks_are_scoped_and_scan_past_contention) \u2014 set FIREWEED_PG_TEST_URL\"",
-        "line": 13554,
+        "line": 13560,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -6371,9 +6371,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "67143cd8359fe9e39354",
+        "id": "78095d173b246c86894c",
         "identity": "// A held g1 lock must be skipped so the next canonical candidate, g2, is selected.",
-        "line": 13631,
+        "line": 13637,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -6385,9 +6385,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "c909bc049a7938d17059",
+        "id": "c4c2779db1de96061ebd",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (whole_cohort_leases_complete_cohort) \u2014 set FIREWEED_PG_TEST_URL\"",
-        "line": 13675,
+        "line": 13681,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -6399,9 +6399,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "0585a21a42f1d03398b8",
+        "id": "0828d393bc863e56ef75",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (discover_active_scopes_reads_live_items) \u2014 set FIREWEED_PG_TEST_URL\"",
-        "line": 13740,
+        "line": 13746,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -6413,9 +6413,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "907a6e6de632822608b3",
+        "id": "b2fe48ea1b05dcc9a5f8",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (commit_transition_rejects_bad_token_bad_version_and_writes_nothing) \u2014 set FIREWEED_PG_TEST",
-        "line": 13943,
+        "line": 13949,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -6427,9 +6427,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "0f8c570c11ca4d4e911c",
+        "id": "427b61a87c5ca0ef893b",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (commit_transition_request_id_replays_without_double_write) \u2014 set FIREWEED_PG_TEST_URL\"",
-        "line": 14005,
+        "line": 14011,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -6441,9 +6441,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "02fe55dd9e2aac55d101",
+        "id": "cacb7f9a00a0f62ee685",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (commit_transition_without_expected_epoch_mints_lifecycle_ids_at_locked_cursor_epoch) \u2014 set",
-        "line": 14056,
+        "line": 14062,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -6455,9 +6455,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "e97dd564f44c4b6f75bd",
+        "id": "df64d627d99c409c5ba7",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (commit_transition_atomically_finalizes_multiple_claims) \u2014 set FIREWEED_PG_TEST_URL\"",
-        "line": 14098,
+        "line": 14104,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -6469,9 +6469,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "2f9b8376dd5a5405e6f9",
+        "id": "5bae8a41df617f6daac3",
         "identity": "\"POSTGRES RELATIONAL SKIPPED (commit_transition_conflict_is_per_entry_during_race) \u2014 set FIREWEED_PG_TEST_URL\"",
-        "line": 14169,
+        "line": 14175,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -6483,9 +6483,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "6cb701d8fb0bfbdf2b1a",
+        "id": "4bfc2ef115c5f68f6763",
         "identity": "eprintln!(\"POSTGRES COMMAND LOG TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14246,
+        "line": 14252,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -6497,9 +6497,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "8ee800e989462aac9c31",
+        "id": "4e94d1a894d425abc546",
         "identity": "eprintln!(\"POSTGRES COMMAND LOG TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14304,
+        "line": 14310,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -6511,9 +6511,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "4779bbd8edfd1261f379",
+        "id": "535a5daa36a43b355e04",
         "identity": "eprintln!(\"POSTGRES COMMAND LOG TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14345,
+        "line": 14351,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -6525,9 +6525,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "0284681c671390a19bcd",
+        "id": "1a22ea88e720e71ed5d2",
         "identity": "eprintln!(\"POSTGRES COMMAND LOG TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14370,
+        "line": 14376,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -6539,9 +6539,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "ee30d1e8b32240319523",
+        "id": "a21e91a4200ca2a00446",
         "identity": "eprintln!(\"POSTGRES COMMAND LOG TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14409,
+        "line": 14415,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -6553,9 +6553,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "68461b27a6afe3c855bc",
+        "id": "05b20fe47ade13537b78",
         "identity": "assert_eq!(result, Err(EngineError::Unavailable));",
-        "line": 14431,
+        "line": 14437,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -6567,9 +6567,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "58de3f601da23d868aa1",
+        "id": "cb858b31d9e9eb51daf1",
         "identity": "eprintln!(\"POSTGRES COMMAND LOG TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14445,
+        "line": 14451,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -6581,9 +6581,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "812f7e3f631e09d395cc",
+        "id": "ac54f7f3f35a6d93cb09",
         "identity": "eprintln!(\"POSTGRES COMMAND LOG TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14487,
+        "line": 14493,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -6595,9 +6595,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "4c359fc79a81c6f9db9e",
+        "id": "1941a5c77c72ff08b174",
         "identity": "eprintln!(\"POSTGRES BATCH UPDATE TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14539,
+        "line": 14545,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -6609,9 +6609,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "dcd37a6fe1de146e0f6c",
+        "id": "aebe4e609fd03cd275ed",
         "identity": "eprintln!(\"POSTGRES BATCH UPDATE TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14586,
+        "line": 14592,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -6623,9 +6623,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "792fa741b259f5bd7bf5",
+        "id": "91f6aef655010e58753f",
         "identity": "eprintln!(\"POSTGRES COMMAND LOG TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14649,
+        "line": 14655,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "debt"
@@ -11641,9 +11641,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "fa57f8a3154f87209ac1",
+        "id": "b3636d6c099323d27161",
         "identity": "eprintln!(\"POSTGRES RELATIONAL SKIPPED (ungrouped_push_has_zero_summary_work)\");",
-        "line": 13108,
+        "line": 13114,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -82801,7 +82801,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "83d9fdc396423089128269088adb083d06689d315be7fd693ed189d01c983964",
+  "source_inventory_sha256": "68a626712bf07f471424bd48a5a8f6940636366a604db3c365b1eb8169abbbb6",
   "workspaces": [
     {
       "listing_error_sha256": "",
