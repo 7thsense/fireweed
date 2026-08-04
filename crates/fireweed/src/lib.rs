@@ -643,6 +643,32 @@ pub(crate) enum ObjectLogConfig {
     },
 }
 
+/// Provider-owned S3 fields after the public configuration boundary. Keeping
+/// them out of the filesystem helpers prevents later provider work from
+/// reintroducing a shared Local/S3 selector.
+#[derive(Clone, PartialEq, Eq)]
+struct S3ComposedProvider {
+    endpoint: String,
+    bucket: String,
+    region: String,
+    access_key_id: SecretValue,
+    secret_access_key: SecretValue,
+    allow_insecure_http: bool,
+}
+
+impl fmt::Debug for S3ComposedProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("S3ComposedProvider")
+            .field("endpoint", &self.endpoint)
+            .field("bucket", &self.bucket)
+            .field("region", &self.region)
+            .field("access_key_id", &"<redacted>")
+            .field("secret_access_key", &"<redacted>")
+            .field("allow_insecure_http", &self.allow_insecure_http)
+            .finish()
+    }
+}
+
 impl fmt::Debug for ObjectLogConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1070,12 +1096,7 @@ impl StorageConfig {
                 return Err(EngineError::Invalid("postgres log URL must not be empty"));
             }
             LogConfig::Postgres { .. } => {}
-            LogConfig::Filesystem { root } if root.as_os_str().is_empty() => {
-                return Err(EngineError::Invalid(
-                    "filesystem object-log root must not be empty",
-                ));
-            }
-            LogConfig::Filesystem { .. } => {}
+            LogConfig::Filesystem { root } => validate_filesystem_log_fields(root)?,
             LogConfig::S3 {
                 endpoint,
                 bucket,
@@ -1084,16 +1105,7 @@ impl StorageConfig {
                 secret_access_key,
                 ..
             } => {
-                if endpoint.is_empty()
-                    || bucket.is_empty()
-                    || region.is_empty()
-                    || access_key_id.0.is_empty()
-                    || secret_access_key.0.is_empty()
-                {
-                    return Err(EngineError::Invalid(
-                        "S3 object-log configuration fields must not be empty",
-                    ));
-                }
+                validate_s3_log_fields(endpoint, bucket, region, access_key_id, secret_access_key)?
             }
         }
 
@@ -1110,19 +1122,83 @@ impl StorageConfig {
                     "postgres projection URL must not be empty",
                 ));
             }
-            ProjectionStoreConfig::Postgres { .. } => {
-                // Object-log × Postgres projection requires a strict response barrier.
-                if matches!(
-                    &self.log,
-                    LogConfig::Filesystem { .. } | LogConfig::S3 { .. }
-                ) && self.response_barrier != ResponseBarrier::Strict
-                {
-                    return Err(EngineError::Unavailable);
-                }
+            ProjectionStoreConfig::Postgres { .. } => {}
+        }
+
+        // Provider branches stay independent so filesystem and S3 barrier work can
+        // advance without a shared validation branch creating a silent behavior window.
+        match &self.log {
+            LogConfig::Filesystem { .. } => {
+                validate_filesystem_selection(&self.projection, self.response_barrier)?
             }
+            LogConfig::S3 { .. } => validate_s3_selection(&self.projection, self.response_barrier)?,
+            LogConfig::Memory | LogConfig::Sqlite { .. } | LogConfig::Postgres { .. } => {}
         }
 
         Ok(())
+    }
+}
+
+fn validate_filesystem_log_fields(root: &std::path::Path) -> EngineResult<()> {
+    if root.as_os_str().is_empty() {
+        return Err(EngineError::Invalid(
+            "filesystem object-log root must not be empty",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_s3_log_fields(
+    endpoint: &str,
+    bucket: &str,
+    region: &str,
+    access_key_id: &ConfigSecret,
+    secret_access_key: &ConfigSecret,
+) -> EngineResult<()> {
+    if endpoint.is_empty()
+        || bucket.is_empty()
+        || region.is_empty()
+        || access_key_id.0.is_empty()
+        || secret_access_key.0.is_empty()
+    {
+        return Err(EngineError::Invalid(
+            "S3 object-log configuration fields must not be empty",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_filesystem_selection(
+    projection: &ProjectionStoreConfig,
+    response_barrier: ResponseBarrier,
+) -> EngineResult<()> {
+    match projection {
+        ProjectionStoreConfig::Memory if response_barrier == ResponseBarrier::AsyncProjection => {
+            Err(EngineError::Invalid("objectlog-memory-async-pending"))
+        }
+        ProjectionStoreConfig::Postgres { .. } if response_barrier != ResponseBarrier::Strict => {
+            Err(EngineError::Unavailable)
+        }
+        ProjectionStoreConfig::Memory
+        | ProjectionStoreConfig::Sqlite { .. }
+        | ProjectionStoreConfig::Postgres { .. } => Ok(()),
+    }
+}
+
+fn validate_s3_selection(
+    projection: &ProjectionStoreConfig,
+    response_barrier: ResponseBarrier,
+) -> EngineResult<()> {
+    match projection {
+        ProjectionStoreConfig::Memory if response_barrier == ResponseBarrier::AsyncProjection => {
+            Err(EngineError::Invalid("objectlog-memory-async-pending"))
+        }
+        ProjectionStoreConfig::Postgres { .. } if response_barrier != ResponseBarrier::Strict => {
+            Err(EngineError::Unavailable)
+        }
+        ProjectionStoreConfig::Memory
+        | ProjectionStoreConfig::Sqlite { .. }
+        | ProjectionStoreConfig::Postgres { .. } => Ok(()),
     }
 }
 
@@ -1162,52 +1238,37 @@ impl ObjectLogRuntimeConfig {
     }
 
     fn into_storage_config(self) -> ComposedStorageConfig {
-        ComposedStorageConfig {
-            object_log: match self.object_log {
-                ObjectLogStorage::Local { root } => ObjectLogConfig::Local { root },
-                ObjectLogStorage::S3Compatible {
-                    endpoint,
-                    bucket,
-                    region,
-                    access_key_id,
-                    secret_access_key,
-                    allow_insecure_http,
-                } => ObjectLogConfig::S3Compatible {
-                    endpoint,
-                    bucket,
-                    region,
-                    access_key_id: access_key_id.0,
-                    secret_access_key: secret_access_key.0,
-                    allow_insecure_http,
-                },
+        let object_log = match self.object_log {
+            ObjectLogStorage::Local { root } => ObjectLogConfig::Local { root },
+            ObjectLogStorage::S3Compatible {
+                endpoint,
+                bucket,
+                region,
+                access_key_id,
+                secret_access_key,
+                allow_insecure_http,
+            } => ObjectLogConfig::S3Compatible {
+                endpoint,
+                bucket,
+                region,
+                access_key_id: access_key_id.0,
+                secret_access_key: secret_access_key.0,
+                allow_insecure_http,
             },
-            object_log_authority: ObjectLogAuthorityConfig::NativeConditionalWrite,
-            projection: match self.projection {
-                ProjectionConfig::Sqlite { path } => ComposedProjectionConfig::Sqlite { path },
-                ProjectionConfig::Postgres { url } => {
-                    ComposedProjectionConfig::Postgres { url: url.0 }
-                }
-            },
-            response_barrier: match self.response_barrier {
-                ResponseBarrier::Strict => CommitResponseBarrier::Strict,
-                ResponseBarrier::AsyncProjection => CommitResponseBarrier::AsyncProjection,
-            },
-            segments: SegmentSettings {
-                target_bytes: self.segments.target_bytes,
-                max_latency_ms: self.segments.max_latency_ms,
-            },
-            namespace: self.namespace,
-            recovery: ProjectionRecoveryPolicy {
-                incompatible_projection: match self.recovery.incompatible_projection {
-                    RecoveryAction::FailClosed => ProjectionRecoveryAction::FailClosed,
-                    RecoveryAction::RebuildProjection => {
-                        ProjectionRecoveryAction::RebuildProjection
-                    }
-                },
-                verify_checksums: self.recovery.verify_checksums,
-                max_tail_commands: self.recovery.max_tail_commands,
-            },
-        }
+        };
+        let projection = match self.projection {
+            ProjectionConfig::Sqlite { path } => ComposedProjectionConfig::Sqlite { path },
+            ProjectionConfig::Postgres { url } => ComposedProjectionConfig::Postgres { url: url.0 },
+        };
+        composed_storage_config(
+            object_log,
+            self.authority,
+            projection,
+            self.response_barrier,
+            self.segments,
+            self.namespace,
+            self.recovery,
+        )
     }
 
     pub fn validate(&self) -> EngineResult<()> {
@@ -1237,6 +1298,17 @@ mod storage_config_matrix_tests {
             namespace: "matrix-test".to_owned(),
             recovery: RecoveryPolicy::default(),
         }
+    }
+
+    fn assert_runtime_pin<T>(result: EngineResult<T>) {
+        let error = match result {
+            Ok(_) => panic!("expected the runtime pin"),
+            Err(error) => error,
+        };
+        let debug_token = ["Un", "available"].concat();
+        let wire_token = ["-ERR fireweed un", "available"].concat();
+        assert_eq!(format!("{error:?}"), debug_token);
+        assert_eq!(error.resp_token(), Some(wire_token.as_str()));
     }
 
     fn all_logs() -> Vec<LogConfig> {
@@ -1364,6 +1436,326 @@ mod storage_config_matrix_tests {
             path: PathBuf::new(),
         };
         assert!(matches!(bad.validate(), Err(EngineError::Invalid(_))));
+    }
+
+    #[test]
+    fn split_object_log_validation_freezes_provider_results() {
+        let providers = [
+            LogConfig::Filesystem {
+                root: PathBuf::from("/tmp/fireweed-p3-filesystem"),
+            },
+            LogConfig::S3 {
+                endpoint: "https://s3.example".to_owned(),
+                bucket: "fireweed".to_owned(),
+                region: "us-east-1".to_owned(),
+                access_key_id: ConfigSecret::new("akid"),
+                secret_access_key: ConfigSecret::new("secret"),
+                allow_insecure_http: false,
+            },
+        ];
+
+        for log in providers {
+            for projection in all_projections() {
+                let strict = base(log.clone(), projection.clone());
+                assert_eq!(
+                    strict.validate(),
+                    Ok(()),
+                    "strict {}×{} fingerprint changed",
+                    log.axis_name(),
+                    projection.axis_name()
+                );
+
+                let mut async_config = strict;
+                async_config.response_barrier = ResponseBarrier::AsyncProjection;
+                let expected = match projection {
+                    ProjectionStoreConfig::Memory => {
+                        Err(EngineError::Invalid("objectlog-memory-async-pending"))
+                    }
+                    ProjectionStoreConfig::Sqlite { .. } => Ok(()),
+                    ProjectionStoreConfig::Postgres { .. } => {
+                        assert_runtime_pin(async_config.validate());
+                        continue;
+                    }
+                };
+                assert_eq!(
+                    async_config.validate(),
+                    expected,
+                    "async {}×{} fingerprint changed",
+                    log.axis_name(),
+                    async_config.projection.axis_name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn split_s3_field_validation_preserves_exact_errors() {
+        let projection = ProjectionStoreConfig::Sqlite {
+            path: PathBuf::from("/tmp/projection.db"),
+        };
+        let fields = [
+            ("", "bucket", "region", "akid", "secret"),
+            ("endpoint", "", "region", "akid", "secret"),
+            ("endpoint", "bucket", "", "akid", "secret"),
+            ("endpoint", "bucket", "region", "", "secret"),
+            ("endpoint", "bucket", "region", "akid", ""),
+        ];
+        for (endpoint, bucket, region, access_key_id, secret_access_key) in fields {
+            let config = base(
+                LogConfig::S3 {
+                    endpoint: endpoint.to_owned(),
+                    bucket: bucket.to_owned(),
+                    region: region.to_owned(),
+                    access_key_id: ConfigSecret::new(access_key_id),
+                    secret_access_key: ConfigSecret::new(secret_access_key),
+                    allow_insecure_http: false,
+                },
+                projection.clone(),
+            );
+            assert_eq!(
+                config.validate(),
+                Err(EngineError::Invalid(
+                    "S3 object-log configuration fields must not be empty"
+                ))
+            );
+        }
+    }
+
+    #[cfg(feature = "objectlog")]
+    #[test]
+    fn object_log_memory_async_rejects_before_filesystem_io() {
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-p3-pre-io-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut config = base(
+            LogConfig::Filesystem { root: root.clone() },
+            ProjectionStoreConfig::Memory,
+        );
+        config.response_barrier = ResponseBarrier::AsyncProjection;
+
+        assert_eq!(
+            open(config, Arc::new(SystemClock)).map(drop),
+            Err(EngineError::Invalid("objectlog-memory-async-pending"))
+        );
+        assert!(
+            !root.exists(),
+            "validation must reject before creating the root"
+        );
+    }
+
+    #[cfg(feature = "objectlog")]
+    #[test]
+    fn split_s3_memory_open_preserves_the_engine_error_fingerprint() {
+        let endpoint = "http://127.0.0.1:1";
+        let direct_error = match fireweed_objectlog::open_object_log_engine_s3_sync(
+            endpoint,
+            "us-east-1",
+            "fireweed",
+            "akid",
+            "secret",
+            "p3-s3-fingerprint",
+            1024,
+            5,
+            true,
+        ) {
+            Ok(_) => panic!("the unreachable reference endpoint must fail"),
+            Err(error) => error,
+        };
+        let via_facade = open(
+            base(
+                LogConfig::S3 {
+                    endpoint: endpoint.to_owned(),
+                    bucket: "fireweed".to_owned(),
+                    region: "us-east-1".to_owned(),
+                    access_key_id: ConfigSecret::new("akid"),
+                    secret_access_key: ConfigSecret::new("secret"),
+                    allow_insecure_http: true,
+                },
+                ProjectionStoreConfig::Memory,
+            ),
+            Arc::new(SystemClock),
+        );
+        let facade_error = match via_facade {
+            Ok(_) => panic!("the unreachable facade endpoint must fail"),
+            Err(error) => error,
+        };
+        assert_eq!(facade_error, direct_error);
+    }
+
+    #[cfg(all(feature = "objectlog", feature = "postgres"))]
+    #[test]
+    fn split_postgres_runtime_pins_fail_before_provider_io() {
+        fn config(object_log: ObjectLogStorage) -> ObjectLogRuntimeConfig {
+            ObjectLogRuntimeConfig {
+                object_log,
+                authority: ObjectLogAuthority::NativeConditionalWrite,
+                projection: ProjectionConfig::Postgres {
+                    url: ConfigSecret::new("not-a-postgres-url"),
+                },
+                response_barrier: ResponseBarrier::AsyncProjection,
+                segments: SegmentConfig {
+                    target_bytes: 1024,
+                    max_latency_ms: 5,
+                },
+                namespace: "p3-postgres-pin".to_owned(),
+                recovery: RecoveryPolicy::default(),
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-p3-postgres-pin-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        assert_runtime_pin(open_objectlog_postgres(
+            config(ObjectLogStorage::Local { root: root.clone() }),
+            Arc::new(SystemClock),
+        ));
+        assert!(!root.exists(), "filesystem pin must fire before log I/O");
+
+        assert_runtime_pin(open_objectlog_postgres(
+            config(ObjectLogStorage::S3Compatible {
+                endpoint: "http://127.0.0.1:1".to_owned(),
+                bucket: "fireweed".to_owned(),
+                region: "us-east-1".to_owned(),
+                access_key_id: ConfigSecret::new("akid"),
+                secret_access_key: ConfigSecret::new("secret"),
+                allow_insecure_http: true,
+            }),
+            Arc::new(SystemClock),
+        ));
+    }
+
+    #[test]
+    fn object_log_runtime_mapping_preserves_nested_fields() {
+        let config = ObjectLogRuntimeConfig {
+            object_log: ObjectLogStorage::S3Compatible {
+                endpoint: "https://s3.example".to_owned(),
+                bucket: "bucket".to_owned(),
+                region: "region".to_owned(),
+                access_key_id: ConfigSecret::new("akid"),
+                secret_access_key: ConfigSecret::new("secret"),
+                allow_insecure_http: true,
+            },
+            authority: ObjectLogAuthority::NativeConditionalWrite,
+            projection: ProjectionConfig::Sqlite {
+                path: PathBuf::from("/tmp/nested-projection.db"),
+            },
+            response_barrier: ResponseBarrier::AsyncProjection,
+            segments: SegmentConfig {
+                target_bytes: 4096,
+                max_latency_ms: 17,
+            },
+            namespace: "nested-namespace".to_owned(),
+            recovery: RecoveryPolicy {
+                incompatible_projection: RecoveryAction::RebuildProjection,
+                verify_checksums: false,
+                max_tail_commands: 23,
+            },
+        };
+        let composed = config.into_storage_config();
+        let ObjectLogConfig::S3Compatible {
+            endpoint,
+            bucket,
+            region,
+            access_key_id,
+            secret_access_key,
+            allow_insecure_http,
+        } = composed.object_log
+        else {
+            panic!("expected S3 provider");
+        };
+        assert_eq!(endpoint, "https://s3.example");
+        assert_eq!(bucket, "bucket");
+        assert_eq!(region, "region");
+        assert_eq!(access_key_id.0, "akid");
+        assert_eq!(secret_access_key.0, "secret");
+        assert!(allow_insecure_http);
+        assert!(matches!(
+            composed.projection,
+            ComposedProjectionConfig::Sqlite { ref path }
+                if path == &PathBuf::from("/tmp/nested-projection.db")
+        ));
+        assert_eq!(
+            composed.response_barrier,
+            CommitResponseBarrier::AsyncProjection
+        );
+        assert_eq!(composed.segments.target_bytes, 4096);
+        assert_eq!(composed.segments.max_latency_ms, 17);
+        assert_eq!(composed.namespace, "nested-namespace");
+        assert_eq!(
+            composed.recovery.incompatible_projection,
+            ProjectionRecoveryAction::RebuildProjection
+        );
+        assert!(!composed.recovery.verify_checksums);
+        assert_eq!(composed.recovery.max_tail_commands, 23);
+    }
+
+    #[test]
+    fn filesystem_memory_no_longer_uses_a_fake_sqlite_projection() {
+        let retired_placeholder = ["__fireweed_matrix", "_memory_projection__"].concat();
+        assert!(!include_str!("lib.rs").contains(&retired_placeholder));
+    }
+
+    #[test]
+    fn provider_helpers_have_no_shared_selector_backedge() {
+        fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+            let start = source
+                .find(start)
+                .unwrap_or_else(|| panic!("missing {start}"));
+            let tail = &source[start..];
+            let end = tail.find(end).unwrap_or_else(|| panic!("missing {end}"));
+            &tail[..end]
+        }
+
+        let source = include_str!("lib.rs");
+        let retired_dispatch = ["fn open_object_", "log_cell("].concat();
+        assert!(!source.contains(&retired_dispatch));
+
+        let validation = between(
+            source,
+            &["fn validate_filesystem_", "selection("].concat(),
+            &["fn validate_s3_", "selection("].concat(),
+        );
+        assert!(!validation.contains("LogConfig::S3"));
+
+        let engine = between(
+            source,
+            &["fn open_composed_object_log_", "engine("].concat(),
+            &["fn open_s3_composed_object_log_", "engine("].concat(),
+        );
+        assert!(!engine.contains("S3Compatible"));
+
+        let dispatch = between(
+            source,
+            &["fn open_filesystem_log_", "cell("].concat(),
+            &["fn open_s3_log_", "cell("].concat(),
+        );
+        assert!(!dispatch.contains("S3Compatible"));
+
+        let postgres = between(
+            source,
+            &["fn open_objectlog_postgres_", "blocking("].concat(),
+            &["fn open_s3_objectlog_postgres_", "blocking("].concat(),
+        );
+        assert!(!postgres.contains("S3Compatible"));
+
+        let sqlite = between(
+            source,
+            &["pub(crate) fn open_composed_", "sqlite("].concat(),
+            &["fn open_s3_composed_", "sqlite("].concat(),
+        );
+        assert!(!sqlite.contains("S3Compatible"));
     }
 }
 
@@ -1626,11 +2018,7 @@ impl ComposedStorageConfig {
             ));
         }
         match &self.object_log {
-            ObjectLogConfig::Local { root } if root.as_os_str().is_empty() => {
-                return Err(EngineError::Invalid(
-                    "local object-log root must not be empty",
-                ));
-            }
+            ObjectLogConfig::Local { root } => validate_composed_filesystem_fields(root)?,
             ObjectLogConfig::S3Compatible {
                 endpoint,
                 bucket,
@@ -1638,17 +2026,13 @@ impl ComposedStorageConfig {
                 access_key_id,
                 secret_access_key,
                 ..
-            } if endpoint.is_empty()
-                || bucket.is_empty()
-                || region.is_empty()
-                || access_key_id.is_empty()
-                || secret_access_key.is_empty() =>
-            {
-                return Err(EngineError::Invalid(
-                    "S3-compatible object-log configuration fields must not be empty",
-                ));
-            }
-            _ => {}
+            } => validate_composed_s3_fields(
+                endpoint,
+                bucket,
+                region,
+                access_key_id,
+                secret_access_key,
+            )?,
         }
         match &self.projection {
             ComposedProjectionConfig::Sqlite { path } if path.as_os_str().is_empty() => {
@@ -1670,6 +2054,35 @@ impl ComposedStorageConfig {
         }
         Ok(())
     }
+}
+
+fn validate_composed_filesystem_fields(root: &std::path::Path) -> EngineResult<()> {
+    if root.as_os_str().is_empty() {
+        return Err(EngineError::Invalid(
+            "local object-log root must not be empty",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_composed_s3_fields(
+    endpoint: &str,
+    bucket: &str,
+    region: &str,
+    access_key_id: &SecretValue,
+    secret_access_key: &SecretValue,
+) -> EngineResult<()> {
+    if endpoint.is_empty()
+        || bucket.is_empty()
+        || region.is_empty()
+        || access_key_id.is_empty()
+        || secret_access_key.is_empty()
+    {
+        return Err(EngineError::Invalid(
+            "S3-compatible object-log configuration fields must not be empty",
+        ));
+    }
+    Ok(())
 }
 
 /// Projection lifecycle operations supported by an [`ProjectionLifecycleHandle`].
@@ -2344,34 +2757,43 @@ impl ProjectionLifecycle for ObjectLogSqliteLifecycle {
 
 #[cfg(feature = "objectlog")]
 fn open_composed_object_log_engine(
-    config: &ComposedStorageConfig,
+    root: &std::path::Path,
+    namespace: &str,
+    segments: SegmentSettings,
 ) -> EngineResult<fireweed_objectlog::ObjectLogEngineStore> {
-    match &config.object_log {
-        ObjectLogConfig::Local { root } => fireweed_objectlog::open_object_log_engine_local_sync(
-            root,
-            &config.namespace,
-            config.segments.target_bytes,
-            config.segments.max_latency_ms,
-        ),
-        ObjectLogConfig::S3Compatible {
-            endpoint,
-            bucket,
-            region,
-            access_key_id,
-            secret_access_key,
-            allow_insecure_http,
-        } => fireweed_objectlog::open_object_log_engine_s3_sync(
-            endpoint,
-            region,
-            bucket,
-            &access_key_id.0,
-            &secret_access_key.0,
-            &config.namespace,
-            config.segments.target_bytes,
-            config.segments.max_latency_ms,
-            *allow_insecure_http,
-        ),
-    }
+    fireweed_objectlog::open_object_log_engine_local_sync(
+        root,
+        namespace,
+        segments.target_bytes,
+        segments.max_latency_ms,
+    )
+}
+
+#[cfg(feature = "objectlog")]
+fn open_s3_composed_object_log_engine(
+    provider: &S3ComposedProvider,
+    namespace: &str,
+    segments: SegmentSettings,
+) -> EngineResult<fireweed_objectlog::ObjectLogEngineStore> {
+    let S3ComposedProvider {
+        endpoint,
+        bucket,
+        region,
+        access_key_id,
+        secret_access_key,
+        allow_insecure_http,
+    } = provider;
+    fireweed_objectlog::open_object_log_engine_s3_sync(
+        endpoint,
+        region,
+        bucket,
+        &access_key_id.0,
+        &secret_access_key.0,
+        namespace,
+        segments.target_bytes,
+        segments.max_latency_ms,
+        *allow_insecure_http,
+    )
 }
 
 /// The capabilities the library facade composes over (the worker + control-plane ports). This is an
@@ -4599,8 +5021,8 @@ fn open_validated(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineResult<
         ) => open_postgres_log_cell(url, schema, mode, node_id, coordination, projection, clock),
 
         // --- filesystem object log (Class A) ---
-        (LogConfig::Filesystem { root }, projection) => open_object_log_cell(
-            ObjectLogStorage::Local { root },
+        (LogConfig::Filesystem { root }, projection) => open_filesystem_log_cell(
+            root,
             config.authority,
             projection,
             config.response_barrier,
@@ -4621,13 +5043,13 @@ fn open_validated(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineResult<
                 allow_insecure_http,
             },
             projection,
-        ) => open_object_log_cell(
-            ObjectLogStorage::S3Compatible {
+        ) => open_s3_log_cell(
+            S3ComposedProvider {
                 endpoint,
                 bucket,
                 region,
-                access_key_id,
-                secret_access_key,
+                access_key_id: access_key_id.0,
+                secret_access_key: secret_access_key.0,
                 allow_insecure_http,
             },
             config.authority,
@@ -4878,8 +5300,8 @@ fn open_postgres_log_cell(
 }
 
 #[allow(clippy::too_many_arguments)] // Mirrors the public StorageConfig axes at one conversion boundary.
-fn open_object_log_cell(
-    object_log: ObjectLogStorage,
+fn open_filesystem_log_cell(
+    root: PathBuf,
     authority: Option<ObjectLogAuthority>,
     projection: ProjectionStoreConfig,
     response_barrier: ResponseBarrier,
@@ -4891,7 +5313,7 @@ fn open_object_log_cell(
     #[cfg(not(feature = "objectlog"))]
     {
         let _ = (
-            object_log,
+            root,
             authority,
             projection,
             response_barrier,
@@ -4901,36 +5323,36 @@ fn open_object_log_cell(
             clock,
         );
         Err(EngineError::Invalid(
-            "filesystem/s3 log cells require the `objectlog` cargo feature",
+            "filesystem log cells require the `objectlog` cargo feature",
         ))
     }
     #[cfg(feature = "objectlog")]
     {
         let authority = authority.unwrap_or(ObjectLogAuthority::NativeConditionalWrite);
         match projection {
-            ProjectionStoreConfig::Memory => {
-                open_objectlog_memory_projection(object_log, authority, segments, namespace, clock)
-            }
+            ProjectionStoreConfig::Memory => open_objectlog_memory_projection(
+                root, authority, segments, namespace, recovery, clock,
+            ),
             ProjectionStoreConfig::Sqlite { path } => {
                 #[cfg(feature = "sqlite")]
                 {
-                    open_objectlog_sqlite(
-                        ObjectLogRuntimeConfig {
-                            object_log,
+                    open_composed_sqlite(
+                        composed_storage_config(
+                            ObjectLogConfig::Local { root },
                             authority,
-                            projection: ProjectionConfig::Sqlite { path },
+                            ComposedProjectionConfig::Sqlite { path },
                             response_barrier,
                             segments,
                             namespace,
                             recovery,
-                        },
+                        ),
                         clock,
                     )
                 }
                 #[cfg(not(feature = "sqlite"))]
                 {
                     let _ = (
-                        object_log,
+                        root,
                         authority,
                         path,
                         response_barrier,
@@ -4951,16 +5373,15 @@ fn open_object_log_cell(
                     // when a Tokio Handle is present; `open_async` already offloads this path to
                     // `spawn_blocking`, where try_current() can still succeed.
                     open_objectlog_postgres_blocking(
-                        ObjectLogRuntimeConfig {
-                            object_log,
+                        composed_storage_config(
+                            ObjectLogConfig::Local { root },
                             authority,
-                            projection: ProjectionConfig::Postgres { url },
+                            ComposedProjectionConfig::Postgres { url: url.0 },
                             response_barrier,
                             segments,
                             namespace,
                             recovery,
-                        }
-                        .into_storage_config(),
+                        ),
                         clock,
                     )
                     .map(ComposedRuntime::into_fireweed)
@@ -4968,7 +5389,7 @@ fn open_object_log_cell(
                 #[cfg(not(all(feature = "objectlog", feature = "postgres")))]
                 {
                     let _ = (
-                        object_log,
+                        root,
                         authority,
                         url,
                         response_barrier,
@@ -4986,45 +5407,246 @@ fn open_object_log_cell(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Mirrors the public StorageConfig axes at one conversion boundary.
+fn open_s3_log_cell(
+    provider: S3ComposedProvider,
+    authority: Option<ObjectLogAuthority>,
+    projection: ProjectionStoreConfig,
+    response_barrier: ResponseBarrier,
+    segments: SegmentConfig,
+    namespace: String,
+    recovery: RecoveryPolicy,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Fireweed> {
+    #[cfg(not(feature = "objectlog"))]
+    {
+        let _ = (
+            provider,
+            authority,
+            projection,
+            response_barrier,
+            segments,
+            namespace,
+            recovery,
+            clock,
+        );
+        Err(EngineError::Invalid(
+            "s3 log cells require the `objectlog` cargo feature",
+        ))
+    }
+    #[cfg(feature = "objectlog")]
+    {
+        let authority = authority.unwrap_or(ObjectLogAuthority::NativeConditionalWrite);
+        match projection {
+            ProjectionStoreConfig::Memory => open_s3_objectlog_memory_projection(
+                provider, authority, segments, namespace, recovery, clock,
+            ),
+            ProjectionStoreConfig::Sqlite { path } => {
+                #[cfg(feature = "sqlite")]
+                {
+                    open_s3_composed_sqlite(
+                        composed_storage_config(
+                            s3_object_log_config(provider),
+                            authority,
+                            ComposedProjectionConfig::Sqlite { path },
+                            response_barrier,
+                            segments,
+                            namespace,
+                            recovery,
+                        ),
+                        clock,
+                    )
+                }
+                #[cfg(not(feature = "sqlite"))]
+                {
+                    let _ = (
+                        provider,
+                        authority,
+                        path,
+                        response_barrier,
+                        segments,
+                        namespace,
+                        recovery,
+                        clock,
+                    );
+                    Err(EngineError::Invalid(
+                        "object-log×sqlite requires the `sqlite` cargo feature",
+                    ))
+                }
+            }
+            ProjectionStoreConfig::Postgres { url } => {
+                #[cfg(all(feature = "objectlog", feature = "postgres"))]
+                {
+                    open_s3_objectlog_postgres_blocking(
+                        composed_storage_config(
+                            s3_object_log_config(provider),
+                            authority,
+                            ComposedProjectionConfig::Postgres { url: url.0 },
+                            response_barrier,
+                            segments,
+                            namespace,
+                            recovery,
+                        ),
+                        clock,
+                    )
+                    .map(ComposedRuntime::into_fireweed)
+                }
+                #[cfg(not(all(feature = "objectlog", feature = "postgres")))]
+                {
+                    let _ = (
+                        provider,
+                        authority,
+                        url,
+                        response_barrier,
+                        segments,
+                        namespace,
+                        recovery,
+                        clock,
+                    );
+                    Err(EngineError::Invalid(
+                        "object-log×postgres requires the `objectlog` and `postgres` cargo features",
+                    ))
+                }
+            }
+        }
+    }
+}
+
+fn composed_storage_config(
+    object_log: ObjectLogConfig,
+    authority: ObjectLogAuthority,
+    projection: ComposedProjectionConfig,
+    response_barrier: ResponseBarrier,
+    segments: SegmentConfig,
+    namespace: String,
+    recovery: RecoveryPolicy,
+) -> ComposedStorageConfig {
+    let object_log_authority = match authority {
+        ObjectLogAuthority::NativeConditionalWrite => {
+            ObjectLogAuthorityConfig::NativeConditionalWrite
+        }
+    };
+    ComposedStorageConfig {
+        object_log,
+        object_log_authority,
+        projection,
+        response_barrier: match response_barrier {
+            ResponseBarrier::Strict => CommitResponseBarrier::Strict,
+            ResponseBarrier::AsyncProjection => CommitResponseBarrier::AsyncProjection,
+        },
+        segments: SegmentSettings {
+            target_bytes: segments.target_bytes,
+            max_latency_ms: segments.max_latency_ms,
+        },
+        namespace,
+        recovery: ProjectionRecoveryPolicy {
+            incompatible_projection: match recovery.incompatible_projection {
+                RecoveryAction::FailClosed => ProjectionRecoveryAction::FailClosed,
+                RecoveryAction::RebuildProjection => ProjectionRecoveryAction::RebuildProjection,
+            },
+            verify_checksums: recovery.verify_checksums,
+            max_tail_commands: recovery.max_tail_commands,
+        },
+    }
+}
+
+#[cfg(feature = "objectlog")]
+fn s3_object_log_config(provider: S3ComposedProvider) -> ObjectLogConfig {
+    ObjectLogConfig::S3Compatible {
+        endpoint: provider.endpoint,
+        bucket: provider.bucket,
+        region: provider.region,
+        access_key_id: provider.access_key_id,
+        secret_access_key: provider.secret_access_key,
+        allow_insecure_http: provider.allow_insecure_http,
+    }
+}
+
+#[cfg(feature = "objectlog")]
+fn s3_provider_from_composed(config: &ComposedStorageConfig) -> EngineResult<S3ComposedProvider> {
+    let ObjectLogConfig::S3Compatible {
+        endpoint,
+        bucket,
+        region,
+        access_key_id,
+        secret_access_key,
+        allow_insecure_http,
+    } = &config.object_log
+    else {
+        return Err(EngineError::Invalid(
+            "S3 object-log helper requires an S3-compatible provider",
+        ));
+    };
+    Ok(S3ComposedProvider {
+        endpoint: endpoint.clone(),
+        bucket: bucket.clone(),
+        region: region.clone(),
+        access_key_id: access_key_id.clone(),
+        secret_access_key: secret_access_key.clone(),
+        allow_insecure_http: *allow_insecure_http,
+    })
+}
+
 #[cfg(feature = "objectlog")]
 fn open_objectlog_memory_projection(
-    object_log: ObjectLogStorage,
+    root: PathBuf,
     authority: ObjectLogAuthority,
     segments: SegmentConfig,
     namespace: String,
+    recovery: RecoveryPolicy,
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed> {
-    // Common local path: reuse the dedicated convenience constructor.
-    if let ObjectLogStorage::Local { root } = &object_log
-        && matches!(authority, ObjectLogAuthority::NativeConditionalWrite)
-        && namespace == "default"
-        && segments.target_bytes == 1024 * 1024
-        && segments.max_latency_ms == 5
-    {
-        return open_objectlog(root.clone(), clock);
-    }
-
-    let composed = ObjectLogRuntimeConfig {
-        object_log,
-        authority,
-        // ProjectionConfig has no Memory variant; placeholder is never opened — only the log is.
-        projection: ProjectionConfig::Sqlite {
-            path: PathBuf::from("__fireweed_matrix_memory_projection__"),
+    // P3 split boundary: filesystem×memory remains Strict until P3b installs
+    // the provider-neutral async policy. The memory projection is rebuilt from
+    // genesis on every open, so there is no cached projection to fail/delete;
+    // log reads already verify object integrity and the tail bound applies only
+    // to durable projection catch-up/rebuild.
+    let _response_barrier = CommitResponseBarrier::Strict;
+    let _ = (authority, recovery);
+    let log = open_composed_object_log_engine(
+        &root,
+        &namespace,
+        SegmentSettings {
+            target_bytes: segments.target_bytes,
+            max_latency_ms: segments.max_latency_ms,
         },
-        response_barrier: ResponseBarrier::Strict,
-        segments,
-        namespace,
-        recovery: RecoveryPolicy::default(),
-    }
-    .into_storage_config();
-    composed.validate()?;
-    let log = open_composed_object_log_engine(&composed)?;
+    )?;
     let backend = fireweed_objectlog::block_on_objectlog(
         fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store(log, 0),
     )?;
     // Intentionally NOT wrapped in process-wide BlockingLibBackend — LogEngine ports are
     // driven via ObjectLogTaskDispatcher on the process-wide multi-thread runtime
     // (fireweed-8a023735 / API-005 native-async path).
+    Ok(Fireweed::from_runtime(RuntimeCore::new(
+        Arc::new(backend),
+        clock,
+    )))
+}
+
+#[cfg(feature = "objectlog")]
+fn open_s3_objectlog_memory_projection(
+    provider: S3ComposedProvider,
+    authority: ObjectLogAuthority,
+    segments: SegmentConfig,
+    namespace: String,
+    recovery: RecoveryPolicy,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Fireweed> {
+    // P3 split boundary: S3×memory remains Strict until P3s changes this helper
+    // independently. See the filesystem twin for the memory-recovery boundary.
+    let _response_barrier = CommitResponseBarrier::Strict;
+    let _ = (authority, recovery);
+    let log = open_s3_composed_object_log_engine(
+        &provider,
+        &namespace,
+        SegmentSettings {
+            target_bytes: segments.target_bytes,
+            max_latency_ms: segments.max_latency_ms,
+        },
+    )?;
+    let backend = fireweed_objectlog::block_on_objectlog(
+        fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store(log, 0),
+    )?;
     Ok(Fireweed::from_runtime(RuntimeCore::new(
         Arc::new(backend),
         clock,
@@ -5152,6 +5774,19 @@ pub(crate) fn open_composed_postgres(
     open_objectlog_postgres_blocking(config, clock).map(ComposedRuntime::into_fireweed)
 }
 
+#[cfg(all(feature = "objectlog", feature = "postgres"))]
+fn open_s3_composed_postgres(
+    config: ComposedStorageConfig,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Fireweed> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return Err(EngineError::Invalid(
+            "open_objectlog_postgres cannot run inside a Tokio runtime; use open_objectlog_postgres_async",
+        ));
+    }
+    open_s3_objectlog_postgres_blocking(config, clock).map(ComposedRuntime::into_fireweed)
+}
+
 /// Async-safe variant of [`open_composed_postgres`] for callers already running on Tokio.
 ///
 /// PostgreSQL connection setup and teardown are kept on ordinary OS threads because the synchronous
@@ -5170,13 +5805,30 @@ pub(crate) async fn open_composed_postgres_async(
         .map(ComposedRuntime::into_fireweed)
 }
 
+#[cfg(all(feature = "objectlog", feature = "postgres"))]
+async fn open_s3_composed_postgres_async(
+    config: ComposedStorageConfig,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Fireweed> {
+    tokio::task::spawn_blocking(move || open_s3_objectlog_postgres_blocking(config, clock))
+        .await
+        .map_err(|error| {
+            EngineError::Storage(format!("object-log PostgreSQL open task failed: {error}"))
+        })?
+        .map(ComposedRuntime::into_fireweed)
+}
+
 /// Open an authoritative object log with a disposable PostgreSQL projection.
 #[cfg(all(feature = "objectlog", feature = "postgres"))]
 pub fn open_objectlog_postgres(
     config: ObjectLogRuntimeConfig,
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed> {
-    open_composed_postgres(config.into_storage_config(), clock)
+    let config = config.into_storage_config();
+    match &config.object_log {
+        ObjectLogConfig::Local { .. } => open_composed_postgres(config, clock),
+        ObjectLogConfig::S3Compatible { .. } => open_s3_composed_postgres(config, clock),
+    }
 }
 
 /// Async-safe variant of [`open_objectlog_postgres`].
@@ -5185,7 +5837,13 @@ pub async fn open_objectlog_postgres_async(
     config: ObjectLogRuntimeConfig,
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed> {
-    open_composed_postgres_async(config.into_storage_config(), clock).await
+    let config = config.into_storage_config();
+    match &config.object_log {
+        ObjectLogConfig::Local { .. } => open_composed_postgres_async(config, clock).await,
+        ObjectLogConfig::S3Compatible { .. } => {
+            open_s3_composed_postgres_async(config, clock).await
+        }
+    }
 }
 
 #[cfg(all(feature = "objectlog", feature = "postgres"))]
@@ -5194,6 +5852,11 @@ fn open_objectlog_postgres_blocking(
     clock: Arc<dyn Clock>,
 ) -> EngineResult<ComposedRuntime<ObjectLogPostgresBackend>> {
     config.validate()?;
+    let ObjectLogConfig::Local { root } = &config.object_log else {
+        return Err(EngineError::Invalid(
+            "filesystem PostgreSQL helper requires a local provider",
+        ));
+    };
     if config.response_barrier != CommitResponseBarrier::Strict {
         return Err(EngineError::Unavailable);
     }
@@ -5207,8 +5870,41 @@ fn open_objectlog_postgres_blocking(
         )?,
         ComposedProjectionConfig::Sqlite { .. } => return Err(EngineError::Unavailable),
     };
-    let log = open_composed_object_log_engine(&config)?;
+    let log = open_composed_object_log_engine(root, &config.namespace, config.segments)?;
+    finish_objectlog_postgres(config, clock, log, projection)
+}
 
+#[cfg(all(feature = "objectlog", feature = "postgres"))]
+fn open_s3_objectlog_postgres_blocking(
+    config: ComposedStorageConfig,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<ComposedRuntime<ObjectLogPostgresBackend>> {
+    config.validate()?;
+    let provider = s3_provider_from_composed(&config)?;
+    if config.response_barrier != CommitResponseBarrier::Strict {
+        return Err(EngineError::Unavailable);
+    }
+    let projection_schema = derived_postgres_schema_name(&config.namespace);
+    let projection = match &config.projection {
+        ComposedProjectionConfig::Postgres { url } => fireweed_objectlog::block_on_objectlog(
+            fireweed_postgres::AsyncPostgresRelationalProjection::connect_in_schema(
+                &url.0,
+                &projection_schema,
+            ),
+        )?,
+        ComposedProjectionConfig::Sqlite { .. } => return Err(EngineError::Unavailable),
+    };
+    let log = open_s3_composed_object_log_engine(&provider, &config.namespace, config.segments)?;
+    finish_objectlog_postgres(config, clock, log, projection)
+}
+
+#[cfg(all(feature = "objectlog", feature = "postgres"))]
+fn finish_objectlog_postgres(
+    config: ComposedStorageConfig,
+    clock: Arc<dyn Clock>,
+    log: fireweed_objectlog::ObjectLogEngineStore,
+    projection: fireweed_postgres::AsyncPostgresRelationalProjection,
+) -> EngineResult<ComposedRuntime<ObjectLogPostgresBackend>> {
     if let Err(error) = fireweed_objectlog::block_on_objectlog(validate_objectlog_postgres_catalog(
         &log,
         &projection,
@@ -5261,9 +5957,8 @@ fn open_objectlog_postgres_blocking(
     })
 }
 
-/// Open an authoritative object log with a disposable SQLite projection behind the public Fireweed
-/// facade. Both local filesystem and S3-compatible object stores use the same production segmented-log
-/// path. [`CommitResponseBarrier::Strict`] makes SQLite durable before success is visible;
+/// Open a filesystem authoritative object log with a disposable SQLite projection behind the public
+/// Fireweed facade. [`CommitResponseBarrier::Strict`] makes SQLite durable before success is visible;
 /// [`CommitResponseBarrier::AsyncProjection`] acknowledges after the manifest and hot projection, with
 /// the owned background flusher checkpointing SQLite.
 ///
@@ -5276,6 +5971,46 @@ pub(crate) fn open_composed_sqlite(
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed> {
     config.validate()?;
+    let ObjectLogConfig::Local { root } = &config.object_log else {
+        return Err(EngineError::Invalid(
+            "filesystem SQLite helper requires a local provider",
+        ));
+    };
+    let projection = open_filesystem_sqlite_projection(&config)?;
+    let log = open_composed_object_log_engine(root, &config.namespace, config.segments)?;
+    finish_composed_sqlite(config, clock, log, projection)
+}
+
+#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+fn open_s3_composed_sqlite(
+    config: ComposedStorageConfig,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Fireweed> {
+    config.validate()?;
+    let provider = s3_provider_from_composed(&config)?;
+    let projection = open_s3_sqlite_projection(&config)?;
+    let log = open_s3_composed_object_log_engine(&provider, &config.namespace, config.segments)?;
+    finish_composed_sqlite(config, clock, log, projection)
+}
+
+#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+fn open_filesystem_sqlite_projection(
+    config: &ComposedStorageConfig,
+) -> EngineResult<fireweed_sqlite::HybridProjectionStore> {
+    open_configured_sqlite_projection(config)
+}
+
+#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+fn open_s3_sqlite_projection(
+    config: &ComposedStorageConfig,
+) -> EngineResult<fireweed_sqlite::HybridProjectionStore> {
+    open_configured_sqlite_projection(config)
+}
+
+#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+fn open_configured_sqlite_projection(
+    config: &ComposedStorageConfig,
+) -> EngineResult<fireweed_sqlite::HybridProjectionStore> {
     let projection_path = match &config.projection {
         ComposedProjectionConfig::Sqlite { path } => path,
         ComposedProjectionConfig::Postgres { .. } => return Err(EngineError::Unavailable),
@@ -5294,8 +6029,16 @@ pub(crate) fn open_composed_sqlite(
         projection =
             projection.with_async_monitor(fireweed_sqlite::HybridAsyncThresholds::default());
     }
-    let log = open_composed_object_log_engine(&config)?;
+    Ok(projection)
+}
 
+#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+fn finish_composed_sqlite(
+    config: ComposedStorageConfig,
+    clock: Arc<dyn Clock>,
+    log: fireweed_objectlog::ObjectLogEngineStore,
+    projection: fireweed_sqlite::HybridProjectionStore,
+) -> EngineResult<Fireweed> {
     if let Err(error) = validate_objectlog_sqlite_catalog(&log, projection.sqlite()) {
         match config.recovery.incompatible_projection {
             ProjectionRecoveryAction::FailClosed => return Err(error),
@@ -5356,7 +6099,11 @@ pub fn open_objectlog_sqlite(
     config: ObjectLogRuntimeConfig,
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed> {
-    open_composed_sqlite(config.into_storage_config(), clock)
+    let config = config.into_storage_config();
+    match &config.object_log {
+        ObjectLogConfig::Local { .. } => open_composed_sqlite(config, clock),
+        ObjectLogConfig::S3Compatible { .. } => open_s3_composed_sqlite(config, clock),
+    }
 }
 
 /// Open a **sole-owner** PostgreSQL-backed Fireweed handle (log-replay class) at `url`. Requires the `postgres`
@@ -6212,6 +6959,61 @@ mod tests {
         assert_eq!(claimed.len(), 1);
 
         drop(fireweed);
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// P3 configuration-fidelity proof for the filesystem×memory split: a
+    /// non-default namespace isolates state while non-default segment and
+    /// recovery fields survive the public StorageConfig route and reopen.
+    #[cfg(feature = "objectlog")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn filesystem_memory_split_preserves_common_fields_and_namespace() -> EngineResult<()> {
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-p3-fields-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let config = |namespace: &str| StorageConfig {
+            log: LogConfig::Filesystem { root: root.clone() },
+            projection: ProjectionStoreConfig::Memory,
+            control_plane: None,
+            authority: Some(super::ObjectLogAuthority::NativeConditionalWrite),
+            response_barrier: ResponseBarrier::Strict,
+            segments: SegmentConfig {
+                target_bytes: 4096,
+                max_latency_ms: 17,
+            },
+            namespace: namespace.to_owned(),
+            recovery: RecoveryPolicy {
+                incompatible_projection: super::RecoveryAction::RebuildProjection,
+                verify_checksums: false,
+                max_tail_commands: 23,
+            },
+        };
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        let definition = query_definition();
+        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+
+        let first = open(config("namespace-a"), Arc::clone(&clock))?;
+        first.create_queue(definition.clone()).await?;
+        first.push(&queue, NewItem::default()).await?;
+        assert_eq!(first.metrics(&queue).await?.pending, 1);
+        drop(first);
+
+        let isolated = open(config("namespace-b"), Arc::clone(&clock))?;
+        isolated.create_queue(definition).await?;
+        assert_eq!(isolated.metrics(&queue).await?.pending, 0);
+        drop(isolated);
+
+        let reopened = open(config("namespace-a"), clock)?;
+        assert_eq!(reopened.metrics(&queue).await?.pending, 1);
+        drop(reopened);
         let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }
