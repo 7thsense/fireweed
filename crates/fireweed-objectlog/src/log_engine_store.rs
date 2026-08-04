@@ -629,6 +629,7 @@ pub fn flush_config_from_segment(target_bytes: usize, max_latency_ms: u64) -> Fl
     if target_bytes > 0 {
         cfg.max_bytes = target_bytes;
     }
+    cfg.max_batches = fireweed_engine::PRODUCTION_OBJECT_LOG_MAX_BATCHES;
     cfg.linger = Duration::from_millis(max_latency_ms);
     cfg
 }

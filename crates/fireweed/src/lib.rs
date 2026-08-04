@@ -1086,6 +1086,17 @@ impl StorageConfig {
             ));
         }
 
+        if matches!(
+            &self.log,
+            LogConfig::Filesystem { .. } | LogConfig::S3 { .. }
+        ) {
+            fireweed_engine::validate_production_object_log_segment_shape(
+                self.segments.target_bytes,
+                self.segments.max_latency_ms,
+                fireweed_engine::PRODUCTION_OBJECT_LOG_MAX_BATCHES,
+            )?;
+        }
+
         match &self.log {
             LogConfig::Memory => {}
             LogConfig::Sqlite { path } if path.as_os_str().is_empty() => {
@@ -1519,6 +1530,53 @@ mod storage_config_matrix_tests {
                 ))
             );
         }
+    }
+
+    #[test]
+    fn production_segment_safety_is_provider_neutral_and_pre_io() {
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-p3o-pre-io-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let providers = [
+            LogConfig::Filesystem { root: root.clone() },
+            LogConfig::S3 {
+                endpoint: "http://127.0.0.1:1".to_owned(),
+                bucket: "fireweed".to_owned(),
+                region: "us-east-1".to_owned(),
+                access_key_id: ConfigSecret::new("akid"),
+                secret_access_key: ConfigSecret::new("secret"),
+                allow_insecure_http: true,
+            },
+        ];
+
+        for log in providers {
+            let mut unsafe_config = base(log.clone(), ProjectionStoreConfig::Memory);
+            unsafe_config.segments = SegmentConfig::new(1, 20).expect("structurally valid");
+            assert_eq!(
+                unsafe_config.validate(),
+                Err(EngineError::Invalid(
+                    fireweed_engine::PRODUCTION_ONE_OBJECT_PER_COMMAND_ERROR
+                )),
+                "{} must share the production group-commit guard",
+                log.axis_name()
+            );
+
+            let mut neighboring_config = base(log, ProjectionStoreConfig::Memory);
+            neighboring_config.segments =
+                SegmentConfig::new(2, 1).expect("neighboring production shape");
+            assert_eq!(neighboring_config.validate(), Ok(()));
+        }
+
+        assert!(
+            !root.exists(),
+            "provider-neutral validation must not create the filesystem root"
+        );
     }
 
     #[cfg(feature = "objectlog")]
@@ -2017,6 +2075,11 @@ impl ComposedStorageConfig {
                 "object-log runtime namespace must not be empty",
             ));
         }
+        fireweed_engine::validate_production_object_log_segment_shape(
+            self.segments.target_bytes,
+            self.segments.max_latency_ms,
+            fireweed_engine::PRODUCTION_OBJECT_LOG_MAX_BATCHES,
+        )?;
         match &self.object_log {
             ObjectLogConfig::Local { root } => validate_composed_filesystem_fields(root)?,
             ObjectLogConfig::S3Compatible {

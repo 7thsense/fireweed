@@ -27,6 +27,7 @@ mod error;
 mod finalize_validation;
 mod idempotency;
 mod maintenance;
+mod object_log_segment_safety;
 mod operator;
 mod ownership;
 mod port;
@@ -113,6 +114,10 @@ pub use maintenance::{
     FrontierRequirement, MaintenanceAuthoritySnapshot, MaintenanceCandidate, MaintenanceDecision,
     MaintenanceDisposition, MaintenanceFilter, MaintenanceObjectClass, MaintenancePolicy,
     MaintenanceReason,
+};
+pub use object_log_segment_safety::{
+    PRODUCTION_OBJECT_LOG_MAX_BATCHES, PRODUCTION_ONE_OBJECT_PER_COMMAND_ERROR,
+    validate_production_object_log_segment_shape,
 };
 pub use operator::{OperationHandle, OperationId, OperatorOperationState, OperatorOperationStore};
 pub use ownership::{OwnedSession, OwnershipOutcome, acquire_and_fence, owner_liveness_violation};

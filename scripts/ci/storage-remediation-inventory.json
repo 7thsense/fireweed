@@ -879,9 +879,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "c9e5980cab503030ca4c",
+        "id": "0ca2103f9e1a2603f396",
         "identity": "return Err(EngineError::Unavailable);",
-        "line": 1075,
+        "line": 1076,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -893,9 +893,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "198957d97435d419a7a7",
+        "id": "a9590d3d331732ad1600",
         "identity": "let _ = sender.send(Err(EngineError::Unavailable));",
-        "line": 1093,
+        "line": 1094,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -907,9 +907,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "eb5e123b7da6bd327839",
+        "id": "dedd0af9dde65b8d4436",
         "identity": "let _ = sender.send(Err(EngineError::Unavailable));",
-        "line": 1103,
+        "line": 1104,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -921,9 +921,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "b6d838cca5300cb148a2",
+        "id": "79e95c8a67178af9e4d3",
         "identity": "eprintln!(\"SQLITE/POSTGRES CONSTRUCT SKIPPED \u2014 set FIREWEED_PG_TEST_URL to a live DB\");",
-        "line": 3750,
+        "line": 3836,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -935,9 +935,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "5d1165686356da2ab4f2",
+        "id": "7840047d2928bcd9c9dd",
         "identity": "\"FILESYSTEM/POSTGRES CONSTRUCT SKIPPED \u2014 set FIREWEED_PG_TEST_URL to a live DB\"",
-        "line": 3852,
+        "line": 3938,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -949,9 +949,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "2bb75ec1383de5ffaad6",
+        "id": "676cb395d5a1681e765c",
         "identity": "\"S3/POSTGRES CONSTRUCT SKIPPED \u2014 set {} for live s3\u00d7postgres open\",",
-        "line": 3977,
+        "line": 4063,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -963,9 +963,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "8ce850418efc255ed8c1",
+        "id": "0f6e473967448b3df088",
         "identity": "\"class_b T0-T3: {cell_id} skipped (FIREWEED_PG_TEST_URL unset; rebuild with --features postgres when live PG is availabl",
-        "line": 4245,
+        "line": 4331,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -4383,9 +4383,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "b0ed6701851be6910a30",
+        "id": "48571977d6eec65578c9",
         "identity": "EngineError::Unavailable.resp_token(),",
-        "line": 192,
+        "line": 197,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-engine/src/lib.rs",
         "status": "debt"
@@ -4397,9 +4397,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "08a11481db9c7555adf6",
+        "id": "749e715d185a2dca64b7",
         "identity": "Some(\"-ERR fireweed unavailable\")",
-        "line": 193,
+        "line": 198,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-engine/src/lib.rs",
         "status": "debt"
@@ -4411,9 +4411,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "0401ebe0e0ecb7dbb76b",
+        "id": "98fd4a18c2ab56e1007f",
         "identity": "EngineError::Unavailable",
-        "line": 235,
+        "line": 240,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-engine/src/lib.rs",
         "status": "discovery_negative"
@@ -4425,9 +4425,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "91fb2a5f7af56bdb2fa0",
+        "id": "768bceb7b7c302eb97f4",
         "identity": "EngineError::Unavailable",
-        "line": 247,
+        "line": 252,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-engine/src/lib.rs",
         "status": "debt"
@@ -8023,9 +8023,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "6d63b9274547726b116a",
+        "id": "3b709e1d62c1b2e688f3",
         "identity": "return Err(EngineError::Unavailable);",
-        "line": 1075,
+        "line": 1076,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8037,9 +8037,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "7a9470558d6514f6abd5",
+        "id": "edabb18cb734ed136bbb",
         "identity": "let _ = sender.send(Err(EngineError::Unavailable));",
-        "line": 1093,
+        "line": 1094,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8051,9 +8051,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "21fc3071bf494018dad8",
+        "id": "bffbf86426613381bf82",
         "identity": "let _ = sender.send(Err(EngineError::Unavailable));",
-        "line": 1103,
+        "line": 1104,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8065,9 +8065,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "9b95e71e03f3a3831500",
+        "id": "4e65b6698be21bac4d0c",
         "identity": "AcquireOutcome::Rejected(_) => Err(EngineError::Unavailable),",
-        "line": 1340,
+        "line": 1341,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8079,9 +8079,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "4a0eaaab620dbe209b13",
+        "id": "7ab0e649ce995f5b4b2d",
         "identity": "Ok(()) | Err(EngineError::Unavailable) => {}",
-        "line": 1444,
+        "line": 1445,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8093,9 +8093,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "324a71b21595fd455293",
+        "id": "127bb0b8c076062fa67e",
         "identity": "return Err(EngineError::Unavailable);",
-        "line": 1515,
+        "line": 1516,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8107,9 +8107,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "9f9346760e68147bb458",
+        "id": "37e870a0848c015fe485",
         "identity": ".ok_or(EngineError::Unavailable)?;",
-        "line": 1519,
+        "line": 1520,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8121,9 +8121,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "c5ab3c3f92d33068889a",
+        "id": "91e18dd889c533d42664",
         "identity": "(_, Some(_)) => Err(EngineError::Unavailable),",
-        "line": 1523,
+        "line": 1524,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8135,9 +8135,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "564c336fce2ac1d399f9",
+        "id": "5d6fb04ba7671a829792",
         "identity": "return Err(EngineError::Unavailable);",
-        "line": 1538,
+        "line": 1539,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8149,9 +8149,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "7e158f8c6c28eeaf7e62",
+        "id": "f23d6d1b750badd2e393",
         "identity": ".ok_or(EngineError::Unavailable)?;",
-        "line": 1542,
+        "line": 1543,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8163,9 +8163,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "7e31b7bc336ddb520a52",
+        "id": "b127aca644ab9a51982e",
         "identity": "(_, Some(_)) => Err(EngineError::Unavailable),",
-        "line": 1545,
+        "line": 1546,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8177,9 +8177,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "2582ccf05cf62f7c33dc",
+        "id": "d3f19c4340001bda0cc1",
         "identity": "_ => Err(EngineError::Unavailable),",
-        "line": 1553,
+        "line": 1554,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8191,9 +8191,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "dd928f256910536f1277",
+        "id": "962cb459ba0bff4dec87",
         "identity": "_ => Err(EngineError::Unavailable),",
-        "line": 1556,
+        "line": 1557,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8205,9 +8205,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "7131eeca8b731928fbf2",
+        "id": "c0b29c684d7adec35dc9",
         "identity": "return Ok(RouteDecision::Unavailable);",
-        "line": 1824,
+        "line": 1825,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8219,9 +8219,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "1d3a6c1b1990c4a50516",
+        "id": "0b229ba8ef26aeda8d95",
         "identity": ".ok_or(EngineError::Unavailable)?;",
-        "line": 1828,
+        "line": 1829,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8233,9 +8233,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "4cd3c29d79268e2503ba",
+        "id": "e02b83becc36cd6476e2",
         "identity": "Ok(()) | Err(EngineError::Unavailable) => {}",
-        "line": 3145,
+        "line": 3147,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "discovery_negative"
@@ -8247,9 +8247,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "d8f23104672540f86d5d",
+        "id": "763bc3b4cb1c9574f41c",
         "identity": "Err(EngineError::Unavailable)",
-        "line": 3324,
+        "line": 3326,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "discovery_negative"
@@ -8261,9 +8261,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "e36d319d2db8548aa8f7",
+        "id": "458ad64db7416a5f73ea",
         "identity": "eprintln!(\"SQLITE/POSTGRES CONSTRUCT SKIPPED \u2014 set FIREWEED_PG_TEST_URL to a live DB\");",
-        "line": 3750,
+        "line": 3836,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8275,9 +8275,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "6d50ba482c639ba06a43",
+        "id": "a65faffff518b522a22c",
         "identity": "\"FILESYSTEM/POSTGRES CONSTRUCT SKIPPED \u2014 set FIREWEED_PG_TEST_URL to a live DB\"",
-        "line": 3852,
+        "line": 3938,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8289,9 +8289,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "faf89a056e706b212a9c",
+        "id": "776e5a5aff2575a673da",
         "identity": "\"S3/POSTGRES CONSTRUCT SKIPPED \u2014 set {} for live s3\u00d7postgres open\",",
-        "line": 3977,
+        "line": 4063,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8303,9 +8303,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "ea38ce2335d6cdb16fa6",
+        "id": "ef9a0679d7b1c55d4e3f",
         "identity": "/// otherwise it is skipped with an explicit `eprintln!`.",
-        "line": 4043,
+        "line": 4129,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8317,9 +8317,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "4e0b2915128870c8f901",
+        "id": "1ce119923c76e8fcd075",
         "identity": "\"class_b T0-T3: {cell_id} skipped (FIREWEED_PG_TEST_URL unset; rebuild with --features postgres when live PG is availabl",
-        "line": 4245,
+        "line": 4331,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8331,9 +8331,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "dc783feadbda7af1f76e",
+        "id": "c4a7cb8f3e3739ff9466",
         "identity": "\"sqlite_log_postgres_lifecycle_and_reopen SKIPPED \u2014 set FIREWEED_PG_TEST_URL\"",
-        "line": 4766,
+        "line": 4852,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "discovery_negative"
@@ -8345,9 +8345,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "a49b29725819bfa8861d",
+        "id": "f9dafa21e9131d449d9b",
         "identity": "\"sqlite_log T4 helm template skipped (helm not on PATH); values+gate checked\"",
-        "line": 5242,
+        "line": 5328,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -8359,9 +8359,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "001e04e67898630491fc",
+        "id": "5d7b93c04f6e4f03d3c5",
         "identity": "\"postgres_log_memory_lifecycle_and_reopen SKIPPED \u2014 set FIREWEED_PG_TEST_URL \\",
-        "line": 5408,
+        "line": 5494,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "discovery_negative"
@@ -8373,9 +8373,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "c8d5adb650e2030bc7e6",
+        "id": "4b823e23dc6ab5f0deb2",
         "identity": "\"postgres_log_sqlite_lifecycle_and_reopen SKIPPED \u2014 set FIREWEED_PG_TEST_URL \\",
-        "line": 5477,
+        "line": 5563,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "discovery_negative"
@@ -8387,9 +8387,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "1dd860311da0edfe468c",
+        "id": "9575b52889f10aee133c",
         "identity": "\"postgres_log_postgres_lifecycle_and_reopen SKIPPED \u2014 set FIREWEED_PG_TEST_URL \\",
-        "line": 5558,
+        "line": 5644,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "discovery_negative"
@@ -8401,9 +8401,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "ae75bb37fd47a621d6f8",
+        "id": "5329f6dd604e96011bfc",
         "identity": "\"postgres_log T4 helm template skipped (helm not on PATH); values+gate checked\"",
-        "line": 6041,
+        "line": 6127,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -9563,9 +9563,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "6ac86c771a64f51714b6",
+        "id": "0f5d4323f19d14c9e145",
         "identity": "Err(EngineError::Unavailable)",
-        "line": 1180,
+        "line": 1191,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -9577,9 +9577,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "7e760f6dc3f1283d6f2b",
+        "id": "67937a8d01bda72dc6d6",
         "identity": "Err(EngineError::Unavailable)",
-        "line": 1197,
+        "line": 1208,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -9591,9 +9591,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "1eecc3a8aee7816847d3",
+        "id": "85ea415e1a35bcd86884",
         "identity": "\"storage_config_open: postgres cell skipped (FIREWEED_PG_TEST_URL unset)\"",
-        "line": 1920,
+        "line": 1978,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -9605,9 +9605,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "ac869687b034b8054a79",
+        "id": "0a4df8e8401648468a82",
         "identity": "return Err(EngineError::Unavailable);",
-        "line": 2169,
+        "line": 2232,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -9619,9 +9619,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "64b356193c4bd79930bf",
+        "id": "dfb9e92da43fb0427fde",
         "identity": "return Err(EngineError::Unavailable);",
-        "line": 2176,
+        "line": 2239,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -9633,9 +9633,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "d11806d3a2a1d26e2e03",
+        "id": "81373e22964b658495f5",
         "identity": "return Err(EngineError::Unavailable);",
-        "line": 2183,
+        "line": 2246,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -9647,9 +9647,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "423335969a150a065408",
+        "id": "28d9d5bfb2ae877960f9",
         "identity": "/// owner serves in-flight ops but refuses a NEW claim with a retryable `Unavailable` (drain split).",
-        "line": 3198,
+        "line": 3261,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -9661,9 +9661,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "19c04b41e1a686694729",
+        "id": "c70b13e0d4ce5d3a2a27",
         "identity": "// `Unavailable` so in-flight leases finalize before handoff; pushes/finalizes/renews continue.",
-        "line": 3920,
+        "line": 3983,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -9675,9 +9675,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "2b833d530ce59901c91b",
+        "id": "526ce80a545a77cdef00",
         "identity": "return Err(EngineError::Unavailable);",
-        "line": 3922,
+        "line": 3985,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -9689,9 +9689,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "e63835daaa20831ccce5",
+        "id": "18493430a6df833f88c8",
         "identity": "/// only via the structured [`EngineError::Unavailable`] each returns.",
-        "line": 4813,
+        "line": 4876,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -9703,9 +9703,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "43c4125e713b1bbc6382",
+        "id": "126f8d48173de10890eb",
         "identity": "/// [`EngineError::Unavailable`] on a backend that has not implemented `range_scan` \u2014 see",
-        "line": 4819,
+        "line": 4882,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -9717,9 +9717,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "2c29eae5ef9c5868b6aa",
+        "id": "9b4eae73122f983b6e19",
         "identity": "/// Returns [`EngineError::Unavailable`] on a backend that has not implemented",
-        "line": 4830,
+        "line": 4893,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -9731,9 +9731,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "8b6392ea115097b639e9",
+        "id": "2c3a2008837d7dc532d9",
         "identity": "/// [`EngineError::Unavailable`] on a backend that has not implemented `declared_bucket_segment`",
-        "line": 4842,
+        "line": 4905,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -9745,9 +9745,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "57a9bddfd70327ee315f",
+        "id": "3c8cf632a4eb0e639d79",
         "identity": "/// [`EngineError::Unavailable`] on a backend that has not implemented `bounded_mutation` \u2014 see",
-        "line": 4854,
+        "line": 4917,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -9759,9 +9759,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "0f3a8ffc5b5fca9a940d",
+        "id": "9b0e8b34fe59811a8279",
         "identity": "/// [`EngineError::Unavailable`] on a backend that has not implemented `claim_by_query` \u2014 see",
-        "line": 4880,
+        "line": 4943,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -9773,9 +9773,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "a41dbb01f45173b77564",
+        "id": "fe4f45ae841ca3194219",
         "identity": "return Err(EngineError::Unavailable);",
-        "line": 4902,
+        "line": 4965,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -9787,9 +9787,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "f749e4f29bc877cf2ef9",
+        "id": "b9015d60412e30ac6e2f",
         "identity": "/// API-002 force). Returns [`EngineError::Unavailable`] when the backend does not implement",
-        "line": 4923,
+        "line": 4986,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -9801,9 +9801,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "110325230360817e1d22",
+        "id": "f92a9897109d84caab73",
         "identity": "return Err(EngineError::Unavailable);",
-        "line": 4931,
+        "line": 4994,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -9815,9 +9815,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "8c55795793e206c8dd83",
+        "id": "98d241c69a1479311cc7",
         "identity": "return Err(EngineError::Unavailable);",
-        "line": 5861,
+        "line": 5924,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -9829,9 +9829,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "1851ddf6d5ec2d411406",
+        "id": "38acb582d64f69637819",
         "identity": "ComposedProjectionConfig::Sqlite { .. } => return Err(EngineError::Unavailable),",
-        "line": 5871,
+        "line": 5934,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -9843,9 +9843,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "f8b8a73c0bd49efe6211",
+        "id": "0ac6c40c15633de075b0",
         "identity": "return Err(EngineError::Unavailable);",
-        "line": 5885,
+        "line": 5948,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -9857,9 +9857,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "6ba626e02b37ba15b328",
+        "id": "c0ee7d24d5d8724b6b71",
         "identity": "ComposedProjectionConfig::Sqlite { .. } => return Err(EngineError::Unavailable),",
-        "line": 5895,
+        "line": 5958,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -9871,9 +9871,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "ca321cdf438a56f06e17",
+        "id": "113d95af009f2208aad0",
         "identity": "ComposedProjectionConfig::Postgres { .. } => return Err(EngineError::Unavailable),",
-        "line": 6016,
+        "line": 6079,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -9885,9 +9885,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "9ab561f92f216a807933",
+        "id": "ef0374dce2adc21b5bdd",
         "identity": "\"public_open_postgres_claim_and_commit_on_current_thread SKIPPED \u2014 set \\",
-        "line": 6439,
+        "line": 6502,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -9899,9 +9899,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "7d014b8aa24068a4e36c",
+        "id": "30d2efb245736d15034a",
         "identity": "\"public_open_postgres_async_claim_and_commit_on_current_thread SKIPPED \u2014 set \\",
-        "line": 6523,
+        "line": 6586,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -11851,9 +11851,9 @@
           "P2f"
         ],
         "detail": "early_success=true",
-        "id": "e99366df719a636004b1",
+        "id": "8f8c8c1b626014d610ab",
         "identity": "eprintln!(\"SQLITE/POSTGRES CONSTRUCT SKIPPED \u2014 set FIREWEED_PG_TEST_URL to a live DB\");",
-        "line": 3750,
+        "line": 3836,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "debt"
@@ -12063,9 +12063,9 @@
           "P2f"
         ],
         "detail": "pre-existing public-release functional gate failure; repair in the path owner's bead",
-        "id": "c3069e8e106b69b6bc5d",
+        "id": "a8cd2b8871248fa421f6",
         "identity": "retired uppercase identifier: PQUEUE_PG_TEST_URL: /// (`FIREWEED_PG_TEST_URL`) or legacy (`PQUEUE_PG_TEST_URL`).",
-        "line": 6315,
+        "line": 6378,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -12077,9 +12077,9 @@
           "P2f"
         ],
         "detail": "pre-existing public-release functional gate failure; repair in the path owner's bead",
-        "id": "30382da3f8687412b513",
+        "id": "73f4c5d76c29305cff73",
         "identity": "retired uppercase identifier: PQUEUE_PG_TEST_URL: .or_else(|_| std::env::var(\"PQUEUE_PG_TEST_URL\"))",
-        "line": 6319,
+        "line": 6382,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -12091,9 +12091,9 @@
           "P2f"
         ],
         "detail": "pre-existing public-release functional gate failure; repair in the path owner's bead",
-        "id": "908cd100ff6a7a45e3ef",
+        "id": "e8d6f5ab20a33dde837f",
         "identity": "retired uppercase identifier: PQUEUE_PG_TEST_URL: /// (fireweed-ca319318). When FIREWEED_PG_TEST_URL / PQUEUE_PG_TEST_URL is set,",
-        "line": 6431,
+        "line": 6494,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -12105,9 +12105,9 @@
           "P2f"
         ],
         "detail": "pre-existing public-release functional gate failure; repair in the path owner's bead",
-        "id": "cdf181d1149426a98eab",
+        "id": "51f8cd99faf9720e7b2f",
         "identity": "retired uppercase identifier: PQUEUE_PG_TEST_URL: FIREWEED_PG_TEST_URL or PQUEUE_PG_TEST_URL to a live PostgreSQL DSN\"",
-        "line": 6440,
+        "line": 6503,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -12119,9 +12119,9 @@
           "P2f"
         ],
         "detail": "pre-existing public-release functional gate failure; repair in the path owner's bead",
-        "id": "d67eb0a12171fd0affe5",
+        "id": "e1eb5d98c9ce6cd21987",
         "identity": "retired uppercase identifier: PQUEUE_PG_TEST_URL: FIREWEED_PG_TEST_URL or PQUEUE_PG_TEST_URL to a live PostgreSQL DSN\"",
-        "line": 6524,
+        "line": 6587,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -12524,9 +12524,9 @@
           "P2f"
         ],
         "detail": "rustdoc fence must have a listed exact behavioral route; compile-only/ignored is debt",
-        "id": "61f02a0bf2e77e9cd933",
+        "id": "38e438c9a24cfcc5acdf",
         "identity": "no_run",
-        "line": 2936,
+        "line": 2999,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -12580,9 +12580,9 @@
           "P2f"
         ],
         "detail": "listed ID was invoked with --exact but did not report exactly one passing behavioral test",
-        "id": "004a2be658d4cda8cbc4",
-        "identity": "crates/fireweed/src/lib.rs - ClaimAt (line 2936)",
-        "line": 2936,
+        "id": "b7e933132b85ba99bf79",
+        "identity": "crates/fireweed/src/lib.rs - ClaimAt (line 2999)",
+        "line": 2999,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "debt"
@@ -20178,7 +20178,7 @@
     "cargo_status": "listed",
     "errors": [],
     "generated_by": "scripts/ci/fireweed_test_placement.py",
-    "input_sha256": "c37a9b7c82322e23c7ac995f1854c34138c40076c977e76fc3fd465b2f2b7b52",
+    "input_sha256": "126441595a3835ebf0dbc7c3d68e27a541ec1b5c857f4b2faf778675a1a1e93a",
     "private_surface": [
       {
         "declaration_kind": "fn",
@@ -20199,7 +20199,7 @@
         "id": "function:open_composed_postgres",
         "item": "open_composed_postgres",
         "kind": "function",
-        "line": 5765,
+        "line": 5828,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -20211,7 +20211,7 @@
         "id": "function:open_composed_postgres_async",
         "item": "open_composed_postgres_async",
         "kind": "function",
-        "line": 5796,
+        "line": 5859,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -20223,7 +20223,7 @@
         "id": "function:open_composed_sqlite",
         "item": "open_composed_sqlite",
         "kind": "function",
-        "line": 5969,
+        "line": 6032,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -20259,7 +20259,7 @@
         "id": "type:ComposedRuntime",
         "item": "ComposedRuntime",
         "kind": "type",
-        "line": 2193,
+        "line": 2256,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -20283,7 +20283,7 @@
         "id": "type:LibBackend",
         "item": "LibBackend",
         "kind": "type",
-        "line": 2803,
+        "line": 2866,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -20319,7 +20319,7 @@
         "id": "type:ProjectionLifecycleCapabilities",
         "item": "ProjectionLifecycleCapabilities",
         "kind": "type",
-        "line": 2090,
+        "line": 2153,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -20331,7 +20331,7 @@
         "id": "type:ProjectionLifecycleHandle",
         "item": "ProjectionLifecycleHandle",
         "kind": "type",
-        "line": 2141,
+        "line": 2204,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -20343,7 +20343,7 @@
         "id": "type:ProjectionRebuildState",
         "item": "ProjectionRebuildState",
         "kind": "type",
-        "line": 2104,
+        "line": 2167,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -20379,7 +20379,7 @@
         "id": "type:ProjectionVerificationState",
         "item": "ProjectionVerificationState",
         "kind": "type",
-        "line": 2097,
+        "line": 2160,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -20391,7 +20391,7 @@
         "id": "type:RuntimeCore",
         "item": "RuntimeCore",
         "kind": "type",
-        "line": 3337,
+        "line": 3400,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -21063,6 +21063,26 @@
         "id": "Cargo.toml::fireweed::fireweed::test::storage_config_matrix_tests::object_log_runtime_mapping_preserves_nested_fields",
         "target": "fireweed",
         "test_id": "storage_config_matrix_tests::object_log_runtime_mapping_preserves_nested_fields"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.92.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "storage_config_matrix_tests::production_segment_safety_is_provider_neutral_and_pre_io",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::storage_config_matrix_tests::production_segment_safety_is_provider_neutral_and_pre_io",
+        "target": "fireweed",
+        "test_id": "storage_config_matrix_tests::production_segment_safety_is_provider_neutral_and_pre_io"
       },
       {
         "exact_invocation": [
@@ -35494,6 +35514,34 @@
         "-p",
         "fireweed-engine",
         "--lib",
+        "object_log_segment_safety::tests::exact_forced_single_batch_predicate_and_neighbors",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "object_log_segment_safety::tests::exact_forced_single_batch_predicate_and_neighbors",
+      "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::object_log_segment_safety::tests::exact_forced_single_batch_predicate_and_neighbors",
+      "listed_kind": "test",
+      "package": "fireweed-engine",
+      "target": "fireweed_engine",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-engine",
+        "--lib",
         "operator::tests::advance_progresses_until_terminal_then_is_frozen",
         "--",
         "--exact"
@@ -40430,6 +40478,34 @@
       "expected_ran": 1,
       "harness_id": "maintenance::tests::limits_are_strictly_nonzero",
       "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::maintenance::tests::limits_are_strictly_nonzero",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--lib",
+        "segment_config::tests::production_validation_rejects_only_forced_single_batch_shapes_and_private_override",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "segment_config::tests::production_validation_rejects_only_forced_single_batch_shapes_and_private_override",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::segment_config::tests::production_validation_rejects_only_forced_single_batch_shapes_and_private_override",
       "listed_kind": "test",
       "package": "fireweed-objectlog",
       "target": "fireweed_objectlog",
@@ -56506,6 +56582,34 @@
       "expected_ran": 1,
       "harness_id": "byte_admission_wiring_tests::node_renewal_uses_one_renewal_and_one_resolution_task_at_1_100_1000",
       "id": "Cargo.toml::fireweed-server::fireweed_server::test::byte_admission_wiring_tests::node_renewal_uses_one_renewal_and_one_resolution_task_at_1_100_1000",
+      "listed_kind": "test",
+      "package": "fireweed-server",
+      "target": "fireweed_server",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-server",
+        "--lib",
+        "byte_admission_wiring_tests::object_log_commit_recovery_tests_rejects_production_one_object_per_command_config",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "byte_admission_wiring_tests::object_log_commit_recovery_tests_rejects_production_one_object_per_command_config",
+      "id": "Cargo.toml::fireweed-server::fireweed_server::test::byte_admission_wiring_tests::object_log_commit_recovery_tests_rejects_production_one_object_per_command_config",
       "listed_kind": "test",
       "package": "fireweed-server",
       "target": "fireweed_server",
@@ -74882,6 +74986,34 @@
         "-p",
         "fireweed",
         "--lib",
+        "storage_config_matrix_tests::production_segment_safety_is_provider_neutral_and_pre_io",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "storage_config_matrix_tests::production_segment_safety_is_provider_neutral_and_pre_io",
+      "id": "Cargo.toml::fireweed::fireweed::test::storage_config_matrix_tests::production_segment_safety_is_provider_neutral_and_pre_io",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
         "storage_config_matrix_tests::provider_helpers_have_no_shared_selector_backedge",
         "--",
         "--exact"
@@ -80760,14 +80892,14 @@
         "-p",
         "fireweed",
         "--doc",
-        "crates/fireweed/src/lib.rs - ClaimAt (line 2936)",
+        "crates/fireweed/src/lib.rs - ClaimAt (line 2999)",
         "--",
         "--exact"
       ],
       "expected_ran": 1,
-      "harness_id": "crates/fireweed/src/lib.rs - ClaimAt (line 2936)",
-      "id": "Cargo.toml::fireweed::rustdoc::crates/fireweed/src/lib.rs - ClaimAt (line 2936)",
-      "line": 2936,
+      "harness_id": "crates/fireweed/src/lib.rs - ClaimAt (line 2999)",
+      "id": "Cargo.toml::fireweed::rustdoc::crates/fireweed/src/lib.rs - ClaimAt (line 2999)",
+      "line": 2999,
       "normalized_block_sha256": "9ae1cd582e6d6a2d9b8c8904f04323a100c653bf6e6b8a0cda2696dec40e0c46",
       "observed_ran": 0,
       "owner_item": "ClaimAt",
@@ -80806,7 +80938,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "db67e054a2556c4b809bdd9dc525a4982b3aa1eda89c8322e365da6a2656472d",
+  "source_inventory_sha256": "84659703bc226edb607faa74837745b600dc8085d6b1e52f46e8d9e8a83c8331",
   "workspaces": [
     {
       "listing_error_sha256": "",

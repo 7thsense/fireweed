@@ -238,6 +238,7 @@ impl ObjectLogSpec {
     }
 
     fn validate(&self) -> EngineResult<()> {
+        self.segment_config().validate_for_production()?;
         match self {
             Self::LocalFilesystem { root, .. } => {
                 if root.as_os_str().is_empty() {
@@ -2081,6 +2082,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         ));
     }
     if let LogSpec::ObjectLog(spec) = &config.backend.log {
+        spec.validate()?;
         config
             .objectlog_byte_limits
             .validate(spec.segment_config().target_bytes)
@@ -3507,6 +3509,90 @@ mod byte_admission_wiring_tests {
             .err()
             .expect("direct Config must not bypass segment-target validation");
         assert!(matches!(error, EngineError::Invalid(_)));
+    }
+
+    #[tokio::test]
+    async fn object_log_commit_recovery_tests_rejects_production_one_object_per_command_config() {
+        fn config(log: ObjectLogSpec) -> Config {
+            Config::new(
+                BackendSpec {
+                    log: LogSpec::ObjectLog(log),
+                    projection: ProjectionSpec::InMemory,
+                    control_plane: ControlPlaneSpec::InProcess,
+                },
+                0,
+                "127.0.0.1:0".to_owned(),
+                Duration::from_secs(1),
+                Vec::new(),
+            )
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-p3o-server-pre-io-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let unsafe_segments = SegmentConfig::new(1, 20).expect("structurally valid test shape");
+
+        let local_error = start(config(ObjectLogSpec::local(root.clone(), unsafe_segments)))
+            .await
+            .err()
+            .expect("local production config must fail closed");
+        assert_eq!(
+            local_error,
+            EngineError::Invalid(fireweed_engine::PRODUCTION_ONE_OBJECT_PER_COMMAND_ERROR)
+        );
+        assert!(!root.exists(), "local guard must run before filesystem I/O");
+
+        let s3_error = tokio::time::timeout(
+            Duration::from_millis(100),
+            start(config(ObjectLogSpec::S3 {
+                endpoint: "http://127.0.0.1:1".to_owned(),
+                bucket: "fireweed".to_owned(),
+                region: "us-east-1".to_owned(),
+                credentials: S3CredentialSource::Static {
+                    access_key_id: "akid".to_owned(),
+                    secret_access_key: "secret".to_owned(),
+                },
+                segment_config: unsafe_segments,
+                allow_insecure_http: true,
+            })),
+        )
+        .await
+        .expect("S3 config rejection must not wait for network I/O")
+        .err()
+        .expect("S3 production config must fail closed");
+        assert_eq!(
+            s3_error,
+            EngineError::Invalid(fireweed_engine::PRODUCTION_ONE_OBJECT_PER_COMMAND_ERROR)
+        );
+
+        let neighboring_segments =
+            SegmentConfig::new(2, 1).expect("neighboring group-commit shape");
+        assert!(
+            ObjectLogSpec::local("/tmp/fireweed-p3o-neighbor", neighboring_segments)
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            ObjectLogSpec::S3 {
+                endpoint: "https://s3.example".to_owned(),
+                bucket: "fireweed".to_owned(),
+                region: "us-east-1".to_owned(),
+                credentials: S3CredentialSource::Static {
+                    access_key_id: "akid".to_owned(),
+                    secret_access_key: "secret".to_owned(),
+                },
+                segment_config: neighboring_segments,
+                allow_insecure_http: false,
+            }
+            .validate()
+            .is_ok()
+        );
     }
 
     #[test]
