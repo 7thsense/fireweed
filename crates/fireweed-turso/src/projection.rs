@@ -11,12 +11,12 @@ use fireweed_core::{
     QueueDefinition, QueueIndex, RequestId, UtcTimestamp, is_retry_exhausted,
 };
 use fireweed_engine::{
-    AsyncProjectionStore, ClaimCompatibility, ClaimUnit, ClaimedItem, CohortLeaseTarget,
-    CommandEnvelope, CommandPosition, CreateQueueOutcome, EngineError, EngineResult, FinalizeKind,
-    FinalizeTarget, IdempotencyDecision, ItemView, LeaseView, LiveItemView, PayloadUpdate,
-    PendingPage, PendingSummary, PushFingerprint, PushItem, QueueCommand, QueueKey, QueueMetrics,
-    RenewTarget, RequestOutcome, ResolvedItemMutationAction, RichClaimSelection,
-    TerminalEmissionMetrics,
+    AsyncProjectionStore, BatchUpdateResponse, ClaimCompatibility, ClaimUnit, ClaimedItem,
+    CohortLeaseTarget, CommandEnvelope, CommandPosition, CreateQueueOutcome, EngineError,
+    EngineResult, FinalizeKind, FinalizeTarget, IdempotencyDecision, ItemView, LeaseView,
+    LiveItemView, PayloadUpdate, PendingPage, PendingSummary, PushFingerprint, PushItem,
+    QueueCommand, QueueKey, QueueMetrics, RenewTarget, RequestOutcome, ResolvedItemMutationAction,
+    RichClaimSelection, ScheduleUpdate, TerminalEmissionMetrics, UpdateFieldsCommand,
 };
 use fireweed_relational::{
     async_projection as sql, elig_sort, fields_from_json, fields_to_json, lease_hash,
@@ -26,7 +26,10 @@ use fireweed_relational::{
 use tokio::sync::Mutex;
 use turso::{Connection, Value, transaction::TransactionBehavior};
 
-use crate::{TursoRelational, local::ConsumerLeaseIndex};
+use crate::{
+    TursoRelational,
+    local::{ConsumerLeaseIndex, TursoBatchUpdateStatementShape},
+};
 
 fn storage(error: impl std::fmt::Display) -> EngineError {
     EngineError::Storage(error.to_string())
@@ -233,6 +236,8 @@ const GATE_UNBLOCK_WRITE_CHUNK: usize = 898; // tenant + queue + 898 gate binds 
 const SIDE_RECORD_WRITE_CHUNK: usize = 225; // 225 * 4 row binds = 900
 const KEY_RETENTION_WRITE_CHUNK: usize = 180; // 180 * 5 row binds = 900
 const CURSOR_UPDATE_CHUNK: usize = 225; // 225 * 4 row binds = 900
+const API001_UPDATE_CHUNK: usize = 89; // tenant + queue + 89 * 10 row binds = 892
+const API001_GATE_DELETE_CHUNK: usize = 898; // tenant + queue + 898 item binds = 900
 
 fn values_rows(rows: usize, columns: usize) -> String {
     let row = format!("({})", vec!["?"; columns].join(","));
@@ -1420,10 +1425,318 @@ async fn definition_in_transaction(
     serde_json::from_str(&text(&row[0])?).map_err(storage)
 }
 
+fn record_statement(shape: &mut Option<TursoBatchUpdateStatementShape>, bind_count: usize) {
+    if let Some(shape) = shape {
+        shape.record(bind_count);
+    }
+}
+
+struct Api001UpdateRow {
+    item_id: ItemId,
+    fields: String,
+    payload: Option<Vec<u8>>,
+    metadata: String,
+    priority: Option<String>,
+    priority_sort: Vec<u8>,
+    not_before: Option<i64>,
+    eligible_since: Option<i64>,
+    updated_at: i64,
+    sequence: i64,
+    gate_keys: Option<Vec<String>>,
+}
+
+/// Apply API-001 updates using a bounded number of set-based statements. The commands have already
+/// passed the engine's batch preflight, but replay still validates the durable row state so a stale
+/// or corrupt log cannot partially mutate the projection.
+async fn apply_api001_update_batch(
+    transaction: &Connection,
+    positions: &[CommandPosition],
+    commands: &[CommandEnvelope],
+    updates: &[&UpdateFieldsCommand],
+    shape: &mut Option<TursoBatchUpdateStatementShape>,
+) -> EngineResult<()> {
+    let first_position = positions
+        .first()
+        .ok_or_else(|| storage("empty BatchUpdate"))?;
+    let tenant = first_position.queue.tenant_id.as_str().to_string();
+    let queue = first_position.queue.queue_id.as_str().to_string();
+    if positions
+        .iter()
+        .any(|position| position.queue != first_position.queue)
+        || positions.len() != commands.len()
+        || commands.len() != updates.len()
+    {
+        return Err(storage(
+            "BatchUpdate projection apply crossed queue or length boundaries",
+        ));
+    }
+    let mut unique = HashSet::with_capacity(updates.len());
+    if updates.iter().any(|update| !unique.insert(update.item_id)) {
+        return Err(storage("BatchUpdate projection apply repeated an item id"));
+    }
+
+    record_statement(shape, 2);
+    let definition = definition_in_transaction(transaction, &first_position.queue).await?;
+    let ids = updates
+        .iter()
+        .map(|update| update.item_id)
+        .collect::<Vec<_>>();
+    let mut current = HashMap::with_capacity(ids.len());
+    for chunk in ids.chunks(VALIDATION_ITEM_CHUNK) {
+        record_statement(shape, chunk.len() + 2);
+        current.extend(
+            validation_rows_by_item(
+                transaction,
+                &tenant,
+                &queue,
+                chunk,
+                "fields,lifecycle_state,priority,not_before,eligible_since,payload,metadata,\
+                 superseded,fenced",
+            )
+            .await?,
+        );
+    }
+
+    // Capture affected groups before changing eligibility inputs.
+    for chunk in ids.chunks(VALIDATION_ITEM_CHUNK) {
+        record_statement(shape, chunk.len() + 2);
+    }
+    let groups = groups_for_items(transaction, &tenant, &queue, &ids).await?;
+
+    let mut rows = Vec::with_capacity(updates.len());
+    for ((position, envelope), update) in positions.iter().zip(commands).zip(updates) {
+        let values = current
+            .remove(&update.item_id)
+            .ok_or(EngineError::NotFound)?;
+        if text(&values[1])? != "Pending" || integer(&values[7])? != 0 || integer(&values[8])? != 0
+        {
+            return Err(EngineError::Conflict);
+        }
+        let mut fields = update
+            .set_fields
+            .clone()
+            .unwrap_or(fields_from_json(text(&values[0])?)?);
+        for (key, value) in &update.field_ops {
+            match value {
+                Some(value) => {
+                    fields.insert(key.clone(), value.clone());
+                }
+                None => {
+                    fields.remove(key);
+                }
+            }
+        }
+        let payload = match &update.payload {
+            PayloadUpdate::Keep => optional_blob(&values[5])?,
+            PayloadUpdate::Set(value) => value.as_ref().map(|value| value.to_vec()),
+        };
+        let metadata = update
+            .set_metadata
+            .as_ref()
+            .map(metadata_to_json)
+            .transpose()?
+            .unwrap_or(text(&values[6])?);
+        let priority = match &update.set_priority {
+            ScheduleUpdate::Keep => optional_text(&values[2])?,
+            ScheduleUpdate::Set(value) => value
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(storage)?,
+        };
+        let parsed_priority = parse_priority(priority.clone())?;
+        let not_before = match &update.set_not_before {
+            ScheduleUpdate::Keep => optional_integer(&values[3])?,
+            ScheduleUpdate::Set(value) => value.map(ts_nanos),
+        };
+        rows.push(Api001UpdateRow {
+            item_id: update.item_id,
+            fields: fields_to_json(&fields)?,
+            payload,
+            metadata,
+            priority,
+            priority_sort: elig_sort(&parsed_priority, &definition.priority_model),
+            not_before,
+            // API-001 explicitly preserves eligible_since, including reschedules.
+            eligible_since: optional_integer(&values[4])?,
+            updated_at: ts_nanos(envelope.created_at),
+            sequence: i64::try_from(position.sequence)
+                .map_err(|_| storage("command sequence exceeds relational integer range"))?,
+            gate_keys: update.set_gate_keys.clone(),
+        });
+    }
+
+    for chunk in rows.chunks(API001_UPDATE_CHUNK) {
+        let mut params = Vec::with_capacity(chunk.len() * 10 + 2);
+        for row in chunk {
+            params.extend([
+                Value::Text(row.item_id.to_string()),
+                Value::Text(row.fields.clone()),
+                row.payload
+                    .as_ref()
+                    .map_or(Value::Null, |payload| Value::Blob(payload.clone())),
+                Value::Text(row.metadata.clone()),
+                row.priority.clone().map_or(Value::Null, Value::Text),
+                Value::Blob(row.priority_sort.clone()),
+                row.not_before.map_or(Value::Null, Value::Integer),
+                row.eligible_since.map_or(Value::Null, Value::Integer),
+                Value::Integer(row.updated_at),
+                Value::Integer(row.sequence),
+            ]);
+        }
+        params.extend([Value::Text(tenant.clone()), Value::Text(queue.clone())]);
+        let tenant_bind = chunk.len() * 10 + 1;
+        let queue_bind = tenant_bind + 1;
+        record_statement(shape, params.len());
+        let changed = transaction
+            .execute(
+                format!(
+                    "WITH updates(item_id,fields,payload,metadata,priority,priority_sort,not_before,\
+                     eligible_since,updated_at,last_command_sequence) AS (VALUES {}) \
+                     UPDATE fireweed_items AS i SET fields=u.fields,payload=u.payload,metadata=u.metadata,\
+                     priority=u.priority,priority_sort=u.priority_sort,not_before=u.not_before,\
+                     eligible_since=u.eligible_since,item_version=i.item_version+1,\
+                     updated_at=u.updated_at,last_command_sequence=u.last_command_sequence \
+                     FROM updates AS u WHERE i.tenant_id=?{tenant_bind} AND i.queue_id=?{queue_bind} \
+                     AND i.item_id=u.item_id AND i.lifecycle_state='Pending' AND i.superseded=0 AND i.fenced=0",
+                    numbered_values_rows(chunk.len(), 10, 1)
+                ),
+                params,
+            )
+            .await
+            .map_err(storage)?;
+        if changed != u64::try_from(chunk.len()).map_err(storage)? {
+            return Err(storage("BatchUpdate changed an unexpected row count"));
+        }
+    }
+
+    let gate_replacements = rows
+        .iter()
+        .filter(|row| row.gate_keys.is_some())
+        .collect::<Vec<_>>();
+    for chunk in gate_replacements.chunks(API001_GATE_DELETE_CHUNK) {
+        let mut params = vec![Value::Text(tenant.clone()), Value::Text(queue.clone())];
+        params.extend(chunk.iter().map(|row| Value::Text(row.item_id.to_string())));
+        record_statement(shape, params.len());
+        transaction
+            .execute(
+                format!(
+                    "DELETE FROM fireweed_item_gates WHERE tenant_id=?1 AND queue_id=?2 \
+                     AND item_id IN ({})",
+                    (0..chunk.len())
+                        .map(|index| format!("?{}", index + 3))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                params,
+            )
+            .await
+            .map_err(storage)?;
+    }
+    let gate_rows = gate_replacements
+        .iter()
+        .flat_map(|row| {
+            row.gate_keys
+                .as_ref()
+                .into_iter()
+                .flatten()
+                .map(move |gate| (row.item_id, gate))
+        })
+        .collect::<Vec<_>>();
+    for chunk in gate_rows.chunks(PUSH_GATE_CHUNK) {
+        let mut params = Vec::with_capacity(chunk.len() * 4);
+        for (item_id, gate) in chunk {
+            params.extend([
+                Value::Text(tenant.clone()),
+                Value::Text(queue.clone()),
+                Value::Text(item_id.to_string()),
+                Value::Text((*gate).clone()),
+            ]);
+        }
+        record_statement(shape, params.len());
+        transaction
+            .execute(
+                format!(
+                    "INSERT INTO fireweed_item_gates (tenant_id,queue_id,item_id,gate_key) VALUES {} \
+                     ON CONFLICT(tenant_id,queue_id,item_id,gate_key) DO NOTHING",
+                    values_rows(chunk.len(), 4)
+                ),
+                params,
+            )
+            .await
+            .map_err(storage)?;
+    }
+
+    for chunk in groups.chunks(GROUP_SUMMARY_CHUNK) {
+        record_statement(shape, chunk.len() + 3);
+    }
+    let now = commands
+        .first()
+        .map(|command| ts_nanos(command.created_at))
+        .unwrap_or_default();
+    refresh_group_summaries(transaction, &tenant, &queue, &groups, now).await?;
+
+    if let (
+        Some(request_id),
+        Some(fingerprint),
+        Some(RequestOutcome::BatchUpdate { response_payload }),
+    ) = (
+        &commands[0].request_id,
+        commands[0].request_fingerprint,
+        &commands[0].request_outcome,
+    ) {
+        let _: BatchUpdateResponse = serde_json::from_str(response_payload).map_err(storage)?;
+        let command_positions = serde_json::to_string(
+            &positions
+                .iter()
+                .map(|position| (position.backend_epoch, position.sequence))
+                .collect::<Vec<_>>(),
+        )
+        .map_err(storage)?;
+        let expires_at = now.saturating_add(
+            i64::try_from(definition.request_id_retention_ms)
+                .unwrap_or(i64::MAX)
+                .saturating_mul(1_000_000),
+        );
+        record_statement(shape, 8);
+        let affected = transaction
+            .execute(
+                "INSERT INTO fireweed_request_idempotency \
+                 (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,\
+                  command_positions,expires_at,created_at) \
+                 VALUES (?1,?2,'batch_update',?3,?4,?5,?6,?7,?8) \
+                 ON CONFLICT(tenant_id,queue_id,operation,request_id) DO UPDATE SET \
+                  request_fingerprint=excluded.request_fingerprint,response_payload=excluded.response_payload,\
+                  command_positions=excluded.command_positions,expires_at=excluded.expires_at,\
+                  created_at=excluded.created_at \
+                 WHERE fireweed_request_idempotency.expires_at<=excluded.created_at OR \
+                  (fireweed_request_idempotency.request_fingerprint=excluded.request_fingerprint \
+                   AND fireweed_request_idempotency.response_payload=excluded.response_payload)",
+                vec![
+                    Value::Text(tenant),
+                    Value::Text(queue),
+                    Value::Text(request_id.as_str().to_string()),
+                    Value::Blob(fingerprint.to_be_bytes().to_vec()),
+                    Value::Text(response_payload.clone()),
+                    Value::Text(command_positions),
+                    Value::Integer(expires_at),
+                    Value::Integer(now),
+                ],
+            )
+            .await
+            .map_err(storage)?;
+        if affected == 0 {
+            return Err(EngineError::RequestIdConflict);
+        }
+    }
+    Ok(())
+}
+
 async fn apply_owned(
     writer: Arc<Mutex<Connection>>,
     live_tokens: Arc<Mutex<BTreeMap<(QueueKey, ItemId), LeaseToken>>>,
     live_tokens_by_consumer: Arc<Mutex<ConsumerLeaseIndex>>,
+    last_batch_update_shape: Arc<std::sync::Mutex<Option<TursoBatchUpdateStatementShape>>>,
     positions: Vec<CommandPosition>,
     commands: Vec<CommandEnvelope>,
     enforce_live_epoch: bool,
@@ -1431,6 +1744,24 @@ async fn apply_owned(
     if positions.len() != commands.len() {
         return Err(storage("positions/commands length mismatch"));
     }
+    let api001_updates = commands
+        .iter()
+        .map(|envelope| match &envelope.command {
+            QueueCommand::UpdateFields(update)
+                if update.api001_batch && update.set_entity_document.is_none() =>
+            {
+                Some(update)
+            }
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>();
+    let api001_updates = api001_updates.filter(|updates| !updates.is_empty());
+    let mut statement_shape = api001_updates
+        .as_ref()
+        .map(|updates| TursoBatchUpdateStatementShape::new(updates.len()));
+    *last_batch_update_shape
+        .lock()
+        .expect("Turso statement-shape mutex poisoned") = None;
     let mut connection = writer.lock().await;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1439,6 +1770,7 @@ async fn apply_owned(
     let mut next_by_queue: HashMap<QueueKey, i64> = HashMap::new();
     let mut max_epoch: HashMap<QueueKey, i64> = HashMap::new();
     let mut token_ops = Vec::new();
+    let mut api001_pending_commands = 0_usize;
 
     // Fence the complete live batch before executing any command. A later position may
     // target a queue already seen in the batch, so checking only while initializing
@@ -1449,6 +1781,7 @@ async fn apply_owned(
             let floor = match floors.get(&position.queue) {
                 Some(floor) => *floor,
                 None => {
+                    record_statement(&mut statement_shape, 2);
                     let row = one_row(
                         &transaction,
                         sql::SELECT_CURSOR,
@@ -1478,6 +1811,7 @@ async fn apply_owned(
         let cursor = match next_by_queue.get(&position.queue) {
             Some(cursor) => *cursor,
             None => {
+                record_statement(&mut statement_shape, 2);
                 let row = one_row(
                     &transaction,
                     sql::SELECT_CURSOR,
@@ -1513,6 +1847,9 @@ async fn apply_owned(
         if let Err(error) = validate_minimal_command(envelope) {
             transaction.rollback().await.map_err(storage)?;
             return Err(error);
+        }
+        if api001_updates.is_some() {
+            api001_pending_commands += 1;
         }
 
         match &envelope.command {
@@ -2065,10 +2402,20 @@ async fn apply_owned(
                 )
                 .await?;
             }
+            QueueCommand::UpdateFields(_) if api001_updates.is_some() => {}
             QueueCommand::UpdateFields(update) => {
+                let old_groups = groups_for_items(
+                    &transaction,
+                    &tenant,
+                    &queue,
+                    std::slice::from_ref(&update.item_id),
+                )
+                .await?;
                 let current = one_row(
                     &transaction,
-                    sql::SELECT_LIVE_FIELDS,
+                    "SELECT fields,lifecycle_state,priority,not_before,eligible_since,payload,metadata \
+                     FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 \
+                     AND lifecycle_state IN ('Pending','Leased') AND superseded=0 AND fenced=0",
                     vec![
                         Value::Text(tenant.clone()),
                         Value::Text(queue.clone()),
@@ -2077,7 +2424,12 @@ async fn apply_owned(
                 )
                 .await?;
                 if let Some(row) = current {
-                    let mut fields = fields_from_json(text(&row[0])?)?;
+                    let definition =
+                        definition_in_transaction(&transaction, &position.queue).await?;
+                    let mut fields = update
+                        .set_fields
+                        .clone()
+                        .unwrap_or(fields_from_json(text(&row[0])?)?);
                     for (key, value) in &update.field_ops {
                         match value {
                             Some(value) => {
@@ -2088,45 +2440,99 @@ async fn apply_owned(
                             }
                         }
                     }
-                    let encoded = fields_to_json(&fields)?;
-                    let base = vec![
-                        Value::Text(tenant.clone()),
-                        Value::Text(queue.clone()),
-                        Value::Text(update.item_id.to_string()),
-                        Value::Text(encoded),
-                    ];
-                    match &update.payload {
-                        PayloadUpdate::Keep => {
-                            let mut params = base;
-                            params.extend([
-                                Value::Integer(ts_nanos(envelope.created_at)),
-                                Value::Integer(incoming),
-                            ]);
-                            transaction
-                                .execute(sql::UPDATE_FIELDS_KEEP_PAYLOAD, params)
-                                .await
-                                .map_err(storage)?;
-                        }
+                    let payload = match &update.payload {
+                        PayloadUpdate::Keep => optional_blob(&row[5])?,
                         PayloadUpdate::Set(payload) => {
-                            let mut params = base;
-                            params.push(
-                                payload
-                                    .as_ref()
-                                    .map_or(Value::Null, |bytes| Value::Blob(bytes.to_vec())),
-                            );
-                            params.extend([
+                            payload.as_ref().map(|payload| payload.to_vec())
+                        }
+                    };
+                    let metadata = update
+                        .set_metadata
+                        .as_ref()
+                        .map(metadata_to_json)
+                        .transpose()?
+                        .unwrap_or(text(&row[6])?);
+                    let priority = match &update.set_priority {
+                        ScheduleUpdate::Keep => optional_text(&row[2])?,
+                        ScheduleUpdate::Set(priority) => priority
+                            .as_ref()
+                            .map(serde_json::to_string)
+                            .transpose()
+                            .map_err(storage)?,
+                    };
+                    let mut eligible_since = optional_integer(&row[4])?;
+                    let not_before = match &update.set_not_before {
+                        ScheduleUpdate::Keep => optional_integer(&row[3])?,
+                        ScheduleUpdate::Set(not_before) => {
+                            let now = ts_nanos(envelope.created_at);
+                            let not_before = not_before.map(ts_nanos);
+                            if !update.api001_batch {
+                                eligible_since = Some(not_before.unwrap_or(now).max(now));
+                            }
+                            not_before
+                        }
+                    };
+                    let parsed_priority = parse_priority(priority.clone())?;
+                    let changed = transaction
+                        .execute(
+                            "UPDATE fireweed_items SET fields=?4,payload=?5,metadata=?6,priority=?7,\
+                             priority_sort=?8,not_before=?9,eligible_since=?10,\
+                             item_version=item_version+1,updated_at=?11,last_command_sequence=?12 \
+                             WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 \
+                             AND lifecycle_state IN ('Pending','Leased') AND superseded=0 AND fenced=0",
+                            vec![
+                                Value::Text(tenant.clone()),
+                                Value::Text(queue.clone()),
+                                Value::Text(update.item_id.to_string()),
+                                Value::Text(fields_to_json(&fields)?),
+                                payload.map_or(Value::Null, Value::Blob),
+                                Value::Text(metadata),
+                                priority.map_or(Value::Null, Value::Text),
+                                Value::Blob(elig_sort(&parsed_priority, &definition.priority_model)),
+                                not_before.map_or(Value::Null, Value::Integer),
+                                eligible_since.map_or(Value::Null, Value::Integer),
                                 Value::Integer(ts_nanos(envelope.created_at)),
                                 Value::Integer(incoming),
-                            ]);
+                            ],
+                        )
+                        .await
+                        .map_err(storage)?;
+                    if changed != 1 {
+                        return Err(EngineError::Conflict);
+                    }
+                    if let Some(gate_keys) = &update.set_gate_keys {
+                        execute_for_items(
+                            &transaction,
+                            sql::delete_item_gates,
+                            vec![Value::Text(tenant.clone()), Value::Text(queue.clone())],
+                            std::slice::from_ref(&update.item_id),
+                        )
+                        .await?;
+                        for chunk in gate_keys.chunks(PUSH_GATE_CHUNK) {
+                            let mut params = Vec::with_capacity(chunk.len() * 4);
+                            for gate in chunk {
+                                params.extend([
+                                    Value::Text(tenant.clone()),
+                                    Value::Text(queue.clone()),
+                                    Value::Text(update.item_id.to_string()),
+                                    Value::Text(gate.clone()),
+                                ]);
+                            }
                             transaction
-                                .execute(sql::UPDATE_FIELDS_SET_PAYLOAD, params)
+                                .execute(
+                                    format!(
+                                        "INSERT INTO fireweed_item_gates \
+                                         (tenant_id,queue_id,item_id,gate_key) VALUES {} \
+                                         ON CONFLICT(tenant_id,queue_id,item_id,gate_key) DO NOTHING",
+                                        values_rows(chunk.len(), 4)
+                                    ),
+                                    params,
+                                )
                                 .await
                                 .map_err(storage)?;
                         }
                     }
                     if let Some(document) = &update.set_entity_document {
-                        let definition =
-                            definition_in_transaction(&transaction, &position.queue).await?;
                         replace_typed_indexes_for_entity(
                             &transaction,
                             &tenant,
@@ -2149,6 +2555,14 @@ async fn apply_owned(
                             .await
                             .map_err(storage)?;
                     }
+                    refresh_group_summaries(
+                        &transaction,
+                        &tenant,
+                        &queue,
+                        &old_groups,
+                        ts_nanos(envelope.created_at),
+                    )
+                    .await?;
                 }
             }
             QueueCommand::ReplacePending(replace) => {
@@ -2936,6 +3350,27 @@ async fn apply_owned(
             .or_insert(epoch);
     }
 
+    if let Some(updates) = &api001_updates {
+        if api001_pending_commands == updates.len() {
+            apply_api001_update_batch(
+                &transaction,
+                &positions,
+                &commands,
+                updates,
+                &mut statement_shape,
+            )
+            .await?;
+        } else if api001_pending_commands == 0 {
+            // An exact replay is already represented by the durable cursor and is a no-op.
+            statement_shape = None;
+        } else {
+            transaction.rollback().await.map_err(storage)?;
+            return Err(storage(
+                "BatchUpdate replay crossed an impossible partial atomic boundary",
+            ));
+        }
+    }
+
     let cursor_updates = next_by_queue.into_iter().collect::<Vec<_>>();
     for chunk in cursor_updates.chunks(CURSOR_UPDATE_CHUNK) {
         let mut params = Vec::with_capacity(chunk.len() * 4);
@@ -2948,6 +3383,7 @@ async fn apply_owned(
                 Value::Integer(epoch),
             ]);
         }
+        record_statement(&mut statement_shape, params.len());
         transaction
             .execute(
                 format!(
@@ -2964,6 +3400,11 @@ async fn apply_owned(
             .map_err(storage)?;
     }
     transaction.commit().await.map_err(storage)?;
+    if statement_shape.is_some() {
+        *last_batch_update_shape
+            .lock()
+            .expect("Turso statement-shape mutex poisoned") = statement_shape;
+    }
     let mut tokens = live_tokens.lock().await;
     let mut by_consumer = live_tokens_by_consumer.lock().await;
     for op in token_ops {
@@ -3781,7 +4222,19 @@ impl AsyncProjectionStore for TursoRelational {
         let writer = self.writer.clone();
         let tokens = self.live_tokens.clone();
         let by_consumer = self.live_tokens_by_consumer.clone();
-        async move { apply_owned(writer, tokens, by_consumer, positions, commands, true).await }
+        let shape = self.last_batch_update_shape.clone();
+        async move {
+            apply_owned(
+                writer,
+                tokens,
+                by_consumer,
+                shape,
+                positions,
+                commands,
+                true,
+            )
+            .await
+        }
     }
 
     fn apply_recovery(
@@ -3792,7 +4245,19 @@ impl AsyncProjectionStore for TursoRelational {
         let writer = self.writer.clone();
         let tokens = self.live_tokens.clone();
         let by_consumer = self.live_tokens_by_consumer.clone();
-        async move { apply_owned(writer, tokens, by_consumer, positions, commands, false).await }
+        let shape = self.last_batch_update_shape.clone();
+        async move {
+            apply_owned(
+                writer,
+                tokens,
+                by_consumer,
+                shape,
+                positions,
+                commands,
+                false,
+            )
+            .await
+        }
     }
 
     fn eligible_candidates(

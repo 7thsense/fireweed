@@ -1,0 +1,28 @@
+{
+  "turso_version": "0.7.0",
+  "turso_features": ["local"],
+  "boundary": "embedded_local_ordinary_wal",
+  "batch_sizes": [1, 100, 1000],
+  "operations_per_second": 196.56346687601044,
+  "p50_us": 5071.859119999999,
+  "p95_us": 41005.754,
+  "p99_us": 41005.754,
+  "database_bytes": 1227768,
+  "cpu_time_ms": 5830.0,
+  "peak_rss_bytes": 46891008,
+  "excluded_time": {
+    "cold_open": true,
+    "fixture_generation": true
+  },
+  "regression_limits": {
+    "min_operations_per_second_ratio": 0.8,
+    "max_p99_ratio": 1.25
+  },
+  "measurement": {
+    "profile": "debug",
+    "latency_unit": "microseconds_per_updated_item",
+    "database_bytes_include": ["main", "wal", "shm"],
+    "cpu_source": "/proc/self/stat",
+    "rss_source": "/proc/self/status VmHWM"
+  }
+}

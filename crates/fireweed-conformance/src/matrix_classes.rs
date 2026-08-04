@@ -1,5 +1,5 @@
 //! Product storage-matrix durability classes (Class A / Class B) and the
-//! conformance **capability claims** each public 5×3 cell may make.
+//! conformance **capability claims** each public 5×4 cell may make.
 //!
 //! Normative product law:
 //! - [orthogonal-storage-matrix-brief](../../../../docs/helix/02-design/orthogonal-storage-matrix-brief.md)
@@ -52,14 +52,16 @@ impl MatrixLog {
 pub enum MatrixProjection {
     Memory,
     Sqlite,
+    Turso,
     Postgres,
 }
 
 impl MatrixProjection {
-    /// All three public projections, in matrix-brief order.
-    pub const ALL: [MatrixProjection; 3] = [
+    /// All four public projections, in matrix-brief order. Turso is the default.
+    pub const ALL: [MatrixProjection; 4] = [
         MatrixProjection::Memory,
         MatrixProjection::Sqlite,
+        MatrixProjection::Turso,
         MatrixProjection::Postgres,
     ];
 
@@ -67,6 +69,7 @@ impl MatrixProjection {
         match self {
             MatrixProjection::Memory => "memory",
             MatrixProjection::Sqlite => "sqlite",
+            MatrixProjection::Turso => "turso",
             MatrixProjection::Postgres => "postgres",
         }
     }
@@ -292,7 +295,7 @@ pub fn register_suite_claims(
     Ok(RegisteredSuiteClaims { cell, claims })
 }
 
-/// One public 5×3 matrix cell.
+/// One public 5×4 matrix cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MatrixCell {
     pub log: MatrixLog,
@@ -341,9 +344,9 @@ impl MatrixCell {
     }
 }
 
-/// All 15 public matrix cells (row-major: log outer, projection inner).
-pub fn all_matrix_cells() -> [MatrixCell; 15] {
-    let mut cells = [MatrixCell::new(MatrixLog::Memory, MatrixProjection::Memory); 15];
+/// All 20 public matrix cells (row-major: log outer, projection inner).
+pub fn all_matrix_cells() -> [MatrixCell; 20] {
+    let mut cells = [MatrixCell::new(MatrixLog::Memory, MatrixProjection::Memory); 20];
     let mut i = 0;
     for log in MatrixLog::ALL {
         for projection in MatrixProjection::ALL {
@@ -351,7 +354,7 @@ pub fn all_matrix_cells() -> [MatrixCell; 15] {
             i += 1;
         }
     }
-    debug_assert_eq!(i, 15);
+    debug_assert_eq!(i, 20);
     cells
 }
 
@@ -371,13 +374,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn matrix_has_exactly_fifteen_cells() {
-        assert_eq!(all_matrix_cells().len(), 15);
+    fn matrix_has_exactly_twenty_cells() {
+        assert_eq!(all_matrix_cells().len(), 20);
         let mut seen = std::collections::BTreeSet::new();
         for cell in all_matrix_cells() {
             assert!(seen.insert((cell.log.as_str(), cell.projection.as_str())));
         }
-        assert_eq!(seen.len(), 15);
+        assert_eq!(seen.len(), 20);
     }
 
     #[test]
@@ -443,7 +446,11 @@ mod tests {
 
     #[test]
     fn class_b_with_durable_projection_claims_projection_reopen_only() {
-        for projection in [MatrixProjection::Sqlite, MatrixProjection::Postgres] {
+        for projection in [
+            MatrixProjection::Sqlite,
+            MatrixProjection::Turso,
+            MatrixProjection::Postgres,
+        ] {
             let cell = MatrixCell::new(MatrixLog::Memory, projection);
             let claims = cell.claims();
             assert!(!claims.durable_log_replay);

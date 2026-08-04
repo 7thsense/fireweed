@@ -270,7 +270,7 @@ async fn turso_projection_image(store: &TursoRelational, shard: &QueueKey) -> Pr
         )
         .await
         .unwrap();
-    let items = rows
+    let mut items = rows
         .into_iter()
         .map(|row| {
             let values = row.values;
@@ -306,7 +306,21 @@ async fn turso_projection_image(store: &TursoRelational, shard: &QueueKey) -> Pr
                 }),
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let rendered = AsyncProjectionStore::render_claimed(
+        store,
+        shard.clone(),
+        items.iter().map(|item| item.item_id).collect(),
+    )
+    .await
+    .unwrap();
+    let tokens = rendered
+        .into_iter()
+        .map(|item| (item.item_id, item.lease_token))
+        .collect::<HashMap<_, _>>();
+    for item in &mut items {
+        item.lease_token = tokens.get(&item.item_id).cloned().flatten();
+    }
 
     let mut side_records = BTreeMap::new();
     for row in store

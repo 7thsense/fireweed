@@ -56,7 +56,7 @@
 //!
 //! ## Product durability classes (Class A / Class B)
 //!
-//! The public 5×3 log × projection matrix (matrix brief) uses a separate product
+//! The public 5×4 log × projection matrix (matrix brief) uses a separate product
 //! **durability class** axis from engine `DurabilityClass` (Atomic / EventualApply):
 //!
 //! | Product class | Logs | Durable log-replay after process death? |
@@ -86,6 +86,7 @@ use fireweed_engine::{
     RenewLeasePort, SnapshotStore, UpdateFieldsPort, UpsertPort,
 };
 
+pub mod async_projection;
 pub mod fault;
 pub mod matrix_classes;
 pub mod scenarios;

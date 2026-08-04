@@ -29,7 +29,7 @@ fireweed-conformance = { path = "../fireweed-conformance" }
 fireweed-projection = { path = "../fireweed-projection" }
 fireweed-sqlite = { path = "../fireweed-sqlite" }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [[test]]
 name = "local_relational"
@@ -59,4 +59,9 @@ required-features = ["local"]
 [[test]]
 name = "cancellation"
 path = "tests/cancellation.rs"
+required-features = ["local"]
+
+[[test]]
+name = "qualification"
+path = "tests/qualification.rs"
 required-features = ["local"]

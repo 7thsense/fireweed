@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use fireweed_core::{ItemId, LeaseToken};
@@ -9,6 +9,11 @@ use fireweed_engine::QueueKey;
 use fireweed_relational::{OWNED_PROJECTION_TABLES, RELATIONAL_SCHEMA};
 use tokio::sync::Mutex;
 use turso::{Builder, Connection, Database, Value, transaction::TransactionBehavior};
+
+/// Exact Turso release qualified by this adapter.
+pub const TURSO_SUPPORTED_VERSION: &str = "0.7.0";
+/// Public mode boundary. Remote, sync, embedded-replica, and MVCC modes are not qualified.
+pub const TURSO_SUPPORTED_BOUNDARY: &str = "embedded_local_ordinary_wal";
 
 /// Default time spent retrying a locked database connection.
 pub const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -18,7 +23,8 @@ pub const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 pub enum JournalMode {
     /// SQLite-compatible write-ahead logging, matching the existing projection durability profile.
     Wal,
-    /// Turso's native multi-version concurrency mode. Opt-in until the complete projection is qualified.
+    /// Turso's native multi-version concurrency mode. Exposed only for typed fail-closed configuration;
+    /// it is outside the qualified projection boundary.
     Mvcc,
 }
 
@@ -163,6 +169,29 @@ pub struct SchemaReport {
     pub indexes: Vec<String>,
 }
 
+/// Runtime-observed SQL shape for one API-001 BatchUpdate projection apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TursoBatchUpdateStatementShape {
+    pub item_count: usize,
+    pub statement_count: usize,
+    pub max_bind_count: usize,
+}
+
+impl TursoBatchUpdateStatementShape {
+    pub(crate) fn new(item_count: usize) -> Self {
+        Self {
+            item_count,
+            statement_count: 0,
+            max_bind_count: 0,
+        }
+    }
+
+    pub(crate) fn record(&mut self, bind_count: usize) {
+        self.statement_count += 1;
+        self.max_bind_count = self.max_bind_count.max(bind_count);
+    }
+}
+
 pub(crate) type ConsumerLeaseIndex = BTreeMap<(QueueKey, String, ItemId), ()>;
 
 /// Async embedded Turso store with a single serialized write connection.
@@ -176,6 +205,7 @@ pub struct TursoRelational {
     pub(crate) writer: Arc<Mutex<Connection>>,
     pub(crate) live_tokens: Arc<Mutex<BTreeMap<(QueueKey, ItemId), LeaseToken>>>,
     pub(crate) live_tokens_by_consumer: Arc<Mutex<ConsumerLeaseIndex>>,
+    pub(crate) last_batch_update_shape: Arc<StdMutex<Option<TursoBatchUpdateStatementShape>>>,
     config: TursoConfig,
 }
 
@@ -185,6 +215,12 @@ impl TursoRelational {
         if config.busy_timeout.is_zero() {
             return Err(TursoRelationalError::Configuration(
                 "busy timeout must be greater than zero".to_string(),
+            ));
+        }
+        if config.journal_mode != JournalMode::Wal {
+            return Err(TursoRelationalError::Configuration(
+                "only embedded/local Turso 0.7 ordinary WAL is qualified; MVCC is unsupported"
+                    .to_string(),
             ));
         }
         let path = config
@@ -202,6 +238,7 @@ impl TursoRelational {
             writer: Arc::new(Mutex::new(writer)),
             live_tokens: Arc::new(Mutex::new(BTreeMap::new())),
             live_tokens_by_consumer: Arc::new(Mutex::new(BTreeMap::new())),
+            last_batch_update_shape: Arc::new(StdMutex::new(None)),
             config,
         })
     }
@@ -212,6 +249,14 @@ impl TursoRelational {
 
     pub fn config(&self) -> &TursoConfig {
         &self.config
+    }
+
+    /// Most recent API-001 BatchUpdate statement trace for structural qualification.
+    pub fn last_batch_update_statement_shape(&self) -> Option<TursoBatchUpdateStatementShape> {
+        *self
+            .last_batch_update_shape
+            .lock()
+            .expect("Turso statement-shape mutex poisoned")
     }
 
     /// Obtain a separately configured connection for future read-side fan-out.
@@ -272,6 +317,128 @@ impl TursoRelational {
         let connection = self.writer.lock().await;
         collect_rows(&connection, sql.as_ref(), params).await
     }
+}
+
+/// Validate one benchmark evidence record without accepting missing or zero-valued observations.
+pub fn verify_local_wal_benchmark_evidence(evidence: &serde_json::Value) -> Result<()> {
+    let object = evidence.as_object().ok_or_else(|| {
+        TursoRelationalError::Configuration("benchmark evidence must be an object".to_string())
+    })?;
+    let text = |field: &str| {
+        object
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                TursoRelationalError::Configuration(format!(
+                    "benchmark evidence requires nonempty {field}"
+                ))
+            })
+    };
+    if text("turso_version")? != TURSO_SUPPORTED_VERSION {
+        return Err(TursoRelationalError::Configuration(
+            "benchmark Turso version is outside the qualified pin".to_string(),
+        ));
+    }
+    if text("boundary")? != TURSO_SUPPORTED_BOUNDARY {
+        return Err(TursoRelationalError::Configuration(
+            "benchmark boundary is outside local ordinary WAL".to_string(),
+        ));
+    }
+    let features = object
+        .get("turso_features")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            TursoRelationalError::Configuration(
+                "benchmark evidence requires turso_features".to_string(),
+            )
+        })?;
+    if features.len() != 1 || features[0].as_str() != Some("local") {
+        return Err(TursoRelationalError::Configuration(
+            "benchmark features must be exactly [local]".to_string(),
+        ));
+    }
+    let batch_sizes = object
+        .get("batch_sizes")
+        .and_then(serde_json::Value::as_array)
+        .filter(|values| !values.is_empty())
+        .ok_or_else(|| {
+            TursoRelationalError::Configuration(
+                "benchmark evidence requires batch_sizes".to_string(),
+            )
+        })?;
+    if batch_sizes
+        .iter()
+        .any(|value| value.as_u64().is_none_or(|value| value == 0))
+    {
+        return Err(TursoRelationalError::Configuration(
+            "benchmark batch sizes must be positive integers".to_string(),
+        ));
+    }
+    for field in [
+        "operations_per_second",
+        "p50_us",
+        "p95_us",
+        "p99_us",
+        "database_bytes",
+        "cpu_time_ms",
+        "peak_rss_bytes",
+    ] {
+        if object
+            .get(field)
+            .and_then(serde_json::Value::as_f64)
+            .is_none_or(|value| !value.is_finite() || value <= 0.0)
+        {
+            return Err(TursoRelationalError::Configuration(format!(
+                "benchmark evidence requires positive {field}"
+            )));
+        }
+    }
+    let p50 = object["p50_us"].as_f64().expect("validated p50");
+    let p95 = object["p95_us"].as_f64().expect("validated p95");
+    let p99 = object["p99_us"].as_f64().expect("validated p99");
+    if !(p50 <= p95 && p95 <= p99) {
+        return Err(TursoRelationalError::Configuration(
+            "benchmark percentiles must be monotonic".to_string(),
+        ));
+    }
+    let exclusions = object
+        .get("excluded_time")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            TursoRelationalError::Configuration(
+                "benchmark evidence requires excluded_time".to_string(),
+            )
+        })?;
+    for field in ["cold_open", "fixture_generation"] {
+        if exclusions.get(field).and_then(serde_json::Value::as_bool) != Some(true) {
+            return Err(TursoRelationalError::Configuration(format!(
+                "benchmark evidence must exclude {field} time"
+            )));
+        }
+    }
+    let limits = object
+        .get("regression_limits")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            TursoRelationalError::Configuration(
+                "benchmark evidence requires regression_limits".to_string(),
+            )
+        })?;
+    let min_ops = limits
+        .get("min_operations_per_second_ratio")
+        .and_then(serde_json::Value::as_f64);
+    let max_p99 = limits
+        .get("max_p99_ratio")
+        .and_then(serde_json::Value::as_f64);
+    if min_ops.is_none_or(|value| !(0.0..=1.0).contains(&value) || value == 0.0)
+        || max_p99.is_none_or(|value| value < 1.0 || !value.is_finite())
+    {
+        return Err(TursoRelationalError::Configuration(
+            "benchmark regression limits are missing or invalid".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 async fn configure_connection(connection: &Connection, config: &TursoConfig) -> Result<()> {
