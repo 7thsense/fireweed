@@ -81,18 +81,19 @@ pub use fireweed_core::{
     WorkerId,
 };
 pub use fireweed_engine::{
-    ActiveScope, AddressedMutation, BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateOutcome,
-    BatchUpdateRequest, BatchUpdateResponse, BatchUpdateValue, ClaimByItemIdsResponse,
-    ClaimCompatibility, ClaimRef, Claimed, ClaimedItem, Clock, CommandPosition, CommitCapabilities,
-    CommitEntryStatus, CommitRecovery, ControlPlaneConfig, CreateQueueOutcome,
-    DiscoveryGranularity, EngineError, EngineResult, EntityEdit, EntityEditOperation,
-    EntityPredicateValue, EntryRecovery, FinalizeKind, GateChange, GateKeyDelta, GroupBatching,
-    IndexHit, InstanceFence, ItemMutationOperation, ItemMutationOutcome, ItemMutationPrecondition,
-    ItemMutationRequest, ItemMutationResponse, ItemMutationResult, ItemMutationReturning,
-    ItemMutationSelectorAggregate, ItemMutationSnapshot, ItemMutationSummary, ItemPatch,
-    ItemPredicate, ItemSelector, ItemSelectorScope, ItemView, LeaseGuard, LifecyclePatch,
-    LiveItemView, PayloadUpdate, PushBatchOutcome, PushDisposition, QueueKey, QueueMetrics,
-    ScheduleUpdate, SelectedMutation, SideRecord, TimestampComparison, UpsertOutcome,
+    ActiveScope, AddressedMutation, AsyncProjectionSpec, BatchUpdateEntry, BatchUpdateItemRef,
+    BatchUpdateOutcome, BatchUpdateRequest, BatchUpdateResponse, BatchUpdateValue,
+    ClaimByItemIdsResponse, ClaimCompatibility, ClaimRef, Claimed, ClaimedItem, Clock,
+    CommandPosition, CommitCapabilities, CommitEntryStatus, CommitRecovery, ControlPlaneConfig,
+    CreateQueueOutcome, DiscoveryGranularity, EngineError, EngineResult, EntityEdit,
+    EntityEditOperation, EntityPredicateValue, EntryRecovery, FinalizeKind, GateChange,
+    GateKeyDelta, GroupBatching, IndexHit, InstanceFence, ItemMutationOperation,
+    ItemMutationOutcome, ItemMutationPrecondition, ItemMutationRequest, ItemMutationResponse,
+    ItemMutationResult, ItemMutationReturning, ItemMutationSelectorAggregate, ItemMutationSnapshot,
+    ItemMutationSummary, ItemPatch, ItemPredicate, ItemSelector, ItemSelectorScope, ItemView,
+    LeaseGuard, LifecyclePatch, LiveItemView, PayloadUpdate, PushBatchOutcome, PushDisposition,
+    QueueKey, QueueMetrics, ScheduleUpdate, SelectedMutation, SideRecord, TimestampComparison,
+    UpsertOutcome,
 };
 
 /// An active-scope result stamped with the exact queue and granularity used for discovery.
@@ -1037,6 +1038,10 @@ pub struct StorageConfig {
     /// Object-log peers only ([`LogConfig::Filesystem`], [`LogConfig::S3`]); ignored for other logs.
     pub authority: Option<ObjectLogAuthority>,
     pub response_barrier: ResponseBarrier,
+    /// Required only when `response_barrier` is [`ResponseBarrier::AsyncProjection`].
+    pub async_projection: Option<AsyncProjectionSpec>,
+    /// Optional SQLite projection apply-batch bound. Independent of response-barrier policy.
+    pub sqlite_projection_deferred_flush_chunk: Option<usize>,
     pub segments: SegmentConfig,
     pub namespace: String,
     pub recovery: RecoveryPolicy,
@@ -1051,6 +1056,8 @@ impl StorageConfig {
             control_plane: None,
             authority: None,
             response_barrier: ResponseBarrier::Strict,
+            async_projection: None,
+            sqlite_projection_deferred_flush_chunk: None,
             segments: SegmentConfig {
                 target_bytes: 1024 * 1024,
                 max_latency_ms: 5,
@@ -1075,28 +1082,6 @@ impl StorageConfig {
         if self.namespace.trim().is_empty() {
             return Err(EngineError::Invalid("storage namespace must not be empty"));
         }
-        if self.segments.target_bytes == 0 || self.segments.max_latency_ms == 0 {
-            return Err(EngineError::Invalid(
-                "segment target_bytes and max_latency_ms must be non-zero",
-            ));
-        }
-        if self.recovery.max_tail_commands == 0 {
-            return Err(EngineError::Invalid(
-                "recovery max_tail_commands must be non-zero",
-            ));
-        }
-
-        if matches!(
-            &self.log,
-            LogConfig::Filesystem { .. } | LogConfig::S3 { .. }
-        ) {
-            fireweed_engine::validate_production_object_log_segment_shape(
-                self.segments.target_bytes,
-                self.segments.max_latency_ms,
-                fireweed_engine::PRODUCTION_OBJECT_LOG_MAX_BATCHES,
-            )?;
-        }
-
         match &self.log {
             LogConfig::Memory => {}
             LogConfig::Sqlite { path } if path.as_os_str().is_empty() => {
@@ -1136,6 +1121,60 @@ impl StorageConfig {
             ProjectionStoreConfig::Postgres { .. } => {}
         }
 
+        validate_response_barrier(self.response_barrier, self.async_projection)?;
+
+        if self.segments.target_bytes == 0 || self.segments.max_latency_ms == 0 {
+            return Err(EngineError::Invalid(
+                "segment target_bytes and max_latency_ms must be non-zero",
+            ));
+        }
+        if self.recovery.max_tail_commands == 0 {
+            return Err(EngineError::Invalid(
+                "recovery max_tail_commands must be non-zero",
+            ));
+        }
+
+        if matches!(
+            &self.log,
+            LogConfig::Filesystem { .. } | LogConfig::S3 { .. }
+        ) {
+            fireweed_engine::validate_production_object_log_segment_shape(
+                self.segments.target_bytes,
+                self.segments.max_latency_ms,
+                fireweed_engine::PRODUCTION_OBJECT_LOG_MAX_BATCHES,
+            )?;
+        }
+
+        if self.response_barrier == ResponseBarrier::AsyncProjection
+            && !matches!(
+                &self.log,
+                LogConfig::Filesystem { .. } | LogConfig::S3 { .. }
+            )
+        {
+            return Err(EngineError::Invalid("async-projection-requires-object-log"));
+        }
+
+        if let Some(chunk) = self.sqlite_projection_deferred_flush_chunk {
+            if chunk == 0 {
+                return Err(EngineError::Invalid(
+                    "sqlite projection deferred flush chunk must be > 0",
+                ));
+            }
+            if !matches!(&self.projection, ProjectionStoreConfig::Sqlite { .. }) {
+                return Err(EngineError::Invalid(
+                    "sqlite-projection-deferred-flush-requires-sqlite-projection",
+                ));
+            }
+            if !matches!(
+                &self.log,
+                LogConfig::Filesystem { .. } | LogConfig::S3 { .. }
+            ) {
+                return Err(EngineError::Invalid(
+                    "sqlite-projection-deferred-flush-requires-object-log",
+                ));
+            }
+        }
+
         // Provider branches stay independent so filesystem and S3 barrier work can
         // advance without a shared validation branch creating a silent behavior window.
         match &self.log {
@@ -1148,6 +1187,51 @@ impl StorageConfig {
 
         Ok(())
     }
+}
+
+fn validate_response_barrier(
+    response_barrier: ResponseBarrier,
+    async_projection: Option<AsyncProjectionSpec>,
+) -> EngineResult<()> {
+    let spec = match (response_barrier, async_projection) {
+        (ResponseBarrier::Strict, None) => return Ok(()),
+        (ResponseBarrier::Strict, Some(_)) => {
+            return Err(EngineError::Invalid(
+                "async-projection-spec-requires-async-projection-barrier",
+            ));
+        }
+        (ResponseBarrier::AsyncProjection, None) => {
+            return Err(EngineError::Invalid("async-projection-spec-required"));
+        }
+        (ResponseBarrier::AsyncProjection, Some(spec)) => spec,
+    };
+
+    if spec.apply_lag_max_commands == 0 {
+        return Err(EngineError::Invalid(
+            "async projection bound apply_lag_max_commands must be > 0",
+        ));
+    }
+    if spec.apply_debt_max_bytes == 0 {
+        return Err(EngineError::Invalid(
+            "async projection bound apply_debt_max_bytes must be > 0",
+        ));
+    }
+    if spec.apply_queue_depth_max == 0 {
+        return Err(EngineError::Invalid(
+            "async projection bound apply_queue_depth_max must be > 0",
+        ));
+    }
+    if spec.oldest_unapplied_max_ms == 0 {
+        return Err(EngineError::Invalid(
+            "async projection bound oldest_unapplied_max_ms must be > 0",
+        ));
+    }
+    if spec.apply_poison_retry_threshold == 0 {
+        return Err(EngineError::Invalid(
+            "async projection bound apply_poison_retry_threshold must be > 0",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_filesystem_log_fields(root: &std::path::Path) -> EngineResult<()> {
@@ -1242,6 +1326,9 @@ impl ObjectLogRuntimeConfig {
             control_plane: None,
             authority: Some(self.authority),
             response_barrier: self.response_barrier,
+            async_projection: (self.response_barrier == ResponseBarrier::AsyncProjection)
+                .then(AsyncProjectionSpec::default),
+            sqlite_projection_deferred_flush_chunk: None,
             segments: self.segments,
             namespace: self.namespace,
             recovery: self.recovery,
@@ -1305,6 +1392,8 @@ mod storage_config_matrix_tests {
             control_plane: None,
             authority: None,
             response_barrier: ResponseBarrier::Strict,
+            async_projection: None,
+            sqlite_projection_deferred_flush_chunk: None,
             segments: segments(),
             namespace: "matrix-test".to_owned(),
             recovery: RecoveryPolicy::default(),
@@ -1478,6 +1567,7 @@ mod storage_config_matrix_tests {
 
                 let mut async_config = strict;
                 async_config.response_barrier = ResponseBarrier::AsyncProjection;
+                async_config.async_projection = Some(AsyncProjectionSpec::default());
                 let expected = match projection {
                     ProjectionStoreConfig::Memory => {
                         Err(EngineError::Invalid("objectlog-memory-async-pending"))
@@ -1596,6 +1686,7 @@ mod storage_config_matrix_tests {
             ProjectionStoreConfig::Memory,
         );
         config.response_barrier = ResponseBarrier::AsyncProjection;
+        config.async_projection = Some(AsyncProjectionSpec::default());
 
         assert_eq!(
             open(config, Arc::new(SystemClock)).map(drop),
@@ -6665,6 +6756,8 @@ mod tests {
                 control_plane: None,
                 authority: None,
                 response_barrier: ResponseBarrier::Strict,
+                async_projection: None,
+                sqlite_projection_deferred_flush_chunk: None,
                 segments: SegmentConfig {
                     target_bytes: 1024 * 1024,
                     max_latency_ms: 5,
@@ -6815,6 +6908,8 @@ mod tests {
                 control_plane: None,
                 authority: None,
                 response_barrier: ResponseBarrier::Strict,
+                async_projection: None,
+                sqlite_projection_deferred_flush_chunk: None,
                 segments: SegmentConfig {
                     target_bytes: 1024 * 1024,
                     max_latency_ms: 5,
@@ -6899,6 +6994,8 @@ mod tests {
                 control_plane: None,
                 authority: None,
                 response_barrier: ResponseBarrier::Strict,
+                async_projection: None,
+                sqlite_projection_deferred_flush_chunk: None,
                 segments: SegmentConfig {
                     target_bytes: 1024 * 1024,
                     max_latency_ms: 5,
@@ -7004,6 +7101,8 @@ mod tests {
                 control_plane: None,
                 authority: None,
                 response_barrier: ResponseBarrier::Strict,
+                async_projection: None,
+                sqlite_projection_deferred_flush_chunk: None,
                 segments: SegmentConfig {
                     target_bytes: 1024 * 1024,
                     max_latency_ms: 5,
@@ -7048,6 +7147,8 @@ mod tests {
             control_plane: None,
             authority: Some(super::ObjectLogAuthority::NativeConditionalWrite),
             response_barrier: ResponseBarrier::Strict,
+            async_projection: None,
+            sqlite_projection_deferred_flush_chunk: None,
             segments: SegmentConfig {
                 target_bytes: 4096,
                 max_latency_ms: 17,

@@ -122,6 +122,8 @@ fn full_matrix_storage_config_is_constructible() -> fireweed::EngineResult<()> {
                 control_plane: None,
                 authority: None,
                 response_barrier: ResponseBarrier::Strict,
+                async_projection: None,
+                sqlite_projection_deferred_flush_chunk: None,
                 segments,
                 namespace: "fixture".to_owned(),
                 recovery: RecoveryPolicy::default(),

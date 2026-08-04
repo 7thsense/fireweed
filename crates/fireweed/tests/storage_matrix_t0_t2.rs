@@ -437,6 +437,8 @@ fn build_config(cell: MatrixCell, root: &Path) -> StorageConfig {
         control_plane: None,
         authority: None,
         response_barrier: ResponseBarrier::Strict,
+        async_projection: None,
+        sqlite_projection_deferred_flush_chunk: None,
         segments: segments(),
         namespace: format!(
             "t0t2-{}-{}-{}-{}",

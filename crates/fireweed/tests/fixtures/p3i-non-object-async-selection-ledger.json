@@ -2,6 +2,7 @@
   {
     "assertion_id": "P3I-MEMORY-MEMORY-ASYNC-IGNORED",
     "successor_assertion_id": "P3B-MEMORY-MEMORY-ASYNC-REJECT",
+    "successor_validate": "Err(Invalid(async-projection-requires-object-log))",
     "log": "memory",
     "projection": "memory",
     "current_validate": "Ok(())",
@@ -16,6 +17,7 @@
   {
     "assertion_id": "P3I-MEMORY-SQLITE-ASYNC-IGNORED",
     "successor_assertion_id": "P3B-MEMORY-SQLITE-ASYNC-REJECT",
+    "successor_validate": "Err(Invalid(async-projection-requires-object-log))",
     "log": "memory",
     "projection": "sqlite",
     "current_validate": "Ok(())",
@@ -30,6 +32,7 @@
   {
     "assertion_id": "P3I-MEMORY-POSTGRES-ASYNC-IGNORED",
     "successor_assertion_id": "P3B-MEMORY-POSTGRES-ASYNC-REJECT",
+    "successor_validate": "Err(Invalid(async-projection-requires-object-log))",
     "log": "memory",
     "projection": "postgres",
     "current_validate": "Ok(())",
@@ -44,6 +47,7 @@
   {
     "assertion_id": "P3I-SQLITE-MEMORY-ASYNC-IGNORED",
     "successor_assertion_id": "P3B-SQLITE-MEMORY-ASYNC-REJECT",
+    "successor_validate": "Err(Invalid(async-projection-requires-object-log))",
     "log": "sqlite",
     "projection": "memory",
     "current_validate": "Ok(())",
@@ -58,6 +62,7 @@
   {
     "assertion_id": "P3I-SQLITE-SQLITE-ASYNC-IGNORED",
     "successor_assertion_id": "P3B-SQLITE-SQLITE-ASYNC-REJECT",
+    "successor_validate": "Err(Invalid(async-projection-requires-object-log))",
     "log": "sqlite",
     "projection": "sqlite",
     "current_validate": "Ok(())",
@@ -72,6 +77,7 @@
   {
     "assertion_id": "P3I-SQLITE-POSTGRES-ASYNC-IGNORED",
     "successor_assertion_id": "P3B-SQLITE-POSTGRES-ASYNC-REJECT",
+    "successor_validate": "Err(Invalid(async-projection-requires-object-log))",
     "log": "sqlite",
     "projection": "postgres",
     "current_validate": "Ok(())",
@@ -86,6 +92,7 @@
   {
     "assertion_id": "P3I-POSTGRES-MEMORY-ASYNC-IGNORED",
     "successor_assertion_id": "P3B-POSTGRES-MEMORY-ASYNC-REJECT",
+    "successor_validate": "Err(Invalid(async-projection-requires-object-log))",
     "log": "postgres",
     "projection": "memory",
     "current_validate": "Ok(())",
@@ -100,6 +107,7 @@
   {
     "assertion_id": "P3I-POSTGRES-SQLITE-ASYNC-IGNORED",
     "successor_assertion_id": "P3B-POSTGRES-SQLITE-ASYNC-REJECT",
+    "successor_validate": "Err(Invalid(async-projection-requires-object-log))",
     "log": "postgres",
     "projection": "sqlite",
     "current_validate": "Ok(())",
@@ -114,6 +122,7 @@
   {
     "assertion_id": "P3I-POSTGRES-POSTGRES-ASYNC-IGNORED",
     "successor_assertion_id": "P3B-POSTGRES-POSTGRES-ASYNC-REJECT",
+    "successor_validate": "Err(Invalid(async-projection-requires-object-log))",
     "log": "postgres",
     "projection": "postgres",
     "current_validate": "Ok(())",

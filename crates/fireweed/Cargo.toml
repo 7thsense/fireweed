@@ -133,3 +133,7 @@ path = "tests/storage_matrix_t0_t2.rs"
 [[test]]
 name = "p3i_async_selection_ledger"
 path = "tests/p3i_async_selection_ledger.rs"
+
+[[test]]
+name = "p3b_async_config_validation"
+path = "tests/p3b_async_config_validation.rs"

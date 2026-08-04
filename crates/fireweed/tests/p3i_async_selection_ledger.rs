@@ -2,8 +2,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use fireweed::{
-    ConfigSecret, LogConfig, PostgresMode, ProjectionStoreConfig, QueueId, QueueKey,
-    RecoveryPolicy, ResponseBarrier, SegmentConfig, StorageConfig, SystemClock, TenantId, open,
+    AsyncProjectionSpec, ConfigSecret, EngineError, LogConfig, PostgresMode, ProjectionStoreConfig,
+    QueueId, QueueKey, RecoveryPolicy, ResponseBarrier, SegmentConfig, StorageConfig, SystemClock,
+    TenantId, open,
 };
 use fireweed_engine::DurabilityClass;
 
@@ -66,6 +67,9 @@ fn config(log: &str, projection: &str, root: &Path, barrier: ResponseBarrier) ->
         control_plane: None,
         authority: None,
         response_barrier: barrier,
+        async_projection: (barrier == ResponseBarrier::AsyncProjection)
+            .then(AsyncProjectionSpec::default),
+        sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentConfig::new(1024, 5).unwrap(),
         namespace: format!("p3i-{log}-{projection}"),
         recovery: RecoveryPolicy::default(),
@@ -99,6 +103,10 @@ fn p3i_non_object_async_selection_ledger() {
         assert!(old_assertions.insert(row["assertion_id"].as_str().unwrap()));
         assert!(successor_assertions.insert(row["successor_assertion_id"].as_str().unwrap()));
         assert_eq!(row["current_validate"], "Ok(())");
+        assert_eq!(
+            row["successor_validate"],
+            "Err(Invalid(async-projection-requires-object-log))"
+        );
         assert_eq!(row["current_open_result"], "accepted_then_dispatch");
         assert_eq!(row["effective_barrier"], "Strict");
         assert_eq!(row["response_timing"], "after_projection_apply");
@@ -116,7 +124,10 @@ fn p3i_non_object_async_selection_ledger() {
         let strict = config(log, projection, &root, ResponseBarrier::Strict);
         let asynchronous = config(log, projection, &root, ResponseBarrier::AsyncProjection);
         assert_eq!(strict.validate(), Ok(()));
-        assert_eq!(asynchronous.validate(), Ok(()));
+        assert_eq!(
+            asynchronous.validate(),
+            Err(EngineError::Invalid("async-projection-requires-object-log"))
+        );
         assert_eq!(
             constructor_route(&strict),
             row["constructor_route"].as_str().unwrap()
@@ -129,17 +140,12 @@ fn p3i_non_object_async_selection_ledger() {
     assert_eq!(old_assertions.len(), 9);
     assert_eq!(successor_assertions.len(), 9);
 
-    // The four deterministic local cells prove the accepted async selector opens the identical
-    // Strict runtime. PostgreSQL routes above are characterized without opening a socket.
+    // The four deterministic local cells retain their Strict route while the old ignored async
+    // selector now fails before construction. PostgreSQL routes above are validated without I/O.
     for log in ["memory", "sqlite"] {
         for projection in ["memory", "sqlite"] {
             let strict = open(
                 config(log, projection, &root, ResponseBarrier::Strict),
-                Arc::new(SystemClock),
-            )
-            .unwrap();
-            let asynchronous = open(
-                config(log, projection, &root, ResponseBarrier::AsyncProjection),
                 Arc::new(SystemClock),
             )
             .unwrap();
@@ -148,9 +154,18 @@ fn p3i_non_object_async_selection_ledger() {
                 QueueId::new("ledger").unwrap(),
             );
             let strict_fingerprint = strict.commit_capabilities(&queue).unwrap();
-            let async_fingerprint = asynchronous.commit_capabilities(&queue).unwrap();
-            assert_eq!(async_fingerprint, strict_fingerprint);
-            assert_eq!(async_fingerprint.durability_class, DurabilityClass::Atomic);
+            assert_eq!(strict_fingerprint.durability_class, DurabilityClass::Atomic);
+            let error = match open(
+                config(log, projection, &root, ResponseBarrier::AsyncProjection),
+                Arc::new(SystemClock),
+            ) {
+                Ok(_) => panic!("async non-object-log selection must fail before construction"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error,
+                EngineError::Invalid("async-projection-requires-object-log")
+            );
         }
     }
     std::fs::remove_dir_all(root).unwrap();
