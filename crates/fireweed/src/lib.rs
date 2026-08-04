@@ -807,6 +807,8 @@ pub(crate) struct ComposedStorageConfig {
     pub object_log_authority: ObjectLogAuthorityConfig,
     pub projection: ComposedProjectionConfig,
     pub response_barrier: CommitResponseBarrier,
+    pub async_projection: Option<AsyncProjectionSpec>,
+    pub sqlite_projection_deferred_flush_chunk: Option<usize>,
     pub segments: SegmentSettings,
     pub namespace: String,
     pub recovery: ProjectionRecoveryPolicy,
@@ -1265,15 +1267,9 @@ fn validate_s3_log_fields(
 
 fn validate_filesystem_selection(
     projection: &ProjectionStoreConfig,
-    response_barrier: ResponseBarrier,
+    _response_barrier: ResponseBarrier,
 ) -> EngineResult<()> {
     match projection {
-        ProjectionStoreConfig::Memory if response_barrier == ResponseBarrier::AsyncProjection => {
-            Err(EngineError::Invalid("objectlog-memory-async-pending"))
-        }
-        ProjectionStoreConfig::Postgres { .. } if response_barrier != ResponseBarrier::Strict => {
-            Err(EngineError::Unavailable)
-        }
         ProjectionStoreConfig::Memory
         | ProjectionStoreConfig::Sqlite { .. }
         | ProjectionStoreConfig::Postgres { .. } => Ok(()),
@@ -1363,6 +1359,9 @@ impl ObjectLogRuntimeConfig {
             self.authority,
             projection,
             self.response_barrier,
+            (self.response_barrier == ResponseBarrier::AsyncProjection)
+                .then(AsyncProjectionSpec::default),
+            None,
             self.segments,
             self.namespace,
             self.recovery,
@@ -1568,15 +1567,17 @@ mod storage_config_matrix_tests {
                 let mut async_config = strict;
                 async_config.response_barrier = ResponseBarrier::AsyncProjection;
                 async_config.async_projection = Some(AsyncProjectionSpec::default());
-                let expected = match projection {
-                    ProjectionStoreConfig::Memory => {
+                let expected = match (&log, projection) {
+                    (LogConfig::Filesystem { .. }, _) => Ok(()),
+                    (LogConfig::S3 { .. }, ProjectionStoreConfig::Memory) => {
                         Err(EngineError::Invalid("objectlog-memory-async-pending"))
                     }
-                    ProjectionStoreConfig::Sqlite { .. } => Ok(()),
-                    ProjectionStoreConfig::Postgres { .. } => {
+                    (LogConfig::S3 { .. }, ProjectionStoreConfig::Sqlite { .. }) => Ok(()),
+                    (LogConfig::S3 { .. }, ProjectionStoreConfig::Postgres { .. }) => {
                         assert_runtime_pin(async_config.validate());
                         continue;
                     }
+                    _ => unreachable!("provider fixture is object-log only"),
                 };
                 assert_eq!(
                     async_config.validate(),
@@ -1671,7 +1672,7 @@ mod storage_config_matrix_tests {
 
     #[cfg(feature = "objectlog")]
     #[test]
-    fn object_log_memory_async_rejects_before_filesystem_io() {
+    fn filesystem_memory_async_opens_and_retires_the_pending_pin() {
         let root = std::env::temp_dir().join(format!(
             "fireweed-p3-pre-io-{}-{}",
             std::process::id(),
@@ -1688,14 +1689,11 @@ mod storage_config_matrix_tests {
         config.response_barrier = ResponseBarrier::AsyncProjection;
         config.async_projection = Some(AsyncProjectionSpec::default());
 
-        assert_eq!(
-            open(config, Arc::new(SystemClock)).map(drop),
-            Err(EngineError::Invalid("objectlog-memory-async-pending"))
-        );
-        assert!(
-            !root.exists(),
-            "validation must reject before creating the root"
-        );
+        let fireweed = open(config, Arc::new(SystemClock))
+            .expect("filesystem×memory AsyncProjection is a supported cell");
+        drop(fireweed);
+        assert!(root.exists(), "the supported cell must open its log root");
+        std::fs::remove_dir_all(root).expect("remove fixture");
     }
 
     #[cfg(feature = "objectlog")]
@@ -1739,7 +1737,7 @@ mod storage_config_matrix_tests {
 
     #[cfg(all(feature = "objectlog", feature = "postgres"))]
     #[test]
-    fn split_postgres_runtime_pins_fail_before_provider_io() {
+    fn filesystem_postgres_async_retires_pin_while_s3_keeps_it() {
         fn config(object_log: ObjectLogStorage) -> ObjectLogRuntimeConfig {
             ObjectLogRuntimeConfig {
                 object_log,
@@ -1766,11 +1764,16 @@ mod storage_config_matrix_tests {
                 .as_nanos()
         ));
         let _ = std::fs::remove_dir_all(&root);
-        assert_runtime_pin(open_objectlog_postgres(
+        let local_error = open_objectlog_postgres(
             config(ObjectLogStorage::Local { root: root.clone() }),
             Arc::new(SystemClock),
-        ));
-        assert!(!root.exists(), "filesystem pin must fire before log I/O");
+        )
+        .expect_err("the deliberately invalid PostgreSQL URL must fail");
+        assert!(matches!(local_error, EngineError::Storage(_)));
+        assert!(
+            !root.exists(),
+            "projection connect precedes filesystem log I/O"
+        );
 
         assert_runtime_pin(open_objectlog_postgres(
             config(ObjectLogStorage::S3Compatible {
@@ -2201,6 +2204,18 @@ impl ComposedStorageConfig {
             }
             _ => {}
         }
+        validate_response_barrier(
+            match self.response_barrier {
+                CommitResponseBarrier::Strict => ResponseBarrier::Strict,
+                CommitResponseBarrier::AsyncProjection => ResponseBarrier::AsyncProjection,
+            },
+            self.async_projection,
+        )?;
+        if self.sqlite_projection_deferred_flush_chunk == Some(0) {
+            return Err(EngineError::Invalid(
+                "sqlite projection deferred flush chunk must be > 0",
+            ));
+        }
         if self.recovery.max_tail_commands == 0 {
             return Err(EngineError::Invalid(
                 "object-log recovery tail bound must be non-zero",
@@ -2288,9 +2303,9 @@ impl Drop for ProjectionLifecycleHandleInner {
 
 /// Opaque, cloneable ownership boundary for composed storage lifecycle state.
 ///
-/// The handle owns its configuration and, when a concrete composition is installed, its background
-/// flusher/checkpoint lifecycle. Dropping the last clone is the shutdown boundary. No concrete adapter
-/// type appears in the public signature.
+/// The handle owns its configuration and, when a concrete composition is installed, its projection
+/// apply/checkpoint lifecycle. Dropping the last clone is the shutdown boundary. No concrete adapter type
+/// appears in the public signature.
 #[derive(Clone)]
 pub(crate) struct ProjectionLifecycleHandle {
     inner: Arc<ProjectionLifecycleHandleInner>,
@@ -2419,17 +2434,6 @@ fn objectlog_high_water(
 ) -> EngineResult<Option<fireweed_engine::CommandPosition>> {
     use fireweed_engine::AsyncLogStore;
     fireweed_objectlog::block_on_objectlog(AsyncLogStore::high_water(log, key.clone()))
-}
-
-#[cfg(feature = "objectlog")]
-fn objectlog_read_from(
-    log: &fireweed_objectlog::ObjectLogEngineStore,
-    key: &QueueKey,
-    from: Option<fireweed_engine::CommandPosition>,
-    limit: usize,
-) -> EngineResult<fireweed_engine::CommandPage> {
-    use fireweed_engine::AsyncLogStore;
-    fireweed_objectlog::block_on_objectlog(AsyncLogStore::read_from(log, key.clone(), from, limit))
 }
 
 #[cfg(all(feature = "objectlog", feature = "postgres"))]
@@ -2628,15 +2632,12 @@ impl ProjectionLifecycle for ObjectLogPostgresLifecycle {
 }
 
 #[cfg(all(feature = "objectlog", feature = "sqlite"))]
-type ObjectLogSqliteBackend = fireweed_objectlog::AsyncObjectLogHybridBackend;
+type ObjectLogSqliteBackend = fireweed_objectlog::AsyncObjectLogSqliteBackend;
 
 #[cfg(all(feature = "objectlog", feature = "sqlite"))]
 struct ObjectLogSqliteLifecycle {
     backend: Arc<ObjectLogSqliteBackend>,
-    executor: blocking_backend::OwnedBlockingExecutor,
     max_tail_commands: u64,
-    stop: Arc<std::sync::atomic::AtomicBool>,
-    flusher: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 #[cfg(all(feature = "objectlog", feature = "sqlite"))]
@@ -2693,32 +2694,13 @@ fn validate_objectlog_sqlite_catalog(
 }
 
 #[cfg(all(feature = "objectlog", feature = "sqlite"))]
-fn verify_objectlog_sqlite_axes(
+async fn verify_objectlog_sqlite_axes(
     backend: &ObjectLogSqliteBackend,
-    require_online: bool,
 ) -> EngineResult<ProjectionVerificationState> {
-    use fireweed_engine::ProjectionStore;
+    use fireweed_engine::AsyncLogStore;
 
-    backend.with_projection(|projection| {
-        if require_online && projection.durable_projection_offline() {
-            return Err(EngineError::Storage(
-                "SQLite projection is offline pending authoritative rebuild".into(),
-            ));
-        }
-        if require_online && let Some(reason) = projection.checkpoint_error() {
-            return Err(EngineError::Storage(format!(
-                "async SQLite checkpoint worker failed: {reason}"
-            )));
-        }
-        if require_online && let Some(reason) = projection.poison_reason() {
-            return Err(EngineError::Storage(format!(
-                "hybrid projection worker is poisoned: {reason}"
-            )));
-        }
-        Ok(())
-    })?;
-
-    let definitions = backend.with_log(objectlog_recover_definitions)?;
+    let log = backend.log_store();
+    let definitions = AsyncLogStore::recover_definitions(log.as_ref()).await?;
     let authoritative: HashMap<QueueKey, QueueDefinition> = definitions
         .iter()
         .cloned()
@@ -2729,18 +2711,17 @@ fn verify_objectlog_sqlite_axes(
             )
         })
         .collect();
-    let projected: HashMap<QueueKey, QueueDefinition> = backend.with_projection(|projection| {
-        ProjectionStore::recover_definitions(projection.sqlite()).map(|defs| {
-            defs.into_iter()
-                .map(|definition| {
-                    (
-                        QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone()),
-                        definition,
-                    )
-                })
-                .collect()
+    let projected: HashMap<QueueKey, QueueDefinition> = backend
+        .projection_definitions()
+        .await?
+        .into_iter()
+        .map(|definition| {
+            (
+                QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone()),
+                definition,
+            )
         })
-    })?;
+        .collect();
     if authoritative != projected {
         return Err(EngineError::Storage(
             "SQLite queue catalog does not exactly match the authoritative object log".into(),
@@ -2751,9 +2732,8 @@ fn verify_objectlog_sqlite_axes(
     let mut authoritative_sequence = 0;
     for definition in definitions {
         let key = QueueKey::new(definition.tenant_id, definition.queue_id);
-        let projected_position =
-            backend.with_projection(|projection| projection.sqlite().recovery_high_water(&key))?;
-        let authoritative_position = backend.with_log(|log| objectlog_high_water(log, &key))?;
+        let projected_position = backend.projection_high_water(&key).await?;
+        let authoritative_position = AsyncLogStore::high_water(log.as_ref(), key.clone()).await?;
         if projected_position != authoritative_position {
             return Err(EngineError::Storage(format!(
                 "SQLite projection for {}/{} is not at the authoritative position: projection {:?}, log {:?}",
@@ -2780,45 +2760,29 @@ fn verify_objectlog_sqlite_axes(
 
 #[cfg(all(feature = "objectlog", feature = "sqlite"))]
 impl ObjectLogSqliteLifecycle {
-    fn verify_backend(
+    async fn verify_backend(
         backend: &ObjectLogSqliteBackend,
     ) -> EngineResult<ProjectionVerificationState> {
-        // Drain deferred SQLite checkpoint work before comparing axes.
-        loop {
-            let before = backend.with_projection(|p| p.deferred_command_count());
-            if before == 0 {
-                break;
-            }
-            backend.try_flush_deferred_projection()?;
-            let after = backend.with_projection(|p| p.deferred_command_count());
-            if after >= before {
-                return Err(EngineError::Storage(
-                    "deferred SQLite checkpoint made no progress during projection verification"
-                        .into(),
-                ));
-            }
-        }
-        verify_objectlog_sqlite_axes(backend, true)
+        verify_objectlog_sqlite_axes(backend).await
     }
 
-    fn rebuilde_backend(
+    async fn rebuilde_backend(
         backend: &ObjectLogSqliteBackend,
         max_tail_commands: u64,
     ) -> EngineResult<ProjectionRebuildState> {
-        backend.with_projection_mut(|projection| projection.begin_durable_rebuild())?;
-        let definitions = backend.with_log(objectlog_recover_definitions)?;
+        use fireweed_engine::AsyncLogStore;
+
+        let log = backend.log_store();
+        let definitions = AsyncLogStore::recover_definitions(log.as_ref()).await?;
+        backend.delete_projection().await?;
         let mut replayed = 0_u64;
         for definition in &definitions {
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-            backend.with_projection_mut(|projection| {
-                projection
-                    .sqlite()
-                    .create_queue_projection(definition.clone())
-            })?;
+            backend.ensure_projection_shard(definition.clone()).await?;
             let mut from = None;
             loop {
-                let page =
-                    backend.with_log(|log| objectlog_read_from(log, &key, from.clone(), 1_024))?;
+                let page = AsyncLogStore::read_from(log.as_ref(), key.clone(), from.clone(), 1_024)
+                    .await?;
                 replayed = replayed.saturating_add(page.entries.len() as u64);
                 if replayed > max_tail_commands {
                     return Err(EngineError::Storage(format!(
@@ -2837,11 +2801,9 @@ impl ObjectLogSqliteLifecycle {
                         .iter()
                         .map(|(_, command)| command.clone())
                         .collect();
-                    backend.with_projection_mut(|projection| {
-                        projection
-                            .sqlite()
-                            .apply_committed_batch(&positions, &commands)
-                    })?;
+                    backend
+                        .apply_projection_recovery(positions, commands)
+                        .await?;
                 }
                 match page.next {
                     Some(next) => from = Some(next),
@@ -2849,11 +2811,7 @@ impl ObjectLogSqliteLifecycle {
                 }
             }
         }
-        let verification = verify_objectlog_sqlite_axes(backend, false)?;
-        backend.with_projection_mut(|projection| {
-            projection.finish_durable_rebuild();
-            Ok::<(), EngineError>(())
-        })?;
+        let verification = verify_objectlog_sqlite_axes(backend).await?;
         Ok(ProjectionRebuildState {
             snapshot_used: false,
             tail_commands_replayed: replayed,
@@ -2879,34 +2837,21 @@ impl ProjectionLifecycle for ObjectLogSqliteLifecycle {
 
     fn verify_projection(&self) -> ProjectionLifecycleFuture<'_, ProjectionVerificationState> {
         let backend = Arc::clone(&self.backend);
-        Box::pin(
-            self.executor
-                .run(move || Self::verify_backend(backend.as_ref())),
-        )
+        Box::pin(async move { Self::verify_backend(backend.as_ref()).await })
     }
 
     fn delete_projection(&self) -> ProjectionLifecycleFuture<'_, ()> {
         let backend = Arc::clone(&self.backend);
-        Box::pin(self.executor.run(move || {
-            backend.with_projection_mut(|projection| projection.delete_durable_projection())
-        }))
+        Box::pin(async move { backend.delete_projection().await })
     }
 
     fn rebuild_projection(&self) -> ProjectionLifecycleFuture<'_, ProjectionRebuildState> {
         let backend = Arc::clone(&self.backend);
         let max_tail_commands = self.max_tail_commands;
-        Box::pin(
-            self.executor
-                .run(move || Self::rebuilde_backend(backend.as_ref(), max_tail_commands)),
-        )
+        Box::pin(async move { Self::rebuilde_backend(backend.as_ref(), max_tail_commands).await })
     }
 
-    fn shutdown(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(flusher) = self.flusher.lock().expect("flusher poisoned").take() {
-            let _ = flusher.join();
-        }
-    }
+    fn shutdown(&mut self) {}
 }
 
 #[cfg(feature = "objectlog")]
@@ -5180,6 +5125,8 @@ fn open_validated(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineResult<
             config.authority,
             projection,
             config.response_barrier,
+            config.async_projection,
+            config.sqlite_projection_deferred_flush_chunk,
             config.segments,
             config.namespace,
             config.recovery,
@@ -5459,6 +5406,8 @@ fn open_filesystem_log_cell(
     authority: Option<ObjectLogAuthority>,
     projection: ProjectionStoreConfig,
     response_barrier: ResponseBarrier,
+    async_projection: Option<AsyncProjectionSpec>,
+    sqlite_projection_deferred_flush_chunk: Option<usize>,
     segments: SegmentConfig,
     namespace: String,
     recovery: RecoveryPolicy,
@@ -5471,6 +5420,8 @@ fn open_filesystem_log_cell(
             authority,
             projection,
             response_barrier,
+            async_projection,
+            sqlite_projection_deferred_flush_chunk,
             segments,
             namespace,
             recovery,
@@ -5485,7 +5436,14 @@ fn open_filesystem_log_cell(
         let authority = authority.unwrap_or(ObjectLogAuthority::NativeConditionalWrite);
         match projection {
             ProjectionStoreConfig::Memory => open_objectlog_memory_projection(
-                root, authority, segments, namespace, recovery, clock,
+                root,
+                authority,
+                response_barrier,
+                async_projection,
+                segments,
+                namespace,
+                recovery,
+                clock,
             ),
             ProjectionStoreConfig::Sqlite { path } => {
                 #[cfg(feature = "sqlite")]
@@ -5496,6 +5454,8 @@ fn open_filesystem_log_cell(
                             authority,
                             ComposedProjectionConfig::Sqlite { path },
                             response_barrier,
+                            async_projection,
+                            sqlite_projection_deferred_flush_chunk,
                             segments,
                             namespace,
                             recovery,
@@ -5532,6 +5492,8 @@ fn open_filesystem_log_cell(
                             authority,
                             ComposedProjectionConfig::Postgres { url: url.0 },
                             response_barrier,
+                            async_projection,
+                            sqlite_projection_deferred_flush_chunk,
                             segments,
                             namespace,
                             recovery,
@@ -5604,6 +5566,9 @@ fn open_s3_log_cell(
                             authority,
                             ComposedProjectionConfig::Sqlite { path },
                             response_barrier,
+                            (response_barrier == ResponseBarrier::AsyncProjection)
+                                .then(AsyncProjectionSpec::default),
+                            None,
                             segments,
                             namespace,
                             recovery,
@@ -5637,6 +5602,9 @@ fn open_s3_log_cell(
                             authority,
                             ComposedProjectionConfig::Postgres { url: url.0 },
                             response_barrier,
+                            (response_barrier == ResponseBarrier::AsyncProjection)
+                                .then(AsyncProjectionSpec::default),
+                            None,
                             segments,
                             namespace,
                             recovery,
@@ -5666,11 +5634,14 @@ fn open_s3_log_cell(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // One normalized argument per public storage axis.
 fn composed_storage_config(
     object_log: ObjectLogConfig,
     authority: ObjectLogAuthority,
     projection: ComposedProjectionConfig,
     response_barrier: ResponseBarrier,
+    async_projection: Option<AsyncProjectionSpec>,
+    sqlite_projection_deferred_flush_chunk: Option<usize>,
     segments: SegmentConfig,
     namespace: String,
     recovery: RecoveryPolicy,
@@ -5688,6 +5659,8 @@ fn composed_storage_config(
             ResponseBarrier::Strict => CommitResponseBarrier::Strict,
             ResponseBarrier::AsyncProjection => CommitResponseBarrier::AsyncProjection,
         },
+        async_projection,
+        sqlite_projection_deferred_flush_chunk,
         segments: SegmentSettings {
             target_bytes: segments.target_bytes,
             max_latency_ms: segments.max_latency_ms,
@@ -5742,20 +5715,17 @@ fn s3_provider_from_composed(config: &ComposedStorageConfig) -> EngineResult<S3C
 }
 
 #[cfg(feature = "objectlog")]
+#[allow(clippy::too_many_arguments)] // Mirrors the filesystem projection policy boundary.
 fn open_objectlog_memory_projection(
     root: PathBuf,
     authority: ObjectLogAuthority,
+    response_barrier: ResponseBarrier,
+    async_projection: Option<AsyncProjectionSpec>,
     segments: SegmentConfig,
     namespace: String,
     recovery: RecoveryPolicy,
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed> {
-    // P3 split boundary: filesystem×memory remains Strict until P3b installs
-    // the provider-neutral async policy. The memory projection is rebuilt from
-    // genesis on every open, so there is no cached projection to fail/delete;
-    // log reads already verify object integrity and the tail bound applies only
-    // to durable projection catch-up/rebuild.
-    let _response_barrier = CommitResponseBarrier::Strict;
     let _ = (authority, recovery);
     let log = open_composed_object_log_engine(
         &root,
@@ -5765,9 +5735,18 @@ fn open_objectlog_memory_projection(
             max_latency_ms: segments.max_latency_ms,
         },
     )?;
-    let backend = fireweed_objectlog::block_on_objectlog(
-        fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store(log, 0),
-    )?;
+    let backend = match response_barrier {
+        ResponseBarrier::Strict => fireweed_objectlog::block_on_objectlog(
+            fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store(log, 0),
+        )?,
+        ResponseBarrier::AsyncProjection => fireweed_objectlog::block_on_objectlog(
+            fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store_with_async_projection(
+                log,
+                0,
+                async_projection.expect("validated async projection spec"),
+            ),
+        )?,
+    };
     // Intentionally NOT wrapped in process-wide BlockingLibBackend — LogEngine ports are
     // driven via ObjectLogTaskDispatcher on the process-wide multi-thread runtime
     // (fireweed-8a023735 / API-005 native-async path).
@@ -6011,9 +5990,6 @@ fn open_objectlog_postgres_blocking(
             "filesystem PostgreSQL helper requires a local provider",
         ));
     };
-    if config.response_barrier != CommitResponseBarrier::Strict {
-        return Err(EngineError::Unavailable);
-    }
     let projection_schema = derived_postgres_schema_name(&config.namespace);
     let projection = match &config.projection {
         ComposedProjectionConfig::Postgres { url } => fireweed_objectlog::block_on_objectlog(
@@ -6070,11 +6046,23 @@ fn finish_objectlog_postgres(
             }
         }
     }
-    let backend = fireweed_objectlog::block_on_objectlog(
-        fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection(
-            log, projection, 0,
-        ),
-    )?;
+    let backend = match config.response_barrier {
+        CommitResponseBarrier::Strict => fireweed_objectlog::block_on_objectlog(
+            fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection(
+                log, projection, 0,
+            ),
+        )?,
+        CommitResponseBarrier::AsyncProjection => fireweed_objectlog::block_on_objectlog(
+            fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection_with_async_projection(
+                log,
+                projection,
+                0,
+                config
+                    .async_projection
+                    .expect("validated async projection spec"),
+            ),
+        )?,
+    };
     let flush_interval = 50_u64;
     let backend = Arc::new(backend);
     // Both axes now own their async boundaries: LogEngine runs on the object-log runtime and the
@@ -6114,7 +6102,7 @@ fn finish_objectlog_postgres(
 /// Open a filesystem authoritative object log with a disposable SQLite projection behind the public
 /// Fireweed facade. [`CommitResponseBarrier::Strict`] makes SQLite durable before success is visible;
 /// [`CommitResponseBarrier::AsyncProjection`] acknowledges after the manifest and hot projection, with
-/// the owned background flusher checkpointing SQLite.
+/// the bounded owned SQLite actor applying selected-projection checkpoints in order.
 ///
 /// The SQLite file is a disposable cache: the returned lifecycle handle can verify it, delete it in place,
 /// and rebuild it exactly from authoritative object-log history without changing the live hot projection.
@@ -6150,21 +6138,21 @@ fn open_s3_composed_sqlite(
 #[cfg(all(feature = "objectlog", feature = "sqlite"))]
 fn open_filesystem_sqlite_projection(
     config: &ComposedStorageConfig,
-) -> EngineResult<fireweed_sqlite::HybridProjectionStore> {
+) -> EngineResult<fireweed_sqlite::SqliteProjectionStore> {
     open_configured_sqlite_projection(config)
 }
 
 #[cfg(all(feature = "objectlog", feature = "sqlite"))]
 fn open_s3_sqlite_projection(
     config: &ComposedStorageConfig,
-) -> EngineResult<fireweed_sqlite::HybridProjectionStore> {
+) -> EngineResult<fireweed_sqlite::SqliteProjectionStore> {
     open_configured_sqlite_projection(config)
 }
 
 #[cfg(all(feature = "objectlog", feature = "sqlite"))]
 fn open_configured_sqlite_projection(
     config: &ComposedStorageConfig,
-) -> EngineResult<fireweed_sqlite::HybridProjectionStore> {
+) -> EngineResult<fireweed_sqlite::SqliteProjectionStore> {
     let projection_path = match &config.projection {
         ComposedProjectionConfig::Sqlite { path } => path,
         ComposedProjectionConfig::Postgres { .. } => return Err(EngineError::Unavailable),
@@ -6177,13 +6165,7 @@ fn open_configured_sqlite_projection(
     {
         std::fs::create_dir_all(parent).map_err(|error| EngineError::Storage(error.to_string()))?;
     }
-    let mut projection = fireweed_sqlite::HybridProjectionStore::open(projection_path)?
-        .with_strict_apply(config.response_barrier == CommitResponseBarrier::Strict);
-    if config.response_barrier == CommitResponseBarrier::AsyncProjection {
-        projection =
-            projection.with_async_monitor(fireweed_sqlite::HybridAsyncThresholds::default());
-    }
-    Ok(projection)
+    fireweed_sqlite::SqliteProjectionStore::open(projection_path)
 }
 
 #[cfg(all(feature = "objectlog", feature = "sqlite"))]
@@ -6191,52 +6173,55 @@ fn finish_composed_sqlite(
     config: ComposedStorageConfig,
     clock: Arc<dyn Clock>,
     log: fireweed_objectlog::ObjectLogEngineStore,
-    projection: fireweed_sqlite::HybridProjectionStore,
+    projection: fireweed_sqlite::SqliteProjectionStore,
 ) -> EngineResult<Fireweed> {
-    if let Err(error) = validate_objectlog_sqlite_catalog(&log, projection.sqlite()) {
+    if let Err(error) = validate_objectlog_sqlite_catalog(&log, &projection) {
         match config.recovery.incompatible_projection {
             ProjectionRecoveryAction::FailClosed => return Err(error),
-            ProjectionRecoveryAction::RebuildProjection => {
-                projection.sqlite().reset_projection()?
-            }
+            ProjectionRecoveryAction::RebuildProjection => projection.reset_projection()?,
         }
     }
-    let backend = fireweed_objectlog::block_on_objectlog(
-        fireweed_objectlog::AsyncObjectLogHybridBackend::from_log_and_projection(
-            log, projection, 0,
-        ),
-    )?;
-    let flush_interval = 50_u64;
-    let backend = Arc::new(backend);
-    // Ports: native-async LogEngine path (no process-wide BlockingLibBackend).
-    // Lifecycle verify/delete/rebuild still offloads sync SQLite projection work via
-    // the shared executor only (not a full product port bridge) — fireweed-8a023735.
-    let lifecycle_executor = blocking_backend::shared_executor()?;
-    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let weak_backend = Arc::downgrade(&backend);
-    let thread_stop = Arc::clone(&stop);
-    let flusher = std::thread::Builder::new()
-        .name(format!("fireweed-composed-{}", config.namespace))
-        .spawn(move || {
-            while !thread_stop.load(Ordering::Acquire) {
-                std::thread::sleep(std::time::Duration::from_millis(flush_interval));
-                let Some(backend) = weak_backend.upgrade() else {
-                    break;
-                };
-                // LogEngine products own log flush; still drain deferred SQLite checkpoints.
-                let _ = backend.try_flush_deferred_projection();
+    let deferred_flush_chunk = config
+        .sqlite_projection_deferred_flush_chunk
+        .unwrap_or(fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK);
+    let backend = match config.response_barrier {
+        CommitResponseBarrier::Strict => {
+            if config.sqlite_projection_deferred_flush_chunk.is_some() {
+                fireweed_objectlog::block_on_objectlog(
+                    fireweed_objectlog::AsyncObjectLogSqliteBackend::from_log_and_projection_with_deferred_flush_chunk(
+                        log,
+                        projection,
+                        0,
+                        deferred_flush_chunk,
+                    ),
+                )?
+            } else {
+                fireweed_objectlog::block_on_objectlog(
+                    fireweed_objectlog::AsyncObjectLogSqliteBackend::from_log_and_projection(
+                        log, projection, 0,
+                    ),
+                )?
             }
-        })
-        .map_err(|error| EngineError::Storage(error.to_string()))?;
+        }
+        CommitResponseBarrier::AsyncProjection => fireweed_objectlog::block_on_objectlog(
+            fireweed_objectlog::AsyncObjectLogSqliteBackend::from_log_and_projection_with_async_projection(
+                log,
+                projection,
+                0,
+                config
+                    .async_projection
+                    .expect("validated async projection spec"),
+                deferred_flush_chunk,
+            ),
+        )?,
+    };
+    let backend = Arc::new(backend);
     let lifecycle = ProjectionLifecycleHandle {
         inner: Arc::new(ProjectionLifecycleHandleInner {
             _config: config.clone(),
             lifecycle: Box::new(ObjectLogSqliteLifecycle {
                 backend: Arc::clone(&backend),
-                executor: lifecycle_executor,
                 max_tail_commands: config.recovery.max_tail_commands,
-                stop,
-                flusher: Mutex::new(Some(flusher)),
             }),
         }),
     };

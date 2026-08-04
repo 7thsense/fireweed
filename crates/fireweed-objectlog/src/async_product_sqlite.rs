@@ -1891,6 +1891,45 @@ impl AsyncObjectLogSqliteBackend {
         f(self.log.as_ref())
     }
 
+    /// Clone the authoritative log handle for asynchronous lifecycle operations.
+    pub fn log_store(&self) -> Arc<ObjectLogEngineStore> {
+        Arc::clone(&self.log)
+    }
+
+    /// Read the disposable projection queue catalog on its owned adapter thread.
+    pub async fn projection_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
+        AsyncProjectionStore::recover_definitions(self.sqlite_projection.as_ref()).await
+    }
+
+    /// Read the disposable projection recovery cursor on its owned adapter thread.
+    pub async fn projection_high_water(
+        &self,
+        shard: &QueueKey,
+    ) -> EngineResult<Option<fireweed_engine::CommandPosition>> {
+        AsyncProjectionStore::recovery_high_water(self.sqlite_projection.as_ref(), shard.clone())
+            .await
+    }
+
+    /// Ensure a projection shard through the owned adapter thread.
+    pub async fn ensure_projection_shard(&self, definition: QueueDefinition) -> EngineResult<()> {
+        AsyncProjectionStore::ensure_shard(self.sqlite_projection.as_ref(), definition).await
+    }
+
+    /// Apply a recovery batch through the owned adapter thread.
+    pub async fn apply_projection_recovery(
+        &self,
+        positions: Vec<fireweed_engine::CommandPosition>,
+        commands: Vec<CommandEnvelope>,
+    ) -> EngineResult<()> {
+        AsyncProjectionStore::apply_recovery(self.sqlite_projection.as_ref(), positions, commands)
+            .await
+    }
+
+    /// Delete the disposable projection through the owned adapter thread.
+    pub async fn delete_projection(&self) -> EngineResult<()> {
+        self.sqlite_projection.delete_projection().await
+    }
+
     /// Borrow the projection axis (lifecycle / diagnostics).
     pub fn with_projection<R>(&self, f: impl FnOnce(&InMemoryProjection) -> R) -> R {
         self.projection.with_store(f)

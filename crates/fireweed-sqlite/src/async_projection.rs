@@ -362,6 +362,11 @@ impl AsyncSqliteProjectionStore {
             .await
     }
 
+    /// Delete the disposable projection contents through the owned actor.
+    pub async fn delete_projection(&self) -> EngineResult<()> {
+        self.execute(|store| store.reset_projection()).await
+    }
+
     /// Maximum commands committed by one selected-projection apply transaction.
     pub fn apply_chunk_size(&self) -> usize {
         self.apply_chunk_size

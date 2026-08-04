@@ -11,11 +11,12 @@
 use std::sync::Arc;
 
 use fireweed::{
-    CohortPolicy, CommitResponseBarrier, ComposedProjectionConfig, ComposedStorageConfig,
-    CreateQueue, EligibilityPolicy, ObjectLogAuthorityConfig, ObjectLogConfig, OrderingMode,
-    PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
-    ProjectionRecoveryAction, ProjectionRecoveryPolicy, QueueCreationPolicy, QueueDefinition,
-    QueueId, QueueKey, RecurrencePolicy, RetryPolicy, SecretValue, SegmentSettings, TenantId,
+    AsyncProjectionSpec, CohortPolicy, CommitResponseBarrier, ComposedProjectionConfig,
+    ComposedStorageConfig, CreateQueue, EligibilityPolicy, ObjectLogAuthorityConfig,
+    ObjectLogConfig, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
+    PriorityTieBreaker, PriorityValue, ProjectionRecoveryAction, ProjectionRecoveryPolicy,
+    QueueCreationPolicy, QueueDefinition, QueueId, QueueKey, RecurrencePolicy, RetryPolicy,
+    SecretValue, SegmentSettings, TenantId,
 };
 use fireweed_memory::ManualClock;
 
@@ -86,6 +87,8 @@ fn composed_storage_config(inputs: &mut [String]) -> ComposedStorageConfig {
             url: SecretValue::new(std::mem::take(&mut inputs[5])),
         },
         response_barrier: CommitResponseBarrier::Strict,
+        async_projection: None,
+        sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentSettings::new(8 * 1024 * 1024, 20).unwrap(),
         namespace: std::mem::take(&mut inputs[6]),
         recovery: ProjectionRecoveryPolicy {
@@ -126,6 +129,8 @@ fn composed_storage_config_is_owned_and_secret_safe() {
             path: "projection.sqlite".into(),
         },
         response_barrier: CommitResponseBarrier::AsyncProjection,
+        async_projection: Some(AsyncProjectionSpec::default()),
+        sqlite_projection_deferred_flush_chunk: None,
         segments: SegmentSettings::new(1024, 5).unwrap(),
         namespace: "local-test".to_owned(),
         recovery: ProjectionRecoveryPolicy {
