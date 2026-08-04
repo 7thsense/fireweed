@@ -434,16 +434,16 @@ fn select_local_image() -> Result<String, FixtureError> {
             REDPANDA_IMAGE_TAG,
         ])
         .output();
-    if let Ok(output) = inspect {
-        if output.status.success() {
-            let body = String::from_utf8_lossy(&output.stdout);
-            if body.contains(REDPANDA_IMAGE_DIGEST) {
-                return Ok(REDPANDA_IMAGE_PINNED.to_string());
-            }
-            // Tag present but digest differs — still allow the local tag so offline hosts work,
-            // but surface the mismatch in the error path only when missing entirely.
-            return Ok(REDPANDA_IMAGE_TAG.to_string());
+    if let Ok(output) = inspect
+        && output.status.success()
+    {
+        let body = String::from_utf8_lossy(&output.stdout);
+        if body.contains(REDPANDA_IMAGE_DIGEST) {
+            return Ok(REDPANDA_IMAGE_PINNED.to_string());
         }
+        // Tag present but digest differs — still allow the local tag so offline hosts work,
+        // but surface the mismatch in the error path only when missing entirely.
+        return Ok(REDPANDA_IMAGE_TAG.to_string());
     }
     // Try digest-only inspect.
     let digest_inspect = Command::new("docker")

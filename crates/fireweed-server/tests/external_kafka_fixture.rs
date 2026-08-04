@@ -116,8 +116,10 @@ fn sentinel_constants_are_stable_for_cross_harness_correlation() {
 fn kafka_endpoint_classifies_as_external_kafka_mode() {
     use fireweed_server::{ChangeRecordSinkConfig, ChangeRecordSinkMode};
 
-    let mut config = ChangeRecordSinkConfig::default();
-    config.enabled = true;
-    config.endpoint = Some("kafka://127.0.0.1:9".into());
+    let config = ChangeRecordSinkConfig {
+        enabled: true,
+        endpoint: Some("kafka://127.0.0.1:9".into()),
+        ..Default::default()
+    };
     assert_eq!(config.mode(), ChangeRecordSinkMode::ExternalKafka);
 }
