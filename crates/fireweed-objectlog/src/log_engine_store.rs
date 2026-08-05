@@ -387,6 +387,61 @@ impl<S: Sequencer<Meta = ()>> ObjectLogEngineStore<S> {
         )
     }
 
+    fn emission_cursor_key(&self, shard: &QueueKey) -> String {
+        format!(
+            "{}emission_cursor/{}",
+            self.meta_prefix,
+            partition_key(shard).0.replace('\0', "/")
+        )
+    }
+
+    /// Durable TD-008 emission cursor for one queue (blob-backed; Class A filesystem/S3 log).
+    pub async fn emission_cursor(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+        let key = self.emission_cursor_key(shard);
+        match self.blob.get(&key).await.map_err(store_err)? {
+            Some(bytes) => {
+                let doc: HighWaterDoc = serde_json::from_slice(&bytes).map_err(store_err)?;
+                Ok(Some(CommandPosition::new(
+                    shard.clone(),
+                    doc.backend_epoch,
+                    doc.sequence,
+                )))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Persist a monotonic emission cursor after a successful sink emit.
+    pub async fn set_emission_cursor(
+        &self,
+        shard: &QueueKey,
+        position: CommandPosition,
+    ) -> EngineResult<()> {
+        if position.queue != *shard {
+            return Err(EngineError::Invalid("emission cursor queue mismatch"));
+        }
+        let permit = self.metadata_permit(shard);
+        let _guard = permit.lock().await;
+        if let Some(current) = self.emission_cursor(shard).await?
+            && !current.precedes(&position)
+            && current != position
+        {
+            return Err(EngineError::Invalid("emission cursor regression"));
+        }
+        self.put_json(
+            &self.emission_cursor_key(shard),
+            &HighWaterDoc {
+                backend_epoch: position.backend_epoch,
+                sequence: position.sequence,
+            },
+        )
+        .await
+    }
+
+    pub fn supports_emission_cursor(&self) -> bool {
+        true
+    }
+
     fn latest_snapshot_key(&self, shard: &QueueKey) -> String {
         format!(
             "{}snapshots/{}/latest.json",
@@ -632,6 +687,44 @@ pub fn flush_config_from_segment(target_bytes: usize, max_latency_ms: u64) -> Fl
     cfg.max_batches = fireweed_engine::PRODUCTION_OBJECT_LOG_MAX_BATCHES;
     cfg.linger = Duration::from_millis(max_latency_ms);
     cfg
+}
+
+impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
+    /// Emit durable change-record tail from the emission cursor (TD-008 / P8c filesystem cursor).
+    pub async fn emit_change_record_tail<Sk>(
+        &self,
+        shard: &QueueKey,
+        sink: &Sk,
+        limit: usize,
+        emitted_at: fireweed_core::UtcTimestamp,
+        source_owner_id: Option<fireweed_core::OwnerId>,
+    ) -> EngineResult<usize>
+    where
+        Sk: fireweed_engine::ChangeRecordSink + ?Sized,
+    {
+        use fireweed_engine::command_envelope_change_records;
+
+        let cursor = self.emission_cursor(shard).await?;
+        let page = AsyncLogStore::read_from(self, shard.clone(), cursor, limit).await?;
+        if page.entries.is_empty() {
+            return Ok(0);
+        }
+        let mut records = Vec::new();
+        for (position, env) in &page.entries {
+            records.extend(command_envelope_change_records(
+                shard,
+                position,
+                env,
+                emitted_at,
+                source_owner_id.clone(),
+            ));
+        }
+        sink.emit(shard, &records)?;
+        if let Some((position, _)) = page.entries.last() {
+            self.set_emission_cursor(shard, position.clone()).await?;
+        }
+        Ok(records.len())
+    }
 }
 
 impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S> {
@@ -1416,6 +1509,76 @@ mod tests {
             drop(log);
         }
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn emission_cursor_advances_monotonically_and_survives_reopen() {
+        use fireweed_engine::{ChangeRecord, ChangeRecordSink, EngineResult};
+
+        let root = temp_root("emission-cursor");
+        let _ = std::fs::remove_dir_all(&root);
+        let log = ObjectLogEngineStore::open_local(&root, zero_linger())
+            .await
+            .unwrap();
+        let mut definition = qdef();
+        definition.emit_change_records = true;
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        log.create_or_read_definition(definition).await.unwrap();
+        log.ensure_shard(shard.clone()).await.unwrap();
+        let epoch = log.acquire_epoch(shard.clone()).await.unwrap();
+        let env = |id: &str| CommandEnvelope {
+            command_id: CommandId::new(id),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: Vec::new(),
+            command: QueueCommand::PauseQueue(Default::default()),
+            checksum: CommandChecksum(0),
+            created_at: UtcTimestamp::new(1, 0).unwrap(),
+        };
+        let positions = log
+            .append(shard.clone(), vec![env("a"), env("b")], epoch)
+            .await
+            .unwrap();
+        assert_eq!(positions.len(), 2);
+        assert!(log.supports_emission_cursor());
+        assert_eq!(log.emission_cursor(&shard).await.unwrap(), None);
+
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<usize>);
+        impl ChangeRecordSink for Sink {
+            fn emit(&self, _shard: &QueueKey, records: &[ChangeRecord]) -> EngineResult<()> {
+                *self.0.lock().unwrap() += records.len();
+                Ok(())
+            }
+        }
+        let sink = Sink::default();
+        let n = log
+            .emit_change_record_tail(&shard, &sink, 1, UtcTimestamp::new(2, 0).unwrap(), None)
+            .await
+            .unwrap();
+        assert!(n >= 1);
+        let cursor = log.emission_cursor(&shard).await.unwrap();
+        assert_eq!(cursor.as_ref(), Some(&positions[0]));
+
+        // Advance past first, then reject a regression to the first position.
+        log.set_emission_cursor(&shard, positions[1].clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            log.set_emission_cursor(&shard, positions[0].clone()).await,
+            Err(EngineError::Invalid("emission cursor regression"))
+        );
+
+        drop(log);
+        let reopened = ObjectLogEngineStore::open_local(&root, zero_linger())
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened.emission_cursor(&shard).await.unwrap(),
+            Some(positions[1].clone())
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
