@@ -11357,6 +11357,20 @@
           "P2f"
         ],
         "detail": "early_success=false",
+        "id": "88d29191de25399b41ce",
+        "identity": ": \"${FIREWEED_S3_TEST_ENDPOINT:?secret file missing FIREWEED_S3_TEST_ENDPOINT}\"",
+        "line": 154,
+        "owner": "P10px",
+        "path": "scripts/ci/s3-qualification-endpoint.sh",
+        "status": "debt"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "early_success=false",
         "id": "9b4eebda2f096273d3de",
         "identity": "#   3. treat a missing fixture as gate failure (this script enforces that)",
         "line": 30,
@@ -15417,6 +15431,48 @@
         "line": 143,
         "owner": "P10px",
         "path": "scripts/ci/release-gate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "6e89bfe2a45baffeb45c",
+        "identity": "export SOURCE_REVISION",
+        "line": 207,
+        "owner": "P10px",
+        "path": "scripts/ci/s3-qualification-endpoint.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "ba1ff572c674d8de436c",
+        "identity": "SOURCE_REVISION=$(git -C \"$REPO_ROOT\" rev-parse HEAD)",
+        "line": 208,
+        "owner": "P10px",
+        "path": "scripts/ci/s3-qualification-endpoint.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "85715d435f1f0f0c8003",
+        "identity": "\"source_revision\": os.environ[\"SOURCE_REVISION\"],",
+        "line": 251,
+        "owner": "P10px",
+        "path": "scripts/ci/s3-qualification-endpoint.sh",
         "status": "debt"
       },
       {
@@ -84033,7 +84089,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "d5855e15cf6f9425d62878e9beeb188fe27fd0c75738a360762ef441f39e4705",
+  "source_inventory_sha256": "eea2a2fabf92e3d19c56cda2e8ea2695ea2bb9bb59ecbfcdd351af1e01733d32",
   "workspaces": [
     {
       "listing_error_sha256": "",
