@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "spec_id": "storage-matrix-completion-brief",
-  "authority_revision": "P1-2026-08-04-turso-default",
+  "authority_revision": "P1-2026-08-04-turso-default+P4-method-contracts",
   "governed_documents": [
     {
       "path": "docs/helix/00-discover/product-vision.md",
@@ -860,5 +860,32 @@
       "product-ready"
     ],
     "storage_campaign_operator_stage_s": "out_of_campaign"
+  },
+  "method_contracts": {
+    "mode": "dynamic",
+    "discovery_roots": [
+      "crates/fireweed/src/facade.rs"
+    ],
+    "fixed_cardinality_forbidden": true,
+    "suite_owner": "P4",
+    "reopen_owners": {
+      "class_b": "P5",
+      "class_a": "P5a"
+    },
+    "family_owners": {
+      "queue_and_ownership": "P6",
+      "append_and_replace": "P7",
+      "claim": "P7",
+      "finalize": "P7",
+      "commit": "P9",
+      "read_and_discovery": "P6",
+      "metrics_and_projection_query": "P6",
+      "mutation_and_maintenance": "P8",
+      "projection_control": "P6"
+    },
+    "cell_id_separator": "--",
+    "provider_brand_in_shared_fixtures": false,
+    "live_s3_provenance_owner": "P4s",
+    "notes": "method_contracts are discovery-derived at verification time; never encode a fixed method count"
   }
 }

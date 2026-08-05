@@ -48,6 +48,7 @@ EXPECTED_TOP_LEVEL = {
     "requirement_dispositions",
     "evidence_contract",
     "private_surface_discovery",
+    "method_contracts",
     "tracked_ignore_policy",
     "topology_attestation",
     "public_identity_classification",
@@ -454,6 +455,30 @@ def validate_document(document: object, *, check_repository: bool) -> None:
     require(private["mode"] == "dynamic", "private surface must be dynamic")
     require(private["lower_bounds_are_allowlist"] is False, "private lower bounds cannot be allowlist")
     require(private["every_discovered_reference_requires_binding"] is True, "private binding coverage")
+
+    method_contracts = document["method_contracts"]
+    require(isinstance(method_contracts, dict), "method_contracts object")
+    require(method_contracts.get("mode") == "dynamic", "method_contracts.mode")
+    require(method_contracts.get("fixed_cardinality_forbidden") is True, "method_contracts fixed cardinality")
+    require(method_contracts.get("suite_owner") == "P4", "method_contracts suite owner")
+    require("required_method_count" not in method_contracts, "method_contracts must not fix count")
+    require("method_count" not in method_contracts, "method_contracts must not fix count")
+    family_owners = method_contracts.get("family_owners")
+    require(isinstance(family_owners, dict), "method_contracts.family_owners")
+    require(set(family_owners) >= {
+        "queue_and_ownership",
+        "append_and_replace",
+        "claim",
+        "finalize",
+        "commit",
+        "read_and_discovery",
+        "metrics_and_projection_query",
+        "mutation_and_maintenance",
+        "projection_control",
+    }, "method_contracts family set")
+    require(method_contracts.get("provider_brand_in_shared_fixtures") is False, "provider brand forbidden in shared fixtures")
+    require(method_contracts.get("live_s3_provenance_owner") == "P4s", "live S3 provenance owner")
+
     require(private["fixed_cardinality_forbidden"] is True, "private fixed cardinality forbidden")
     if check_repository:
         for root in private["roots"]:

@@ -1,3 +1,9 @@
+//! Provider-neutral shared API-005 public-interface suite (local cells).
+//!
+//! Cell IDs use the authority-manifest separator (`log--projection[--variant]`).
+//! Provider brand strings are forbidden in fixtures; live S3 provenance is P4s.
+//! Method coverage is discovery-derived via `scripts/ci/api005_suite_ownership.py`.
+
 #[path = "support/public_interface.rs"]
 mod public_interface;
 
@@ -59,7 +65,7 @@ async fn assert_cell(
     drop(fireweed);
 }
 
-fn objectlog_sqlite_config(
+fn filesystem_sqlite_config(
     root: &Path,
     barrier: ResponseBarrier,
     namespace: &str,
@@ -83,9 +89,9 @@ fn objectlog_sqlite_config(
     }
 }
 
-fn objectlog_sqlite(root: &Path, barrier: ResponseBarrier, namespace: &str) -> Fireweed {
+fn filesystem_sqlite(root: &Path, barrier: ResponseBarrier, namespace: &str) -> Fireweed {
     fireweed::open_objectlog_sqlite(
-        objectlog_sqlite_config(root, barrier, namespace),
+        filesystem_sqlite_config(root, barrier, namespace),
         Arc::new(SystemClock),
     )
     .unwrap()
@@ -95,34 +101,34 @@ fn objectlog_sqlite(root: &Path, barrier: ResponseBarrier, namespace: &str) -> F
 fn objectlog_authority_validation_accepts_native_conditional_write() {
     let root = FixtureRoot::new("authority-validation");
     let mut local =
-        objectlog_sqlite_config(root.path(), ResponseBarrier::Strict, "authority-validation");
+        filesystem_sqlite_config(root.path(), ResponseBarrier::Strict, "authority-validation");
     local.authority = ObjectLogAuthority::NativeConditionalWrite;
     local.validate().unwrap();
 
-    let mut s3 = local;
+    let mut s3 = local.clone();
     s3.object_log = ObjectLogStorage::S3Compatible {
-        endpoint: "https://objects.example.test".into(),
-        bucket: "fireweed".into(),
+        endpoint: "http://127.0.0.1:9".into(),
+        bucket: "fixture".into(),
         region: "us-east-1".into(),
-        access_key_id: ConfigSecret::new("access"),
-        secret_access_key: ConfigSecret::new("secret"),
-        allow_insecure_http: false,
+        access_key_id: ConfigSecret::new("fixture-key"),
+        secret_access_key: ConfigSecret::new("fixture-secret"),
+        allow_insecure_http: true,
     };
     s3.authority = ObjectLogAuthority::NativeConditionalWrite;
     s3.validate().unwrap();
 }
 
 #[tokio::test]
-async fn memory_public_interface() {
-    assert_cell("memory", false, true, |_| {
+async fn memory_memory_public_interface() {
+    assert_cell("memory--memory", false, true, |_| {
         fireweed::open_memory(Arc::new(SystemClock))
     })
     .await;
 }
 
 #[tokio::test]
-async fn sqlite_log_public_interface() {
-    assert_cell("sqlite-log", false, true, |root| {
+async fn sqlite_memory_public_interface() {
+    assert_cell("sqlite--memory", false, true, |root| {
         fireweed::open_sqlite(
             root.join("log.sqlite").to_str().unwrap(),
             Arc::new(SystemClock),
@@ -133,8 +139,8 @@ async fn sqlite_log_public_interface() {
 }
 
 #[tokio::test]
-async fn sqlite_relational_public_interface() {
-    assert_cell("sqlite-relational", false, true, |root| {
+async fn sqlite_sqlite_public_interface() {
+    assert_cell("sqlite--sqlite", false, true, |root| {
         fireweed::open_sqlite_relational(
             root.join("relational.sqlite").to_str().unwrap(),
             Arc::new(SystemClock),
@@ -145,28 +151,28 @@ async fn sqlite_relational_public_interface() {
 }
 
 #[tokio::test]
-async fn objectlog_local_direct_public_interface() {
-    assert_cell("objectlog-local-direct", false, true, |root| {
+async fn filesystem_memory_public_interface() {
+    assert_cell("filesystem--memory", false, true, |root| {
         fireweed::open_objectlog(root.join("object-log"), Arc::new(SystemClock)).unwrap()
     })
     .await;
 }
 
 #[tokio::test]
-async fn objectlog_sqlite_strict_public_interface() {
-    assert_cell("objectlog-sqlite-strict", true, true, |root| {
-        objectlog_sqlite(root, ResponseBarrier::Strict, "public-interface-strict")
+async fn filesystem_sqlite_strict_public_interface() {
+    assert_cell("filesystem--sqlite--strict", true, true, |root| {
+        filesystem_sqlite(root, ResponseBarrier::Strict, "filesystem-sqlite-strict")
     })
     .await;
 }
 
 #[tokio::test]
-async fn objectlog_sqlite_async_public_interface() {
-    assert_cell("objectlog-sqlite-async", true, false, |root| {
-        objectlog_sqlite(
+async fn filesystem_sqlite_async_public_interface() {
+    assert_cell("filesystem--sqlite--async", true, false, |root| {
+        filesystem_sqlite(
             root,
             ResponseBarrier::AsyncProjection,
-            "public-interface-async",
+            "filesystem-sqlite-async",
         )
     })
     .await;

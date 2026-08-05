@@ -3,20 +3,21 @@ use std::future::Future;
 
 use fireweed::{
     BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateOutcome, BatchUpdateRequest, BatchUpdateValue,
-    BoundedMutationRequest, BucketRule, ClaimAt, ClaimByQueryAt, ClaimByQueryRequest,
-    ClaimCompatibility, ClaimRef, ClientItemKey, CohortOnIncomplete, CohortPolicy, CommitEntry,
-    CommitEntryStatus, CommitRequest, CompoundIndexDef, CompoundIndexField, CreateQueue,
-    DeclaredBucketSegmentRequest, DiscoveryGranularity, EligibilityPolicy, EngineError,
-    FinalizeKind, Fireweed, GateKeyPolicy, GroupBatching, GroupByField, GroupKey,
-    GroupedAggregateRequest, IndexDeclaration, IndexDef, IndexType, ItemMutationOperation,
-    ItemMutationOutcome, ItemMutationRequest, ItemMutationReturning, ItemPatch, ItemPredicate,
-    ItemSelector, ItemSelectorScope, LeaseGuard, MetricsByQueryRequest, MultiClaimCommitEntry,
-    MultiClaimCommitRequest, MultiQueueClaimLimits, MultiQueueClaimTarget, MutationOutcome, Nack,
-    NewItem, OrderField, OrderingMode, PayloadUpdate, PriorityDirection, PriorityModel,
-    PriorityModelKind, PriorityTieBreaker, PriorityValue, QueryFilter, QueueCreationPolicy,
-    QueueDefinition, QueueId, QueueIndex, QueueKey, QueueTemplate, RangeScanRequest,
-    RecurrenceMode, RecurrencePolicy, RequestId, RetryPolicy, ScheduleUpdate, SelectedMutation,
-    SideRecord, SortDirection, TenantId, TypedValue, UtcTimestamp, WorkerId,
+    BoundedMutationRequest, BucketRule, ClaimAt, ClaimByItemIdsDisposition, ClaimByItemIdsRequest,
+    ClaimByQueryAt, ClaimByQueryRequest, ClaimCompatibility, ClaimRef, ClientItemKey,
+    CohortOnIncomplete, CohortPolicy, CommitEntry, CommitEntryStatus, CommitRequest,
+    CompoundIndexDef, CompoundIndexField, CreateQueue, DeclaredBucketSegmentRequest,
+    DiscoveryGranularity, EligibilityPolicy, EngineError, FinalizeKind, Fireweed, GateKeyPolicy,
+    GroupBatching, GroupByField, GroupKey, GroupedAggregateRequest, IndexDeclaration, IndexDef,
+    IndexType, ItemMutationOperation, ItemMutationOutcome, ItemMutationRequest,
+    ItemMutationReturning, ItemPatch, ItemPredicate, ItemSelector, ItemSelectorScope, LeaseGuard,
+    MetricsByQueryRequest, MultiClaimCommitEntry, MultiClaimCommitRequest, MultiQueueClaimLimits,
+    MultiQueueClaimTarget, MutationOutcome, Nack, NewItem, OrderField, OrderingMode, PayloadUpdate,
+    PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
+    QueryFilter, QueueCreationPolicy, QueueDefinition, QueueId, QueueIndex, QueueKey,
+    QueueTemplate, RangeScanRequest, RecurrenceMode, RecurrencePolicy, RequestId, RetryPolicy,
+    ScheduleUpdate, SelectedMutation, SideRecord, SortDirection, TenantId, TypedValue,
+    UtcTimestamp, WorkerId,
 };
 use serde_json::json;
 
@@ -950,6 +951,96 @@ async fn exercise_claim_and_finalize(cell: &str, fw: &Fireweed, failures: &mut V
         }),
         "did not return one claimed item from each target queue",
     );
+
+    // API-001 BatchClaimByItemIds — provider-neutral shared suite (P4 method_contracts).
+    // Always invoke the method. When the composition advertises the capability, require
+    // success; when it does not, require structured Unavailable so the gap stays visible
+    // for P6/P7 method-parity owners instead of a silent skip.
+    let by_ids = create(cell, fw, failures, "claim-by-item-ids").await;
+    let pushed = call(
+        cell,
+        "push_batch[claim_by_item_ids]",
+        failures,
+        fw.push_batch(&by_ids, vec![item("cbi-target", 1), item("cbi-other", 2)]),
+    )
+    .await;
+    let advertises_cbi = fw.hot_projection_capabilities(&by_ids).claim_by_item_ids;
+    if let Some(ids) = pushed.as_ref() {
+        let target = ids[0];
+        let other = ids[1];
+        let request = ClaimByItemIdsRequest {
+            item_ids: vec![target],
+            lease_duration_ms: 60_000,
+            worker_id: WorkerId::new("public-interface-cbi").unwrap(),
+            request_id: RequestId::new(format!("cbi-{cell}")).unwrap(),
+            lease_token: None,
+        };
+        if advertises_cbi {
+            let claimed = call(
+                cell,
+                "claim_by_item_ids",
+                failures,
+                fw.claim_by_item_ids(&by_ids, request),
+            )
+            .await;
+            check(
+                cell,
+                "claim_by_item_ids",
+                failures,
+                claimed.as_ref().is_some_and(|response| {
+                    response.items.len() == 1
+                        && response.items[0].item_id == target
+                        && response.outcomes.len() == 1
+                        && response.outcomes[0].disposition == ClaimByItemIdsDisposition::Claimed
+                }),
+                "did not lease exactly the requested item id set",
+            );
+            if claimed.is_some() {
+                let _ = call(
+                    cell,
+                    "ack[claim_by_item_ids]",
+                    failures,
+                    fw.ack(&by_ids, [target]),
+                )
+                .await;
+            }
+            let remaining = call(
+                cell,
+                "claim_by_item_ids[remaining]",
+                failures,
+                fw.claim_by_item_ids(
+                    &by_ids,
+                    ClaimByItemIdsRequest {
+                        item_ids: vec![other],
+                        lease_duration_ms: 60_000,
+                        worker_id: WorkerId::new("public-interface-cbi").unwrap(),
+                        request_id: RequestId::new(format!("cbi-remaining-{cell}")).unwrap(),
+                        lease_token: None,
+                    },
+                ),
+            )
+            .await;
+            check(
+                cell,
+                "claim_by_item_ids[remaining]",
+                failures,
+                remaining.as_ref().is_some_and(|response| {
+                    response.items.len() == 1 && response.items[0].item_id == other
+                }),
+                "did not claim the remaining outside-set item by id",
+            );
+        } else {
+            match fw.claim_by_item_ids(&by_ids, request).await {
+                Err(EngineError::Unavailable) => {}
+                Err(error) => failures.push(format!(
+                    "{cell}.claim_by_item_ids: expected Unavailable without capability, got {error}"
+                )),
+                Ok(_) => failures.push(format!(
+                    "{cell}.claim_by_item_ids: returned Ok without advertising claim_by_item_ids capability"
+                )),
+            }
+        }
+    }
 
     for method in ["ack", "complete", "release", "fail", "rearm", "purge"] {
         let scenario = format!("finalize-{method}");
