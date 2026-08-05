@@ -12,12 +12,16 @@ fn constructor_route(config: &StorageConfig) -> &'static str {
     match (&config.log, &config.projection) {
         (LogConfig::Memory, ProjectionStoreConfig::Memory) => "open_memory_log_cell::memory",
         (LogConfig::Memory, ProjectionStoreConfig::Sqlite { .. }) => "open_memory_log_cell::sqlite",
+        (LogConfig::Memory, ProjectionStoreConfig::Turso { .. }) => "open_memory_log_cell::turso",
         (LogConfig::Memory, ProjectionStoreConfig::Postgres { .. }) => {
             "open_memory_log_cell::postgres"
         }
         (LogConfig::Sqlite { .. }, ProjectionStoreConfig::Memory) => "open_sqlite_log_cell::memory",
         (LogConfig::Sqlite { .. }, ProjectionStoreConfig::Sqlite { .. }) => {
             "open_sqlite_log_cell::sqlite"
+        }
+        (LogConfig::Sqlite { .. }, ProjectionStoreConfig::Turso { .. }) => {
+            "open_sqlite_log_cell::turso"
         }
         (LogConfig::Sqlite { .. }, ProjectionStoreConfig::Postgres { .. }) => {
             "open_sqlite_log_cell::postgres"
@@ -27,6 +31,9 @@ fn constructor_route(config: &StorageConfig) -> &'static str {
         }
         (LogConfig::Postgres { .. }, ProjectionStoreConfig::Sqlite { .. }) => {
             "open_postgres_log_cell::sqlite"
+        }
+        (LogConfig::Postgres { .. }, ProjectionStoreConfig::Turso { .. }) => {
+            "open_postgres_log_cell::turso"
         }
         (LogConfig::Postgres { .. }, ProjectionStoreConfig::Postgres { .. }) => {
             "open_postgres_log_cell::postgres"

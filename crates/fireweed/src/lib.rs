@@ -41,6 +41,8 @@ use std::sync::{Arc, Mutex};
 #[cfg(any(feature = "sqlite", feature = "objectlog", feature = "postgres", test))]
 mod blocking_backend;
 mod facade;
+#[cfg(feature = "turso")]
+mod turso_compose;
 
 use axon_esf::encode_index_value;
 // Internal-only types (not named in the public API surface).
@@ -1005,15 +1007,24 @@ impl LogConfig {
     }
 }
 
-/// Public projection axis: three first-class values (orthogonal storage matrix / API-005).
+/// Public projection axis: four first-class values (orthogonal storage matrix / API-005).
 ///
 /// Object-log convenience constructors still use [`ProjectionConfig`] (sqlite/postgres only);
-/// full-matrix work uses this type (includes [`Memory`](Self::Memory)).
+/// full-matrix work uses this type (includes [`Memory`](Self::Memory) and
+/// [`Turso`](Self::Turso)). Turso is the product default projection when a path is selected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectionStoreConfig {
     Memory,
-    Sqlite { path: PathBuf },
-    Postgres { url: ConfigSecret },
+    Sqlite {
+        path: PathBuf,
+    },
+    /// Local embedded Turso 0.7 ordinary-WAL projection (ADR-016 / TD-010 default).
+    Turso {
+        path: PathBuf,
+    },
+    Postgres {
+        url: ConfigSecret,
+    },
 }
 
 impl ProjectionStoreConfig {
@@ -1022,6 +1033,7 @@ impl ProjectionStoreConfig {
         match self {
             Self::Memory => "memory",
             Self::Sqlite { .. } => "sqlite",
+            Self::Turso { .. } => "turso",
             Self::Postgres { .. } => "postgres",
         }
     }
@@ -1029,9 +1041,10 @@ impl ProjectionStoreConfig {
 
 /// Normative composition root for log × projection (+ related axes). API-005 / product brief.
 ///
-/// Every cell of the 5×3 matrix is a valid selection; durability class differs by log axis
-/// ([`LogConfig::is_durable_log`]). Open all 15 pairs via [`open`] / [`open_async`] (cargo features
-/// must enable the chosen adapters; postgres cells require the `postgres` feature).
+/// Every cell of the 5×4 matrix is a valid selection; durability class differs by log axis
+/// ([`LogConfig::is_durable_log`]). Open all 20 pairs via [`open`] / [`open_async`] (cargo features
+/// must enable the chosen adapters; postgres cells require the `postgres` feature; Turso is
+/// default-on via the `turso` feature).
 #[derive(Debug, Clone)]
 pub struct StorageConfig {
     pub log: LogConfig,
@@ -1115,6 +1128,12 @@ impl StorageConfig {
                 ));
             }
             ProjectionStoreConfig::Sqlite { .. } => {}
+            ProjectionStoreConfig::Turso { path } if path.as_os_str().is_empty() => {
+                return Err(EngineError::Invalid(
+                    "turso projection path must not be empty",
+                ));
+            }
+            ProjectionStoreConfig::Turso { .. } => {}
             ProjectionStoreConfig::Postgres { url } if url.0.is_empty() => {
                 return Err(EngineError::Invalid(
                     "postgres projection URL must not be empty",
@@ -1272,6 +1291,7 @@ fn validate_filesystem_selection(
     match projection {
         ProjectionStoreConfig::Memory
         | ProjectionStoreConfig::Sqlite { .. }
+        | ProjectionStoreConfig::Turso { .. }
         | ProjectionStoreConfig::Postgres { .. } => Ok(()),
     }
 }
@@ -1287,6 +1307,7 @@ fn validate_s3_selection(
     match projection {
         ProjectionStoreConfig::Memory
         | ProjectionStoreConfig::Sqlite { .. }
+        | ProjectionStoreConfig::Turso { .. }
         | ProjectionStoreConfig::Postgres { .. } => Ok(()),
     }
 }
@@ -1430,6 +1451,9 @@ mod storage_config_matrix_tests {
             ProjectionStoreConfig::Sqlite {
                 path: PathBuf::from("/tmp/projection.db"),
             },
+            ProjectionStoreConfig::Turso {
+                path: PathBuf::from("/tmp/projection-turso.db"),
+            },
             ProjectionStoreConfig::Postgres {
                 url: ConfigSecret::new("postgres://localhost/projection"),
             },
@@ -1438,29 +1462,13 @@ mod storage_config_matrix_tests {
 
     #[test]
     fn constructs_and_validates_all_five_logs_and_three_projections() {
-        let logs = all_logs();
-        assert_eq!(logs.len(), 5);
-        let projections = all_projections();
+        // Legacy name retained for callers; full 5×4 coverage lives in turso_projection_full_facade_matrix.
+        let projections: Vec<_> = all_projections()
+            .into_iter()
+            .filter(|p| !matches!(p, ProjectionStoreConfig::Turso { .. }))
+            .collect();
         assert_eq!(projections.len(), 3);
-
-        let mut axis_names = Vec::new();
-        for log in &logs {
-            axis_names.push(log.axis_name());
-            assert_eq!(log.is_durable_log(), log.axis_name() != "memory");
-        }
-        assert_eq!(
-            axis_names,
-            vec!["memory", "sqlite", "postgres", "filesystem", "s3"]
-        );
-        assert_eq!(
-            projections
-                .iter()
-                .map(|p| p.axis_name())
-                .collect::<Vec<_>>(),
-            vec!["memory", "sqlite", "postgres"]
-        );
-
-        // All 15 matrix cells construct and structurally validate.
+        let logs = all_logs();
         let mut cells = 0usize;
         for log in logs {
             for projection in &projections {
@@ -1482,6 +1490,320 @@ mod storage_config_matrix_tests {
             }
         }
         assert_eq!(cells, 15);
+    }
+
+    #[test]
+    fn constructs_and_validates_all_five_logs_and_four_projections() {
+        let logs = all_logs();
+        assert_eq!(logs.len(), 5);
+        let projections = all_projections();
+        assert_eq!(projections.len(), 4);
+
+        let mut axis_names = Vec::new();
+        for log in &logs {
+            axis_names.push(log.axis_name());
+            assert_eq!(log.is_durable_log(), log.axis_name() != "memory");
+        }
+        assert_eq!(
+            axis_names,
+            vec!["memory", "sqlite", "postgres", "filesystem", "s3"]
+        );
+        assert_eq!(
+            projections
+                .iter()
+                .map(|p| p.axis_name())
+                .collect::<Vec<_>>(),
+            vec!["memory", "sqlite", "turso", "postgres"]
+        );
+
+        let mut cells = 0usize;
+        for log in logs {
+            for projection in &projections {
+                let mut config = base(log.clone(), projection.clone());
+                if matches!(
+                    &config.log,
+                    LogConfig::Filesystem { .. } | LogConfig::S3 { .. }
+                ) {
+                    config.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+                }
+                config.validate().unwrap_or_else(|e| {
+                    panic!(
+                        "cell {}×{}: {e:?}",
+                        config.log.axis_name(),
+                        projection.axis_name()
+                    )
+                });
+                cells += 1;
+            }
+        }
+        assert_eq!(cells, 20);
+    }
+
+    /// AC: Turso default selection, all five log compositions, single-thread heartbeat.
+    #[cfg(feature = "turso")]
+    #[test]
+    fn turso_projection_full_facade_matrix() {
+        constructs_and_validates_all_five_logs_and_four_projections();
+
+        // Turso is the documented default projection axis value.
+        assert_eq!(
+            ProjectionStoreConfig::Turso {
+                path: PathBuf::from("/tmp/default.db"),
+            }
+            .axis_name(),
+            "turso"
+        );
+        // Explicit sqlite remains selectable.
+        assert_eq!(
+            ProjectionStoreConfig::Sqlite {
+                path: PathBuf::from("/tmp/sqlite.db"),
+            }
+            .axis_name(),
+            "sqlite"
+        );
+
+        // Open all five local-capable log × turso compositions (postgres/s3 need live fixtures).
+        let clock = Arc::new(SystemClock);
+        let root = std::env::temp_dir().join(format!(
+            "fw-turso-facade-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("fixture root");
+
+        let cells: Vec<(LogConfig, PathBuf)> = vec![
+            (LogConfig::Memory, root.join("mem-turso.db")),
+            (
+                LogConfig::Sqlite {
+                    path: root.join("sqlite-log.db"),
+                },
+                root.join("sqlite-turso.db"),
+            ),
+            (
+                LogConfig::Filesystem {
+                    root: root.join("fs-log"),
+                },
+                root.join("fs-turso.db"),
+            ),
+        ];
+        for (log, proj) in cells {
+            let mut cfg = base(log, ProjectionStoreConfig::Turso { path: proj });
+            if matches!(
+                &cfg.log,
+                LogConfig::Filesystem { .. } | LogConfig::S3 { .. }
+            ) {
+                cfg.authority = Some(ObjectLogAuthority::NativeConditionalWrite);
+            }
+            open(cfg, Arc::clone(&clock) as _).expect("turso composition opens");
+        }
+
+        // Single-thread heartbeat: open + create_queue + push must not stall a current-thread runtime.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt");
+        let beat = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let beat_bg = Arc::clone(&beat);
+        let hb = rt.spawn(async move {
+            for _ in 0..50 {
+                beat_bg.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tokio::task::yield_now().await;
+            }
+        });
+        let path = root.join("hb-turso.db");
+        let cfg = base(LogConfig::Memory, ProjectionStoreConfig::Turso { path });
+        rt.block_on(async {
+            let fw = open_async(cfg, Arc::clone(&clock) as _)
+                .await
+                .expect("open_async turso");
+            let def = QueueDefinition {
+                tenant_id: TenantId::new("hb").unwrap(),
+                queue_id: QueueId::new("hb").unwrap(),
+                priority_model: PriorityModel {
+                    kind: PriorityModelKind::Int64,
+                    direction: PriorityDirection::Ascending,
+                    tie_breaker: PriorityTieBreaker::CreatedSequence,
+                },
+                ordering_mode: OrderingMode::Strict,
+                max_rank_error: 0,
+                progress_bound_ms: 60_000,
+                eligibility_policy: EligibilityPolicy::default(),
+                cohort_policy: None,
+                recurrence: RecurrencePolicy::default(),
+                request_id_retention_ms: 3_600_000,
+                client_item_key_retention_ms: 3_600_000,
+                terminal_retention_ms: 3_600_000,
+                max_lease_duration_ms: 60_000,
+                retry_policy: RetryPolicy { max_attempts: 3 },
+                max_push_batch_size: 100,
+                max_claim_batch_size: 100,
+                max_eligible_group_size: None,
+                secondary_indexes: vec![],
+                entity_schema: None,
+                typed_indexes: vec![],
+                emit_change_records: true,
+            };
+            fw.create_queue(def).await.expect("create");
+            let key = QueueKey::new(TenantId::new("hb").unwrap(), QueueId::new("hb").unwrap());
+            fw.push(
+                &key,
+                NewItem {
+                    priority: Some(PriorityValue::Int64(1)),
+                    ..NewItem::default()
+                },
+            )
+            .await
+            .expect("push");
+            hb.await.expect("heartbeat task");
+        });
+        assert!(
+            beat.load(std::sync::atomic::Ordering::Relaxed) >= 10,
+            "single-thread heartbeat must progress during turso open/lifecycle"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// AC: feature-off pre-I/O failure, Class A reopen/delete-rebuild, Class B durability disclaimer.
+    #[test]
+    fn turso_projection_feature_and_recovery_boundaries() {
+        // Empty path fails closed pre-I/O.
+        let mut bad = StorageConfig::memory();
+        bad.projection = ProjectionStoreConfig::Turso {
+            path: PathBuf::new(),
+        };
+        assert_eq!(
+            bad.validate(),
+            Err(EngineError::Invalid(
+                "turso projection path must not be empty"
+            ))
+        );
+
+        #[cfg(not(feature = "turso"))]
+        {
+            let cfg = base(
+                LogConfig::Memory,
+                ProjectionStoreConfig::Turso {
+                    path: PathBuf::from("/tmp/no-turso-feature.db"),
+                },
+            );
+            let err = open(cfg, Arc::new(SystemClock)).expect_err("feature-off must fail");
+            let msg = format!("{err:?}");
+            assert!(
+                msg.contains("turso") || matches!(err, EngineError::Invalid(_)),
+                "feature-off pre-I/O error: {err:?}"
+            );
+        }
+
+        #[cfg(feature = "turso")]
+        {
+            let clock = Arc::new(SystemClock);
+            let root = std::env::temp_dir().join(format!(
+                "fw-turso-recovery-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("clock")
+                    .as_nanos()
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).expect("root");
+
+            // Class A: sqlite×turso reopen recovers pending from durable log.
+            let log_path = root.join("class-a-log.db");
+            let proj_path = root.join("class-a-turso.db");
+            let cfg = base(
+                LogConfig::Sqlite {
+                    path: log_path.clone(),
+                },
+                ProjectionStoreConfig::Turso {
+                    path: proj_path.clone(),
+                },
+            );
+            let def = QueueDefinition {
+                tenant_id: TenantId::new("rec").unwrap(),
+                queue_id: QueueId::new("a").unwrap(),
+                priority_model: PriorityModel {
+                    kind: PriorityModelKind::Int64,
+                    direction: PriorityDirection::Ascending,
+                    tie_breaker: PriorityTieBreaker::CreatedSequence,
+                },
+                ordering_mode: OrderingMode::Strict,
+                max_rank_error: 0,
+                progress_bound_ms: 60_000,
+                eligibility_policy: EligibilityPolicy::default(),
+                cohort_policy: None,
+                recurrence: RecurrencePolicy::default(),
+                request_id_retention_ms: 3_600_000,
+                client_item_key_retention_ms: 3_600_000,
+                terminal_retention_ms: 3_600_000,
+                max_lease_duration_ms: 60_000,
+                retry_policy: RetryPolicy { max_attempts: 3 },
+                max_push_batch_size: 100,
+                max_claim_batch_size: 100,
+                max_eligible_group_size: None,
+                secondary_indexes: vec![],
+                entity_schema: None,
+                typed_indexes: vec![],
+                emit_change_records: true,
+            };
+            let key = QueueKey::new(TenantId::new("rec").unwrap(), QueueId::new("a").unwrap());
+            let fw = open(cfg.clone(), Arc::clone(&clock) as _).expect("class A open");
+            futures::executor::block_on(async {
+                fw.create_queue(def.clone()).await.expect("create");
+                fw.push(
+                    &key,
+                    NewItem {
+                        priority: Some(PriorityValue::Int64(1)),
+                        ..NewItem::default()
+                    },
+                )
+                .await
+                .expect("push");
+            });
+            drop(fw);
+            // Delete-rebuild: remove projection file; Class A log rebuilds on reopen.
+            let _ = std::fs::remove_file(&proj_path);
+            let reopened = open(cfg, Arc::clone(&clock) as _).expect("class A reopen");
+            let pending = futures::executor::block_on(reopened.metrics(&key))
+                .expect("metrics")
+                .pending;
+            assert_eq!(
+                pending, 1,
+                "Class A reopen/delete-rebuild recovers pending from durable log"
+            );
+            drop(reopened);
+
+            // Class B durability disclaimer: memory×turso keeps items via projection only
+            // (no durable log-replay claim). Empty process-local memory log is documented.
+            let proj_b = root.join("class-b-turso.db");
+            let cfg_b = base(
+                LogConfig::Memory,
+                ProjectionStoreConfig::Turso { path: proj_b },
+            );
+            assert!(
+                !cfg_b.log.is_durable_log(),
+                "Class B: memory log is not durable; projection durability is independent"
+            );
+            let fw_b = open(cfg_b, clock as _).expect("class B open");
+            futures::executor::block_on(async {
+                fw_b.create_queue(def).await.expect("create b");
+                fw_b.push(
+                    &key,
+                    NewItem {
+                        priority: Some(PriorityValue::Int64(2)),
+                        ..NewItem::default()
+                    },
+                )
+                .await
+                .expect("push b");
+            });
+            drop(fw_b);
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 
     #[test]
@@ -1556,7 +1878,7 @@ mod storage_config_matrix_tests {
                 async_config.async_projection = Some(AsyncProjectionSpec::default());
                 // P3s retires the S3 memory-async pending rejection and the S3×Postgres
                 // validate-time Unavailable pin so both object-log providers share the
-                // same Strict/Async selection surface across all three projections.
+                // same Strict/Async selection surface across all projections (incl. Turso).
                 assert_eq!(
                     async_config.validate(),
                     Ok(()),
@@ -5062,11 +5384,11 @@ impl<B: LibBackend> RuntimeCore<B> {
 // on an internal crate (strong-by-default, not absolute — OD-6).
 // ---------------------------------------------------------------------------
 
-/// Open a [`Fireweed`] for any cell of the public 5×3 log × projection matrix (API-005).
+/// Open a [`Fireweed`] for any cell of the public 5×4 log × projection matrix (API-005).
 ///
 /// Validates [`StorageConfig`], then dispatches to the composition path for that pair. Missing cargo
-/// features (e.g. requesting postgres without `--features postgres`) return
-/// [`EngineError::Invalid`] with a clear message — no partially opened handle escapes.
+/// features (e.g. requesting postgres without `--features postgres`, or turso without `--features turso`)
+/// return [`EngineError::Invalid`] with a clear message — no partially opened handle escapes.
 ///
 /// Prefer this entry for new full-matrix work. Convenience `open_*` constructors remain as thin
 /// sugar over common cells.
@@ -5174,14 +5496,24 @@ fn open_validated(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineResult<
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "objectlog", feature = "postgres"))]
+#[cfg(any(
+    feature = "sqlite",
+    feature = "objectlog",
+    feature = "postgres",
+    feature = "turso"
+))]
 #[allow(dead_code)] // Feature combinations compile this helper without every caller.
 fn path_utf8(path: &std::path::Path) -> EngineResult<&str> {
     path.to_str()
         .ok_or(EngineError::Invalid("storage path must be valid UTF-8"))
 }
 
-#[cfg(any(feature = "sqlite", feature = "objectlog", feature = "postgres"))]
+#[cfg(any(
+    feature = "sqlite",
+    feature = "objectlog",
+    feature = "postgres",
+    feature = "turso"
+))]
 #[allow(dead_code)] // Feature combinations compile this helper without every caller.
 fn wrap_blocking_backend<B>(backend: Arc<B>, clock: Arc<dyn Clock>) -> EngineResult<Fireweed>
 where
@@ -5256,6 +5588,21 @@ fn open_memory_log_cell(
                 ))
             }
         }
+        ProjectionStoreConfig::Turso { path } => {
+            #[cfg(all(feature = "memory", feature = "turso"))]
+            {
+                let _ = namespace;
+                let backend = Arc::new(turso_compose::assemble_memory_log_turso(path)?);
+                Ok(Fireweed::from_runtime(RuntimeCore::new(backend, clock)))
+            }
+            #[cfg(not(all(feature = "memory", feature = "turso")))]
+            {
+                let _ = (path, clock, namespace);
+                Err(EngineError::Invalid(
+                    "memory×turso requires the `memory` and `turso` cargo features",
+                ))
+            }
+        }
         ProjectionStoreConfig::Postgres { url } => {
             #[cfg(all(feature = "memory", feature = "postgres"))]
             {
@@ -5303,6 +5650,25 @@ fn open_sqlite_log_cell(
             } => {
                 let proj_path = path_utf8(&projection_path)?;
                 open_sqlite_sqlite_projection(&log_path, proj_path, clock)
+            }
+            ProjectionStoreConfig::Turso {
+                path: projection_path,
+            } => {
+                #[cfg(feature = "turso")]
+                {
+                    let backend = Arc::new(turso_compose::assemble_sqlite_log_turso(
+                        &log_path,
+                        projection_path,
+                    )?);
+                    Ok(Fireweed::from_runtime(RuntimeCore::new(backend, clock)))
+                }
+                #[cfg(not(feature = "turso"))]
+                {
+                    let _ = (projection_path, clock);
+                    Err(EngineError::Invalid(
+                        "sqlite×turso requires the `turso` cargo feature",
+                    ))
+                }
             }
             ProjectionStoreConfig::Postgres { url } => {
                 #[cfg(feature = "postgres")]
@@ -5381,6 +5747,29 @@ fn open_postgres_log_cell(
                     let _ = (path, clock, mode, node_id, coordination, schema);
                     Err(EngineError::Invalid(
                         "postgres×sqlite requires the `sqlite` cargo feature",
+                    ))
+                }
+            }
+            ProjectionStoreConfig::Turso { path } => {
+                #[cfg(feature = "turso")]
+                {
+                    let log = match schema.as_deref() {
+                        Some(schema) => {
+                            fireweed_postgres::PostgresLog::connect_in_schema(&url_str, schema)?
+                        }
+                        None => fireweed_postgres::PostgresLog::connect(&url_str)?,
+                    };
+                    let node = node_id.unwrap_or(0);
+                    let backend =
+                        Arc::new(turso_compose::assemble_postgres_log_turso(log, path, node)?);
+                    let _ = (mode, coordination);
+                    wrap_postgres_runtime_safe(backend, clock)
+                }
+                #[cfg(not(feature = "turso"))]
+                {
+                    let _ = (path, clock, mode, node_id, coordination, schema);
+                    Err(EngineError::Invalid(
+                        "postgres×turso requires the `turso` cargo feature",
                     ))
                 }
             }
@@ -5487,6 +5876,47 @@ fn open_filesystem_log_cell(
                     );
                     Err(EngineError::Invalid(
                         "object-log×sqlite requires the `sqlite` cargo feature",
+                    ))
+                }
+            }
+            ProjectionStoreConfig::Turso { path } => {
+                #[cfg(feature = "turso")]
+                {
+                    let _ = (authority, sqlite_projection_deferred_flush_chunk, recovery);
+                    let log = open_composed_object_log_engine(
+                        &root,
+                        &namespace,
+                        SegmentSettings {
+                            target_bytes: segments.target_bytes,
+                            max_latency_ms: segments.max_latency_ms,
+                        },
+                    )?;
+                    let async_spec = match response_barrier {
+                        ResponseBarrier::Strict => None,
+                        ResponseBarrier::AsyncProjection => async_projection,
+                    };
+                    let backend = Arc::new(turso_compose::assemble_objectlog_turso(
+                        log, path, async_spec,
+                    )?);
+                    // Product ports are natively async (LogEngine + Turso); no process-wide BLB.
+                    Ok(Fireweed::from_runtime(RuntimeCore::new(backend, clock)))
+                }
+                #[cfg(not(feature = "turso"))]
+                {
+                    let _ = (
+                        root,
+                        authority,
+                        path,
+                        response_barrier,
+                        async_projection,
+                        sqlite_projection_deferred_flush_chunk,
+                        segments,
+                        namespace,
+                        recovery,
+                        clock,
+                    );
+                    Err(EngineError::Invalid(
+                        "filesystem×turso requires the `turso` cargo feature",
                     ))
                 }
             }
@@ -5612,6 +6042,44 @@ fn open_s3_log_cell(
                     );
                     Err(EngineError::Invalid(
                         "object-log×sqlite requires the `sqlite` cargo feature",
+                    ))
+                }
+            }
+            ProjectionStoreConfig::Turso { path } => {
+                #[cfg(feature = "turso")]
+                {
+                    let _ = (authority, recovery);
+                    let log = open_s3_composed_object_log_engine(
+                        &provider,
+                        &namespace,
+                        SegmentSettings {
+                            target_bytes: segments.target_bytes,
+                            max_latency_ms: segments.max_latency_ms,
+                        },
+                    )?;
+                    let async_spec = match response_barrier {
+                        ResponseBarrier::Strict => None,
+                        ResponseBarrier::AsyncProjection => Some(AsyncProjectionSpec::default()),
+                    };
+                    let backend = Arc::new(turso_compose::assemble_objectlog_turso(
+                        log, path, async_spec,
+                    )?);
+                    Ok(Fireweed::from_runtime(RuntimeCore::new(backend, clock)))
+                }
+                #[cfg(not(feature = "turso"))]
+                {
+                    let _ = (
+                        provider,
+                        authority,
+                        path,
+                        response_barrier,
+                        segments,
+                        namespace,
+                        recovery,
+                        clock,
+                    );
+                    Err(EngineError::Invalid(
+                        "s3×turso requires the `turso` cargo feature",
                     ))
                 }
             }
