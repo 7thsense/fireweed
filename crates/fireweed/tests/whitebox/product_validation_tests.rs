@@ -105,6 +105,25 @@ fn qdef_attempts(
     }
 }
 
+/// Scheduled-action product profile: timestamp-ascending queue that admits the five API-003
+/// finalize mappings including **rearm**. API-001 requires `recurrence.mode=recurring` (and a
+/// domain `until`) for rearm on every composition, including object-log; memory/sqlite previously
+/// skipped `validate_rearm`, which hid the profile misalignment.
+fn qdef_scheduled_actions(
+    tenant: &str,
+    queue: &str,
+    direction: PriorityDirection,
+    ordering: OrderingMode,
+) -> QueueDefinition {
+    let mut def = qdef(tenant, queue, direction, ordering);
+    def.recurrence = RecurrencePolicy {
+        mode: RecurrenceMode::Recurring,
+        // Far-future series bound so smoke-scale rearm stays within the series.
+        until: Some(ts(i64::MAX / 4)),
+    };
+    def
+}
+
 /// A bounded-relaxed queue carrying an explicit `max_rank_error` (rank positions); see AC-E2E-8.
 fn qdef_relaxed(
     tenant: &str,
@@ -565,8 +584,11 @@ fn ts(seconds: i64) -> UtcTimestamp {
 /// `fireweed.set_gates` on the gate-capable relational backend — no gated item is claimed while its gate is
 /// blocked, eligibility restored on reopen.
 /// DEFERRED: cross-tenant AUTHZ denial lives in the auth layer (ADR-002), not this trusted library facade.
+///
+/// P7N: product profile uses a recurring queue so rearm is valid on every composition (object-log
+/// included). Memory/sqlite previously skipped `validate_rearm`, which let a non-recurring profile
+/// pass only on those legs.
 #[tokio::test]
-#[ignore = "objectlog profile rearm requires recurrence.mode=recurring (API-001); memory/sqlite paths skip validate_rearm — align product profile or restrict rearm coverage to jobs_connectors_recurring_e2e"]
 async fn scheduled_action_delivery_e2e() {
     let (fireweed, clock) = deployment();
     let memory = scheduled_batch_delivery_profile(&fireweed, clock.clone(), "sched-mem").await;
@@ -1007,7 +1029,7 @@ async fn scheduled_batch_delivery_profile<B: LibBackend>(
 ) -> ScheduledProfileEvidence {
     let q = qk(tenant, "campaign");
     fireweed
-        .create_queue(qdef(
+        .create_queue(qdef_scheduled_actions(
             tenant,
             "campaign",
             PriorityDirection::Ascending,
