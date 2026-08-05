@@ -420,11 +420,11 @@ fn all_six_s3_barrier_cells_open_with_caller_tuning() {
 }
 
 #[test]
-fn s3_create_queue_retains_native_cas_fail_closed_until_adapter_upgrade() {
-    // docs/operator/object-log-authority-compatibility.md: the crates.io BlobStore
-    // port is overwrite-only, so S3 queue definition authority fails closed even
-    // when the qualification endpoint itself enforces If-None-Match:*. P3s must
-    // not paper over that with a silent process-local put.
+fn s3_create_queue_uses_if_none_match_create_only_on_qualified_endpoint() {
+    // P7S3 / residual closure: Fireweed issues PutObject + If-None-Match:* for
+    // queue-definition authority on the S3 open path (object-log BlobStore remains
+    // overwrite-only put). On a P1s-qualified endpoint this succeeds and is
+    // create-or-read for the same definition.
     use fireweed::{
         EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
         PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
@@ -434,12 +434,12 @@ fn s3_create_queue_retains_native_cas_fail_closed_until_adapter_upgrade() {
     let config = s3_config(
         ProjectionStoreConfig::Memory,
         ResponseBarrier::Strict,
-        format!("p3s-cas-negative-{}", std::process::id()),
+        format!("p3s-cas-create-{}", std::process::id()),
     );
     let fireweed = fireweed::open(config, Arc::new(SystemClock)).expect("s3×memory opens");
     let definition = QueueDefinition {
         tenant_id: TenantId::new("p3s").unwrap(),
-        queue_id: QueueId::new("cas-negative").unwrap(),
+        queue_id: QueueId::new("cas-create").unwrap(),
         priority_model: PriorityModel {
             kind: PriorityModelKind::Int64,
             direction: PriorityDirection::Ascending,
@@ -464,18 +464,22 @@ fn s3_create_queue_retains_native_cas_fail_closed_until_adapter_upgrade() {
         typed_indexes: vec![],
         emit_change_records: true,
     };
-    let err = tokio::runtime::Builder::new_current_thread()
+    let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .expect("runtime")
+        .expect("runtime");
+    let first = rt
+        .block_on(fireweed.create_queue(definition.clone()))
+        .expect("S3 create_queue must succeed with create-only PutObject");
+    assert!(first.created, "first create_queue must report created=true");
+    let second = rt
         .block_on(fireweed.create_queue(definition))
-        .expect_err("S3 create_queue must fail closed without put-if-absent");
-    let text = format!("{err:?}");
+        .expect("idempotent create-or-read must succeed");
     assert!(
-        text.contains("create-only") || text.contains("NativeConditionalWrite"),
-        "expected native create-only fail-closed text, got {text}"
+        !second.created,
+        "second create_queue for the same queue must be create-or-read (created=false)"
     );
-    eprintln!("P3s PASS s3 create_queue retains native-CAS fail-closed negative");
+    eprintln!("P3s PASS s3 create_queue create-only on qualified endpoint");
 }
 
 #[test]

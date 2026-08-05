@@ -274,11 +274,10 @@ fn p1s_attestation_is_minio_native_cas_not_garage() {
 
 /// P1s env builds a typed Config whose endpoint/bucket match the attestation.
 ///
-/// Full `start()` always applies a bootstrap queue inventory (default `t1:q1` when
-/// unset). On S3, queue-definition create-only publication is currently fail-closed
-/// until the BlobStore adapter exposes put-if-absent (P3s residual). This test proves
-/// the production config path is wired to the attested endpoint and that residual is
-/// provider-neutral (never a Garage cell pin).
+/// Full `start()` applies a bootstrap queue inventory. On S3, Fireweed publishes
+/// queue definitions with create-only PutObject (`If-None-Match: *`); a P1s-qualified
+/// endpoint must allow bootstrap. This test proves the production config path is
+/// wired to the attested endpoint and never pins Garage cell ids.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn production_s3_object_log_config_uses_p1s_attested_endpoint() {
     let doc = load_attestation();
@@ -315,27 +314,10 @@ async fn production_s3_object_log_config_uses_p1s_attested_endpoint() {
         "must select S3 object-log backend"
     );
 
-    match start(config).await {
-        Ok(server) => {
-            // put-if-absent may land later; full start is then allowed.
-            server.shutdown_and_drain(Duration::from_secs(10)).await;
-        }
-        Err(err) => {
-            let text = format!("{err:?}");
-            assert!(
-                text.contains("create-only")
-                    || text.contains("NativeConditionalWrite")
-                    || text.contains("put-if-absent")
-                    || text.contains("If-None-Match")
-                    || text.contains("authority is unavailable"),
-                "must name native create-only residual (not garage pin): {text}"
-            );
-            assert!(
-                !text.to_ascii_lowercase().contains("garage-s3"),
-                "must not name garage-s3 cell ids: {text}"
-            );
-        }
-    }
+    let server = start(config)
+        .await
+        .expect("P1s-qualified S3 start must succeed with create-only definition authority");
+    server.shutdown_and_drain(Duration::from_secs(10)).await;
 }
 
 /// Unsupported / unreachable endpoint fails closed (not via retired Garage pins).
