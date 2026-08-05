@@ -3465,6 +3465,10 @@ where
             let counters = Arc::clone(&self.counters);
             let commit_idempotency = Arc::clone(&self.commit_idempotency);
             let node_id = self.node_id;
+            // fireweed-a355d82b: unique-index queues still need full staged-set validation for
+            // within-commit cross-entry uniqueness; all other queues validate only the delta.
+            let requires_cross_entry_push_validation =
+                definition.requires_cross_entry_push_validation();
             self.engine
                 .submit_operation(shard.clone(), move || {
                     Box::pin(async move {
@@ -3610,12 +3614,21 @@ where
                                     counter_base,
                                     max_attempts,
                                 );
-                                let mut candidate = committed_pushes.clone();
-                                candidate.extend(push_items.iter().cloned());
+                                // fireweed-a355d82b: do not re-validate the entire staged push set on
+                                // every entry unless unique indexes require within-commit cross-entry
+                                // uniqueness. Re-cloning + re-scanning O(n) staged items per entry made
+                                // per-entry commit cost superlinear in batch size (sqlite/log-replay).
+                                let stage_at = committed_pushes.len();
+                                committed_pushes.extend(push_items.iter().cloned());
+                                let validate_from = if requires_cross_entry_push_validation {
+                                    0
+                                } else {
+                                    stage_at
+                                };
                                 if let Err(e) = projection
                                     .run_with_store({
                                         let shard = shard.clone();
-                                        let candidate = candidate.clone();
+                                        let candidate = committed_pushes[validate_from..].to_vec();
                                         move |p| {
                                             ProjectionStore::index_validate_push(
                                                 p, &shard, &candidate,
@@ -3624,6 +3637,7 @@ where
                                     })
                                     .await
                                 {
+                                    committed_pushes.truncate(stage_at);
                                     recovery.push(reject(e));
                                     continue;
                                 }

@@ -185,6 +185,9 @@ where
     }
 
     let commit_fingerprint = fingerprint.0;
+    // fireweed-a355d82b: unique-index queues still need full staged-set validation; others only
+    // validate each entry's push delta (avoids superlinear per-entry commit cost).
+    let requires_cross_entry_push_validation = definition.requires_cross_entry_push_validation();
     let mut recovery: Vec<EntryRecovery> = Vec::with_capacity(entries.len());
     let mut committed_envelopes: Vec<CommandEnvelope> = Vec::new();
     let mut finalized_in_commit: HashSet<ItemId> = HashSet::new();
@@ -304,12 +307,21 @@ where
             let counter_base = counters.reserve(shard, epoch, lifecycle_items.len() as u32);
             let (push_items, push_ids) =
                 build_push_items(lifecycle_items, epoch, node_id, counter_base, max_attempts);
-            let mut candidate = committed_pushes.clone();
-            candidate.extend(push_items.iter().cloned());
-            if let Err(e) =
-                AsyncProjectionStore::index_validate_push(projection, shard.clone(), candidate)
-                    .await
+            let stage_at = committed_pushes.len();
+            committed_pushes.extend(push_items.iter().cloned());
+            let validate_from = if requires_cross_entry_push_validation {
+                0
+            } else {
+                stage_at
+            };
+            if let Err(e) = AsyncProjectionStore::index_validate_push(
+                projection,
+                shard.clone(),
+                committed_pushes[validate_from..].to_vec(),
+            )
+            .await
             {
+                committed_pushes.truncate(stage_at);
                 recovery.push(reject(e));
                 continue;
             }

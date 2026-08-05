@@ -972,6 +972,25 @@ impl QueueDefinition {
             queue: self,
         }
     }
+
+    /// Whether lifecycle pushes staged across multiple `commit_transition` entries need full-set
+    /// unique-index validation (fireweed-a355d82b).
+    ///
+    /// Queues without unique secondary/typed indexes can validate each entry's push delta alone —
+    /// re-validating the entire staged set every entry made per-entry commit cost superlinear.
+    /// Unique indexes still require the full staged candidate so within-commit cross-entry
+    /// uniqueness is caught before the durable append.
+    pub fn requires_cross_entry_push_validation(&self) -> bool {
+        if self.secondary_indexes.iter().any(|spec| spec.unique) {
+            return true;
+        }
+        self.typed_indexes
+            .iter()
+            .any(|index| match &index.declaration {
+                IndexDeclaration::Single(def) => def.unique,
+                IndexDeclaration::Compound(def) => def.unique,
+            })
+    }
 }
 
 // ---------------------------------------------------------------------------
