@@ -13,15 +13,49 @@ Public matrix cells with log axis `s3` are Class A product cells:
 | `s3×sqlite` | always | when S3 fixture present | `charts/fireweed-queue/ci/s3-sqlite-values.yaml` |
 | `s3×postgres` | always (spec + composition root) | when S3 **and** Postgres fixtures present | `charts/fireweed-queue/ci/s3-postgres-values.yaml` |
 
+## Qualification endpoint (P1s)
+
+Before required S3 cells, final S3 gates, or Snorri live-provider rows claim an
+endpoint, operators run the P1s qualification harness:
+
+```bash
+bash scripts/ci/s3-qualification-endpoint.sh survey
+bash scripts/ci/s3-qualification-endpoint.sh provision
+bash scripts/ci/s3-qualification-endpoint.sh verify-isolation
+# secrets:   $FIREWEED_S3_SECRET_DIR/credentials.env   (default /tmp/fireweed-s3-secrets)
+# attest:    $FIREWEED_S3_SECRET_DIR/s3-native-cas-capability-attestation.json
+source /tmp/fireweed-s3-secrets/credentials.env   # path outside the repository only
+```
+
+Contracts:
+
+- Capability ID: `S3-NATIVE-CAS-CAPABILITY-ATTESTATION` (manifest-owned; consumed only).
+- Selection requires a real two-writer CAS preflight (`If-None-Match: *` + concurrent
+  create race + `If-Match` conditional update). Nonconforming topologies are not
+  selected (Garage v2.2.0 is rejected; see
+  `docs/operator/object-log-authority-compatibility.md`).
+- Credentials live in an explicit secret-file path **outside** the repository.
+  `.env.garage-e3` remains forbidden in-repo. Attestation records the secret path,
+  never credential values.
+- Image is digest-pinned; teardown is `bash scripts/ci/s3-qualification-endpoint.sh teardown`.
+- Consumers take `docs/helix/04-build/storage-authority-manifest.json` + the run-owned
+  attestation explicitly. Missing attestation blocks S3 children only.
+
+Contract tests: `bash scripts/ci/tests/s3-qualification-endpoint-test.sh`.
+
 ## Required job shape
 
 A **required** storage-matrix / product CI job that claims the s3 axis **must**:
 
-1. **Provision an S3-compatible service** before tests (MinIO, Garage, or cloud S3).
-   - Disposable MinIO via docker is acceptable for unit/integration lanes
-     (see `crates/fireweed-server/tests/production_s3_object_log_config.rs`).
+1. **Provision an S3-compatible service** before tests (MinIO or other attested CAS provider).
+   - Preferred hermetic path: `scripts/ci/s3-qualification-endpoint.sh provision`
+     (digest-pinned MinIO + two-writer CAS preflight + run-owned attestation).
+   - Disposable MinIO via docker remains acceptable for unit/integration lanes when the
+     same native create-only bar is met (see
+     `crates/fireweed-server/tests/production_s3_object_log_config.rs`).
    - Kind/deploy lanes may use the in-cluster MinIO fixture under
-     `scripts/ci/kind/object-log.yaml`.
+     `scripts/ci/kind/object-log.yaml` only when CAS preflight still passes.
+   - Do **not** claim product S3 cells against Garage v2.2.0 (create-only not enforced).
 2. **Create a writable bucket** and export:
 
    | Variable | Required | Default if unset in tests |
