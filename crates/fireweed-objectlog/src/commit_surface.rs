@@ -29,11 +29,11 @@ use fireweed_engine::{
     CommandEnvelope, CommitCapabilities, CommitEntryOutcome, CommitEntryStatus, CommitOutcomeEntry,
     CommitRecovery, CommitTransition, CommitTransitionEntry, DurabilityClass, EngineError,
     EngineResult, EntryRecovery, FinalizeCommand, FinalizeOutcome, IdGen, IdempotencyDecision,
-    InProcessControlPlane, PushCommand, PushItem, QueueCommand, QueueCounters,
-    QueueIdempotencyCache, QueueKey, RequestOutcome, WriteSideRecordsCommand, build_push_items,
-    commit_body_hash, compile_entity_schema, outcome_entry_from_recovery, outcomes_from_recovery,
-    recovery_from_outcome_entry, request_expires_at, validate_distinct_commit_claims,
-    validate_entity, validate_instance_fence,
+    InProcessControlPlane, PushCommand, QueueCommand, QueueCounters, QueueIdempotencyCache,
+    QueueKey, RequestOutcome, WriteSideRecordsCommand, build_push_items, commit_body_hash,
+    compile_entity_schema, outcome_entry_from_recovery, outcomes_from_recovery,
+    recovery_from_outcome_entry, request_expires_at, stage_unique_push_keys,
+    validate_distinct_commit_claims, validate_entity, validate_instance_fence,
 };
 
 use crate::async_product::SeqIdGen;
@@ -185,14 +185,15 @@ where
     }
 
     let commit_fingerprint = fingerprint.0;
-    // fireweed-a355d82b: unique-index queues still need full staged-set validation; others only
-    // validate each entry's push delta (avoids superlinear per-entry commit cost).
+    // fireweed-a355d82b / fireweed-60ca4bfd: always validate only this entry's push delta against
+    // durable state. Unique-index queues track staged keys incrementally (O(1) per key) so
+    // within-commit cross-entry uniqueness does not re-scan the full staged set each entry.
     let requires_cross_entry_push_validation = definition.requires_cross_entry_push_validation();
     let mut recovery: Vec<EntryRecovery> = Vec::with_capacity(entries.len());
     let mut committed_envelopes: Vec<CommandEnvelope> = Vec::new();
     let mut finalized_in_commit: HashSet<ItemId> = HashSet::new();
     let mut staged_fences: HashMap<Vec<u8>, u64> = HashMap::new();
-    let mut committed_pushes: Vec<PushItem> = Vec::new();
+    let mut staged_unique_keys: HashMap<(String, Vec<u8>), ItemId> = HashMap::new();
 
     for entry in entries {
         let CommitTransitionEntry {
@@ -295,7 +296,6 @@ where
         }
 
         let mut lifecycle_item_ids = Vec::new();
-        let mut entry_pushes: Vec<PushItem> = Vec::new();
         if !lifecycle_items.is_empty() {
             if let Some(e) = lifecycle_items
                 .iter()
@@ -307,26 +307,26 @@ where
             let counter_base = counters.reserve(shard, epoch, lifecycle_items.len() as u32);
             let (push_items, push_ids) =
                 build_push_items(lifecycle_items, epoch, node_id, counter_base, max_attempts);
-            let stage_at = committed_pushes.len();
-            committed_pushes.extend(push_items.iter().cloned());
-            let validate_from = if requires_cross_entry_push_validation {
-                0
-            } else {
-                stage_at
-            };
+            // fireweed-a355d82b / fireweed-60ca4bfd: validate only this entry's push delta against
+            // durable projection. Cross-entry uniqueness for unique-index queues uses staged keys.
             if let Err(e) = AsyncProjectionStore::index_validate_push(
                 projection,
                 shard.clone(),
-                committed_pushes[validate_from..].to_vec(),
+                push_items.clone(),
             )
             .await
             {
-                committed_pushes.truncate(stage_at);
+                recovery.push(reject(e));
+                continue;
+            }
+            if requires_cross_entry_push_validation
+                && let Err(e) =
+                    stage_unique_push_keys(&definition, &push_items, &mut staged_unique_keys)
+            {
                 recovery.push(reject(e));
                 continue;
             }
             lifecycle_item_ids = push_ids.clone();
-            entry_pushes = push_items.clone();
             envelopes.push(mk_env(
                 QueueCommand::Push(PushCommand { items: push_items }),
                 push_ids,
@@ -347,7 +347,6 @@ where
         if let Some((key, next)) = &instance {
             staged_fences.insert(key.clone(), *next);
         }
-        committed_pushes.extend(entry_pushes);
         committed_envelopes.append(&mut envelopes);
         recovery.push(EntryRecovery {
             consumed_input_id,

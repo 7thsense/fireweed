@@ -46,8 +46,8 @@ use crate::{
     UnifiedAtomicCommitter, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
     WriteSideRecordsCommand, batch_update_body_hash, build_push_items, claim_by_item_ids_body_hash,
     claim_by_query_body_hash, commit_body_hash, compile_entity_schema, generate_query_lease_token,
-    outcome_entry_from_recovery, plan_batch_update, validate_api001_reserved_write_fields,
-    validate_entity, validate_gate_push,
+    outcome_entry_from_recovery, plan_batch_update, stage_unique_push_keys,
+    validate_api001_reserved_write_fields, validate_entity, validate_gate_push,
 };
 
 /// Resolve the push request-id body fingerprint for ledger record/rebuild.
@@ -3465,10 +3465,12 @@ where
             let counters = Arc::clone(&self.counters);
             let commit_idempotency = Arc::clone(&self.commit_idempotency);
             let node_id = self.node_id;
-            // fireweed-a355d82b: unique-index queues still need full staged-set validation for
-            // within-commit cross-entry uniqueness; all other queues validate only the delta.
+            // fireweed-a355d82b / fireweed-60ca4bfd: always validate only this entry's push delta
+            // against durable state. Unique-index queues track staged keys incrementally so
+            // within-commit cross-entry uniqueness stays O(1) per key (not O(N²) full re-scan).
             let requires_cross_entry_push_validation =
                 definition.requires_cross_entry_push_validation();
+            let definition_for_unique = definition.clone();
             self.engine
                 .submit_operation(shard.clone(), move || {
                     Box::pin(async move {
@@ -3476,7 +3478,8 @@ where
                         let mut committed_envelopes: Vec<CommandEnvelope> = Vec::new();
                         let mut finalized_in_commit: HashSet<ItemId> = HashSet::new();
                         let mut staged_fences: HashMap<Vec<u8>, u64> = HashMap::new();
-                        let mut committed_pushes: Vec<PushItem> = Vec::new();
+                        let mut staged_unique_keys: HashMap<(String, Vec<u8>), ItemId> =
+                            HashMap::new();
 
                         for entry in entries {
                             let CommitTransitionEntry {
@@ -3597,7 +3600,6 @@ where
                             }
 
                             let mut lifecycle_item_ids = Vec::new();
-                            let mut entry_pushes: Vec<PushItem> = Vec::new();
                             if !lifecycle_items.is_empty() {
                                 if let Some(e) = lifecycle_items.iter().find_map(|item| {
                                     validate_entity(schema.as_ref(), item.entity.as_ref()).err()
@@ -3614,21 +3616,13 @@ where
                                     counter_base,
                                     max_attempts,
                                 );
-                                // fireweed-a355d82b: do not re-validate the entire staged push set on
-                                // every entry unless unique indexes require within-commit cross-entry
-                                // uniqueness. Re-cloning + re-scanning O(n) staged items per entry made
-                                // per-entry commit cost superlinear in batch size (sqlite/log-replay).
-                                let stage_at = committed_pushes.len();
-                                committed_pushes.extend(push_items.iter().cloned());
-                                let validate_from = if requires_cross_entry_push_validation {
-                                    0
-                                } else {
-                                    stage_at
-                                };
+                                // fireweed-a355d82b / fireweed-60ca4bfd: validate only this entry's
+                                // push delta against durable projection (plus within-delta uniqueness).
+                                // Cross-entry uniqueness for unique-index queues uses staged_unique_keys.
                                 if let Err(e) = projection
                                     .run_with_store({
                                         let shard = shard.clone();
-                                        let candidate = committed_pushes[validate_from..].to_vec();
+                                        let candidate = push_items.clone();
                                         move |p| {
                                             ProjectionStore::index_validate_push(
                                                 p, &shard, &candidate,
@@ -3637,12 +3631,20 @@ where
                                     })
                                     .await
                                 {
-                                    committed_pushes.truncate(stage_at);
+                                    recovery.push(reject(e));
+                                    continue;
+                                }
+                                if requires_cross_entry_push_validation
+                                    && let Err(e) = stage_unique_push_keys(
+                                        &definition_for_unique,
+                                        &push_items,
+                                        &mut staged_unique_keys,
+                                    )
+                                {
                                     recovery.push(reject(e));
                                     continue;
                                 }
                                 lifecycle_item_ids = push_ids.clone();
-                                entry_pushes = push_items.clone();
                                 envelopes.push(mk_env(
                                     QueueCommand::Push(PushCommand { items: push_items }),
                                     push_ids,
@@ -3663,7 +3665,6 @@ where
                             if let Some((key, next)) = &instance {
                                 staged_fences.insert(key.clone(), *next);
                             }
-                            committed_pushes.extend(entry_pushes);
                             committed_envelopes.append(&mut envelopes);
                             recovery.push(EntryRecovery {
                                 consumed_input_id,

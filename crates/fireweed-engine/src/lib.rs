@@ -135,8 +135,8 @@ pub use command::{
     RenewLeaseCommand, ReplacePendingCommand, RequestOutcome, ResolvedItemMutation,
     ResolvedItemMutationAction, ResolvedItemValues, ScheduleUpdate, SetGatesCommand, SideRecord,
     UnfenceLeaseCommand, UpdateFieldsCommand, WriteSideRecordsCommand, build_push_items,
-    command_envelope_change_records, validate_gate_command, validate_gate_push,
-    validate_request_replay_metadata,
+    command_envelope_change_records, stage_unique_push_keys, unique_index_keys_for_push_item,
+    validate_gate_command, validate_gate_push, validate_request_replay_metadata,
 };
 pub use commit::{RawCommitFault, RawCommitOutcome, RawCommitRequest};
 pub use error::{CommitRejection, DurableIntegrityStage, EngineError, EngineResult};
