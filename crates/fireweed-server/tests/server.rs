@@ -25,8 +25,8 @@ use fireweed_resp::{RespHooks, RouteDecision, SystemClock, serve_with_shutdown_a
 use fireweed_server::ObjectLogTursoBackend;
 use fireweed_server::{
     BackendSpec, ChangeRecordSinkConfig, Config, ControlPlaneSpec, LogSpec,
-    NiflheimChangeRecordSink, ObjectLogSpec, OwnershipRuntime, ProjectionSpec, SegmentConfig,
-    emit_change_record_tick, start, start_with,
+    NiflheimChangeRecordSink, ObjectLogSpec, OwnershipRuntime, ProjectionSpec, ResponseBarrierSpec,
+    SegmentConfig, emit_change_record_tick, start, start_with,
 };
 use fireweed_sqlite::composed_sqlite_backend_in_memory;
 
@@ -40,6 +40,7 @@ fn objectlog_sqlite_spec(root: std::path::PathBuf, projection: std::path::PathBu
         )),
         projection: ProjectionSpec::Sqlite { path: projection },
         control_plane: ControlPlaneSpec::InProcess,
+        response_barrier: ResponseBarrierSpec::Strict,
         async_projection: None,
         sqlite_projection_deferred_flush_chunk: None,
     }
@@ -53,6 +54,7 @@ fn objectlog_hybrid_spec(root: std::path::PathBuf, projection: std::path::PathBu
         )),
         projection: ProjectionSpec::Hybrid { path: projection },
         control_plane: ControlPlaneSpec::InProcess,
+        response_barrier: ResponseBarrierSpec::Strict,
         async_projection: None,
         sqlite_projection_deferred_flush_chunk: Some(fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK),
     }
@@ -69,6 +71,7 @@ fn objectlog_hybrid_async_spec(
         )),
         projection: ProjectionSpec::HybridAsync { path: projection },
         control_plane: ControlPlaneSpec::InProcess,
+        response_barrier: ResponseBarrierSpec::AsyncProjection,
         async_projection: Some(AsyncProjectionSpec::default()),
         sqlite_projection_deferred_flush_chunk: Some(fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK),
     }
@@ -1688,6 +1691,7 @@ async fn change_record_sink_rejected_on_class_b_memory_log() {
             log: LogSpec::Memory,
             projection: ProjectionSpec::InMemory,
             control_plane: ControlPlaneSpec::InProcess,
+            response_barrier: ResponseBarrierSpec::Strict,
             async_projection: None,
             sqlite_projection_deferred_flush_chunk: None,
         },
@@ -1722,6 +1726,7 @@ async fn env_and_programmatic_sink_configs_share_the_typed_startup_validation_bo
                 log: LogSpec::Memory,
                 projection: ProjectionSpec::InMemory,
                 control_plane: ControlPlaneSpec::InProcess,
+                response_barrier: ResponseBarrierSpec::Strict,
                 async_projection: None,
                 sqlite_projection_deferred_flush_chunk: None,
             },
@@ -2286,6 +2291,7 @@ async fn class_a_filesystem_memory_starts_with_enabled_embedded_change_record_de
             )),
             projection: ProjectionSpec::InMemory,
             control_plane: ControlPlaneSpec::InProcess,
+            response_barrier: ResponseBarrierSpec::Strict,
             async_projection: None,
             sqlite_projection_deferred_flush_chunk: None,
         },
@@ -2340,6 +2346,7 @@ async fn class_a_sqlite_memory_starts_with_opt_out_and_disabled_endpoint_tuple_r
             },
             projection: ProjectionSpec::InMemory,
             control_plane: ControlPlaneSpec::InProcess,
+            response_barrier: ResponseBarrierSpec::Strict,
             async_projection: None,
             sqlite_projection_deferred_flush_chunk: None,
         },
@@ -2366,6 +2373,7 @@ async fn class_a_sqlite_memory_starts_with_opt_out_and_disabled_endpoint_tuple_r
             },
             projection: ProjectionSpec::InMemory,
             control_plane: ControlPlaneSpec::InProcess,
+            response_barrier: ResponseBarrierSpec::Strict,
             async_projection: None,
             sqlite_projection_deferred_flush_chunk: None,
         },

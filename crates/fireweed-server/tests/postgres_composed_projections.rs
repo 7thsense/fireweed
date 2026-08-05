@@ -14,7 +14,9 @@ use fireweed_core::{
     EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
 };
-use fireweed_server::{BackendSpec, Config, ControlPlaneSpec, LogSpec, ProjectionSpec, start};
+use fireweed_server::{
+    BackendSpec, Config, ControlPlaneSpec, LogSpec, ProjectionSpec, ResponseBarrierSpec, start,
+};
 use std::time::Duration;
 
 fn qdef() -> QueueDefinition {
@@ -153,6 +155,7 @@ async fn postgres_sqlite_combo_runs_under_tokio() {
             path: sqlite_path.clone(),
         },
         control_plane: ControlPlaneSpec::InProcess,
+        response_barrier: ResponseBarrierSpec::Strict,
         async_projection: None,
         sqlite_projection_deferred_flush_chunk: None,
     };
@@ -193,6 +196,7 @@ async fn postgres_postgres_combo_runs_under_tokio() {
         },
         projection: ProjectionSpec::Postgres { url: atomic_url },
         control_plane: ControlPlaneSpec::InProcess,
+        response_barrier: ResponseBarrierSpec::Strict,
         async_projection: None,
         sqlite_projection_deferred_flush_chunk: None,
     };

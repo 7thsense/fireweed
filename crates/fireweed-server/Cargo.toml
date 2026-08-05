@@ -84,7 +84,8 @@ turso-projection = ["dep:fireweed-turso", "fireweed-turso/local"]
 
 [dev-dependencies]
 # Class B memory-log cells need memory+sqlite; postgres for memory×postgres (gated by FIREWEED_PG_TEST_URL).
-fireweed = { path = "../fireweed", default-features = false, features = ["memory", "sqlite", "postgres"] }
+# objectlog is required for P3v server/facade fingerprint comparison on filesystem cells (P10r consumes).
+fireweed = { path = "../fireweed", default-features = false, features = ["memory", "sqlite", "postgres", "objectlog"] }
 fireweed-core = { path = "../fireweed-core" }
 fireweed-conformance = { path = "../fireweed-conformance" }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "macros", "test-util"] }
