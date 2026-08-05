@@ -154,7 +154,7 @@ fn all_six_filesystem_barrier_cells_open_with_caller_tuning() {
 }
 
 #[test]
-fn filesystem_pins_are_retired_but_s3_transitions_are_unchanged() {
+fn filesystem_and_s3_async_selection_pins_are_retired() {
     let fixture = FixtureRoot::new();
     for projection in [
         ProjectionStoreConfig::Memory,
@@ -171,6 +171,9 @@ fn filesystem_pins_are_retired_but_s3_transitions_are_unchanged() {
         assert_eq!(config.validate(), Ok(()));
     }
 
+    // P3s retires the S3 twins of the memory-async pending rejection and the
+    // S3×Postgres validate-time Unavailable pin; both providers now share the
+    // same pre-I/O AsyncProjection acceptance surface.
     let mut s3_memory = filesystem_config(
         fixture.path().join("unused"),
         ProjectionStoreConfig::Memory,
@@ -185,16 +188,13 @@ fn filesystem_pins_are_retired_but_s3_transitions_are_unchanged() {
         secret_access_key: ConfigSecret::new("secret"),
         allow_insecure_http: true,
     };
-    assert_eq!(
-        s3_memory.validate(),
-        Err(EngineError::Invalid("objectlog-memory-async-pending"))
-    );
+    assert_eq!(s3_memory.validate(), Ok(()));
 
     let mut s3_postgres = s3_memory;
     s3_postgres.projection = ProjectionStoreConfig::Postgres {
         url: ConfigSecret::new("postgres://127.0.0.1:1/fireweed"),
     };
-    assert_eq!(s3_postgres.validate(), Err(EngineError::Unavailable));
+    assert_eq!(s3_postgres.validate(), Ok(()));
 }
 
 #[test]

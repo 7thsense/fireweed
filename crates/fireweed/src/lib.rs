@@ -1298,15 +1298,13 @@ fn validate_filesystem_selection(
 
 fn validate_s3_selection(
     projection: &ProjectionStoreConfig,
-    response_barrier: ResponseBarrier,
+    _response_barrier: ResponseBarrier,
 ) -> EngineResult<()> {
+    // P3s: S3 mirrors filesystem — all three projections accept both Strict and
+    // AsyncProjection. The retired memory-async pending rejection and S3×Postgres
+    // validate-time Unavailable pins are gone; runtime helpers thread the selected
+    // barrier and AsyncProjectionSpec without a second Strict pin.
     match projection {
-        ProjectionStoreConfig::Memory if response_barrier == ResponseBarrier::AsyncProjection => {
-            Err(EngineError::Invalid("objectlog-memory-async-pending"))
-        }
-        ProjectionStoreConfig::Postgres { .. } if response_barrier != ResponseBarrier::Strict => {
-            Err(EngineError::Unavailable)
-        }
         ProjectionStoreConfig::Memory
         | ProjectionStoreConfig::Sqlite { .. }
         | ProjectionStoreConfig::Turso { .. }
@@ -1418,17 +1416,6 @@ mod storage_config_matrix_tests {
             namespace: "matrix-test".to_owned(),
             recovery: RecoveryPolicy::default(),
         }
-    }
-
-    fn assert_runtime_pin<T>(result: EngineResult<T>) {
-        let error = match result {
-            Ok(_) => panic!("expected the runtime pin"),
-            Err(error) => error,
-        };
-        let debug_token = ["Un", "available"].concat();
-        let wire_token = ["-ERR fireweed un", "available"].concat();
-        assert_eq!(format!("{error:?}"), debug_token);
-        assert_eq!(error.resp_token(), Some(wire_token.as_str()));
     }
 
     fn all_logs() -> Vec<LogConfig> {
@@ -1889,22 +1876,12 @@ mod storage_config_matrix_tests {
                 let mut async_config = strict;
                 async_config.response_barrier = ResponseBarrier::AsyncProjection;
                 async_config.async_projection = Some(AsyncProjectionSpec::default());
-                let expected = match (&log, projection) {
-                    (LogConfig::Filesystem { .. }, _) => Ok(()),
-                    (LogConfig::S3 { .. }, ProjectionStoreConfig::Memory) => {
-                        Err(EngineError::Invalid("objectlog-memory-async-pending"))
-                    }
-                    (LogConfig::S3 { .. }, ProjectionStoreConfig::Sqlite { .. }) => Ok(()),
-                    (LogConfig::S3 { .. }, ProjectionStoreConfig::Turso { .. }) => Ok(()),
-                    (LogConfig::S3 { .. }, ProjectionStoreConfig::Postgres { .. }) => {
-                        assert_runtime_pin(async_config.validate());
-                        continue;
-                    }
-                    _ => unreachable!("provider fixture is object-log only"),
-                };
+                // P3s retires the S3 memory-async pending rejection and the S3×Postgres
+                // validate-time Unavailable pin so both object-log providers share the
+                // same Strict/Async selection surface across all projections (incl. Turso).
                 assert_eq!(
                     async_config.validate(),
-                    expected,
+                    Ok(()),
                     "async {}×{} fingerprint changed",
                     log.axis_name(),
                     async_config.projection.axis_name()
@@ -2060,7 +2037,7 @@ mod storage_config_matrix_tests {
 
     #[cfg(all(feature = "objectlog", feature = "postgres"))]
     #[test]
-    fn filesystem_postgres_async_retires_pin_while_s3_keeps_it() {
+    fn both_providers_retire_postgres_async_pins_before_projection_connect() {
         fn config(object_log: ObjectLogStorage) -> ObjectLogRuntimeConfig {
             ObjectLogRuntimeConfig {
                 object_log,
@@ -2073,13 +2050,13 @@ mod storage_config_matrix_tests {
                     target_bytes: 1024,
                     max_latency_ms: 5,
                 },
-                namespace: "p3-postgres-pin".to_owned(),
+                namespace: "p3s-postgres-pin".to_owned(),
                 recovery: RecoveryPolicy::default(),
             }
         }
 
         let root = std::env::temp_dir().join(format!(
-            "fireweed-p3-postgres-pin-{}-{}",
+            "fireweed-p3s-postgres-pin-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -2098,7 +2075,10 @@ mod storage_config_matrix_tests {
             "projection connect precedes filesystem log I/O"
         );
 
-        assert_runtime_pin(open_objectlog_postgres(
+        // P3s removes the S3 runtime Strict pin: AsyncProjection on S3×Postgres now
+        // reaches projection connect (and fails on the deliberately bad URL with Storage,
+        // not the retired Unavailable pin).
+        let s3_error = open_objectlog_postgres(
             config(ObjectLogStorage::S3Compatible {
                 endpoint: "http://127.0.0.1:1".to_owned(),
                 bucket: "fireweed".to_owned(),
@@ -2108,7 +2088,16 @@ mod storage_config_matrix_tests {
                 allow_insecure_http: true,
             }),
             Arc::new(SystemClock),
-        ));
+        )
+        .expect_err("S3×Postgres AsyncProjection must no longer pin Unavailable");
+        assert!(
+            matches!(s3_error, EngineError::Storage(_)),
+            "expected projection-connect Storage error, got {s3_error:?}"
+        );
+        assert!(
+            !matches!(s3_error, EngineError::Unavailable),
+            "retired runtime pin must not surface as Unavailable"
+        );
     }
 
     #[test]
@@ -5497,6 +5486,8 @@ fn open_validated(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineResult<
             config.authority,
             projection,
             config.response_barrier,
+            config.async_projection,
+            config.sqlite_projection_deferred_flush_chunk,
             config.segments,
             config.namespace,
             config.recovery,
@@ -5978,6 +5969,8 @@ fn open_s3_log_cell(
     authority: Option<ObjectLogAuthority>,
     projection: ProjectionStoreConfig,
     response_barrier: ResponseBarrier,
+    async_projection: Option<AsyncProjectionSpec>,
+    sqlite_projection_deferred_flush_chunk: Option<usize>,
     segments: SegmentConfig,
     namespace: String,
     recovery: RecoveryPolicy,
@@ -5990,6 +5983,8 @@ fn open_s3_log_cell(
             authority,
             projection,
             response_barrier,
+            async_projection,
+            sqlite_projection_deferred_flush_chunk,
             segments,
             namespace,
             recovery,
@@ -6004,7 +5999,14 @@ fn open_s3_log_cell(
         let authority = authority.unwrap_or(ObjectLogAuthority::NativeConditionalWrite);
         match projection {
             ProjectionStoreConfig::Memory => open_s3_objectlog_memory_projection(
-                provider, authority, segments, namespace, recovery, clock,
+                provider,
+                authority,
+                response_barrier,
+                async_projection,
+                segments,
+                namespace,
+                recovery,
+                clock,
             ),
             ProjectionStoreConfig::Sqlite { path } => {
                 #[cfg(feature = "sqlite")]
@@ -6015,9 +6017,8 @@ fn open_s3_log_cell(
                             authority,
                             ComposedProjectionConfig::Sqlite { path },
                             response_barrier,
-                            (response_barrier == ResponseBarrier::AsyncProjection)
-                                .then(AsyncProjectionSpec::default),
-                            None,
+                            async_projection,
+                            sqlite_projection_deferred_flush_chunk,
                             segments,
                             namespace,
                             recovery,
@@ -6032,6 +6033,8 @@ fn open_s3_log_cell(
                         authority,
                         path,
                         response_barrier,
+                        async_projection,
+                        sqlite_projection_deferred_flush_chunk,
                         segments,
                         namespace,
                         recovery,
@@ -6089,9 +6092,8 @@ fn open_s3_log_cell(
                             authority,
                             ComposedProjectionConfig::Postgres { url: url.0 },
                             response_barrier,
-                            (response_barrier == ResponseBarrier::AsyncProjection)
-                                .then(AsyncProjectionSpec::default),
-                            None,
+                            async_projection,
+                            sqlite_projection_deferred_flush_chunk,
                             segments,
                             namespace,
                             recovery,
@@ -6107,6 +6109,8 @@ fn open_s3_log_cell(
                         authority,
                         url,
                         response_barrier,
+                        async_projection,
+                        sqlite_projection_deferred_flush_chunk,
                         segments,
                         namespace,
                         recovery,
@@ -6244,17 +6248,19 @@ fn open_objectlog_memory_projection(
 }
 
 #[cfg(feature = "objectlog")]
+#[allow(clippy::too_many_arguments)] // Mirrors the filesystem projection policy boundary.
 fn open_s3_objectlog_memory_projection(
     provider: S3ComposedProvider,
     authority: ObjectLogAuthority,
+    response_barrier: ResponseBarrier,
+    async_projection: Option<AsyncProjectionSpec>,
     segments: SegmentConfig,
     namespace: String,
     recovery: RecoveryPolicy,
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed> {
-    // P3 split boundary: S3×memory remains Strict until P3s changes this helper
-    // independently. See the filesystem twin for the memory-recovery boundary.
-    let _response_barrier = CommitResponseBarrier::Strict;
+    // P3s: S3×memory now selects Strict vs AsyncProjection with the caller's
+    // AsyncProjectionSpec, reusing P3b's provider-neutral memory async pipeline.
     let _ = (authority, recovery);
     let log = open_s3_composed_object_log_engine(
         &provider,
@@ -6264,9 +6270,18 @@ fn open_s3_objectlog_memory_projection(
             max_latency_ms: segments.max_latency_ms,
         },
     )?;
-    let backend = fireweed_objectlog::block_on_objectlog(
-        fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store(log, 0),
-    )?;
+    let backend = match response_barrier {
+        ResponseBarrier::Strict => fireweed_objectlog::block_on_objectlog(
+            fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store(log, 0),
+        )?,
+        ResponseBarrier::AsyncProjection => fireweed_objectlog::block_on_objectlog(
+            fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store_with_async_projection(
+                log,
+                0,
+                async_projection.expect("validated async projection spec"),
+            ),
+        )?,
+    };
     Ok(Fireweed::from_runtime(RuntimeCore::new(
         Arc::new(backend),
         clock,
@@ -6498,9 +6513,9 @@ fn open_s3_objectlog_postgres_blocking(
 ) -> EngineResult<ComposedRuntime<ObjectLogPostgresBackend>> {
     config.validate()?;
     let provider = s3_provider_from_composed(&config)?;
-    if config.response_barrier != CommitResponseBarrier::Strict {
-        return Err(EngineError::Unavailable);
-    }
+    // P3s: retire the runtime Strict pin. finish_objectlog_postgres selects
+    // Strict vs AsyncProjection from config (same transactional checkpoint path
+    // as the filesystem helper).
     let projection_schema = derived_postgres_schema_name(&config.namespace);
     let projection = match &config.projection {
         ComposedProjectionConfig::Postgres { url } => fireweed_objectlog::block_on_objectlog(
