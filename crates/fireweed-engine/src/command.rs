@@ -6,8 +6,8 @@ use std::sync::Mutex;
 
 use bytes::Bytes;
 use fireweed_core::{
-    ClientItemKey, CohortId, GroupKey, ItemId, ItemState, LeaseToken, Metadata, OwnerId,
-    PriorityValue, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp, WorkerId,
+    ClientItemKey, CohortId, GroupKey, IndexDeclaration, ItemId, ItemState, LeaseToken, Metadata,
+    OwnerId, PriorityValue, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp, WorkerId,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -167,6 +167,91 @@ pub fn build_push_items(
         });
     }
     (items, ids)
+}
+
+/// Length-prefix composite key for ADR-010 secondary indexes (matches projection encoding).
+fn legacy_secondary_index_key(field_bytes: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for bytes in field_bytes {
+        out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        out.extend_from_slice(bytes);
+    }
+    out
+}
+
+/// Unique secondary/typed index keys a push candidate would occupy.
+///
+/// Used for O(1) within-commit cross-entry uniqueness tracking (fireweed-60ca4bfd) so commit
+/// paths can validate only the new entry's delta against durable state and check staged keys
+/// incrementally, instead of re-scanning the full staged push set each entry.
+pub fn unique_index_keys_for_push_item(
+    definition: &QueueDefinition,
+    item: &PushItem,
+) -> EngineResult<Vec<(String, Vec<u8>)>> {
+    let mut out = Vec::new();
+    for spec in definition.secondary_indexes.iter().filter(|s| s.unique) {
+        let mut field_bytes: Vec<&[u8]> = Vec::with_capacity(spec.fields.len());
+        let mut complete = true;
+        for field_name in &spec.fields {
+            match item.fields.get(field_name) {
+                Some(v) => field_bytes.push(v.as_ref()),
+                None => {
+                    complete = false;
+                    break;
+                }
+            }
+        }
+        if complete {
+            out.push((spec.name.clone(), legacy_secondary_index_key(&field_bytes)));
+        }
+    }
+    if let Some(entity) = item.entity_document.as_ref() {
+        for qi in &definition.typed_indexes {
+            let unique = match &qi.declaration {
+                IndexDeclaration::Single(def) => def.unique,
+                IndexDeclaration::Compound(def) => def.unique,
+            };
+            if !unique {
+                continue;
+            }
+            let key = match &qi.declaration {
+                IndexDeclaration::Single(def) => def.index_key(entity),
+                IndexDeclaration::Compound(def) => def.index_key(entity),
+            }
+            .map_err(|e| EngineError::Storage(e.to_string()))?;
+            if let Some(k) = key {
+                out.push((qi.name.clone(), k));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Record unique keys for newly staged lifecycle pushes; reject if any key collides with a
+/// different item already staged earlier in this commit (fireweed-60ca4bfd).
+///
+/// Call after durable `index_validate_push` of the *new* items only. On `Conflict`, `staged` is
+/// left unchanged so rejected entries do not pollute subsequent validation.
+pub fn stage_unique_push_keys(
+    definition: &QueueDefinition,
+    items: &[PushItem],
+    staged: &mut HashMap<(String, Vec<u8>), ItemId>,
+) -> EngineResult<()> {
+    let mut pending: Vec<(String, Vec<u8>, ItemId)> = Vec::new();
+    for item in items {
+        for (name, key) in unique_index_keys_for_push_item(definition, item)? {
+            if let Some(prev) = staged.get(&(name.clone(), key.clone()))
+                && *prev != item.item_id
+            {
+                return Err(EngineError::Conflict);
+            }
+            pending.push((name, key, item.item_id));
+        }
+    }
+    for (name, key, id) in pending {
+        staged.insert((name, key), id);
+    }
+    Ok(())
 }
 
 /// Reject gate-bearing pushes on backends that do not enforce gate state.
@@ -2062,5 +2147,120 @@ mod serde_tests {
             records[0].idempotency_key(),
             other_records[0].idempotency_key()
         );
+    }
+}
+
+#[cfg(test)]
+mod unique_stage_tests {
+    //! fireweed-60ca4bfd: incremental staged unique keys catch within-commit collisions.
+    use super::*;
+    use fireweed_core::{
+        IndexDeclaration, IndexDef, IndexSpec, IndexType, PriorityDirection, PriorityModel,
+        PriorityModelKind, PriorityTieBreaker, QueueId, QueueIndex, TenantId,
+    };
+    use serde_json::json;
+
+    fn def_with_unique_email() -> QueueDefinition {
+        QueueDefinition {
+            tenant_id: TenantId::new("t").unwrap(),
+            queue_id: QueueId::new("q").unwrap(),
+            priority_model: PriorityModel {
+                kind: PriorityModelKind::Int64,
+                direction: PriorityDirection::Ascending,
+                tie_breaker: PriorityTieBreaker::CreatedSequence,
+            },
+            ordering_mode: fireweed_core::OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 60_000,
+            eligibility_policy: fireweed_core::EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: fireweed_core::RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: fireweed_core::RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 10_000,
+            max_claim_batch_size: 10_000,
+            max_eligible_group_size: None,
+            secondary_indexes: vec![IndexSpec {
+                name: "by_color".into(),
+                fields: vec!["color".into()],
+                unique: true,
+            }],
+            entity_schema: None,
+            typed_indexes: vec![QueueIndex {
+                name: "by_email".into(),
+                declaration: IndexDeclaration::Single(IndexDef {
+                    field: "email".into(),
+                    index_type: IndexType::String,
+                    unique: true,
+                }),
+            }],
+            emit_change_records: false,
+        }
+    }
+
+    fn push(id: u64, color: Option<&str>, email: Option<&str>) -> PushItem {
+        let mut fields = BTreeMap::new();
+        if let Some(c) = color {
+            fields.insert("color".into(), Bytes::from(c.as_bytes().to_vec()));
+        }
+        PushItem {
+            client_item_key: ClientItemKey::new(format!("k{id}")).unwrap(),
+            item_id: ItemId::from_u64(id),
+            priority: None,
+            not_before: None,
+            group_key: None,
+            max_attempts: 3,
+            payload: None,
+            fields,
+            metadata: Metadata::default(),
+            cohort_size: None,
+            gate_keys: Vec::new(),
+            entity_document: email.map(|e| json!({ "email": e })),
+        }
+    }
+
+    #[test]
+    fn stage_unique_keys_accepts_disjoint_keys() {
+        let def = def_with_unique_email();
+        let mut staged = HashMap::new();
+        stage_unique_push_keys(&def, &[push(1, Some("red"), Some("a@x"))], &mut staged).unwrap();
+        stage_unique_push_keys(&def, &[push(2, Some("blue"), Some("b@x"))], &mut staged).unwrap();
+        assert_eq!(staged.len(), 4); // 2 secondary + 2 typed
+    }
+
+    #[test]
+    fn stage_unique_keys_rejects_typed_collision_across_entries() {
+        let def = def_with_unique_email();
+        let mut staged = HashMap::new();
+        stage_unique_push_keys(&def, &[push(1, None, Some("dup@x"))], &mut staged).unwrap();
+        let err =
+            stage_unique_push_keys(&def, &[push(2, None, Some("dup@x"))], &mut staged).unwrap_err();
+        assert!(matches!(err, EngineError::Conflict));
+        // Rejected entry must not pollute the map with the second item id.
+        assert_eq!(
+            staged.get(&("by_email".into(), {
+                // Re-derive the key for the first item.
+                unique_index_keys_for_push_item(&def, &push(1, None, Some("dup@x")))
+                    .unwrap()
+                    .into_iter()
+                    .find(|(n, _)| n == "by_email")
+                    .unwrap()
+                    .1
+            })),
+            Some(&ItemId::from_u64(1))
+        );
+    }
+
+    #[test]
+    fn stage_unique_keys_rejects_secondary_collision_across_entries() {
+        let def = def_with_unique_email();
+        let mut staged = HashMap::new();
+        stage_unique_push_keys(&def, &[push(1, Some("red"), None)], &mut staged).unwrap();
+        let err =
+            stage_unique_push_keys(&def, &[push(2, Some("red"), None)], &mut staged).unwrap_err();
+        assert!(matches!(err, EngineError::Conflict));
     }
 }
