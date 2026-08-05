@@ -42,21 +42,25 @@ fireweed-memory = { path = "../fireweed-memory", optional = true }
 fireweed-sqlite = { path = "../fireweed-sqlite", optional = true }
 fireweed-objectlog = { path = "../fireweed-objectlog", optional = true }
 fireweed-postgres = { path = "../fireweed-postgres", optional = true }
+fireweed-turso = { path = "../fireweed-turso", optional = true }
 # Composition-root only: Class B MemoryLog pairings and object-log × memory projection assembly.
 fireweed-projection = { path = "../fireweed-projection", optional = true }
-# Optional: pulled by `objectlog` / `postgres`. Workers need `rt` + I/O drivers for LogEngine.
+# Optional: pulled by `objectlog` / `postgres` / `turso`. Workers need `rt` + I/O drivers for LogEngine.
 tokio = { version = "1", features = ["rt", "time", "fs", "io-util", "net", "sync"], optional = true }
 
 [features]
 # Default pulls the embeddable adapters so `cargo build`/`cargo test` behave as before; a consumer who
 # wants only one backend uses e.g. `--no-default-features --features sqlite`. `postgres` is OPT-IN (it pulls
 # the postgres client) and is the multi-instance backend (`open_postgres` / `open_postgres_coordinated`).
-default = ["memory", "sqlite", "objectlog"]
+# `turso` is default-on: Turso is the public default projection (ADR-016 / TD-010).
+default = ["memory", "sqlite", "objectlog", "turso"]
 memory = ["dep:fireweed-memory", "dep:fireweed-projection"]
 sqlite = ["dep:fireweed-sqlite"]
 # objectlog pulls tokio so BlockingLibBackend workers host a reactor for LogEngine I/O.
 objectlog = ["dep:fireweed-objectlog", "dep:fireweed-projection", "dep:tokio"]
 postgres = ["dep:fireweed-postgres", "dep:tokio"]
+# Local embedded Turso 0.7 ordinary-WAL projection (public default projection axis).
+turso = ["dep:fireweed-turso", "fireweed-turso/local", "dep:tokio", "dep:fireweed-projection"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time"] }

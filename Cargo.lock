@@ -1426,6 +1426,7 @@ dependencies = [
  "fireweed-projection",
  "fireweed-release",
  "fireweed-sqlite",
+ "fireweed-turso",
  "futures",
  "postgres",
  "rusqlite",

@@ -1,6 +1,6 @@
-//! Table-driven T0–T2 harness for all 15 public storage-matrix cells, plus Class B T3
+//! Table-driven T0–T2 harness for all 20 public storage-matrix cells, plus Class B T3
 //! (projection durability + rejection; no `durable_log_replay` claims) and Class A cell-batch
-//! T0–T4 coverage for **sqlite**, **postgres**, **filesystem**, and **s3** log three-cell batches.
+//! T0–T4 coverage for **sqlite**, **postgres**, **filesystem**, and **s3** log batches.
 //!
 //! Governing bar: `docs/helix/04-build/storage-matrix-completion-brief.md` §2
 //!
@@ -68,7 +68,7 @@ use fireweed::{
 static FIXTURE_ORDINAL: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
-// Matrix cell table (5 log × 3 projection = 15)
+// Matrix cell table (5 log × 4 projection = 20)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,13 +116,15 @@ impl LogAxis {
 enum ProjectionAxis {
     Memory,
     Sqlite,
+    Turso,
     Postgres,
 }
 
 impl ProjectionAxis {
-    const ALL: [ProjectionAxis; 3] = [
+    const ALL: [ProjectionAxis; 4] = [
         ProjectionAxis::Memory,
         ProjectionAxis::Sqlite,
+        ProjectionAxis::Turso,
         ProjectionAxis::Postgres,
     ];
 
@@ -130,6 +132,7 @@ impl ProjectionAxis {
         match self {
             ProjectionAxis::Memory => "memory",
             ProjectionAxis::Sqlite => "sqlite",
+            ProjectionAxis::Turso => "turso",
             ProjectionAxis::Postgres => "postgres",
         }
     }
@@ -140,6 +143,14 @@ impl ProjectionAxis {
 
     fn needs_live_postgres(self) -> bool {
         matches!(self, ProjectionAxis::Postgres)
+    }
+
+    #[allow(dead_code)]
+    fn is_local_deterministic(self) -> bool {
+        matches!(
+            self,
+            ProjectionAxis::Memory | ProjectionAxis::Sqlite | ProjectionAxis::Turso
+        )
     }
 }
 
@@ -192,11 +203,11 @@ impl MatrixCell {
     }
 }
 
-fn all_matrix_cells() -> [MatrixCell; 15] {
+fn all_matrix_cells() -> [MatrixCell; 20] {
     let mut cells = [MatrixCell {
         log: LogAxis::Memory,
         projection: ProjectionAxis::Memory,
-    }; 15];
+    }; 20];
     let mut i = 0;
     for log in LogAxis::ALL {
         for projection in ProjectionAxis::ALL {
@@ -204,7 +215,7 @@ fn all_matrix_cells() -> [MatrixCell; 15] {
             i += 1;
         }
     }
-    assert_eq!(i, 15);
+    assert_eq!(i, 20);
     cells
 }
 
@@ -290,6 +301,7 @@ enum SkipReason {
     MissingObjectlogFeature,
     MissingSqliteFeature,
     MissingMemoryFeature,
+    MissingTursoFeature,
 }
 
 impl SkipReason {
@@ -313,6 +325,9 @@ impl SkipReason {
             SkipReason::MissingMemoryFeature => {
                 format!("storage_matrix_t0_t2: {cell_id} skipped (build without memory feature)")
             }
+            SkipReason::MissingTursoFeature => {
+                format!("storage_matrix_t0_t2: {cell_id} skipped (build without turso feature)")
+            }
         }
     }
 }
@@ -334,6 +349,11 @@ fn skip_reason(cell: MatrixCell) -> Option<SkipReason> {
     #[cfg(not(feature = "sqlite"))]
     if matches!(cell.log, LogAxis::Sqlite) || matches!(cell.projection, ProjectionAxis::Sqlite) {
         return Some(SkipReason::MissingSqliteFeature);
+    }
+
+    #[cfg(not(feature = "turso"))]
+    if matches!(cell.projection, ProjectionAxis::Turso) {
+        return Some(SkipReason::MissingTursoFeature);
     }
 
     #[cfg(not(feature = "objectlog"))]
@@ -421,6 +441,9 @@ fn build_config(cell: MatrixCell, root: &Path) -> StorageConfig {
         ProjectionAxis::Memory => ProjectionStoreConfig::Memory,
         ProjectionAxis::Sqlite => ProjectionStoreConfig::Sqlite {
             path: root.join("projection.db"),
+        },
+        ProjectionAxis::Turso => ProjectionStoreConfig::Turso {
+            path: root.join("projection-turso.db"),
         },
         ProjectionAxis::Postgres => {
             let url = std::env::var("FIREWEED_PG_TEST_URL").expect("checked by skip_reason");
@@ -739,16 +762,18 @@ async fn run_cell_t0_t2(cell: MatrixCell) {
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Registers all 15 cells and runs T0–T2 (or documents skip) for each.
+/// Registers all 20 cells and runs T0–T2 (or documents skip) for each.
 #[tokio::test]
-async fn storage_matrix_all_15_cells_t0_t2() {
+async fn storage_matrix_t0_t2_all_twenty_cells() {
     let cells = all_matrix_cells();
-    assert_eq!(cells.len(), 15, "public matrix is exactly 15 cells");
+    assert_eq!(cells.len(), 20, "public matrix is exactly 20 cells");
 
     let mut ran = 0usize;
     let mut skipped = 0usize;
     let mut class_a = 0usize;
     let mut class_b = 0usize;
+    let mut local_turso_ran = 0usize;
+    let mut local_turso_skipped = 0usize;
 
     for cell in cells {
         if cell.is_class_a() {
@@ -757,8 +782,14 @@ async fn storage_matrix_all_15_cells_t0_t2() {
             class_b += 1;
         }
 
+        let is_local_turso = matches!(cell.projection, ProjectionAxis::Turso)
+            && !cell.needs_live_postgres()
+            && !cell.needs_live_s3();
         if skip_reason(cell).is_some() {
             skipped += 1;
+            if is_local_turso {
+                local_turso_skipped += 1;
+            }
             // Still invoke so skip is eprintln'd consistently and the cell is "registered".
             run_cell_t0_t2(cell).await;
             continue;
@@ -766,32 +797,53 @@ async fn storage_matrix_all_15_cells_t0_t2() {
 
         run_cell_t0_t2(cell).await;
         ran += 1;
+        if is_local_turso {
+            local_turso_ran += 1;
+        }
     }
 
-    assert_eq!(class_a, 12, "12 Class A cells (non-memory log)");
-    assert_eq!(class_b, 3, "3 Class B cells (memory log)");
-    assert_eq!(ran + skipped, 15, "every cell counted as ran or skipped");
+    assert_eq!(
+        class_a, 16,
+        "16 Class A cells (non-memory log × 4 projections)"
+    );
+    assert_eq!(class_b, 4, "4 Class B cells (memory log × 4 projections)");
+    assert_eq!(ran + skipped, 20, "every cell counted as ran or skipped");
 
-    // Default feature set always exercises local cells: memory/sqlite/filesystem × memory/sqlite.
-    // That is at least the 2×2 local durable-capable subset plus memory×memory = 6 cells without PG/S3.
+    // Local deterministic Turso rows (memory/sqlite/filesystem × turso) must never skip when the
+    // turso feature is enabled — only live postgres/s3 fixture gaps may skip other rows.
+    #[cfg(feature = "turso")]
+    {
+        assert_eq!(
+            local_turso_skipped, 0,
+            "deterministic local Turso rows must not skip; local_turso_ran={local_turso_ran} local_turso_skipped={local_turso_skipped}"
+        );
+        assert_eq!(
+            local_turso_ran, 3,
+            "expected exactly memory×turso, sqlite×turso, filesystem×turso; ran={local_turso_ran}"
+        );
+    }
+
+    // Default feature set always exercises local cells including Turso.
     assert!(
-        ran >= 6,
-        "expected ≥6 in-process cells (memory/sqlite/filesystem × memory/sqlite) to run without live PG/S3; ran={ran} skipped={skipped}"
+        ran >= 9,
+        "expected ≥9 in-process cells (memory/sqlite/filesystem × memory/sqlite/turso) without live PG/S3; ran={ran} skipped={skipped}"
     );
 
-    eprintln!("storage_matrix_t0_t2: ran={ran} skipped={skipped} (of 15 registered cells)");
+    eprintln!(
+        "storage_matrix_t0_t2: ran={ran} skipped={skipped} local_turso_ran={local_turso_ran} (of 20 registered cells)"
+    );
 }
 
 /// Structural registration: the table enumerates every public axis pair exactly once.
 #[test]
-fn storage_matrix_registers_exactly_15_distinct_cells() {
+fn storage_matrix_registers_exactly_20_distinct_cells() {
     let cells = all_matrix_cells();
-    assert_eq!(cells.len(), 15);
+    assert_eq!(cells.len(), 20);
 
     let mut ids: Vec<String> = cells.iter().map(|c| c.id()).collect();
     ids.sort();
     ids.dedup();
-    assert_eq!(ids.len(), 15, "cell ids must be unique: {ids:?}");
+    assert_eq!(ids.len(), 20, "cell ids must be unique: {ids:?}");
 
     // Spot-check axes and reopen expectations.
     let mem_mem = cells
@@ -1001,7 +1053,7 @@ async fn run_filesystem_cell_t0_t3(cell: MatrixCell) {
 
 /// Focused T0–T2 for the three Class A **sqlite log** cells (brief program cell batch).
 ///
-/// Complements the full 15-cell table: always exercises `sqlite×memory` and `sqlite×sqlite`
+/// Complements the full 20-cell table: always exercises `sqlite×memory` and `sqlite×sqlite`
 /// when the `sqlite` feature is on; `sqlite×postgres` follows the same skip rules as the table.
 #[tokio::test]
 async fn sqlite_log_three_cells_t0_t2() {
@@ -1303,7 +1355,7 @@ fn sqlite_log_t3_t4_evidence_and_helm_values_present() {
 /// Focused T0–T2 for the three Class A **postgres log** cells (brief program cell batch).
 ///
 /// All three require `FIREWEED_PG_TEST_URL` + `--features postgres`. When the URL is unset each
-/// cell is still registered and documents the skip (same rules as the 15-cell table).
+/// cell is still registered and documents the skip (same rules as the 20-cell table).
 #[tokio::test]
 async fn postgres_log_three_cells_t0_t2() {
     let cells = [
