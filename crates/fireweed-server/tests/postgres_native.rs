@@ -21,7 +21,8 @@ use fireweed_core::{
 };
 use fireweed_engine::QueueKey;
 use fireweed_server::{
-    BackendSpec, Config, ControlPlaneSpec, LogSpec, ProjectionSpec, resolve_postgres_log, start,
+    BackendSpec, Config, ControlPlaneSpec, LogSpec, ProjectionSpec, ResponseBarrierSpec,
+    resolve_postgres_log, start,
 };
 
 /// Build a `BackendSpec` carrying the postgres log axis + in-memory projection (the server's only wired
@@ -31,6 +32,7 @@ fn pg_spec(url: String, credentials: Option<fireweed_postgres::CredentialProvide
         log: LogSpec::Postgres { url, credentials },
         projection: ProjectionSpec::InMemory,
         control_plane: ControlPlaneSpec::InProcess,
+        response_barrier: ResponseBarrierSpec::Strict,
         async_projection: None,
         sqlite_projection_deferred_flush_chunk: None,
     }

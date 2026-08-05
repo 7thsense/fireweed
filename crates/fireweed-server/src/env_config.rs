@@ -30,7 +30,8 @@ use fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK;
 use crate::{
     BackendSpec, ChangeRecordSinkConfig, Config, ControlPlaneSpec, DEFAULT_RECOVERY_MAX_TAIL,
     EmbeddedFjordConfig, LogSpec, ObjectLogByteLimits, ObjectLogSpec, ProjectionSpec,
-    S3CredentialSource, SegmentConfig, resolve_node_id, validated_owner_endpoint,
+    ResponseBarrierSpec, S3CredentialSource, SegmentConfig, resolve_node_id,
+    validated_owner_endpoint,
 };
 
 /// A rejected runtime configuration: the populator could not build a valid [`Config`] from the supplied env
@@ -600,18 +601,45 @@ fn parse_backend(
     }
 
     let replicas = replica_count(env)?;
+    // Barrier-aware Option coherence (P3v). P12a later maps explicit env/help barrier syntax into
+    // `response_barrier`; until then HybridAsync selection is the sole env path that selects
+    // AsyncProjection, and Strict paths keep async_projection / deferred-flush unset unless the
+    // cell permits deferred-flush defaults for object-log × SQLite-family projections.
+    let response_barrier = match &projection_spec {
+        ProjectionSpec::HybridAsync { .. } => ResponseBarrierSpec::AsyncProjection,
+        _ => ResponseBarrierSpec::Strict,
+    };
+    // Always parse hybrid-async bounds so zero-threshold ConfigError fingerprints stay at from_env;
+    // only attach Some under AsyncProjection (Strict+Some is a typed EngineError at start).
+    let thresholds = hybrid_async_thresholds(env)?;
+    let async_projection = match response_barrier {
+        ResponseBarrierSpec::AsyncProjection => Some(thresholds),
+        ResponseBarrierSpec::Strict => None,
+    };
+    let deferred_default = parse_usize(
+        env,
+        "FIREWEED_HYBRID_DEFERRED_FLUSH_CHUNK",
+        DEFAULT_DEFERRED_FLUSH_CHUNK,
+    );
+    let sqlite_projection_deferred_flush_chunk = if matches!(log_spec, LogSpec::ObjectLog(_))
+        && matches!(
+            projection_spec,
+            ProjectionSpec::Sqlite { .. }
+                | ProjectionSpec::Hybrid { .. }
+                | ProjectionSpec::HybridStrict { .. }
+                | ProjectionSpec::HybridAsync { .. }
+        ) {
+        Some(deferred_default)
+    } else {
+        None
+    };
     Ok(BackendSpec {
         log: log_spec,
         projection: projection_spec,
         control_plane: parse_control_plane(env, replicas)?,
-        // Preserve the six legacy tuning names by relocating their values into the backend-owned fields.
-        // P12a replaces these names and supplies barrier-aware Option semantics.
-        async_projection: Some(hybrid_async_thresholds(env)?),
-        sqlite_projection_deferred_flush_chunk: Some(parse_usize(
-            env,
-            "FIREWEED_HYBRID_DEFERRED_FLUSH_CHUNK",
-            DEFAULT_DEFERRED_FLUSH_CHUNK,
-        )),
+        response_barrier,
+        async_projection,
+        sqlite_projection_deferred_flush_chunk,
     })
 }
 
@@ -1467,20 +1495,33 @@ mod tests {
 
     #[test]
     fn hybrid_async_thresholds_default_when_env_absent() {
+        // Default Strict composition leaves async unset (P3v Option/barrier coherence). P12a later
+        // maps explicit barrier syntax; public env cannot select HybridAsync today.
         let config = Config::from_env(&BTreeMap::new()).expect("empty env yields defaults");
-        assert_eq!(
-            config.backend.async_projection,
-            Some(AsyncProjectionSpec::default())
-        );
-        assert_eq!(
-            config.backend.sqlite_projection_deferred_flush_chunk,
-            Some(DEFAULT_DEFERRED_FLUSH_CHUNK)
-        );
+        assert_eq!(config.backend.response_barrier, ResponseBarrierSpec::Strict);
+        assert_eq!(config.backend.async_projection, None);
+        // Default projection is memory → deferred-flush is not cell-applicable.
+        assert_eq!(config.backend.sqlite_projection_deferred_flush_chunk, None);
+        assert_eq!(config.validate_for_start(), Ok(()));
     }
 
     #[test]
     fn hybrid_async_thresholds_parsed_from_env() {
+        // Public env is Strict-only until P12a; legacy FIREWEED_HYBRID_ASYNC_* bounds are still
+        // parsed for zero-bound ConfigError fingerprints but are not attached under Strict
+        // (Strict+Some is a typed EngineError at start). Deferred flush attaches on
+        // filesystem×sqlite only.
         let config = Config::from_env(&map(&[
+            ("FIREWEED_LOG_BACKEND", "filesystem"),
+            (
+                "FIREWEED_OBJECT_LOG_ROOT",
+                "/tmp/fireweed-p3v-deferred-flush-env",
+            ),
+            ("FIREWEED_PROJECTION_BACKEND", "sqlite"),
+            (
+                "FIREWEED_SQLITE_PROJECTION_PATH",
+                "/tmp/fireweed-p3v-deferred-flush-env.sqlite",
+            ),
             ("FIREWEED_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS", "5000"),
             ("FIREWEED_HYBRID_ASYNC_APPLY_DEBT_MAX_BYTES", "1048576"),
             ("FIREWEED_HYBRID_ASYNC_APPLY_QUEUE_DEPTH_MAX", "64"),
@@ -1488,20 +1529,17 @@ mod tests {
             ("FIREWEED_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD", "5"),
             ("FIREWEED_HYBRID_DEFERRED_FLUSH_CHUNK", "17"),
         ]))
-        .expect("valid hybrid-async env");
-        let spec = config
-            .backend
-            .async_projection
-            .expect("legacy async settings populate BackendSpec");
-        assert_eq!(spec.apply_lag_max_commands, 5000);
-        assert_eq!(spec.apply_debt_max_bytes, 1_048_576);
-        assert_eq!(spec.apply_queue_depth_max, 64);
-        assert_eq!(spec.oldest_unapplied_max_ms, 30_000);
-        assert_eq!(spec.apply_poison_retry_threshold, 5);
+        .expect("valid filesystem×sqlite env");
+        assert_eq!(config.backend.response_barrier, ResponseBarrierSpec::Strict);
+        assert_eq!(
+            config.backend.async_projection, None,
+            "Strict env must not attach async_projection (P3v coherence)"
+        );
         assert_eq!(
             config.backend.sqlite_projection_deferred_flush_chunk,
             Some(17)
         );
+        assert_eq!(config.validate_for_start(), Ok(()));
     }
 
     #[test]
