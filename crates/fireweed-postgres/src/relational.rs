@@ -1197,6 +1197,8 @@ fn encode_engine_error(e: &EngineError) -> (&'static str, Option<String>) {
             ("request_too_large", Some(format!("{requested}:{limit}")))
         }
         EngineError::Backpressure { resource } => ("backpressure", Some((*resource).to_string())),
+        // Startup-only; unreachable from the commit path. Named for exhaustive-match completeness.
+        EngineError::ChangeRecordsRequireDurableLog => ("change_records_require_durable_log", None),
     }
 }
 
@@ -5462,6 +5464,87 @@ impl PostgresRelationalBackend {
         let mut client = connect(PostgresConnectConfig::new(url))?;
         st(client.batch_execute(&format!("SET search_path TO {schema}")))?;
         migrate_metrics_batch(&mut client, batch_size)
+    }
+
+    /// Durable TD-008 emission cursor for one queue (relational_emission_cursor table).
+    pub fn emission_cursor(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+        let mut inner = self.inner.lock().expect("poisoned");
+        let (t, q) = parts(shard);
+        let row = st(inner.client.query_opt(
+            "SELECT epoch, seq FROM relational_emission_cursor WHERE tenant=$1 AND queue=$2",
+            &[&t, &q],
+        ))?;
+        Ok(row.map(|row| {
+            let epoch: i64 = row.get(0);
+            let seq: i64 = row.get(1);
+            CommandPosition::new(shard.clone(), epoch as u64, seq as u64)
+        }))
+    }
+
+    /// Persist a monotonic emission cursor after a successful sink emit.
+    pub fn set_emission_cursor(
+        &self,
+        shard: &QueueKey,
+        position: CommandPosition,
+    ) -> EngineResult<()> {
+        let mut inner = self.inner.lock().expect("poisoned");
+        let (t, q) = parts(shard);
+        let current = st(inner.client.query_opt(
+            "SELECT epoch, seq FROM relational_emission_cursor WHERE tenant=$1 AND queue=$2",
+            &[&t, &q],
+        ))?;
+        if let Some(row) = current {
+            let epoch: i64 = row.get(0);
+            let seq: i64 = row.get(1);
+            let cur = CommandPosition::new(shard.clone(), epoch as u64, seq as u64);
+            if !cur.precedes(&position) && cur != position {
+                return Err(EngineError::Invalid("emission cursor regression"));
+            }
+        }
+        st(inner.client.execute(
+            "INSERT INTO relational_emission_cursor(tenant,queue,epoch,seq) VALUES($1,$2,$3,$4) \
+             ON CONFLICT(tenant,queue) DO UPDATE SET epoch=EXCLUDED.epoch, seq=EXCLUDED.seq",
+            &[
+                &t,
+                &q,
+                &(position.backend_epoch as i64),
+                &(position.sequence as i64),
+            ],
+        ))?;
+        Ok(())
+    }
+
+    /// Emit durable change-record tail from the relational command log + emission cursor (TD-008).
+    pub fn emit_change_record_tail<S: fireweed_engine::ChangeRecordSink + ?Sized>(
+        &self,
+        shard: &QueueKey,
+        sink: &S,
+        limit: usize,
+        emitted_at: fireweed_core::UtcTimestamp,
+        source_owner_id: Option<fireweed_core::OwnerId>,
+    ) -> EngineResult<usize> {
+        use fireweed_engine::{LogRead, command_envelope_change_records};
+
+        let cursor = self.emission_cursor(shard)?;
+        let page = futures::executor::block_on(LogRead::read_from(self, shard, cursor, limit))?;
+        if page.entries.is_empty() {
+            return Ok(0);
+        }
+        let mut records = Vec::new();
+        for (position, env) in &page.entries {
+            records.extend(command_envelope_change_records(
+                shard,
+                position,
+                env,
+                emitted_at,
+                source_owner_id.clone(),
+            ));
+        }
+        sink.emit(shard, &records)?;
+        if let Some((position, _)) = page.entries.last() {
+            self.set_emission_cursor(shard, position.clone())?;
+        }
+        Ok(records.len())
     }
 
     /// Connect to `url` (default `search_path`), ensure the schema, and load the queue-def cache.

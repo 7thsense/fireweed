@@ -64,6 +64,10 @@ CREATE TABLE IF NOT EXISTS high_water (
     tenant TEXT NOT NULL, queue TEXT NOT NULL, epoch BIGINT NOT NULL, seq BIGINT NOT NULL,
     PRIMARY KEY (tenant, queue)
 );
+CREATE TABLE IF NOT EXISTS emission_cursor (
+    tenant TEXT NOT NULL, queue TEXT NOT NULL, epoch BIGINT NOT NULL, seq BIGINT NOT NULL,
+    PRIMARY KEY (tenant, queue)
+);
 CREATE TABLE IF NOT EXISTS snapshots (
     tenant TEXT NOT NULL, queue TEXT NOT NULL, ref_id TEXT NOT NULL,
     ord BIGSERIAL, epoch BIGINT NOT NULL, seq BIGINT NOT NULL, payload BYTEA NOT NULL,
@@ -184,6 +188,51 @@ impl PostgresLog {
 impl LogStore for PostgresLog {
     fn supports_emission_cursor(&self) -> bool {
         true
+    }
+
+    fn emission_cursor(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+        let (t, q) = parts(shard);
+        let row = st(self.client.borrow_mut().query_opt(
+            "SELECT epoch, seq FROM emission_cursor WHERE tenant=$1 AND queue=$2",
+            &[&t, &q],
+        ))?;
+        Ok(row.map(|row| {
+            let epoch: i64 = row.get(0);
+            let seq: i64 = row.get(1);
+            CommandPosition::new(shard.clone(), epoch as u64, seq as u64)
+        }))
+    }
+
+    fn set_emission_cursor(
+        &mut self,
+        shard: &QueueKey,
+        position: CommandPosition,
+    ) -> EngineResult<()> {
+        let (t, q) = parts(shard);
+        let client = self.client.get_mut();
+        let current = st(client.query_opt(
+            "SELECT epoch, seq FROM emission_cursor WHERE tenant=$1 AND queue=$2",
+            &[&t, &q],
+        ))?;
+        if let Some(row) = current {
+            let epoch: i64 = row.get(0);
+            let seq: i64 = row.get(1);
+            let cur = CommandPosition::new(shard.clone(), epoch as u64, seq as u64);
+            if !cur.precedes(&position) && cur != position {
+                return Err(EngineError::Invalid("emission cursor regression"));
+            }
+        }
+        st(client.execute(
+            "INSERT INTO emission_cursor(tenant,queue,epoch,seq) VALUES($1,$2,$3,$4) \
+             ON CONFLICT(tenant,queue) DO UPDATE SET epoch=EXCLUDED.epoch, seq=EXCLUDED.seq",
+            &[
+                &t,
+                &q,
+                &(position.backend_epoch as i64),
+                &(position.sequence as i64),
+            ],
+        ))?;
+        Ok(())
     }
 
     fn ensure_shard(&mut self, shard: &QueueKey) -> EngineResult<()> {

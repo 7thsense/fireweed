@@ -2046,17 +2046,12 @@ async fn xinfo<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
 }
 
 fn err_reply(e: &EngineError) -> Resp {
-    // `-ERR fireweed …` tokens map straight through; the non-`-ERR` errors get their idiomatic Redis
-    // reply (TD-006 §2/§7): Forbidden → `-NOPERM`, not-found → `-ERR no such queue`.
-    if let Some(tok) = e.resp_token() {
-        return Resp::Error(tok.trim_start_matches('-').to_string());
-    }
+    // One exhaustive match names every `EngineError` variant. Generic table tokens agree with
+    // `EngineError::resp_token()` (cross-table tests); Forbidden/NotFound/Storage/DurableDataCorrupt
+    // are the only non-table mappings (TD-006 §2/§7, TD-008).
     match e {
         EngineError::Forbidden(why) => Resp::Error(format!("NOPERM {why}")),
         EngineError::NotFound => Resp::Error("ERR no such queue".into()),
-        // A client-caused incompatible re-create, not an internal fault (queue-create is library-only
-        // over RESP today, so this is latent — but the token must be honest).
-        EngineError::QueueDefinitionConflict => Resp::Error("ERR fireweed queue_conflict".into()),
         EngineError::Storage(_) | EngineError::DurableDataCorrupt { .. } => {
             // Keep adapter/storage details out of the client-visible RESP token, but do not erase them
             // from operator diagnostics. Live release evidence relies on the server log to distinguish a
@@ -2064,9 +2059,26 @@ fn err_reply(e: &EngineError) -> Resp {
             eprintln!("[fireweed-resp] internal engine error: {e}");
             Resp::Error("ERR fireweed internal".into())
         }
-        // Every other variant carries a `-ERR fireweed …` token via `resp_token()` above; this arm is
-        // unreachable, but stays total.
-        _ => Resp::Error("ERR fireweed internal".into()),
+        EngineError::QueueDefinitionConflict => Resp::Error("ERR fireweed queue_conflict".into()),
+        EngineError::ChangeRecordsRequireDurableLog => {
+            Resp::Error("ERR fireweed change_records_require_durable_log".into())
+        }
+        EngineError::Invalid(_) => Resp::Error("ERR fireweed invalid".into()),
+        EngineError::Terminal => Resp::Error("ERR fireweed terminal".into()),
+        EngineError::StaleLease => Resp::Error("ERR fireweed stale_lease".into()),
+        EngineError::Superseded => Resp::Error("ERR fireweed superseded".into()),
+        EngineError::Unavailable => Resp::Error("ERR fireweed unavailable".into()),
+        EngineError::Conflict => Resp::Error("ERR fireweed conflict".into()),
+        EngineError::BatchTooLarge => Resp::Error("ERR fireweed batch_too_large".into()),
+        EngineError::RequestIdConflict => Resp::Error("ERR fireweed request_id_conflict".into()),
+        EngineError::Paused { .. } => Resp::Error("ERR fireweed paused".into()),
+        EngineError::RequestExpired => Resp::Error("ERR fireweed request_expired".into()),
+        EngineError::EpochFenced => Resp::Error("ERR fireweed epoch_stale".into()),
+        EngineError::EntitySchemaViolation(_) => {
+            Resp::Error("ERR fireweed entity_schema_violation".into())
+        }
+        EngineError::RequestTooLarge { .. } => Resp::Error("ERR fireweed invalid".into()),
+        EngineError::Backpressure { .. } => Resp::Error("ERR fireweed unavailable".into()),
     }
 }
 
@@ -2100,6 +2112,70 @@ mod tests {
             b"custom",
             b"value",
         ])
+    }
+
+    /// Every generic table token from `EngineError::resp_token` must agree with the direct
+    /// exhaustive `err_reply` arm (TD-006 / TD-008). Non-table mappings stay out of this table.
+    #[test]
+    fn err_reply_agrees_with_engine_resp_token_table() {
+        let cases: &[(EngineError, &str)] = &[
+            (EngineError::Invalid("x"), "ERR fireweed invalid"),
+            (EngineError::Terminal, "ERR fireweed terminal"),
+            (EngineError::StaleLease, "ERR fireweed stale_lease"),
+            (EngineError::Superseded, "ERR fireweed superseded"),
+            (EngineError::Unavailable, "ERR fireweed unavailable"),
+            (EngineError::Conflict, "ERR fireweed conflict"),
+            (EngineError::BatchTooLarge, "ERR fireweed batch_too_large"),
+            (
+                EngineError::RequestIdConflict,
+                "ERR fireweed request_id_conflict",
+            ),
+            (
+                EngineError::Paused { drain_intake: true },
+                "ERR fireweed paused",
+            ),
+            (EngineError::RequestExpired, "ERR fireweed request_expired"),
+            (EngineError::EpochFenced, "ERR fireweed epoch_stale"),
+            (
+                EngineError::EntitySchemaViolation("x".into()),
+                "ERR fireweed entity_schema_violation",
+            ),
+            (
+                EngineError::RequestTooLarge {
+                    requested: 2,
+                    limit: 1,
+                },
+                "ERR fireweed invalid",
+            ),
+            (
+                EngineError::Backpressure {
+                    resource: "buffered bytes",
+                },
+                "ERR fireweed unavailable",
+            ),
+            (
+                EngineError::QueueDefinitionConflict,
+                "ERR fireweed queue_conflict",
+            ),
+            (
+                EngineError::ChangeRecordsRequireDurableLog,
+                "ERR fireweed change_records_require_durable_log",
+            ),
+        ];
+        for (error, expected_reply) in cases {
+            let token = error
+                .resp_token()
+                .expect("generic table variants must have a resp_token");
+            assert_eq!(
+                token.trim_start_matches('-'),
+                *expected_reply,
+                "resp_token vs expected for {error:?}"
+            );
+            match err_reply(error) {
+                Resp::Error(msg) => assert_eq!(msg, *expected_reply, "err_reply for {error:?}"),
+                other => panic!("expected error reply for {error:?}, got {other:?}"),
+            }
+        }
     }
 
     #[derive(Default)]

@@ -1682,7 +1682,7 @@ async fn objectlog_hybrid_disk_loss_replays_retained_object_log() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn change_record_sink_rejected_on_unwired_profile() {
+async fn change_record_sink_rejected_on_class_b_memory_log() {
     let config = Config::new(
         BackendSpec {
             log: LogSpec::Memory,
@@ -1697,9 +1697,10 @@ async fn change_record_sink_rejected_on_unwired_profile() {
         vec![qdef()],
     );
     let mut config = config;
+    // Use HTTP so feature-off Kafka does not win before Class-B durability.
     config.change_record_sink = ChangeRecordSinkConfig {
         enabled: true,
-        endpoint: Some("kafka://127.0.0.1:9092".to_string()),
+        endpoint: Some("http://127.0.0.1:8080".to_string()),
         ..ChangeRecordSinkConfig::default()
     };
 
@@ -1708,9 +1709,7 @@ async fn change_record_sink_rejected_on_unwired_profile() {
             .await
             .err()
             .expect("memory backend must refuse sink startup"),
-        EngineError::Invalid(
-            "change record sink is only wired for objectlog/hybrid, objectlog/hybrid-strict, and objectlog/hybrid-async",
-        )
+        EngineError::ChangeRecordsRequireDurableLog
     );
 }
 
@@ -1772,9 +1771,7 @@ async fn env_and_programmatic_sink_configs_share_the_typed_startup_validation_bo
         );
     }
 
-    let invalid_composition = EngineError::Invalid(
-        "change record sink is only wired for objectlog/hybrid, objectlog/hybrid-strict, and objectlog/hybrid-async",
-    );
+    let class_b = EngineError::ChangeRecordsRequireDurableLog;
     for config in [
         direct_config("http://127.0.0.1:8080", true),
         env_config("http://127.0.0.1:8080", true),
@@ -1784,14 +1781,14 @@ async fn env_and_programmatic_sink_configs_share_the_typed_startup_validation_bo
                 .await
                 .err()
                 .expect("valid endpoint must reach the later composition hook"),
-            invalid_composition
+            class_b
         );
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn change_record_sink_rejected_without_durable_cursor_store() {
-    let (object_root, projection_path) = tmp_runtime_paths("change-record-sink-no-cursor");
+async fn change_record_sink_rejected_on_legacy_hybrid_projection() {
+    let (object_root, projection_path) = tmp_runtime_paths("change-record-sink-hybrid-retired");
     let mut config = Config::new(
         objectlog_hybrid_spec(object_root.clone(), projection_path.clone()),
         0,
@@ -1803,20 +1800,20 @@ async fn change_record_sink_rejected_without_durable_cursor_store() {
         &mut config,
         SegmentConfig::new(1024 * 1024, 5).expect("valid segment config"),
     );
+    // Embedded (no endpoint) so feature-off Kafka does not mask the Hybrid retirement.
     config.change_record_sink = ChangeRecordSinkConfig {
         enabled: true,
-        endpoint: Some("kafka://127.0.0.1:9092".to_string()),
+        endpoint: None,
         ..ChangeRecordSinkConfig::default()
     };
 
-    match start(config).await {
-        Ok(_) => panic!("objectlog/hybrid must refuse sink startup without a durable cursor"),
-        Err(err) => assert!(
-            err.to_string().contains("durable emission cursor store"),
-            "{}",
-            err
-        ),
-    }
+    assert_eq!(
+        start(config)
+            .await
+            .err()
+            .expect("objectlog/hybrid must refuse enabled change-record delivery"),
+        EngineError::Invalid("legacy-projection-change-record-delivery-retired")
+    );
     let _ = std::fs::remove_dir_all(&object_root);
     let _ = std::fs::remove_file(&projection_path);
 }
@@ -2275,4 +2272,116 @@ async fn reclaim_driver_reaps_only_after_emitter_advances_terminal_cursor() {
             vec![ChangeRecordKind::Finalize],
         ]
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn class_a_filesystem_memory_starts_with_enabled_embedded_change_record_delivery() {
+    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
+    let (object_root, _) = tmp_runtime_paths("p8c-fs-memory-emit");
+    let mut config = Config::new(
+        BackendSpec {
+            log: LogSpec::ObjectLog(ObjectLogSpec::local(
+                object_root.clone(),
+                SegmentConfig::new(262_144, 20).unwrap(),
+            )),
+            projection: ProjectionSpec::InMemory,
+            control_plane: ControlPlaneSpec::InProcess,
+            async_projection: None,
+            sqlite_projection_deferred_flush_chunk: None,
+        },
+        0,
+        "127.0.0.1:0".to_string(),
+        Duration::from_secs(60),
+        vec![qdef()],
+    );
+    // Embedded mode: enabled, no endpoint.
+    config.change_record_sink = ChangeRecordSinkConfig {
+        enabled: true,
+        endpoint: None,
+        tick_interval: Duration::from_millis(50),
+        ..ChangeRecordSinkConfig::default()
+    };
+    let server = start(config)
+        .await
+        .expect("Class A filesystem×memory must start with enabled embedded delivery");
+    let mut con = redis_test_connection(server.addr()).await;
+    let _: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("priority")
+        .arg(1)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    // Give the emitter a couple of ticks to run without panic.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    server.shutdown_and_drain(Duration::from_secs(5)).await;
+    let _ = std::fs::remove_dir_all(&object_root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn class_a_sqlite_memory_starts_with_opt_out_and_disabled_endpoint_tuple_rejected() {
+    let dir = std::env::temp_dir().join(format!(
+        "p8c-sqlite-memory-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log_path = dir.join("log.sqlite");
+
+    // Disabled + endpoint is tuple-coherence rejection at start.
+    let mut disabled = Config::new(
+        BackendSpec {
+            log: LogSpec::Sqlite {
+                path: log_path.clone(),
+            },
+            projection: ProjectionSpec::InMemory,
+            control_plane: ControlPlaneSpec::InProcess,
+            async_projection: None,
+            sqlite_projection_deferred_flush_chunk: None,
+        },
+        0,
+        "127.0.0.1:0".to_string(),
+        Duration::from_secs(60),
+        vec![qdef()],
+    );
+    disabled.change_record_sink.endpoint = Some("http://127.0.0.1:9".into());
+    assert_eq!(
+        start(disabled).await.err(),
+        Some(EngineError::Invalid(
+            "change-record-endpoint-requires-enabled"
+        ))
+    );
+
+    // Enabled embedded + all queues opted out still starts (no emitter task needed).
+    let mut opted_out = qdef();
+    opted_out.emit_change_records = false;
+    let mut enabled = Config::new(
+        BackendSpec {
+            log: LogSpec::Sqlite {
+                path: log_path.clone(),
+            },
+            projection: ProjectionSpec::InMemory,
+            control_plane: ControlPlaneSpec::InProcess,
+            async_projection: None,
+            sqlite_projection_deferred_flush_chunk: None,
+        },
+        0,
+        "127.0.0.1:0".to_string(),
+        Duration::from_secs(60),
+        vec![opted_out],
+    );
+    enabled.change_record_sink = ChangeRecordSinkConfig {
+        enabled: true,
+        endpoint: None,
+        ..ChangeRecordSinkConfig::default()
+    };
+    let server = start(enabled)
+        .await
+        .expect("opt-out queues allow enabled sink without emitter work");
+    server.shutdown_and_drain(Duration::from_secs(5)).await;
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -138,7 +138,8 @@ where
     }
 }
 
-/// LogEngine hybrid product: emission cursor not yet on [`ObjectLogEngineStore`]. Fail closed.
+/// Legacy Hybrid product: enabled delivery is rejected at startup validation
+/// (`legacy-projection-change-record-delivery-retired`). Fail closed if reached.
 impl ChangeRecordEmissionBackend for fireweed_objectlog::AsyncObjectLogHybridBackend {
     fn emit_change_record_tail<S: ChangeRecordSink + ?Sized>(
         &self,
@@ -149,12 +150,114 @@ impl ChangeRecordEmissionBackend for fireweed_objectlog::AsyncObjectLogHybridBac
         _source_owner_id: Option<fireweed_core::OwnerId>,
     ) -> EngineResult<usize> {
         Err(EngineError::Invalid(
-            "change record emission cursor is not yet implemented on ObjectLogEngineStore hybrid product",
+            "legacy-projection-change-record-delivery-retired",
         ))
     }
 
     fn supports_change_record_emission_cursor(&self) -> bool {
         false
+    }
+}
+
+fn emit_from_objectlog_store<S: ChangeRecordSink + ?Sized>(
+    log: &fireweed_objectlog::ObjectLogEngineStore,
+    shard: &QueueKey,
+    sink: &S,
+    limit: usize,
+    emitted_at: UtcTimestamp,
+    source_owner_id: Option<fireweed_core::OwnerId>,
+) -> EngineResult<usize> {
+    // Drive LogEngine futures on the process-wide objectlog runtime. `ChangeRecordSink: Sync`
+    // lets the real sink run before the cursor advances (TD-008 at-least-once).
+    fireweed_objectlog::block_on_objectlog(log.emit_change_record_tail(
+        shard,
+        sink,
+        limit,
+        emitted_at,
+        source_owner_id,
+    ))
+}
+
+impl ChangeRecordEmissionBackend for fireweed_objectlog::AsyncObjectLogMemoryBackend {
+    fn emit_change_record_tail<S: ChangeRecordSink + ?Sized>(
+        &self,
+        shard: &QueueKey,
+        sink: &S,
+        limit: usize,
+        emitted_at: UtcTimestamp,
+        source_owner_id: Option<fireweed_core::OwnerId>,
+    ) -> EngineResult<usize> {
+        self.with_log(|log| {
+            emit_from_objectlog_store(log, shard, sink, limit, emitted_at, source_owner_id)
+        })
+    }
+
+    fn supports_change_record_emission_cursor(&self) -> bool {
+        true
+    }
+}
+
+impl ChangeRecordEmissionBackend for fireweed_objectlog::AsyncObjectLogSqliteBackend {
+    fn emit_change_record_tail<S: ChangeRecordSink + ?Sized>(
+        &self,
+        shard: &QueueKey,
+        sink: &S,
+        limit: usize,
+        emitted_at: UtcTimestamp,
+        source_owner_id: Option<fireweed_core::OwnerId>,
+    ) -> EngineResult<usize> {
+        self.with_log(|log| {
+            emit_from_objectlog_store(log, shard, sink, limit, emitted_at, source_owner_id)
+        })
+    }
+
+    fn supports_change_record_emission_cursor(&self) -> bool {
+        true
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl ChangeRecordEmissionBackend for fireweed_postgres::AsyncObjectLogPostgresBackend {
+    fn emit_change_record_tail<S: ChangeRecordSink + ?Sized>(
+        &self,
+        shard: &QueueKey,
+        sink: &S,
+        limit: usize,
+        emitted_at: UtcTimestamp,
+        source_owner_id: Option<fireweed_core::OwnerId>,
+    ) -> EngineResult<usize> {
+        self.with_log(|log| {
+            emit_from_objectlog_store(log, shard, sink, limit, emitted_at, source_owner_id)
+        })
+    }
+
+    fn supports_change_record_emission_cursor(&self) -> bool {
+        true
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl ChangeRecordEmissionBackend for fireweed_postgres::PostgresRelationalBackend {
+    fn emit_change_record_tail<S: ChangeRecordSink + ?Sized>(
+        &self,
+        shard: &QueueKey,
+        sink: &S,
+        limit: usize,
+        emitted_at: UtcTimestamp,
+        source_owner_id: Option<fireweed_core::OwnerId>,
+    ) -> EngineResult<usize> {
+        fireweed_postgres::PostgresRelationalBackend::emit_change_record_tail(
+            self,
+            shard,
+            sink,
+            limit,
+            emitted_at,
+            source_owner_id,
+        )
+    }
+
+    fn supports_change_record_emission_cursor(&self) -> bool {
+        true
     }
 }
 

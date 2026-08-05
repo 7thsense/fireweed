@@ -388,6 +388,8 @@ pub(crate) fn encode_engine_error(e: &EngineError) -> (&'static str, Option<Stri
             ("request_too_large", Some(format!("{requested}:{limit}")))
         }
         EngineError::Backpressure { resource } => ("backpressure", Some((*resource).to_string())),
+        // Startup-only; unreachable from the commit path. Named for exhaustive-match completeness.
+        EngineError::ChangeRecordsRequireDurableLog => ("change_records_require_durable_log", None),
     }
 }
 

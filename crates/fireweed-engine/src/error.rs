@@ -108,6 +108,9 @@ pub enum EngineError {
         manifest_index: u64,
         locator: String,
     },
+    /// Change-record delivery was requested for a Class B (memory-log) cell. Startup-only:
+    /// must never escape a mutation or appear in a production commit outcome (TD-008).
+    ChangeRecordsRequireDurableLog,
 }
 
 impl EngineError {
@@ -129,9 +132,12 @@ impl EngineError {
             EngineError::EntitySchemaViolation(_) => Some("-ERR fireweed entity_schema_violation"),
             EngineError::RequestTooLarge { .. } => Some("-ERR fireweed invalid"),
             EngineError::Backpressure { .. } => Some("-ERR fireweed unavailable"),
+            EngineError::QueueDefinitionConflict => Some("-ERR fireweed queue_conflict"),
+            EngineError::ChangeRecordsRequireDurableLog => {
+                Some("-ERR fireweed change_records_require_durable_log")
+            }
             // Forbidden -> `-NOPERM`, NotFound -> nil: non-`-ERR fireweed` mappings handled by the adapter.
             EngineError::NotFound
-            | EngineError::QueueDefinitionConflict
             | EngineError::Forbidden(_)
             | EngineError::Storage(_)
             | EngineError::DurableDataCorrupt { .. } => None,
@@ -174,6 +180,9 @@ impl std::fmt::Display for EngineError {
                 f,
                 "durable data corrupt: stage={stage} manifest_index={manifest_index} locator={locator}"
             ),
+            EngineError::ChangeRecordsRequireDurableLog => {
+                write!(f, "change records require a durable Class A log")
+            }
         }
     }
 }
@@ -223,6 +232,9 @@ pub enum CommitRejection {
         manifest_index: u64,
         locator: String,
     },
+    /// Name-level exhaustive serde/mapping mirror of [`EngineError::ChangeRecordsRequireDurableLog`].
+    /// Startup-only; production commit outcomes must never contain this class (TD-008).
+    ChangeRecordsRequireDurableLog,
 }
 
 impl CommitRejection {
@@ -265,6 +277,9 @@ impl CommitRejection {
                 manifest_index: *manifest_index,
                 locator: locator.clone(),
             },
+            EngineError::ChangeRecordsRequireDurableLog => {
+                CommitRejection::ChangeRecordsRequireDurableLog
+            }
         }
     }
 
@@ -313,6 +328,9 @@ impl CommitRejection {
                 manifest_index,
                 locator,
             },
+            CommitRejection::ChangeRecordsRequireDurableLog => {
+                EngineError::ChangeRecordsRequireDurableLog
+            }
         }
     }
 }
@@ -359,6 +377,110 @@ mod commit_rejection_tests {
                 e,
                 "commit rejection {e:?} must round-trip byte-identically"
             );
+        }
+    }
+
+    /// Startup-only `ChangeRecordsRequireDurableLog` exists in the name-level mirror so serde tables
+    /// stay exhaustive; mapping fixtures may round-trip it, but production commits never emit it.
+    #[test]
+    fn change_records_require_durable_log_mirror_round_trips_in_mapping_fixtures() {
+        let error = EngineError::ChangeRecordsRequireDurableLog;
+        let projected = CommitRejection::from_error(&error);
+        assert_eq!(projected, CommitRejection::ChangeRecordsRequireDurableLog);
+        let json = serde_json::to_string(&projected).expect("serialize");
+        let decoded: CommitRejection = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.into_error(), error);
+    }
+
+    /// Backpressure keeps its existing payload normalization rather than false Rust-shape identity.
+    #[test]
+    fn backpressure_normalizes_resource_string_in_mirror() {
+        let error = EngineError::Backpressure {
+            resource: "buffered bytes",
+        };
+        let projected = CommitRejection::from_error(&error);
+        assert_eq!(
+            projected,
+            CommitRejection::Backpressure("buffered bytes".into())
+        );
+        assert_eq!(projected.clone().into_error(), error);
+
+        let unknown = CommitRejection::Backpressure("other-resource".into());
+        assert_eq!(
+            unknown.into_error(),
+            EngineError::Backpressure {
+                resource: "bounded resource",
+            }
+        );
+    }
+
+    #[test]
+    fn resp_token_table_is_exhaustive_for_generic_tokens() {
+        let cases: &[(EngineError, Option<&str>)] = &[
+            (EngineError::Invalid("x"), Some("-ERR fireweed invalid")),
+            (EngineError::Terminal, Some("-ERR fireweed terminal")),
+            (EngineError::StaleLease, Some("-ERR fireweed stale_lease")),
+            (EngineError::Superseded, Some("-ERR fireweed superseded")),
+            (EngineError::Unavailable, Some("-ERR fireweed unavailable")),
+            (EngineError::Conflict, Some("-ERR fireweed conflict")),
+            (
+                EngineError::BatchTooLarge,
+                Some("-ERR fireweed batch_too_large"),
+            ),
+            (
+                EngineError::RequestIdConflict,
+                Some("-ERR fireweed request_id_conflict"),
+            ),
+            (
+                EngineError::Paused {
+                    drain_intake: false,
+                },
+                Some("-ERR fireweed paused"),
+            ),
+            (
+                EngineError::RequestExpired,
+                Some("-ERR fireweed request_expired"),
+            ),
+            (EngineError::EpochFenced, Some("-ERR fireweed epoch_stale")),
+            (
+                EngineError::EntitySchemaViolation("x".into()),
+                Some("-ERR fireweed entity_schema_violation"),
+            ),
+            (
+                EngineError::RequestTooLarge {
+                    requested: 1,
+                    limit: 0,
+                },
+                Some("-ERR fireweed invalid"),
+            ),
+            (
+                EngineError::Backpressure {
+                    resource: "buffered bytes",
+                },
+                Some("-ERR fireweed unavailable"),
+            ),
+            (
+                EngineError::QueueDefinitionConflict,
+                Some("-ERR fireweed queue_conflict"),
+            ),
+            (
+                EngineError::ChangeRecordsRequireDurableLog,
+                Some("-ERR fireweed change_records_require_durable_log"),
+            ),
+            (EngineError::NotFound, None),
+            (EngineError::Forbidden("x"), None),
+            (EngineError::Storage("x".into()), None),
+            (
+                EngineError::DurableDataCorrupt {
+                    stage: DurableIntegrityStage::Manifest,
+                    manifest_index: 0,
+                    locator: "x".into(),
+                },
+                None,
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.resp_token(), *expected, "{error:?}");
         }
     }
 }

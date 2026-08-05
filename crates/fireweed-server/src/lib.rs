@@ -18,8 +18,8 @@ use std::time::Duration;
 use fireweed_core::{OwnerId, QueueDefinition, QueueId, TenantId, UtcTimestamp};
 use fireweed_engine::{
     AcquireOutcome, AsyncProjectionSpec, AuthContext, BufferedByteBudget, BufferedByteBudgetConfig,
-    Clock, ControlPlaneConfig, EngineError, EngineResult, InMemoryControlPlane, LeaseState,
-    OwnedSession, QueueControlPlane, QueueKey, assemble_async_log_replay,
+    Clock, ControlPlaneConfig, ControlPlaneStore, EngineError, EngineResult, InMemoryControlPlane,
+    LeaseState, OwnedSession, QueueControlPlane, QueueKey, assemble_async_log_replay,
 };
 use fireweed_memory::composed_memory_backend;
 use fireweed_resp::{
@@ -355,14 +355,30 @@ pub enum ControlPlaneSpec {
     },
 }
 
-fn change_record_sink_profile_is_wired(log: &LogSpec, projection: &ProjectionSpec) -> bool {
+/// Class A durable-log axes that can host a reconstructible emission cursor (TD-008).
+fn log_spec_is_durable_class_a(log: &LogSpec) -> bool {
+    match log {
+        LogSpec::Sqlite { .. } | LogSpec::ObjectLog(_) => true,
+        #[cfg(feature = "postgres")]
+        LogSpec::Postgres { .. } => true,
+        LogSpec::Memory => false,
+    }
+}
+
+/// Legacy Hybrid projection variants still present until P12a removes them. Enabled change-record
+/// delivery on these selectors is retired; Disabled remains usable for migration tests.
+fn projection_is_legacy_hybrid(projection: &ProjectionSpec) -> bool {
     matches!(
-        (log, projection),
-        (LogSpec::ObjectLog(_), ProjectionSpec::Hybrid { .. })
-            | (LogSpec::ObjectLog(_), ProjectionSpec::HybridStrict { .. })
-            | (LogSpec::ObjectLog(_), ProjectionSpec::HybridAsync { .. })
+        projection,
+        ProjectionSpec::Hybrid { .. }
+            | ProjectionSpec::HybridStrict { .. }
+            | ProjectionSpec::HybridAsync { .. }
     )
 }
+
+/// Exact feature-off rejection retained when relocating external-Kafka gating into pure validation.
+const EXTERNAL_KAFKA_FEATURE_REQUIRED: &str = "external-kafka change record sink requires the `external-kafka` cargo feature (pure-Rust rskafka); \
+     the default in-process embedded surface needs no endpoint";
 
 /// Typed configuration for the embedded fjord surface that fireweed-server boots behind the composition
 /// root seam. The namespace root is isolated from fireweed's own queue storage roots so the Kafka surface
@@ -1010,15 +1026,47 @@ impl Config {
         Ok(())
     }
 
+    /// Composition/durability rules for the change-record sink (P8c).
+    ///
+    /// Precedence under Strict (P3c's barrier placeholder remains inert; P3v owns barrier assertions):
+    /// 1. selector-tuple coherence (`disabled` + present endpoint)
+    /// 2. feature availability (external-Kafka feature-off)
+    /// 3. legacy Hybrid enabled-delivery retirement
+    /// 4. durable-log / Class-B capability
     fn validate_change_record_sink_composition(&self) -> EngineResult<()> {
-        if self.change_record_sink.enabled
-            && self.queues.iter().any(|queue| queue.emit_change_records)
-            && !change_record_sink_profile_is_wired(&self.backend.log, &self.backend.projection)
-        {
+        // Tuple coherence: a present endpoint requires an enabled sink (Strict path only here).
+        if !self.change_record_sink.enabled && self.change_record_sink.endpoint.is_some() {
             return Err(EngineError::Invalid(
-                "change record sink is only wired for objectlog/hybrid, objectlog/hybrid-strict, and objectlog/hybrid-async",
+                "change-record-endpoint-requires-enabled",
             ));
         }
+
+        // Disabled delivery is always composition-legal, including Hybrid migration tests.
+        if !self.change_record_sink.enabled {
+            return Ok(());
+        }
+
+        // Feature availability precedes durability so Class B + kafka + feature-off names the feature.
+        #[cfg(not(feature = "external-kafka"))]
+        if matches!(
+            self.change_record_sink.mode(),
+            change_record_sink::ChangeRecordSinkMode::ExternalKafka
+        ) {
+            return Err(EngineError::Invalid(EXTERNAL_KAFKA_FEATURE_REQUIRED));
+        }
+
+        // Hybrid enabled delivery is retired before Class A capability checks (P12a removes selectors).
+        if projection_is_legacy_hybrid(&self.backend.projection) {
+            return Err(EngineError::Invalid(
+                "legacy-projection-change-record-delivery-retired",
+            ));
+        }
+
+        // Class B memory log cannot provide log-derived history (TD-008).
+        if !log_spec_is_durable_class_a(&self.backend.log) {
+            return Err(EngineError::ChangeRecordsRequireDurableLog);
+        }
+
         Ok(())
     }
 }
@@ -2194,7 +2242,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             .map_err(|e| EngineError::Storage(format!("memory/sqlite open task failed: {e}")))??;
             // Single-member pool: SQLite projection is blocking-safe via whole-operation adapter.
             let (backend, lifecycle) = blocking_backend_pool(vec![Arc::new(backend)]);
-            run_owned_with_blocking_lifecycle(
+            finalize_blocking_with_change_record_delivery(
                 backend,
                 lifecycle,
                 control_plane,
@@ -2204,6 +2252,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &listen,
                 interval,
                 &queues,
+                &change_record_sink,
+                &fjord_surface,
+                fjord_broker_listen.as_deref(),
+                fjord_log.clone(),
             )
             .await
         }
@@ -2222,7 +2274,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 EngineError::Storage(format!("memory/postgres connect task join failed: {e}"))
             })??;
             let (backend, lifecycle) = blocking_backend(Arc::new(backend));
-            run_owned_with_blocking_lifecycle(
+            finalize_blocking_with_change_record_delivery(
                 backend,
                 lifecycle,
                 control_plane,
@@ -2232,6 +2284,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &listen,
                 interval,
                 &queues,
+                &change_record_sink,
+                &fjord_surface,
+                fjord_broker_listen.as_deref(),
+                fjord_log.clone(),
             )
             .await
         }
@@ -2252,7 +2308,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             .map_err(|e| EngineError::Storage(format!("sqlite open task failed: {e}")))??;
             let (backend, lifecycle) =
                 blocking_backend_pool(backends.into_iter().map(Arc::new).collect());
-            run_owned_with_blocking_lifecycle(
+            finalize_blocking_with_change_record_delivery(
                 backend,
                 lifecycle,
                 control_plane,
@@ -2262,6 +2318,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &listen,
                 interval,
                 &queues,
+                &change_record_sink,
+                &fjord_surface,
+                fjord_broker_listen.as_deref(),
+                fjord_log.clone(),
             )
             .await
         }
@@ -2297,7 +2357,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             // Single-member pool: whole-operation adapter is always available (unlike
             // `blocking_backend`, which is gated on the `postgres` feature for historical reasons).
             let (backend, lifecycle) = blocking_backend_pool(vec![Arc::new(backend)]);
-            run_owned_with_blocking_lifecycle(
+            finalize_blocking_with_change_record_delivery(
                 backend,
                 lifecycle,
                 control_plane,
@@ -2307,6 +2367,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &listen,
                 interval,
                 &queues,
+                &change_record_sink,
+                &fjord_surface,
+                fjord_broker_listen.as_deref(),
+                fjord_log.clone(),
             )
             .await
         }
@@ -2330,7 +2394,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 EngineError::Storage(format!("sqlite/postgres connect task join failed: {e}"))
             })??;
             let (backend, lifecycle) = blocking_backend(Arc::new(backend));
-            run_owned_with_blocking_lifecycle(
+            finalize_blocking_with_change_record_delivery(
                 backend,
                 lifecycle,
                 control_plane,
@@ -2340,6 +2404,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &listen,
                 interval,
                 &queues,
+                &change_record_sink,
+                &fjord_surface,
+                fjord_broker_listen.as_deref(),
+                fjord_log.clone(),
             )
             .await
         }
@@ -2367,6 +2435,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &listen,
                 interval,
                 &queues,
+                &change_record_sink,
+                &fjord_surface,
+                fjord_broker_listen.as_deref(),
+                fjord_log.clone(),
             )
             .await
         }
@@ -2410,6 +2482,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &listen,
                 interval,
                 &queues,
+                &change_record_sink,
+                &fjord_surface,
+                fjord_broker_listen.as_deref(),
+                fjord_log.clone(),
             )
             .await
         }
@@ -2442,6 +2518,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &listen,
                 interval,
                 &queues,
+                &change_record_sink,
+                &fjord_surface,
+                fjord_broker_listen.as_deref(),
+                fjord_log.clone(),
             )
             .await
         }
@@ -2491,6 +2571,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &listen,
                 interval,
                 &queues,
+                &change_record_sink,
+                &fjord_surface,
+                fjord_broker_listen.as_deref(),
+                fjord_log.clone(),
             )
             .await
         }
@@ -2512,6 +2596,8 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 legacy_hybrid_product_config(sqlite_projection_deferred_flush_chunk, false, None)?,
             )
             .await?;
+            // P8c: enabled change-record delivery on Hybrid* is rejected at validate_for_start.
+            // Disabled remains usable for migration tests without the Class A delivery finalizer.
             let flusher = spawn_hybrid_flusher(&backend, debug_segments);
             let fjord_task = maybe_spawn_embedded_broker(
                 &fjord_surface,
@@ -2520,7 +2606,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &queues,
             )
             .await?;
-            let emitter_backend = Arc::clone(&backend);
             let mut server = run_owned_with_fjord_task(
                 backend,
                 control_plane,
@@ -2534,15 +2619,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             )
             .await?;
             server.maintenance_tasks.push(flusher);
-            let change_record_emitter = change_record_sink::spawn_change_record_emitter_if_enabled(
-                emitter_backend,
-                &queues,
-                &change_record_sink,
-                fjord_log.clone(),
-            )?;
-            if let Some(task) = change_record_emitter {
-                server.maintenance_tasks.push(task);
-            }
             Ok(server)
         }
         (LogSpec::ObjectLog(spec), ProjectionSpec::HybridStrict { path }) => {
@@ -2560,6 +2636,8 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 legacy_hybrid_product_config(sqlite_projection_deferred_flush_chunk, true, None)?,
             )
             .await?;
+            // P8c: enabled change-record delivery on Hybrid* is rejected at validate_for_start.
+            // Disabled remains usable for migration tests without the Class A delivery finalizer.
             let flusher = spawn_hybrid_flusher(&backend, debug_segments);
             let fjord_task = maybe_spawn_embedded_broker(
                 &fjord_surface,
@@ -2568,7 +2646,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &queues,
             )
             .await?;
-            let emitter_backend = Arc::clone(&backend);
             let mut server = run_owned_with_fjord_task(
                 backend,
                 control_plane,
@@ -2582,15 +2659,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             )
             .await?;
             server.maintenance_tasks.push(flusher);
-            let change_record_emitter = change_record_sink::spawn_change_record_emitter_if_enabled(
-                emitter_backend,
-                &queues,
-                &change_record_sink,
-                fjord_log.clone(),
-            )?;
-            if let Some(task) = change_record_emitter {
-                server.maintenance_tasks.push(task);
-            }
             Ok(server)
         }
         (LogSpec::ObjectLog(spec), ProjectionSpec::HybridAsync { path }) => {
@@ -2621,6 +2689,8 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 )?,
             )
             .await?;
+            // P8c: enabled change-record delivery on Hybrid* is rejected at validate_for_start.
+            // Disabled remains usable for migration tests without the Class A delivery finalizer.
             let flusher = spawn_hybrid_flusher(&backend, debug_segments);
             let fjord_task = maybe_spawn_embedded_broker(
                 &fjord_surface,
@@ -2629,7 +2699,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &queues,
             )
             .await?;
-            let emitter_backend = Arc::clone(&backend);
             let mut server = run_owned_with_fjord_task(
                 backend,
                 control_plane,
@@ -2643,15 +2712,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             )
             .await?;
             server.maintenance_tasks.push(flusher);
-            let change_record_emitter = change_record_sink::spawn_change_record_emitter_if_enabled(
-                emitter_backend,
-                &queues,
-                &change_record_sink,
-                fjord_log.clone(),
-            )?;
-            if let Some(task) = change_record_emitter {
-                server.maintenance_tasks.push(task);
-            }
             Ok(server)
         }
         #[cfg(feature = "postgres")]
@@ -2682,6 +2742,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &listen,
                 interval,
                 &queues,
+                &change_record_sink,
+                &fjord_surface,
+                fjord_broker_listen.as_deref(),
+                fjord_log.clone(),
             )
             .await
         }
@@ -2729,6 +2793,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &listen,
                 interval,
                 &queues,
+                &change_record_sink,
+                &fjord_surface,
+                fjord_broker_listen.as_deref(),
+                fjord_log.clone(),
             )
             .await
         }
@@ -2761,7 +2829,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             })??;
             let (backend, lifecycle) =
                 blocking_backend_pool(backends.into_iter().map(Arc::new).collect());
-            run_owned_with_blocking_lifecycle(
+            finalize_blocking_with_change_record_delivery(
                 backend,
                 lifecycle,
                 control_plane,
@@ -2771,6 +2839,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &listen,
                 interval,
                 &queues,
+                &change_record_sink,
+                &fjord_surface,
+                fjord_broker_listen.as_deref(),
+                fjord_log.clone(),
             )
             .await
         }
@@ -2798,7 +2870,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 EngineError::Storage(format!("postgres/sqlite connect task join failed: {e}"))
             })??;
             let (backend, lifecycle) = blocking_backend(Arc::new(backend));
-            run_owned_with_blocking_lifecycle(
+            finalize_blocking_with_change_record_delivery(
                 backend,
                 lifecycle,
                 control_plane,
@@ -2808,6 +2880,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &listen,
                 interval,
                 &queues,
+                &change_record_sink,
+                &fjord_surface,
+                fjord_broker_listen.as_deref(),
+                fjord_log.clone(),
             )
             .await
         }
@@ -2840,7 +2916,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 EngineError::Storage(format!("postgres/postgres connect task join failed: {e}"))
             })??;
             let lifecycle = backend.lifecycle();
-            run_owned_with_blocking_lifecycle(
+            finalize_blocking_with_change_record_delivery(
                 backend,
                 lifecycle,
                 control_plane,
@@ -2850,6 +2926,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &listen,
                 interval,
                 &queues,
+                &change_record_sink,
+                &fjord_surface,
+                fjord_broker_listen.as_deref(),
+                fjord_log.clone(),
             )
             .await
         }
@@ -3022,9 +3102,14 @@ async fn open_objectlog_s3_postgres_backend(
     Ok(Arc::new(backend))
 }
 
-/// Provider-invariant finalization for async object-log product cells (memory/sqlite projections).
+/// Shared Class-A arm finalizer: bind listener, attach embedded-Fjord + change-record emitter tasks
+/// to the returned [`Server`] shutdown lifecycle, and clean up on construction failure.
+///
+/// Every canonical SQLite-log, Postgres-log, and filesystem-object-log × public projection arm must
+/// reach emission through this helper (P8c). S3 arms are owned by P8cs and call the same helper.
+/// Direct unit-test calls to `spawn_change_record_emitter_if_enabled` do not count as reachability.
 #[allow(clippy::too_many_arguments)]
-async fn finalize_objectlog_async_owned<B: RespBackend + 'static>(
+async fn finalize_with_change_record_delivery<B>(
     backend: Arc<B>,
     control_plane: Arc<dyn QueueControlPlane>,
     advertise_addr: Option<&str>,
@@ -3033,8 +3118,24 @@ async fn finalize_objectlog_async_owned<B: RespBackend + 'static>(
     listen: &str,
     reclaim_interval: Duration,
     queues: &[QueueDefinition],
-) -> EngineResult<Server> {
-    run_owned(
+    change_record_sink: &ChangeRecordSinkConfig,
+    fjord_surface: &EmbeddedFjordSurface,
+    fjord_broker_listen: Option<&str>,
+    fjord_log: Arc<dyn LogBackend>,
+    mut pre_tasks: Vec<tokio::task::JoinHandle<()>>,
+) -> EngineResult<Server>
+where
+    B: RespBackend + change_record_sink::ChangeRecordEmissionBackend + ControlPlaneStore + 'static,
+{
+    let fjord_task = maybe_spawn_embedded_broker(
+        fjord_surface,
+        fjord_broker_listen,
+        change_record_sink,
+        queues,
+    )
+    .await?;
+    let emitter_backend = Arc::clone(&backend);
+    let mut server = match run_owned(
         backend,
         control_plane,
         advertise_addr,
@@ -3043,6 +3144,76 @@ async fn finalize_objectlog_async_owned<B: RespBackend + 'static>(
         listen,
         reclaim_interval,
         queues,
+    )
+    .await
+    {
+        Ok(server) => server,
+        Err(error) => {
+            if let Some(task) = fjord_task {
+                task.abort();
+            }
+            for task in pre_tasks.drain(..) {
+                task.abort();
+            }
+            return Err(error);
+        }
+    };
+    server.fjord_task = fjord_task;
+    server.maintenance_tasks.append(&mut pre_tasks);
+
+    let change_record_emitter = match change_record_sink::spawn_change_record_emitter_if_enabled(
+        emitter_backend,
+        queues,
+        change_record_sink,
+        fjord_log,
+    ) {
+        Ok(handle) => handle,
+        Err(error) => {
+            // Construction-failure cleanup: cancel attached tasks before returning.
+            server.shutdown();
+            let _ = server.shutdown_and_drain(Duration::from_secs(5)).await;
+            return Err(error);
+        }
+    };
+    if let Some(task) = change_record_emitter {
+        server.maintenance_tasks.push(task);
+    }
+    Ok(server)
+}
+
+/// Provider-invariant finalization for async object-log product cells (memory/sqlite projections).
+#[allow(clippy::too_many_arguments)]
+async fn finalize_objectlog_async_owned<B>(
+    backend: Arc<B>,
+    control_plane: Arc<dyn QueueControlPlane>,
+    advertise_addr: Option<&str>,
+    owner_id: OwnerId,
+    clock: Arc<dyn Clock>,
+    listen: &str,
+    reclaim_interval: Duration,
+    queues: &[QueueDefinition],
+    change_record_sink: &ChangeRecordSinkConfig,
+    fjord_surface: &EmbeddedFjordSurface,
+    fjord_broker_listen: Option<&str>,
+    fjord_log: Arc<dyn LogBackend>,
+) -> EngineResult<Server>
+where
+    B: RespBackend + change_record_sink::ChangeRecordEmissionBackend + ControlPlaneStore + 'static,
+{
+    finalize_with_change_record_delivery(
+        backend,
+        control_plane,
+        advertise_addr,
+        owner_id,
+        clock,
+        listen,
+        reclaim_interval,
+        queues,
+        change_record_sink,
+        fjord_surface,
+        fjord_broker_listen,
+        fjord_log,
+        Vec::new(),
     )
     .await
 }
@@ -3050,7 +3221,7 @@ async fn finalize_objectlog_async_owned<B: RespBackend + 'static>(
 /// Provider-invariant finalization for blocking object-log×postgres product cells.
 #[cfg(feature = "postgres")]
 #[allow(clippy::too_many_arguments)]
-async fn finalize_objectlog_blocking_owned<B: RespBackend + 'static>(
+async fn finalize_objectlog_blocking_owned<B>(
     backend: Arc<B>,
     control_plane: Arc<dyn QueueControlPlane>,
     advertise_addr: Option<&str>,
@@ -3059,11 +3230,17 @@ async fn finalize_objectlog_blocking_owned<B: RespBackend + 'static>(
     listen: &str,
     reclaim_interval: Duration,
     queues: &[QueueDefinition],
-) -> EngineResult<Server> {
+    change_record_sink: &ChangeRecordSinkConfig,
+    fjord_surface: &EmbeddedFjordSurface,
+    fjord_broker_listen: Option<&str>,
+    fjord_log: Arc<dyn LogBackend>,
+) -> EngineResult<Server>
+where
+    B: RespBackend + change_record_sink::ChangeRecordEmissionBackend + ControlPlaneStore + 'static,
+{
     let (backend, lifecycle) = blocking_backend(backend);
-    run_owned_with_blocking_lifecycle(
+    let mut server = finalize_with_change_record_delivery(
         backend,
-        lifecycle,
         control_plane,
         advertise_addr,
         owner_id,
@@ -3071,8 +3248,55 @@ async fn finalize_objectlog_blocking_owned<B: RespBackend + 'static>(
         listen,
         reclaim_interval,
         queues,
+        change_record_sink,
+        fjord_surface,
+        fjord_broker_listen,
+        fjord_log,
+        Vec::new(),
     )
-    .await
+    .await?;
+    server.blocking_lifecycles.push(lifecycle);
+    Ok(server)
+}
+
+/// Blocking whole-operation finalizer with change-record delivery (sqlite/postgres log Class A arms).
+#[allow(clippy::too_many_arguments)]
+async fn finalize_blocking_with_change_record_delivery<B>(
+    backend: Arc<B>,
+    lifecycle: PostgresBlockingLifecycle,
+    control_plane: Arc<dyn QueueControlPlane>,
+    advertise_addr: Option<&str>,
+    owner_id: OwnerId,
+    clock: Arc<dyn Clock>,
+    listen: &str,
+    reclaim_interval: Duration,
+    queues: &[QueueDefinition],
+    change_record_sink: &ChangeRecordSinkConfig,
+    fjord_surface: &EmbeddedFjordSurface,
+    fjord_broker_listen: Option<&str>,
+    fjord_log: Arc<dyn LogBackend>,
+) -> EngineResult<Server>
+where
+    B: RespBackend + change_record_sink::ChangeRecordEmissionBackend + ControlPlaneStore + 'static,
+{
+    let mut server = finalize_with_change_record_delivery(
+        backend,
+        control_plane,
+        advertise_addr,
+        owner_id,
+        clock,
+        listen,
+        reclaim_interval,
+        queues,
+        change_record_sink,
+        fjord_surface,
+        fjord_broker_listen,
+        fjord_log,
+        Vec::new(),
+    )
+    .await?;
+    server.blocking_lifecycles.push(lifecycle);
+    Ok(server)
 }
 
 /// Open LogEngine × hybrid projection for legacy `objectlog/hybrid{,-strict,-async}` product cells.
@@ -3224,6 +3448,7 @@ fn blocking_backend_pool<B: RespBackend>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // retained for non-delivery injection paths / tests
 async fn run_owned_with_blocking_lifecycle<B: RespBackend>(
     backend: Arc<B>,
     lifecycle: PostgresBlockingLifecycle,
@@ -3612,6 +3837,33 @@ mod byte_admission_wiring_tests {
             2,
             "two object-log×postgres arms must share finalize_objectlog_blocking_owned"
         );
+        // P8c: Class A delivery reachability is only via the shared finalizer (not direct spawns).
+        assert!(
+            production_start.contains("finalize_with_change_record_delivery(")
+                || production_start.contains("finalize_objectlog_async_owned(")
+                    && production_start.contains("finalize_blocking_with_change_record_delivery("),
+            "Class A arms must reach change-record delivery through the shared finalizer chain"
+        );
+        assert_eq!(
+            production_start
+                .matches("spawn_change_record_emitter_if_enabled(")
+                .count(),
+            0,
+            "production start arms must not call spawn_change_record_emitter_if_enabled directly"
+        );
+        // Hybrid arms must not accept enabled delivery via a separate path that bypasses validation.
+        let hybrid_section = production_start
+            .split("ProjectionSpec::Hybrid { path }")
+            .nth(1)
+            .unwrap_or("");
+        assert!(
+            !hybrid_section
+                .split("ProjectionSpec::Turso")
+                .next()
+                .unwrap_or(hybrid_section)
+                .contains("finalize_with_change_record_delivery("),
+            "legacy Hybrid arms must not use the Class A delivery finalizer (enabled delivery is retired)"
+        );
     }
 
     #[test]
@@ -3791,32 +4043,139 @@ mod byte_admission_wiring_tests {
 
     #[test]
     fn validate_for_start_sends_valid_endpoints_to_later_composition_hooks() {
-        let mut invalid_composition =
+        let mut class_b =
             startup_validation_config(LogSpec::Memory, ProjectionSpec::InMemory, None);
-        invalid_composition.change_record_sink.enabled = true;
-        invalid_composition.change_record_sink.endpoint = Some("http://127.0.0.1:8080".to_owned());
+        class_b.change_record_sink.enabled = true;
+        class_b.change_record_sink.endpoint = Some("http://127.0.0.1:8080".to_owned());
         assert_eq!(
-            invalid_composition.validate_for_start(),
-            Err(EngineError::Invalid(
-                "change record sink is only wired for objectlog/hybrid, objectlog/hybrid-strict, and objectlog/hybrid-async",
-            ))
+            class_b.validate_for_start(),
+            Err(EngineError::ChangeRecordsRequireDurableLog)
         );
 
+        // Disabled + endpoint is tuple-coherence rejection (not a free pass).
         let mut disabled =
             startup_validation_config(LogSpec::Memory, ProjectionSpec::InMemory, None);
         disabled.change_record_sink.endpoint = Some("http://127.0.0.1:8080".to_owned());
-        assert_eq!(disabled.validate_for_start(), Ok(()));
+        assert_eq!(
+            disabled.validate_for_start(),
+            Err(EngineError::Invalid(
+                "change-record-endpoint-requires-enabled"
+            ))
+        );
 
-        let mut wired = startup_validation_config(
+        // Enabled Hybrid is retired for change-record delivery.
+        let mut hybrid = startup_validation_config(
             validation_object_log("wired"),
             ProjectionSpec::Hybrid {
                 path: std::env::temp_dir().join("fireweed-p3c-wired.sqlite"),
             },
             None,
         );
-        wired.change_record_sink.enabled = true;
-        wired.change_record_sink.endpoint = Some("http://127.0.0.1:8080".to_owned());
-        assert_eq!(wired.validate_for_start(), Ok(()));
+        hybrid.change_record_sink.enabled = true;
+        hybrid.change_record_sink.endpoint = Some("http://127.0.0.1:8080".to_owned());
+        assert_eq!(
+            hybrid.validate_for_start(),
+            Err(EngineError::Invalid(
+                "legacy-projection-change-record-delivery-retired"
+            ))
+        );
+
+        // Class A durable log × public projection with enabled HTTP is composition-legal.
+        let mut class_a = startup_validation_config(
+            validation_object_log("class-a-fs"),
+            ProjectionSpec::InMemory,
+            None,
+        );
+        class_a.change_record_sink.enabled = true;
+        class_a.change_record_sink.endpoint = Some("http://127.0.0.1:8080".to_owned());
+        assert_eq!(class_a.validate_for_start(), Ok(()));
+    }
+
+    #[test]
+    fn validate_for_start_tuple_feature_durability_order_under_strict() {
+        // Tuple coherence wins before feature and durability.
+        let mut disabled_endpoint =
+            startup_validation_config(LogSpec::Memory, ProjectionSpec::InMemory, None);
+        disabled_endpoint.change_record_sink.enabled = false;
+        disabled_endpoint.change_record_sink.endpoint = Some("kafka://127.0.0.1:9092".to_owned());
+        assert_eq!(
+            disabled_endpoint.validate_for_start(),
+            Err(EngineError::Invalid(
+                "change-record-endpoint-requires-enabled"
+            ))
+        );
+
+        // Feature-off Kafka on Class B returns feature availability, not Class-B durability.
+        #[cfg(not(feature = "external-kafka"))]
+        {
+            let mut class_b_kafka =
+                startup_validation_config(LogSpec::Memory, ProjectionSpec::InMemory, None);
+            class_b_kafka.change_record_sink.enabled = true;
+            class_b_kafka.change_record_sink.endpoint = Some("kafka://127.0.0.1:9092".to_owned());
+            assert_eq!(
+                class_b_kafka.validate_for_start(),
+                Err(EngineError::Invalid(EXTERNAL_KAFKA_FEATURE_REQUIRED))
+            );
+
+            let mut class_a_kafka = startup_validation_config(
+                validation_object_log("feature-off-kafka"),
+                ProjectionSpec::InMemory,
+                None,
+            );
+            class_a_kafka.change_record_sink.enabled = true;
+            class_a_kafka.change_record_sink.endpoint = Some("kafka://127.0.0.1:9092".to_owned());
+            assert_eq!(
+                class_a_kafka.validate_for_start(),
+                Err(EngineError::Invalid(EXTERNAL_KAFKA_FEATURE_REQUIRED))
+            );
+        }
+
+        // Hybrid enabled (embedded) is retired before any construction.
+        let mut hybrid_enabled = startup_validation_config(
+            validation_object_log("hybrid-retired"),
+            ProjectionSpec::HybridStrict {
+                path: std::env::temp_dir().join("fireweed-p8c-hybrid-strict.sqlite"),
+            },
+            None,
+        );
+        hybrid_enabled.change_record_sink.enabled = true;
+        assert_eq!(
+            hybrid_enabled.validate_for_start(),
+            Err(EngineError::Invalid(
+                "legacy-projection-change-record-delivery-retired"
+            ))
+        );
+
+        // Hybrid disabled remains usable for migration tests.
+        let hybrid_disabled = startup_validation_config(
+            validation_object_log("hybrid-disabled"),
+            ProjectionSpec::Hybrid {
+                path: std::env::temp_dir().join("fireweed-p8c-hybrid-disabled.sqlite"),
+            },
+            None,
+        );
+        assert_eq!(hybrid_disabled.validate_for_start(), Ok(()));
+    }
+
+    #[test]
+    fn change_records_require_durable_log_is_confined_to_startup_validation() {
+        let source = include_str!("lib.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source");
+        let constructions: Vec<_> = production
+            .match_indices("EngineError::ChangeRecordsRequireDurableLog")
+            .collect();
+        assert_eq!(
+            constructions.len(),
+            1,
+            "production creation of ChangeRecordsRequireDurableLog must be confined to sink composition validation"
+        );
+        assert!(
+            production.contains("fn validate_change_record_sink_composition"),
+            "sole construction site must live under sink composition validation"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
