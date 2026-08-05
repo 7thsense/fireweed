@@ -319,7 +319,6 @@ def validate_document(document: object, *, check_repository: bool) -> None:
         validation["transitional_engine_error_reasons"]
         == [
             "objectlog-memory-async-pending",
-            "s3-async-projection-pending",
             "legacy-projection-change-record-delivery-retired",
         ],
         "transitional rejection registry drift",

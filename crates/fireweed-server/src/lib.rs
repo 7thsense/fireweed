@@ -1078,10 +1078,11 @@ impl Config {
         self.change_record_sink.validate()
     }
 
-    /// Provider-neutral barrier + deferred-flush composition validation (P3v).
+    /// Provider-neutral barrier + deferred-flush composition validation (P3v / P3vs).
     ///
     /// Order inside this hook: Option/barrier coherence and bound positivity first, then deferred-flush
-    /// cell applicability, then log-axis cell applicability (non-object-log async, S3 async pending).
+    /// cell applicability, then log-axis cell applicability (non-object-log async rejected; object-log
+    /// filesystem and S3 both accept Strict and AsyncProjection).
     /// All failures are typed [`EngineError::Invalid`] before any I/O — never `ConfigError`, ignore, or
     /// silent Strict coercion.
     fn validate_response_barrier(&self) -> EngineResult<()> {
@@ -1144,14 +1145,11 @@ impl Config {
             }
         }
 
-        // 3. Cell applicability for AsyncProjection.
+        // 3. Cell applicability for AsyncProjection: object-log only (filesystem and S3).
         if self.backend.response_barrier == ResponseBarrierSpec::AsyncProjection {
             match &self.backend.log {
-                LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem { .. }) => {}
-                LogSpec::ObjectLog(ObjectLogSpec::S3 { .. }) => {
-                    // Unified programmatic rejection until P3vs wires S3 async cells.
-                    return Err(EngineError::Invalid("s3-async-projection-pending"));
-                }
+                LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem { .. })
+                | LogSpec::ObjectLog(ObjectLogSpec::S3 { .. }) => {}
                 LogSpec::Memory | LogSpec::Sqlite { .. } => {
                     return Err(EngineError::Invalid("async-projection-requires-object-log"));
                 }
@@ -2604,11 +2602,12 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             }),
             ProjectionSpec::InMemory,
         ) => {
-            // Canonical S3 object-log × in-memory projection (async composition).
+            // Canonical S3 object-log × in-memory projection (P3vs barrier-threaded).
             let _ = (
                 objectlog_byte_budget,
                 config_objectlog_queue_limit,
                 debug_segments,
+                sqlite_projection_deferred_flush_chunk,
             );
             let backend = open_objectlog_s3_memory_backend(
                 endpoint,
@@ -2618,6 +2617,8 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 secret_access_key,
                 segment_config,
                 node_id,
+                response_barrier,
+                async_projection,
             )
             .await?;
             finalize_objectlog_async_owned(
@@ -2695,7 +2696,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             }),
             ProjectionSpec::Sqlite { path },
         ) => {
-            // Canonical S3 object-log × durable sqlite projection (async composition).
+            // Canonical S3 object-log × durable sqlite projection (P3vs barrier-threaded).
             let _ = (
                 objectlog_byte_budget,
                 config_objectlog_queue_limit,
@@ -2715,6 +2716,9 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &p,
                 segment_config,
                 node_id,
+                response_barrier,
+                async_projection,
+                sqlite_projection_deferred_flush_chunk,
             )
             .await?;
             finalize_objectlog_async_owned(
@@ -3103,13 +3107,14 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             }),
             ProjectionSpec::Postgres { url },
         ) => {
-            // Canonical S3 object-log × durable Postgres projection (async product).
+            // Canonical S3 object-log × durable Postgres projection (P3vs barrier-threaded).
             // Sync Postgres client work is confined inside projection applies. LogEngine owns flush.
             let _ = (
                 objectlog_byte_budget,
                 config_objectlog_queue_limit,
                 recovery_max_tail,
                 debug_segments,
+                sqlite_projection_deferred_flush_chunk,
             );
             let backend = open_objectlog_s3_postgres_backend(
                 endpoint,
@@ -3120,6 +3125,8 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &url,
                 segment_config,
                 node_id,
+                response_barrier,
+                async_projection,
             )
             .await?;
             finalize_objectlog_blocking_owned(
@@ -3316,7 +3323,7 @@ fn objectlog_flush_from_segment(segment: &SegmentConfig) -> fireweed_objectlog::
 /// Canonical filesystem object-log × in-memory projection open (P3d / P8c / P3v owner surface).
 ///
 /// Threads [`ResponseBarrierSpec`] independently of the projection axis into the concrete LogEngine
-/// product. S3 twins remain Strict-only here until P3vs.
+/// product. S3 twins share the same barrier branching at their provider-specific helpers (P3vs).
 async fn open_objectlog_filesystem_memory_backend(
     root: PathBuf,
     segment_config: SegmentConfig,
@@ -3345,6 +3352,9 @@ async fn open_objectlog_filesystem_memory_backend(
 }
 
 /// Canonical S3 object-log × in-memory projection open (P3d / P8cs / P3vs owner surface).
+///
+/// Threads [`ResponseBarrierSpec`] independently of the projection axis — no projection-selected
+/// barrier and no Strict pin. Reuses the provider-neutral memory async pipeline.
 #[allow(clippy::too_many_arguments)]
 async fn open_objectlog_s3_memory_backend(
     endpoint: String,
@@ -3354,6 +3364,8 @@ async fn open_objectlog_s3_memory_backend(
     secret_access_key: String,
     segment_config: SegmentConfig,
     node_id: u8,
+    response_barrier: ResponseBarrierSpec,
+    async_projection: Option<AsyncProjectionSpec>,
 ) -> EngineResult<fireweed_objectlog::AsyncObjectLogMemoryBackend> {
     let flush = objectlog_flush_from_segment(&segment_config);
     let log = fireweed_objectlog::ObjectLogEngineStore::open_s3(
@@ -3365,7 +3377,19 @@ async fn open_objectlog_s3_memory_backend(
         flush,
     )
     .await?;
-    fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store(log, node_id).await
+    match response_barrier {
+        ResponseBarrierSpec::Strict => {
+            fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store(log, node_id).await
+        }
+        ResponseBarrierSpec::AsyncProjection => {
+            fireweed_objectlog::AsyncObjectLogMemoryBackend::from_log_store_with_async_projection(
+                log,
+                node_id,
+                async_projection.expect("async projection validated before open"),
+            )
+            .await
+        }
+    }
 }
 
 /// Canonical filesystem object-log × sqlite projection open (P3d / P8c / P3v owner surface).
@@ -3418,6 +3442,9 @@ async fn open_objectlog_filesystem_sqlite_backend(
 }
 
 /// Canonical S3 object-log × sqlite projection open (P3d / P8cs / P3vs owner surface).
+///
+/// Threads barrier and optional deferred-flush tuning independently of other projection arms —
+/// same provider-neutral apply pipelines as the filesystem twin; no Strict pin.
 #[allow(clippy::too_many_arguments)]
 async fn open_objectlog_s3_sqlite_backend(
     endpoint: String,
@@ -3428,8 +3455,12 @@ async fn open_objectlog_s3_sqlite_backend(
     projection_path: &str,
     segment_config: SegmentConfig,
     node_id: u8,
+    response_barrier: ResponseBarrierSpec,
+    async_projection: Option<AsyncProjectionSpec>,
+    deferred_flush_chunk: Option<usize>,
 ) -> EngineResult<fireweed_objectlog::AsyncObjectLogSqliteBackend> {
     let flush = objectlog_flush_from_segment(&segment_config);
+    let chunk = deferred_flush_chunk.unwrap_or(fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK);
     let log = fireweed_objectlog::ObjectLogEngineStore::open_s3(
         &endpoint,
         &region,
@@ -3440,10 +3471,34 @@ async fn open_objectlog_s3_sqlite_backend(
     )
     .await?;
     let projection = fireweed_sqlite::SqliteProjectionStore::open(projection_path)?;
-    fireweed_objectlog::AsyncObjectLogSqliteBackend::from_log_and_projection(
-        log, projection, node_id,
-    )
-    .await
+    match response_barrier {
+        ResponseBarrierSpec::Strict => {
+            if deferred_flush_chunk.is_some() {
+                fireweed_objectlog::AsyncObjectLogSqliteBackend::from_log_and_projection_with_deferred_flush_chunk(
+                    log,
+                    projection,
+                    node_id,
+                    chunk,
+                )
+                .await
+            } else {
+                fireweed_objectlog::AsyncObjectLogSqliteBackend::from_log_and_projection(
+                    log, projection, node_id,
+                )
+                .await
+            }
+        }
+        ResponseBarrierSpec::AsyncProjection => {
+            fireweed_objectlog::AsyncObjectLogSqliteBackend::from_log_and_projection_with_async_projection(
+                log,
+                projection,
+                node_id,
+                async_projection.expect("async projection validated before open"),
+                chunk,
+            )
+            .await
+        }
+    }
 }
 
 /// Canonical filesystem object-log × Turso projection open (TD-010 / LogEngine composition).
@@ -3528,6 +3583,9 @@ async fn open_objectlog_filesystem_postgres_backend(
 }
 
 /// Canonical S3 object-log × Postgres projection open (P3d / P8cs / P3vs owner surface).
+///
+/// Threads barrier independently of the memory/sqlite S3 helpers (no shared barrier branch and
+/// no projection-selected barrier). Reuses the provider-neutral Postgres async apply pipeline.
 #[cfg(feature = "postgres")]
 #[allow(clippy::too_many_arguments)]
 async fn open_objectlog_s3_postgres_backend(
@@ -3539,6 +3597,8 @@ async fn open_objectlog_s3_postgres_backend(
     projection_url: &str,
     segment_config: SegmentConfig,
     node_id: u8,
+    response_barrier: ResponseBarrierSpec,
+    async_projection: Option<AsyncProjectionSpec>,
 ) -> EngineResult<Arc<ObjectLogPostgresBackend>> {
     let flush = objectlog_flush_from_segment(&segment_config);
     let log = fireweed_objectlog::ObjectLogEngineStore::open_s3(
@@ -3552,10 +3612,23 @@ async fn open_objectlog_s3_postgres_backend(
     .await?;
     let projection =
         fireweed_postgres::AsyncPostgresRelationalProjection::connect(projection_url).await?;
-    let backend = fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection(
-        log, projection, node_id,
-    )
-    .await?;
+    let backend = match response_barrier {
+        ResponseBarrierSpec::Strict => {
+            fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection(
+                log, projection, node_id,
+            )
+            .await?
+        }
+        ResponseBarrierSpec::AsyncProjection => {
+            fireweed_postgres::AsyncObjectLogPostgresBackend::from_log_and_projection_with_async_projection(
+                log,
+                projection,
+                node_id,
+                async_projection.expect("async projection validated before open"),
+            )
+            .await?
+        }
+    };
     Ok(Arc::new(backend))
 }
 
@@ -4585,10 +4658,31 @@ mod byte_admission_wiring_tests {
             production.contains("open_objectlog_filesystem_postgres_backend"),
             "filesystem postgres helper remains the P3d/P3v owner surface"
         );
+        assert!(
+            production.contains("open_objectlog_s3_memory_backend"),
+            "S3 memory helper remains the P3vs owner surface"
+        );
+        assert!(
+            production.contains("open_objectlog_s3_sqlite_backend"),
+            "S3 sqlite helper remains the P3vs owner surface"
+        );
+        assert!(
+            production.contains("open_objectlog_s3_postgres_backend"),
+            "S3 postgres helper remains the P3vs owner surface"
+        );
         // Barrier reaches helpers through BackendSpec.response_barrier only.
         assert!(
             production.contains("response_barrier,"),
             "start must destructure response_barrier from BackendSpec"
+        );
+        // S3 helpers must not reintroduce a Strict pin or the retired pending reason.
+        assert!(
+            !production.contains("s3-async-projection-pending"),
+            "production must not retain s3-async-projection-pending"
+        );
+        assert!(
+            !production.contains("CommitResponseBarrier::Strict"),
+            "server helpers must not hard-pin facade CommitResponseBarrier::Strict"
         );
     }
 
@@ -4843,7 +4937,7 @@ mod byte_admission_wiring_tests {
             }
         }
 
-        // Programmatic S3+AsyncProjection is unified pending until P3vs.
+        // P3vs: S3×{memory,sqlite[,postgres]} under Strict and AsyncProjection validate pre-I/O.
         let s3 = LogSpec::ObjectLog(ObjectLogSpec::S3 {
             endpoint: "http://127.0.0.1:1".into(),
             bucket: "fireweed".into(),
@@ -4855,35 +4949,75 @@ mod byte_admission_wiring_tests {
             segment_config: SegmentConfig::new(262_144, 20).expect("valid segments"),
             allow_insecure_http: true,
         });
-        for projection in [
+        let s3_projections: Vec<ProjectionSpec> = vec![
             ProjectionSpec::InMemory,
             ProjectionSpec::Sqlite {
                 path: never.join("s3.sqlite"),
             },
-        ] {
-            let config = startup_validation_config(
+            #[cfg(feature = "postgres")]
+            ProjectionSpec::Postgres {
+                url: "postgres://127.0.0.1:1/fireweed".into(),
+            },
+        ];
+        for projection in &s3_projections {
+            let strict = startup_validation_config(s3.clone(), projection.clone(), None);
+            assert_eq!(
+                strict.validate_for_start(),
+                Ok(()),
+                "Strict S3×{} must validate pre-I/O",
+                projection.label()
+            );
+            let async_ok = startup_validation_config(
                 s3.clone(),
-                projection,
+                projection.clone(),
                 Some(AsyncProjectionSpec::default()),
             );
             assert_eq!(
-                config.validate_for_start(),
-                Err(EngineError::Invalid("s3-async-projection-pending"))
+                async_ok.validate_for_start(),
+                Ok(()),
+                "AsyncProjection S3×{} must validate pre-I/O (pending retired)",
+                projection.label()
             );
         }
 
-        // Strict S3 remains composition-legal at the barrier hook.
-        let strict_s3 = startup_validation_config(s3, ProjectionSpec::InMemory, None);
-        assert_eq!(strict_s3.validate_for_start(), Ok(()));
+        // Deferred flush on S3×sqlite remains composition-legal; S3×memory still rejects it.
+        let mut s3_deferred = startup_validation_config(
+            s3.clone(),
+            ProjectionSpec::Sqlite {
+                path: never.join("s3-deferred.sqlite"),
+            },
+            None,
+        );
+        s3_deferred.backend.sqlite_projection_deferred_flush_chunk = Some(7);
+        assert_eq!(s3_deferred.validate_for_start(), Ok(()));
+        let mut s3_deferred_memory = startup_validation_config(s3, ProjectionSpec::InMemory, None);
+        s3_deferred_memory
+            .backend
+            .sqlite_projection_deferred_flush_chunk = Some(7);
+        assert_eq!(
+            s3_deferred_memory.validate_for_start(),
+            Err(EngineError::Invalid(
+                "sqlite-projection-deferred-flush-requires-sqlite-projection"
+            ))
+        );
 
         assert!(
             !never.exists(),
             "P3v barrier validation must not create filesystem paths"
         );
+        // Transitional S3 pending rejection must not remain in production source.
+        let production = include_str!("lib.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source");
+        assert!(
+            !production.contains("s3-async-projection-pending"),
+            "P3vs must retire the s3-async-projection-pending hook branch"
+        );
     }
 
     #[test]
-    fn p3v_barrier_precedes_sink_composition_and_matches_facade_non_s3_fingerprints() {
+    fn p3v_barrier_precedes_sink_composition_and_matches_facade_fingerprints() {
         // Barrier wins over sink composition: AsyncProjection on Class B with a valid enabled endpoint
         // returns the barrier cell error, not ChangeRecordsRequireDurableLog.
         let mut class_b_async = startup_validation_config(
@@ -4911,14 +5045,15 @@ mod byte_admission_wiring_tests {
             Err(EngineError::Invalid(msg)) if msg.contains("change record sink endpoint")
         ));
 
-        // 12 non-S3 cells: server barrier fingerprints agree with facade ResponseBarrier semantics.
-        // (dev-only; production never names the facade type.)
+        // Full matrix fingerprints: server barrier validation agrees with facade ResponseBarrier
+        // semantics for every cell including S3 (P3vs). Dev-only; production never names the facade type.
         use fireweed::{
             LogConfig, ProjectionStoreConfig, ResponseBarrier, SegmentConfig as FacadeSegments,
             StorageConfig,
         };
         let never = std::path::PathBuf::from("/fireweed-p3v-fingerprint-never-opened");
         let pg_url = "postgres://127.0.0.1:1/fireweed";
+        let s3_endpoint = "http://127.0.0.1:1";
 
         let server_logs: Vec<LogSpec> = vec![
             LogSpec::Memory,
@@ -4931,6 +5066,17 @@ mod byte_admission_wiring_tests {
                 credentials: None,
             },
             validation_object_log("fp-fs"),
+            LogSpec::ObjectLog(ObjectLogSpec::S3 {
+                endpoint: s3_endpoint.into(),
+                bucket: "fireweed".into(),
+                region: "us-east-1".into(),
+                credentials: S3CredentialSource::Static {
+                    access_key_id: "ak".into(),
+                    secret_access_key: "sk".into(),
+                },
+                segment_config: SegmentConfig::new(262_144, 20).expect("valid segments"),
+                allow_insecure_http: true,
+            }),
         ];
         let facade_logs: Vec<LogConfig> = vec![
             LogConfig::Memory,
@@ -4947,6 +5093,14 @@ mod byte_admission_wiring_tests {
             },
             LogConfig::Filesystem {
                 root: never.join("fs-log"),
+            },
+            LogConfig::S3 {
+                endpoint: s3_endpoint.into(),
+                bucket: "fireweed".into(),
+                region: "us-east-1".into(),
+                access_key_id: fireweed::ConfigSecret::new("ak"),
+                secret_access_key: fireweed::ConfigSecret::new("sk"),
+                allow_insecure_http: true,
             },
         ];
         let server_projections = [
@@ -4968,7 +5122,7 @@ mod byte_admission_wiring_tests {
             },
         ];
 
-        // Without postgres feature the matrix is 3 logs × 2 projections = 6; with postgres 4×3 = 12.
+        // Without postgres: 4 logs × 2 projections = 8; with postgres: 5×3 = 15.
         let mut seen = 0_usize;
         for (s_log, f_log) in server_logs.iter().zip(facade_logs.iter()) {
             for (s_proj, f_proj) in server_projections.iter().zip(facade_projections.iter()) {
@@ -4979,7 +5133,7 @@ mod byte_admission_wiring_tests {
                     log: f_log.clone(),
                     projection: f_proj.clone(),
                     control_plane: None,
-                    authority: matches!(f_log, LogConfig::Filesystem { .. })
+                    authority: matches!(f_log, LogConfig::Filesystem { .. } | LogConfig::S3 { .. })
                         .then_some(fireweed::ObjectLogAuthority::NativeConditionalWrite),
                     response_barrier: ResponseBarrier::Strict,
                     async_projection: None,
@@ -4991,7 +5145,9 @@ mod byte_admission_wiring_tests {
                 assert_eq!(
                     server_strict.validate_for_start().map_err(err_label),
                     facade_strict.validate().map_err(err_label),
-                    "Strict fingerprint mismatch for cell"
+                    "Strict fingerprint mismatch for cell {}×{}",
+                    s_log.label(),
+                    s_proj.label()
                 );
 
                 // AsyncProjection
@@ -5005,19 +5161,21 @@ mod byte_admission_wiring_tests {
                 assert_eq!(
                     server_async.validate_for_start().map_err(err_label),
                     facade_strict.validate().map_err(err_label),
-                    "AsyncProjection fingerprint mismatch for cell"
+                    "AsyncProjection fingerprint mismatch for cell {}×{}",
+                    s_log.label(),
+                    s_proj.label()
                 );
             }
         }
         #[cfg(feature = "postgres")]
         assert_eq!(
-            seen, 12,
-            "postgres builds must fingerprint all 12 non-S3 cells"
+            seen, 15,
+            "postgres builds must fingerprint all 15 cells (12 non-S3 + 3 S3)"
         );
         #[cfg(not(feature = "postgres"))]
         assert_eq!(
-            seen, 6,
-            "non-postgres builds fingerprint the available non-S3 submatrix"
+            seen, 8,
+            "non-postgres builds fingerprint the available submatrix including S3"
         );
     }
 
@@ -5895,74 +6053,192 @@ mod byte_admission_wiring_tests {
         );
     }
 
-    /// Live s3 × postgres construction when S3-compatible + Postgres test envs are set.
-    /// Without live services this is a no-op skip (unit coverage lives in the construction tests above).
-    #[cfg(feature = "postgres")]
-    #[tokio::test]
-    async fn s3_object_log_postgres_projection_constructs_when_s3_and_pg_available() {
-        let required = [
+    /// Live S3 × {memory,sqlite,postgres} × {Strict,AsyncProjection} against the attested endpoint.
+    /// Requires FIREWEED_S3_TEST_* (and FIREWEED_PG_TEST_URL for postgres cells).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p3vs_s3_helpers_thread_barrier_on_all_three_cells() {
+        let required_s3 = [
             "FIREWEED_S3_TEST_ENDPOINT",
             "FIREWEED_S3_TEST_BUCKET",
             "FIREWEED_S3_TEST_REGION",
             "FIREWEED_S3_TEST_ACCESS_KEY",
             "FIREWEED_S3_TEST_SECRET_KEY",
-            "FIREWEED_PG_TEST_URL",
         ];
-        let values: Option<Vec<_>> = required
+        let missing: Vec<_> = required_s3
             .iter()
-            .map(|name| std::env::var(name).ok().map(|value| (*name, value)))
+            .filter(|name| std::env::var(name).is_err())
             .collect();
-        let Some(values) = values else {
-            eprintln!(
-                "S3/POSTGRES CONSTRUCT SKIPPED — set {} for live s3×postgres open",
-                required.join(", ")
+        if !missing.is_empty() {
+            panic!(
+                "P3vs requires live S3 env; missing: {}",
+                missing
+                    .iter()
+                    .map(|s| s.as_ref())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
-            return;
-        };
-        let lookup = |name: &str| {
-            values
-                .iter()
-                .find_map(|(key, value)| (*key == name).then_some(value.as_str()))
-                .expect("required live-test variable")
-        };
+        }
+        let endpoint = std::env::var("FIREWEED_S3_TEST_ENDPOINT").expect("endpoint");
+        let bucket = std::env::var("FIREWEED_S3_TEST_BUCKET").expect("bucket");
+        let region = std::env::var("FIREWEED_S3_TEST_REGION").expect("region");
+        let access = std::env::var("FIREWEED_S3_TEST_ACCESS_KEY").expect("access");
+        let secret = std::env::var("FIREWEED_S3_TEST_SECRET_KEY").expect("secret");
+        let segments = SegmentConfig::new(262_144, 20).expect("valid segments");
+        let spec = AsyncProjectionSpec::new(13, 65_537, 7, 12_345, 4).expect("bounds");
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-p3vs-s3-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("fixture root");
 
-        let url = lookup("FIREWEED_PG_TEST_URL").to_owned();
-        let schema = format!("fireweed_s3_pg_{}", std::process::id());
-        let mut client =
-            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
-                .expect("connect to create schema");
-        client
-            .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema};"))
-            .expect("create schema");
-        drop(client);
+        let mut opened = 0_usize;
+        for barrier in [
+            ResponseBarrierSpec::Strict,
+            ResponseBarrierSpec::AsyncProjection,
+        ] {
+            let async_spec = (barrier == ResponseBarrierSpec::AsyncProjection).then_some(spec);
+            let mem = open_objectlog_s3_memory_backend(
+                endpoint.clone(),
+                region.clone(),
+                bucket.clone(),
+                access.clone(),
+                secret.clone(),
+                segments,
+                0,
+                barrier,
+                async_spec,
+            )
+            .await
+            .expect("s3×memory barrier open");
+            drop(mem);
+            opened += 1;
+            eprintln!("P3vs PASS s3×memory barrier={barrier:?}");
 
-        let scoped = if url.contains('?') {
-            format!("{url}&options=-csearch_path%3D{schema}")
-        } else {
-            format!("{url}?options=-csearch_path%3D{schema}")
-        };
+            let sqlite_path = root.join(format!("proj-{:?}.sqlite", barrier));
+            let sqlite = open_objectlog_s3_sqlite_backend(
+                endpoint.clone(),
+                region.clone(),
+                bucket.clone(),
+                access.clone(),
+                secret.clone(),
+                sqlite_path.to_str().expect("utf8"),
+                segments,
+                0,
+                barrier,
+                async_spec,
+                Some(7),
+            )
+            .await
+            .expect("s3×sqlite barrier open");
+            drop(sqlite);
+            opened += 1;
+            eprintln!("P3vs PASS s3×sqlite barrier={barrier:?} deferred_flush_chunk=7");
 
-        // S3 requires native create-only (If-None-Match / equivalent); open probes the endpoint.
-        let segment_config = SegmentConfig::new(262_144, 20).unwrap();
-        let backend = open_objectlog_s3_postgres_backend(
-            lookup("FIREWEED_S3_TEST_ENDPOINT").to_owned(),
-            lookup("FIREWEED_S3_TEST_REGION").to_owned(),
-            lookup("FIREWEED_S3_TEST_BUCKET").to_owned(),
-            lookup("FIREWEED_S3_TEST_ACCESS_KEY").to_owned(),
-            lookup("FIREWEED_S3_TEST_SECRET_KEY").to_owned(),
-            &scoped,
-            segment_config,
+            #[cfg(feature = "postgres")]
+            {
+                let url = std::env::var("FIREWEED_PG_TEST_URL")
+                    .expect("FIREWEED_PG_TEST_URL is required for P3vs s3×postgres cells");
+                let schema = format!("fireweed_p3vs_{}_{:?}", std::process::id(), barrier)
+                    .replace(['(', ')', ' '], "_");
+                // Sync postgres client owns a private runtime — keep setup/teardown off this reactor.
+                let url_for_setup = url.clone();
+                let schema_for_setup = schema.clone();
+                tokio::task::spawn_blocking(move || {
+                    let mut client = fireweed_postgres::connect(
+                        fireweed_postgres::PostgresConnectConfig::new(&url_for_setup),
+                    )
+                    .expect("connect to create schema");
+                    client
+                        .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema_for_setup};"))
+                        .expect("create schema");
+                })
+                .await
+                .expect("schema create join");
+                let scoped = if url.contains('?') {
+                    format!("{url}&options=-csearch_path%3D{schema}")
+                } else {
+                    format!("{url}?options=-csearch_path%3D{schema}")
+                };
+                let backend = open_objectlog_s3_postgres_backend(
+                    endpoint.clone(),
+                    region.clone(),
+                    bucket.clone(),
+                    access.clone(),
+                    secret.clone(),
+                    &scoped,
+                    segments,
+                    0,
+                    barrier,
+                    async_spec,
+                )
+                .await
+                .expect("s3×postgres barrier open");
+                drop(backend);
+                opened += 1;
+                eprintln!("P3vs PASS s3×postgres barrier={barrier:?}");
+                let url_for_teardown = url.clone();
+                let schema_for_teardown = schema.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Ok(mut client) = fireweed_postgres::connect(
+                        fireweed_postgres::PostgresConnectConfig::new(&url_for_teardown),
+                    ) {
+                        let _ = client.batch_execute(&format!(
+                            "DROP SCHEMA IF EXISTS {schema_for_teardown} CASCADE;"
+                        ));
+                    }
+                })
+                .await;
+            }
+        }
+
+        #[cfg(feature = "postgres")]
+        assert_eq!(
+            opened, 6,
+            "exactly six S3 barrier cells (3 projections × 2 barriers)"
+        );
+        #[cfg(not(feature = "postgres"))]
+        assert_eq!(
+            opened, 4,
+            "memory+sqlite × 2 barriers without postgres feature"
+        );
+
+        // Unsupported endpoint negative: unreachable host fails at open, not via retired pending.
+        let unreachable = match open_objectlog_s3_memory_backend(
+            "http://127.0.0.1:1".into(),
+            region,
+            bucket,
+            access,
+            secret,
+            segments,
             0,
+            ResponseBarrierSpec::AsyncProjection,
+            Some(spec),
         )
         .await
-        .expect("construct s3×postgres");
-        drop(backend);
-
-        if let Ok(mut client) =
-            fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
         {
-            let _ = client.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE;"));
-        }
+            Ok(_) => panic!("unreachable S3 endpoint must fail at open"),
+            Err(error) => error,
+        };
+        let text = format!("{unreachable:?}");
+        assert!(
+            !text.contains("s3-async-projection-pending"),
+            "retired pending must not surface: {text}"
+        );
+        assert!(
+            !matches!(
+                unreachable,
+                EngineError::Invalid("s3-async-projection-pending")
+            ),
+            "retired pending pin must not return: {unreachable:?}"
+        );
+        eprintln!("P3vs PASS unreachable S3 endpoint negative under AsyncProjection");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
