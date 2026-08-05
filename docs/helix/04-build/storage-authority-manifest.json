@@ -199,7 +199,6 @@
     },
     "transitional_engine_error_reasons": [
       "objectlog-memory-async-pending",
-      "s3-async-projection-pending",
       "legacy-projection-change-record-delivery-retired"
     ],
     "current_engine_error_reasons": [
