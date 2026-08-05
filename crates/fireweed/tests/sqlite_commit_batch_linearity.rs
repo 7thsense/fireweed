@@ -66,7 +66,7 @@ fn tmp_sqlite(tag: &str) -> String {
 /// Fixed total of `total_entries` finalize+lifecycle transitions, matching the snorri shape where
 /// every commit entry stages a lifecycle continuation.
 async fn measure_ms_per_entry(entries_per_commit: usize, total_entries: usize) -> (f64, Duration) {
-    assert!(total_entries % entries_per_commit == 0);
+    assert!(total_entries.is_multiple_of(entries_per_commit));
     let path = tmp_sqlite(&format!("b{entries_per_commit}"));
     let fw = open_sqlite(&path, Arc::new(ManualClock::at(0))).expect("open sqlite");
     let def = qdef();
@@ -166,7 +166,7 @@ async fn sqlite_commit_batch_size_sweep_repro_table() {
     const TOTAL: usize = 512;
     eprintln!("entries/commit\tms/entry\twall");
     for batch in [16usize, 32, 64, 128, 256, 512] {
-        if TOTAL % batch != 0 {
+        if !TOTAL.is_multiple_of(batch) {
             continue;
         }
         let (ms, wall) = measure_ms_per_entry(batch, TOTAL).await;
