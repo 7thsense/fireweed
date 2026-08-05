@@ -816,7 +816,7 @@
     },
     {
       "path": "crates/fireweed-server/tests/production_s3_object_log_config.rs",
-      "state": "future_current_source",
+      "state": "current_source",
       "classification": "live_s3_provenance",
       "semantic_owner": "P4s"
     },
