@@ -16,11 +16,14 @@ sync are deliberately durable, potentially slow control-plane operations; it
 does not block an async runtime worker or the data-plane LogEngine.
 
 The upstream `object-log` v0.3.1 `BlobStore` port exposes overwrite-only `put`.
-Consequently, the current Fireweed S3/custom-BlobStore path cannot express or
-probe `If-None-Match: *`, and queue creation fails closed instead of pretending
-an unconditional read-then-put is authoritative. S3 becomes supported only
-when its adapter exposes enforced conditional create **and** its manifest
-sequencer is fenced/shared by a real single-writer authority.
+Fireweed therefore owns a separate create-only path for **queue-definition**
+authority on the S3 open path: `PutObject` with `If-None-Match: *`. That path
+requires the endpoint to enforce the precondition (P1s-qualified MinIO does;
+Garage v2.2.0 does not). Generic `open_with_blob` (custom adapters without a
+create-only publisher) still fails closed rather than pretending an
+unconditional read-then-put is authoritative. Multi-writer **manifest**
+sequencing remains single-process (in-memory sequencer lock over unique
+manifest keys); cross-process multi-writer S3 still needs control-plane fencing.
 
 ## Compatibility matrix
 
@@ -28,16 +31,14 @@ sequencer is fenced/shared by a real single-writer authority.
 |----------------|-----------------------------|--------------------------|
 | **Filesystem local blob, one process** | Synced temp + atomic hard-link create; canonical-root handles share one sequencer | Supported, including concurrent handles and unrelated queues |
 | **Filesystem local blob, multiple processes** | Definition hard-link is authoritative, but `object-log` v0.3.1 manifest sequencing is not cross-process fenced | Unsupported for concurrent writers |
-| **AWS S3 / MinIO** | The service can enforce HTTP 412, but the current `BlobStore` port cannot request it | Unsupported until the adapter and sequencer boundary are upgraded; creation fails closed |
+| **AWS S3 / MinIO** (P1s-qualified) | Endpoint enforces HTTP 412; Fireweed issues `If-None-Match: *` for definitions | Supported for single-writer product cells (definition create-only + log append) |
 | **Garage v2.2.0** | **Not enforced** — second conditional PUT returns **200** | **Unsupported** |
-| **Other S3-compatible** | Must enforce create-only and supply fenced sequencing | Unsupported through the current overwrite-only port |
+| **Other S3-compatible** | Must enforce create-only; multi-process multi-writer also needs fenced sequencing | Supported only when create-only is enforced; multi-writer still needs control-plane fencing |
 
 **Garage (as of v2.2.0):** execution-verified 2026-08-01 (`fireweed-2aefefbb` /
 snorri-a1b67264). Garage’s S3 docs do not claim conditional-write support.
-Until the S3 adapter exposes and proves create-only preconditions, use the
-single-process filesystem object-log product. A deployment may use an S3
-service for other purposes, but must not claim that the current Fireweed
-object-log S3 path provides multi-writer queue-definition or manifest authority.
+Do not select Garage for Fireweed object-log S3. P1s attestation retains it as a
+rejected candidate.
 
 There is **no** second public authority mode in the product matrix (historical
 Postgres-pointer fallbacks were demoted). Multi-replica shared S3 still
@@ -47,17 +48,18 @@ native conditional create on the object store.
 ## Failure boundary
 
 Local authority is selected from the canonical filesystem root and needs no
-network probe. For S3/custom BlobStore paths, open may still inspect storage
-generation, but the first queue create fails closed with `EngineError::Storage`
-because the adapter cannot issue conditional create. The error names:
+network probe. The S3 product open path publishes definitions with create-only
+PutObject; a 412 means another writer won and the stored definition is returned
+(create-or-read). Custom `open_with_blob` without a create-only publisher fails
+closed on the first queue create with `EngineError::Storage` naming:
 
 1. That **native conditional create** was required  
 2. That overwrite-only `put` cannot prove the precondition
-3. The required adapter operation (`If-None-Match: *` / put-if-absent)
+3. The required operation (`If-None-Match: *` / put-if-absent)
 
-An ambiguous network response in a future conditional adapter must be resolved
-by rereading the immutable per-queue authority key; it must never be converted
-to `created=true` from process-local state.
+An ambiguous network response must be resolved by rereading the immutable
+per-queue authority key; it must never be converted to `created=true` from
+process-local state.
 
 ## Poisoned projection (illegal-lifecycle residual)
 

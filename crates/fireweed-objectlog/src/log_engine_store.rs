@@ -29,6 +29,8 @@ use object_log::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::s3_create_only::S3CreateOnlyPut;
+
 fn store_err(e: impl std::fmt::Display) -> EngineError {
     EngineError::Storage(e.to_string())
 }
@@ -137,8 +139,11 @@ enum DefinitionAuthority {
     /// One store owns this in-memory blob namespace. A short catalog-only permit makes the
     /// get/put pair atomic without serializing append, read, projection, or unrelated I/O.
     ProcessLocal,
-    /// The crates.io BlobStore port has overwrite-only `put`; an S3/custom adapter cannot claim
-    /// multi-writer authority until it exposes an enforced conditional-create operation.
+    /// S3 PutObject with `If-None-Match: *` (enforced by the endpoint, e.g. P1s MinIO).
+    /// Owned by Fireweed because `object_log::BlobStore` is overwrite-only `put`.
+    S3CreateOnly { put: Arc<S3CreateOnlyPut> },
+    /// Generic/custom BlobStore path without a create-only publisher: fail closed rather
+    /// than pretend read-then-put is authoritative.
     ConditionalCreateUnavailable,
 }
 
@@ -278,12 +283,40 @@ impl ObjectLogEngineStore<ManifestSequencer> {
     }
 
     /// Open against an S3-compatible endpoint (crates.io `object_log::S3BlobStore`).
+    ///
+    /// Queue-definition authority uses a Fireweed-owned create-only PutObject path
+    /// (`If-None-Match: *`) because the BlobStore port is overwrite-only.
     pub async fn open_s3(
         endpoint: &str,
         region: &str,
         bucket: &str,
         access_key_id: &str,
         secret_access_key: &str,
+        flush: FlushConfig,
+    ) -> EngineResult<Self> {
+        Self::open_s3_with_prefixes(
+            endpoint,
+            region,
+            bucket,
+            access_key_id,
+            secret_access_key,
+            "fwlog/",
+            "fwmeta/",
+            flush,
+        )
+        .await
+    }
+
+    /// S3 open with explicit data/meta prefixes (namespaced product cells).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_s3_with_prefixes(
+        endpoint: &str,
+        region: &str,
+        bucket: &str,
+        access_key_id: &str,
+        secret_access_key: &str,
+        data_prefix: impl Into<String>,
+        meta_prefix: impl Into<String>,
         flush: FlushConfig,
     ) -> EngineResult<Self> {
         let blob: Arc<dyn BlobStore> = Arc::new(object_log::S3BlobStore::new(
@@ -293,17 +326,30 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             access_key_id,
             secret_access_key,
         ));
-        Self::open_with_blob(blob, "fwlog/", "fwmeta/", flush)
-            .await
-            .map_err(|err| match err {
-                EngineError::Storage(detail)
-                    if !detail.contains("INCOMPATIBLE_OBJECT_LOG_GENERATION")
-                        && !detail.contains("MIXED_OBJECT_LOG_GENERATION") =>
-                {
-                    open_store_err(endpoint, detail)
-                }
-                other => other,
-            })
+        let put = Arc::new(S3CreateOnlyPut::new(
+            endpoint,
+            region,
+            bucket,
+            access_key_id,
+            secret_access_key,
+        ));
+        Self::open_with_blob_and_authority(
+            blob,
+            data_prefix,
+            meta_prefix,
+            flush,
+            DefinitionAuthority::S3CreateOnly { put },
+        )
+        .await
+        .map_err(|err| match err {
+            EngineError::Storage(detail)
+                if !detail.contains("INCOMPATIBLE_OBJECT_LOG_GENERATION")
+                    && !detail.contains("MIXED_OBJECT_LOG_GENERATION") =>
+            {
+                open_store_err(endpoint, detail)
+            }
+            other => other,
+        })
     }
 
     /// Open over an existing blob store (local, memory, or S3) with durable manifest sequencing.
@@ -607,12 +653,15 @@ impl<S: Sequencer<Meta = ()>> ObjectLogEngineStore<S> {
                     true
                 }
             }
+            DefinitionAuthority::S3CreateOnly { put } => {
+                put.put_if_absent(&key, Bytes::from(bytes)).await?
+            }
             DefinitionAuthority::ConditionalCreateUnavailable => {
                 return Err(EngineError::Storage(
                     "NativeConditionalWrite queue-definition authority is unavailable: the \
                      configured BlobStore exposes overwrite-only put and cannot prove create-only \
-                     publication; use the local filesystem adapter or an S3 adapter with enforced \
-                     If-None-Match: * support"
+                     publication; use the local filesystem adapter or the S3 open path (which \
+                     issues If-None-Match: * PutObject for definitions)"
                         .into(),
                 ));
             }

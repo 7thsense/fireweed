@@ -168,6 +168,11 @@ path = "tests/p3s_s3_barriers.rs"
 required-features = ["objectlog", "sqlite", "postgres"]
 
 [[test]]
+name = "p7s_s3_lifecycle"
+path = "tests/p7s_s3_lifecycle.rs"
+required-features = ["objectlog", "sqlite", "postgres"]
+
+[[test]]
 name = "p3b_non_s3_barrier_conformance"
 path = "tests/p3b_non_s3_barrier_conformance.rs"
 required-features = ["memory", "objectlog", "sqlite", "postgres"]

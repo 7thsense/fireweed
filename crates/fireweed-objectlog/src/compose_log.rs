@@ -5,19 +5,16 @@
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-
-use fireweed_engine::{
-    DispatchError, EngineError, EngineResult, OwnedTaskDispatcher, OwnedTaskFactory, TaskOutcome,
-    task_outcome_channel,
-};
-use object_log::{BlobStore, S3BlobStore};
 
 use crate::ObjectLogEngineStore;
 use crate::SegmentConfig;
 use crate::async_product::AsyncObjectLogMemoryBackend;
 use crate::flush_config_from_segment;
+use fireweed_engine::{
+    DispatchError, EngineError, EngineResult, OwnedTaskDispatcher, OwnedTaskFactory, TaskOutcome,
+    task_outcome_channel,
+};
 
 /// Product type for composed object-log × in-memory projection (LogEngine async product).
 ///
@@ -177,15 +174,12 @@ pub async fn open_object_log_engine_s3(
     }
     let flush = flush_config_from_segment(target_bytes, max_latency_ms);
     let ns = sanitize_namespace(namespace);
-    let blob: Arc<dyn BlobStore> = Arc::new(S3BlobStore::new(
+    ObjectLogEngineStore::open_s3_with_prefixes(
         endpoint,
         region,
         bucket,
         access_key_id,
         secret_access_key,
-    ));
-    ObjectLogEngineStore::open_with_blob(
-        blob,
         format!("{ns}/fwlog/"),
         format!("{ns}/fwmeta/"),
         flush,
