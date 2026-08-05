@@ -1,25 +1,152 @@
+# Focused Turso lane: path-filtered, policy-governed qualification of the public
+# default projection (ADR-016 / TD-010 / AC-TURSO-6).
+#
+# Turso is stock default (default feature closure on fireweed + fireweed-server).
+# This workflow proves adapter suite + public facade/server composition without
+# treating turso-projection as an opt-in solely to obtain default behavior.
 name: turso projection
 
 on:
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - crates/fireweed/**
+      - crates/fireweed-conformance/**
+      - crates/fireweed-engine/**
+      - crates/fireweed-objectlog/**
+      - crates/fireweed-projection/**
+      - crates/fireweed-relational/**
+      - crates/fireweed-server/**
+      - crates/fireweed-turso/**
+      - .github/workflows/turso.yml
+  push:
+    branches:
+      - main
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - crates/fireweed/**
+      - crates/fireweed-conformance/**
+      - crates/fireweed-engine/**
+      - crates/fireweed-objectlog/**
+      - crates/fireweed-projection/**
+      - crates/fireweed-relational/**
+      - crates/fireweed-server/**
+      - crates/fireweed-turso/**
+      - .github/workflows/turso.yml
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: turso-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   focused:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v5
-      - run: rustup toolchain install 1.92.0 --profile minimal --component clippy --component rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - run: bash scripts/ci/verify-github-actions-policy.sh
-      - run: cargo +1.92.0 fmt --all --check
-      - run: cargo +1.92.0 clippy -p fireweed-turso -p fireweed-server --all-targets --features fireweed-server/turso-projection -- -D warnings
-      - run: cargo +1.92.0 test -p fireweed-turso --features local
-      - run: cargo +1.92.0 test -p fireweed-server --features turso-projection --test server objectlog_turso_profile_rebuilds_deleted_projection_from_authoritative_log -- --exact
+
+      - name: Install Rust 1.92.0
+        run: rustup toolchain install 1.92.0 --profile minimal --component clippy --component rustfmt
+
+      - name: Reuse Cargo build state
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Verify workflow policy
+        run: bash scripts/ci/verify-github-actions-policy.sh
+
+      - name: rustfmt
+        run: cargo +1.92.0 fmt --all --check
+
+      # Adapter suite: complete fireweed-turso local embedded WAL qualification.
+      - name: fireweed-turso clippy (local)
+        run: cargo +1.92.0 clippy -p fireweed-turso --all-targets --features local -- -D warnings
+
+      - name: fireweed-turso tests (local)
+        run: cargo +1.92.0 test -p fireweed-turso --features local
+
+      # Fireweed facade: 20-cell register Turso route leaves + composition matrix.
+      - name: Fireweed 20-cell Turso route tests
+        run: >
+          cargo +1.92.0 test -p fireweed --all-features
+          --test storage_matrix_t0_t2 storage_matrix_t0_t2_all_twenty_cells
+          -- --exact
+
+      - name: Fireweed facade Turso full matrix
+        run: >
+          cargo +1.92.0 test -p fireweed --all-features --lib
+          storage_config_matrix_tests::turso_projection_full_facade_matrix
+          -- --exact
+
+      - name: Fireweed facade Turso feature and recovery boundaries
+        run: >
+          cargo +1.92.0 test -p fireweed --all-features --lib
+          storage_config_matrix_tests::turso_projection_feature_and_recovery_boundaries
+          -- --exact
+
+      # Server: default feature closure (includes turso-projection) and all-features.
+      - name: fireweed-server clippy (default features)
+        run: cargo +1.92.0 clippy -p fireweed-server --all-targets -- -D warnings
+
+      - name: fireweed-server clippy (all features)
+        run: cargo +1.92.0 clippy -p fireweed-server --all-targets --all-features -- -D warnings
+
+      - name: fireweed-server tests (default features)
+        run: cargo +1.92.0 test -p fireweed-server
+
+      - name: fireweed-server tests (all features)
+        run: cargo +1.92.0 test -p fireweed-server --all-features
+
+      # Exact public default selector + Class A delete-rebuild from authoritative log.
+      - name: public default Turso env selector
+        run: >
+          cargo +1.92.0 test -p fireweed-server --all-features
+          env_config::tests::turso_projection_is_the_public_env_default
+          -- --exact
+
+      - name: public projection help/parser bijection
+        run: >
+          cargo +1.92.0 test -p fireweed-server --all-features
+          env_config::tests::public_projection_help_and_parser_are_bijective
+          -- --exact
+
+      - name: all five log specs accept Turso
+        run: >
+          cargo +1.92.0 test -p fireweed-server --all-features
+          env_config::tests::all_five_log_specs_accept_turso
+          -- --exact
+
+      - name: Turso startup validation precedes storage I/O
+        run: >
+          cargo +1.92.0 test -p fireweed-server --all-features --test server
+          turso_startup_validation_precedes_storage_io
+          -- --exact
+
+      - name: objectlog Turso delete-rebuild from authoritative log
+        run: >
+          cargo +1.92.0 test -p fireweed-server --all-features --test server
+          objectlog_turso_profile_rebuilds_deleted_projection_from_authoritative_log
+          -- --exact
+
+      - name: memory × Turso server push/claim lifecycle
+        run: >
+          cargo +1.92.0 test -p fireweed-server --all-features --test server
+          memory_turso_server_push_claim_lifecycle
+          -- --exact
+
+      - name: Repository shape test (public-default Turso lane)
+        run: >
+          cargo +1.92.0 test -p fireweed-server --test turso_workflow_shape
+          turso_workflow_qualifies_the_public_default_projection
+          -- --exact
