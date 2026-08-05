@@ -802,6 +802,126 @@ async fn postgres_coordinated_public_interface() {
     .await;
 }
 
+/// P7N non-S3 cell: memory log × postgres projection (Class B).
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires live PostgreSQL; P10 executes the full external matrix"]
+async fn memory_postgres_public_interface() {
+    let postgres_url = required_env("FIREWEED_PG_TEST_URL");
+    let schema_name = unique_name("memory_postgres");
+    let mut schema = PostgresSchema::new(postgres_url.clone(), schema_name.clone());
+    let isolated_url = schema_url(&postgres_url, &schema_name);
+    let mut cfg = fireweed::StorageConfig::memory();
+    cfg.projection = fireweed::ProjectionStoreConfig::Postgres {
+        url: ConfigSecret::new(isolated_url.clone()),
+    };
+    cfg.namespace = schema_name.clone();
+    let fireweed = fireweed::open(cfg.clone(), Arc::new(SystemClock)).unwrap_or_else(|error| {
+        panic!(
+            "failed to open memory--postgres: {}",
+            redacted_error(error, &[&postgres_url])
+        )
+    });
+    public_interface::run("memory--postgres", &fireweed, false).await;
+    let probe = seed_reopen_probe("memory--postgres", &fireweed).await;
+    drop(fireweed);
+    let reopened = fireweed::open(cfg, Arc::new(SystemClock)).unwrap_or_else(|error| {
+        panic!(
+            "failed to reopen memory--postgres: {}",
+            redacted_error(error, &[&postgres_url])
+        )
+    });
+    verify_reopen_probe(&reopened, probe).await;
+    drop(reopened);
+    schema
+        .cleanup()
+        .unwrap_or_else(|_| panic!("failed to clean memory--postgres schema"));
+}
+
+/// P7N non-S3 cell: sqlite log × postgres projection.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires live PostgreSQL; P10 executes the full external matrix"]
+async fn sqlite_postgres_public_interface() {
+    let postgres_url = required_env("FIREWEED_PG_TEST_URL");
+    let root = FixtureRoot::new("sqlite_postgres");
+    let schema_name = unique_name("sqlite_postgres");
+    let mut schema = PostgresSchema::new(postgres_url.clone(), schema_name.clone());
+    let isolated_url = schema_url(&postgres_url, &schema_name);
+    let log_path = root.path().join("log.sqlite");
+    let fireweed = fireweed::open_sqlite_postgres_projection(
+        log_path.to_str().unwrap(),
+        &isolated_url,
+        Arc::new(SystemClock),
+    )
+    .unwrap_or_else(|error| {
+        panic!(
+            "failed to open sqlite--postgres: {}",
+            redacted_error(error, &[&postgres_url])
+        )
+    });
+    public_interface::run("sqlite--postgres", &fireweed, false).await;
+    let probe = seed_reopen_probe("sqlite--postgres", &fireweed).await;
+    drop(fireweed);
+    let reopened = fireweed::open_sqlite_postgres_projection(
+        log_path.to_str().unwrap(),
+        &isolated_url,
+        Arc::new(SystemClock),
+    )
+    .unwrap_or_else(|error| {
+        panic!(
+            "failed to reopen sqlite--postgres: {}",
+            redacted_error(error, &[&postgres_url])
+        )
+    });
+    verify_reopen_probe(&reopened, probe).await;
+    drop(reopened);
+    schema
+        .cleanup()
+        .unwrap_or_else(|_| panic!("failed to clean sqlite--postgres schema"));
+}
+
+/// P7N non-S3 cell: postgres log × sqlite projection.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires live PostgreSQL; P10 executes the full external matrix"]
+async fn postgres_sqlite_public_interface() {
+    let postgres_url = required_env("FIREWEED_PG_TEST_URL");
+    let root = FixtureRoot::new("postgres_sqlite");
+    let schema_name = unique_name("postgres_sqlite");
+    let mut schema = PostgresSchema::new(postgres_url.clone(), schema_name.clone());
+    let isolated_url = schema_url(&postgres_url, &schema_name);
+    let mut cfg = fireweed::StorageConfig::memory();
+    cfg.log = fireweed::LogConfig::Postgres {
+        url: ConfigSecret::new(isolated_url.clone()),
+        schema: Some(schema_name.clone()),
+        mode: PostgresMode::LogReplay,
+        node_id: None,
+        coordination: None,
+    };
+    cfg.projection = fireweed::ProjectionStoreConfig::Sqlite {
+        path: root.path().join("projection.sqlite"),
+    };
+    cfg.namespace = schema_name.clone();
+    let fireweed = fireweed::open(cfg.clone(), Arc::new(SystemClock)).unwrap_or_else(|error| {
+        panic!(
+            "failed to open postgres--sqlite: {}",
+            redacted_error(error, &[&postgres_url])
+        )
+    });
+    public_interface::run("postgres--sqlite", &fireweed, false).await;
+    let probe = seed_reopen_probe("postgres--sqlite", &fireweed).await;
+    drop(fireweed);
+    let reopened = fireweed::open(cfg, Arc::new(SystemClock)).unwrap_or_else(|error| {
+        panic!(
+            "failed to reopen postgres--sqlite: {}",
+            redacted_error(error, &[&postgres_url])
+        )
+    });
+    verify_reopen_probe(&reopened, probe).await;
+    drop(reopened);
+    schema
+        .cleanup()
+        .unwrap_or_else(|_| panic!("failed to clean postgres--sqlite schema"));
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires live PostgreSQL; P10 executes the full external matrix"]
 async fn filesystem_postgres_strict_public_interface() {

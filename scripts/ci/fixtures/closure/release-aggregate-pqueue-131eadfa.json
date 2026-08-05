@@ -1,0 +1,11 @@
+{
+  "aggregate": "pqueue-131eadfa",
+  "required": [
+    {
+      "id": "pqueue-131eadfa",
+      "status": "closed",
+      "closing_commit_sha": "6167cfcc0a2e9efdf974d66d66438c6a76cb222f"
+    }
+  ],
+  "notes": "Candidate-mode fixture for release-gate build-closure. Never reads .ddx/**. Operator mode audits the live tracker separately."
+}
