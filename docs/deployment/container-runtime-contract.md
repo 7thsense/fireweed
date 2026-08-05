@@ -12,7 +12,7 @@ control plane), not a table of environment variable names.
 | Axis | Public values | Notes |
 |------|---------------|-------|
 | **Log backend** | `memory`, `sqlite`, `postgres`, `filesystem`, `s3` | Command append, authority, replay when durable |
-| **Projection** | `memory`, `sqlite`, `postgres` | Serving, claim selection, validation, apply |
+| **Projection** | `memory`, `sqlite`, `turso` (default), `postgres` | Serving, claim selection, validation, apply |
 
 Typed **`StorageConfig`** (API-005, `orthogonal-storage-matrix-brief`) is the
 normative composition root. The service process must assemble one
@@ -25,13 +25,13 @@ manifest, conditional write / authority, retention). They are not profile SKUs
 and are not “fake S3” vs “real S3.” Historical evidence IDs may still name older
 pair strings; public product selection uses only the axes above.
 
-| Log \ Projection | `memory` | `sqlite` | `postgres` |
-|------------------|----------|----------|------------|
-| `memory` | Class B | Class B | Class B |
-| `sqlite` | Class A | Class A | Class A |
-| `postgres` | Class A | Class A | Class A |
-| `filesystem` | Class A | Class A | Class A |
-| `s3` | Class A | Class A | Class A |
+| Log \ Projection | `memory` | `sqlite` | `turso` (default) | `postgres` |
+|------------------|----------|----------|-------------------|------------|
+| `memory` | Class B | Class B | Class B | Class B |
+| `sqlite` | Class A | Class A | Class A | Class A |
+| `postgres` | Class A | Class A | Class A | Class A |
+| `filesystem` | Class A | Class A | Class A | Class A |
+| `s3` | Class A | Class A | Class A | Class A |
 
 **Durability (summary):** Class A success ⇒ durable on the log and visible in
 the serving projection; recovery via high-water + tail when the log remains.
@@ -58,6 +58,7 @@ StorageConfig
   projection:
     Memory
     | Sqlite { path }
+    | Turso { path }          # public default
     | Postgres { url, … }
   control_plane: …
   # object-log: segments, authority, recovery where applicable
@@ -91,12 +92,14 @@ cell.
 The container injection map accepts **only** public product axis names:
 
 - log: `memory` | `sqlite` | `postgres` | `filesystem` | `s3`
-- projection: `memory` | `sqlite` | `postgres`
+- projection: `memory` | `sqlite` | `turso` | `postgres`
 
-Defaults are `filesystem` × `memory`. Legacy product spellings and demoted
-projection paths are hard-rejected by the env adapter (no long-lived aliases).
-The stock `fireweed-service` binary ships the full public matrix at runtime
-(including postgres log/projection via the blocking-safe
+Defaults are `filesystem` × `turso` (TD-010). The documented Turso path env is
+`FIREWEED_TURSO_PROJECTION_PATH` (default
+`/var/lib/fireweed/fireweed-projection.turso`). Legacy product spellings and
+demoted Hybrid projection paths are hard-rejected by the env adapter (no
+long-lived aliases). The stock `fireweed-service` binary ships the full public
+matrix at runtime (Turso default-on; postgres via the blocking-safe
 `PostgresNativeBackend`); selecting a cell is injection only — no rebuild.
 Lakebase / cloud postgres with `sslmode=require` still requires a `tls`-built
 image (`--features tls`); a non-tls binary fails closed on TLS-requiring DSNs

@@ -29,34 +29,40 @@ shape (see [container-runtime-contract.md](container-runtime-contract.md)).
 | Axis | Helm value | Public values |
 |------|------------|---------------|
 | Log backend | `storage.log.backend` | `memory`, `sqlite`, `postgres`, `filesystem`, `s3` |
-| Projection | `storage.projection.backend` | `memory`, `sqlite`, `postgres` |
+| Projection | `storage.projection.backend` | `memory`, `sqlite`, `turso` (server default), `postgres` |
 | Control plane | `storage.controlPlane.backend` | `inprocess`, `postgres` |
+
+Stock `fireweed-service` defaults `FIREWEED_PROJECTION_BACKEND` to `turso` and
+uses `FIREWEED_TURSO_PROJECTION_PATH` (default
+`/var/lib/fireweed/fireweed-projection.turso`). Helm chart defaulting to Turso
+is a separate deployment-gate deliverable; until that lands, set the projection
+axis explicitly in values when you need Turso under Helm.
 
 ### Durability classes
 
 | Class | Log backends | Client contract |
 |-------|--------------|-----------------|
 | **A — Durable log** | `sqlite`, `postgres`, `filesystem`, `s3` | Success ⇒ durable on the log and visible in the serving projection; recovery via high-water + tail when the log remains; `request_id` resolves ambiguity across crash |
-| **B — Memory log** | `memory` | Success ⇒ visible in the projection; durable **only if** the projection is durable (`sqlite` / `postgres`). After process death only the projection remains. **No** Class A log rebuild, branch, read-as-of, or change-record-from-log claims |
+| **B — Memory log** | `memory` | Success ⇒ visible in the projection; durable **only if** the projection is durable (`sqlite` / `turso` / `postgres`). After process death only the projection remains. **No** Class A log rebuild, branch, read-as-of, or change-record-from-log claims |
 
 **Class B disclaimer:** a `memory` log is an explicit weaker persistence
 envelope, not a second architecture. Use it for development and evaluation.
 Do not claim Class A recovery or durability for any memory-log combination.
 
-### Full matrix (15 cells)
+### Full matrix (20 cells)
 
 Every cell is a valid, preview-supported selection. Semantics differ only by
 durability class. Open the same pair via library `StorageConfig`, server env
 adapter, or Helm `storage.log` / `storage.projection`. Invalid or demoted names
 fail closed at schema validation / startup.
 
-| Log \ Projection | `memory` | `sqlite` | `postgres` |
-|------------------|----------|----------|------------|
-| `memory` | Class B | Class B | Class B |
-| `sqlite` | Class A | Class A | Class A |
-| `postgres` | Class A | Class A | Class A |
-| `filesystem` | Class A | Class A | Class A |
-| `s3` | Class A | Class A | Class A |
+| Log \ Projection | `memory` | `sqlite` | `turso` (default) | `postgres` |
+|------------------|----------|----------|-------------------|------------|
+| `memory` | Class B | Class B | Class B | Class B |
+| `sqlite` | Class A | Class A | Class A | Class A |
+| `postgres` | Class A | Class A | Class A | Class A |
+| `filesystem` | Class A | Class A | Class A | Class A |
+| `s3` | Class A | Class A | Class A | Class A |
 
 ### Axis examples (`StorageConfig` ↔ Helm)
 
@@ -132,18 +138,22 @@ storage:
         credentials:
           existingSecret: fireweed-objectlog-s3
   projection:
-    backend: sqlite   # or memory | postgres
+    backend: turso   # or memory | sqlite | postgres
 ```
 
-#### Projection axis (three public values)
+#### Projection axis (four public values)
 
-| Projection | When to use | Structured fields |
-|------------|-------------|-------------------|
+| Projection | When to use | Structured fields / env |
+|------------|-------------|-------------------------|
+| `turso` (default) | Local durable serving projection (stock default) | `FIREWEED_TURSO_PROJECTION_PATH` (server); Helm Turso path wiring is a follow-on chart gate |
 | `memory` | Rebuildable / process-local serving | none |
-| `sqlite` | Local durable serving projection | `storage.projection.sqlite.path` |
+| `sqlite` | Local durable serving projection (explicit alternative) | `storage.projection.sqlite.path` |
 | `postgres` | Shared durable serving projection | `storage.projection.postgres.existingSecret` + `databaseUrlKey` |
 
 ```yaml
+# turso projection (server default; set path via FIREWEED_TURSO_PROJECTION_PATH)
+# Helm values for turso are owned by the T4 deployment bead (P12).
+
 # memory projection (no extra fields)
 storage:
   projection:
@@ -208,7 +218,7 @@ for multi-writer object-log (it returns 200 on a second conditional put). See
 
 ### Public product names only
 
-Use only the five public log names and three public projection names in values
+Use only the five public log names and four public projection names in values
 files and operator runbooks. The Helm schema and the server env adapter
 hard-reject older spellings and demoted projection paths (no long-lived
 aliases).

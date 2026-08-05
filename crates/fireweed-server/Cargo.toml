@@ -6,12 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
-# LogEngine cutover retired `ObjectLogTursoBackend`, but the legacy `turso-projection` selector and its
-# feature-gated tests remain until P12a removes them atomically after its storage-campaign prerequisites.
-# P2 inventories this one temporary exception and P2f rejects it in closure mode.
-[package.metadata.cargo-machete]
-ignored = ["fireweed-turso"]
-
 [lib]
 path = "src/lib.rs"
 
@@ -29,7 +23,16 @@ fireweed-engine = { path = "../fireweed-engine" }
 fireweed-resp = { path = "../fireweed-resp" }
 fireweed-memory = { path = "../fireweed-memory" }
 fireweed-sqlite = { path = "../fireweed-sqlite" }
+# Turso is the public default projection (TD-010 / ADR-016). Composition helpers live on the facade
+# (`fireweed::turso_compose`); the adapter crate is linked so cargo-machete sees a real use.
 fireweed-turso = { path = "../fireweed-turso", optional = true }
+fireweed = { path = "../fireweed", default-features = false, optional = true, features = [
+    "memory",
+    "sqlite",
+    "objectlog",
+    "turso",
+    "postgres",
+] }
 fireweed-objectlog = { path = "../fireweed-objectlog" }
 fireweed-projection = { path = "../fireweed-projection" }
 fjord = { git = "https://github.com/7thsense/fjord.git", tag = "v0.1.3", package = "fjord-broker" }
@@ -58,10 +61,10 @@ tokio-util = { version = "0.7" }
 futures = "0.3"
 [features]
 # Stock fireweed-service ships the full public StorageConfig matrix (log × projection)
-# at runtime: memory|sqlite|postgres|filesystem|s3 × memory|sqlite|postgres.
+# at runtime: memory|sqlite|postgres|filesystem|s3 × memory|sqlite|turso|postgres.
 # Selecting a cell is FIREWEED_LOG_BACKEND / FIREWEED_PROJECTION_BACKEND only — no rebuild.
-# `tls` stays opt-in (native-tls / OpenSSL for Lakebase and cloud postgres DSNs).
-default = ["env-config", "postgres"]
+# Turso is the public default projection (TD-010). `tls` stays opt-in (native-tls / OpenSSL).
+default = ["env-config", "postgres", "turso-projection"]
 # The OPTIONAL env-var populator: `Config::from_env(&BTreeMap)` + `ConfigError`, the single place that maps
 # the documented `FIREWEED_*`/`DATABRICKS_*` env NAMES onto the typed `Config`. Default-on so the `fireweed-service`
 # bin builds; a pure-library embedder can `default-features = false` to drop ALL env-name knowledge — the core
@@ -78,9 +81,14 @@ tls = ["postgres", "fireweed-postgres/tls"]
 # the swappable-at-the-seam external option). Default-off: the in-process embedded fjord surface is the
 # default. No C Kafka client: the external seam is pure Rust.
 external-kafka = ["dep:rskafka", "dep:chrono"]
-# Opt-in native-async Turso derived projection for the object-log profile. The dependency's local
-# feature is intentionally selected here; remote/sync/MVCC Turso modes remain out of scope.
-turso-projection = ["dep:fireweed-turso", "fireweed-turso/local"]
+# Public default Turso projection (TD-010 / ADR-016). Local embedded Turso 0.7 ordinary-WAL only;
+# remote/sync/MVCC remain out of scope. Default-on; library embedders may disable via
+# `default-features = false` and receive typed feature-unavailable diagnostics before I/O.
+turso-projection = [
+    "dep:fireweed-turso",
+    "fireweed-turso/local",
+    "dep:fireweed",
+]
 
 [dev-dependencies]
 # Class B memory-log cells need memory+sqlite; postgres for memory×postgres (gated by FIREWEED_PG_TEST_URL).

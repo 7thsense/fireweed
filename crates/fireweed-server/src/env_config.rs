@@ -10,11 +10,11 @@
 //!
 //! Public product names (injection values):
 //! - log: `memory` | `sqlite` | `postgres` | `filesystem` | `s3`
-//! - projection: `memory` | `sqlite` | `postgres`
+//! - projection: `memory` | `sqlite` | `turso` | `postgres` (default: `turso`)
 //!
 //! Legacy / non-public names are **hard-rejected** on this surface (no long-lived aliases):
-//! `objectlog`, `inmemory`, `hybrid`, `hybrid-strict`, `hybrid-async`, `turso`. Direct
-//! [`Config`] / [`BackendSpec`] construction can still name internal profiles.
+//! `objectlog`, `inmemory`, `hybrid`, `hybrid-strict`, `hybrid-async`. Direct
+//! [`Config`] / [`BackendSpec`] construction can still name internal Hybrid profiles.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -423,9 +423,9 @@ fn parse_backend(
     env: &BTreeMap<String, String>,
     segments: SegmentConfig,
 ) -> Result<BackendSpec, ConfigError> {
-    // Product defaults: filesystem log × memory projection (public axes only).
+    // Product defaults: filesystem log × turso projection (public axes only; TD-010).
     let log = env_or(env, "FIREWEED_LOG_BACKEND", "filesystem");
-    let projection = env_or(env, "FIREWEED_PROJECTION_BACKEND", "memory");
+    let projection = env_or(env, "FIREWEED_PROJECTION_BACKEND", "turso");
 
     // Public product log names: memory|sqlite|postgres|filesystem|s3.
     // Legacy `objectlog` (+ store local/s3) is hard-rejected — use filesystem or s3.
@@ -496,9 +496,8 @@ fn parse_backend(
         }
     };
 
-    // Public product projection names: memory|sqlite|postgres.
-    // Legacy `inmemory`, demoted hybrid*, and non-public `turso` are hard-rejected (construct
-    // Config directly for internal/tests).
+    // Public product projection names: memory|sqlite|turso|postgres (default turso).
+    // Legacy `inmemory` and demoted hybrid* are hard-rejected (construct Config directly for Hybrid tests).
     let projection_spec = match projection.as_str() {
         "memory" => ProjectionSpec::InMemory,
         "sqlite" => ProjectionSpec::Sqlite {
@@ -508,19 +507,34 @@ fn parse_backend(
                 "/var/lib/fireweed/fireweed-projection.db",
             )),
         },
+        "turso" => {
+            #[cfg(feature = "turso-projection")]
+            {
+                ProjectionSpec::Turso {
+                    path: PathBuf::from(env_or(
+                        env,
+                        "FIREWEED_TURSO_PROJECTION_PATH",
+                        "/var/lib/fireweed/fireweed-projection.turso",
+                    )),
+                }
+            }
+            #[cfg(not(feature = "turso-projection"))]
+            {
+                return Err(unsupported_storage(
+                    &log,
+                    &projection,
+                    "turso projection requires the `turso-projection` cargo feature; rebuild with \
+                     default features (or `--features turso-projection`). Feature-disabled builds \
+                     reject turso before storage I/O and never fall back to sqlite or memory",
+                ));
+            }
+        }
         "inmemory" => {
             return Err(unsupported_storage(
                 &log,
                 &projection,
-                "inmemory is not a public product projection (public: memory|sqlite|postgres); \
+                "inmemory is not a public product projection (public: memory|sqlite|turso|postgres); \
                  use FIREWEED_PROJECTION_BACKEND=memory",
-            ));
-        }
-        "turso" => {
-            return Err(unsupported_storage(
-                &log,
-                &projection,
-                "turso is not a public product projection (public: memory|sqlite|postgres)",
             ));
         }
         // Demoted from the public projection axis: hybrid profiles remain in the type system for
@@ -529,7 +543,7 @@ fn parse_backend(
             return Err(unsupported_storage(
                 &log,
                 &projection,
-                "this projection is not a public product value (public: memory|sqlite|postgres). \
+                "this projection is not a public product value (public: memory|sqlite|turso|postgres). \
                  hybrid|hybrid-strict|hybrid-async are demoted from the public env/Helm projection axis",
             ));
         }
@@ -556,24 +570,23 @@ fn parse_backend(
                 &log,
                 &projection,
                 &format!(
-                    "unknown FIREWEED_PROJECTION_BACKEND={other:?}; expected memory|sqlite|postgres"
+                    "unknown FIREWEED_PROJECTION_BACKEND={other:?}; expected memory|sqlite|turso|postgres"
                 ),
             ));
         }
     };
 
-    // Only specific log×projection pairings are wired (preserve the prior behavior): memory×memory
-    // (+ Class B memory/{sqlite,postgres}), sqlite/{memory,sqlite,postgres}, filesystem|s3 ×
-    // {memory,sqlite[,postgres]}, and (with the feature) postgres/{memory,sqlite,postgres}.
-    // Internal Hybrid/Turso specs remain in the type system for direct Config construction.
+    // Full public 5×4 matrix pairings plus transitional Hybrid* for direct Config tests.
     let wired = match (&log_spec, &projection_spec) {
         (LogSpec::Memory, ProjectionSpec::InMemory) => true,
         // Class B: memory log × durable projection (projection survives process death; no log rebuild).
         (LogSpec::Memory, ProjectionSpec::Sqlite { .. }) => true,
+        (LogSpec::Memory, ProjectionSpec::Turso { .. }) => true,
         #[cfg(feature = "postgres")]
         (LogSpec::Memory, ProjectionSpec::Postgres { .. }) => true,
         (LogSpec::Sqlite { .. }, ProjectionSpec::InMemory) => true,
         (LogSpec::Sqlite { .. }, ProjectionSpec::Sqlite { .. }) => true,
+        (LogSpec::Sqlite { .. }, ProjectionSpec::Turso { .. }) => true,
         #[cfg(feature = "postgres")]
         (LogSpec::Sqlite { .. }, ProjectionSpec::Postgres { .. }) => true,
         (LogSpec::ObjectLog(_), ProjectionSpec::InMemory) => true,
@@ -588,6 +601,8 @@ fn parse_backend(
         (LogSpec::Postgres { .. }, ProjectionSpec::InMemory) => true,
         #[cfg(feature = "postgres")]
         (LogSpec::Postgres { .. }, ProjectionSpec::Sqlite { .. }) => true,
+        #[cfg(feature = "postgres")]
+        (LogSpec::Postgres { .. }, ProjectionSpec::Turso { .. }) => true,
         #[cfg(feature = "postgres")]
         (LogSpec::Postgres { .. }, ProjectionSpec::Postgres { .. }) => true,
         _ => false,
@@ -865,10 +880,16 @@ mod tests {
     fn defaults_when_env_is_empty() {
         let config = Config::from_env(&BTreeMap::new()).expect("empty env yields defaults");
         assert!(matches!(config.backend.log, LogSpec::ObjectLog(_)));
-        assert!(matches!(
-            config.backend.projection,
-            ProjectionSpec::InMemory
-        ));
+        // TD-010: Turso is the public default projection when FIREWEED_PROJECTION_BACKEND is absent.
+        assert!(
+            matches!(
+                config.backend.projection,
+                ProjectionSpec::Turso { ref path }
+                    if path == &PathBuf::from("/var/lib/fireweed/fireweed-projection.turso")
+            ),
+            "default projection must be Turso at FIREWEED_TURSO_PROJECTION_PATH default"
+        );
+        assert_eq!(config.backend.projection.label(), "turso");
         assert_eq!(
             config.embedded_fjord.namespace_root,
             PathBuf::from("/var/lib/fireweed/fjord")
@@ -885,6 +906,151 @@ mod tests {
         assert_eq!(config.queues.len(), 1, "default bootstrap is t1:q1");
         assert_eq!(config.queues[0].tenant_id.as_str(), "t1");
         assert_eq!(config.queues[0].queue_id.as_str(), "q1");
+    }
+
+    #[test]
+    fn turso_projection_is_the_public_env_default() {
+        // Omit FIREWEED_PROJECTION_BACKEND → Turso with the single documented path default.
+        let config = Config::from_env(&map(&[
+            ("FIREWEED_LOG_BACKEND", "filesystem"),
+            ("FIREWEED_OBJECT_LOG_ROOT", "/data/olog"),
+        ]))
+        .expect("filesystem × default turso");
+        match config.backend.projection {
+            ProjectionSpec::Turso { path } => {
+                assert_eq!(
+                    path,
+                    PathBuf::from("/var/lib/fireweed/fireweed-projection.turso")
+                );
+            }
+            other => panic!("expected Turso default, got label={}", other.label()),
+        }
+        // Explicit override of path alone keeps Turso selection.
+        let config = Config::from_env(&map(&[
+            ("FIREWEED_LOG_BACKEND", "memory"),
+            (
+                "FIREWEED_TURSO_PROJECTION_PATH",
+                "/data/custom-projection.turso",
+            ),
+        ]))
+        .expect("memory × default turso with custom path");
+        match config.backend.projection {
+            ProjectionSpec::Turso { path } => {
+                assert_eq!(path, PathBuf::from("/data/custom-projection.turso"));
+            }
+            other => panic!("expected Turso, got {}", other.label()),
+        }
+        // Explicit memory/sqlite/postgres remain selectable.
+        for (proj, check) in [
+            ("memory", "memory"),
+            ("sqlite", "sqlite"),
+            ("postgres", "postgres"),
+        ] {
+            let mut pairs = vec![
+                ("FIREWEED_LOG_BACKEND", "memory"),
+                ("FIREWEED_PROJECTION_BACKEND", proj),
+            ];
+            if proj == "sqlite" {
+                pairs.push(("FIREWEED_SQLITE_PROJECTION_PATH", "/tmp/x.db"));
+            }
+            if proj == "postgres" {
+                pairs.push(("FIREWEED_PG_PROJECTION_URL", "postgres://u:p@localhost/db"));
+            }
+            let config = Config::from_env(&map(&pairs)).unwrap_or_else(|e| {
+                panic!("explicit {proj} must remain selectable: {e}");
+            });
+            assert_eq!(config.backend.projection.label(), check);
+        }
+    }
+
+    #[test]
+    fn public_projection_help_and_parser_are_bijective() {
+        // Public names accepted by the parser must match the help advertisement set.
+        const PUBLIC: &[&str] = &["memory", "sqlite", "turso", "postgres"];
+        for name in PUBLIC {
+            let mut pairs = vec![
+                ("FIREWEED_LOG_BACKEND", "memory"),
+                ("FIREWEED_PROJECTION_BACKEND", *name),
+            ];
+            if *name == "sqlite" {
+                pairs.push(("FIREWEED_SQLITE_PROJECTION_PATH", "/tmp/p.db"));
+            }
+            if *name == "turso" {
+                pairs.push(("FIREWEED_TURSO_PROJECTION_PATH", "/tmp/p.turso"));
+            }
+            if *name == "postgres" {
+                pairs.push(("FIREWEED_PG_PROJECTION_URL", "postgres://u:p@localhost/db"));
+            }
+            let config = Config::from_env(&map(&pairs)).unwrap_or_else(|e| {
+                panic!("public projection {name} must parse: {e}");
+            });
+            assert_eq!(config.backend.projection.label(), *name);
+        }
+        // Non-public aliases stay rejected (bijection: parser domain == public set).
+        for bad in [
+            "inmemory",
+            "hybrid",
+            "hybrid-strict",
+            "hybrid-async",
+            "objectlog",
+        ] {
+            let result = Config::from_env(&map(&[
+                ("FIREWEED_LOG_BACKEND", "filesystem"),
+                ("FIREWEED_PROJECTION_BACKEND", bad),
+                ("FIREWEED_OBJECT_LOG_ROOT", "/data/olog"),
+            ]));
+            assert!(
+                result.is_err(),
+                "{bad} must be rejected on public env surface"
+            );
+        }
+    }
+
+    #[test]
+    fn all_five_log_specs_accept_turso() {
+        let logs: Vec<Vec<(&str, &str)>> = vec![
+            vec![
+                ("FIREWEED_LOG_BACKEND", "memory"),
+                ("FIREWEED_PROJECTION_BACKEND", "turso"),
+                ("FIREWEED_TURSO_PROJECTION_PATH", "/tmp/m.turso"),
+            ],
+            vec![
+                ("FIREWEED_LOG_BACKEND", "sqlite"),
+                ("FIREWEED_SQLITE_LOG_PATH", "/tmp/log.db"),
+                ("FIREWEED_PROJECTION_BACKEND", "turso"),
+                ("FIREWEED_TURSO_PROJECTION_PATH", "/tmp/s.turso"),
+            ],
+            vec![
+                ("FIREWEED_LOG_BACKEND", "postgres"),
+                ("FIREWEED_PG_URL", "postgres://u:p@localhost/db"),
+                ("FIREWEED_PROJECTION_BACKEND", "turso"),
+                ("FIREWEED_TURSO_PROJECTION_PATH", "/tmp/pg.turso"),
+            ],
+            vec![
+                ("FIREWEED_LOG_BACKEND", "filesystem"),
+                ("FIREWEED_OBJECT_LOG_ROOT", "/tmp/olog"),
+                ("FIREWEED_PROJECTION_BACKEND", "turso"),
+                ("FIREWEED_TURSO_PROJECTION_PATH", "/tmp/fs.turso"),
+            ],
+            vec![
+                ("FIREWEED_LOG_BACKEND", "s3"),
+                ("FIREWEED_PROJECTION_BACKEND", "turso"),
+                ("FIREWEED_TURSO_PROJECTION_PATH", "/tmp/s3.turso"),
+                ("FIREWEED_OBJECT_LOG_S3_ENDPOINT", "https://s3.example.com"),
+                ("FIREWEED_OBJECT_LOG_S3_BUCKET", "fw"),
+                ("FIREWEED_OBJECT_LOG_S3_REGION", "us-east-1"),
+                ("FIREWEED_OBJECT_LOG_S3_CREDENTIAL_SOURCE", "static"),
+                ("FIREWEED_OBJECT_LOG_S3_ACCESS_KEY_ID", "ak"),
+                ("FIREWEED_OBJECT_LOG_S3_SECRET_ACCESS_KEY", "sk"),
+            ],
+        ];
+        for pairs in logs {
+            let config = Config::from_env(&map(&pairs)).unwrap_or_else(|e| {
+                panic!("log×turso must parse for {:?}: {e}", pairs[0]);
+            });
+            assert_eq!(config.backend.projection.label(), "turso");
+            assert_eq!(config.validate_for_start(), Ok(()));
+        }
     }
 
     #[test]
@@ -1308,9 +1474,12 @@ mod tests {
 
     #[test]
     fn sqlite_log_path_is_threaded() {
+        // Explicit projection so this case stays about log-path threading; public default
+        // projection is Turso (see turso_projection_is_the_public_env_default).
         let config = Config::from_env(&map(&[
             ("FIREWEED_LOG_BACKEND", "sqlite"),
             ("FIREWEED_SQLITE_LOG_PATH", "/data/log.db"),
+            ("FIREWEED_PROJECTION_BACKEND", "memory"),
         ]))
         .expect("valid env");
         match config.backend.log {
@@ -1403,22 +1572,22 @@ mod tests {
     }
 
     #[test]
-    fn turso_projection_is_hard_rejected_on_public_env_surface() {
-        // Turso remains in the type system for direct Config construction / experimental wiring,
-        // but the public env adapter never accepts it (feature flags do not re-open the select).
-        let Err(error) = Config::from_env(&map(&[
+    fn turso_projection_is_accepted_on_public_env_surface() {
+        // Turso is the public default projection (TD-010); explicit selection parses with the
+        // single documented FIREWEED_TURSO_PROJECTION_PATH setting.
+        let config = Config::from_env(&map(&[
             ("FIREWEED_LOG_BACKEND", "filesystem"),
             ("FIREWEED_PROJECTION_BACKEND", "turso"),
             ("FIREWEED_OBJECT_LOG_ROOT", "/data/olog"),
             ("FIREWEED_TURSO_PROJECTION_PATH", "/data/projection.turso"),
-        ])) else {
-            panic!("public env surface must hard-reject turso")
-        };
-        assert!(
-            error.0.contains("turso is not a public product projection"),
-            "{}",
-            error.0
-        );
+        ]))
+        .expect("public env surface accepts turso");
+        match config.backend.projection {
+            ProjectionSpec::Turso { path } => {
+                assert_eq!(path, PathBuf::from("/data/projection.turso"));
+            }
+            other => panic!("expected Turso, got {}", other.label()),
+        }
     }
 
     #[test]
@@ -1500,7 +1669,7 @@ mod tests {
         let config = Config::from_env(&BTreeMap::new()).expect("empty env yields defaults");
         assert_eq!(config.backend.response_barrier, ResponseBarrierSpec::Strict);
         assert_eq!(config.backend.async_projection, None);
-        // Default projection is memory → deferred-flush is not cell-applicable.
+        // Default projection is turso → deferred-flush is not cell-applicable.
         assert_eq!(config.backend.sqlite_projection_deferred_flush_chunk, None);
         assert_eq!(config.validate_for_start(), Ok(()));
     }

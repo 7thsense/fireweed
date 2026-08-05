@@ -41,9 +41,15 @@ fn service_help_advertises_only_fireweed_runtime_names() {
     assert!(stdout.starts_with("fireweed-service\n"));
     assert!(stdout.contains("FIREWEED_LISTEN_ADDR"));
     assert!(stdout.contains("FIREWEED_LOG_BACKEND=memory|sqlite|postgres|filesystem|s3"));
-    assert!(stdout.contains("FIREWEED_PROJECTION_BACKEND=memory|sqlite|postgres"));
+    assert!(stdout.contains("FIREWEED_PROJECTION_BACKEND=memory|sqlite|turso|postgres"));
+    assert!(
+        stdout
+            .contains("FIREWEED_TURSO_PROJECTION_PATH=/var/lib/fireweed/fireweed-projection.turso")
+    );
     assert!(!stdout.contains("FIREWEED_LOG_BACKEND=objectlog"));
     assert!(!stdout.contains("FIREWEED_PROJECTION_BACKEND=inmemory"));
+    assert!(!stdout.contains("hybrid-strict"));
+    assert!(!stdout.contains("hybrid-async"));
 }
 
 #[test]
