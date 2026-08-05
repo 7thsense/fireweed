@@ -101,4 +101,7 @@ bash "${SCRIPT_DIR}/property-fuzz-smoke.sh"
 echo "--- microsite gate ---"
 bash "${SCRIPT_DIR}/microsite-gate.sh"
 
+echo "--- API-005 suite ownership map ---"
+python3 "${SCRIPT_DIR}/api005_suite_ownership.py" --self-test
+
 echo "=== pr-gate [${MODE}] PASSED ==="
