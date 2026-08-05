@@ -266,7 +266,8 @@ async fn create_recurring(
     let mut queue_definition = definition(name);
     queue_definition.recurrence = RecurrencePolicy {
         mode: RecurrenceMode::Recurring,
-        until: None,
+        // Domain requires until when mode=recurring; far-future keeps rearm in-series for suite.
+        until: Some(UtcTimestamp::new(i64::MAX / 4, 0).unwrap()),
     };
     let outcome = call(
         cell,
@@ -1307,6 +1308,88 @@ async fn exercise_claim_and_finalize(cell: &str, fw: &Fireweed, failures: &mut V
             .is_some_and(|value| value.pending >= 1 && value.leased == 0),
         "metrics did not reflect the reclaimed pending item",
     );
+
+    // P7N race: two sequential claimers against a single eligible item — only one wins.
+    let race_q = create(cell, fw, failures, "claim-race").await;
+    let _ = call(
+        cell,
+        "push[claim-race]",
+        failures,
+        fw.push(&race_q, item("race-item", 1)),
+    )
+    .await;
+    let first = call(
+        cell,
+        "claim[race-first]",
+        failures,
+        fw.claim(&race_q, 1, 60_000),
+    )
+    .await;
+    let second = call(
+        cell,
+        "claim[race-second]",
+        failures,
+        fw.claim(&race_q, 1, 60_000),
+    )
+    .await;
+    check(
+        cell,
+        "claim-race",
+        failures,
+        first.as_ref().is_some_and(|items| items.len() == 1)
+            && second.as_ref().is_some_and(|items| items.is_empty()),
+        "second claimer must observe an empty batch after the sole eligible item was leased",
+    );
+    if let Some(items) = first {
+        if let Some(won) = items.into_iter().next() {
+            let _ = call(
+                cell,
+                "ack[claim-race]",
+                failures,
+                fw.ack(&race_q, [won.item_id]),
+            )
+            .await;
+        }
+    }
+
+    // P7N recurrence: claim → rearm → claim same id (series stays alive inside until).
+    let (rec_q, rec_claimed) = seed_claim(cell, fw, failures, "recurrence-cycle", true).await;
+    if let Some(claimed) = rec_claimed {
+        let _ = call(
+            cell,
+            "rearm[recurrence-cycle]",
+            failures,
+            fw.rearm(&rec_q, [claimed.item_id]),
+        )
+        .await;
+        let again = call(
+            cell,
+            "claim[recurrence-cycle]",
+            failures,
+            fw.claim(&rec_q, 1, 60_000),
+        )
+        .await;
+        check(
+            cell,
+            "recurrence-cycle",
+            failures,
+            again
+                .as_ref()
+                .is_some_and(|items| items.len() == 1 && items[0].item_id == claimed.item_id),
+            "rearm must return the same recurring item id to pending eligibility",
+        );
+        if let Some(items) = again {
+            if let Some(item) = items.into_iter().next() {
+                let _ = call(
+                    cell,
+                    "ack[recurrence-cycle]",
+                    failures,
+                    fw.ack(&rec_q, [item.item_id]),
+                )
+                .await;
+            }
+        }
+    }
 }
 
 async fn exercise_rich_claims(cell: &str, fw: &Fireweed, failures: &mut Vec<String>) {

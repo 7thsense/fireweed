@@ -119,6 +119,11 @@ name = "public_interface_conformance"
 path = "tests/public_interface_conformance.rs"
 
 [[test]]
+name = "p7n_non_s3_lifecycle_parity"
+path = "tests/p7n_non_s3_lifecycle_parity.rs"
+required-features = ["memory", "sqlite", "objectlog"]
+
+[[test]]
 name = "public_interface_external_conformance"
 path = "tests/public_interface_external_conformance.rs"
 required-features = ["postgres", "objectlog", "sqlite"]

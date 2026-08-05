@@ -1,0 +1,200 @@
+{
+  "schema_version": 1,
+  "plan_key": "P7N",
+  "bead_id": "fireweed-03d96518",
+  "description": "Provider-neutral Snorri lifecycle ledger for 12 non-S3 cells (claim/append/finalize/lifecycle/races/recurrence).",
+  "entries": [
+    {
+      "semantic_id": "SNORRI-MATRIX-LIFECYCLE",
+      "cell_id": "memory--memory",
+      "status": "passed",
+      "command": "cargo test -p fireweed --test public_interface_conformance memory_memory -- --nocapture",
+      "methods": [
+        "push",
+        "claim",
+        "complete",
+        "fail",
+        "release",
+        "retry",
+        "rearm"
+      ]
+    },
+    {
+      "semantic_id": "SNORRI-MATRIX-LIFECYCLE",
+      "cell_id": "memory--sqlite",
+      "status": "passed",
+      "command": "cargo test -p fireweed --test public_interface_conformance memory_sqlite -- --nocapture",
+      "methods": [
+        "push",
+        "claim",
+        "complete",
+        "fail",
+        "release",
+        "retry",
+        "rearm"
+      ]
+    },
+    {
+      "semantic_id": "SNORRI-MATRIX-LIFECYCLE",
+      "cell_id": "memory--postgres",
+      "status": "passed",
+      "command": "cargo test -p fireweed --test public_interface_conformance memory_postgres -- --nocapture",
+      "methods": [
+        "push",
+        "claim",
+        "complete",
+        "fail",
+        "release",
+        "retry",
+        "rearm"
+      ]
+    },
+    {
+      "semantic_id": "SNORRI-MATRIX-LIFECYCLE",
+      "cell_id": "sqlite--memory",
+      "status": "passed",
+      "command": "cargo test -p fireweed --test public_interface_conformance sqlite_memory -- --nocapture",
+      "methods": [
+        "push",
+        "claim",
+        "complete",
+        "fail",
+        "release",
+        "retry",
+        "rearm"
+      ]
+    },
+    {
+      "semantic_id": "SNORRI-MATRIX-LIFECYCLE",
+      "cell_id": "sqlite--sqlite",
+      "status": "passed",
+      "command": "cargo test -p fireweed --test public_interface_conformance sqlite_sqlite -- --nocapture",
+      "methods": [
+        "push",
+        "claim",
+        "complete",
+        "fail",
+        "release",
+        "retry",
+        "rearm"
+      ]
+    },
+    {
+      "semantic_id": "SNORRI-MATRIX-LIFECYCLE",
+      "cell_id": "sqlite--postgres",
+      "status": "passed",
+      "command": "cargo test -p fireweed --test public_interface_conformance sqlite_postgres -- --nocapture",
+      "methods": [
+        "push",
+        "claim",
+        "complete",
+        "fail",
+        "release",
+        "retry",
+        "rearm"
+      ]
+    },
+    {
+      "semantic_id": "SNORRI-MATRIX-LIFECYCLE",
+      "cell_id": "postgres--memory",
+      "status": "passed",
+      "command": "cargo test -p fireweed --test public_interface_conformance postgres_memory -- --nocapture",
+      "methods": [
+        "push",
+        "claim",
+        "complete",
+        "fail",
+        "release",
+        "retry",
+        "rearm"
+      ]
+    },
+    {
+      "semantic_id": "SNORRI-MATRIX-LIFECYCLE",
+      "cell_id": "postgres--sqlite",
+      "status": "passed",
+      "command": "cargo test -p fireweed --test public_interface_conformance postgres_sqlite -- --nocapture",
+      "methods": [
+        "push",
+        "claim",
+        "complete",
+        "fail",
+        "release",
+        "retry",
+        "rearm"
+      ]
+    },
+    {
+      "semantic_id": "SNORRI-MATRIX-LIFECYCLE",
+      "cell_id": "postgres--postgres",
+      "status": "passed",
+      "command": "cargo test -p fireweed --test public_interface_conformance postgres_postgres -- --nocapture",
+      "methods": [
+        "push",
+        "claim",
+        "complete",
+        "fail",
+        "release",
+        "retry",
+        "rearm"
+      ]
+    },
+    {
+      "semantic_id": "SNORRI-MATRIX-LIFECYCLE",
+      "cell_id": "filesystem--memory",
+      "status": "passed",
+      "command": "cargo test -p fireweed --test public_interface_conformance filesystem_memory -- --nocapture",
+      "methods": [
+        "push",
+        "claim",
+        "complete",
+        "fail",
+        "release",
+        "retry",
+        "rearm"
+      ]
+    },
+    {
+      "semantic_id": "SNORRI-MATRIX-LIFECYCLE",
+      "cell_id": "filesystem--sqlite--strict",
+      "status": "passed",
+      "command": "cargo test -p fireweed --test public_interface_conformance filesystem_sqlite_strict -- --nocapture",
+      "methods": [
+        "push",
+        "claim",
+        "complete",
+        "fail",
+        "release",
+        "retry",
+        "rearm"
+      ]
+    },
+    {
+      "semantic_id": "SNORRI-MATRIX-LIFECYCLE",
+      "cell_id": "filesystem--postgres--strict",
+      "status": "passed",
+      "command": "cargo test -p fireweed --test public_interface_conformance filesystem_postgres_strict -- --nocapture",
+      "methods": [
+        "push",
+        "claim",
+        "complete",
+        "fail",
+        "release",
+        "retry",
+        "rearm"
+      ]
+    },
+    {
+      "semantic_id": "SNORRI-REOPEN",
+      "cell_id": "matrix",
+      "status": "passed",
+      "command": "cargo test -p fireweed --test storage_matrix_t0_t2 storage_matrix_t0_t2_all_twenty_cells"
+    },
+    {
+      "semantic_id": "SNORRI-RETRY-ONCE",
+      "cell_id": "matrix",
+      "status": "passed",
+      "command": "cargo test -p fireweed --test request_id_idempotency"
+    }
+  ]
+}

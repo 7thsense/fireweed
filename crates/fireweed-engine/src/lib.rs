@@ -24,6 +24,7 @@ mod commit;
 mod compose;
 mod control_plane;
 mod density;
+mod epoch;
 mod error;
 mod finalize_validation;
 mod idempotency;
@@ -111,6 +112,9 @@ pub use control_plane::{
     resolve_target,
 };
 pub use density::{RenewSweep, ResidentQueues, renew_all_resident};
+pub use epoch::{
+    MIN_ASSIGNMENT_EPOCH, resolve_bounded_epoch, resolve_bounded_epoch_sync, resolve_epoch_fence,
+};
 pub use idempotency::{IdempotencyDecision, QueueIdempotencyCache};
 pub use maintenance::{
     FrontierRequirement, MaintenanceAuthoritySnapshot, MaintenanceCandidate, MaintenanceDecision,

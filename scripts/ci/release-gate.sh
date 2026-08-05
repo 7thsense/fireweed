@@ -170,8 +170,11 @@ ${CARGO} llvm-cov report --lcov \
 bash "${SCRIPT_DIR}/check-lcov-coverage.py" \
     --lcov "${REPO_ROOT}/target/coverage/fireweed-engine.lcov" --crate fireweed-engine --min-lines 80
 
-echo "--- build-closure integrity ---"
-bash "${SCRIPT_DIR}/verify-build-closure.sh" --aggregate pqueue-131eadfa
+echo "--- build-closure integrity (candidate mode; never reads .ddx/**) ---"
+bash "${SCRIPT_DIR}/verify-build-closure.sh" \
+    --mode candidate \
+    --fixture "${SCRIPT_DIR}/fixtures/closure/release-aggregate-pqueue-131eadfa.json" \
+    --aggregate pqueue-131eadfa
 
 echo "=== release gate PASSED ==="
 if [[ "${RUN_LOCAL_PERFORMANCE}" == true ]]; then
