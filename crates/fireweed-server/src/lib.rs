@@ -45,6 +45,9 @@ pub use change_record_sink::{
 };
 /// Segment flush knobs for object-log product cells (maps onto LogEngine FlushConfig).
 pub use fireweed_objectlog::SegmentConfig;
+/// Public Turso adapter types (default projection axis). Direct dep so cargo-machete tracks usage.
+#[cfg(feature = "turso-projection")]
+pub use fireweed_turso::{TursoConfig, TursoRelational};
 /// Recovery-window default for object-log reopen budgets (FIREWEED_RECOVERY_MAX_TAIL_COMMANDS).
 pub const DEFAULT_RECOVERY_MAX_TAIL: u64 = 1_000_000;
 pub use tokio_dispatcher::TokioTaskDispatcher;
@@ -294,8 +297,9 @@ pub enum ProjectionSpec {
     InMemory,
     /// Derived relational sqlite projection (`fireweed_items` is the read model) at `path`.
     Sqlite { path: PathBuf },
-    /// Native-async local Turso derived projection. Selection is accepted only by builds carrying the
-    /// `turso-projection` feature and only with an object-log authority.
+    /// Native-async local Turso 0.7 ordinary-WAL derived projection (TD-010 / ADR-016 public default).
+    /// Composes with all five log axes through the generic native-async engine when the
+    /// `turso-projection` feature is enabled (default-on for stock `fireweed-service`).
     Turso { path: PathBuf },
     /// SQLite-first durable projection image plus hot in-memory serving at `path`.
     Hybrid { path: PathBuf },
@@ -321,9 +325,9 @@ pub enum ProjectionSpec {
 }
 
 impl ProjectionSpec {
-    /// Public product axis name when the value is one of the three matrix projections;
-    /// legacy hybrid/turso names remain for non-public implementation profiles.
-    fn label(&self) -> &'static str {
+    /// Public product axis name for the four matrix projections; legacy hybrid names remain
+    /// for non-public implementation profiles only.
+    pub fn label(&self) -> &'static str {
         match self {
             // Public matrix name is `memory`.
             ProjectionSpec::InMemory => "memory",
@@ -391,6 +395,7 @@ fn projection_accepts_sqlite_deferred_flush(projection: &ProjectionSpec) -> bool
 }
 
 /// Exact feature-off rejection retained when relocating external-Kafka gating into pure validation.
+#[cfg_attr(feature = "external-kafka", allow(dead_code))]
 const EXTERNAL_KAFKA_FEATURE_REQUIRED: &str = "external-kafka change record sink requires the `external-kafka` cargo feature (pure-Rust rskafka); \
      the default in-process embedded surface needs no endpoint";
 
@@ -811,11 +816,11 @@ pub enum ResponseBarrierSpec {
 /// A backend selected as the orthogonal product `LogSpec × ProjectionSpec × ControlPlaneSpec` (ADR-012).
 /// [`start`] assembles the concrete backend from this spec.
 ///
-/// Object-log cells (`filesystem`/`s3` × memory|sqlite|hybrid|postgres) open via crates.io LogEngine
+/// Object-log cells (`filesystem`/`s3` × memory|sqlite|turso|hybrid|postgres) open via LogEngine
 /// products ([`fireweed_objectlog::ObjectLogEngineStore`] + async projection composition). Segment seal
-/// knobs on [`ObjectLogSpec`] map to [`object_log::FlushConfig`] through
+/// knobs on [`ObjectLogSpec`] map to LogEngine FlushConfig through
 /// [`fireweed_objectlog::flush_config_from_segment`]. Memory/sqlite/postgres log axes use async
-/// log-replay composition.
+/// log-replay composition (Turso via [`fireweed::turso_compose`]).
 pub struct BackendSpec {
     pub log: LogSpec,
     pub projection: ProjectionSpec,
@@ -1048,6 +1053,23 @@ impl Config {
             self.objectlog_byte_limits
                 .validate(spec.segment_config().target_bytes)
                 .map_err(EngineError::Invalid)?;
+        }
+        // Pre-I/O Turso path validation (AC-TURSO-5): empty paths fail closed before database open.
+        if let ProjectionSpec::Turso { path } = &self.backend.projection {
+            if path.as_os_str().is_empty() {
+                return Err(EngineError::Invalid(
+                    "turso projection path must not be empty",
+                ));
+            }
+            #[cfg(not(feature = "turso-projection"))]
+            {
+                let _ = path;
+                return Err(EngineError::Invalid(
+                    "turso projection requires the `turso-projection` cargo feature; rebuild with \
+                     default features (or `--features turso-projection`). Feature-disabled builds \
+                     reject turso before storage I/O and never fall back to sqlite or memory",
+                ));
+            }
         }
         Ok(())
     }
@@ -2711,8 +2733,184 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             )
             .await
         }
-        (LogSpec::ObjectLog(_), ProjectionSpec::Turso { .. }) => Err(EngineError::Invalid(
-            "FIREWEED_PROJECTION_BACKEND=turso is not supported after LogEngine cutover; use memory|sqlite|hybrid|postgres projections",
+        // --- Turso projection: all five log axes (TD-010 public default) ---
+        #[cfg(feature = "turso-projection")]
+        (LogSpec::Memory, ProjectionSpec::Turso { path }) => {
+            // Class B: memory log × durable Turso projection (projection survives process death).
+            let backend = tokio::task::spawn_blocking(move || {
+                fireweed::turso_compose::assemble_memory_log_turso(path)
+            })
+            .await
+            .map_err(|e| EngineError::Storage(format!("memory/turso open task failed: {e}")))??;
+            finalize_objectlog_async_owned(
+                Arc::new(backend),
+                control_plane,
+                advertise_addr.as_deref(),
+                owner_id.clone(),
+                clock,
+                &listen,
+                interval,
+                &queues,
+                &change_record_sink,
+                &fjord_surface,
+                fjord_broker_listen.as_deref(),
+                fjord_log.clone(),
+            )
+            .await
+        }
+        #[cfg(feature = "turso-projection")]
+        (
+            LogSpec::Sqlite { path },
+            ProjectionSpec::Turso {
+                path: projection_path,
+            },
+        ) => {
+            let log_p = path
+                .into_os_string()
+                .into_string()
+                .map_err(|_| EngineError::Storage("non-utf8 sqlite log path".into()))?;
+            let backend = tokio::task::spawn_blocking(move || {
+                fireweed::turso_compose::assemble_sqlite_log_turso(&log_p, projection_path)
+            })
+            .await
+            .map_err(|e| EngineError::Storage(format!("sqlite/turso open task failed: {e}")))??;
+            finalize_objectlog_async_owned(
+                Arc::new(backend),
+                control_plane,
+                advertise_addr.as_deref(),
+                owner_id.clone(),
+                clock,
+                &listen,
+                interval,
+                &queues,
+                &change_record_sink,
+                &fjord_surface,
+                fjord_broker_listen.as_deref(),
+                fjord_log.clone(),
+            )
+            .await
+        }
+        #[cfg(all(feature = "turso-projection", feature = "postgres"))]
+        (LogSpec::Postgres { url, credentials }, ProjectionSpec::Turso { path }) => {
+            let backend = tokio::task::spawn_blocking(move || {
+                let mut connect_config = fireweed_postgres::PostgresConnectConfig::new(url);
+                if let Some(provider) = credentials {
+                    connect_config = connect_config.with_credential_provider(provider);
+                }
+                let log = fireweed_postgres::PostgresLog::connect_with_config(connect_config)?;
+                fireweed::turso_compose::assemble_postgres_log_turso(log, path, node_id)
+            })
+            .await
+            .map_err(|e| EngineError::Storage(format!("postgres/turso open task failed: {e}")))??;
+            finalize_objectlog_async_owned(
+                Arc::new(backend),
+                control_plane,
+                advertise_addr.as_deref(),
+                owner_id.clone(),
+                clock,
+                &listen,
+                interval,
+                &queues,
+                &change_record_sink,
+                &fjord_surface,
+                fjord_broker_listen.as_deref(),
+                fjord_log.clone(),
+            )
+            .await
+        }
+        #[cfg(feature = "turso-projection")]
+        (
+            LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem {
+                root,
+                segment_config,
+            }),
+            ProjectionSpec::Turso { path },
+        ) => {
+            let _ = (
+                objectlog_byte_budget,
+                config_objectlog_queue_limit,
+                debug_segments,
+                recovery_max_tail,
+            );
+            let backend = open_objectlog_filesystem_turso_backend(
+                root,
+                path,
+                segment_config,
+                node_id,
+                async_projection,
+            )
+            .await?;
+            finalize_objectlog_async_owned(
+                Arc::new(backend),
+                control_plane,
+                advertise_addr.as_deref(),
+                owner_id.clone(),
+                clock,
+                &listen,
+                interval,
+                &queues,
+                &change_record_sink,
+                &fjord_surface,
+                fjord_broker_listen.as_deref(),
+                fjord_log.clone(),
+            )
+            .await
+        }
+        #[cfg(feature = "turso-projection")]
+        (
+            LogSpec::ObjectLog(ObjectLogSpec::S3 {
+                endpoint,
+                bucket,
+                region,
+                credentials:
+                    S3CredentialSource::Static {
+                        access_key_id,
+                        secret_access_key,
+                    },
+                segment_config,
+                ..
+            }),
+            ProjectionSpec::Turso { path },
+        ) => {
+            let _ = (
+                objectlog_byte_budget,
+                config_objectlog_queue_limit,
+                debug_segments,
+                recovery_max_tail,
+            );
+            let backend = open_objectlog_s3_turso_backend(
+                endpoint,
+                region,
+                bucket,
+                access_key_id,
+                secret_access_key,
+                path,
+                segment_config,
+                node_id,
+                async_projection,
+            )
+            .await?;
+            finalize_objectlog_async_owned(
+                Arc::new(backend),
+                control_plane,
+                advertise_addr.as_deref(),
+                owner_id.clone(),
+                clock,
+                &listen,
+                interval,
+                &queues,
+                &change_record_sink,
+                &fjord_surface,
+                fjord_broker_listen.as_deref(),
+                fjord_log.clone(),
+            )
+            .await
+        }
+        #[cfg(not(feature = "turso-projection"))]
+        (_, ProjectionSpec::Turso { .. }) => Err(EngineError::Invalid(
+            "turso projection requires the `turso-projection` cargo feature; rebuild with \
+             default features (or `--features turso-projection`). Feature-disabled builds \
+             reject turso before storage I/O and never fall back to sqlite or memory",
         )),
         (LogSpec::ObjectLog(spec), ProjectionSpec::Hybrid { path }) => {
             // Program A: LogEngine × hybrid projection (async product). LogEngine owns group-commit
@@ -3246,6 +3444,51 @@ async fn open_objectlog_s3_sqlite_backend(
         log, projection, node_id,
     )
     .await
+}
+
+/// Canonical filesystem object-log × Turso projection open (TD-010 / LogEngine composition).
+#[cfg(feature = "turso-projection")]
+async fn open_objectlog_filesystem_turso_backend(
+    root: PathBuf,
+    projection_path: PathBuf,
+    segment_config: SegmentConfig,
+    node_id: u8,
+    async_projection: Option<AsyncProjectionSpec>,
+) -> EngineResult<fireweed::turso_compose::DerivedObjectLogTursoBackend> {
+    let _ = node_id;
+    let flush = objectlog_flush_from_segment(&segment_config);
+    let log = fireweed_objectlog::ObjectLogEngineStore::open_local(root, flush).await?;
+    // assemble_objectlog_turso opens the Turso projection (pre-I/O empty path already validated)
+    // and recovers SeparateReplayCommit product state.
+    fireweed::turso_compose::assemble_objectlog_turso(log, projection_path, async_projection)
+}
+
+/// Canonical S3 object-log × Turso projection open (TD-010 / LogEngine composition).
+#[cfg(feature = "turso-projection")]
+#[allow(clippy::too_many_arguments)]
+async fn open_objectlog_s3_turso_backend(
+    endpoint: String,
+    region: String,
+    bucket: String,
+    access_key_id: String,
+    secret_access_key: String,
+    projection_path: PathBuf,
+    segment_config: SegmentConfig,
+    node_id: u8,
+    async_projection: Option<AsyncProjectionSpec>,
+) -> EngineResult<fireweed::turso_compose::DerivedObjectLogTursoBackend> {
+    let _ = node_id;
+    let flush = objectlog_flush_from_segment(&segment_config);
+    let log = fireweed_objectlog::ObjectLogEngineStore::open_s3(
+        &endpoint,
+        &region,
+        &bucket,
+        &access_key_id,
+        &secret_access_key,
+        flush,
+    )
+    .await?;
+    fireweed::turso_compose::assemble_objectlog_turso(log, projection_path, async_projection)
 }
 
 /// Canonical filesystem object-log × Postgres projection open (P3d / P8c / P3v owner surface).
@@ -4006,11 +4249,13 @@ mod byte_admission_wiring_tests {
             "open_objectlog_filesystem_memory_backend",
             "open_objectlog_filesystem_sqlite_backend",
             "open_objectlog_filesystem_postgres_backend",
+            "open_objectlog_filesystem_turso_backend",
         ];
         let s3_helpers = [
             "open_objectlog_s3_memory_backend",
             "open_objectlog_s3_sqlite_backend",
             "open_objectlog_s3_postgres_backend",
+            "open_objectlog_s3_turso_backend",
         ];
         for helper in filesystem_helpers.iter().chain(s3_helpers.iter()) {
             assert_eq!(
@@ -4035,14 +4280,16 @@ mod byte_admission_wiring_tests {
             "legacy hybrid arms retain the shared hybrid open helper"
         );
 
-        // Each memory/sqlite arm finalizes through the provider-invariant async helper;
-        // postgres arms use the blocking finalizer.
+        // Async finalizer is shared by:
+        // - 4 object-log arms: fs/s3 × memory/sqlite
+        // - 5 Turso arms: memory/sqlite/postgres/fs/s3 × turso
+        // Postgres object-log arms use the blocking finalizer.
         assert_eq!(
             production_start
                 .matches("finalize_objectlog_async_owned(")
                 .count(),
-            4,
-            "four async object-log arms (fs/s3 × memory/sqlite) must share finalize_objectlog_async_owned"
+            9,
+            "nine async composition arms (4 object-log memory/sqlite + 5 turso) must share finalize_objectlog_async_owned"
         );
         assert_eq!(
             production_start

@@ -42,7 +42,7 @@ use std::sync::{Arc, Mutex};
 mod blocking_backend;
 mod facade;
 #[cfg(feature = "turso")]
-mod turso_compose;
+pub mod turso_compose;
 
 use axon_esf::encode_index_value;
 // Internal-only types (not named in the public API surface).

@@ -51,7 +51,7 @@ use fireweed_objectlog::{ObjectLogEngineStore, ObjectLogTaskDispatcher};
 /// - Outside a runtime: private current-thread runtime.
 /// - Inside a runtime: dedicated OS thread with its own current-thread runtime so the caller's
 ///   reactor is never blocked by `block_on`.
-pub(crate) fn block_on_turso<F, T>(fut: F) -> EngineResult<T>
+pub fn block_on_turso<F, T>(fut: F) -> EngineResult<T>
 where
     F: std::future::Future<Output = EngineResult<T>> + Send + 'static,
     T: Send + 'static,
@@ -80,7 +80,7 @@ where
     }
 }
 
-pub(crate) async fn open_turso_projection_async(path: &Path) -> EngineResult<TursoRelational> {
+pub async fn open_turso_projection_async(path: &Path) -> EngineResult<TursoRelational> {
     if path.as_os_str().is_empty() {
         return Err(EngineError::Invalid(
             "turso projection path must not be empty",
@@ -97,7 +97,7 @@ pub(crate) async fn open_turso_projection_async(path: &Path) -> EngineResult<Tur
         .map_err(|e| EngineError::Storage(e.to_string()))
 }
 
-pub(crate) fn open_turso_projection(path: &Path) -> EngineResult<TursoRelational> {
+pub fn open_turso_projection(path: &Path) -> EngineResult<TursoRelational> {
     let path = path.to_path_buf();
     block_on_turso(async move { open_turso_projection_async(&path).await })
 }
@@ -198,7 +198,7 @@ type AtomicEngine<L> = AsyncComposedBackend<
 >;
 
 /// Generic atomic log × Turso product (Class A or B depending on the log axis).
-pub(crate) struct AtomicTursoBackend<L: AsyncLogStore + 'static> {
+pub struct AtomicTursoBackend<L: AsyncLogStore + 'static> {
     engine: AtomicEngine<L>,
     log: Arc<L>,
     projection: Arc<TursoRelational>,
@@ -206,6 +206,8 @@ pub(crate) struct AtomicTursoBackend<L: AsyncLogStore + 'static> {
     projection_path: PathBuf,
     control: Arc<InProcessControlPlane>,
     ids: Arc<SeqIdGen>,
+    /// Shared with push planners; recovery observes recovered item ids into this map.
+    counters: Arc<QueueCounters>,
     #[allow(dead_code)]
     node_id: u8,
 }
@@ -214,7 +216,7 @@ impl<L> AtomicTursoBackend<L>
 where
     L: AsyncLogStore + 'static,
 {
-    pub(crate) async fn assemble(
+    pub async fn assemble(
         log: L,
         projection: TursoRelational,
         projection_path: PathBuf,
@@ -275,6 +277,7 @@ where
             projection_path,
             control,
             ids,
+            counters,
             node_id,
         };
         backend.recover_async().await?;
@@ -307,6 +310,12 @@ where
                         .await?;
                 if page.entries.is_empty() {
                     break;
+                }
+                // Seed QueueCounters past every recovered item id so reopen never remints.
+                for (_, env) in &page.entries {
+                    for item_id in &env.item_ids {
+                        self.counters.observe(&shard, *item_id);
+                    }
                 }
                 let tail: Vec<_> = page
                     .entries
@@ -357,8 +366,13 @@ where
     }
 
     #[allow(dead_code)]
-    pub(crate) fn projection_path(&self) -> &Path {
+    pub fn projection_path(&self) -> &Path {
         &self.projection_path
+    }
+
+    /// Borrow the Turso projection axis (rebuild/read diagnostics).
+    pub fn projection(&self) -> &Arc<TursoRelational> {
+        &self.projection
     }
 }
 
@@ -1048,7 +1062,7 @@ type ObjectLogEngine = AsyncComposedBackend<
 
 /// Provider-neutral object-log × Turso product (not a public `ObjectLogTursoBackend` alias).
 #[cfg(feature = "objectlog")]
-pub(crate) struct DerivedObjectLogTursoBackend {
+pub struct DerivedObjectLogTursoBackend {
     engine: ObjectLogEngine,
     log: Arc<ObjectLogEngineStore>,
     projection: Arc<TursoRelational>,
@@ -1056,13 +1070,15 @@ pub(crate) struct DerivedObjectLogTursoBackend {
     projection_path: PathBuf,
     control: Arc<InProcessControlPlane>,
     ids: Arc<SeqIdGen>,
+    /// Shared with push planners; recovery observes recovered item ids into this map.
+    counters: Arc<QueueCounters>,
     #[allow(dead_code)]
     node_id: u8,
 }
 
 #[cfg(feature = "objectlog")]
 impl DerivedObjectLogTursoBackend {
-    pub(crate) async fn from_log_and_projection(
+    pub async fn from_log_and_projection(
         log: ObjectLogEngineStore,
         projection: TursoRelational,
         projection_path: PathBuf,
@@ -1123,6 +1139,7 @@ impl DerivedObjectLogTursoBackend {
             projection_path,
             control,
             ids,
+            counters,
             node_id,
         };
         backend.recover_async().await?;
@@ -1146,6 +1163,12 @@ impl DerivedObjectLogTursoBackend {
                         .await?;
                 if page.entries.is_empty() {
                     break;
+                }
+                // Seed QueueCounters past every recovered item id so reopen never remints.
+                for (_, env) in &page.entries {
+                    for item_id in &env.item_ids {
+                        self.counters.observe(&shard, *item_id);
+                    }
                 }
                 let tail: Vec<_> = page
                     .entries
@@ -1196,8 +1219,18 @@ impl DerivedObjectLogTursoBackend {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn projection_path(&self) -> &Path {
+    pub fn projection_path(&self) -> &Path {
         &self.projection_path
+    }
+
+    /// Borrow the object-log axis (change-record emission and diagnostics).
+    pub fn with_log<R>(&self, f: impl FnOnce(&ObjectLogEngineStore) -> R) -> R {
+        f(self.log.as_ref())
+    }
+
+    /// Borrow the Turso projection axis (rebuild/read diagnostics).
+    pub fn projection(&self) -> &Arc<TursoRelational> {
+        &self.projection
     }
 
     fn create_queue_impl(
@@ -1235,7 +1268,7 @@ impl DerivedObjectLogTursoBackend {
     }
 
     #[allow(dead_code)]
-    pub(crate) async fn delete_projection_file(&self) -> EngineResult<()> {
+    pub async fn delete_projection_file(&self) -> EngineResult<()> {
         let path = self.projection_path.clone();
         // Drop is composition-owned; remove the durable projection file for rebuild.
         if path.exists() {
@@ -1261,7 +1294,7 @@ impl_turso_product_ports!(
 // Sync open helpers used by the facade matrix dispatch
 // ---------------------------------------------------------------------------
 
-pub(crate) fn assemble_memory_log_turso(
+pub fn assemble_memory_log_turso(
     projection_path: PathBuf,
 ) -> EngineResult<AtomicTursoBackend<InProcessLogStore<fireweed_projection::MemoryLog>>> {
     let projection = open_turso_projection(&projection_path)?;
@@ -1272,7 +1305,7 @@ pub(crate) fn assemble_memory_log_turso(
 }
 
 #[cfg(feature = "sqlite")]
-pub(crate) fn assemble_sqlite_log_turso(
+pub fn assemble_sqlite_log_turso(
     log_path: &str,
     projection_path: PathBuf,
 ) -> EngineResult<AtomicTursoBackend<InProcessLogStore<fireweed_sqlite::SqliteLog>>> {
@@ -1286,7 +1319,7 @@ pub(crate) fn assemble_sqlite_log_turso(
 }
 
 #[cfg(feature = "postgres")]
-pub(crate) fn assemble_postgres_log_turso(
+pub fn assemble_postgres_log_turso(
     log: fireweed_postgres::PostgresLog,
     projection_path: PathBuf,
     node_id: u8,
@@ -1299,7 +1332,7 @@ pub(crate) fn assemble_postgres_log_turso(
 }
 
 #[cfg(feature = "objectlog")]
-pub(crate) fn assemble_objectlog_turso(
+pub fn assemble_objectlog_turso(
     log: ObjectLogEngineStore,
     projection_path: PathBuf,
     async_spec: Option<AsyncProjectionSpec>,

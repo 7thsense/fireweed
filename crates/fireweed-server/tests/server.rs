@@ -15,14 +15,8 @@ use fireweed_engine::{
     FinalizePort, InMemoryControlPlane, LogStore, ProjectionRead, PushPort, PushSpec,
     QueueControlPlane, QueueKey, ReclaimDriver,
 };
-#[cfg(feature = "turso-projection")]
-use fireweed_engine::{ReassignLeasePort, RenewLeasePort};
 use fireweed_memory::{ManualClock, composed_memory_backend};
-#[cfg(feature = "turso-projection")]
-use fireweed_objectlog::segmented::LocalFsBlobStore;
 use fireweed_resp::{RespHooks, RouteDecision, SystemClock, serve_with_shutdown_and_hooks};
-#[cfg(feature = "turso-projection")]
-use fireweed_server::ObjectLogTursoBackend;
 use fireweed_server::{
     BackendSpec, ChangeRecordSinkConfig, Config, ControlPlaneSpec, LogSpec,
     NiflheimChangeRecordSink, ObjectLogSpec, OwnershipRuntime, ProjectionSpec, ResponseBarrierSpec,
@@ -39,6 +33,21 @@ fn objectlog_sqlite_spec(root: std::path::PathBuf, projection: std::path::PathBu
             SegmentConfig::new(262_144, 20).unwrap(),
         )),
         projection: ProjectionSpec::Sqlite { path: projection },
+        control_plane: ControlPlaneSpec::InProcess,
+        response_barrier: ResponseBarrierSpec::Strict,
+        async_projection: None,
+        sqlite_projection_deferred_flush_chunk: None,
+    }
+}
+
+/// Object-log (LogEngine) × Turso projection — public default composition cell.
+fn objectlog_turso_spec(root: std::path::PathBuf, projection: std::path::PathBuf) -> BackendSpec {
+    BackendSpec {
+        log: LogSpec::ObjectLog(ObjectLogSpec::local(
+            root,
+            SegmentConfig::new(262_144, 20).unwrap(),
+        )),
+        projection: ProjectionSpec::Turso { path: projection },
         control_plane: ControlPlaneSpec::InProcess,
         response_barrier: ResponseBarrierSpec::Strict,
         async_projection: None,
@@ -974,170 +983,203 @@ async fn objectlog_sqlite_runtime_reopens_rebuilds_and_keeps_item_ids_advancing(
     let _ = std::fs::remove_file(&rebuilt_projection_path);
 }
 
+/// Delete-rebuild: after the Turso projection file is removed, reopen against a fresh path
+/// rebuilds complete state from the authoritative object log (LogEngine composition).
 #[cfg(feature = "turso-projection")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn objectlog_turso_profile_rebuilds_deleted_projection_from_authoritative_log() {
     let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     let (object_root, projection_path) = tmp_runtime_paths("objectlog-turso-profile");
-    let config = SegmentConfig::new(1, 5).unwrap();
-    let item_id = {
-        let store = Arc::new(LocalFsBlobStore::open(&object_root).unwrap());
-        let backend = ObjectLogTursoBackend::open_with_blob_store(store, &projection_path, config)
+    let first_id = {
+        let server = start(Config::new(
+            objectlog_turso_spec(object_root.clone(), projection_path.clone()),
+            0,
+            "127.0.0.1:0".to_string(),
+            Duration::from_secs(60),
+            vec![qdef()],
+        ))
+        .await
+        .expect("filesystem×turso server starts");
+        let mut con = redis_test_connection(server.addr()).await;
+        let produced: String = redis::cmd("XADD")
+            .arg("t1:q1")
+            .arg("*")
+            .arg("priority")
+            .arg(7)
+            .query_async(&mut con)
             .await
             .unwrap();
-        backend.create_queue(qdef()).await.unwrap();
-        let ids = backend
-            .push(&qkey(), vec![PushSpec::default()], ts(0), None)
+        let reply: StreamReadReply = redis::cmd("XREADGROUP")
+            .arg("GROUP")
+            .arg("g")
+            .arg("c")
+            .arg("STREAMS")
+            .arg("t1:q1")
+            .arg(">")
+            .query_async(&mut con)
             .await
             .unwrap();
-        let claimed = backend
-            .claim(ClaimRequest {
-                eligibility_time: None,
-                shard: qkey(),
-                worker_id: WorkerId::new("turso-worker").unwrap(),
-                max_items: 1,
-                lease_token: LeaseToken::new("turso-lease-1").unwrap(),
-                lease_expires_at: ts(30),
-                now: ts(1),
-                compatibility: Default::default(),
-                expected_epoch: None,
-            })
+        assert_eq!(reply.keys[0].ids[0].id, produced);
+        let acked: i64 = redis::cmd("XACK")
+            .arg("t1:q1")
+            .arg("g")
+            .arg(&produced)
+            .query_async(&mut con)
             .await
             .unwrap();
-        assert_eq!(claimed.items.len(), 1);
-        backend
-            .renew(&qkey(), ids.clone(), ts(40), ts(2), None)
-            .await
-            .unwrap();
-        backend
-            .reassign(
-                &qkey(),
-                ids.clone(),
-                LeaseToken::new("turso-lease-2").unwrap(),
-                ts(50),
-                ts(3),
-                None,
-            )
-            .await
-            .unwrap();
-        let pending = backend.pending(&qkey()).await.unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].lease_token.as_str(), "turso-lease-2");
-        backend
-            .finalize(
-                &qkey(),
-                vec![FinalizeOutcome::new(ids[0], FinalizeKind::Complete)],
-                ts(4),
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(backend.metrics(&qkey()).await.unwrap().complete, 1);
-        ids[0]
+        assert_eq!(acked, 1);
+        server.shutdown_and_drain(Duration::from_secs(5)).await;
+        produced
     };
 
-    std::fs::remove_file(&projection_path).unwrap();
-    let store = Arc::new(LocalFsBlobStore::open(&object_root).unwrap());
-    let reopened = ObjectLogTursoBackend::open_with_blob_store(store, &projection_path, config)
+    // Rebuild from the authoritative object log into a distinct empty Turso path (logical loss).
+    let rebuilt_projection_path = projection_path.with_extension("rebuilt.turso");
+    let _ = std::fs::remove_file(&rebuilt_projection_path);
+    let _ = std::fs::remove_file(format!("{}-wal", rebuilt_projection_path.display()));
+    let _ = std::fs::remove_file(format!("{}-shm", rebuilt_projection_path.display()));
+    let server = start(Config::new(
+        objectlog_turso_spec(object_root.clone(), rebuilt_projection_path.clone()),
+        0,
+        "127.0.0.1:0".to_string(),
+        Duration::from_secs(60),
+        vec![qdef()],
+    ))
+    .await
+    .expect("turso rebuild from object log");
+    let mut con = redis_test_connection(server.addr()).await;
+    let empty: Option<StreamReadReply> = redis::cmd("XREADGROUP")
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
         .await
         .unwrap();
-    reopened.create_queue(qdef()).await.unwrap();
-    assert_eq!(reopened.metrics(&qkey()).await.unwrap().complete, 1);
-    assert_eq!(
-        fireweed_engine::AsyncProjectionStore::item_state(
-            reopened.projection().as_ref(),
-            qkey(),
-            item_id,
-        )
-        .await
-        .unwrap(),
-        Some(fireweed_core::ItemState::Complete),
+    assert!(
+        empty.is_none(),
+        "acked item must not redeliver after Turso rebuild from object log"
     );
-
-    drop(reopened);
+    let next_id: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("priority")
+        .arg(9)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_ne!(
+        next_id, first_id,
+        "post-reopen push must not remint an existing item id"
+    );
+    server.shutdown_and_drain(Duration::from_secs(5)).await;
     let _ = std::fs::remove_dir_all(&object_root);
     let _ = std::fs::remove_file(&projection_path);
+    let _ = std::fs::remove_file(&rebuilt_projection_path);
 }
 
+/// AC-TURSO-5: empty path fails closed before any Turso/database I/O.
 #[cfg(feature = "turso-projection")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn object_log_turso_create_loser_can_push_claim_and_reopen() {
-    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
-    let (object_root, projection_path) = tmp_runtime_paths("objectlog-turso-create-race");
-    let config = SegmentConfig::new(1, 5).unwrap();
-    let store = Arc::new(LocalFsBlobStore::open(&object_root).unwrap());
-    let left = ObjectLogTursoBackend::open_with_blob_store(store.clone(), &projection_path, config)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn turso_startup_validation_precedes_storage_io() {
+    let root = std::env::temp_dir().join(format!(
+        "fw-turso-preio-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    // Intentionally do not create root: validation must fail before log/projection open.
+    let result = start(Config::new(
+        BackendSpec {
+            log: LogSpec::ObjectLog(ObjectLogSpec::local(
+                root.clone(),
+                SegmentConfig::new(262_144, 20).unwrap(),
+            )),
+            projection: ProjectionSpec::Turso {
+                path: std::path::PathBuf::new(),
+            },
+            control_plane: ControlPlaneSpec::InProcess,
+            response_barrier: ResponseBarrierSpec::Strict,
+            async_projection: None,
+            sqlite_projection_deferred_flush_chunk: None,
+        },
+        0,
+        "127.0.0.1:0".to_string(),
+        Duration::from_secs(60),
+        vec![qdef()],
+    ))
+    .await;
+    let Err(err) = result else {
+        panic!("empty turso path must fail before I/O");
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("turso projection path must not be empty"),
+        "unexpected pre-I/O error: {msg}"
+    );
+    assert!(
+        !root.exists(),
+        "validation must not create the object-log root before rejecting empty Turso path"
+    );
+}
+
+/// Server surface: memory × turso (Class B) push/claim via RESP; proves all-log Turso arms compile
+/// through the shared composition path.
+#[cfg(feature = "turso-projection")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn memory_turso_server_push_claim_lifecycle() {
+    let projection = std::env::temp_dir().join(format!(
+        "fw-mem-turso-{}-{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&projection);
+    let server = start(Config::new(
+        BackendSpec {
+            log: LogSpec::Memory,
+            projection: ProjectionSpec::Turso {
+                path: projection.clone(),
+            },
+            control_plane: ControlPlaneSpec::InProcess,
+            response_barrier: ResponseBarrierSpec::Strict,
+            async_projection: None,
+            sqlite_projection_deferred_flush_chunk: None,
+        },
+        0,
+        "127.0.0.1:0".to_string(),
+        Duration::from_secs(60),
+        vec![qdef()],
+    ))
+    .await
+    .expect("memory×turso starts");
+    let mut con = redis_test_connection(server.addr()).await;
+    let produced: String = redis::cmd("XADD")
+        .arg("t1:q1")
+        .arg("*")
+        .arg("priority")
+        .arg(1)
+        .query_async(&mut con)
         .await
         .unwrap();
-    let right =
-        ObjectLogTursoBackend::open_with_blob_store(store.clone(), &projection_path, config)
-            .await
-            .unwrap();
-    let definition = qdef();
-
-    let (left_outcome, right_outcome) = tokio::join!(
-        left.create_queue(definition.clone()),
-        right.create_queue(definition.clone())
-    );
-    let left_outcome = left_outcome.unwrap();
-    let right_outcome = right_outcome.unwrap();
-    assert_eq!(
-        usize::from(left_outcome.created) + usize::from(right_outcome.created),
-        1
-    );
-    assert_eq!(left_outcome.definition, definition);
-    assert_eq!(right_outcome.definition, definition);
-
-    let loser = if left_outcome.created { &right } else { &left };
-    let ids = loser
-        .push(&qkey(), vec![PushSpec::default()], ts(0), None)
+    let reply: StreamReadReply = redis::cmd("XREADGROUP")
+        .arg("GROUP")
+        .arg("g")
+        .arg("c")
+        .arg("STREAMS")
+        .arg("t1:q1")
+        .arg(">")
+        .query_async(&mut con)
         .await
         .unwrap();
-    let claimed = loser
-        .claim(ClaimRequest {
-            eligibility_time: None,
-            shard: qkey(),
-            worker_id: WorkerId::new("turso-create-loser").unwrap(),
-            max_items: 1,
-            lease_token: LeaseToken::new("turso-create-loser-lease").unwrap(),
-            lease_expires_at: ts(30),
-            now: ts(1),
-            compatibility: Default::default(),
-            expected_epoch: None,
-        })
-        .await
-        .unwrap();
-    assert_eq!(claimed.items.len(), 1);
-    assert_eq!(claimed.items[0].item_id, ids[0]);
-    drop(left);
-    drop(right);
-
-    let reopened = ObjectLogTursoBackend::open_with_blob_store(store, &projection_path, config)
-        .await
-        .unwrap();
-    let reopened_outcome = reopened.create_queue(definition.clone()).await.unwrap();
-    assert!(!reopened_outcome.created);
-    assert_eq!(reopened_outcome.definition, definition);
-    assert_eq!(
-        reopened.queue_definition(&qkey()).await.unwrap(),
-        definition
-    );
-    assert_eq!(
-        fireweed_engine::AsyncProjectionStore::item_state(
-            reopened.projection().as_ref(),
-            qkey(),
-            ids[0],
-        )
-        .await
-        .unwrap(),
-        Some(fireweed_core::ItemState::Leased)
-    );
-
-    drop(reopened);
-    let _ = std::fs::remove_dir_all(&object_root);
-    let _ = std::fs::remove_file(&projection_path);
-    let _ = std::fs::remove_file(format!("{}-wal", projection_path.display()));
-    let _ = std::fs::remove_file(format!("{}-shm", projection_path.display()));
+    assert_eq!(reply.keys[0].ids[0].id, produced);
+    server.shutdown_and_drain(Duration::from_secs(5)).await;
+    let _ = std::fs::remove_file(&projection);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

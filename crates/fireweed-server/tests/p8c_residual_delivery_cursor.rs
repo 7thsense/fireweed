@@ -143,6 +143,8 @@ fn kafka_sink() -> ChangeRecordSinkConfig {
     }
 }
 
+#[cfg_attr(feature = "external-kafka", allow(dead_code))]
+#[cfg(not(feature = "external-kafka"))]
 const EXTERNAL_KAFKA_FEATURE_REQUIRED: &str = "external-kafka change record sink requires the `external-kafka` cargo feature (pure-Rust rskafka); \
      the default in-process embedded surface needs no endpoint";
 
@@ -725,7 +727,7 @@ async fn p8c_residual_filesystem_log_cursor_lifecycle() {
     let flush = flush_config_from_segment(262_144, 1);
 
     let positions = {
-        let log = ObjectLogEngineStore::open_local(&root, flush.clone())
+        let log = ObjectLogEngineStore::open_local(&root, flush)
             .await
             .expect("open filesystem log");
         let mut definition = qdef();
