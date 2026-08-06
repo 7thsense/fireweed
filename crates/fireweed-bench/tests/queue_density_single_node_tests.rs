@@ -175,7 +175,8 @@ where
     futures::executor::block_on(async {
         for i in 0..density {
             let key = qk("density", &format!("cold{i}"));
-            fireweed.create_queue(qdef("density", &format!("cold{i}")))
+            fireweed
+                .create_queue(qdef("density", &format!("cold{i}")))
                 .await
                 .unwrap();
             seed(&fireweed, &key, cold_each, batch).await;
@@ -236,7 +237,8 @@ fn measure_hot_under_concurrent_load(
     let fireweed = Arc::new(open_memory(Arc::new(SysClock)));
     futures::executor::block_on(async {
         for i in 0..cold {
-            fireweed.create_queue(qdef("noisy", &format!("c{i}")))
+            fireweed
+                .create_queue(qdef("noisy", &format!("c{i}")))
                 .await
                 .unwrap();
         }
@@ -267,7 +269,10 @@ fn measure_hot_under_concurrent_load(
                         seed(&fireweed, q, NOISY_BATCH, NOISY_BATCH as usize).await;
                         let mut d = 0u64;
                         while d < NOISY_BATCH {
-                            let c = fireweed.claim(q, NOISY_BATCH as usize, 3_600_000).await.unwrap();
+                            let c = fireweed
+                                .claim(q, NOISY_BATCH as usize, 3_600_000)
+                                .await
+                                .unwrap();
                             if c.is_empty() {
                                 break;
                             }
@@ -286,7 +291,8 @@ fn measure_hot_under_concurrent_load(
     // Hot driver: wait for the noisy pool to be running, then measure the hot queue under concurrent load.
     barrier.wait();
     let hot = qk("noisy", "hot");
-    let (push_rate, claim_rate) = futures::executor::block_on(run_hot(&fireweed, &hot, hot_items, batch));
+    let (push_rate, claim_rate) =
+        futures::executor::block_on(run_hot(&fireweed, &hot, hot_items, batch));
     stop.store(true, Ordering::Relaxed);
     let noisy_ops: u64 = handles.into_iter().map(|h| h.join().unwrap()).sum();
     (push_rate, claim_rate, noisy_ops)
@@ -604,81 +610,75 @@ fn queue_density_single_node_durable_tests() {
         "must stand up >=1000 co-resident durable sqlite_log_sqlite_projection queues"
     );
 
-    // ---- Optional reduced POSTGRES density point (gated on a live DB) ----
+    // ---- Reduced POSTGRES density point (fail-closed on live DB) ----
     // 1000 durable queues on a live postgres schema (create_queue + seed each, per-queue) is impractically
     // slow for an in-process test, so postgres runs a REDUCED residency ladder (0 -> 100) purely to
     // demonstrate the same shape holds on a third durable backend. The object_log and
     // sqlite_log_sqlite_projection substrates at 1000 above are the required deliverable; this is a
-    // supporting, honestly-reduced point.
+    // supporting, honestly-reduced point. Missing FIREWEED_PG_TEST_URL is a hard failure (no LOUD skip).
+    let url = std::env::var("FIREWEED_PG_TEST_URL").expect(
+        "FIREWEED_PG_TEST_URL required for postgres durable density point (fail-closed live postgres; no LOUD skip)",
+    );
+    assert!(
+        !url.trim().is_empty(),
+        "FIREWEED_PG_TEST_URL must be non-empty (fail-closed live postgres; no LOUD skip)"
+    );
     let pg_densities = [0usize, 100];
-    let pg_points: Vec<ResidencyPoint> = match std::env::var("FIREWEED_PG_TEST_URL") {
-        Ok(url) if !url.trim().is_empty() => {
-            println!(
-                "\nTP-002 E2 queue density — DURABLE residency ladder (single node, postgres, REDUCED 0->100):"
-            );
-            println!(
-                "  co-resident queues | hot push items/s | hot claim items/s | cold still resident"
-            );
-            let mut pts = Vec::new();
-            for &d in &pg_densities {
-                let p = measure_residency_on(
-                    || {
-                        let schema = format!(
-                            "fireweed_density_{}_{}",
-                            std::process::id(),
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_nanos()
-                        );
-                        open_postgres_runtime(
-                            PostgresRuntimeConfig {
-                                url: ConfigSecret::new(url.clone()),
-                                schema: Some(schema),
-                                mode: PostgresMode::LogReplay,
-                                node_id: None,
-                                coordination: None,
-                            },
-                            Arc::new(SysClock),
-                        )
-                        .expect("connect postgres")
+    println!(
+        "\nTP-002 E2 queue density — DURABLE residency ladder (single node, postgres, REDUCED 0->100):"
+    );
+    println!("  co-resident queues | hot push items/s | hot claim items/s | cold still resident");
+    let mut pg_points = Vec::new();
+    for &d in &pg_densities {
+        let p = measure_residency_on(
+            || {
+                let schema = format!(
+                    "fireweed_density_{}_{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                );
+                open_postgres_runtime(
+                    PostgresRuntimeConfig {
+                        url: ConfigSecret::new(url.clone()),
+                        schema: Some(schema),
+                        mode: PostgresMode::LogReplay,
+                        node_id: None,
+                        coordination: None,
                     },
-                    d,
-                    DURABLE_COLD_EACH,
-                    DURABLE_HOT_ITEMS,
-                    DURABLE_BATCH,
-                );
-                println!(
-                    "  {:>18} | {:>16.0} | {:>17.0} | {:>6} / {}",
-                    p.density, p.hot_push_rate, p.hot_claim_rate, p.cold_resident_after, p.density
-                );
-                pts.push(p);
-            }
-            // Same portable durable bars at the reduced scale: fully resident + measurable progress.
-            for p in &pts {
-                assert_eq!(
-                    p.cold_resident_after, p.density,
-                    "all {} postgres cold queues must remain fully resident; only {} were",
-                    p.density, p.cold_resident_after
-                );
-                assert!(
-                    p.hot_push_rate.is_finite()
-                        && p.hot_push_rate > 0.0
-                        && p.hot_claim_rate.is_finite()
-                        && p.hot_claim_rate > 0.0,
-                    "postgres hot queue must progress at {} co-resident queues",
-                    p.density
-                );
-            }
-            pts
-        }
-        _ => {
-            eprintln!(
-                "LOUD-SKIP: postgres durable density point — set FIREWEED_PG_TEST_URL to a live DB to run the reduced 0->100 postgres ladder (object_log_sqlite_projection at 1000 is the required deliverable and ran above)"
-            );
-            Vec::new()
-        }
-    };
+                    Arc::new(SysClock),
+                )
+                .expect("connect postgres")
+            },
+            d,
+            DURABLE_COLD_EACH,
+            DURABLE_HOT_ITEMS,
+            DURABLE_BATCH,
+        );
+        println!(
+            "  {:>18} | {:>16.0} | {:>17.0} | {:>6} / {}",
+            p.density, p.hot_push_rate, p.hot_claim_rate, p.cold_resident_after, p.density
+        );
+        pg_points.push(p);
+    }
+    // Same portable durable bars at the reduced scale: fully resident + measurable progress.
+    for p in &pg_points {
+        assert_eq!(
+            p.cold_resident_after, p.density,
+            "all {} postgres cold queues must remain fully resident; only {} were",
+            p.density, p.cold_resident_after
+        );
+        assert!(
+            p.hot_push_rate.is_finite()
+                && p.hot_push_rate > 0.0
+                && p.hot_claim_rate.is_finite()
+                && p.hot_claim_rate > 0.0,
+            "postgres hot queue must progress at {} co-resident queues",
+            p.density
+        );
+    }
 
     // ---- Emit durable-backend E2 density evidence (REAL measured numbers) ----
     // Ordinary and governed runs write only to a typed, external run-owned ledger. Promotion into
@@ -820,8 +820,8 @@ fn emit_and_verify(suite: &str, row: &fireweed_release::LedgerRow, evidence_id: 
         .expect("create run-owned density ledger path");
     path.delete().expect("clear run-owned density ledger");
     fireweed_release::append_row(&path, row).expect("emit ledger row");
-    let summary = fireweed_release::verify_ledger(path.path(), true)
-        .expect("emitted row validates strict");
+    let summary =
+        fireweed_release::verify_ledger(path.path(), true).expect("emitted row validates strict");
     // SMOKE-tier row: the id is recorded under smoke_evidence_ids (a release gate must NOT count it toward
     // the headline E2 requirement).
     assert!(

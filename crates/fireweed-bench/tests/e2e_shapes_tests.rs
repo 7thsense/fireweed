@@ -2,8 +2,8 @@
 //! pg-gated backends. Runs the full [`fireweed_bench::lifecycle`] (push → claim → update_fields →
 //! ack/nack(retry) → reclaim_expired → re-drain) at a SMALL scale and asserts the state-machine invariants.
 //!
-//! Embedded backends always run. The postgres / postgres_relational backends are gated on
-//! `FIREWEED_PG_TEST_URL`; without it they LOUD-skip (printed), so the suite passes on a box with no DB.
+//! Embedded backends always run. The postgres / postgres_relational backends require
+//! `FIREWEED_PG_TEST_URL` (fail-closed; no LOUD skip).
 //!
 //! Run in isolation (this is a separate workspace):
 //!   FIREWEED_PG_TEST_URL=postgres://... cargo test --manifest-path crates/fireweed-bench/Cargo.toml \
@@ -39,7 +39,14 @@ fn run_one(backend: &str, fireweed: &Fireweed, shape: &Shape, supports_update: b
     let qn = format!("{backend}-{}", shape.name);
     let q = qkey(&qn);
     block_on(fireweed.create_queue(bench_qdef("bench", &qn, shape))).expect("create queue");
-    let res = block_on(lifecycle(fireweed, &q, shape, ITEMS, BATCH, supports_update));
+    let res = block_on(lifecycle(
+        fireweed,
+        &q,
+        shape,
+        ITEMS,
+        BATCH,
+        supports_update,
+    ));
     let stats = res.unwrap_or_else(|e| panic!("[{backend}] lifecycle failed: {e}"));
     assert_eq!(
         stats.push.items, ITEMS,
@@ -66,7 +73,8 @@ fn lifecycle_over_shapes_sqlite_log() {
     for shape in all_shapes() {
         let path = tmp(&format!("sqlite-{}", shape.name));
         let _ = std::fs::remove_file(&path);
-        let fireweed = open_sqlite(path.to_str().unwrap(), Arc::new(SystemClock)).expect("open sqlite");
+        let fireweed =
+            open_sqlite(path.to_str().unwrap(), Arc::new(SystemClock)).expect("open sqlite");
         run_one("sqlite", &fireweed, &shape, true);
         let _ = std::fs::remove_file(&path);
     }
@@ -95,12 +103,9 @@ fn lifecycle_over_shapes_objectlog() {
 
 #[test]
 fn lifecycle_over_shapes_postgres_log() {
-    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-        eprintln!(
-            "LOUD-SKIP: lifecycle_over_shapes_postgres_log — set FIREWEED_PG_TEST_URL to a live DB to run it"
-        );
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL").expect(
+        "FIREWEED_PG_TEST_URL required for lifecycle_over_shapes_postgres_log (fail-closed live postgres; no LOUD skip)",
+    );
     for shape in all_shapes() {
         let schema = format!(
             "fireweed_e2e_log_{}_{}",
@@ -124,12 +129,9 @@ fn lifecycle_over_shapes_postgres_log() {
 
 #[test]
 fn lifecycle_over_shapes_postgres_relational() {
-    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-        eprintln!(
-            "LOUD-SKIP: lifecycle_over_shapes_postgres_relational — set FIREWEED_PG_TEST_URL to a live DB to run it"
-        );
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL").expect(
+        "FIREWEED_PG_TEST_URL required for lifecycle_over_shapes_postgres_relational (fail-closed live postgres; no LOUD skip)",
+    );
     for shape in all_shapes() {
         let schema = format!(
             "fireweed_e2e_rel_{}_{}",

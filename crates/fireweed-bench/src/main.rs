@@ -15,8 +15,10 @@
 //!   cargo run --release -p fireweed-bench -- [--items N] [--batch B] [--backends a,b,c]
 //!       [--workloads ingest,claim,lifecycle,recovery,density] [--shapes minimal,hot_record,...]
 //!       [--queues Q] [--pg-url URL]
-//!   # postgres / postgres_relational need a live DB (else they loud-skip):
+//!   # postgres / postgres_relational require a live DB (fail-closed; no LOUD skip):
 //!   FIREWEED_PG_TEST_URL=postgres://postgres:fireweed@HOST:5432/postgres cargo run --release -p fireweed-bench
+//!   # omit those backends when no DB is available:
+//!   cargo run --release -p fireweed-bench -- --backends memory,sqlite,sqlite_relational,objectlog
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -209,7 +211,8 @@ where
             let fireweed = make();
             let qn = format!("{name}-{}-tput", shape.name);
             let q = qkey(&qn);
-            fireweed.create_queue(bench_qdef("bench", &qn, shape))
+            fireweed
+                .create_queue(bench_qdef("bench", &qn, shape))
                 .await
                 .expect("create queue");
             let mut s = ingest(&fireweed, &q, shape, cfg.items, cfg.batch).await;
@@ -226,7 +229,8 @@ where
             let fireweed = make();
             let qn = format!("{name}-{}-life", shape.name);
             let q = qkey(&qn);
-            fireweed.create_queue(bench_qdef("bench", &qn, shape))
+            fireweed
+                .create_queue(bench_qdef("bench", &qn, shape))
                 .await
                 .expect("create queue");
             match lifecycle(&fireweed, &q, shape, cfg.items, cfg.batch, supports_update).await {
@@ -312,7 +316,8 @@ async fn run_objectlog(cfg: &Config) {
         {
             let fireweed = open_objectlog(&dir, Arc::new(SystemClock)).expect("open objectlog");
             let q = qkey("recov");
-            fireweed.create_queue(bench_qdef("bench", "recov", shape))
+            fireweed
+                .create_queue(bench_qdef("bench", "recov", shape))
                 .await
                 .unwrap();
             ingest(&fireweed, &q, shape, cfg.items, cfg.batch).await;
@@ -325,13 +330,12 @@ async fn run_objectlog(cfg: &Config) {
 }
 
 async fn run_postgres(cfg: &Config) {
-    let Some(url) = cfg.pg_url.clone() else {
-        println!(
-            "{:<20} (SKIPPED — set --pg-url or FIREWEED_PG_TEST_URL to a live DB)",
-            "postgres"
-        );
-        return;
-    };
+    let url = cfg.pg_url.clone().unwrap_or_else(|| {
+        panic!(
+            "postgres backend selected but no live DB: set --pg-url or FIREWEED_PG_TEST_URL \
+             (fail-closed; no LOUD skip). Omit postgres from --backends when no DB is available."
+        )
+    });
     let mut counter = 0usize;
     run_shapes(cfg, "postgres", LOG_FAMILY, true, || {
         counter += 1;
@@ -365,7 +369,8 @@ async fn run_postgres(cfg: &Config) {
             )
             .expect("connect postgres");
             let q = qkey("recov");
-            fireweed.create_queue(bench_qdef("bench", "recov", shape))
+            fireweed
+                .create_queue(bench_qdef("bench", "recov", shape))
                 .await
                 .unwrap();
             ingest(&fireweed, &q, shape, cfg.items, cfg.batch).await;
@@ -387,13 +392,12 @@ async fn run_postgres(cfg: &Config) {
 }
 
 async fn run_postgres_relational(cfg: &Config) {
-    let Some(url) = cfg.pg_url.clone() else {
-        println!(
-            "{:<20} (SKIPPED — set --pg-url or FIREWEED_PG_TEST_URL to a live DB)",
-            "postgres_relational"
-        );
-        return;
-    };
+    let url = cfg.pg_url.clone().unwrap_or_else(|| {
+        panic!(
+            "postgres_relational backend selected but no live DB: set --pg-url or FIREWEED_PG_TEST_URL \
+             (fail-closed; no LOUD skip). Omit postgres_relational from --backends when no DB is available."
+        )
+    });
     let mut counter = 0usize;
     run_shapes(cfg, "postgres_relational", REL_FAMILY, true, || {
         counter += 1;
@@ -430,7 +434,8 @@ where
     {
         let fireweed = reopen(&path);
         let q = qkey("recov");
-        fireweed.create_queue(bench_qdef("bench", "recov", shape))
+        fireweed
+            .create_queue(bench_qdef("bench", "recov", shape))
             .await
             .unwrap();
         ingest(&fireweed, &q, shape, cfg.items, cfg.batch).await;
@@ -441,7 +446,13 @@ where
     let _ = std::fs::remove_file(&path);
 }
 
-async fn report_recovery(name: &str, family: &str, elapsed: Duration, fireweed: &Fireweed, cfg: &Config) {
+async fn report_recovery(
+    name: &str,
+    family: &str,
+    elapsed: Duration,
+    fireweed: &Fireweed,
+    cfg: &Config,
+) {
     let resident = fireweed
         .metrics(&qkey("recov"))
         .await
@@ -473,7 +484,8 @@ async fn density(cfg: &Config) {
     let create_start = Instant::now();
     for i in 0..cfg.queues {
         let name = format!("q{i}");
-        fireweed.create_queue(bench_qdef("bench", &name, &shape))
+        fireweed
+            .create_queue(bench_qdef("bench", &name, &shape))
             .await
             .unwrap();
         ingest(&fireweed, &qkey(&name), &shape, cold_each, cfg.batch).await;
@@ -488,7 +500,8 @@ async fn density(cfg: &Config) {
     );
 
     let hot = format!("q{}", cfg.queues);
-    fireweed.create_queue(bench_qdef("bench", &hot, &shape))
+    fireweed
+        .create_queue(bench_qdef("bench", &hot, &shape))
         .await
         .unwrap();
     let hk = qkey(&hot);
