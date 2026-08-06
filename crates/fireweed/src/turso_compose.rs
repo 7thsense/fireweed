@@ -659,7 +659,104 @@ macro_rules! impl_turso_product_ports {
             }
         }
         impl fireweed_engine::RecoveryReadPort for $ty {}
-        impl BatchUpdatePort for $ty {}
+        impl BatchUpdatePort for $ty {
+            fn batch_update(
+                &self,
+                shard: &QueueKey,
+                request: fireweed_engine::BatchUpdateRequest,
+                now: UtcTimestamp,
+                expected_epoch: Option<u64>,
+            ) -> impl std::future::Future<
+                Output = EngineResult<fireweed_engine::BatchUpdateResponse>,
+            > + Send {
+                let shard = shard.clone();
+                async move {
+                    use fireweed_engine::{
+                        BatchUpdateItemRef, BatchUpdateSnapshotItem, CommandChecksum,
+                        CommandEnvelope, QueueCommand, batch_update_body_hash, plan_batch_update,
+                    };
+
+                    if request.updates.is_empty() {
+                        return Err(EngineError::Invalid("empty batch update"));
+                    }
+                    if request.updates.len() > 1_000 {
+                        return Err(EngineError::BatchTooLarge);
+                    }
+
+                    let definition =
+                        AsyncControlPlane::queue_definition(self.control.as_ref(), shard.clone())
+                            .await?;
+                    let request_id = request.request_id.clone();
+                    let fingerprint = batch_update_body_hash(&request)?;
+
+                    let mut keys = Vec::new();
+                    for update in &request.updates {
+                        match &update.item_ref {
+                            BatchUpdateItemRef::ClientItemKey(key)
+                            | BatchUpdateItemRef::Both {
+                                client_item_key: key,
+                                ..
+                            } => keys.push(key.clone()),
+                            BatchUpdateItemRef::ItemId(_) => {}
+                        }
+                    }
+                    let mut snapshot = Vec::new();
+                    if !keys.is_empty() {
+                        let views = self
+                            .projection
+                            .server_live_items(&shard, &keys)
+                            .await?;
+                        for view in views.into_iter().flatten() {
+                            snapshot.push(BatchUpdateSnapshotItem {
+                                item_id: view.item_id,
+                                client_item_key: view.client_item_key,
+                                state: view.lifecycle_state,
+                                item_version: view.item_version,
+                                fenced: false,
+                                superseded: false,
+                            });
+                        }
+                    }
+
+                    let plan =
+                        plan_batch_update(&definition, true, request.updates, snapshot);
+                    let envelopes: Vec<CommandEnvelope> = plan
+                        .commands
+                        .into_iter()
+                        .map(|(_idx, update)| CommandEnvelope {
+                            command_id: self.ids.next_command_id(),
+                            request_id: Some(request_id.clone()),
+                            request_fingerprint: Some(fingerprint.0),
+                            request_outcome: None,
+                            item_ids: vec![update.item_id],
+                            command: QueueCommand::UpdateFields(update),
+                            checksum: CommandChecksum(0),
+                            created_at: now,
+                        })
+                        .collect();
+
+                    let response = fireweed_engine::BatchUpdateResponse {
+                        request_id,
+                        results: plan.outcomes,
+                    };
+                    if !envelopes.is_empty() {
+                        let epoch = match expected_epoch {
+                            Some(e) => e,
+                            None => {
+                                AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone())
+                                    .await?
+                            }
+                        };
+                        use fireweed_engine::AsyncCommitStrategy;
+                        let strategy = self.engine.commit_strategy();
+                        strategy
+                            .commit(RawCommitRequest::new(shard, envelopes, epoch))
+                            .await?;
+                    }
+                    Ok(response)
+                }
+            }
+        }
 
         impl FinalizePort for $ty {
             fn finalize(
