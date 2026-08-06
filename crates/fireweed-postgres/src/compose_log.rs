@@ -145,7 +145,25 @@ fn next_page_cursor(
 /// The durable postgres command-log axis (ADR-012). The composition serializes access behind its
 /// unit-of-work `Mutex`, so the single connection in the [`RefCell`] is never used concurrently.
 pub struct PostgresLog {
-    client: RefCell<Client>,
+    /// Wrapped so [`Drop`] can move the client off a Tokio worker thread.
+    ///
+    /// `postgres::Client::drop` drives an internal `block_on`. That panics with
+    /// "Cannot start a runtime from within a runtime" when a Tokio handle is
+    /// already present (e.g. Turso `block_on_turso` current-thread open). We
+    /// therefore drop the client on a bare OS thread whenever a handle is live.
+    client: std::mem::ManuallyDrop<RefCell<Client>>,
+}
+
+impl Drop for PostgresLog {
+    fn drop(&mut self) {
+        // SAFETY: Drop runs once; client is not used after this.
+        let client = unsafe { std::mem::ManuallyDrop::take(&mut self.client) };
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let _ = std::thread::spawn(move || drop(client)).join();
+        } else {
+            drop(client);
+        }
+    }
 }
 
 impl PostgresLog {
@@ -180,7 +198,7 @@ impl PostgresLog {
     fn from_client(mut client: Client) -> EngineResult<Self> {
         st(client.batch_execute(SCHEMA))?;
         Ok(Self {
-            client: RefCell::new(client),
+            client: std::mem::ManuallyDrop::new(RefCell::new(client)),
         })
     }
 }
