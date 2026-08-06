@@ -69,9 +69,7 @@ pub fn is_durable_log_cell(cell: &str) -> bool {
 /// Disposable projection rebuild: durable object log + non-memory projection.
 pub fn is_maintenance_cell(cell: &str) -> bool {
     parse_cell(cell)
-        .map(|(log, proj)| {
-            matches!(log, "filesystem" | "s3") && !matches!(proj, "memory")
-        })
+        .map(|(log, proj)| matches!(log, "filesystem" | "s3") && !matches!(proj, "memory"))
         .unwrap_or(false)
 }
 

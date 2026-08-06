@@ -151,7 +151,8 @@ pub fn validate_checkpoint_row(tier: &str, row: &RepetitionResult) -> Result<(),
                 || operation.durations_ns.len() != samples
                 || operation.total_ns == 0
         })
-        || row.projection_catchup.is_some() // baseline Strict matrix has no async catch-up rows
+        || row.projection_catchup.is_some()
+    // baseline Strict matrix has no async catch-up rows
     {
         return Err("checkpoint row violates matrix workload invariants".into());
     }
@@ -355,13 +356,11 @@ pub fn write_evidence(
     let bytes = canonical_bytes(evidence)?;
     path.write(&bytes).map_err(|error| error.to_string())?;
     digest_path
-        .write(
-        format!(
+        .write(format!(
             "{}  {}\n",
             digest_hex(&bytes),
             path.path().file_name().unwrap().to_string_lossy()
-        ),
-    )
+        ))
         .map_err(|error| error.to_string())
 }
 

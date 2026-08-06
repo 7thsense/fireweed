@@ -7,8 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
-use fireweed_objectlog::segmented::{BlobStore, S3BlobStore};
 use fireweed_objectlog::S3CreateOnlyPut;
+use fireweed_objectlog::segmented::{BlobStore, S3BlobStore};
 use postgres::{Client, NoTls};
 use sha2::{Digest, Sha256};
 

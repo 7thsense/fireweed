@@ -348,7 +348,10 @@ pub async fn ingest(
         let n = (items - done).min(batch as u64) as usize;
         let batch_items = make_batch(shape, done, n);
         let t = Instant::now();
-        fireweed.push_batch(q, batch_items).await.expect("push_batch");
+        fireweed
+            .push_batch(q, batch_items)
+            .await
+            .expect("push_batch");
         lat.push(t.elapsed());
         done += n as u64;
     }
@@ -586,12 +589,14 @@ pub async fn lifecycle(
         .map(|c| c.item_id)
         .collect();
     let ack_start = Instant::now();
-    fireweed.ack(q, ack_ids.clone())
+    fireweed
+        .ack(q, ack_ids.clone())
         .await
         .map_err(|e| format!("ack: {e:?}"))?;
     let ack_wall = ack_start.elapsed();
     let not_before = Some(plus_ms(now_ts(), BACKOFF_MS));
-    fireweed.nack(q, nack_ids.clone(), Nack::Retry { not_before })
+    fireweed
+        .nack(q, nack_ids.clone(), Nack::Retry { not_before })
         .await
         .map_err(|e| format!("nack-retry: {e:?}"))?;
 
@@ -649,7 +654,8 @@ pub async fn lifecycle(
         ),
     )?;
     let r2_ids: Vec<ItemId> = round2.iter().map(|c| c.item_id).collect();
-    fireweed.ack(q, r2_ids)
+    fireweed
+        .ack(q, r2_ids)
         .await
         .map_err(|e| format!("round-2 ack: {e:?}"))?;
     let m = metrics!();

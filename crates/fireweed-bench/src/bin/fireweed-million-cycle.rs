@@ -15,9 +15,7 @@ use fireweed::{
     open_async,
 };
 use fireweed_bench::performance_matrix_cells::{FULL_CELL_IDS, SMOKE_CELL_IDS, parse_cell};
-use fireweed_bench::performance_matrix_million_cycle::{
-    WorkSizes, run_million_cycle_with,
-};
+use fireweed_bench::performance_matrix_million_cycle::{WorkSizes, run_million_cycle_with};
 use fireweed_bench::performance_matrix_services::{
     ObjectStoreService, PostgresService, derived_plain_schema,
 };
@@ -262,7 +260,9 @@ fn main() {
         })
         && (postgres.is_none() || s3.is_none())
     {
-        eprintln!("production full register needs FIREWEED_PERF_POSTGRES_URL and FIREWEED_PERF_S3_*");
+        eprintln!(
+            "production full register needs FIREWEED_PERF_POSTGRES_URL and FIREWEED_PERF_S3_*"
+        );
         std::process::exit(2);
     }
 
@@ -297,7 +297,9 @@ fn main() {
             Ok(mut r) => {
                 // Class A: reopen same namespace and require live items still present.
                 // Class B (memory log): no durable log claim; reopen_ok marks the boundary check only.
-                let is_class_b = parse_cell(cell).map(|(l, _)| l == "memory").unwrap_or(false);
+                let is_class_b = parse_cell(cell)
+                    .map(|(l, _)| l == "memory")
+                    .unwrap_or(false);
                 drop(fireweed);
                 if is_class_b {
                     r.reopen_ok = true;
@@ -306,8 +308,7 @@ fn main() {
                         Ok(reopened) => {
                             let keys: Vec<_> = (0..sizes.insert_items.min(100))
                                 .map(|i| {
-                                    fireweed::ClientItemKey::new(format!("mc-{i:09}"))
-                                        .expect("key")
+                                    fireweed::ClientItemKey::new(format!("mc-{i:09}")).expect("key")
                                 })
                                 .collect();
                             r.reopen_ok = drive_cell(cell, async {
@@ -360,8 +361,10 @@ fn main() {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Err(e) = std::fs::write(&path, serde_json::to_vec_pretty(&report).unwrap_or_default())
-        {
+        if let Err(e) = std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&report).unwrap_or_default(),
+        ) {
             eprintln!("write output: {e}");
         } else {
             println!("wrote {}", path.display());

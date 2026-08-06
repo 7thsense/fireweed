@@ -662,8 +662,8 @@ fn tp002_e2_release_rows_emit_only_on_pass() {
     let path = fireweed_release::ledger_path(env!("CARGO_MANIFEST_DIR"), "e2-pass")
         .expect("create run-owned E2 pass ledger path");
     fireweed_release::append_row(&path, &row).expect("emit release row");
-    let summary = fireweed_release::verify_ledger(path.path(), true)
-        .expect("release row validates strict");
+    let summary =
+        fireweed_release::verify_ledger(path.path(), true).expect("release row validates strict");
     assert!(
         summary.evidence_ids.contains("E2") && !summary.smoke_evidence_ids.contains("E2"),
         "a release-tier E2 row must count toward the headline (release) bucket, not smoke"
@@ -763,8 +763,8 @@ fn emit_and_verify(suite: &str, row: &fireweed_release::LedgerRow, evidence_id: 
         .expect("create run-owned scale-out ledger path");
     path.delete().expect("clear run-owned E2 ledger");
     fireweed_release::append_row(&path, row).expect("emit ledger row");
-    let summary = fireweed_release::verify_ledger(path.path(), true)
-        .expect("emitted row validates strict");
+    let summary =
+        fireweed_release::verify_ledger(path.path(), true).expect("emitted row validates strict");
     // These are SMOKE-tier rows: the id is recorded under smoke_evidence_ids (a release gate must NOT count
     // it toward the headline E2/E3 requirement — the live runs supply release-tier evidence).
     assert!(

@@ -13,6 +13,10 @@ use fireweed_bench::performance_matrix::{
     ProjectionCatchupEvidence, RepetitionSpec, run_preflight, run_repetition,
 };
 use fireweed_bench::performance_matrix_analysis::build_comparisons;
+use fireweed_bench::performance_matrix_cells::{
+    FULL_CELL_IDS as CELLS_FULL, SMOKE_CELL_IDS as CELLS_SMOKE,
+    barrier_class as cell_barrier_class, is_maintenance_cell, parse_cell,
+};
 use fireweed_bench::performance_matrix_checkpoint::{
     LifecycleFragment, MatrixCheckpoint, read_checkpoint, read_fragment, read_lifecycle_fragment,
     write_checkpoint, write_fragment, write_lifecycle_fragment,
@@ -25,10 +29,6 @@ use fireweed_bench::performance_matrix_lifecycle::{
     reopen_verify_and_drain, run_projection_maintenance, seed_recovery_population,
 };
 use fireweed_bench::performance_matrix_provenance::collect as collect_provenance;
-use fireweed_bench::performance_matrix_cells::{
-    FULL_CELL_IDS as CELLS_FULL, SMOKE_CELL_IDS as CELLS_SMOKE, barrier_class as cell_barrier_class,
-    is_maintenance_cell, parse_cell,
-};
 use fireweed_bench::performance_matrix_services::{
     AuthorizedCleanup, ObjectStoreService, PostgresService, RunOwnership, SchemaKind,
     SecretRedactor, ServiceLocks, cleanup_owned, derived_plain_schema, facade_postgres_schema,
@@ -302,7 +302,9 @@ fn build_storage_config(
 
     let log = match log_axis {
         "memory" => LogConfig::Memory,
-        "sqlite" => LogConfig::Sqlite { path: log_path.clone() },
+        "sqlite" => LogConfig::Sqlite {
+            path: log_path.clone(),
+        },
         "postgres" => LogConfig::Postgres {
             url: ConfigSecret::new(postgres_url(cfg)?),
             schema: Some(derived_plain_schema(namespace)),
@@ -332,9 +334,7 @@ fn build_storage_config(
 
     let projection = match proj_axis {
         "memory" => ProjectionStoreConfig::Memory,
-        "sqlite" => ProjectionStoreConfig::Sqlite {
-            path: proj_sqlite,
-        },
+        "sqlite" => ProjectionStoreConfig::Sqlite { path: proj_sqlite },
         "turso" => ProjectionStoreConfig::Turso { path: proj_turso },
         "postgres" => ProjectionStoreConfig::Postgres {
             url: ConfigSecret::new(postgres_url(cfg)?),
@@ -382,10 +382,9 @@ fn construct(
                 .map_err(|_| "construct thread panicked".to_owned())?
         })?
     } else if matches!(log, "filesystem" | "s3") || matches!(proj, "turso") {
-        drive_cell(
-            cell,
-            async move { open_async(config, clock).await.map_err(|e| e.to_string()) },
-        )?
+        drive_cell(cell, async move {
+            open_async(config, clock).await.map_err(|e| e.to_string())
+        })?
     } else {
         open(config, clock).map_err(|error| error.to_string())?
     };
@@ -643,9 +642,7 @@ fn cleanup_recipe(cell: &str, namespace: &str, log_path: &Path) -> Result<Cleanu
             let path = log_path
                 .to_str()
                 .ok_or_else(|| "sqlite log path is not utf-8".to_owned())?;
-            CleanupRecipe::LocalAndPostgres(facade_postgres_schema(&format!(
-                "sqlite_pg_{path}"
-            )))
+            CleanupRecipe::LocalAndPostgres(facade_postgres_schema(&format!("sqlite_pg_{path}")))
         }
         _ => CleanupRecipe::Local,
     })
@@ -711,8 +708,7 @@ fn collect_service_topology(cfg: &Config) -> Result<ServiceTopology, String> {
         object_store_bucket_sha256: cfg.s3.as_ref().map(|s3| digest_hex(s3.bucket.as_bytes())),
         object_store_region: cfg.s3.as_ref().map(|s3| s3.region.clone()),
         object_store_provider: cfg.s3.as_ref().map(|_| {
-            std::env::var("FIREWEED_PERF_S3_PROVIDER")
-                .unwrap_or_else(|_| "s3-compatible".into())
+            std::env::var("FIREWEED_PERF_S3_PROVIDER").unwrap_or_else(|_| "s3-compatible".into())
         }),
         object_store_preflight_rtt_ns: cfg
             .s3
@@ -1710,8 +1706,9 @@ fn run(cfg: Config) -> Result<PathBuf, String> {
     let output = fireweed_release::RunOwned::new(&repository_root, run_root, &path)
         .map_err(|error| format!("matrix evidence output is not run-owned: {error}"))?;
     let digest_path = path.with_extension("json.sha256");
-    let digest_output = fireweed_release::RunOwned::new(&repository_root, run_root, &digest_path)
-        .map_err(|error| format!("matrix evidence digest output is not run-owned: {error}"))?;
+    let digest_output =
+        fireweed_release::RunOwned::new(&repository_root, run_root, &digest_path)
+            .map_err(|error| format!("matrix evidence digest output is not run-owned: {error}"))?;
     write_evidence(&output, &digest_output, &evidence)?;
     verify_file(&path)?;
     if evidence.status != "passed" {
