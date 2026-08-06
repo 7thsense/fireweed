@@ -3434,6 +3434,49 @@ impl TursoRelational {
         ensure_shard_owned(Arc::clone(&self.writer), definition).await
     }
 
+    /// Class B / reopen mint floor: greatest durable item id for `shard`.
+    ///
+    /// Prefers `fireweed_id_high_water` (survives terminal reaping); falls back to
+    /// `MAX(item_id)` on live rows so memory-log reopen never remints existing ids.
+    pub async fn recovery_counter_high_water(
+        &self,
+        shard: &QueueKey,
+    ) -> EngineResult<Option<ItemId>> {
+        let tenant = shard.tenant_id.as_str().to_string();
+        let queue = shard.queue_id.as_str().to_string();
+        let connection = self.writer.lock().await;
+        // Prefer the monotonic high-water table when present.
+        if let Some(row) = one_row(
+            &connection,
+            "SELECT item_id FROM fireweed_id_high_water WHERE tenant=?1 AND queue=?2",
+            vec![tenant.clone().into(), queue.clone().into()],
+        )
+        .await?
+        {
+            let id = text(&row[0])?;
+            return Ok(Some(
+                ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?,
+            ));
+        }
+        // Fall back to the greatest live item id (string-encoded; length-then-lex order
+        // matches sqlite id_high_water advance semantics for decimal item ids).
+        let Some(row) = one_row(
+            &connection,
+            "SELECT item_id FROM fireweed_items \
+             WHERE tenant_id=?1 AND queue_id=?2 \
+             ORDER BY length(item_id) DESC, item_id DESC LIMIT 1",
+            vec![tenant.into(), queue.into()],
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        let id = text(&row[0])?;
+        Ok(Some(
+            ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?,
+        ))
+    }
+
     pub(crate) async fn purge_items_validate(
         &self,
         shard: &QueueKey,

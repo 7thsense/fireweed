@@ -70,6 +70,14 @@ NON_S3_LOCAL_CELLS = (
     "filesystem--sqlite",
 )
 
+# Class B memory-log cells (P5): log=memory × {memory,sqlite,turso,postgres}.
+CLASS_B_CELLS = (
+    "memory--memory",
+    "memory--sqlite",
+    "memory--turso",
+    "memory--postgres",
+)
+
 # Forbidden provider-brand tokens in fixtures / cell IDs (P1s / P4 neutrality).
 FORBIDDEN_BRANDS = re.compile(
     r"(?i)\b(garage|minio|eldir|aws|gcs|azure|r2|cloudflare|digitalocean)\b"
@@ -118,6 +126,21 @@ LIFECYCLE_COMMANDS: dict[str, list[list[str]]] = {
             "--test",
             "storage_matrix_t0_t2",
             "storage_matrix_t0_t2_all_twenty_cells",
+            "--",
+            "--nocapture",
+        ],
+        [
+            "rustup",
+            "run",
+            "1.92.0",
+            "cargo",
+            "test",
+            "-p",
+            "fireweed",
+            "--features",
+            "postgres",
+            "--test",
+            "p5_class_b_reopen",
             "--",
             "--nocapture",
         ],
@@ -172,9 +195,11 @@ def resolve_cells(name: str) -> tuple[str, ...]:
         return NON_S3_CELLS
     if name == "non-s3-local":
         return NON_S3_LOCAL_CELLS
+    if name == "class-b":
+        return CLASS_B_CELLS
     if name == "all-listed":
         return NON_S3_CELLS
-    die(f"unknown cell set {name!r} (expected non-s3|non-s3-local)", code=2)
+    die(f"unknown cell set {name!r} (expected non-s3|non-s3-local|class-b)", code=2)
     return ()  # unreachable
 
 
@@ -272,8 +297,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--cells",
         default="non-s3",
-        choices=("non-s3", "non-s3-local", "all-listed"),
-        help="Cell set to require for SNORRI-MATRIX-LIFECYCLE (default non-s3 = 12 cells)",
+        choices=("non-s3", "non-s3-local", "class-b", "all-listed"),
+        help="Cell set to require for lifecycle/reopen ledgers (default non-s3 = 12 cells)",
     )
     parser.add_argument(
         "--ids",

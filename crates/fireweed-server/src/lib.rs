@@ -6279,6 +6279,7 @@ mod class_b_memory_log_tests {
     enum ClassBProjection {
         Memory,
         Sqlite,
+        Turso,
         Postgres,
     }
 
@@ -6287,6 +6288,7 @@ mod class_b_memory_log_tests {
             match self {
                 Self::Memory => "memory",
                 Self::Sqlite => "sqlite",
+                Self::Turso => "turso",
                 Self::Postgres => "postgres",
             }
         }
@@ -6299,6 +6301,7 @@ mod class_b_memory_log_tests {
             match self {
                 Self::Memory => MatrixProjection::Memory,
                 Self::Sqlite => MatrixProjection::Sqlite,
+                Self::Turso => MatrixProjection::Turso,
                 Self::Postgres => MatrixProjection::Postgres,
             }
         }
@@ -6383,6 +6386,9 @@ mod class_b_memory_log_tests {
             ClassBProjection::Memory => ProjectionStoreConfig::Memory,
             ClassBProjection::Sqlite => ProjectionStoreConfig::Sqlite {
                 path: root.join("projection.db"),
+            },
+            ClassBProjection::Turso => ProjectionStoreConfig::Turso {
+                path: root.join("projection.turso"),
             },
             ClassBProjection::Postgres => {
                 let url = std::env::var("FIREWEED_PG_TEST_URL")
@@ -6657,6 +6663,11 @@ mod class_b_memory_log_tests {
             "server match arm for memory×sqlite (Class B) must exist"
         );
         assert!(
+            source.contains("LogSpec::Memory, ProjectionSpec::Turso")
+                || source.contains("assemble_memory_log_turso"),
+            "server match arm for memory×turso (Class B) must exist"
+        );
+        assert!(
             source.contains("LogSpec::Memory, ProjectionSpec::Postgres"),
             "server match arm for memory×postgres (Class B) must exist (feature postgres)"
         );
@@ -6688,10 +6699,11 @@ mod class_b_memory_log_tests {
 
     /// T3 offline: every Class B cell's max claim set bans `durable_log_replay`.
     #[test]
-    fn class_b_three_cells_never_claim_durable_log_replay() {
+    fn class_b_four_cells_never_claim_durable_log_replay() {
         for proj in [
             ClassBProjection::Memory,
             ClassBProjection::Sqlite,
+            ClassBProjection::Turso,
             ClassBProjection::Postgres,
         ] {
             assert_class_b_t3_claims(proj);
@@ -6708,6 +6720,11 @@ mod class_b_memory_log_tests {
         run_class_b_cell_t0_t3(ClassBProjection::Sqlite).await;
     }
 
+    #[tokio::test]
+    async fn class_b_memory_turso_t0_t3() {
+        run_class_b_cell_t0_t3(ClassBProjection::Turso).await;
+    }
+
     /// `memory×postgres` Class B: requires live `FIREWEED_PG_TEST_URL` (and fireweed `postgres` feature).
     /// Skips with `eprintln!` when the fixture is absent; T3 claim ban still runs offline.
     #[tokio::test]
@@ -6715,12 +6732,13 @@ mod class_b_memory_log_tests {
         run_class_b_cell_t0_t3(ClassBProjection::Postgres).await;
     }
 
-    /// Table registration: all three Class B cells are covered by the T0–T3 harness.
+    /// Table registration: all four Class B cells (memory log × memory/sqlite/turso/postgres).
     #[tokio::test]
-    async fn class_b_all_three_cells_t0_t3() {
+    async fn class_b_all_four_cells_t0_t3() {
         for proj in [
             ClassBProjection::Memory,
             ClassBProjection::Sqlite,
+            ClassBProjection::Turso,
             ClassBProjection::Postgres,
         ] {
             run_class_b_cell_t0_t3(proj).await;
