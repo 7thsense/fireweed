@@ -206,13 +206,9 @@ fn drop_schema(url: &str, namespace: &str) {
 
 #[test]
 fn objectlog_postgres_item_mutation_reopens_and_replays_resolved_response() {
-    let Ok(url) = runtime_env("PG_TEST_URL") else {
-        eprintln!(
-            "SKIP objectlog_postgres_item_mutation_reopens_and_replays_resolved_response: \
-             FIREWEED_PG_TEST_URL is unset"
-        );
-        return;
-    };
+    let url = runtime_env("PG_TEST_URL").expect(
+        "SKIP objectlog_postgres_item_mutation_reopens_and_replays_re (fail-closed; no LOUD skip)",
+    );
     let (root, namespace) = unique_fixture("objectlog_postgres_mutation");
     let durability = config(&root, &namespace, &url);
     let clock = Arc::new(ManualClock::at(1_000));
@@ -307,13 +303,9 @@ fn objectlog_postgres_item_mutation_reopens_and_replays_resolved_response() {
 
 #[test]
 fn objectlog_postgres_hot_mutations_and_query_claim_replay_after_reopen() {
-    let Ok(url) = runtime_env("PG_TEST_URL") else {
-        eprintln!(
-            "SKIP objectlog_postgres_hot_mutations_and_query_claim_replay_after_reopen: \
-             FIREWEED_PG_TEST_URL is unset"
-        );
-        return;
-    };
+    let url = runtime_env("PG_TEST_URL").expect(
+        "SKIP objectlog_postgres_hot_mutations_and_query_claim_replay (fail-closed; no LOUD skip)",
+    );
     let (root, namespace) = unique_fixture("objectlog_postgres_hot_mutations");
     let durability = config(&root, &namespace, &url);
     let clock = Arc::new(ManualClock::at(1_000));
@@ -404,12 +396,9 @@ fn objectlog_postgres_hot_mutations_and_query_claim_replay_after_reopen() {
 
 #[test]
 fn public_objectlog_postgres_delete_and_rebuild() {
-    let Ok(url) = runtime_env("PG_TEST_URL") else {
-        eprintln!(
-            "SKIP public_objectlog_postgres_delete_and_rebuild: FIREWEED_PG_TEST_URL is unset"
-        );
-        return;
-    };
+    let url = runtime_env("PG_TEST_URL").expect(
+        "SKIP public_objectlog_postgres_delete_and_rebuild: FIREWEED_ (fail-closed; no LOUD skip)",
+    );
     let (root, schema) = unique_fixture("public_objectlog_postgres");
     let durability = config(&root, &schema, &url);
     let clock = Arc::new(ManualClock::at(1_000));
@@ -658,10 +647,9 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
                     "CI must set FIREWEED_S3_TEST_URL or FIREWEED_S3_TEST_ENDPOINT; S3+Postgres coverage cannot be skipped"
                 );
             }
-            eprintln!(
-                "SKIP public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection: FIREWEED_S3_TEST_URL and FIREWEED_S3_TEST_ENDPOINT are unset"
+            panic!(
+                "SKIP public_s3_objectlog_postgres_open_and_reopen: S3 env unset (fail-closed; no LOUD skip)"
             );
-            return;
         }
     };
     let bucket = runtime_env("S3_TEST_BUCKET").unwrap_or_else(|_| unique_bucket("pg"));
@@ -750,10 +738,8 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
 }
 #[tokio::test(flavor = "current_thread")]
 async fn asynchronous_open_is_safe_inside_tokio() {
-    let Ok(url) = runtime_env("PG_TEST_URL") else {
-        eprintln!("SKIP asynchronous_open_is_safe_inside_tokio: FIREWEED_PG_TEST_URL is unset");
-        return;
-    };
+    let url = runtime_env("PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
     let (root, schema) = unique_fixture("tokio_async_open");
     let fireweed = fireweed::open_objectlog_postgres_async(
         public_config(&root, &schema, &url),

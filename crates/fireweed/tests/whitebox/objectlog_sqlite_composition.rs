@@ -1234,8 +1234,7 @@ fn public_s3_sqlite_delete_and_rebuild() {
     let endpoint = match runtime_env("S3_TEST_URL") {
         Ok(value) => value,
         Err(_) => {
-            eprintln!("SKIP public_s3_sqlite_delete_and_rebuild: FIREWEED_S3_TEST_URL is unset");
-            return;
+            panic!("FIREWEED_S3_TEST_URL required (fail-closed live S3; no LOUD skip)");
         }
     };
     let bucket = runtime_env("S3_TEST_BUCKET").unwrap_or_else(|_| "fireweed-test".into());

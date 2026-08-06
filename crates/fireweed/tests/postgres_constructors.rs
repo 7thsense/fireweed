@@ -75,10 +75,8 @@ fn schema_url(url: &str, schema: &str) -> String {
 /// working multi-instance owner (acquires + fences) without the client naming either.
 #[test]
 fn open_postgres_coordinated_builds_a_working_owner() {
-    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-        eprintln!("OWED-6 SKIPPED — set FIREWEED_PG_TEST_URL to a live DB");
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("the test clock is after the Unix epoch")
@@ -116,10 +114,8 @@ fn open_postgres_coordinated_builds_a_working_owner() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn open_postgres_runtime_async_is_safe_inside_tokio() {
-    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-        eprintln!("SKIPPED — set FIREWEED_PG_TEST_URL to a live DB");
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("the test clock is after the Unix epoch")
