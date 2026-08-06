@@ -48,6 +48,30 @@ pub async fn run_with_commit_boundary(
     }
 }
 
+/// P6-owned surface only: ownership, reads/discovery, metrics/index/hot queries,
+/// range/aggregate/bucket query, and projection-control capabilities.
+///
+/// Excludes P7 claim/finalize, P8 mutation/maintenance, and P9 commit so leaf
+/// ownership stays clean while still exercising every P6 method contract.
+pub async fn run_p6_surface(
+    cell: &str,
+    fireweed: &Fireweed,
+    expect_projection_control: bool,
+) {
+    let mut failures = Vec::new();
+    exercise_control(cell, fireweed, &mut failures).await;
+    exercise_push_read_and_index(cell, fireweed, &mut failures).await;
+    exercise_metrics_and_claimed(cell, fireweed, &mut failures).await;
+    exercise_queries(cell, fireweed, &mut failures).await;
+    exercise_projection(cell, fireweed, expect_projection_control, &mut failures).await;
+    if !failures.is_empty() {
+        panic!(
+            "P6 query/ownership/discovery parity failed for {cell}:\n{}",
+            failures.join("\n")
+        );
+    }
+}
+
 async fn call<T, F>(cell: &str, method: &str, failures: &mut Vec<String>, future: F) -> Option<T>
 where
     F: Future<Output = Result<T, EngineError>>,
@@ -2265,6 +2289,83 @@ async fn exercise_commit(
         ),
         Err(error) => failures.push(format!("{cell}.commit_capabilities: {error}")),
     }
+}
+
+/// P6 metrics + claimed reads without the full claim/finalize lifecycle surface.
+async fn exercise_metrics_and_claimed(cell: &str, fw: &Fireweed, failures: &mut Vec<String>) {
+    let queue = create(cell, fw, failures, "metrics-claimed").await;
+    let _ = call(
+        cell,
+        "push[metrics-claimed]",
+        failures,
+        fw.push_batch(
+            &queue,
+            vec![item("metrics-a", 1), item("metrics-b", 2), item("metrics-c", 3)],
+        ),
+    )
+    .await;
+    let before = call(cell, "metrics", failures, fw.metrics(&queue)).await;
+    check(
+        cell,
+        "metrics",
+        failures,
+        before
+            .as_ref()
+            .is_some_and(|value| value.pending == 3 && value.leased == 0),
+        "metrics did not count three pending items before claim",
+    );
+    let claimed = call(
+        cell,
+        "claim[metrics-claimed]",
+        failures,
+        fw.claim(&queue, 1, 60_000),
+    )
+    .await;
+    check(
+        cell,
+        "claim[metrics-claimed]",
+        failures,
+        claimed.as_ref().is_some_and(|items| items.len() == 1),
+        "did not lease one item for claimed/metrics observation",
+    );
+    if let Some(items) = claimed.as_ref() {
+        if let Some(first) = items.first() {
+            let leased = call(
+                cell,
+                "claimed",
+                failures,
+                fw.claimed(&queue, &[first.item_id]),
+            )
+            .await;
+            check(
+                cell,
+                "claimed",
+                failures,
+                leased.as_ref().is_some_and(|rows| {
+                    rows.len() == 1
+                        && rows[0].item_id == first.item_id
+                        && rows[0].lease_token.is_some()
+                }),
+                "claimed did not return the leased item with a token",
+            );
+        }
+    }
+    let after = call(
+        cell,
+        "metrics[after-claim]",
+        failures,
+        fw.metrics(&queue),
+    )
+    .await;
+    check(
+        cell,
+        "metrics[after-claim]",
+        failures,
+        after
+            .as_ref()
+            .is_some_and(|value| value.pending == 2 && value.leased == 1),
+        "metrics did not reflect one leased and two pending items",
+    );
 }
 
 async fn exercise_queries(cell: &str, fw: &Fireweed, failures: &mut Vec<String>) {
