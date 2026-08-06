@@ -121,7 +121,9 @@ pub struct ResolvedItemValues {
     pub priority: Option<PriorityValue>,
     pub not_before: Option<UtcTimestamp>,
     pub eligible_since: UtcTimestamp,
+    #[serde(with = "crate::wire_bytes::option_bytes")]
     pub payload: Option<Bytes>,
+    #[serde(with = "crate::wire_bytes::btreemap_bytes")]
     pub fields: BTreeMap<String, Bytes>,
     pub metadata: Metadata,
     pub gate_keys: Vec<String>,
@@ -328,10 +330,11 @@ pub struct PushItem {
     pub not_before: Option<UtcTimestamp>,
     pub group_key: Option<GroupKey>,
     pub max_attempts: u32,
+    #[serde(with = "crate::wire_bytes::option_bytes")]
     pub payload: Option<Bytes>,
     /// Structured hot-storage fields for compound work records. Defaulted for backwards-compatible log
     /// replay of commands written before structured fields existed.
-    #[serde(default)]
+    #[serde(default, with = "crate::wire_bytes::btreemap_bytes")]
     pub fields: BTreeMap<String, Bytes>,
     /// Caller-owned metadata for compatibility predicates and claim responses. Defaulted for log replay of
     /// commands written before metadata existed.
@@ -477,6 +480,7 @@ pub struct LeaseExpiredCommand {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UpdateFieldsCommand {
     pub item_id: ItemId,
+    #[serde(with = "crate::wire_bytes::btreemap_option_bytes")]
     pub field_ops: BTreeMap<String, Option<Bytes>>,
     pub payload: PayloadUpdate,
     /// Reschedule the item's priority (BQ pqueue-7a96f929). `Keep` leaves it; `Set(Some(p))` re-prices the
@@ -496,7 +500,7 @@ pub struct UpdateFieldsCommand {
     pub set_entity_document: Option<serde_json::Value>,
     /// API-001 `BatchUpdate` uses full replacement for the hot field map. `None` preserves the legacy
     /// FAC-1 delta behavior; `Some` replaces the complete map before any (normally empty) `field_ops`.
-    #[serde(default)]
+    #[serde(default, with = "crate::wire_bytes::option_btreemap_bytes")]
     pub set_fields: Option<BTreeMap<String, Bytes>>,
     /// API-001 full metadata replacement. Kept on the durable command so projection rebuild is exact.
     #[serde(default)]
@@ -524,6 +528,7 @@ pub enum ScheduleUpdate<T> {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PayloadUpdate {
     Keep,
+    #[serde(with = "crate::wire_bytes::option_bytes")]
     Set(Option<Bytes>),
 }
 
@@ -553,9 +558,9 @@ pub struct PurgeItemsCommand {
 /// record carries no lifecycle, lease, priority, or eligibility.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct SideRecord {
-    #[serde(default)]
+    #[serde(default, with = "crate::wire_bytes::vec_u8")]
     pub key: Vec<u8>,
-    #[serde(default)]
+    #[serde(default, with = "crate::wire_bytes::bytes_val")]
     pub payload: Bytes,
 }
 
@@ -571,7 +576,7 @@ pub struct WriteSideRecordsCommand {
 /// Validated pre-commit, so apply is infallible (overwrite the stored fence for `instance_key` with `next`).
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct AdvanceInstanceFenceCommand {
-    #[serde(default)]
+    #[serde(default, with = "crate::wire_bytes::vec_u8")]
     pub instance_key: Vec<u8>,
     #[serde(default)]
     pub expected: u64,
@@ -1246,9 +1251,9 @@ pub struct CommitOutcomeEntry {
     pub consumed_input_id: ItemId,
     #[serde(default)]
     pub additional_consumed_input_ids: Vec<ItemId>,
-    #[serde(default)]
+    #[serde(default, with = "crate::wire_bytes::option_instance")]
     pub instance: Option<(Vec<u8>, u64)>,
-    #[serde(default)]
+    #[serde(default, with = "crate::wire_bytes::vec_vec_u8")]
     pub side_record_keys: Vec<Vec<u8>>,
     #[serde(default)]
     pub lifecycle_item_ids: Vec<ItemId>,
@@ -1429,6 +1434,57 @@ mod serde_tests {
         };
         assert_eq!(p.items[0].payload.as_deref(), Some(&b"payload"[..]));
         assert_eq!(p.items[0].priority, Some(PriorityValue::Int64(7)));
+    }
+
+    #[test]
+    fn side_record_bytes_encode_as_base64_not_integer_arrays() {
+        let raw = vec![0x5Au8; 3149];
+        let env = envelope(QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+            records: vec![SideRecord {
+                key: b"state/run-1".to_vec(),
+                payload: Bytes::from(raw.clone()),
+            }],
+        }));
+        let json = serde_json::to_string(&env).unwrap();
+        assert!(
+            !json.contains("[90,90,90"),
+            "must not emit integer-array byte encoding"
+        );
+        // Payload field alone is base64 of raw (~4/3); full envelope includes structure.
+        let b64_payload = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &raw);
+        assert!(json.contains(&b64_payload));
+        let expansion = b64_payload.len() as f64 / raw.len() as f64;
+        assert!(
+            expansion <= crate::wire_bytes::MAX_ENCODED_EXPANSION,
+            "payload expansion {expansion}"
+        );
+        let decoded: CommandEnvelope = serde_json::from_str(&json).unwrap();
+        let QueueCommand::WriteSideRecords(w) = decoded.command else {
+            panic!("expected WriteSideRecords");
+        };
+        assert_eq!(w.records[0].payload.as_ref(), raw.as_slice());
+    }
+
+    #[test]
+    fn legacy_integer_array_side_record_still_replays() {
+        // Minimal envelope body with legacy integer-array key/payload.
+        let json = r#"{
+            "command_id":"c1",
+            "request_id":null,
+            "item_ids":[],
+            "command":{"WriteSideRecords":{"records":[{
+                "key":[115,116,97,116,101],
+                "payload":[111,112,97,113,117,101]
+            }]}},
+            "checksum":0,
+            "created_at":{"seconds":1,"nanoseconds":0}
+        }"#;
+        let decoded: CommandEnvelope = serde_json::from_str(json).unwrap();
+        let QueueCommand::WriteSideRecords(w) = decoded.command else {
+            panic!("expected WriteSideRecords");
+        };
+        assert_eq!(w.records[0].key, b"state");
+        assert_eq!(&w.records[0].payload[..], b"opaque");
     }
 
     #[test]

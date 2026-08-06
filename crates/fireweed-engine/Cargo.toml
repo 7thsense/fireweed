@@ -15,6 +15,7 @@ path = "src/lib.rs"
 fireweed-core = { path = "../fireweed-core" }
 axon-esf.workspace = true
 bytes = { version = "1", features = ["serde"] }
+base64 = "0.22"
 sha2 = "0.11"
 getrandom = "0.3"
 # Command/log types derive Serialize/Deserialize so a durable backend can persist the command log.

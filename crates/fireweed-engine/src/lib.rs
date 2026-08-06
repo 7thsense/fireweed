@@ -36,6 +36,8 @@ mod port;
 pub mod schema_validation;
 pub mod sequenced_metadata;
 mod types;
+/// Compact Base64 wire encoding for durable envelope byte fields (fireweed-659490cc).
+pub mod wire_bytes;
 
 pub use active_scope::{
     ActiveScope, DiscoveryGranularity, project_scopes, resolve_granularity, roll_up_queue_scopes,

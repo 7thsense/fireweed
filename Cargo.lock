@@ -1469,6 +1469,7 @@ name = "fireweed-engine"
 version = "0.29.3"
 dependencies = [
  "axon-esf",
+ "base64",
  "bytes",
  "fireweed-conformance",
  "fireweed-core",
