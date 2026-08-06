@@ -72,6 +72,40 @@ pub async fn run_p6_surface(
     }
 }
 
+/// P8-owned surface: update/fields/batch/mutate, gates, reclaim, purge, and
+/// bounded_mutation. Fails closed on unexpected `Unavailable`.
+pub async fn run_p8_surface(cell: &str, fireweed: &Fireweed) {
+    let mut failures = Vec::new();
+    exercise_control(cell, fireweed, &mut failures).await;
+    exercise_mutation(cell, fireweed, &mut failures).await;
+    if !failures.is_empty() {
+        panic!(
+            "P8 mutation/maintenance parity failed for {cell}:\n{}",
+            failures.join("\n")
+        );
+    }
+}
+
+/// P9-owned surface: claim/finalize path scaffolding plus commit, multi-claim,
+/// commit_capabilities, explain, side records, and atomic rejection.
+pub async fn run_p9_surface(
+    cell: &str,
+    fireweed: &Fireweed,
+    expect_atomic_commit: bool,
+) {
+    let mut failures = Vec::new();
+    exercise_control(cell, fireweed, &mut failures).await;
+    exercise_push_read_and_index(cell, fireweed, &mut failures).await;
+    exercise_claim_and_finalize(cell, fireweed, &mut failures).await;
+    exercise_commit(cell, fireweed, expect_atomic_commit, &mut failures).await;
+    if !failures.is_empty() {
+        panic!(
+            "P9 transaction parity failed for {cell}:\n{}",
+            failures.join("\n")
+        );
+    }
+}
+
 async fn call<T, F>(cell: &str, method: &str, failures: &mut Vec<String>, future: F) -> Option<T>
 where
     F: Future<Output = Result<T, EngineError>>,

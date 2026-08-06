@@ -129,6 +129,16 @@ path = "tests/p6n_non_s3_query_parity.rs"
 required-features = ["memory", "sqlite", "objectlog"]
 
 [[test]]
+name = "p8n_non_s3_mutation_parity"
+path = "tests/p8n_non_s3_mutation_parity.rs"
+required-features = ["memory", "sqlite", "objectlog"]
+
+[[test]]
+name = "p9n_non_s3_transaction_parity"
+path = "tests/p9n_non_s3_transaction_parity.rs"
+required-features = ["memory", "sqlite", "objectlog"]
+
+[[test]]
 name = "p5_class_b_reopen"
 path = "tests/p5_class_b_reopen.rs"
 required-features = ["memory", "sqlite", "turso"]
@@ -195,6 +205,16 @@ required-features = ["objectlog", "sqlite", "postgres"]
 [[test]]
 name = "p6s3_s3_query_parity"
 path = "tests/p6s3_s3_query_parity.rs"
+required-features = ["objectlog", "sqlite", "postgres"]
+
+[[test]]
+name = "p8s3_s3_mutation_parity"
+path = "tests/p8s3_s3_mutation_parity.rs"
+required-features = ["objectlog", "sqlite", "postgres"]
+
+[[test]]
+name = "p9s3_s3_transaction_parity"
+path = "tests/p9s3_s3_transaction_parity.rs"
 required-features = ["objectlog", "sqlite", "postgres"]
 
 [[test]]
