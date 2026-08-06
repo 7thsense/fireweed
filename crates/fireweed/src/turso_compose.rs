@@ -303,6 +303,14 @@ where
             if projection_owns_catalog && let Some(position) = high_water.clone() {
                 AsyncLogStore::set_high_water(self.log.as_ref(), shard.clone(), position).await?;
             }
+            // Class B (empty memory log): seed mint counters from the durable projection so
+            // reopen never remints item ids that already exist in fireweed_items.
+            // Class A still seeds from log envelopes below.
+            if projection_owns_catalog
+                && let Some(item_id) = self.projection.recovery_counter_high_water(&shard).await?
+            {
+                self.counters.observe(&shard, item_id);
+            }
             let mut from = None;
             loop {
                 let page =

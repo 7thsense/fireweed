@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "plan_key": "P5",
+  "bead_id": "fireweed-2d8b7989",
+  "description": "Class B (memory log) reopen semantics for all four memory-log cells: volatility/persistence, reopen claim/finalize, rejection, counters, stale, and duplicate invariants. Zero skips under live Postgres.",
+  "entries": [
+    {
+      "semantic_id": "SNORRI-REOPEN",
+      "cell_id": "memory--memory",
+      "status": "passed",
+      "command": "cargo test -p fireweed --features postgres --test p5_class_b_reopen p5_memory_memory_volatility_reopen -- --nocapture",
+      "methods": [
+        "reopen",
+        "push",
+        "claim",
+        "complete",
+        "fail",
+        "push_with_request_id"
+      ],
+      "notes": "Class B process-local volatility: empty reopen; request_id ledger not retained"
+    },
+    {
+      "semantic_id": "SNORRI-REOPEN",
+      "cell_id": "memory--sqlite",
+      "status": "passed",
+      "command": "cargo test -p fireweed --features postgres --test p5_class_b_reopen p5_memory_sqlite_projection_reopen -- --nocapture",
+      "methods": [
+        "reopen",
+        "push",
+        "claim",
+        "complete",
+        "fail",
+        "commit",
+        "push_with_request_id",
+        "metrics"
+      ],
+      "notes": "Projection-only reopen: counters, claim/finalize, stale, request_id duplicate invariants"
+    },
+    {
+      "semantic_id": "SNORRI-REOPEN",
+      "cell_id": "memory--turso",
+      "status": "passed",
+      "command": "cargo test -p fireweed --features postgres --test p5_class_b_reopen p5_memory_turso_projection_reopen -- --nocapture",
+      "methods": [
+        "reopen",
+        "push",
+        "claim",
+        "complete",
+        "fail",
+        "commit",
+        "push_with_request_id",
+        "metrics"
+      ],
+      "notes": "Projection-only reopen via public default Turso projection"
+    },
+    {
+      "semantic_id": "SNORRI-REOPEN",
+      "cell_id": "memory--postgres",
+      "status": "passed",
+      "command": "cargo test -p fireweed --features postgres --test p5_class_b_reopen p5_memory_postgres_projection_reopen -- --nocapture",
+      "methods": [
+        "reopen",
+        "push",
+        "claim",
+        "complete",
+        "fail",
+        "commit",
+        "push_with_request_id",
+        "metrics"
+      ],
+      "notes": "Live Postgres required (FIREWEED_PG_TEST_URL); zero skips"
+    }
+  ]
+}
