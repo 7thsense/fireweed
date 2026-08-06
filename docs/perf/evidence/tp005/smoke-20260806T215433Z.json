@@ -1,0 +1,2203 @@
+{
+  "schema_version": "fireweed-performance-matrix-v1",
+  "run_id": "1786052147279-1330933",
+  "tier": "smoke",
+  "status": "passed",
+  "command": [
+    "--tier",
+    "smoke",
+    "--output",
+    "/tmp/fw-smoke-out"
+  ],
+  "seed": 104376051830509,
+  "resolved_config_sha256": "0330fd5b70f530bbe5757a10c65003430a2fceecaad9626df8d04747213d0e07",
+  "schedule": [
+    {
+      "ordinal": 0,
+      "phase": "warmup",
+      "repetition": 0,
+      "shape": "minimal",
+      "cell": "memory--memory"
+    },
+    {
+      "ordinal": 1,
+      "phase": "warmup",
+      "repetition": 0,
+      "shape": "minimal",
+      "cell": "memory--sqlite"
+    },
+    {
+      "ordinal": 2,
+      "phase": "warmup",
+      "repetition": 0,
+      "shape": "minimal",
+      "cell": "memory--turso"
+    },
+    {
+      "ordinal": 3,
+      "phase": "warmup",
+      "repetition": 0,
+      "shape": "minimal",
+      "cell": "sqlite--memory"
+    },
+    {
+      "ordinal": 4,
+      "phase": "warmup",
+      "repetition": 0,
+      "shape": "minimal",
+      "cell": "sqlite--sqlite"
+    },
+    {
+      "ordinal": 5,
+      "phase": "warmup",
+      "repetition": 0,
+      "shape": "minimal",
+      "cell": "sqlite--turso"
+    },
+    {
+      "ordinal": 6,
+      "phase": "warmup",
+      "repetition": 0,
+      "shape": "minimal",
+      "cell": "filesystem--memory"
+    },
+    {
+      "ordinal": 7,
+      "phase": "warmup",
+      "repetition": 0,
+      "shape": "minimal",
+      "cell": "filesystem--sqlite"
+    },
+    {
+      "ordinal": 8,
+      "phase": "warmup",
+      "repetition": 0,
+      "shape": "minimal",
+      "cell": "filesystem--turso"
+    },
+    {
+      "ordinal": 9,
+      "phase": "common",
+      "repetition": 0,
+      "shape": "minimal",
+      "cell": "memory--memory"
+    },
+    {
+      "ordinal": 10,
+      "phase": "common",
+      "repetition": 0,
+      "shape": "minimal",
+      "cell": "memory--sqlite"
+    },
+    {
+      "ordinal": 11,
+      "phase": "common",
+      "repetition": 0,
+      "shape": "minimal",
+      "cell": "memory--turso"
+    },
+    {
+      "ordinal": 12,
+      "phase": "common",
+      "repetition": 0,
+      "shape": "minimal",
+      "cell": "sqlite--memory"
+    },
+    {
+      "ordinal": 13,
+      "phase": "common",
+      "repetition": 0,
+      "shape": "minimal",
+      "cell": "sqlite--sqlite"
+    },
+    {
+      "ordinal": 14,
+      "phase": "common",
+      "repetition": 0,
+      "shape": "minimal",
+      "cell": "sqlite--turso"
+    },
+    {
+      "ordinal": 15,
+      "phase": "common",
+      "repetition": 0,
+      "shape": "minimal",
+      "cell": "filesystem--memory"
+    },
+    {
+      "ordinal": 16,
+      "phase": "common",
+      "repetition": 0,
+      "shape": "minimal",
+      "cell": "filesystem--sqlite"
+    },
+    {
+      "ordinal": 17,
+      "phase": "common",
+      "repetition": 0,
+      "shape": "minimal",
+      "cell": "filesystem--turso"
+    }
+  ],
+  "unsupported_cells": [],
+  "git_commit": "59124799a660f73a5d49da0e8934655521b9c762",
+  "git_branch": "agent/slot-a",
+  "host_fingerprint_sha256": "bf3673698f6d5bcd66efc89e5f06769749fcbeb961410fe510d8ae3e40295571",
+  "provenance": {
+    "remote_ref": "refs/remotes/origin/main",
+    "remote_commit": "59124799a660f73a5d49da0e8934655521b9c762",
+    "remote_url": "https://github.com/7thsense/fireweed.git",
+    "os_kernel": "Linux 6.6.87.2-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Thu Jun  5 18:30:46 UTC 2025",
+    "architecture": "x86_64",
+    "cpu_model": "AMD Ryzen 9 5950X 16-Core Processor",
+    "logical_cpu_count": 32,
+    "total_memory_kib": 98871364,
+    "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14) (Homebrew)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 22.1.8",
+    "cargo_version": "cargo 1.97.1 (c980f4866 2026-06-30) (Homebrew)\nrelease: 1.97.1\ncommit-hash: c980f4866141969fab6254a680546a277789d6f0\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nlibgit2: 1.9.6 (sys:0.20.4 system)\nlibcurl: 8.21.0 (sys:0.4.88+curl-8.20.0 system ssl:OpenSSL/3.6.3)\nos: Ubuntu 24.4.0 (noble) [64-bit]",
+    "filesystem": "ext2/ext3:4096",
+    "free_space": "Filesystem     1024-blocks       Used  Available Capacity Mounted on\n/dev/sdd        4259966888 3016181296 1029020844      75% /",
+    "load_average": "26.16 34.86 31.36 17/2399 1333489",
+    "cpu_governor": "unknown",
+    "turbo_state": "unknown",
+    "virtualization": "wsl",
+    "host_fingerprint_sha256": "bf3673698f6d5bcd66efc89e5f06769749fcbeb961410fe510d8ae3e40295571",
+    "conformance_output_sha256": null,
+    "benchmark_test_output_sha256": null
+  },
+  "source_clean": false,
+  "submodule_status": "",
+  "enabled_features": "fireweed/default+postgres;profile=release",
+  "rustflags_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "service_topology": {
+    "postgres_configured": false,
+    "postgres_server": null,
+    "postgres_durability": null,
+    "object_store_configured": false,
+    "object_store_scheme": null,
+    "object_store_endpoint_sha256": null,
+    "object_store_bucket_sha256": null,
+    "object_store_region": null,
+    "object_store_provider": null,
+    "object_store_preflight_rtt_ns": []
+  },
+  "started_unix_ms": 1786052147279,
+  "finished_unix_ms": 1786052174202,
+  "shapes": [
+    {
+      "id": "minimal",
+      "items": 512,
+      "batch": 64
+    }
+  ],
+  "cells": [
+    {
+      "id": "memory--memory",
+      "barrier_class": "Strict",
+      "status": "passed"
+    },
+    {
+      "id": "memory--sqlite",
+      "barrier_class": "Strict",
+      "status": "passed"
+    },
+    {
+      "id": "memory--turso",
+      "barrier_class": "Strict",
+      "status": "passed"
+    },
+    {
+      "id": "sqlite--memory",
+      "barrier_class": "Strict",
+      "status": "passed"
+    },
+    {
+      "id": "sqlite--sqlite",
+      "barrier_class": "Strict",
+      "status": "passed"
+    },
+    {
+      "id": "sqlite--turso",
+      "barrier_class": "Strict",
+      "status": "passed"
+    },
+    {
+      "id": "filesystem--memory",
+      "barrier_class": "Strict",
+      "status": "passed"
+    },
+    {
+      "id": "filesystem--sqlite",
+      "barrier_class": "Strict",
+      "status": "passed"
+    },
+    {
+      "id": "filesystem--turso",
+      "barrier_class": "Strict",
+      "status": "passed"
+    }
+  ],
+  "repetitions": [
+    {
+      "cell": "memory--memory",
+      "shape": "minimal",
+      "repetition": 0,
+      "items": 512,
+      "batch": 64,
+      "append": {
+        "operation": "append",
+        "durations_ns": [
+          791702,
+          593506,
+          442129,
+          752826,
+          432167,
+          692671,
+          684813,
+          1126788
+        ],
+        "total_ns": 5643480,
+        "items": 512
+      },
+      "claim": {
+        "operation": "claim",
+        "durations_ns": [
+          291012,
+          271149,
+          211261,
+          247112,
+          241288,
+          313370,
+          258437,
+          257745
+        ],
+        "total_ns": 2091374,
+        "items": 512
+      },
+      "finalize": {
+        "operation": "finalize",
+        "durations_ns": [
+          318647,
+          229026,
+          269101,
+          290171,
+          345680,
+          281715,
+          284514,
+          248215
+        ],
+        "total_ns": 2267069,
+        "items": 512
+      },
+      "accepted": 512,
+      "claimed": 512,
+      "finalized": 512,
+      "projection_catchup": null
+    },
+    {
+      "cell": "memory--sqlite",
+      "shape": "minimal",
+      "repetition": 0,
+      "items": 512,
+      "batch": 64,
+      "append": {
+        "operation": "append",
+        "durations_ns": [
+          3134471,
+          2337384,
+          2404452,
+          2631910,
+          2371873,
+          2547895,
+          2974233,
+          3575554
+        ],
+        "total_ns": 22118463,
+        "items": 512
+      },
+      "claim": {
+        "operation": "claim",
+        "durations_ns": [
+          3020627,
+          2596358,
+          2530247,
+          2628821,
+          2655406,
+          2272276,
+          2734835,
+          2180050
+        ],
+        "total_ns": 20618620,
+        "items": 512
+      },
+      "finalize": {
+        "operation": "finalize",
+        "durations_ns": [
+          3125651,
+          3570251,
+          2781572,
+          2642248,
+          2617273,
+          2948027,
+          2598661,
+          2570447
+        ],
+        "total_ns": 22854130,
+        "items": 512
+      },
+      "accepted": 512,
+      "claimed": 512,
+      "finalized": 512,
+      "projection_catchup": null
+    },
+    {
+      "cell": "memory--turso",
+      "shape": "minimal",
+      "repetition": 0,
+      "items": 512,
+      "batch": 64,
+      "append": {
+        "operation": "append",
+        "durations_ns": [
+          6967894,
+          10300214,
+          17940456,
+          29326958,
+          36176146,
+          36515113,
+          56547785,
+          56858870
+        ],
+        "total_ns": 250808748,
+        "items": 512
+      },
+      "claim": {
+        "operation": "claim",
+        "durations_ns": [
+          11373400,
+          11960427,
+          10969023,
+          12873468,
+          10166644,
+          10668335,
+          15273155,
+          9000582
+        ],
+        "total_ns": 92285034,
+        "items": 512
+      },
+      "finalize": {
+        "operation": "finalize",
+        "durations_ns": [
+          14820109,
+          13163170,
+          20027722,
+          13409679,
+          18318877,
+          12374424,
+          15559621,
+          14324474
+        ],
+        "total_ns": 121998076,
+        "items": 512
+      },
+      "accepted": 512,
+      "claimed": 512,
+      "finalized": 512,
+      "projection_catchup": null
+    },
+    {
+      "cell": "sqlite--memory",
+      "shape": "minimal",
+      "repetition": 0,
+      "items": 512,
+      "batch": 64,
+      "append": {
+        "operation": "append",
+        "durations_ns": [
+          9893483,
+          9910292,
+          10824874,
+          30195952,
+          8017659,
+          76953826,
+          9810128,
+          10665817
+        ],
+        "total_ns": 166455501,
+        "items": 512
+      },
+      "claim": {
+        "operation": "claim",
+        "durations_ns": [
+          8222820,
+          9001812,
+          8937989,
+          10001963,
+          13219982,
+          8970773,
+          9571338,
+          11768193
+        ],
+        "total_ns": 79694870,
+        "items": 512
+      },
+      "finalize": {
+        "operation": "finalize",
+        "durations_ns": [
+          8538131,
+          9213670,
+          9017001,
+          11078061,
+          11926636,
+          12217472,
+          30224993,
+          11085501
+        ],
+        "total_ns": 103301465,
+        "items": 512
+      },
+      "accepted": 512,
+      "claimed": 512,
+      "finalized": 512,
+      "projection_catchup": null
+    },
+    {
+      "cell": "sqlite--sqlite",
+      "shape": "minimal",
+      "repetition": 0,
+      "items": 512,
+      "batch": 64,
+      "append": {
+        "operation": "append",
+        "durations_ns": [
+          11347541,
+          9965582,
+          9406671,
+          11283360,
+          12346608,
+          13117560,
+          11008130,
+          12855598
+        ],
+        "total_ns": 91442108,
+        "items": 512
+      },
+      "claim": {
+        "operation": "claim",
+        "durations_ns": [
+          10359525,
+          11826071,
+          15051682,
+          16241376,
+          10980748,
+          11829409,
+          11093437,
+          12378231
+        ],
+        "total_ns": 99760479,
+        "items": 512
+      },
+      "finalize": {
+        "operation": "finalize",
+        "durations_ns": [
+          20630871,
+          14504900,
+          14570274,
+          11938614,
+          11171765,
+          11559811,
+          11898884,
+          15289366
+        ],
+        "total_ns": 111564485,
+        "items": 512
+      },
+      "accepted": 512,
+      "claimed": 512,
+      "finalized": 512,
+      "projection_catchup": null
+    },
+    {
+      "cell": "sqlite--turso",
+      "shape": "minimal",
+      "repetition": 0,
+      "items": 512,
+      "batch": 64,
+      "append": {
+        "operation": "append",
+        "durations_ns": [
+          18933892,
+          25831213,
+          29518267,
+          99080635,
+          68007958,
+          60062945,
+          44768392,
+          46257296
+        ],
+        "total_ns": 392950841,
+        "items": 512
+      },
+      "claim": {
+        "operation": "claim",
+        "durations_ns": [
+          20545641,
+          83060508,
+          23309605,
+          20079180,
+          27943103,
+          68857399,
+          16847969,
+          37387938
+        ],
+        "total_ns": 298031343,
+        "items": 512
+      },
+      "finalize": {
+        "operation": "finalize",
+        "durations_ns": [
+          55303259,
+          53786663,
+          20203700,
+          23575162,
+          19956653,
+          22497412,
+          21019182,
+          21793263
+        ],
+        "total_ns": 238135294,
+        "items": 512
+      },
+      "accepted": 512,
+      "claimed": 512,
+      "finalized": 512,
+      "projection_catchup": null
+    },
+    {
+      "cell": "filesystem--memory",
+      "shape": "minimal",
+      "repetition": 0,
+      "items": 512,
+      "batch": 64,
+      "append": {
+        "operation": "append",
+        "durations_ns": [
+          48025076,
+          53967761,
+          61347086,
+          70369279,
+          103859202,
+          88509786,
+          72417001,
+          131905562
+        ],
+        "total_ns": 630601845,
+        "items": 512
+      },
+      "claim": {
+        "operation": "claim",
+        "durations_ns": [
+          80105317,
+          63644994,
+          127003659,
+          76163552,
+          76640171,
+          92125359,
+          83112089,
+          58810766
+        ],
+        "total_ns": 657605907,
+        "items": 512
+      },
+      "finalize": {
+        "operation": "finalize",
+        "durations_ns": [
+          100747364,
+          76828222,
+          57544538,
+          70396786,
+          67296283,
+          105459309,
+          79467974,
+          61079509
+        ],
+        "total_ns": 618819985,
+        "items": 512
+      },
+      "accepted": 512,
+      "claimed": 512,
+      "finalized": 512,
+      "projection_catchup": null
+    },
+    {
+      "cell": "filesystem--sqlite",
+      "shape": "minimal",
+      "repetition": 0,
+      "items": 512,
+      "batch": 64,
+      "append": {
+        "operation": "append",
+        "durations_ns": [
+          119615687,
+          79488321,
+          64186123,
+          53567482,
+          89973868,
+          151931262,
+          92339766,
+          74594120
+        ],
+        "total_ns": 725888641,
+        "items": 512
+      },
+      "claim": {
+        "operation": "claim",
+        "durations_ns": [
+          67984477,
+          98362201,
+          59935751,
+          57961618,
+          62859626,
+          117484909,
+          102252831,
+          66680082
+        ],
+        "total_ns": 633521495,
+        "items": 512
+      },
+      "finalize": {
+        "operation": "finalize",
+        "durations_ns": [
+          112331102,
+          67276618,
+          58572104,
+          84680479,
+          76419880,
+          82199516,
+          84353272,
+          60823597
+        ],
+        "total_ns": 626656568,
+        "items": 512
+      },
+      "accepted": 512,
+      "claimed": 512,
+      "finalized": 512,
+      "projection_catchup": null
+    },
+    {
+      "cell": "filesystem--turso",
+      "shape": "minimal",
+      "repetition": 0,
+      "items": 512,
+      "batch": 64,
+      "append": {
+        "operation": "append",
+        "durations_ns": [
+          88404649,
+          86359000,
+          71198857,
+          96152624,
+          132043512,
+          99228564,
+          254171572,
+          131275081
+        ],
+        "total_ns": 958977843,
+        "items": 512
+      },
+      "claim": {
+        "operation": "claim",
+        "durations_ns": [
+          79651755,
+          88801795,
+          109325553,
+          121879353,
+          184107861,
+          158049938,
+          68894655,
+          155182065
+        ],
+        "total_ns": 965892975,
+        "items": 512
+      },
+      "finalize": {
+        "operation": "finalize",
+        "durations_ns": [
+          181879870,
+          77192742,
+          89629810,
+          72760927,
+          107015156,
+          69766787,
+          70545608,
+          114488668
+        ],
+        "total_ns": 783279568,
+        "items": 512
+      },
+      "accepted": 512,
+      "claimed": 512,
+      "finalized": 512,
+      "projection_catchup": null
+    }
+  ],
+  "summaries": [
+    {
+      "cell": "filesystem--memory",
+      "shape": "minimal",
+      "operation": "append",
+      "samples": 8,
+      "p50_ns": 70369279,
+      "p95_ns": 131905562,
+      "p99_ns": 131905562,
+      "median_items_per_second": 811.9227751387248,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "filesystem--memory",
+      "shape": "minimal",
+      "operation": "claim",
+      "samples": 8,
+      "p50_ns": 76640171,
+      "p95_ns": 127003659,
+      "p99_ns": 127003659,
+      "median_items_per_second": 778.5818140468741,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "filesystem--memory",
+      "shape": "minimal",
+      "operation": "finalize",
+      "samples": 8,
+      "p50_ns": 70396786,
+      "p95_ns": 105459309,
+      "p99_ns": 105459309,
+      "median_items_per_second": 827.381164814837,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "filesystem--sqlite",
+      "shape": "minimal",
+      "operation": "append",
+      "samples": 8,
+      "p50_ns": 79488321,
+      "p95_ns": 151931262,
+      "p99_ns": 151931262,
+      "median_items_per_second": 705.3423501635976,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "filesystem--sqlite",
+      "shape": "minimal",
+      "operation": "claim",
+      "samples": 8,
+      "p50_ns": 66680082,
+      "p95_ns": 117484909,
+      "p99_ns": 117484909,
+      "median_items_per_second": 808.1809441998491,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "filesystem--sqlite",
+      "shape": "minimal",
+      "operation": "finalize",
+      "samples": 8,
+      "p50_ns": 76419880,
+      "p95_ns": 112331102,
+      "p99_ns": 112331102,
+      "median_items_per_second": 817.0344430188753,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "filesystem--turso",
+      "shape": "minimal",
+      "operation": "append",
+      "samples": 8,
+      "p50_ns": 96152624,
+      "p95_ns": 254171572,
+      "p99_ns": 254171572,
+      "median_items_per_second": 533.9018036102842,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "filesystem--turso",
+      "shape": "minimal",
+      "operation": "claim",
+      "samples": 8,
+      "p50_ns": 109325553,
+      "p95_ns": 184107861,
+      "p99_ns": 184107861,
+      "median_items_per_second": 530.0794324547189,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "filesystem--turso",
+      "shape": "minimal",
+      "operation": "finalize",
+      "samples": 8,
+      "p50_ns": 77192742,
+      "p95_ns": 181879870,
+      "p99_ns": 181879870,
+      "median_items_per_second": 653.6618864032465,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "memory--memory",
+      "shape": "minimal",
+      "operation": "append",
+      "samples": 8,
+      "p50_ns": 684813,
+      "p95_ns": 1126788,
+      "p99_ns": 1126788,
+      "median_items_per_second": 90724.16310503447,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "memory--memory",
+      "shape": "minimal",
+      "operation": "claim",
+      "samples": 8,
+      "p50_ns": 257745,
+      "p95_ns": 313370,
+      "p99_ns": 313370,
+      "median_items_per_second": 244815.13110519687,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "memory--memory",
+      "shape": "minimal",
+      "operation": "finalize",
+      "samples": 8,
+      "p50_ns": 281715,
+      "p95_ns": 345680,
+      "p99_ns": 345680,
+      "median_items_per_second": 225842.2659389723,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "memory--sqlite",
+      "shape": "minimal",
+      "operation": "append",
+      "samples": 8,
+      "p50_ns": 2547895,
+      "p95_ns": 3575554,
+      "p99_ns": 3575554,
+      "median_items_per_second": 23148.082215296785,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "memory--sqlite",
+      "shape": "minimal",
+      "operation": "claim",
+      "samples": 8,
+      "p50_ns": 2596358,
+      "p95_ns": 3020627,
+      "p99_ns": 3020627,
+      "median_items_per_second": 24831.923765994037,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "memory--sqlite",
+      "shape": "minimal",
+      "operation": "finalize",
+      "samples": 8,
+      "p50_ns": 2642248,
+      "p95_ns": 3570251,
+      "p99_ns": 3570251,
+      "median_items_per_second": 22402.952989240894,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "memory--turso",
+      "shape": "minimal",
+      "operation": "append",
+      "samples": 8,
+      "p50_ns": 29326958,
+      "p95_ns": 56858870,
+      "p99_ns": 56858870,
+      "median_items_per_second": 2041.3960999478372,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "memory--turso",
+      "shape": "minimal",
+      "operation": "claim",
+      "samples": 8,
+      "p50_ns": 10969023,
+      "p95_ns": 15273155,
+      "p99_ns": 15273155,
+      "median_items_per_second": 5548.0285134857295,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "memory--turso",
+      "shape": "minimal",
+      "operation": "finalize",
+      "samples": 8,
+      "p50_ns": 14324474,
+      "p95_ns": 20027722,
+      "p99_ns": 20027722,
+      "median_items_per_second": 4196.78749687823,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "sqlite--memory",
+      "shape": "minimal",
+      "operation": "append",
+      "samples": 8,
+      "p50_ns": 9910292,
+      "p95_ns": 76953826,
+      "p99_ns": 76953826,
+      "median_items_per_second": 3075.8971432250833,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "sqlite--memory",
+      "shape": "minimal",
+      "operation": "claim",
+      "samples": 8,
+      "p50_ns": 9001812,
+      "p95_ns": 13219982,
+      "p99_ns": 13219982,
+      "median_items_per_second": 6424.503860788028,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "sqlite--memory",
+      "shape": "minimal",
+      "operation": "finalize",
+      "samples": 8,
+      "p50_ns": 11078061,
+      "p95_ns": 30224993,
+      "p99_ns": 30224993,
+      "median_items_per_second": 4956.367269331563,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "append",
+      "samples": 8,
+      "p50_ns": 11283360,
+      "p95_ns": 13117560,
+      "p99_ns": 13117560,
+      "median_items_per_second": 5599.171007737486,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "claim",
+      "samples": 8,
+      "p50_ns": 11826071,
+      "p95_ns": 16241376,
+      "p99_ns": 16241376,
+      "median_items_per_second": 5132.292919323292,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "finalize",
+      "samples": 8,
+      "p50_ns": 11938614,
+      "p95_ns": 20630871,
+      "p99_ns": 20630871,
+      "median_items_per_second": 4589.274086641461,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "append",
+      "samples": 8,
+      "p50_ns": 44768392,
+      "p95_ns": 99080635,
+      "p99_ns": 99080635,
+      "median_items_per_second": 1302.9619651583848,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "claim",
+      "samples": 8,
+      "p50_ns": 23309605,
+      "p95_ns": 83060508,
+      "p99_ns": 83060508,
+      "median_items_per_second": 1717.94011611725,
+      "throughput_cv": 0.0
+    },
+    {
+      "cell": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "finalize",
+      "samples": 8,
+      "p50_ns": 21793263,
+      "p95_ns": 55303259,
+      "p99_ns": 55303259,
+      "median_items_per_second": 2150.0382887385017,
+      "throughput_cv": 0.0
+    }
+  ],
+  "comparisons": [
+    {
+      "left": "filesystem--memory",
+      "right": "filesystem--sqlite",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 1.1511045309421826,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "filesystem--memory",
+      "right": "filesystem--sqlite",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.9633756148726322,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--memory",
+      "right": "filesystem--sqlite",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 1.0126637522865394,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "filesystem--memory",
+      "right": "filesystem--turso",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 1.5207342804396649,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "filesystem--memory",
+      "right": "filesystem--turso",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 1.4688021575207657,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "filesystem--memory",
+      "right": "filesystem--turso",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 1.2657632057568404,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "filesystem--memory",
+      "right": "memory--memory",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.008949355357499788,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--memory",
+      "right": "memory--memory",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.003180284692911069,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--memory",
+      "right": "memory--memory",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.003663535527217984,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--memory",
+      "right": "memory--sqlite",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.035075163790553136,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--memory",
+      "right": "memory--sqlite",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.031354067505357734,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--memory",
+      "right": "memory--sqlite",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.036931790430136155,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--memory",
+      "right": "memory--turso",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.3977291693461506,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--memory",
+      "right": "memory--turso",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.14033486168183096,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--memory",
+      "right": "memory--turso",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.19714630903525196,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--memory",
+      "right": "sqlite--memory",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.2639629146660679,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--memory",
+      "right": "sqlite--memory",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.12118940713833948,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--memory",
+      "right": "sqlite--memory",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.16693298132574044,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--memory",
+      "right": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.14500767596073239,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--memory",
+      "right": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.1517025287304787,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--memory",
+      "right": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.18028584677981918,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--memory",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.623136205698859,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--memory",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.4532066087417308,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--memory",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.38482159557274154,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--sqlite",
+      "right": "filesystem--turso",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 1.3211087608133547,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "filesystem--sqlite",
+      "right": "filesystem--turso",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 1.5246412041630883,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "filesystem--sqlite",
+      "right": "filesystem--turso",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 1.2499343468143462,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "filesystem--sqlite",
+      "right": "memory--memory",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.007774580949807149,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--sqlite",
+      "right": "memory--memory",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.0033011886992090145,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--sqlite",
+      "right": "memory--memory",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.0036177215970710132,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--sqlite",
+      "right": "memory--sqlite",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.030470876317239413,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--sqlite",
+      "right": "memory--sqlite",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.03254604644472245,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--sqlite",
+      "right": "memory--sqlite",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.036469944092247984,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--sqlite",
+      "right": "memory--turso",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.3455195932732608,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--sqlite",
+      "right": "memory--turso",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.1456699334250687,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--sqlite",
+      "right": "memory--turso",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.19468091811334845,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--sqlite",
+      "right": "sqlite--memory",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.22931272318945134,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--sqlite",
+      "right": "sqlite--memory",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.12579663141500827,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--sqlite",
+      "right": "sqlite--memory",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.16484541976427508,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--sqlite",
+      "right": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.12597263937623732,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--sqlite",
+      "right": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.15746976193759615,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--sqlite",
+      "right": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.17803130246613805,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--sqlite",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.5413376361126996,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--sqlite",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.4704360394275178,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--sqlite",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.3800092525320823,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--turso",
+      "right": "memory--memory",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.005884890919215951,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--turso",
+      "right": "memory--memory",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.002165223326114366,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--turso",
+      "right": "memory--memory",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.0028943292952076597,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--turso",
+      "right": "memory--sqlite",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.02306462361091277,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--turso",
+      "right": "memory--sqlite",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.021346692163280306,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--turso",
+      "right": "memory--sqlite",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.029177487749814508,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--turso",
+      "right": "memory--turso",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.2615375838250728,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--turso",
+      "right": "memory--turso",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.09554374696637585,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--turso",
+      "right": "memory--turso",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.15575291503071606,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--turso",
+      "right": "sqlite--memory",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.17357596133740913,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--turso",
+      "right": "sqlite--memory",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.08250900675615744,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--turso",
+      "right": "sqlite--memory",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.13188326265648231,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--turso",
+      "right": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.09535372341235623,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--turso",
+      "right": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.10328316033150568,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--turso",
+      "right": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.14243252289200528,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--turso",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.4097600834767149,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--turso",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.30855524443585486,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "filesystem--turso",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.30402337010787445,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "memory--memory",
+      "right": "memory--sqlite",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 3.9192950094622465,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--memory",
+      "right": "memory--sqlite",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 9.858887028336396,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--memory",
+      "right": "memory--sqlite",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 10.080915049343448,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--memory",
+      "right": "memory--turso",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 44.44221437836229,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--memory",
+      "right": "memory--turso",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 44.12650917530772,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--memory",
+      "right": "memory--turso",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 53.81312875788076,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--memory",
+      "right": "sqlite--memory",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 29.495187543855916,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--memory",
+      "right": "sqlite--memory",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 38.10646493644848,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--memory",
+      "right": "sqlite--memory",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 45.56608775471765,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--memory",
+      "right": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 16.20314203293003,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--memory",
+      "right": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 47.70092723730906,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--memory",
+      "right": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 49.210890802176735,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--memory",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 69.62917224832904,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--memory",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 142.50504357422443,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--memory",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 105.04104374414717,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--sqlite",
+      "right": "memory--turso",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 11.339338904335262,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--sqlite",
+      "right": "memory--turso",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 4.4758104082620465,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--sqlite",
+      "right": "memory--turso",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 5.3381194558707765,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--sqlite",
+      "right": "sqlite--memory",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 7.525635981125813,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--sqlite",
+      "right": "sqlite--memory",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 3.86518932886876,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--sqlite",
+      "right": "sqlite--memory",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 4.5200348908490495,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--sqlite",
+      "right": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 4.134198113132905,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--sqlite",
+      "right": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 4.83836837770908,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--sqlite",
+      "right": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 4.881589673288811,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--sqlite",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 17.765739011793,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--sqlite",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 14.454475760259417,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--sqlite",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 10.419792571408319,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--turso",
+      "right": "sqlite--memory",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.6636750206177018,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "memory--turso",
+      "right": "sqlite--memory",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.863573068629958,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "memory--turso",
+      "right": "sqlite--memory",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.8467466732836016,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "memory--turso",
+      "right": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.36458898953556423,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "memory--turso",
+      "right": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 1.0810038711152234,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--turso",
+      "right": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.9144774135618338,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "memory--turso",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 1.5667349888449662,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--turso",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 3.229465603274308,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "memory--turso",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 1.9519594227043386,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "sqlite--memory",
+      "right": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 0.549348669468124,
+      "rounds_left_faster": 0,
+      "rounds_right_faster": 1
+    },
+    {
+      "left": "sqlite--memory",
+      "right": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 1.2517804345499277,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "sqlite--memory",
+      "right": "sqlite--sqlite",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 1.0799893786598285,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "sqlite--memory",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 2.3606960337105347,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "sqlite--memory",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 3.7396553002721507,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "sqlite--memory",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 2.305246048543455,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "sqlite--sqlite",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "append",
+      "status": "inconclusive",
+      "median_throughput_ratio": 4.297263586705591,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "sqlite--sqlite",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "claim",
+      "status": "inconclusive",
+      "median_throughput_ratio": 2.98746904573303,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    },
+    {
+      "left": "sqlite--sqlite",
+      "right": "sqlite--turso",
+      "shape": "minimal",
+      "operation": "finalize",
+      "status": "inconclusive",
+      "median_throughput_ratio": 2.1345080739627846,
+      "rounds_left_faster": 1,
+      "rounds_right_faster": 0
+    }
+  ],
+  "recovery": [],
+  "maintenance": [],
+  "cleanup": [
+    {
+      "phase": "common",
+      "cell": "memory--memory",
+      "shape": "minimal",
+      "repetition": 0,
+      "logical_namespace": "fireweed-perf/v1/59124799a660/1786052147279-1330933/memory--memory/minimal/r00",
+      "status": "passed"
+    },
+    {
+      "phase": "common",
+      "cell": "memory--sqlite",
+      "shape": "minimal",
+      "repetition": 0,
+      "logical_namespace": "fireweed-perf/v1/59124799a660/1786052147279-1330933/memory--sqlite/minimal/r00",
+      "status": "passed"
+    },
+    {
+      "phase": "common",
+      "cell": "memory--turso",
+      "shape": "minimal",
+      "repetition": 0,
+      "logical_namespace": "fireweed-perf/v1/59124799a660/1786052147279-1330933/memory--turso/minimal/r00",
+      "status": "passed"
+    },
+    {
+      "phase": "common",
+      "cell": "sqlite--memory",
+      "shape": "minimal",
+      "repetition": 0,
+      "logical_namespace": "fireweed-perf/v1/59124799a660/1786052147279-1330933/sqlite--memory/minimal/r00",
+      "status": "passed"
+    },
+    {
+      "phase": "common",
+      "cell": "sqlite--sqlite",
+      "shape": "minimal",
+      "repetition": 0,
+      "logical_namespace": "fireweed-perf/v1/59124799a660/1786052147279-1330933/sqlite--sqlite/minimal/r00",
+      "status": "passed"
+    },
+    {
+      "phase": "common",
+      "cell": "sqlite--turso",
+      "shape": "minimal",
+      "repetition": 0,
+      "logical_namespace": "fireweed-perf/v1/59124799a660/1786052147279-1330933/sqlite--turso/minimal/r00",
+      "status": "passed"
+    },
+    {
+      "phase": "common",
+      "cell": "filesystem--memory",
+      "shape": "minimal",
+      "repetition": 0,
+      "logical_namespace": "fireweed-perf/v1/59124799a660/1786052147279-1330933/filesystem--memory/minimal/r00",
+      "status": "passed"
+    },
+    {
+      "phase": "common",
+      "cell": "filesystem--sqlite",
+      "shape": "minimal",
+      "repetition": 0,
+      "logical_namespace": "fireweed-perf/v1/59124799a660/1786052147279-1330933/filesystem--sqlite/minimal/r00",
+      "status": "passed"
+    },
+    {
+      "phase": "common",
+      "cell": "filesystem--turso",
+      "shape": "minimal",
+      "repetition": 0,
+      "logical_namespace": "fireweed-perf/v1/59124799a660/1786052147279-1330933/filesystem--turso/minimal/r00",
+      "status": "passed"
+    }
+  ],
+  "failures": []
+}
