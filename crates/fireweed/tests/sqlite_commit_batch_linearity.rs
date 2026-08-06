@@ -301,3 +301,109 @@ async fn sqlite_commit_batch_size_sweep_repro_table() {
         eprintln!("{batch}\t{ms:.3}\t{wall:?}");
     }
 }
+
+/// fireweed-2045eac0: finalize + side_record + instance_fence entries (no lifecycle pushes).
+///
+/// Snorri dispatch commits use this shape; a355d82b/60ca4bfd only fixed push validation.
+async fn measure_ms_per_entry_finalize_only(
+    tag: &str,
+    entries_per_commit: usize,
+    total_entries: usize,
+) -> (f64, Duration) {
+    let path = tmp_sqlite(tag);
+    let fw = open_sqlite(&path, Arc::new(ManualClock::at(0))).expect("open sqlite");
+    let def = qdef_plain();
+    let queue = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+    fw.create_queue(def).await.expect("create queue");
+
+    let mut inputs = Vec::with_capacity(total_entries);
+    for _ in 0..total_entries {
+        inputs.push(NewItem::default());
+    }
+    for chunk in inputs.chunks(500) {
+        fw.push_batch(&queue, chunk.to_vec())
+            .await
+            .expect("push inputs");
+    }
+
+    let commits = total_entries / entries_per_commit;
+    let mut commit_wall = Duration::ZERO;
+    let mut committed_entries = 0usize;
+    let mut fence_i = 0u64;
+
+    for _ in 0..commits {
+        let claimed = fw
+            .claim(&queue, entries_per_commit, 30_000)
+            .await
+            .expect("claim");
+        assert_eq!(claimed.len(), entries_per_commit, "claim batch size");
+        let entries: Vec<CommitEntry> = claimed
+            .into_iter()
+            .map(|item| {
+                fence_i += 1;
+                let key = format!("inst-{fence_i}").into_bytes();
+                CommitEntry {
+                    claim_ref: ClaimRef {
+                        item_id: item.item_id,
+                        lease_token: item.lease_token.expect("lease token"),
+                        lease_expires_at: item.lease_expires_at,
+                        item_version: item.item_version,
+                    },
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![SideRecord {
+                        key: format!("side-{fence_i}").into_bytes(),
+                        payload: bytes::Bytes::from_static(b"payload"),
+                    }],
+                    lifecycle_items: vec![],
+                    instance_fence: Some(InstanceFence {
+                        instance_key: key,
+                        expected: 0,
+                        next: 1,
+                    }),
+                }
+            })
+            .collect();
+        let t0 = Instant::now();
+        let outcomes = fw
+            .commit(
+                &queue,
+                CommitRequest {
+                    request_id: None,
+                    entries,
+                },
+            )
+            .await
+            .expect("commit");
+        commit_wall += t0.elapsed();
+        for outcome in outcomes {
+            match outcome {
+                EntryOutcome::Committed { .. } => committed_entries += 1,
+                EntryOutcome::Rejected(e) => panic!("entry rejected: {e}"),
+            }
+        }
+    }
+    assert_eq!(committed_entries, total_entries);
+    let _ = std::fs::remove_file(&path);
+    let ms_per_entry = commit_wall.as_secs_f64() * 1000.0 / total_entries as f64;
+    (ms_per_entry, commit_wall)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_finalize_side_record_fence_commit_per_entry_cost_is_flat() {
+    const TOTAL: usize = 1024;
+    let _ = measure_ms_per_entry_finalize_only("fin-warm", 64, TOTAL).await;
+    let (ms_64, wall_64) = measure_ms_per_entry_finalize_only("fin-64", 64, TOTAL).await;
+    let (ms_512, wall_512) = measure_ms_per_entry_finalize_only("fin-512", 512, TOTAL).await;
+    let ratio = ms_512 / ms_64.max(1e-9);
+    eprintln!(
+        "sqlite finalize+side+fence linearity: 64 → {ms_64:.3} ms/entry (wall {wall_64:?}); \
+         512 → {ms_512:.3} ms/entry (wall {wall_512:?}); ratio={ratio:.2}"
+    );
+    const MAX_RATIO: f64 = 2.5;
+    assert!(
+        ratio <= MAX_RATIO,
+        "per-entry finalize+side+fence commit cost must be flat 64→512: \
+         64={ms_64:.3}, 512={ms_512:.3}, ratio={ratio:.2} (max {MAX_RATIO}). \
+         Superlinearity is fireweed-2045eac0 (snorri dispatch path)."
+    );
+}
