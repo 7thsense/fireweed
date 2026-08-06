@@ -532,12 +532,8 @@ async fn run_cell_t0_t2(cell: MatrixCell) {
     let expectation = cell.reopen_expectation();
 
     if let Some(reason) = skip_reason(cell) {
-        eprintln!("{}", reason.message(&cell_id));
-        // Class B T3 claims are fixture-independent — still enforce offline.
-        if !cell.is_class_a() {
-            assert_class_b_t3_no_durable_log_replay(cell);
-        }
-        return;
+        // Fail-closed: missing live fixtures or features must not count as success.
+        panic!("{} (fail-closed; no LOUD skip)", reason.message(&cell_id));
     }
 
     let root = FixtureRoot::new(&cell.queue_id_slug());

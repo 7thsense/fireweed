@@ -7080,13 +7080,9 @@ mod tests {
     #[cfg(feature = "postgres")]
     #[tokio::test(flavor = "current_thread")]
     async fn public_open_postgres_claim_and_commit_on_current_thread() -> EngineResult<()> {
-        let Some(url) = postgres_test_url() else {
-            eprintln!(
-                "public_open_postgres_claim_and_commit_on_current_thread SKIPPED — set \
-                 FIREWEED_PG_TEST_URL or PQUEUE_PG_TEST_URL to a live PostgreSQL DSN"
-            );
-            return Ok(());
-        };
+        let url = postgres_test_url().expect(
+            "FIREWEED_PG_TEST_URL or PQUEUE_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)",
+        );
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         // Unique schema so parallel suite runs and reopens do not collide.
         let schema = format!(
@@ -7164,13 +7160,9 @@ mod tests {
     #[cfg(feature = "postgres")]
     #[tokio::test(flavor = "current_thread")]
     async fn public_open_postgres_async_claim_and_commit_on_current_thread() -> EngineResult<()> {
-        let Some(url) = postgres_test_url() else {
-            eprintln!(
-                "public_open_postgres_async_claim_and_commit_on_current_thread SKIPPED — set \
-                 FIREWEED_PG_TEST_URL or PQUEUE_PG_TEST_URL to a live PostgreSQL DSN"
-            );
-            return Ok(());
-        };
+        let url = postgres_test_url().expect(
+            "FIREWEED_PG_TEST_URL or PQUEUE_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)",
+        );
         // Isolate via URL query? Prefer schema-bearing open_postgres_runtime_async-equivalent
         // by using a dedicated DB name suffix is hard; use open_async with schema instead when
         // available. open_postgres_async uses the default schema — unique queue id avoids clash.
