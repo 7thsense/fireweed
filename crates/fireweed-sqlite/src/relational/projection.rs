@@ -10,11 +10,11 @@ use fireweed_core::{
 };
 use fireweed_engine::TerminalEmissionMetrics;
 use fireweed_engine::{
-    AsOfProjectionStore, BatchUpdateItemRef, BatchUpdateSnapshotItem, ClaimRef, ClaimedItem,
-    CohortLeaseTarget, CommandEnvelope, CommandPosition, CreateQueueOutcome, EngineError,
-    EngineResult, FinalizeOutcome, IdempotencyDecision, IndexHit, ItemView, LeaseView,
-    LiveItemView, PendingPage, PendingSummary, ProjectionRead, PushFingerprint, PushItem,
-    QueueCounters, QueueKey, QueueMetrics, UpdateFieldsCommand,
+    ActiveScope, AsOfProjectionStore, BatchUpdateItemRef, BatchUpdateSnapshotItem, ClaimRef,
+    ClaimedItem, CohortLeaseTarget, CommandEnvelope, CommandPosition, CreateQueueOutcome,
+    DiscoveryGranularity, EngineError, EngineResult, FinalizeOutcome, IdempotencyDecision,
+    IndexHit, ItemView, LeaseView, LiveItemView, PendingPage, PendingSummary, ProjectionRead,
+    PushFingerprint, PushItem, QueueCounters, QueueKey, QueueMetrics, UpdateFieldsCommand,
 };
 use fireweed_engine::{ProjectionSnapshot, ProjectionStore};
 use fireweed_projection::{InMemoryProjection, ProjectionData, ProjectionImage};
@@ -1003,6 +1003,19 @@ impl ProjectionStore for SqliteProjectionStore {
             side_record_query: false,
             claim_by_item_ids: false,
         }
+    }
+
+    /// Exact live rollup from the materialized item table (same SQL as the
+    /// unified relational family). Log-replay cells that pair any durable log
+    /// with this projection (memory×sqlite, postgres×sqlite, …) must not return
+    /// unexpected `Unavailable` on P6 discovery (fireweed-477e7b82 / P6N).
+    fn discover_active_scopes(
+        &self,
+        shard: &QueueKey,
+        granularity: DiscoveryGranularity,
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<ActiveScope>> {
+        discover_active_scopes_sql(&self.lock().conn, shard, granularity, now)
     }
 
     fn ensure_shard(&mut self, definition: &QueueDefinition) -> EngineResult<()> {
