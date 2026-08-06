@@ -39,8 +39,7 @@ fn fresh_schema() -> String {
 /// (backend, cp) sharing one fresh schema, or `None` when no DB is configured (LOUD skip at the call site).
 fn pair(name: &str) -> Option<(PostgresBackend, PostgresControlPlane)> {
     let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-        eprintln!("BND-1 SKIPPED ({name}) — set FIREWEED_PG_TEST_URL to a live DB");
-        return None;
+        panic!("BND-1 SKIPPED ({name}) — set FIREWEED_PG_TEST_URL to a live DB");
     };
     let schema = fresh_schema();
     let mut c = Client::connect(&url, NoTls).expect("connect");

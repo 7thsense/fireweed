@@ -27,16 +27,10 @@ fn fresh_schema() -> String {
     )
 }
 
-fn pg_url(test: &str) -> Option<String> {
-    match std::env::var("FIREWEED_PG_TEST_URL") {
-        Ok(url) => Some(url),
-        Err(_) => {
-            eprintln!(
-                "POSTGRES API-001 BATCH UPDATE SKIPPED ({test}) — set FIREWEED_PG_TEST_URL to a live DB"
-            );
-            None
-        }
-    }
+fn pg_url(test: &str) -> String {
+    let _ = test;
+    std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)")
 }
 
 fn key(index: usize) -> ClientItemKey {
@@ -96,9 +90,7 @@ fn claim_request(shard: &QueueKey, token: &str, now: i64) -> ClaimRequest {
 
 #[test]
 fn batch_update_is_set_based_at_sizes_1_100_and_1000() {
-    let Some(url) = pg_url("batch_update_is_set_based_at_sizes_1_100_and_1000") else {
-        return;
-    };
+    let url = pg_url("batch_update_is_set_based_at_sizes_1_100_and_1000");
     for size in [1_usize, 100, 1_000] {
         let schema = fresh_schema();
         futures::executor::block_on(async {
@@ -158,10 +150,7 @@ fn batch_update_is_set_based_at_sizes_1_100_and_1000() {
 
 #[test]
 fn batch_update_preserves_order_and_idempotency_across_mixed_outcomes() {
-    let Some(url) = pg_url("batch_update_preserves_order_and_idempotency_across_mixed_outcomes")
-    else {
-        return;
-    };
+    let url = pg_url("batch_update_preserves_order_and_idempotency_across_mixed_outcomes");
     let schema = fresh_schema();
     futures::executor::block_on(async {
         let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
@@ -344,9 +333,7 @@ fn batch_update_preserves_order_and_idempotency_across_mixed_outcomes() {
 
 #[test]
 fn disabled_gate_update_is_invalid_without_aborting_valid_sibling() {
-    let Some(url) = pg_url("disabled_gate_update_is_invalid_without_aborting_valid_sibling") else {
-        return;
-    };
+    let url = pg_url("disabled_gate_update_is_invalid_without_aborting_valid_sibling");
     let schema = fresh_schema();
     futures::executor::block_on(async {
         let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
@@ -397,10 +384,7 @@ fn disabled_gate_update_is_invalid_without_aborting_valid_sibling() {
 
 #[test]
 fn stale_epoch_and_snapshot_tail_rebuild_preserve_batch_update_replay() {
-    let Some(url) = pg_url("stale_epoch_and_snapshot_tail_rebuild_preserve_batch_update_replay")
-    else {
-        return;
-    };
+    let url = pg_url("stale_epoch_and_snapshot_tail_rebuild_preserve_batch_update_replay");
     let schema = fresh_schema();
     let shard = fireweed_conformance::shard();
     let successful = BatchUpdateRequest {

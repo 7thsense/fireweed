@@ -45,12 +45,10 @@ macro_rules! pg_composed {
                                 .expect("connect postgres (is FIREWEED_PG_TEST_URL a live DB?)")
                         }));
                     }
-                    Err(_) => {
-                        eprintln!(
+                    Err(_) => { panic!(
                             "POSTGRES UNIFIED COMPOSITION SKIPPED ({}) — set FIREWEED_PG_TEST_URL to a live DB",
                             stringify!($name)
-                        );
-                    }
+                        ); }
                 }
             }
         )+
@@ -111,7 +109,7 @@ fn claimed_item_shape_includes_payload_fields_and_gate_keys_if_supported() {
             );
         }
         Err(_) => {
-            eprintln!(
+            panic!(
                 "POSTGRES UNIFIED COMPOSITION SKIPPED (claimed_item_shape_includes_payload_fields_and_gate_keys_if_supported) — set FIREWEED_PG_TEST_URL to a live DB"
             );
         }

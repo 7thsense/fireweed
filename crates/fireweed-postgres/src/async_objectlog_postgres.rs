@@ -1910,12 +1910,8 @@ mod async_projection {
 
     #[tokio::test(flavor = "current_thread")]
     async fn async_projection_both_barriers_and_ordered_watermark_catch_up() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES ASYNC PROJECTION SKIPPED (barriers/catch-up) — set FIREWEED_PG_TEST_URL"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
 
         let (strict_schema, strict_root) = fixture("strict");
         let strict = open(&url, &strict_schema, &strict_root, None).await;
@@ -1970,12 +1966,8 @@ mod async_projection {
 
     #[tokio::test(flavor = "current_thread")]
     async fn async_projection_common_bounds_and_poison_fail_closed() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES ASYNC PROJECTION SKIPPED (bounds/poison) — set FIREWEED_PG_TEST_URL"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
 
         let cases = [
             (
@@ -2070,10 +2062,8 @@ mod async_projection {
 
     #[tokio::test(flavor = "current_thread")]
     async fn async_projection_reopen_resumes_transactional_cursor_without_duplicates() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!("POSTGRES ASYNC PROJECTION SKIPPED (reopen) — set FIREWEED_PG_TEST_URL");
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let (schema, root) = fixture("reopen");
         let backend = open(&url, &schema, &root, Some(spec())).await;
         let shard = create(&backend).await;

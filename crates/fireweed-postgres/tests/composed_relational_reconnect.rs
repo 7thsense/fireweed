@@ -43,12 +43,10 @@ macro_rules! pg_reconnect {
                                 .expect("connect postgres (is FIREWEED_PG_TEST_URL a live DB?)")
                         }));
                     }
-                    Err(_) => {
-                        eprintln!(
+                    Err(_) => { panic!(
                             "POSTGRES UNIFIED COMPOSITION RECONNECT SKIPPED ({}) — set FIREWEED_PG_TEST_URL to a live DB",
                             stringify!($name)
-                        );
-                    }
+                        ); }
                 }
             }
         )+
@@ -81,12 +79,8 @@ fn open(url: &str, schema: &str) -> PostgresRelationalBackend {
 
 #[test]
 fn composed_relational_recover_replays_tail() {
-    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-        eprintln!(
-            "POSTGRES UNIFIED COMPOSITION RECONNECT SKIPPED (TestComposedRelationalRecoverReplaysTail) — set FIREWEED_PG_TEST_URL to a live DB"
-        );
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
     let schema = unique_schema("tail");
 
     {
@@ -121,12 +115,8 @@ fn composed_relational_recover_replays_tail() {
 
 #[test]
 fn composed_relational_recovery_seeds_counters() {
-    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-        eprintln!(
-            "POSTGRES UNIFIED COMPOSITION RECONNECT SKIPPED (TestComposedRelationalRecoverySeedsCounters) — set FIREWEED_PG_TEST_URL to a live DB"
-        );
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
     let schema = unique_schema("counters");
 
     {

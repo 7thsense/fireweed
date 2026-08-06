@@ -11705,12 +11705,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn projection_store_exposes_indexes_and_exact_discovery() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (projection_store_exposes_indexes_and_exact_discovery) — set FIREWEED_PG_TEST_URL"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fw_projection_ports_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).expect("connect");
         cleanup
@@ -11800,12 +11796,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn pending_entry_ports_preserve_bounds_and_requested_order() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (pending_entry_ports_preserve_bounds_and_requested_order) — set FIREWEED_PG_TEST_URL"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_pending_ports_{}", std::process::id());
         let mut client = Client::connect(&url, NoTls).expect("connect");
         client
@@ -11879,12 +11871,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn eligible_candidates_accepts_unbounded_limit_sentinel() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (eligible_candidates_accepts_unbounded_limit_sentinel) — set FIREWEED_PG_TEST_URL"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_unbounded_limit_{}", std::process::id());
         let mut client = Client::connect(&url, NoTls).expect("connect");
         client
@@ -11911,12 +11899,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn push_500_across_128_groups_has_constant_query_amplification() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (push_500_across_128_groups_has_constant_query_amplification) — set FIREWEED_PG_TEST_URL"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_push_amp_{}", std::process::id());
         let mut c = Client::connect(&url, NoTls).expect("connect");
         c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -11971,12 +11955,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn async_validate_500_items_uses_one_conflict_and_one_group_query() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (async_validate_500_items_uses_one_conflict_and_one_group_query) — set FIREWEED_PG_TEST_URL"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_validate_amp_{}", std::process::id());
         let mut c = Client::connect(&url, NoTls).expect("connect");
         c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -12019,12 +11999,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn existing_schema_requires_exact_predeployed_indexes() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (existing_schema_requires_exact_predeployed_indexes)"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_index_predeploy_{}", std::process::id());
         let mut admin = Client::connect(&url, NoTls).unwrap();
         admin
@@ -12067,12 +12043,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn existing_schema_rejects_missing_maintenance_triggers() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (existing_schema_rejects_missing_maintenance_triggers)"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_trigger_ready_{}", std::process::id());
         let mut admin = Client::connect(&url, NoTls).unwrap();
         admin
@@ -12177,12 +12149,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn claim_refreshes_group_summary() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (claim_refreshes_group_summary) — set FIREWEED_PG_TEST_URL"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_gs_{}", std::process::id());
         let mut c = Client::connect(&url, NoTls).expect("connect");
         c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -12204,12 +12172,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn update_fields_reschedules_and_repairs_group_summary() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (update_fields_reschedules_and_repairs_group_summary)"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_vec_a8609c39_update_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -12338,10 +12302,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn touched_group_push_absorbs_prior_due_rows() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!("POSTGRES RELATIONAL SKIPPED (touched_group_push_absorbs_prior_due_rows)");
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_due_push_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -12383,12 +12345,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn due_promotion_claims_new_leader_and_repairs_to_remaining_item() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (due_promotion_claims_new_leader_and_repairs_to_remaining_item)"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_due_claim_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -12444,12 +12402,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn incomplete_due_chunk_returns_unavailable_before_selecting() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (incomplete_due_chunk_returns_unavailable_before_selecting)"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_due_chunk_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -12497,12 +12451,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn online_metrics_migration_is_bounded_resumable_and_gates_startup() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (online_metrics_migration_is_bounded_resumable_and_gates_startup)"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_vec_metrics_migrate_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -12653,12 +12603,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn migration_marker_serializes_waiting_update_and_delete() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (migration_marker_serializes_waiting_update_and_delete)"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_vec_metrics_mutation_race_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -12795,12 +12741,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn migration_seeds_authority_without_double_counting_preexisting_counters() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (migration_seeds_authority_without_double_counting_preexisting_counters)"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_vec_metrics_upgrade_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -12875,12 +12817,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn compound_later_field_metrics_range_uses_normalized_components() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (compound_later_field_metrics_range_uses_normalized_components)"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_vec_metrics_component_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -12984,12 +12922,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn future_grouped_replacement_moves_the_due_frontier() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (future_grouped_replacement_moves_the_due_frontier)"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_vec_replace_due_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -13072,12 +13006,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn million_due_items_in_one_hot_group_advance_in_bounded_chunks() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (million_due_items_in_one_hot_group_advance_in_bounded_chunks)"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_vec_a8609c39_hot_{}", std::process::id());
         let mut client = Client::connect(&url, NoTls).unwrap();
         client
@@ -13131,12 +13061,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn grouped_lifecycle_is_exact_at_1_100_and_1000_items() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (grouped_lifecycle_is_exact_at_1_100_and_1000_items)"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         for size in [1usize, 100, 1_000] {
             let schema = format!("fireweed_rel_lifecycle_{size}_{}", std::process::id());
             let mut cleanup = Client::connect(&url, NoTls).unwrap();
@@ -13193,10 +13119,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn ungrouped_push_has_zero_summary_work() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!("POSTGRES RELATIONAL SKIPPED (ungrouped_push_has_zero_summary_work)");
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_ungrouped_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -13217,12 +13141,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn request_replay_and_failed_push_do_not_double_apply_summary_delta() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (request_replay_and_failed_push_do_not_double_apply_summary_delta)"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_summary_replay_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -13267,12 +13187,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn bounded_group_queries_use_required_partial_indexes() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (bounded_group_queries_use_required_partial_indexes)"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_group_plan_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -13369,12 +13285,8 @@ mod gated_group_summary_tests {
     /// BQ-14b: group_batching leases whole groups oldest-first (env-gated; LOUD-skips without a DB).
     #[test]
     fn group_batching_leases_whole_groups() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (group_batching_leases_whole_groups) — set FIREWEED_PG_TEST_URL"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_gb_{}", std::process::id());
         let mut c = Client::connect(&url, NoTls).expect("connect");
         c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -13426,12 +13338,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn oversized_group_locks_only_max_items_plus_one() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (oversized_group_locks_only_max_items_plus_one)"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_vec_a8609c39_group_bound_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -13496,12 +13404,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn group_member_lock_budget_is_global_across_candidates() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (group_member_lock_budget_is_global_across_candidates)"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_vec_group_global_bound_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -13572,12 +13476,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn group_batching_refills_past_metadata_mismatch_before_limit() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (group_batching_refills_past_metadata_mismatch_before_limit)"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_vec_a8609c39_refill_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).unwrap();
         cleanup
@@ -13638,12 +13538,8 @@ mod gated_group_summary_tests {
 
     #[test]
     fn group_candidate_locks_are_scoped_and_scan_past_contention() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (group_candidate_locks_are_scoped_and_scan_past_contention) — set FIREWEED_PG_TEST_URL"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_group_locks_{}", std::process::id());
         let mut cleanup = Client::connect(&url, NoTls).expect("connect");
         cleanup
@@ -13759,12 +13655,8 @@ mod gated_group_summary_tests {
     /// BQ-14c: whole_cohort leases a complete, all-eligible cohort (env-gated; LOUD-skips without a DB).
     #[test]
     fn whole_cohort_leases_complete_cohort() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (whole_cohort_leases_complete_cohort) — set FIREWEED_PG_TEST_URL"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_wc_{}", std::process::id());
         let mut c = Client::connect(&url, NoTls).expect("connect");
         c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -13824,12 +13716,8 @@ mod gated_group_summary_tests {
     /// crossings, reports deferred at-risk as None, and drops fully-leased scopes (env-gated; LOUD skip).
     #[test]
     fn discover_active_scopes_reads_live_items() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (discover_active_scopes_reads_live_items) — set FIREWEED_PG_TEST_URL"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_rel_ds_{}", std::process::id());
         let mut c = Client::connect(&url, NoTls).expect("connect");
         c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -14027,12 +13915,8 @@ mod commit_transition_tests {
 
     #[test]
     fn commit_transition_rejects_bad_token_bad_version_and_writes_nothing() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (commit_transition_rejects_bad_token_bad_version_and_writes_nothing) — set FIREWEED_PG_TEST_URL"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = unique_schema("rejects");
         let backend = block_on(backend_for_schema(&url, &schema));
 
@@ -14089,12 +13973,8 @@ mod commit_transition_tests {
 
     #[test]
     fn commit_transition_request_id_replays_without_double_write() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (commit_transition_request_id_replays_without_double_write) — set FIREWEED_PG_TEST_URL"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = unique_schema("replay");
         let backend = block_on(backend_for_schema(&url, &schema));
         let claim_ref = block_on(push_and_claim(&backend, 0, 10));
@@ -14140,12 +14020,8 @@ mod commit_transition_tests {
 
     #[test]
     fn commit_transition_without_expected_epoch_mints_lifecycle_ids_at_locked_cursor_epoch() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (commit_transition_without_expected_epoch_mints_lifecycle_ids_at_locked_cursor_epoch) — set FIREWEED_PG_TEST_URL"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = unique_schema("cursor_epoch_ids");
         let backend = block_on(backend_for_schema(&url, &schema));
         let claim_ref = block_on(push_and_claim(&backend, 0, 10));
@@ -14182,12 +14058,8 @@ mod commit_transition_tests {
 
     #[test]
     fn commit_transition_atomically_finalizes_multiple_claims() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (commit_transition_atomically_finalizes_multiple_claims) — set FIREWEED_PG_TEST_URL"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = unique_schema("multi_claim");
         let backend = block_on(backend_for_schema(&url, &schema));
         block_on(backend.push(&shard(), vec![item(10), item(11)], ts(0), None)).unwrap();
@@ -14253,12 +14125,8 @@ mod commit_transition_tests {
 
     #[test]
     fn commit_transition_conflict_is_per_entry_during_race() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (commit_transition_conflict_is_per_entry_during_race) — set FIREWEED_PG_TEST_URL"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = unique_schema("race");
         let b1 = block_on(backend_for_schema(&url, &schema));
         let b2 = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
@@ -14332,8 +14200,7 @@ mod command_log_recovery_tests {
     #[test]
     fn nonempty_prelog_upgrade_restores_snapshot_and_exposes_baseline_ref() {
         let Some(url) = live_url() else {
-            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
-            return;
+            panic!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
         };
         let schema = unique_schema("upgrade");
         let shard = fireweed_conformance::shard();
@@ -14390,8 +14257,7 @@ mod command_log_recovery_tests {
     #[test]
     fn deleted_terminal_log_suffix_fails_closed() {
         let Some(url) = live_url() else {
-            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
-            return;
+            panic!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
         };
         let schema = unique_schema("suffix");
         let shard = fireweed_conformance::shard();
@@ -14431,8 +14297,7 @@ mod command_log_recovery_tests {
     #[test]
     fn durable_position_tamper_breaks_command_checksum() {
         let Some(url) = live_url() else {
-            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
-            return;
+            panic!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
         };
         let schema = unique_schema("position_tamper");
         let shard = fireweed_conformance::shard();
@@ -14456,8 +14321,7 @@ mod command_log_recovery_tests {
     #[test]
     fn projection_failure_rolls_back_command_append() {
         let Some(url) = live_url() else {
-            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
-            return;
+            panic!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
         };
         let schema = unique_schema("rollback");
         let shard = fireweed_conformance::shard();
@@ -14495,8 +14359,7 @@ mod command_log_recovery_tests {
     #[test]
     fn atomic_fault_cut_never_reports_or_leaves_append_only_state() {
         let Some(url) = live_url() else {
-            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
-            return;
+            panic!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
         };
         let schema = unique_schema("fault_cut");
         let shard = fireweed_conformance::shard();
@@ -14531,8 +14394,7 @@ mod command_log_recovery_tests {
     #[test]
     fn command_reads_hard_bound_each_page() {
         let Some(url) = live_url() else {
-            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
-            return;
+            panic!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
         };
         let schema = unique_schema("page");
         let shard = fireweed_conformance::shard();
@@ -14573,8 +14435,7 @@ mod command_log_recovery_tests {
     #[test]
     fn projection_only_store_has_no_internal_command_log() {
         let Some(url) = live_url() else {
-            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
-            return;
+            panic!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
         };
         let schema = unique_schema("reap_guard");
         let mut store = PostgresRelational::connect_in_schema(&url, &schema).unwrap();
@@ -14625,8 +14486,7 @@ mod command_log_recovery_tests {
     #[test]
     fn batch_update_1000_uses_one_target_select_command_insert_and_projection_update() {
         let Some(url) = live_url() else {
-            eprintln!("POSTGRES BATCH UPDATE TEST SKIPPED — set FIREWEED_PG_TEST_URL");
-            return;
+            panic!("POSTGRES BATCH UPDATE TEST SKIPPED — set FIREWEED_PG_TEST_URL");
         };
         let schema = unique_schema("batch_update_1000");
         let shard = fireweed_conformance::shard();
@@ -14672,8 +14532,7 @@ mod command_log_recovery_tests {
     #[test]
     fn all_rejected_batch_update_marker_rebuilds_idempotent_response() {
         let Some(url) = live_url() else {
-            eprintln!("POSTGRES BATCH UPDATE TEST SKIPPED — set FIREWEED_PG_TEST_URL");
-            return;
+            panic!("POSTGRES BATCH UPDATE TEST SKIPPED — set FIREWEED_PG_TEST_URL");
         };
         let schema = unique_schema("batch_update_marker");
         let shard = fireweed_conformance::shard();
@@ -14735,8 +14594,7 @@ mod command_log_recovery_tests {
     #[test]
     fn empty_genesis_baseline_rebuilds_before_any_data_command() {
         let Some(url) = live_url() else {
-            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
-            return;
+            panic!("POSTGRES COMMAND LOG TEST SKIPPED — set FIREWEED_PG_TEST_URL");
         };
         let schema = unique_schema("empty_genesis_rebuild");
         let shard = fireweed_conformance::shard();

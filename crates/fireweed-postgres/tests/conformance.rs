@@ -31,8 +31,9 @@ fn fresh_schema() -> String {
     )
 }
 
-fn pg_url() -> Option<String> {
-    std::env::var("FIREWEED_PG_TEST_URL").ok()
+fn pg_url() -> String {
+    std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)")
 }
 
 /// Generate one `#[test]` per conformance scenario, each env-gated + schema-isolated. Driven by a
@@ -51,8 +52,8 @@ macro_rules! pg_conformance {
                         }));
                     }
                     Err(_) => {
-                        eprintln!(
-                            "POSTGRES CONFORMANCE SKIPPED ({}) — set FIREWEED_PG_TEST_URL to a live DB",
+                        panic!(
+                            "POSTGRES CONFORMANCE requires FIREWEED_PG_TEST_URL for {} (fail-closed; no LOUD skip)",
                             stringify!($name)
                         );
                     }
@@ -201,7 +202,7 @@ fn schema_validation_rejects_before_append_and_idempotency_on_postgres_log() {
             });
         }
         Err(_) => {
-            eprintln!(
+            panic!(
                 "POSTGRES CONFORMANCE SKIPPED (schema_validation_rejects_before_append_and_idempotency_on_postgres_log) — set FIREWEED_PG_TEST_URL to a live DB"
             );
         }
@@ -227,7 +228,7 @@ fn commit_transition_shared_scenario_runs_against_postgres_log_replay() {
             });
         }
         Err(_) => {
-            eprintln!(
+            panic!(
                 "POSTGRES CONFORMANCE SKIPPED (commit_transition_shared_scenario_runs_against_postgres_log_replay) — set FIREWEED_PG_TEST_URL to a live DB"
             );
         }
@@ -236,12 +237,7 @@ fn commit_transition_shared_scenario_runs_against_postgres_log_replay() {
 
 #[test]
 fn postgres_high_water_concurrent_monotonic() {
-    let Some(url) = pg_url() else {
-        eprintln!(
-            "POSTGRES CONFORMANCE SKIPPED (postgres_high_water_concurrent_monotonic) — set FIREWEED_PG_TEST_URL to a live DB"
-        );
-        return;
-    };
+    let url = pg_url();
     let schema = fresh_schema();
     futures::executor::block_on(async {
         let backend = PostgresBackend::connect_in_schema(&url, &schema)
@@ -330,12 +326,7 @@ fn postgres_high_water_concurrent_monotonic() {
 
 #[test]
 fn postgres_append_concurrent_sequence_no_gap_no_dup() {
-    let Some(url) = pg_url() else {
-        eprintln!(
-            "POSTGRES CONFORMANCE SKIPPED (postgres_append_concurrent_sequence_no_gap_no_dup) — set FIREWEED_PG_TEST_URL to a live DB"
-        );
-        return;
-    };
+    let url = pg_url();
     let schema = fresh_schema();
     futures::executor::block_on(async {
         let backend = PostgresBackend::connect_in_schema(&url, &schema)

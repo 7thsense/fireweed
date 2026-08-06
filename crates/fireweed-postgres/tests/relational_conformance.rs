@@ -39,10 +39,8 @@ fn fresh_schema() -> String {
 
 #[test]
 fn v0193_upgrade_backfills_item_id_high_water_before_counter_restore() {
-    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-        eprintln!("POSTGRES ITEM-ID UPGRADE SKIPPED — set FIREWEED_PG_TEST_URL to a live DB");
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
     let schema = fresh_schema();
     let shard = fireweed_conformance::shard();
     let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
@@ -111,12 +109,10 @@ macro_rules! pg_relational {
                                 .expect("connect postgres (is FIREWEED_PG_TEST_URL a live DB?)")
                         }));
                     }
-                    Err(_) => {
-                        eprintln!(
+                    Err(_) => { panic!(
                             "POSTGRES RELATIONAL SKIPPED ({}) — set FIREWEED_PG_TEST_URL to a live DB",
                             stringify!($name)
-                        );
-                    }
+                        ); }
                 }
             }
         )+
@@ -272,7 +268,7 @@ fn schema_validation_rejects_before_append_and_idempotency_on_postgres_relationa
             });
         }
         Err(_) => {
-            eprintln!(
+            panic!(
                 "POSTGRES RELATIONAL SKIPPED (schema_validation_rejects_before_append_and_idempotency_on_postgres_relational) — set FIREWEED_PG_TEST_URL to a live DB"
             );
         }
@@ -298,7 +294,7 @@ fn commit_transition_shared_scenario_runs_against_postgres_relational() {
             });
         }
         Err(_) => {
-            eprintln!(
+            panic!(
                 "POSTGRES RELATIONAL SKIPPED (commit_transition_shared_scenario_runs_against_postgres_relational) — set FIREWEED_PG_TEST_URL to a live DB"
             );
         }
@@ -332,7 +328,7 @@ fn commit_transition_explain_commit_shared_scenario_runs_against_postgres_relati
             });
         }
         Err(_) => {
-            eprintln!(
+            panic!(
                 "POSTGRES RELATIONAL SKIPPED (commit_transition_explain_commit_shared_scenario_runs_against_postgres_relational) — set FIREWEED_PG_TEST_URL to a live DB"
             );
         }
@@ -390,7 +386,7 @@ fn postgres_relational_recovery_high_water() {
             );
         }
         Err(_) => {
-            eprintln!(
+            panic!(
                 "POSTGRES RELATIONAL SKIPPED (TestPostgresRelationalRecoveryHighWater) — set FIREWEED_PG_TEST_URL to a live DB"
             );
         }
@@ -524,7 +520,7 @@ fn postgres_relational_truncate_then_recover_exact_state() {
             });
         }
         Err(_) => {
-            eprintln!(
+            panic!(
                 "POSTGRES RELATIONAL SKIPPED (TestPostgresRelationalTruncateThenRecoverExactState) — set FIREWEED_PG_TEST_URL to a live DB"
             );
         }

@@ -12,8 +12,9 @@ use fireweed_engine::{
 };
 use fireweed_postgres::{PostgresLog, composed_postgres_backend_in_schema};
 
-fn pg_url() -> Option<String> {
-    std::env::var("FIREWEED_PG_TEST_URL").ok()
+fn pg_url() -> String {
+    std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)")
 }
 
 fn fresh_schema(tag: &str) -> String {
@@ -28,23 +29,13 @@ fn fresh_schema(tag: &str) -> String {
 
 #[test]
 fn composed_postgres_projection_rebuilds_from_durable_log_on_reconnect() {
-    let Some(url) = pg_url() else {
-        eprintln!(
-            "COMPOSED POSTGRES RECOVERY SKIPPED (reopen) — set FIREWEED_PG_TEST_URL to a live DB"
-        );
-        return;
-    };
+    let url = pg_url();
     futures::executor::block_on(reopen_inner(url));
 }
 
 #[test]
 fn postgres_log_pagination_resumes_after_last_returned_position() {
-    let Some(url) = pg_url() else {
-        eprintln!(
-            "COMPOSED POSTGRES RECOVERY SKIPPED (pagination) — set FIREWEED_PG_TEST_URL to a live DB"
-        );
-        return;
-    };
+    let url = pg_url();
     let mut log = PostgresLog::connect_in_schema(&url, &fresh_schema("pagination"))
         .expect("connect postgres log");
     let shard = qkey();
@@ -86,12 +77,7 @@ fn postgres_log_pagination_resumes_after_last_returned_position() {
 
 #[test]
 fn postgres_log_batches_sequence_allocation_and_pages_across_insert_chunks() {
-    let Some(url) = pg_url() else {
-        eprintln!(
-            "COMPOSED POSTGRES RECOVERY SKIPPED (batched append) — set FIREWEED_PG_TEST_URL to a live DB"
-        );
-        return;
-    };
+    let url = pg_url();
     let mut log = PostgresLog::connect_in_schema(&url, &fresh_schema("batched_append"))
         .expect("connect postgres log");
     let shard = qkey();
@@ -144,12 +130,7 @@ fn postgres_log_batches_sequence_allocation_and_pages_across_insert_chunks() {
 
 #[test]
 fn composed_postgres_log_preserves_request_id_idempotency() {
-    let Some(url) = pg_url() else {
-        eprintln!(
-            "COMPOSED POSTGRES RECOVERY SKIPPED (request id) — set FIREWEED_PG_TEST_URL to a live DB"
-        );
-        return;
-    };
+    let url = pg_url();
     futures::executor::block_on(
         fireweed_conformance::scenarios::request_id_push_replays_once_and_conflicts_on_body_change(
             || {
@@ -162,12 +143,7 @@ fn composed_postgres_log_preserves_request_id_idempotency() {
 
 #[test]
 fn postgres_log_cross_chunk_append_is_one_atomic_transaction() {
-    let Some(url) = pg_url() else {
-        eprintln!(
-            "COMPOSED POSTGRES RECOVERY SKIPPED (batched atomicity) — set FIREWEED_PG_TEST_URL to a live DB"
-        );
-        return;
-    };
+    let url = pg_url();
     let schema = fresh_schema("batched_atomicity");
     let mut log = PostgresLog::connect_in_schema(&url, &schema).expect("connect postgres log");
     let shard = qkey();

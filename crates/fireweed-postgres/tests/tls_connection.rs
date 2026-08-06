@@ -13,13 +13,8 @@ use fireweed_postgres::{PostgresConnectConfig, PostgresSslMode, connect};
 /// `connect()` path (native-tls connector selection + handshake), not a bespoke connector.
 #[test]
 fn postgres_tls_connection_succeeds() {
-    let Ok(url) = std::env::var("FIREWEED_PG_TLS_TEST_URL") else {
-        eprintln!(
-            "POSTGRES TLS ROUND-TRIP SKIPPED — set FIREWEED_PG_TLS_TEST_URL to a TLS-enabled postgres DSN \
-             (sslmode=require) to run this proof"
-        );
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TLS_TEST_URL")
+        .expect("FIREWEED_PG_TLS_TEST_URL required (fail-closed live TLS postgres; no LOUD skip)");
 
     // The DSN must actually demand TLS; a misconfigured `disable` URL here would silently prove nothing.
     let ssl_mode = PostgresConnectConfig::new(&url)
