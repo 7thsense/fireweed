@@ -9,11 +9,41 @@ use fireweed::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Fixed work sizes (TP-005).
+/// Fixed work sizes (TP-005 production gate).
 pub const INSERT_ITEMS: u64 = 1_000_000;
 pub const MODIFY_ITEMS: u64 = 500_000;
 pub const BATCH: usize = 1_000;
 pub const WARMUP_ITEMS: u64 = 10_000;
+
+/// Configurable work sizes (production defaults or reduced functional probes).
+#[derive(Debug, Clone, Copy)]
+pub struct WorkSizes {
+    pub insert_items: u64,
+    pub modify_items: u64,
+    pub batch: usize,
+    pub warmup_items: u64,
+}
+
+impl WorkSizes {
+    pub const fn production() -> Self {
+        Self {
+            insert_items: INSERT_ITEMS,
+            modify_items: MODIFY_ITEMS,
+            batch: BATCH,
+            warmup_items: WARMUP_ITEMS,
+        }
+    }
+
+    /// Small functional probe: 2k insert / 1k modify, batch 100.
+    pub const fn probe() -> Self {
+        Self {
+            insert_items: 2_000,
+            modify_items: 1_000,
+            batch: 100,
+            warmup_items: 200,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -51,13 +81,30 @@ fn item(i: u64, payload_tag: u8) -> NewItem {
     }
 }
 
-/// Unmeasured warmup of `WARMUP_ITEMS` then the timed 1M/500K/1M cycle.
+/// Production TP-005 sizes.
 pub async fn run_million_cycle(
     fireweed: &Fireweed,
     definition: QueueDefinition,
     queue: QueueKey,
     cell: &str,
 ) -> Result<MillionCycleResult, String> {
+    run_million_cycle_with(fireweed, definition, queue, cell, WorkSizes::production()).await
+}
+
+/// Unmeasured warmup then timed insert / modify / read+verify.
+pub async fn run_million_cycle_with(
+    fireweed: &Fireweed,
+    definition: QueueDefinition,
+    queue: QueueKey,
+    cell: &str,
+    sizes: WorkSizes,
+) -> Result<MillionCycleResult, String> {
+    if sizes.modify_items > sizes.insert_items {
+        return Err("modify_items must be <= insert_items".into());
+    }
+    if sizes.batch == 0 {
+        return Err("batch must be > 0".into());
+    }
     fireweed
         .create_queue(definition)
         .await
@@ -65,8 +112,8 @@ pub async fn run_million_cycle(
 
     // Warmup (untimed).
     let mut i = 0u64;
-    while i < WARMUP_ITEMS {
-        let end = (i + BATCH as u64).min(WARMUP_ITEMS);
+    while i < sizes.warmup_items {
+        let end = (i + sizes.batch as u64).min(sizes.warmup_items);
         let batch: Vec<_> = (i..end).map(|n| item(n + 9_000_000_000, 0)).collect();
         let rid = RequestId::new(format!("mc-warm-{i}"))
             .map_err(|e| format!("warmup request id: {e}"))?;
@@ -77,11 +124,11 @@ pub async fn run_million_cycle(
         i = end;
     }
 
-    // Insert 1M.
+    // Insert.
     let insert_start = Instant::now();
     let mut inserted = 0u64;
-    while inserted < INSERT_ITEMS {
-        let end = (inserted + BATCH as u64).min(INSERT_ITEMS);
+    while inserted < sizes.insert_items {
+        let end = (inserted + sizes.batch as u64).min(sizes.insert_items);
         let batch: Vec<_> = (inserted..end).map(|n| item(n, 1)).collect();
         let rid = RequestId::new(format!("mc-ins-{inserted}"))
             .map_err(|e| format!("insert request id: {e}"))?;
@@ -99,11 +146,11 @@ pub async fn run_million_cycle(
     }
     let insert_ns = nanos(insert_start);
 
-    // Modify first 500K → version 2.
+    // Modify first modify_items → version 2.
     let modify_start = Instant::now();
     let mut modified = 0u64;
-    while modified < MODIFY_ITEMS {
-        let end = (modified + BATCH as u64).min(MODIFY_ITEMS);
+    while modified < sizes.modify_items {
+        let end = (modified + sizes.batch as u64).min(sizes.modify_items);
         let updates: Vec<_> = (modified..end)
             .map(|n| BatchUpdateEntry {
                 item_ref: BatchUpdateItemRef::ClientItemKey(client_key(n)),
@@ -145,11 +192,11 @@ pub async fn run_million_cycle(
     }
     let modify_ns = nanos(modify_start);
 
-    // Read + verify all 1M.
+    // Read + verify all inserts.
     let read_start = Instant::now();
     let mut read = 0u64;
-    while read < INSERT_ITEMS {
-        let end = (read + BATCH as u64).min(INSERT_ITEMS);
+    while read < sizes.insert_items {
+        let end = (read + sizes.batch as u64).min(sizes.insert_items);
         let keys: Vec<_> = (read..end).map(client_key).collect();
         let items = fireweed
             .live_items(&queue, keys)
@@ -167,8 +214,8 @@ pub async fn run_million_cycle(
             let view = maybe_view
                 .as_ref()
                 .ok_or_else(|| format!("item {n} missing from live_items"))?;
-            let expected_version = if n < MODIFY_ITEMS { 2 } else { 1 };
-            let expected_tag = if n < MODIFY_ITEMS { 2u8 } else { 1u8 };
+            let expected_version = if n < sizes.modify_items { 2 } else { 1 };
+            let expected_tag = if n < sizes.modify_items { 2u8 } else { 1u8 };
             if view.item_version != expected_version {
                 return Err(format!(
                     "item {n} version: expected {expected_version}, got {}",
@@ -192,9 +239,37 @@ pub async fn run_million_cycle(
         insert_ns,
         modify_ns,
         read_verify_ns,
-        insert_items: INSERT_ITEMS,
-        modify_items: MODIFY_ITEMS,
-        read_items: INSERT_ITEMS,
+        insert_items: sizes.insert_items,
+        modify_items: sizes.modify_items,
+        read_items: sizes.insert_items,
         reopen_ok: false, // filled by orchestrator after reopen
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{SystemClock, bench_qdef, qkey};
+    use fireweed::{StorageConfig, open};
+    use std::sync::Arc;
+
+    #[test]
+    fn probe_cycle_on_memory_memory() {
+        let shape = crate::all_shapes()[0];
+        let mut def = bench_qdef("bench", "mc-probe", &shape);
+        def.max_push_batch_size = 1_000;
+        def.max_claim_batch_size = 1_000;
+        let fireweed = open(StorageConfig::memory(), Arc::new(SystemClock)).expect("open");
+        let result = futures::executor::block_on(run_million_cycle_with(
+            &fireweed,
+            def,
+            qkey("mc-probe"),
+            "memory--memory",
+            WorkSizes::probe(),
+        ))
+        .expect("probe cycle");
+        assert_eq!(result.insert_items, 2_000);
+        assert_eq!(result.modify_items, 1_000);
+        assert!(result.insert_ns > 0 && result.modify_ns > 0 && result.read_verify_ns > 0);
+    }
 }
