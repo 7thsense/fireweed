@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use fireweed::{
     ConfigSecret, Fireweed, LogConfig, ObjectLogAuthority, PostgresMode, ProjectionStoreConfig,
     RecoveryAction, RecoveryPolicy, ResponseBarrier, SegmentConfig, StorageConfig, open,
+    open_async,
 };
 use fireweed_bench::performance_matrix::{
     ProjectionCatchupEvidence, RepetitionSpec, run_preflight, run_repetition,
@@ -253,15 +254,18 @@ where
     F: std::future::Future<Output = T> + Send,
     T: Send,
 {
-    let needs_objectlog_runtime = parse_cell(cell)
-        .map(|(log, proj)| {
-            matches!(log, "filesystem" | "s3") || matches!(proj, "turso")
-        })
-        .unwrap_or(false);
-    if needs_objectlog_runtime {
-        fireweed_objectlog::block_on_objectlog_future(fut)
-    } else {
-        futures::executor::block_on(fut)
+    // Object-log products need the shared multi-thread reactor. Turso products also need a
+    // reactor, but never nest a Tokio handle on the same thread as the sync postgres client
+    // (Drop of postgres::Client panics with "runtime from within a runtime").
+    let route = parse_cell(cell).map(|(log, proj)| (log, proj));
+    match route {
+        Ok((log, _)) if matches!(log, "filesystem" | "s3") => {
+            fireweed_objectlog::block_on_objectlog_future(fut)
+        }
+        Ok((log, "turso")) if !matches!(log, "postgres") => {
+            fireweed_objectlog::block_on_objectlog_future(fut)
+        }
+        _ => futures::executor::block_on(fut),
     }
 }
 
@@ -367,11 +371,23 @@ fn construct(
     std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
     let (config, recipe) = build_storage_config(cfg, cell, root, namespace)?;
     let clock = Arc::new(SystemClock);
-    // Prefer open_async offload for postgres/object-log cells when a runtime is present;
-    // fall back to open for the plain block_on orchestrator.
-    let fireweed = match open(config, clock) {
-        Ok(fw) => fw,
-        Err(error) => return Err(error.to_string()),
+    // Open on a thread with no outer Tokio handle when the cell involves the sync postgres
+    // client (log or projection), so postgres Drop never re-enters a nested runtime.
+    let (log, proj) = parse_cell(cell)?;
+    let fireweed = if matches!(log, "postgres") || matches!(proj, "postgres") {
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| open(config, clock).map_err(|error| error.to_string()))
+                .join()
+                .map_err(|_| "construct thread panicked".to_owned())?
+        })?
+    } else if matches!(log, "filesystem" | "s3") || matches!(proj, "turso") {
+        drive_cell(
+            cell,
+            async move { open_async(config, clock).await.map_err(|e| e.to_string()) },
+        )?
+    } else {
+        open(config, clock).map_err(|error| error.to_string())?
     };
     Ok((fireweed, recipe))
 }
