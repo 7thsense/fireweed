@@ -129,6 +129,11 @@ path = "tests/p5_class_b_reopen.rs"
 required-features = ["memory", "sqlite", "turso"]
 
 [[test]]
+name = "p5an_non_s3_class_a_reopen_parity"
+path = "tests/p5an_non_s3_class_a_reopen_parity.rs"
+required-features = ["memory", "sqlite", "objectlog"]
+
+[[test]]
 name = "public_interface_external_conformance"
 path = "tests/public_interface_external_conformance.rs"
 required-features = ["postgres", "objectlog", "sqlite"]

@@ -2359,7 +2359,6 @@ async fn noisy_neighbor_scale_e2e() {
 ///   - live multi-PROCESS service injection + owner reassignment/epoch-advance under load (TD-003 control
 ///     plane) (-> pqueue-c33c367e server runtime). NOT asserted, NOT claimed in the row.
 #[tokio::test]
-#[ignore = "LogEngine reopen does not yet rehydrate control-plane queue registry for metrics(queue) without create_queue; durable crash recovery proof blocked on catalog recovery"]
 async fn worker_crash_recovery_e2e() {
     let dir = std::env::temp_dir().join(format!("fireweed-pv-e2e5-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
