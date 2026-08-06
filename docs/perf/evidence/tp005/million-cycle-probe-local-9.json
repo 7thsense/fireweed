@@ -1,0 +1,103 @@
+{
+  "failures": [],
+  "results": [
+    {
+      "cell": "memory--memory",
+      "insert_items": 2000,
+      "insert_ns": 27743285,
+      "modify_items": 1000,
+      "modify_ns": 12008801,
+      "read_items": 2000,
+      "read_verify_ns": 2176810,
+      "reopen_ok": true
+    },
+    {
+      "cell": "memory--sqlite",
+      "insert_items": 2000,
+      "insert_ns": 96022588,
+      "modify_items": 1000,
+      "modify_ns": 161582559,
+      "read_items": 2000,
+      "read_verify_ns": 14571620,
+      "reopen_ok": true
+    },
+    {
+      "cell": "memory--turso",
+      "insert_items": 2000,
+      "insert_ns": 4134398605,
+      "modify_items": 1000,
+      "modify_ns": 2889883331,
+      "read_items": 2000,
+      "read_verify_ns": 452439234,
+      "reopen_ok": true
+    },
+    {
+      "cell": "sqlite--memory",
+      "insert_items": 2000,
+      "insert_ns": 255853241,
+      "modify_items": 1000,
+      "modify_ns": 154063959,
+      "read_items": 2000,
+      "read_verify_ns": 1857867,
+      "reopen_ok": true
+    },
+    {
+      "cell": "sqlite--sqlite",
+      "insert_items": 2000,
+      "insert_ns": 534739335,
+      "modify_items": 1000,
+      "modify_ns": 250968817,
+      "read_items": 2000,
+      "read_verify_ns": 15156416,
+      "reopen_ok": true
+    },
+    {
+      "cell": "sqlite--turso",
+      "insert_items": 2000,
+      "insert_ns": 5675932558,
+      "modify_items": 1000,
+      "modify_ns": 2892507220,
+      "read_items": 2000,
+      "read_verify_ns": 429934476,
+      "reopen_ok": true
+    },
+    {
+      "cell": "filesystem--memory",
+      "insert_items": 2000,
+      "insert_ns": 2152620318,
+      "modify_items": 1000,
+      "modify_ns": 1104041928,
+      "read_items": 2000,
+      "read_verify_ns": 1234627,
+      "reopen_ok": true
+    },
+    {
+      "cell": "filesystem--sqlite",
+      "insert_items": 2000,
+      "insert_ns": 1543107464,
+      "modify_items": 1000,
+      "modify_ns": 2165657390,
+      "read_items": 2000,
+      "read_verify_ns": 2681614,
+      "reopen_ok": true
+    },
+    {
+      "cell": "filesystem--turso",
+      "insert_items": 2000,
+      "insert_ns": 6439854553,
+      "modify_items": 1000,
+      "modify_ns": 3043800444,
+      "read_items": 2000,
+      "read_verify_ns": 318017550,
+      "reopen_ok": true
+    }
+  ],
+  "sizes": {
+    "batch": 100,
+    "insert": 2000,
+    "modify": 1000,
+    "warmup": 200
+  },
+  "status": "passed",
+  "tier": "probe"
+}
