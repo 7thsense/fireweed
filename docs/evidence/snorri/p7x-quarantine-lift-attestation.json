@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "capability_id": "SNORRI-P7X-QUARANTINE-LIFT",
+  "plan_key": "P7x",
+  "bead_id": "fireweed-4915c30f",
+  "attested_at": "2026-08-06T01:35:08Z",
+  "fireweed_fix_commit": "25ca87dc0dee406c9e1849e9bdd33eb7ca875681",
+  "fireweed_merge_head": "a059e86fa6692c55f1a2442010f94e036ffb8603",
+  "root_cause": "AsyncLogReplay claim_by_query selected outside KeyedQueueGate allowing double Claim",
+  "fix_summary": "Select+append Claim under submit_operation for claim_by_query and claim_by_item_ids",
+  "revalidation": {
+    "worker-pool/sqlite": {
+      "runs": 10,
+      "pass": 10,
+      "fail": 0,
+      "evidence_dir": "/tmp/p7x-10x"
+    },
+    "campaign-scale/sqlite": {
+      "runs": 10,
+      "pass": 10,
+      "fail": 0,
+      "evidence_dir": "/tmp/p7x-10x"
+    }
+  },
+  "snorri_quarantine_rows_removed": [
+    [
+      "durable/worker-pool.scenario.yaml",
+      "sqlite",
+      "fireweed-2be744bd"
+    ],
+    [
+      "durable/campaign-scale.scenario.yaml",
+      "sqlite",
+      "fireweed-9cec8b02"
+    ]
+  ],
+  "snorri_pin": {
+    "rev": "25ca87dc0dee406c9e1849e9bdd33eb7ca875681",
+    "note": "path/git pin on snorri agent/p7x-quarantine-lift"
+  },
+  "related_beads": [
+    "fireweed-9cec8b02",
+    "fireweed-2be744bd"
+  ]
+}
