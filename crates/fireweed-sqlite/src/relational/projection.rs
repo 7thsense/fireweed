@@ -1005,6 +1005,13 @@ impl ProjectionStore for SqliteProjectionStore {
         }
     }
 
+    /// Gate membership + `SetGates` are durable in this projection (item_gates /
+    /// gate_state tables). Required for log-replay cells (memory×sqlite,
+    /// postgres×sqlite, …) so P8 gate push/claim is not refused as Unavailable.
+    fn supports_gates(&self) -> bool {
+        true
+    }
+
     /// Exact live rollup from the materialized item table (same SQL as the
     /// unified relational family). Log-replay cells that pair any durable log
     /// with this projection (memory×sqlite, postgres×sqlite, …) must not return
