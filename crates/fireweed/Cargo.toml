@@ -193,6 +193,11 @@ path = "tests/p5as3_s3_reopen_parity.rs"
 required-features = ["objectlog", "sqlite", "postgres"]
 
 [[test]]
+name = "p6s3_s3_query_parity"
+path = "tests/p6s3_s3_query_parity.rs"
+required-features = ["objectlog", "sqlite", "postgres"]
+
+[[test]]
 name = "p3b_non_s3_barrier_conformance"
 path = "tests/p3b_non_s3_barrier_conformance.rs"
 required-features = ["memory", "objectlog", "sqlite", "postgres"]
