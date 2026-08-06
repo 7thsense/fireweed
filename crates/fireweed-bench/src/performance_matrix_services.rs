@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use bytes::Bytes;
 use fireweed_objectlog::segmented::{BlobStore, S3BlobStore};
 use fireweed_objectlog::S3CreateOnlyPut;
-use futures::executor::block_on;
 use postgres::{Client, NoTls};
 use sha2::{Digest, Sha256};
 
@@ -275,21 +274,30 @@ pub fn cleanup_owned(
         let service = s3.ok_or("object-store cleanup service missing")?;
         let store = object_store(service);
         let prefix = physical_object_prefix(&namespace);
-        let keys = block_on(store.list(&prefix))
-            .map_err(|error| format!("object-store cleanup list: {error}"))?;
-        if keys.iter().any(|key| !key.starts_with(&prefix)) {
-            return Err("object-store returned a key outside the exact owned prefix".into());
-        }
-        for key in keys {
-            block_on(store.delete(&key))
-                .map_err(|error| format!("object-store cleanup delete: {error}"))?;
-        }
-        if !block_on(store.list(&prefix))
-            .map_err(|error| format!("object-store cleanup verification: {error}"))?
-            .is_empty()
-        {
-            return Err("object-store cleanup verification failed".into());
-        }
+        fireweed_objectlog::block_on_objectlog_future(async {
+            let keys = store
+                .list(&prefix)
+                .await
+                .map_err(|error| format!("object-store cleanup list: {error}"))?;
+            if keys.iter().any(|key| !key.starts_with(&prefix)) {
+                return Err("object-store returned a key outside the exact owned prefix".into());
+            }
+            for key in keys {
+                store
+                    .delete(&key)
+                    .await
+                    .map_err(|error| format!("object-store cleanup delete: {error}"))?;
+            }
+            if !store
+                .list(&prefix)
+                .await
+                .map_err(|error| format!("object-store cleanup verification: {error}"))?
+                .is_empty()
+            {
+                return Err("object-store cleanup verification failed".into());
+            }
+            Ok::<(), String>(())
+        })?;
     }
     if let Some(path) = cleanup.local {
         std::fs::remove_dir_all(path).map_err(|error| format!("local cleanup: {error}"))?;
@@ -320,14 +328,19 @@ fn create_only_store(config: &ObjectStoreService) -> S3CreateOnlyPut {
 
 pub fn object_store_preflight_rtts(config: &ObjectStoreService) -> Result<Vec<u64>, String> {
     let store = object_store(config);
-    let mut samples = Vec::with_capacity(3);
-    for _ in 0..3 {
-        let started = std::time::Instant::now();
-        block_on(store.list("fireweed-perf/v1/_locks/"))
-            .map_err(|error| format!("object-store preflight list: {error}"))?;
-        samples.push(started.elapsed().as_nanos().min(u64::MAX as u128) as u64);
-    }
-    Ok(samples)
+    // S3BlobStore (aws-sdk) requires a Tokio reactor; use the shared object-log runtime.
+    fireweed_objectlog::block_on_objectlog_future(async {
+        let mut samples = Vec::with_capacity(3);
+        for _ in 0..3 {
+            let started = std::time::Instant::now();
+            store
+                .list("fireweed-perf/v1/_locks/")
+                .await
+                .map_err(|error| format!("object-store preflight list: {error}"))?;
+            samples.push(started.elapsed().as_nanos().min(u64::MAX as u128) as u64);
+        }
+        Ok(samples)
+    })
 }
 
 /// Holds service locks for the lifetime of the run. The object lock is removed
@@ -335,7 +348,8 @@ pub fn object_store_preflight_rtts(config: &ObjectStoreService) -> Result<Vec<u6
 /// delete a successor's lock.
 pub struct ServiceLocks {
     postgres: Option<Client>,
-    object_store: Option<(S3BlobStore, Vec<u8>)>,
+    /// Credentials + lock payload when an object-store lock is held.
+    object_lock: Option<(ObjectStoreService, Vec<u8>)>,
 }
 
 impl ServiceLocks {
@@ -360,11 +374,12 @@ impl ServiceLocks {
             None
         };
         let object_lock = if let Some(service) = s3 {
-            let store = object_store(service);
             let create_only = create_only_store(service);
             let payload = format!("run={run_id}\ncommit={commit}\n").into_bytes();
-            match block_on(create_only.put_if_absent(LOCK_KEY, Bytes::from(payload.clone()))) {
-                Ok(true) => Some((store, payload)),
+            match fireweed_objectlog::block_on_objectlog_future(
+                create_only.put_if_absent(LOCK_KEY, Bytes::from(payload.clone())),
+            ) {
+                Ok(true) => Some((service.clone(), payload)),
                 Ok(false) => {
                     release_postgres(&mut pg_lock);
                     return Err("another matrix holds the object-store service lock".into());
@@ -379,7 +394,7 @@ impl ServiceLocks {
         };
         Ok(Self {
             postgres: pg_lock,
-            object_store: object_lock,
+            object_lock,
         })
     }
 }
@@ -393,11 +408,14 @@ fn release_postgres(client: &mut Option<Client>) {
 impl Drop for ServiceLocks {
     fn drop(&mut self) {
         release_postgres(&mut self.postgres);
-        if let Some((store, payload)) = self.object_store.as_ref() {
-            let current = block_on(store.get(LOCK_KEY)).ok().flatten();
-            if current.as_deref() == Some(payload.as_slice()) {
-                let _ = block_on(store.delete(LOCK_KEY));
-            }
+        if let Some((service, payload)) = self.object_lock.take() {
+            let store = object_store(&service);
+            let _ = fireweed_objectlog::block_on_objectlog_future(async move {
+                let current = store.get(LOCK_KEY).await.ok().flatten();
+                if current.as_deref() == Some(payload.as_slice()) {
+                    let _ = store.delete(LOCK_KEY).await;
+                }
+            });
         }
     }
 }
