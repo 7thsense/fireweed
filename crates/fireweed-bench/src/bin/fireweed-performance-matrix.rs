@@ -5,10 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fireweed::{
-    ConfigSecret, Fireweed, ObjectLogAuthority, ObjectLogRuntimeConfig, ObjectLogStorage,
-    PostgresMode, PostgresRuntimeConfig, ProjectionConfig, RecoveryAction, RecoveryPolicy,
-    ResponseBarrier, SegmentConfig, open_memory, open_objectlog, open_objectlog_postgres,
-    open_objectlog_sqlite, open_postgres_runtime, open_sqlite, open_sqlite_relational,
+    ConfigSecret, Fireweed, LogConfig, ObjectLogAuthority, PostgresMode, ProjectionStoreConfig,
+    RecoveryAction, RecoveryPolicy, ResponseBarrier, SegmentConfig, StorageConfig, open,
 };
 use fireweed_bench::performance_matrix::{
     ProjectionCatchupEvidence, RepetitionSpec, run_preflight, run_repetition,
@@ -26,27 +24,18 @@ use fireweed_bench::performance_matrix_lifecycle::{
     reopen_verify_and_drain, run_projection_maintenance, seed_recovery_population,
 };
 use fireweed_bench::performance_matrix_provenance::collect as collect_provenance;
+use fireweed_bench::performance_matrix_cells::{
+    FULL_CELL_IDS as CELLS_FULL, SMOKE_CELL_IDS as CELLS_SMOKE, barrier_class as cell_barrier_class,
+    is_maintenance_cell, parse_cell,
+};
 use fireweed_bench::performance_matrix_services::{
     AuthorizedCleanup, ObjectStoreService, PostgresService, RunOwnership, SchemaKind,
-    SecretRedactor, ServiceLocks, cleanup_owned, derived_plain_schema, object_store_preflight_rtts,
+    SecretRedactor, ServiceLocks, cleanup_owned, derived_plain_schema, facade_postgres_schema,
+    object_store_preflight_rtts,
 };
 use fireweed_bench::{Grouping, PriorityDist, Shape, SystemClock, bench_qdef, qkey};
 use postgres::{Client, NoTls};
 
-const CELLS_FULL: &[&str] = &[
-    "memory",
-    "sqlite-log",
-    "sqlite-relational",
-    "postgres-log",
-    "postgres-relational",
-    "objectlog-local-direct",
-    "objectlog-local-sqlite-strict",
-    "objectlog-local-sqlite-async",
-    "objectlog-local-postgres-strict",
-    "objectlog-s3-sqlite-strict",
-    "objectlog-s3-sqlite-async",
-    "objectlog-s3-postgres-strict",
-];
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 
 fn check_cancelled() -> Result<(), String> {
@@ -89,35 +78,22 @@ fn wait_for_fragment(mut child: Child) -> Result<ExitStatus, String> {
         std::thread::sleep(Duration::from_millis(100));
     }
 }
-const CELLS_SMOKE: &[&str] = &[
-    "memory",
-    "sqlite-log",
-    "sqlite-relational",
-    "objectlog-local-direct",
-    "objectlog-local-sqlite-strict",
-    "objectlog-local-sqlite-async",
-];
-const RECOVERY_CELLS: &[&str] = &[
-    "sqlite-log",
-    "sqlite-relational",
-    "postgres-log",
-    "postgres-relational",
-    "objectlog-local-direct",
-    "objectlog-local-sqlite-strict",
-    "objectlog-local-sqlite-async",
-    "objectlog-local-postgres-strict",
-    "objectlog-s3-sqlite-strict",
-    "objectlog-s3-sqlite-async",
-    "objectlog-s3-postgres-strict",
-];
-const MAINTENANCE_CELLS: &[&str] = &[
-    "objectlog-local-sqlite-strict",
-    "objectlog-local-sqlite-async",
-    "objectlog-local-postgres-strict",
-    "objectlog-s3-sqlite-strict",
-    "objectlog-s3-sqlite-async",
-    "objectlog-s3-postgres-strict",
-];
+/// Recovery reopen: every cell except pure volatile memory--memory.
+fn recovery_cells() -> Vec<&'static str> {
+    CELLS_FULL
+        .iter()
+        .copied()
+        .filter(|cell| *cell != "memory--memory")
+        .collect()
+}
+
+fn maintenance_cells() -> Vec<&'static str> {
+    CELLS_FULL
+        .iter()
+        .copied()
+        .filter(|cell| is_maintenance_cell(cell))
+        .collect()
+}
 
 struct Config {
     tier: String,
@@ -174,9 +150,10 @@ fn write_failure_journal(
 
 enum CleanupRecipe {
     Local,
-    LocalAndPostgres(SchemaKind),
+    /// Exact allowlisted PostgreSQL schema name.
+    LocalAndPostgres(String),
     S3,
-    S3AndPostgres(SchemaKind),
+    S3AndPostgres(String),
 }
 
 fn now_ms() -> u128 {
@@ -263,81 +240,122 @@ fn matrix_qdef(queue: &str, shape: &Shape) -> fireweed::QueueDefinition {
 }
 
 fn barrier_class(cell: &str) -> &'static str {
-    match cell {
-        "memory" => "volatile-visible",
-        "sqlite-log" | "sqlite-relational" => "local-durable-visible",
-        "postgres-log" | "postgres-relational" => "postgres-durable-visible",
-        "objectlog-local-direct" => "objectlog-durable-visible",
-        value if value.ends_with("sqlite-async") => "objectlog-hot-visible",
-        _ => "objectlog-projection-visible",
+    cell_barrier_class(cell)
+}
+
+/// Drive public-facade futures on a reactor appropriate to the cell.
+///
+/// Object-log and Turso products require the process-wide object-log Tokio runtime
+/// (`spawn_blocking` definition publish, LogEngine I/O). Postgres sync client paths
+/// must stay on `futures::executor::block_on` (they panic under a Tokio handle).
+fn drive_cell<F, T>(cell: &str, fut: F) -> T
+where
+    F: std::future::Future<Output = T> + Send,
+    T: Send,
+{
+    let needs_objectlog_runtime = parse_cell(cell)
+        .map(|(log, proj)| {
+            matches!(log, "filesystem" | "s3") || matches!(proj, "turso")
+        })
+        .unwrap_or(false);
+    if needs_objectlog_runtime {
+        fireweed_objectlog::block_on_objectlog_future(fut)
+    } else {
+        futures::executor::block_on(fut)
     }
 }
 
-fn object_config(
+fn matrix_segments() -> Result<SegmentConfig, String> {
+    SegmentConfig::new(262_144, 20).map_err(|error| error.to_string())
+}
+
+fn matrix_recovery() -> RecoveryPolicy {
+    RecoveryPolicy {
+        incompatible_projection: RecoveryAction::RebuildProjection,
+        verify_checksums: true,
+        max_tail_commands: 1_000_000,
+    }
+}
+
+fn postgres_url(cfg: &Config) -> Result<&str, String> {
+    cfg.postgres
+        .as_ref()
+        .map(|postgres| postgres.url.as_str())
+        .ok_or_else(|| "PostgreSQL configuration missing".to_owned())
+}
+
+fn build_storage_config(
     cfg: &Config,
     cell: &str,
     root: &Path,
     namespace: &str,
-) -> Result<(ObjectLogRuntimeConfig, CleanupRecipe), String> {
-    let s3_cell = cell.starts_with("objectlog-s3-");
-    let postgres_projection = cell.ends_with("postgres-strict");
-    let object_log = if s3_cell {
-        let s3 = cfg.s3.as_ref().ok_or("S3 configuration missing")?;
-        ObjectLogStorage::S3Compatible {
-            endpoint: s3.endpoint.clone(),
-            bucket: s3.bucket.clone(),
-            region: s3.region.clone(),
-            access_key_id: ConfigSecret::new(&s3.access),
-            secret_access_key: ConfigSecret::new(&s3.secret),
-            allow_insecure_http: s3.endpoint.starts_with("http://"),
-        }
-    } else {
-        ObjectLogStorage::Local {
-            root: root.join("log"),
-        }
-    };
-    let projection = if postgres_projection {
-        ProjectionConfig::Postgres {
-            url: ConfigSecret::new(
-                cfg.postgres
-                    .as_ref()
-                    .ok_or("PostgreSQL configuration missing")?
-                    .url
-                    .as_str(),
-            ),
-        }
-    } else {
-        ProjectionConfig::Sqlite {
-            path: root.join("projection.sqlite"),
-        }
-    };
-    let authority = ObjectLogAuthority::NativeConditionalWrite;
-    let cleanup = match (s3_cell, postgres_projection) {
-        (true, true) => CleanupRecipe::S3AndPostgres(SchemaKind::ObjectLog),
-        (true, false) => CleanupRecipe::S3,
-        (false, true) => CleanupRecipe::LocalAndPostgres(SchemaKind::ObjectLog),
-        (false, false) => CleanupRecipe::Local,
-    };
-    Ok((
-        ObjectLogRuntimeConfig {
-            object_log,
-            authority,
-            projection,
-            response_barrier: if cell.ends_with("sqlite-async") {
-                ResponseBarrier::AsyncProjection
+) -> Result<(StorageConfig, CleanupRecipe), String> {
+    let (log_axis, proj_axis) = parse_cell(cell)?;
+    let log_path = root.join("log.sqlite");
+    let proj_sqlite = root.join("projection.sqlite");
+    let proj_turso = root.join("projection.turso");
+    let fs_root = root.join("log");
+
+    let log = match log_axis {
+        "memory" => LogConfig::Memory,
+        "sqlite" => LogConfig::Sqlite { path: log_path.clone() },
+        "postgres" => LogConfig::Postgres {
+            url: ConfigSecret::new(postgres_url(cfg)?),
+            schema: Some(derived_plain_schema(namespace)),
+            // Relational when projection is also postgres; log-replay otherwise.
+            mode: if proj_axis == "postgres" {
+                PostgresMode::Relational
             } else {
-                ResponseBarrier::Strict
+                PostgresMode::LogReplay
             },
-            segments: SegmentConfig::new(262_144, 20).map_err(|error| error.to_string())?,
-            namespace: namespace.into(),
-            recovery: RecoveryPolicy {
-                incompatible_projection: RecoveryAction::RebuildProjection,
-                verify_checksums: true,
-                max_tail_commands: 1_000_000,
-            },
+            node_id: None,
+            coordination: None,
         },
-        cleanup,
-    ))
+        "filesystem" => LogConfig::Filesystem { root: fs_root },
+        "s3" => {
+            let s3 = cfg.s3.as_ref().ok_or("S3 configuration missing")?;
+            LogConfig::S3 {
+                endpoint: s3.endpoint.clone(),
+                bucket: s3.bucket.clone(),
+                region: s3.region.clone(),
+                access_key_id: ConfigSecret::new(&s3.access),
+                secret_access_key: ConfigSecret::new(&s3.secret),
+                allow_insecure_http: s3.endpoint.starts_with("http://"),
+            }
+        }
+        other => return Err(format!("unknown log axis {other}")),
+    };
+
+    let projection = match proj_axis {
+        "memory" => ProjectionStoreConfig::Memory,
+        "sqlite" => ProjectionStoreConfig::Sqlite {
+            path: proj_sqlite,
+        },
+        "turso" => ProjectionStoreConfig::Turso { path: proj_turso },
+        "postgres" => ProjectionStoreConfig::Postgres {
+            url: ConfigSecret::new(postgres_url(cfg)?),
+        },
+        other => return Err(format!("unknown projection axis {other}")),
+    };
+
+    let authority = matches!(log_axis, "filesystem" | "s3")
+        .then_some(ObjectLogAuthority::NativeConditionalWrite);
+
+    let config = StorageConfig {
+        log,
+        projection,
+        control_plane: None,
+        authority,
+        response_barrier: ResponseBarrier::Strict,
+        async_projection: None,
+        sqlite_projection_deferred_flush_chunk: None,
+        segments: matrix_segments()?,
+        namespace: namespace.into(),
+        recovery: matrix_recovery(),
+    };
+
+    let recipe = cleanup_recipe(cell, namespace, &log_path)?;
+    Ok((config, recipe))
 }
 
 fn construct(
@@ -347,59 +365,15 @@ fn construct(
     namespace: &str,
 ) -> Result<(Fireweed, CleanupRecipe), String> {
     std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
-    let clock = || Arc::new(SystemClock);
-    match cell {
-        "memory" => Ok((open_memory(clock()), CleanupRecipe::Local)),
-        "sqlite-log" => Ok((
-            open_sqlite(root.join("log.sqlite").to_str().unwrap(), clock())
-                .map_err(|e| e.to_string())?,
-            CleanupRecipe::Local,
-        )),
-        "sqlite-relational" => Ok((
-            open_sqlite_relational(root.join("relational.sqlite").to_str().unwrap(), clock())
-                .map_err(|e| e.to_string())?,
-            CleanupRecipe::Local,
-        )),
-        "objectlog-local-direct" => Ok((
-            open_objectlog(root.join("objectlog"), clock()).map_err(|e| e.to_string())?,
-            CleanupRecipe::Local,
-        )),
-        "postgres-log" | "postgres-relational" => {
-            let schema = derived_plain_schema(namespace);
-            let fw = open_postgres_runtime(
-                PostgresRuntimeConfig {
-                    url: ConfigSecret::new(
-                        cfg.postgres
-                            .as_ref()
-                            .ok_or("PostgreSQL configuration missing")?
-                            .url
-                            .as_str(),
-                    ),
-                    schema: Some(schema.clone()),
-                    mode: if cell == "postgres-log" {
-                        PostgresMode::LogReplay
-                    } else {
-                        PostgresMode::Relational
-                    },
-                    node_id: None,
-                    coordination: None,
-                },
-                clock(),
-            )
-            .map_err(|e| e.to_string())?;
-            Ok((fw, CleanupRecipe::LocalAndPostgres(SchemaKind::Plain)))
-        }
-        _ => {
-            let (runtime, cleanup) = object_config(cfg, cell, root, namespace)?;
-            let fw = if cell.ends_with("postgres-strict") {
-                open_objectlog_postgres(runtime, clock())
-            } else {
-                open_objectlog_sqlite(runtime, clock())
-            }
-            .map_err(|e| e.to_string())?;
-            Ok((fw, cleanup))
-        }
-    }
+    let (config, recipe) = build_storage_config(cfg, cell, root, namespace)?;
+    let clock = Arc::new(SystemClock);
+    // Prefer open_async offload for postgres/object-log cells when a runtime is present;
+    // fall back to open for the plain block_on orchestrator.
+    let fireweed = match open(config, clock) {
+        Ok(fw) => fw,
+        Err(error) => return Err(error.to_string()),
+    };
+    Ok((fireweed, recipe))
 }
 
 fn authorize_cleanup(
@@ -410,9 +384,9 @@ fn authorize_cleanup(
 ) -> Result<AuthorizedCleanup, String> {
     let (schema, object_store) = match recipe {
         CleanupRecipe::Local => (None, false),
-        CleanupRecipe::LocalAndPostgres(kind) => (Some(kind), false),
+        CleanupRecipe::LocalAndPostgres(schema) => (Some(schema), false),
         CleanupRecipe::S3 => (None, true),
-        CleanupRecipe::S3AndPostgres(kind) => (Some(kind), true),
+        CleanupRecipe::S3AndPostgres(schema) => (Some(schema), true),
     };
     ownership.authorize(namespace, Some(root), schema, object_store)
 }
@@ -637,20 +611,28 @@ fn repetitions_for_tier(tier: &str) -> usize {
     if tier == "full" { 5 } else { 1 }
 }
 
-fn cleanup_recipe(cell: &str) -> CleanupRecipe {
-    match cell {
-        "postgres-log" | "postgres-relational" => {
-            CleanupRecipe::LocalAndPostgres(SchemaKind::Plain)
-        }
-        value if value.starts_with("objectlog-s3-") && value.ends_with("postgres-strict") => {
-            CleanupRecipe::S3AndPostgres(SchemaKind::ObjectLog)
-        }
-        value if value.starts_with("objectlog-s3-") => CleanupRecipe::S3,
-        value if value.ends_with("postgres-strict") => {
-            CleanupRecipe::LocalAndPostgres(SchemaKind::ObjectLog)
+fn cleanup_recipe(cell: &str, namespace: &str, log_path: &Path) -> Result<CleanupRecipe, String> {
+    let (log, proj) = parse_cell(cell)?;
+    let plain = || RunOwnership::resolve_schema(SchemaKind::Plain, namespace);
+    let objectlog = || RunOwnership::resolve_schema(SchemaKind::ObjectLog, namespace);
+    Ok(match (log, proj) {
+        ("s3", "postgres") => CleanupRecipe::S3AndPostgres(objectlog()),
+        ("s3", _) => CleanupRecipe::S3,
+        ("filesystem", "postgres") => CleanupRecipe::LocalAndPostgres(objectlog()),
+        ("postgres", _) => CleanupRecipe::LocalAndPostgres(plain()),
+        ("memory", "postgres") => CleanupRecipe::LocalAndPostgres(facade_postgres_schema(
+            &format!("memory_pg_{namespace}"),
+        )),
+        ("sqlite", "postgres") => {
+            let path = log_path
+                .to_str()
+                .ok_or_else(|| "sqlite log path is not utf-8".to_owned())?;
+            CleanupRecipe::LocalAndPostgres(facade_postgres_schema(&format!(
+                "sqlite_pg_{path}"
+            )))
         }
         _ => CleanupRecipe::Local,
-    }
+    })
 }
 
 fn safe_postgres_identity(url: &str) -> &str {
@@ -712,7 +694,10 @@ fn collect_service_topology(cfg: &Config) -> Result<ServiceTopology, String> {
         object_store_endpoint_sha256: safe_s3.as_deref().map(|value| digest_hex(value.as_bytes())),
         object_store_bucket_sha256: cfg.s3.as_ref().map(|s3| digest_hex(s3.bucket.as_bytes())),
         object_store_region: cfg.s3.as_ref().map(|s3| s3.region.clone()),
-        object_store_provider: cfg.s3.as_ref().map(|_| "Garage".into()),
+        object_store_provider: cfg.s3.as_ref().map(|_| {
+            std::env::var("FIREWEED_PERF_S3_PROVIDER")
+                .unwrap_or_else(|_| "s3-compatible".into())
+        }),
         object_store_preflight_rtt_ns: cfg
             .s3
             .as_ref()
@@ -793,10 +778,12 @@ fn fragment_coordinates(cfg: &Config, args: &FragmentArgs) -> Result<(Shape, u64
     if command_output("git", &["rev-parse", "HEAD"]) != args.source_commit {
         return Err("fragment source commit differs from coordinator".into());
     }
-    let allowed_cells = match args.phase.as_str() {
+    let recovery = recovery_cells();
+    let maintenance = maintenance_cells();
+    let allowed_cells: &[&str] = match args.phase.as_str() {
         "common" => cells_for_tier(&cfg.tier),
-        "recovery" => RECOVERY_CELLS,
-        "maintenance" => MAINTENANCE_CELLS,
+        "recovery" => recovery.as_slice(),
+        "maintenance" => maintenance.as_slice(),
         _ => return Err("unsupported fragment phase".into()),
     };
     if !allowed_cells.contains(&args.cell.as_str()) {
@@ -835,7 +822,7 @@ fn wait_for_projection(
     let mut poll_count = 0;
     loop {
         poll_count += 1;
-        match futures::executor::block_on(control.verify()) {
+        match drive_cell(cell, control.verify()) {
             Ok(value)
                 if value.compatible
                     && value.projection_sequence == value.authoritative_sequence =>
@@ -886,31 +873,42 @@ fn execute_fragment(
         .join(format!("r{repetition:02}"));
     let ownership = RunOwnership::new(&cfg.work_root, run_id)?;
     std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
-    let owned = authorize_cleanup(&ownership, &namespace, &root, cleanup_recipe(cell))?;
+    let owned = authorize_cleanup(
+        &ownership,
+        &namespace,
+        &root,
+        cleanup_recipe(cell, &namespace, &root.join("log.sqlite"))?,
+    )?;
     match construct(cfg, cell, &root, &namespace) {
         Ok((fw, _)) => {
             let preflight_definition = matrix_qdef("preflight", shape);
-            let preflight = futures::executor::block_on(run_preflight(
-                &fw,
-                preflight_definition,
-                qkey("preflight"),
-                shape,
-                &format!("{cell}-{repetition}"),
-            ));
+            let preflight = drive_cell(
+                cell,
+                run_preflight(
+                    &fw,
+                    preflight_definition,
+                    qkey("preflight"),
+                    shape,
+                    &format!("{cell}-{repetition}"),
+                ),
+            );
             let definition = matrix_qdef("matrix", shape);
             let outcome = preflight.and_then(|_| {
-                futures::executor::block_on(run_repetition(
-                    &fw,
-                    definition,
-                    qkey("matrix"),
-                    shape,
-                    RepetitionSpec {
-                        cell,
-                        repetition,
-                        items,
-                        batch,
-                    },
-                ))
+                drive_cell(
+                    cell,
+                    run_repetition(
+                        &fw,
+                        definition,
+                        qkey("matrix"),
+                        shape,
+                        RepetitionSpec {
+                            cell,
+                            repetition,
+                            items,
+                            batch,
+                        },
+                    ),
+                )
             });
             let verification = wait_for_projection(&fw, cell);
             drop(fw);
@@ -952,7 +950,12 @@ fn execute_lifecycle_fragment(
         .join(format!("r{:02}", args.repetition));
     let ownership = RunOwnership::new(&cfg.work_root, &args.run_id)?;
     std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
-    let owned = authorize_cleanup(&ownership, &namespace, &root, cleanup_recipe(&args.cell))?;
+    let owned = authorize_cleanup(
+        &ownership,
+        &namespace,
+        &root,
+        cleanup_recipe(&args.cell, &namespace, &root.join("log.sqlite"))?,
+    )?;
     let (fireweed, _) = match construct(cfg, &args.cell, &root, &namespace) {
         Ok(value) => value,
         Err(error) => {
@@ -962,43 +965,52 @@ fn execute_lifecycle_fragment(
     };
     let result = if args.phase == "recovery" {
         let definition = matrix_qdef("recovery", shape);
-        let population = futures::executor::block_on(seed_recovery_population(
-            &fireweed,
-            definition,
-            &qkey("recovery"),
-            shape,
-            &format!("tp005-recovery-{}-{}", args.cell, args.repetition),
-            items,
-            batch,
-        ));
+        let population = drive_cell(
+            &args.cell,
+            seed_recovery_population(
+                &fireweed,
+                definition,
+                &qkey("recovery"),
+                shape,
+                &format!("tp005-recovery-{}-{}", args.cell, args.repetition),
+                items,
+                batch,
+            ),
+        );
         let prepared = match population {
             Ok(population) => wait_for_projection(&fireweed, &args.cell).map(|_| population),
             Err(error) => Err(error),
         };
         drop(fireweed);
         match prepared {
-            Ok(population) => futures::executor::block_on(reopen_verify_and_drain(
+            Ok(population) => drive_cell(
                 &args.cell,
-                args.repetition,
-                &qkey("recovery"),
-                population,
-                || construct(cfg, &args.cell, &root, &namespace).map(|(fireweed, _)| fireweed),
-            ))
+                reopen_verify_and_drain(
+                    &args.cell,
+                    args.repetition,
+                    &qkey("recovery"),
+                    population,
+                    || construct(cfg, &args.cell, &root, &namespace).map(|(fireweed, _)| fireweed),
+                ),
+            )
             .map(LifecycleFragment::Recovery),
             Err(error) => Err(error),
         }
     } else {
         let definition = matrix_qdef("maintenance", shape);
-        let result = futures::executor::block_on(run_projection_maintenance(
-            &fireweed,
-            definition,
-            &qkey("maintenance"),
-            shape,
+        let result = drive_cell(
             &args.cell,
-            args.repetition,
-            items,
-            batch,
-        ))
+            run_projection_maintenance(
+                &fireweed,
+                definition,
+                &qkey("maintenance"),
+                shape,
+                &args.cell,
+                args.repetition,
+                items,
+                batch,
+            ),
+        )
         .map(LifecycleFragment::Maintenance);
         drop(fireweed);
         result
@@ -1057,7 +1069,12 @@ fn clean_fragment_state(
         .join(shape)
         .join(format!("r{repetition:02}"));
     std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
-    let owned = authorize_cleanup(ownership, &namespace, &root, cleanup_recipe(cell))?;
+    let owned = authorize_cleanup(
+        ownership,
+        &namespace,
+        &root,
+        cleanup_recipe(cell, &namespace, &root.join("log.sqlite"))?,
+    )?;
     cleanup_owned(owned, cfg.postgres.as_ref(), cfg.s3.as_ref())
 }
 
@@ -1365,7 +1382,7 @@ fn run(cfg: Config) -> Result<PathBuf, String> {
             .iter()
             .filter(|(shape, _, _)| matches!(shape.name, "minimal" | "record-1k"))
         {
-            for cell in RECOVERY_CELLS {
+            for cell in recovery_cells() {
                 for round in 0..3 {
                     check_cancelled()?;
                     if checkpoint.contains_recovery(cell, shape.name, round) {
@@ -1448,7 +1465,7 @@ fn run(cfg: Config) -> Result<PathBuf, String> {
             .find(|(shape, _, _)| shape.name == "record-1k")
             .map(|(shape, _, _)| shape)
             .expect("full tier includes record-1k");
-        for cell in MAINTENANCE_CELLS {
+        for cell in maintenance_cells() {
             for round in 0..3 {
                 check_cancelled()?;
                 if checkpoint.contains_maintenance(cell, round) {
@@ -1643,10 +1660,7 @@ fn run(cfg: Config) -> Result<PathBuf, String> {
         seed: 0x5eed_f17e_0eed_u64,
         resolved_config_sha256: digest_hex(&resolved),
         schedule,
-        unsupported_cells: vec![
-            "objectlog-s3-memory".into(),
-            "objectlog-*-postgres-async".into(),
-        ],
+        unsupported_cells: vec![],
         git_commit: commit.clone(),
         git_branch: branch,
         host_fingerprint_sha256: provenance.host_fingerprint_sha256.clone(),

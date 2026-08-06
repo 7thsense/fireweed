@@ -21,6 +21,7 @@ mod reclaim_tick;
 mod recovery_stats;
 mod request_id_probe;
 mod s3_create_only;
+pub use s3_create_only::S3CreateOnlyPut;
 mod segment_config;
 pub mod storage_generation;
 

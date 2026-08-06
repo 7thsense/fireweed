@@ -6,7 +6,10 @@
 
 use std::path::{Path, PathBuf};
 
+use bytes::Bytes;
 use fireweed_objectlog::segmented::{BlobStore, S3BlobStore};
+use fireweed_objectlog::S3CreateOnlyPut;
+use futures::executor::block_on;
 use postgres::{Client, NoTls};
 use sha2::{Digest, Sha256};
 
@@ -119,14 +122,21 @@ fn redact_url_authorities(message: &str) -> String {
     output
 }
 
+/// Matches facade `derived_postgres_schema_name`: `fireweed_` + 54 hex (27 digest bytes).
+/// Used for object-log × postgres projections and other facade-derived postgres schemas.
 pub fn derived_objectlog_schema(namespace: &str) -> String {
     let digest = Sha256::digest(namespace.as_bytes());
-    format!("fireweed_{}", hex(&digest[..30]))
+    format!("fireweed_{}", hex(&digest[..27]))
 }
 
 pub fn derived_plain_schema(namespace: &str) -> String {
     let digest = Sha256::digest(namespace.as_bytes());
     format!("fireweed_perf_{}", hex(&digest[..20]))
+}
+
+/// Facade seed → schema (same formula as object-log postgres projection).
+pub fn facade_postgres_schema(seed: &str) -> String {
+    derived_objectlog_schema(seed)
 }
 
 pub fn physical_object_prefix(namespace: &str) -> String {
@@ -173,7 +183,7 @@ impl RunOwnership {
         &self,
         namespace: &str,
         local: Option<&Path>,
-        schema_kind: Option<SchemaKind>,
+        schema: Option<String>,
         object_store: bool,
     ) -> Result<AuthorizedCleanup, String> {
         let parts = namespace.split('/').collect::<Vec<_>>();
@@ -193,6 +203,16 @@ impl RunOwnership {
         ] {
             validate_component(value, label)?;
         }
+        if let Some(schema) = schema.as_deref() {
+            // Allow only fireweed-owned schema names (plain or facade-derived).
+            if !(schema.starts_with("fireweed_perf_") || schema.starts_with("fireweed_"))
+                || !schema
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            {
+                return Err("cleanup schema is not an allowlisted fireweed schema".into());
+            }
+        }
         let local = local
             .map(|path| {
                 let canonical = path
@@ -209,15 +229,19 @@ impl RunOwnership {
                 Ok::<PathBuf, String>(canonical)
             })
             .transpose()?;
-        let schema = schema_kind.map(|kind| match kind {
-            SchemaKind::Plain => derived_plain_schema(namespace),
-            SchemaKind::ObjectLog => derived_objectlog_schema(namespace),
-        });
         Ok(AuthorizedCleanup {
             local,
             schema,
             namespace: object_store.then(|| namespace.to_owned()),
         })
+    }
+
+    /// Resolve [`SchemaKind`] into an exact allowlisted schema name for `namespace`.
+    pub fn resolve_schema(kind: SchemaKind, namespace: &str) -> String {
+        match kind {
+            SchemaKind::Plain => derived_plain_schema(namespace),
+            SchemaKind::ObjectLog => derived_objectlog_schema(namespace),
+        }
     }
 }
 
@@ -249,21 +273,18 @@ pub fn cleanup_owned(
     }
     if let Some(namespace) = cleanup.namespace {
         let service = s3.ok_or("object-store cleanup service missing")?;
-        let store = object_store(service)?;
+        let store = object_store(service);
         let prefix = physical_object_prefix(&namespace);
-        let keys = store
-            .list(&prefix)
+        let keys = block_on(store.list(&prefix))
             .map_err(|error| format!("object-store cleanup list: {error}"))?;
         if keys.iter().any(|key| !key.starts_with(&prefix)) {
             return Err("object-store returned a key outside the exact owned prefix".into());
         }
         for key in keys {
-            store
-                .delete(&key)
+            block_on(store.delete(&key))
                 .map_err(|error| format!("object-store cleanup delete: {error}"))?;
         }
-        if !store
-            .list(&prefix)
+        if !block_on(store.list(&prefix))
             .map_err(|error| format!("object-store cleanup verification: {error}"))?
             .is_empty()
         {
@@ -276,24 +297,33 @@ pub fn cleanup_owned(
     Ok(())
 }
 
-fn object_store(config: &ObjectStoreService) -> Result<S3BlobStore, String> {
+fn object_store(config: &ObjectStoreService) -> S3BlobStore {
+    // object-log 0.3: (endpoint, region, bucket, access, secret) → Self
     S3BlobStore::new(
         &config.endpoint,
+        &config.region,
         &config.bucket,
         &config.access,
         &config.secret,
-        &config.region,
     )
-    .map_err(|error| format!("object-store client: {error}"))
+}
+
+fn create_only_store(config: &ObjectStoreService) -> S3CreateOnlyPut {
+    S3CreateOnlyPut::new(
+        &config.endpoint,
+        &config.region,
+        &config.bucket,
+        &config.access,
+        &config.secret,
+    )
 }
 
 pub fn object_store_preflight_rtts(config: &ObjectStoreService) -> Result<Vec<u64>, String> {
-    let store = object_store(config)?;
+    let store = object_store(config);
     let mut samples = Vec::with_capacity(3);
     for _ in 0..3 {
         let started = std::time::Instant::now();
-        store
-            .list("fireweed-perf/v1/_locks/")
+        block_on(store.list("fireweed-perf/v1/_locks/"))
             .map_err(|error| format!("object-store preflight list: {error}"))?;
         samples.push(started.elapsed().as_nanos().min(u64::MAX as u128) as u64);
     }
@@ -330,9 +360,10 @@ impl ServiceLocks {
             None
         };
         let object_lock = if let Some(service) = s3 {
-            let store = object_store(service)?;
+            let store = object_store(service);
+            let create_only = create_only_store(service);
             let payload = format!("run={run_id}\ncommit={commit}\n").into_bytes();
-            match store.put_if_absent(LOCK_KEY, &payload) {
+            match block_on(create_only.put_if_absent(LOCK_KEY, Bytes::from(payload.clone()))) {
                 Ok(true) => Some((store, payload)),
                 Ok(false) => {
                     release_postgres(&mut pg_lock);
@@ -362,10 +393,11 @@ fn release_postgres(client: &mut Option<Client>) {
 impl Drop for ServiceLocks {
     fn drop(&mut self) {
         release_postgres(&mut self.postgres);
-        if let Some((store, payload)) = self.object_store.as_ref()
-            && store.get(LOCK_KEY).ok().flatten().as_deref() == Some(payload.as_slice())
-        {
-            let _ = store.delete(LOCK_KEY);
+        if let Some((store, payload)) = self.object_store.as_ref() {
+            let current = block_on(store.get(LOCK_KEY)).ok().flatten();
+            if current.as_deref() == Some(payload.as_slice()) {
+                let _ = block_on(store.delete(LOCK_KEY));
+            }
         }
     }
 }
