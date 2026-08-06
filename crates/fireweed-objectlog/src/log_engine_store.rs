@@ -333,6 +333,23 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             access_key_id,
             secret_access_key,
         ));
+        // fireweed-1d17e656: prove the endpoint enforces If-None-Match:* before accepting
+        // NativeConditionalWrite. Probe once per open, not per create_queue.
+        let meta_prefix = meta_prefix.into();
+        let probe_key = format!(
+            "{meta_prefix}create-only-probe/{pid}-{nanos}",
+            pid = std::process::id(),
+            nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        put.probe_enforced_create_only(&probe_key)
+            .await
+            .map_err(|err| match err {
+                EngineError::Storage(detail) => open_store_err(endpoint, detail),
+                other => other,
+            })?;
         Self::open_with_blob_and_authority(
             blob,
             data_prefix,
