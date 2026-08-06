@@ -31,6 +31,7 @@ pub mod performance_matrix_cells;
 pub mod performance_matrix_checkpoint;
 pub mod performance_matrix_evidence;
 pub mod performance_matrix_lifecycle;
+pub mod performance_matrix_million_cycle;
 pub mod performance_matrix_provenance;
 pub mod performance_matrix_services;
 
