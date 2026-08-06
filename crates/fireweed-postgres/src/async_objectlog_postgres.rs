@@ -29,13 +29,15 @@ use fireweed_engine::{
     item_mutation_fingerprint, request_expires_at,
 };
 use fireweed_objectlog::{
-    AsyncProjectionApplyCoordinator, AsyncProjectionApplySnapshot, ClaimByQueryIdempotency,
-    CommitIdempotency, FlushConfig, ObjectLogEngineStore, SeqIdGen, eventual_commit_capabilities,
-    finish_prepared_commit_transition, make_envelope, map_submit_error,
-    new_batch_update_idempotency, new_claim_by_item_ids_idempotency,
-    new_claim_by_query_idempotency, new_commit_idempotency, prepare_commit_transition,
-    rebuild_process_idempotency_from_log, record_claim_by_query_idempotency,
-    retained_item_mutation_response, strict_commit_capabilities,
+    AsyncProjectionApplyCoordinator, AsyncProjectionApplySnapshot, BatchUpdateIdempotency,
+    ClaimByQueryIdempotency, CommitIdempotency, FlushConfig, ObjectLogEngineStore,
+    PreparedBatchUpdate, PreparedUpsert, SeqIdGen, eventual_commit_capabilities,
+    finish_prepared_commit_transition, index_get_unique, index_lookup, item_version_after,
+    make_envelope, map_submit_error, new_batch_update_idempotency,
+    new_claim_by_item_ids_idempotency, new_claim_by_query_idempotency, new_commit_idempotency,
+    prepare_batch_update, prepare_commit_transition, prepare_reschedule, prepare_update_fields,
+    prepare_upsert, rebuild_process_idempotency_from_log, record_batch_update_idempotency,
+    record_claim_by_query_idempotency, retained_item_mutation_response, strict_commit_capabilities,
 };
 use fireweed_objectlog::{explain_commit_if_authoritative, side_record as objectlog_side_record};
 use fireweed_projection::{AsyncInMemoryProjection, InMemoryProjection};
@@ -214,6 +216,7 @@ pub struct AsyncObjectLogPostgresBackend {
     counters: Arc<QueueCounters>,
     node_id: u8,
     commit_idempotency: CommitIdempotency,
+    batch_update_idempotency: BatchUpdateIdempotency,
     claim_by_query_idempotency: ClaimByQueryIdempotency,
 }
 
@@ -388,6 +391,7 @@ impl AsyncObjectLogPostgresBackend {
             counters,
             node_id,
             commit_idempotency,
+            batch_update_idempotency,
             claim_by_query_idempotency,
         })
     }
@@ -475,6 +479,24 @@ impl AsyncObjectLogPostgresBackend {
             return Err(EngineError::StaleLease);
         }
         Ok(claimed)
+    }
+
+    async fn submit_envelopes(
+        &self,
+        shard: &QueueKey,
+        envelopes: Vec<CommandEnvelope>,
+        epoch: u64,
+    ) -> EngineResult<()> {
+        if envelopes.is_empty() {
+            return Ok(());
+        }
+        self.engine
+            .submit_commit(RawCommitRequest::new(shard.clone(), envelopes, epoch))
+            .await
+            .map_err(|error| {
+                EngineError::Storage(format!("async product port submission failed: {error:?}"))
+            })??;
+        Ok(())
     }
 }
 
@@ -737,19 +759,44 @@ impl PurgePort for AsyncObjectLogPostgresBackend {
 impl UpsertPort for AsyncObjectLogPostgresBackend {
     fn replace_if_pending(
         &self,
-        _shard: &QueueKey,
-        _client_item_key: &ClientItemKey,
-        _priority: Option<PriorityValue>,
-        _group_key: Option<GroupKey>,
-        _not_before: Option<UtcTimestamp>,
-        _payload: Option<Bytes>,
-        _fields: std::collections::BTreeMap<String, Bytes>,
-        _metadata: Metadata,
-        _entity: Option<serde_json::Value>,
-        _now: UtcTimestamp,
-        _expected_epoch: Option<u64>,
+        shard: &QueueKey,
+        client_item_key: &ClientItemKey,
+        priority: Option<PriorityValue>,
+        group_key: Option<GroupKey>,
+        not_before: Option<UtcTimestamp>,
+        payload: Option<Bytes>,
+        fields: std::collections::BTreeMap<String, Bytes>,
+        metadata: Metadata,
+        entity: Option<serde_json::Value>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
-        std::future::ready(Err(EngineError::Unavailable))
+        let client_item_key = client_item_key.clone();
+        let shard = shard.clone();
+        async move {
+            let epoch = self.resolve_epoch(&shard, expected_epoch).await?;
+            let PreparedUpsert { envelopes, outcome } = prepare_upsert(
+                self.projection.as_ref(),
+                self.control.as_ref(),
+                self.ids.as_ref(),
+                self.counters.as_ref(),
+                self.node_id,
+                epoch,
+                &shard,
+                client_item_key,
+                priority,
+                group_key,
+                not_before,
+                payload,
+                fields,
+                metadata,
+                entity,
+                now,
+            )
+            .await?;
+            self.submit_envelopes(&shard, envelopes, epoch).await?;
+            Ok(outcome)
+        }
     }
 }
 
@@ -912,20 +959,39 @@ impl ProjectionRead for AsyncObjectLogPostgresBackend {
     }
 }
 
-// LibBackend / facade ports: defaults where available; explicit Unavailable for required methods.
+// LibBackend / facade ports: wire product ports through the shared objectlog port surface
+// (fireweed-fa53d12c — full public_interface on object-log × Postgres cells).
 impl fireweed_engine::UpdateFieldsPort for AsyncObjectLogPostgresBackend {
     fn update_fields(
         &self,
-        _shard: &QueueKey,
-        _item_id: ItemId,
-        _field_ops: std::collections::BTreeMap<String, Option<Bytes>>,
-        _payload: fireweed_engine::PayloadUpdate,
-        _entity: Option<serde_json::Value>,
-        _expected_item_version: Option<u64>,
-        _now: UtcTimestamp,
-        _expected_epoch: Option<u64>,
+        shard: &QueueKey,
+        item_id: ItemId,
+        field_ops: std::collections::BTreeMap<String, Option<Bytes>>,
+        payload: fireweed_engine::PayloadUpdate,
+        entity: Option<serde_json::Value>,
+        expected_item_version: Option<u64>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
-        std::future::ready(Err(EngineError::Unavailable))
+        let shard = shard.clone();
+        async move {
+            let epoch = self.resolve_epoch(&shard, expected_epoch).await?;
+            let envelope = prepare_update_fields(
+                self.projection.as_ref(),
+                self.control.as_ref(),
+                self.ids.as_ref(),
+                &shard,
+                item_id,
+                field_ops,
+                payload,
+                entity,
+                expected_item_version,
+                now,
+            )
+            .await?;
+            self.submit_envelopes(&shard, vec![envelope], epoch).await?;
+            item_version_after(self.projection.as_ref(), &shard, item_id)
+        }
     }
 }
 impl fireweed_engine::CommitTransitionPort for AsyncObjectLogPostgresBackend {
@@ -1022,7 +1088,53 @@ impl fireweed_engine::RecoveryReadPort for AsyncObjectLogPostgresBackend {
     }
 }
 
-impl fireweed_engine::BatchUpdatePort for AsyncObjectLogPostgresBackend {}
+impl fireweed_engine::BatchUpdatePort for AsyncObjectLogPostgresBackend {
+    fn batch_update(
+        &self,
+        shard: &QueueKey,
+        request: fireweed_engine::BatchUpdateRequest,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::BatchUpdateResponse>> + Send
+    {
+        let shard = shard.clone();
+        async move {
+            let epoch = self.resolve_epoch(&shard, expected_epoch).await?;
+            match prepare_batch_update(
+                self.projection.as_ref(),
+                self.control.as_ref(),
+                self.ids.as_ref(),
+                &self.batch_update_idempotency,
+                self.supports_gates(),
+                &shard,
+                request,
+                now,
+            )
+            .await?
+            {
+                PreparedBatchUpdate::Replay(response) => Ok(response),
+                PreparedBatchUpdate::Proceed {
+                    envelopes,
+                    response,
+                    request_id,
+                    fingerprint,
+                    expires_at,
+                } => {
+                    self.submit_envelopes(&shard, envelopes, epoch).await?;
+                    record_batch_update_idempotency(
+                        &self.batch_update_idempotency,
+                        &shard,
+                        request_id,
+                        fingerprint,
+                        response.clone(),
+                        expires_at,
+                    );
+                    Ok(response)
+                }
+            }
+        }
+    }
+}
 impl fireweed_engine::ItemMutationPort for AsyncObjectLogPostgresBackend {
     fn mutate_items(
         &self,
@@ -1130,27 +1242,93 @@ impl fireweed_engine::ItemMutationPort for AsyncObjectLogPostgresBackend {
         }
     }
 }
-impl fireweed_engine::SetGatesPort for AsyncObjectLogPostgresBackend {}
-impl fireweed_engine::ReschedulePort for AsyncObjectLogPostgresBackend {}
-impl fireweed_engine::DiscoveryPort for AsyncObjectLogPostgresBackend {}
+impl fireweed_engine::SetGatesPort for AsyncObjectLogPostgresBackend {
+    fn set_gates(
+        &self,
+        shard: &QueueKey,
+        command: fireweed_engine::SetGatesCommand,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let shard = shard.clone();
+        async move {
+            let epoch = self.resolve_epoch(&shard, expected_epoch).await?;
+            let envelope = make_envelope(
+                self.ids.as_ref(),
+                QueueCommand::SetGates(command),
+                Vec::new(),
+                now,
+            );
+            self.submit_envelopes(&shard, vec![envelope], epoch).await
+        }
+    }
+}
+impl fireweed_engine::ReschedulePort for AsyncObjectLogPostgresBackend {
+    fn reschedule(
+        &self,
+        shard: &QueueKey,
+        item_id: ItemId,
+        set_priority: fireweed_engine::ScheduleUpdate<PriorityValue>,
+        set_not_before: fireweed_engine::ScheduleUpdate<UtcTimestamp>,
+        expected_item_version: Option<u64>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        let shard = shard.clone();
+        async move {
+            let epoch = self.resolve_epoch(&shard, expected_epoch).await?;
+            let envelope = prepare_reschedule(
+                self.projection.as_ref(),
+                self.ids.as_ref(),
+                &shard,
+                item_id,
+                set_priority,
+                set_not_before,
+                expected_item_version,
+                now,
+            )?;
+            self.submit_envelopes(&shard, vec![envelope], epoch).await?;
+            item_version_after(self.projection.as_ref(), &shard, item_id)
+        }
+    }
+}
+impl fireweed_engine::DiscoveryPort for AsyncObjectLogPostgresBackend {
+    fn discover_active_scopes(
+        &self,
+        shard: &QueueKey,
+        granularity: fireweed_engine::DiscoveryGranularity,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::ActiveScope>>> + Send
+    {
+        std::future::ready(self.read_healthy_projection(shard, |projection| {
+            ProjectionStore::discover_active_scopes(projection, shard, granularity, now)
+        }))
+    }
+}
 impl fireweed_engine::IndexQueryPort for AsyncObjectLogPostgresBackend {
     fn index_get_unique(
         &self,
-        _shard: &QueueKey,
-        _index: &str,
-        _key: &[Vec<u8>],
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
     ) -> impl std::future::Future<Output = EngineResult<Option<fireweed_engine::IndexHit>>> + Send
     {
-        std::future::ready(Err(EngineError::Unavailable))
+        std::future::ready(
+            self.ensure_projection_healthy(shard)
+                .and_then(|()| index_get_unique(self.projection.as_ref(), shard, index, key)),
+        )
     }
     fn index_lookup(
         &self,
-        _shard: &QueueKey,
-        _index: &str,
-        _key: &[Vec<u8>],
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
     ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::IndexHit>>> + Send
     {
-        std::future::ready(Err(EngineError::Unavailable))
+        std::future::ready(
+            self.ensure_projection_healthy(shard)
+                .and_then(|()| index_lookup(self.projection.as_ref(), shard, index, key)),
+        )
     }
 }
 impl fireweed_engine::HotProjectionQueryPort for AsyncObjectLogPostgresBackend {
@@ -1485,10 +1663,15 @@ impl fireweed_engine::HistoricalProjectionRead for AsyncObjectLogPostgresBackend
     type AsOfProjection = fireweed_projection::InMemoryProjection;
     fn current_position(
         &self,
-        _shard: &QueueKey,
+        shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::CommandPosition>> + Send
     {
-        std::future::ready(Err(EngineError::Unavailable))
+        async move {
+            self.ensure_projection_healthy(shard)?;
+            AsyncLogStore::high_water(self.log.as_ref(), shard.clone())
+                .await?
+                .ok_or(EngineError::NotFound)
+        }
     }
     fn read_as_of<T, F>(
         &self,
@@ -1500,6 +1683,8 @@ impl fireweed_engine::HistoricalProjectionRead for AsyncObjectLogPostgresBackend
         T: Send + 'static,
         F: FnOnce(&Self::AsOfProjection) -> EngineResult<T> + Send + 'static,
     {
+        // Historical as-of snapshots remain a later port; current_position is enough for
+        // the API-005 public_interface suite on object-log × Postgres cells.
         std::future::ready(Err(EngineError::Unavailable))
     }
 }

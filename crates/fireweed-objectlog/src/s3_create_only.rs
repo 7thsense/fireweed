@@ -108,6 +108,61 @@ impl S3CreateOnlyPut {
         }
         Ok(false)
     }
+
+    /// Best-effort delete (probe cleanup). Errors are ignored by the probe caller.
+    pub async fn delete_object(&self, key: &str) -> EngineResult<()> {
+        self.client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|err| {
+                EngineError::Storage(format!("S3 DeleteObject failed for key {key}: {err}"))
+            })?;
+        Ok(())
+    }
+
+    /// Prove the endpoint **enforces** create-only: first put creates, second put must
+    /// not create (412 / already-exists). Fail closed if the second put succeeds as a
+    /// create (non-enforcing stores such as Garage v2.2.0).
+    ///
+    /// `probe_key` must be unique per open and under the meta prefix so it never collides
+    /// with production objects. Best-effort deletes the probe key afterward.
+    pub async fn probe_enforced_create_only(&self, probe_key: &str) -> EngineResult<()> {
+        let payload = Bytes::from_static(b"fireweed-create-only-probe-v1");
+        let first = self.put_if_absent(probe_key, payload.clone()).await?;
+        if !first {
+            // Key already present from a crashed prior probe; still require second put to
+            // report already-exists rather than a second successful create.
+            let second = self.put_if_absent(probe_key, payload.clone()).await?;
+            if second {
+                let _ = self.delete_object(probe_key).await;
+                return Err(EngineError::Storage(
+                    "S3 create-only probe failed: second PutObject with If-None-Match: * \
+                     created an object that already existed; endpoint does not enforce \
+                     conditional create (unsupported for NativeConditionalWrite, e.g. Garage \
+                     v2.2.0). Use a P1s-qualified endpoint (MinIO/AWS S3)."
+                        .into(),
+                ));
+            }
+            let _ = self.delete_object(probe_key).await;
+            return Ok(());
+        }
+        let second = self.put_if_absent(probe_key, payload).await?;
+        if second {
+            let _ = self.delete_object(probe_key).await;
+            return Err(EngineError::Storage(
+                "S3 create-only probe failed: second PutObject with If-None-Match: * \
+                 reported create success for an existing key; endpoint does not enforce \
+                 conditional create (unsupported for NativeConditionalWrite, e.g. Garage \
+                 v2.2.0). Use a P1s-qualified endpoint (MinIO/AWS S3)."
+                    .into(),
+            ));
+        }
+        let _ = self.delete_object(probe_key).await;
+        Ok(())
+    }
 }
 
 enum PutClassify {
@@ -141,4 +196,34 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn live_minio_probe_enforced_create_only_when_env_set() {
+        let Ok(endpoint) = std::env::var("FIREWEED_S3_TEST_ENDPOINT") else {
+            eprintln!("SKIP live create-only probe: FIREWEED_S3_TEST_ENDPOINT unset");
+            return;
+        };
+        let bucket = std::env::var("FIREWEED_S3_TEST_BUCKET").expect("bucket");
+        let region =
+            std::env::var("FIREWEED_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
+        let access = std::env::var("FIREWEED_S3_TEST_ACCESS_KEY").expect("access");
+        let secret = std::env::var("FIREWEED_S3_TEST_SECRET_KEY").expect("secret");
+        let put = S3CreateOnlyPut::new(&endpoint, &region, &bucket, &access, &secret);
+        let key = format!(
+            "fwmeta/create-only-probe-test/{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        put.probe_enforced_create_only(&key)
+            .await
+            .expect("P1s MinIO must enforce If-None-Match create-only");
+    }
 }
