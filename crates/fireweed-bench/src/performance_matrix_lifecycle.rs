@@ -539,8 +539,8 @@ mod tests {
     };
 
     use fireweed::{
-        ObjectLogAuthority, ObjectLogRuntimeConfig, ObjectLogStorage, ProjectionConfig,
-        RecoveryPolicy, ResponseBarrier, SegmentConfig, open_memory, open_objectlog_sqlite,
+        LogConfig, ObjectLogAuthority, ProjectionStoreConfig, RecoveryAction, RecoveryPolicy,
+        ResponseBarrier, SegmentConfig, StorageConfig, open,
     };
 
     use super::*;
@@ -550,13 +550,13 @@ mod tests {
     fn maintenance_rejects_memory_before_population() {
         let shape = all_shapes()[0];
         let queue = qkey("maintenance-na");
-        let fireweed = open_memory(Arc::new(SystemClock));
+        let fireweed = open(StorageConfig::memory(), Arc::new(SystemClock)).expect("open");
         let error = futures::executor::block_on(run_projection_maintenance(
             &fireweed,
             bench_qdef("bench", "maintenance-na", &shape),
             &queue,
             &shape,
-            "memory",
+            "memory--memory",
             0,
             128,
             64,
@@ -566,7 +566,7 @@ mod tests {
         assert!(futures::executor::block_on(fireweed.queue_definition(&queue)).is_err());
     }
 
-    fn local_config(label: &str) -> (PathBuf, ObjectLogRuntimeConfig) {
+    fn filesystem_sqlite_config(label: &str) -> (PathBuf, StorageConfig) {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -575,28 +575,35 @@ mod tests {
             "fireweed-tp005-lifecycle-{label}-{}-{nonce}",
             std::process::id()
         ));
-        let config = ObjectLogRuntimeConfig {
-            object_log: ObjectLogStorage::Local {
+        let config = StorageConfig {
+            log: LogConfig::Filesystem {
                 root: base.join("log"),
             },
-            authority: ObjectLogAuthority::NativeConditionalWrite,
-            projection: ProjectionConfig::Sqlite {
+            projection: ProjectionStoreConfig::Sqlite {
                 path: base.join("projection.sqlite"),
             },
+            control_plane: None,
+            authority: Some(ObjectLogAuthority::NativeConditionalWrite),
             response_barrier: ResponseBarrier::Strict,
+            async_projection: None,
+            sqlite_projection_deferred_flush_chunk: None,
             segments: SegmentConfig::new(256 * 1024, 20).expect("segments"),
             namespace: format!("tp005-lifecycle-{label}-{nonce}"),
-            recovery: RecoveryPolicy::default(),
+            recovery: RecoveryPolicy {
+                incompatible_projection: RecoveryAction::RebuildProjection,
+                verify_checksums: true,
+                max_tail_commands: 1_000_000,
+            },
         };
         (base, config)
     }
 
     #[test]
-    fn local_objectlog_recovery_reopens_exact_population() {
-        let (base, config) = local_config("recovery");
+    fn filesystem_sqlite_recovery_reopens_exact_population() {
+        let (base, config) = filesystem_sqlite_config("recovery");
         let shape = all_shapes()[0];
         let queue = qkey("recovery");
-        let fireweed = open_objectlog_sqlite(config.clone(), Arc::new(SystemClock)).expect("open");
+        let fireweed = open(config.clone(), Arc::new(SystemClock)).expect("open");
         let population = futures::executor::block_on(seed_recovery_population(
             &fireweed,
             bench_qdef("bench", "recovery", &shape),
@@ -610,11 +617,11 @@ mod tests {
         drop(fireweed);
 
         let result = futures::executor::block_on(reopen_verify_and_drain(
-            "objectlog-local-sqlite-strict",
+            "filesystem--sqlite",
             0,
             &queue,
             population,
-            || open_objectlog_sqlite(config, Arc::new(SystemClock)),
+            || open(config, Arc::new(SystemClock)),
         ))
         .expect("recover");
         assert_eq!(result.reopened_metrics.pending, 128);
@@ -623,17 +630,17 @@ mod tests {
     }
 
     #[test]
-    fn local_objectlog_projection_maintenance_preserves_population() {
-        let (base, config) = local_config("maintenance");
+    fn filesystem_sqlite_projection_maintenance_preserves_population() {
+        let (base, config) = filesystem_sqlite_config("maintenance");
         let shape = all_shapes()[1];
         let queue = qkey("maintenance");
-        let fireweed = open_objectlog_sqlite(config, Arc::new(SystemClock)).expect("open");
+        let fireweed = open(config, Arc::new(SystemClock)).expect("open");
         let result = futures::executor::block_on(run_projection_maintenance(
             &fireweed,
             bench_qdef("bench", "maintenance", &shape),
             &queue,
             &shape,
-            "objectlog-local-sqlite-strict",
+            "filesystem--sqlite",
             0,
             128,
             64,

@@ -19,14 +19,7 @@ pub struct Comparison {
 }
 
 fn barrier_class(cell: &str) -> &'static str {
-    match cell {
-        "memory" => "volatile-visible",
-        "sqlite-log" | "sqlite-relational" => "local-durable-visible",
-        "postgres-log" | "postgres-relational" => "postgres-durable-visible",
-        "objectlog-local-direct" => "objectlog-durable-visible",
-        value if value.ends_with("sqlite-async") => "objectlog-hot-visible",
-        _ => "objectlog-projection-visible",
-    }
+    crate::performance_matrix_cells::barrier_class(cell)
 }
 
 fn operation<'a>(row: &'a RepetitionResult, name: &str) -> &'a OperationSamples {
@@ -139,11 +132,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn barrier_classes_prevent_invalid_ratios() {
-        assert_ne!(barrier_class("memory"), barrier_class("sqlite-log"));
+    fn barrier_classes_are_strict_for_baseline_matrix() {
+        assert_eq!(barrier_class("memory--memory"), "Strict");
+        assert_eq!(barrier_class("s3--turso"), "Strict");
         assert_eq!(
-            barrier_class("sqlite-log"),
-            barrier_class("sqlite-relational")
+            barrier_class("sqlite--sqlite"),
+            barrier_class("filesystem--postgres")
         );
     }
 }

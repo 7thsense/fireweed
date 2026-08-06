@@ -11,10 +11,10 @@ use fireweed_core::{
     QueueDefinition, QueueIndex, RequestId, UtcTimestamp, is_retry_exhausted,
 };
 use fireweed_engine::{
-    AsyncProjectionStore, BatchUpdateResponse, ClaimCompatibility, ClaimUnit, ClaimedItem,
-    CohortLeaseTarget, CommandEnvelope, CommandPosition, CreateQueueOutcome, EngineError,
-    EngineResult, FinalizeKind, FinalizeTarget, IdempotencyDecision, ItemView, LeaseView,
-    LiveItemView, PayloadUpdate, PendingPage, PendingSummary, PushFingerprint, PushItem,
+    AsyncProjectionStore, BatchUpdateResponse, ClaimCompatibility, ClaimRef, ClaimUnit,
+    ClaimedItem, CohortLeaseTarget, CommandEnvelope, CommandPosition, CreateQueueOutcome,
+    EngineError, EngineResult, FinalizeKind, FinalizeTarget, IdempotencyDecision, ItemView,
+    LeaseView, LiveItemView, PayloadUpdate, PendingPage, PendingSummary, PushFingerprint, PushItem,
     QueueCommand, QueueKey, QueueMetrics, RenewTarget, RequestOutcome, ResolvedItemMutationAction,
     RichClaimSelection, ScheduleUpdate, TerminalEmissionMetrics, UpdateFieldsCommand,
 };
@@ -4032,6 +4032,57 @@ impl AsyncProjectionStore for TursoRelational {
                         || integer(&row[4])? < now_nanos
                     {
                         return Err(EngineError::StaleLease);
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    fn commit_validate(
+        &self,
+        shard: QueueKey,
+        claim_refs: Vec<ClaimRef>,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let writer = self.writer.clone();
+        async move {
+            let connection = writer.lock().await;
+            let tenant = shard.tenant_id.as_str().to_string();
+            let queue = shard.queue_id.as_str().to_string();
+            let now_nanos = ts_nanos(now);
+            for chunk in claim_refs.chunks(VALIDATION_ITEM_CHUNK) {
+                let rows = validation_rows_by_item(
+                    &connection,
+                    &tenant,
+                    &queue,
+                    &chunk.iter().map(|c| c.item_id).collect::<Vec<_>>(),
+                    "lifecycle_state,fenced,superseded,lease_expires_at,lease_token_hash,item_version",
+                )
+                .await?;
+                for claim_ref in chunk {
+                    let row = rows.get(&claim_ref.item_id).ok_or(EngineError::NotFound)?;
+                    let state = parse_state(&text(&row[0])?).map_err(storage)?;
+                    if integer(&row[1])? != 0 {
+                        return Err(EngineError::StaleLease);
+                    }
+                    if state.is_terminal() {
+                        return Err(EngineError::Terminal);
+                    }
+                    if integer(&row[2])? != 0 {
+                        return Err(EngineError::Superseded);
+                    }
+                    if state != ItemState::Leased {
+                        return Err(EngineError::Invalid("item is not leased"));
+                    }
+                    if blob(&row[4])? != lease_hash(&claim_ref.lease_token)
+                        || matches!(row[3], Value::Null)
+                        || integer(&row[3])? < now_nanos
+                    {
+                        return Err(EngineError::StaleLease);
+                    }
+                    if integer(&row[5])? as u64 != claim_ref.item_version {
+                        return Err(EngineError::Conflict);
                     }
                 }
             }

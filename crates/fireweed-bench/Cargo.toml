@@ -38,6 +38,7 @@ fireweed = { path = "../fireweed", features = ["postgres"] }
 fireweed-core = { path = "../fireweed-core" }
 fireweed-engine = { path = "../fireweed-engine" }
 futures = "0.3"
+bytes = "1"
 ctrlc = "3"
 postgres = "0.19"
 serde = { version = "1", features = ["derive"] }

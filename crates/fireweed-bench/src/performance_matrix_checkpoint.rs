@@ -150,30 +150,12 @@ impl MatrixCheckpoint {
 }
 
 fn validate_lifecycle_fragment(fragment: &LifecycleFragment) -> Result<(), String> {
-    const RECOVERY_CELLS: &[&str] = &[
-        "sqlite-log",
-        "sqlite-relational",
-        "postgres-log",
-        "postgres-relational",
-        "objectlog-local-direct",
-        "objectlog-local-sqlite-strict",
-        "objectlog-local-sqlite-async",
-        "objectlog-local-postgres-strict",
-        "objectlog-s3-sqlite-strict",
-        "objectlog-s3-sqlite-async",
-        "objectlog-s3-postgres-strict",
-    ];
-    const MAINTENANCE_CELLS: &[&str] = &[
-        "objectlog-local-sqlite-strict",
-        "objectlog-local-sqlite-async",
-        "objectlog-local-postgres-strict",
-        "objectlog-s3-sqlite-strict",
-        "objectlog-s3-sqlite-async",
-        "objectlog-s3-postgres-strict",
-    ];
+    use crate::performance_matrix_cells::{FULL_CELL_IDS, is_maintenance_cell};
     match fragment {
         LifecycleFragment::Recovery(value) => {
-            if !RECOVERY_CELLS.contains(&value.cell.as_str())
+            let recovery_ok = FULL_CELL_IDS.contains(&value.cell.as_str())
+                && value.cell.as_str() != "memory--memory";
+            if !recovery_ok
                 || !matches!(value.population.shape.as_str(), "minimal" | "record-1k")
                 || value.repetition >= 3
                 || value.population.items != 12_800
@@ -189,7 +171,7 @@ fn validate_lifecycle_fragment(fragment: &LifecycleFragment) -> Result<(), Strin
             }
         }
         LifecycleFragment::Maintenance(value) => {
-            if !MAINTENANCE_CELLS.contains(&value.cell.as_str())
+            if !is_maintenance_cell(&value.cell)
                 || value.population.shape != "record-1k"
                 || value.repetition >= 3
                 || value.population.items != 12_800
@@ -346,7 +328,7 @@ mod tests {
             items: 512,
         };
         RepetitionResult {
-            cell: "memory".into(),
+            cell: "memory--memory".into(),
             shape: "minimal".into(),
             repetition: 0,
             items: 512,

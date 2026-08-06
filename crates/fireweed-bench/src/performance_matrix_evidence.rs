@@ -12,40 +12,41 @@ use crate::performance_matrix_provenance::Provenance;
 
 pub const SCHEMA_VERSION: &str = "fireweed-performance-matrix-v1";
 
+/// TP-005 full register: exactly 20 `log--projection` cells. Barrier class is Strict.
 const FULL_CELLS: &[(&str, &str)] = &[
-    ("memory", "volatile-visible"),
-    ("sqlite-log", "local-durable-visible"),
-    ("sqlite-relational", "local-durable-visible"),
-    ("postgres-log", "postgres-durable-visible"),
-    ("postgres-relational", "postgres-durable-visible"),
-    ("objectlog-local-direct", "objectlog-durable-visible"),
-    (
-        "objectlog-local-sqlite-strict",
-        "objectlog-projection-visible",
-    ),
-    ("objectlog-local-sqlite-async", "objectlog-hot-visible"),
-    (
-        "objectlog-local-postgres-strict",
-        "objectlog-projection-visible",
-    ),
-    ("objectlog-s3-sqlite-strict", "objectlog-projection-visible"),
-    ("objectlog-s3-sqlite-async", "objectlog-hot-visible"),
-    (
-        "objectlog-s3-postgres-strict",
-        "objectlog-projection-visible",
-    ),
+    ("memory--memory", "Strict"),
+    ("memory--sqlite", "Strict"),
+    ("memory--turso", "Strict"),
+    ("memory--postgres", "Strict"),
+    ("sqlite--memory", "Strict"),
+    ("sqlite--sqlite", "Strict"),
+    ("sqlite--turso", "Strict"),
+    ("sqlite--postgres", "Strict"),
+    ("postgres--memory", "Strict"),
+    ("postgres--sqlite", "Strict"),
+    ("postgres--turso", "Strict"),
+    ("postgres--postgres", "Strict"),
+    ("filesystem--memory", "Strict"),
+    ("filesystem--sqlite", "Strict"),
+    ("filesystem--turso", "Strict"),
+    ("filesystem--postgres", "Strict"),
+    ("s3--memory", "Strict"),
+    ("s3--sqlite", "Strict"),
+    ("s3--turso", "Strict"),
+    ("s3--postgres", "Strict"),
 ];
 
+/// Smoke: local logs × local projections (9 cells). No live PG/S3 required.
 const SMOKE_CELLS: &[(&str, &str)] = &[
-    ("memory", "volatile-visible"),
-    ("sqlite-log", "local-durable-visible"),
-    ("sqlite-relational", "local-durable-visible"),
-    ("objectlog-local-direct", "objectlog-durable-visible"),
-    (
-        "objectlog-local-sqlite-strict",
-        "objectlog-projection-visible",
-    ),
-    ("objectlog-local-sqlite-async", "objectlog-hot-visible"),
+    ("memory--memory", "Strict"),
+    ("memory--sqlite", "Strict"),
+    ("memory--turso", "Strict"),
+    ("sqlite--memory", "Strict"),
+    ("sqlite--sqlite", "Strict"),
+    ("sqlite--turso", "Strict"),
+    ("filesystem--memory", "Strict"),
+    ("filesystem--sqlite", "Strict"),
+    ("filesystem--turso", "Strict"),
 ];
 
 const FULL_SHAPES: &[(&str, u64, usize)] = &[
@@ -93,16 +94,24 @@ pub fn build_schedule(tier: &str) -> Result<Vec<ScheduleEntry>, String> {
     }
     if tier == "full" {
         for shape in ["minimal", "record-1k"] {
-            for (cell, _) in FULL_CELLS.iter().filter(|(cell, _)| *cell != "memory") {
+            // Recovery on every durable-log cell (Class A); Class B memory-log rows still
+            // run reopen with projection-boundary semantics (include all non memory--memory).
+            for (cell, _) in FULL_CELLS
+                .iter()
+                .filter(|(cell, _)| *cell != "memory--memory")
+            {
                 for repetition in 0..3 {
                     push("recovery", repetition, shape, cell);
                 }
             }
         }
-        for (cell, _) in FULL_CELLS
-            .iter()
-            .filter(|(cell, _)| cell.starts_with("objectlog-") && *cell != "objectlog-local-direct")
-        {
+        // Maintenance: disposable projection rebuild for filesystem/s3 × non-memory projection.
+        for (cell, _) in FULL_CELLS.iter().filter(|(cell, _)| {
+            let Some((log, proj)) = cell.split_once("--") else {
+                return false;
+            };
+            matches!(log, "filesystem" | "s3") && proj != "memory"
+        }) {
             for repetition in 0..3 {
                 push("maintenance", repetition, "record-1k", cell);
             }
@@ -142,7 +151,7 @@ pub fn validate_checkpoint_row(tier: &str, row: &RepetitionResult) -> Result<(),
                 || operation.durations_ns.len() != samples
                 || operation.total_ns == 0
         })
-        || (row.cell.ends_with("sqlite-async") != row.projection_catchup.is_some())
+        || row.projection_catchup.is_some() // baseline Strict matrix has no async catch-up rows
     {
         return Err("checkpoint row violates matrix workload invariants".into());
     }
@@ -379,11 +388,7 @@ fn verify_evidence(evidence: &MatrixEvidence) -> Result<(), String> {
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit())
         || evidence.schedule != build_schedule(&evidence.tier)?
-        || evidence.unsupported_cells
-            != [
-                "objectlog-s3-memory".to_owned(),
-                "objectlog-*-postgres-async".to_owned(),
-            ]
+        || !evidence.unsupported_cells.is_empty()
         || evidence.command.iter().any(|argument| {
             let lower = argument.to_ascii_lowercase();
             lower.contains("password=")
@@ -435,7 +440,11 @@ fn verify_evidence(evidence: &MatrixEvidence) -> Result<(), String> {
                 .as_ref()
                 .is_none_or(|value| value.len() != 64)
             || evidence.service_topology.object_store_region.is_none()
-            || evidence.service_topology.object_store_provider.as_deref() != Some("Garage")
+            || evidence
+                .service_topology
+                .object_store_provider
+                .as_ref()
+                .is_none_or(|p| p.is_empty())
             || evidence
                 .service_topology
                 .object_store_preflight_rtt_ns
@@ -587,20 +596,8 @@ fn verify_evidence(evidence: &MatrixEvidence) -> Result<(), String> {
         {
             return Err(format!("{} {} does not reconcile", row.cell, row.shape));
         }
-        if row.cell.ends_with("sqlite-async") {
-            let catchup = row.projection_catchup.as_ref().ok_or_else(|| {
-                format!("{} {} lacks async catch-up evidence", row.cell, row.shape)
-            })?;
-            if !catchup.compatible
-                || catchup.poll_count == 0
-                || catchup.projection_sequence != catchup.authoritative_sequence
-            {
-                return Err(format!(
-                    "{} {} has invalid async catch-up evidence",
-                    row.cell, row.shape
-                ));
-            }
-        } else if row.projection_catchup.is_some() {
+        // Baseline TP-005 Strict matrix has no async catch-up rows.
+        if row.projection_catchup.is_some() {
             return Err(format!(
                 "{} {} has unexpected async catch-up evidence",
                 row.cell, row.shape
@@ -731,7 +728,7 @@ fn verify_evidence(evidence: &MatrixEvidence) -> Result<(), String> {
         let recovery_cells = FULL_CELLS
             .iter()
             .map(|(cell, _)| *cell)
-            .filter(|cell| *cell != "memory")
+            .filter(|cell| *cell != "memory--memory")
             .collect::<BTreeSet<_>>();
         let recovery_shapes = [("minimal", 12_800, 128), ("record-1k", 12_800, 128)];
         let expected_recovery = recovery_cells.len() * recovery_shapes.len() * 3;
@@ -772,7 +769,11 @@ fn verify_evidence(evidence: &MatrixEvidence) -> Result<(), String> {
         let maintenance_cells = FULL_CELLS
             .iter()
             .map(|(cell, _)| *cell)
-            .filter(|cell| cell.starts_with("objectlog-") && *cell != "objectlog-local-direct")
+            .filter(|cell| {
+                cell.split_once("--").is_some_and(|(log, proj)| {
+                    matches!(log, "filesystem" | "s3") && proj != "memory"
+                })
+            })
             .collect::<BTreeSet<_>>();
         let expected_maintenance = maintenance_cells.len() * 3;
         if evidence.maintenance.len() != expected_maintenance {
@@ -900,15 +901,7 @@ mod tests {
                 accepted: 512,
                 claimed: 512,
                 finalized: 512,
-                projection_catchup: cell.ends_with("sqlite-async").then_some(
-                    crate::performance_matrix::ProjectionCatchupEvidence {
-                        duration_ns: 1,
-                        poll_count: 1,
-                        compatible: true,
-                        projection_sequence: 1,
-                        authoritative_sequence: 1,
-                    },
-                ),
+                projection_catchup: None,
             })
             .collect::<Vec<_>>();
         let summaries = build_summaries(&repetitions);
@@ -921,10 +914,7 @@ mod tests {
             seed: 0x5eed_f17e_0eed,
             resolved_config_sha256: "0".repeat(64),
             schedule: build_schedule("smoke").unwrap(),
-            unsupported_cells: vec![
-                "objectlog-s3-memory".into(),
-                "objectlog-*-postgres-async".into(),
-            ],
+            unsupported_cells: vec![],
             git_commit: "0".repeat(40),
             git_branch: "main".into(),
             host_fingerprint_sha256: "0".repeat(64),

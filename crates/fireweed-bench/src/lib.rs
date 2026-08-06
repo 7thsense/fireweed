@@ -27,6 +27,7 @@ use fireweed_engine::{Clock, QueueKey};
 
 pub mod performance_matrix;
 pub mod performance_matrix_analysis;
+pub mod performance_matrix_cells;
 pub mod performance_matrix_checkpoint;
 pub mod performance_matrix_evidence;
 pub mod performance_matrix_lifecycle;

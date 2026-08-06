@@ -585,7 +585,79 @@ macro_rules! impl_turso_product_ports {
             }
         }
 
-        impl fireweed_engine::CommitTransitionPort for $ty {}
+        impl fireweed_engine::CommitTransitionPort for $ty {
+            fn commit_transition(
+                &self,
+                shard: &QueueKey,
+                transition: fireweed_engine::CommitTransition,
+                now: UtcTimestamp,
+                expected_epoch: Option<u64>,
+            ) -> impl std::future::Future<
+                Output = EngineResult<Vec<fireweed_engine::CommitEntryOutcome>>,
+            > + Send {
+                let shard = shard.clone();
+                async move {
+                    // Per-entry lease validation so fabricated tokens become Rejected(StaleLease)
+                    // (TP-005 preflight). Accepted plain finalizes reuse FinalizePort; richer
+                    // side-record / fence / lifecycle entries stay Unavailable until the full
+                    // Strict commit surface is wired for Turso products.
+                    let mut outcomes = Vec::with_capacity(transition.entries.len());
+                    for entry in transition.entries {
+                        let mut refs = vec![entry.claim_ref.clone()];
+                        refs.extend(entry.additional_claim_refs.iter().cloned());
+                        match AsyncProjectionStore::commit_validate(
+                            self.projection.as_ref(),
+                            shard.clone(),
+                            refs,
+                            now,
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                if !entry.side_records.is_empty()
+                                    || entry.instance_fence.is_some()
+                                    || !entry.lifecycle_items.is_empty()
+                                {
+                                    outcomes.push(fireweed_engine::CommitEntryOutcome::Rejected(
+                                        EngineError::Unavailable,
+                                    ));
+                                    continue;
+                                }
+                                match FinalizePort::finalize(
+                                    self,
+                                    &shard,
+                                    vec![FinalizeOutcome {
+                                        item_id: entry.claim_ref.item_id,
+                                        kind: entry.finalize,
+                                        applied_state: None,
+                                        not_before: None,
+                                    }],
+                                    now,
+                                    expected_epoch,
+                                )
+                                .await
+                                {
+                                    Ok(()) => outcomes.push(
+                                        fireweed_engine::CommitEntryOutcome::Committed {
+                                            lifecycle_item_ids: Vec::new(),
+                                        },
+                                    ),
+                                    Err(error) => outcomes.push(
+                                        fireweed_engine::CommitEntryOutcome::Rejected(error),
+                                    ),
+                                }
+                            }
+                            Err(error) => {
+                                outcomes.push(fireweed_engine::CommitEntryOutcome::Rejected(
+                                    error,
+                                ));
+                            }
+                        }
+                    }
+                    Ok(outcomes)
+                }
+            }
+        }
         impl fireweed_engine::RecoveryReadPort for $ty {}
         impl BatchUpdatePort for $ty {}
 
