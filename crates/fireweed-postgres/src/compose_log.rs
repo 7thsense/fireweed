@@ -145,23 +145,20 @@ fn next_page_cursor(
 /// The durable postgres command-log axis (ADR-012). The composition serializes access behind its
 /// unit-of-work `Mutex`, so the single connection in the [`RefCell`] is never used concurrently.
 pub struct PostgresLog {
-    /// Wrapped so [`Drop`] can move the client off a Tokio worker thread.
+    /// `Option` so [`Drop`] can move the client to a bare OS thread.
     ///
     /// `postgres::Client::drop` drives an internal `block_on`. That panics with
     /// "Cannot start a runtime from within a runtime" when a Tokio handle is
-    /// already present (e.g. Turso `block_on_turso` current-thread open). We
-    /// therefore drop the client on a bare OS thread whenever a handle is live.
-    client: std::mem::ManuallyDrop<RefCell<Client>>,
+    /// already present (e.g. Turso `block_on_turso` current-thread open). Drop
+    /// therefore always closes the client on a thread with no Tokio handle.
+    client: RefCell<Option<Client>>,
 }
 
 impl Drop for PostgresLog {
     fn drop(&mut self) {
-        // SAFETY: Drop runs once; client is not used after this.
-        let client = unsafe { std::mem::ManuallyDrop::take(&mut self.client) };
-        if tokio::runtime::Handle::try_current().is_ok() {
+        if let Some(client) = self.client.get_mut().take() {
+            // Always offload close: cheap when no handle is present, required when one is.
             let _ = std::thread::spawn(move || drop(client)).join();
-        } else {
-            drop(client);
         }
     }
 }
@@ -198,8 +195,21 @@ impl PostgresLog {
     fn from_client(mut client: Client) -> EngineResult<Self> {
         st(client.batch_execute(SCHEMA))?;
         Ok(Self {
-            client: std::mem::ManuallyDrop::new(RefCell::new(client)),
+            client: RefCell::new(Some(client)),
         })
+    }
+
+    fn client_mut(&self) -> std::cell::RefMut<'_, Client> {
+        std::cell::RefMut::map(self.client.borrow_mut(), |slot| {
+            slot.as_mut().expect("postgres log client closed")
+        })
+    }
+
+    fn client_get_mut(&mut self) -> &mut Client {
+        self.client
+            .get_mut()
+            .as_mut()
+            .expect("postgres log client closed")
     }
 }
 
@@ -210,7 +220,7 @@ impl LogStore for PostgresLog {
 
     fn emission_cursor(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
         let (t, q) = parts(shard);
-        let row = st(self.client.borrow_mut().query_opt(
+        let row = st(self.client_mut().query_opt(
             "SELECT epoch, seq FROM emission_cursor WHERE tenant=$1 AND queue=$2",
             &[&t, &q],
         ))?;
@@ -227,7 +237,7 @@ impl LogStore for PostgresLog {
         position: CommandPosition,
     ) -> EngineResult<()> {
         let (t, q) = parts(shard);
-        let client = self.client.get_mut();
+        let client = self.client_get_mut();
         let current = st(client.query_opt(
             "SELECT epoch, seq FROM emission_cursor WHERE tenant=$1 AND queue=$2",
             &[&t, &q],
@@ -255,7 +265,7 @@ impl LogStore for PostgresLog {
 
     fn ensure_shard(&mut self, shard: &QueueKey) -> EngineResult<()> {
         let (t, q) = parts(shard);
-        st(self.client.get_mut().execute(
+        st(self.client_get_mut().execute(
             "INSERT INTO log_epochs(tenant,queue,assignment_epoch) VALUES($1,$2,0) \
              ON CONFLICT(tenant,queue) DO NOTHING",
             &[&t, &q],
@@ -265,7 +275,7 @@ impl LogStore for PostgresLog {
 
     fn current_epoch(&self, shard: &QueueKey) -> EngineResult<u64> {
         let (t, q) = parts(shard);
-        let epoch: i64 = st(self.client.borrow_mut().query_opt(
+        let epoch: i64 = st(self.client_mut().query_opt(
             "SELECT assignment_epoch FROM log_epochs WHERE tenant=$1 AND queue=$2",
             &[&t, &q],
         ))?
@@ -277,7 +287,7 @@ impl LogStore for PostgresLog {
     fn acquire_epoch(&mut self, shard: &QueueKey) -> EngineResult<u64> {
         let (t, q) = parts(shard);
         // TD-003 acquire: strictly-greater epoch, durably recorded (the fence authority advances).
-        let epoch: i64 = st(self.client.get_mut().query_opt(
+        let epoch: i64 = st(self.client_get_mut().query_opt(
             "UPDATE log_epochs SET assignment_epoch = assignment_epoch + 1 \
              WHERE tenant=$1 AND queue=$2 RETURNING assignment_epoch",
             &[&t, &q],
@@ -298,7 +308,7 @@ impl LogStore for PostgresLog {
             .iter()
             .map(to_json)
             .collect::<EngineResult<Vec<_>>>()?;
-        let client = self.client.get_mut();
+        let client = self.client_get_mut();
         let mut tx = st(client.transaction())?;
         // TD-003 fence: reject a non-current epoch (a stale owner) before writing anything.
         let epoch: i64 = st(tx.query_opt(LOCK_CURRENT_EPOCH_SQL, &[&t, &q]))?
@@ -379,8 +389,7 @@ impl LogStore for PostgresLog {
         // Fetching one lookahead row proves continuation without a history-wide COUNT(*). This is one
         // bounded indexed query per page regardless of total shard history.
         let mut rows = st(self
-            .client
-            .borrow_mut()
+            .client_mut()
             .query(READ_PAGE_SQL, &[&t, &q, &start, &fetch_limit]))?;
         let has_more = rows.len() > limit;
         if has_more {
@@ -406,7 +415,7 @@ impl LogStore for PostgresLog {
 
     fn high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
         let (t, q) = parts(shard);
-        let row = st(self.client.borrow_mut().query_opt(
+        let row = st(self.client_mut().query_opt(
             "SELECT epoch, seq FROM high_water WHERE tenant=$1 AND queue=$2",
             &[&t, &q],
         ))?;
@@ -419,7 +428,7 @@ impl LogStore for PostgresLog {
 
     fn set_high_water(&mut self, shard: &QueueKey, position: CommandPosition) -> EngineResult<()> {
         let (t, q) = parts(shard);
-        let client = self.client.get_mut();
+        let client = self.client_get_mut();
         // Fold the monotonic guard into the write so concurrent connections cannot regress it.
         let updated = st(client.query_opt(
             "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES($1,$2,$3,$4) \
@@ -446,7 +455,7 @@ impl LogStore for PostgresLog {
         snapshot: ProjectionSnapshot,
     ) -> EngineResult<SnapshotRef> {
         let (t, q) = parts(shard);
-        let client = self.client.get_mut();
+        let client = self.client_get_mut();
         let n: i64 = st(client.query_one(
             "SELECT COUNT(*) FROM snapshots WHERE tenant=$1 AND queue=$2",
             &[&t, &q],
@@ -473,7 +482,7 @@ impl LogStore for PostgresLog {
 
     fn latest_snapshot(&self, shard: &QueueKey) -> EngineResult<Option<SnapshotRef>> {
         let (t, q) = parts(shard);
-        let row = st(self.client.borrow_mut().query_opt(
+        let row = st(self.client_mut().query_opt(
             "SELECT ref_id, epoch, seq FROM snapshots \
              WHERE tenant=$1 AND queue=$2 ORDER BY ord DESC LIMIT 1",
             &[&t, &q],
@@ -496,7 +505,7 @@ impl LogStore for PostgresLog {
         position: &CommandPosition,
     ) -> EngineResult<Option<SnapshotRef>> {
         let (t, q) = parts(shard);
-        let row = st(self.client.borrow_mut().query_opt(
+        let row = st(self.client_mut().query_opt(
             "SELECT ref_id, epoch, seq FROM snapshots \
              WHERE tenant=$1 AND queue=$2 AND (epoch, seq) <= ($3, $4) \
              ORDER BY epoch DESC, seq DESC LIMIT 1",
@@ -521,7 +530,7 @@ impl LogStore for PostgresLog {
 
     fn read_snapshot(&self, snapshot_ref: &SnapshotRef) -> EngineResult<ProjectionSnapshot> {
         let (t, q) = parts(&snapshot_ref.queue);
-        let row = st(self.client.borrow_mut().query_opt(
+        let row = st(self.client_mut().query_opt(
             "SELECT payload FROM snapshots WHERE tenant=$1 AND queue=$2 AND ref_id=$3",
             &[&t, &q, &snapshot_ref.ref_id],
         ))?;
@@ -536,7 +545,7 @@ impl LogStore for PostgresLog {
             definition.tenant_id.clone(),
             definition.queue_id.clone(),
         ));
-        st(self.client.get_mut().execute(
+        st(self.client_get_mut().execute(
             "INSERT INTO queue_defs(tenant,queue,definition) VALUES($1,$2,$3) \
              ON CONFLICT(tenant,queue) DO UPDATE SET definition=EXCLUDED.definition",
             &[&t, &q, &to_json(definition)?],
@@ -546,8 +555,7 @@ impl LogStore for PostgresLog {
 
     fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
         let rows = st(self
-            .client
-            .borrow_mut()
+            .client_mut()
             .query("SELECT definition FROM queue_defs", &[]))?;
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
@@ -572,7 +580,7 @@ impl LogStore for PostgresLog {
             .map(DefinitionCursor::queue_parts)
             .transpose()?
             .unwrap_or_default();
-        let rows = st(self.client.borrow_mut().query(
+        let rows = st(self.client_mut().query(
             "SELECT definition FROM queue_defs \
              WHERE ($1 = '' OR tenant > $1 OR (tenant = $1 AND queue > $2)) \
              ORDER BY tenant, queue LIMIT $3",
