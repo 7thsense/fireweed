@@ -1405,10 +1405,28 @@ pub fn assemble_postgres_log_turso(
     node_id: u8,
 ) -> EngineResult<AtomicTursoBackend<InProcessLogStore<fireweed_postgres::PostgresLog>>> {
     let projection = open_turso_projection(&projection_path)?;
-    let log = InProcessLogStore::new(log);
-    block_on_turso(async move {
-        AtomicTursoBackend::assemble(log, projection, projection_path, node_id).await
-    })
+    // Offload sync postgres LogStore calls so assemble/recover never runs the
+    // blocking client on a Tokio worker (Client methods and Drop both panic
+    // with nested-runtime when a handle is present on the thread).
+    let log =
+        InProcessLogStore::new_with_blocking_offload(log, DEFAULT_BLOCKING_AXIS_IN_FLIGHT)?;
+    // Dedicated multi-thread runtime on this OS thread only for the async
+    // assemble future. PostgresLog Drop offloads Client close to a bare thread.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .thread_name("fw-pg-turso-open")
+        .build()
+        .map_err(|e| EngineError::Storage(format!("postgres×turso open runtime: {e}")))?;
+    let result = rt.block_on(AtomicTursoBackend::assemble(
+        log,
+        projection,
+        projection_path,
+        node_id,
+    ));
+    // Shut down workers before returning so any residual Drop cannot nest on them.
+    drop(rt);
+    result
 }
 
 #[cfg(feature = "objectlog")]
