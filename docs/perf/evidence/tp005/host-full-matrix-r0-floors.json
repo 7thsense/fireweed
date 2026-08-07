@@ -1,0 +1,646 @@
+{
+  "source_commit": "25f59301",
+  "floor_factor": 0.25,
+  "cells": [
+    {
+      "cell": "filesystem--memory",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 378.25622742555953,
+      "claim_items_per_s": 1328.3966391942793,
+      "finalize_items_per_s": 1489.0672864219314,
+      "append_floor_items_per_s": 94.56405685638988
+    },
+    {
+      "cell": "filesystem--memory",
+      "shape": "large-16k",
+      "append_items_per_s": 147.08034500682123,
+      "claim_items_per_s": 185.3472198006576,
+      "finalize_items_per_s": 205.78458664733608,
+      "append_floor_items_per_s": 36.77008625170531
+    },
+    {
+      "cell": "filesystem--memory",
+      "shape": "minimal",
+      "append_items_per_s": 1754.8716290029597,
+      "claim_items_per_s": 1571.4617428462493,
+      "finalize_items_per_s": 1834.5803690823923,
+      "append_floor_items_per_s": 438.7179072507399
+    },
+    {
+      "cell": "filesystem--memory",
+      "shape": "record-1k",
+      "append_items_per_s": 1791.9969771161393,
+      "claim_items_per_s": 1561.799993121418,
+      "finalize_items_per_s": 1399.4270685231174,
+      "append_floor_items_per_s": 447.9992442790348
+    },
+    {
+      "cell": "filesystem--postgres",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 406.10235911874247,
+      "claim_items_per_s": 366.8874604356004,
+      "finalize_items_per_s": 526.7668199392305,
+      "append_floor_items_per_s": 101.52558977968562
+    },
+    {
+      "cell": "filesystem--postgres",
+      "shape": "large-16k",
+      "append_items_per_s": 159.14377232083163,
+      "claim_items_per_s": 205.6472107565355,
+      "finalize_items_per_s": 216.24525716525054,
+      "append_floor_items_per_s": 39.78594308020791
+    },
+    {
+      "cell": "filesystem--postgres",
+      "shape": "minimal",
+      "append_items_per_s": 1211.347156011819,
+      "claim_items_per_s": 1098.2769881049635,
+      "finalize_items_per_s": 1223.9175270908,
+      "append_floor_items_per_s": 302.83678900295473
+    },
+    {
+      "cell": "filesystem--postgres",
+      "shape": "record-1k",
+      "append_items_per_s": 1516.6665537303036,
+      "claim_items_per_s": 1561.1663324968993,
+      "finalize_items_per_s": 1544.4468098491957,
+      "append_floor_items_per_s": 379.1666384325759
+    },
+    {
+      "cell": "filesystem--sqlite",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 374.8660379751716,
+      "claim_items_per_s": 854.4591442072453,
+      "finalize_items_per_s": 786.0237785943527,
+      "append_floor_items_per_s": 93.7165094937929
+    },
+    {
+      "cell": "filesystem--sqlite",
+      "shape": "large-16k",
+      "append_items_per_s": 199.61991709040262,
+      "claim_items_per_s": 175.4954075104777,
+      "finalize_items_per_s": 204.20849770319938,
+      "append_floor_items_per_s": 49.904979272600656
+    },
+    {
+      "cell": "filesystem--sqlite",
+      "shape": "minimal",
+      "append_items_per_s": 1794.6753596725503,
+      "claim_items_per_s": 1863.434880573683,
+      "finalize_items_per_s": 1886.9867646247098,
+      "append_floor_items_per_s": 448.66883991813756
+    },
+    {
+      "cell": "filesystem--sqlite",
+      "shape": "record-1k",
+      "append_items_per_s": 1281.5875704476548,
+      "claim_items_per_s": 515.3341481193513,
+      "finalize_items_per_s": 1412.3517646399396,
+      "append_floor_items_per_s": 320.3968926119137
+    },
+    {
+      "cell": "filesystem--turso",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 72.01106654764968,
+      "claim_items_per_s": 125.34483031652256,
+      "finalize_items_per_s": 117.61813466373022,
+      "append_floor_items_per_s": 18.00276663691242
+    },
+    {
+      "cell": "filesystem--turso",
+      "shape": "large-16k",
+      "append_items_per_s": 80.16994308689993,
+      "claim_items_per_s": 117.86323265384766,
+      "finalize_items_per_s": 147.98498448083225,
+      "append_floor_items_per_s": 20.042485771724984
+    },
+    {
+      "cell": "filesystem--turso",
+      "shape": "minimal",
+      "append_items_per_s": 115.1205417630601,
+      "claim_items_per_s": 735.0800118277544,
+      "finalize_items_per_s": 427.051148844533,
+      "append_floor_items_per_s": 28.780135440765026
+    },
+    {
+      "cell": "filesystem--turso",
+      "shape": "record-1k",
+      "append_items_per_s": 45.88201336470982,
+      "claim_items_per_s": 511.62395377446114,
+      "finalize_items_per_s": 466.70298195598895,
+      "append_floor_items_per_s": 11.470503341177455
+    },
+    {
+      "cell": "memory--memory",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 70163.73733154665,
+      "claim_items_per_s": 366966.2802999113,
+      "finalize_items_per_s": 359539.00807232485,
+      "append_floor_items_per_s": 17540.934332886663
+    },
+    {
+      "cell": "memory--memory",
+      "shape": "large-16k",
+      "append_items_per_s": 5052.051746991443,
+      "claim_items_per_s": 144997.26362976545,
+      "finalize_items_per_s": 144691.18109059893,
+      "append_floor_items_per_s": 1263.0129367478607
+    },
+    {
+      "cell": "memory--memory",
+      "shape": "minimal",
+      "append_items_per_s": 163576.67975710344,
+      "claim_items_per_s": 272773.61324452277,
+      "finalize_items_per_s": 260615.44745127254,
+      "append_floor_items_per_s": 40894.16993927586
+    },
+    {
+      "cell": "memory--memory",
+      "shape": "record-1k",
+      "append_items_per_s": 19035.90601669815,
+      "claim_items_per_s": 206896.99204909406,
+      "finalize_items_per_s": 183303.4212223116,
+      "append_floor_items_per_s": 4758.976504174538
+    },
+    {
+      "cell": "memory--postgres",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 330.14329267932595,
+      "claim_items_per_s": 573.3840528427726,
+      "finalize_items_per_s": 4188.23186161527,
+      "append_floor_items_per_s": 82.53582316983149
+    },
+    {
+      "cell": "memory--postgres",
+      "shape": "large-16k",
+      "append_items_per_s": 1041.6693528986373,
+      "claim_items_per_s": 1360.742525082414,
+      "finalize_items_per_s": 1479.6802352194402,
+      "append_floor_items_per_s": 260.4173382246593
+    },
+    {
+      "cell": "memory--postgres",
+      "shape": "minimal",
+      "append_items_per_s": 5208.072099013758,
+      "claim_items_per_s": 3593.8140551292036,
+      "finalize_items_per_s": 3452.8273005093247,
+      "append_floor_items_per_s": 1302.0180247534395
+    },
+    {
+      "cell": "memory--postgres",
+      "shape": "record-1k",
+      "append_items_per_s": 2099.212416681905,
+      "claim_items_per_s": 2263.5815764207305,
+      "finalize_items_per_s": 1888.8477368977285,
+      "append_floor_items_per_s": 524.8031041704762
+    },
+    {
+      "cell": "memory--sqlite",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 3604.8207248402678,
+      "claim_items_per_s": 3944.2036229607484,
+      "finalize_items_per_s": 3730.5136521019303,
+      "append_floor_items_per_s": 901.2051812100669
+    },
+    {
+      "cell": "memory--sqlite",
+      "shape": "large-16k",
+      "append_items_per_s": 1542.130820775313,
+      "claim_items_per_s": 1598.2205891426663,
+      "finalize_items_per_s": 5711.356013025733,
+      "append_floor_items_per_s": 385.53270519382824
+    },
+    {
+      "cell": "memory--sqlite",
+      "shape": "minimal",
+      "append_items_per_s": 32655.39625193097,
+      "claim_items_per_s": 34916.30655429294,
+      "finalize_items_per_s": 39350.96631278138,
+      "append_floor_items_per_s": 8163.849062982743
+    },
+    {
+      "cell": "memory--sqlite",
+      "shape": "record-1k",
+      "append_items_per_s": 2377.4637717199453,
+      "claim_items_per_s": 2251.5769574465553,
+      "finalize_items_per_s": 4873.127267375222,
+      "append_floor_items_per_s": 594.3659429299863
+    },
+    {
+      "cell": "memory--turso",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 53.632493547663984,
+      "claim_items_per_s": 130.1127641315602,
+      "finalize_items_per_s": 121.81823992672814,
+      "append_floor_items_per_s": 13.408123386915996
+    },
+    {
+      "cell": "memory--turso",
+      "shape": "large-16k",
+      "append_items_per_s": 182.28868920463563,
+      "claim_items_per_s": 359.2250302993516,
+      "finalize_items_per_s": 449.9892011310269,
+      "append_floor_items_per_s": 45.57217230115891
+    },
+    {
+      "cell": "memory--turso",
+      "shape": "minimal",
+      "append_items_per_s": 136.62161921754847,
+      "claim_items_per_s": 1428.7286397478238,
+      "finalize_items_per_s": 624.3023407928894,
+      "append_floor_items_per_s": 34.15540480438712
+    },
+    {
+      "cell": "memory--turso",
+      "shape": "record-1k",
+      "append_items_per_s": 27.78609981525234,
+      "claim_items_per_s": 323.1742566529301,
+      "finalize_items_per_s": 293.97806538171886,
+      "append_floor_items_per_s": 6.946524953813085
+    },
+    {
+      "cell": "postgres--memory",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 11420.858718734762,
+      "claim_items_per_s": 18092.12321719105,
+      "finalize_items_per_s": 17454.37735302393,
+      "append_floor_items_per_s": 2855.2146796836905
+    },
+    {
+      "cell": "postgres--memory",
+      "shape": "large-16k",
+      "append_items_per_s": 848.5979751452029,
+      "claim_items_per_s": 1729.4290895161143,
+      "finalize_items_per_s": 2204.2865669746107,
+      "append_floor_items_per_s": 212.14949378630072
+    },
+    {
+      "cell": "postgres--memory",
+      "shape": "minimal",
+      "append_items_per_s": 15095.639716810658,
+      "claim_items_per_s": 12029.48696414683,
+      "finalize_items_per_s": 14591.825642859067,
+      "append_floor_items_per_s": 3773.9099292026644
+    },
+    {
+      "cell": "postgres--memory",
+      "shape": "record-1k",
+      "append_items_per_s": 3633.66652983291,
+      "claim_items_per_s": 11547.069195020997,
+      "finalize_items_per_s": 11252.871860372707,
+      "append_floor_items_per_s": 908.4166324582275
+    },
+    {
+      "cell": "postgres--postgres",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 1496.8343219383764,
+      "claim_items_per_s": 2242.157569428479,
+      "finalize_items_per_s": 2868.869115671214,
+      "append_floor_items_per_s": 374.2085804845941
+    },
+    {
+      "cell": "postgres--postgres",
+      "shape": "large-16k",
+      "append_items_per_s": 626.7271520675537,
+      "claim_items_per_s": 831.8678053914418,
+      "finalize_items_per_s": 1631.6913656434563,
+      "append_floor_items_per_s": 156.68178801688842
+    },
+    {
+      "cell": "postgres--postgres",
+      "shape": "minimal",
+      "append_items_per_s": 4408.717263649033,
+      "claim_items_per_s": 1408.4599880038138,
+      "finalize_items_per_s": 5600.484754158259,
+      "append_floor_items_per_s": 1102.1793159122583
+    },
+    {
+      "cell": "postgres--postgres",
+      "shape": "record-1k",
+      "append_items_per_s": 2615.0544970339442,
+      "claim_items_per_s": 1398.6346979356977,
+      "finalize_items_per_s": 5130.929898660639,
+      "append_floor_items_per_s": 653.7636242584861
+    },
+    {
+      "cell": "postgres--sqlite",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 2344.341901973193,
+      "claim_items_per_s": 2793.851348440534,
+      "finalize_items_per_s": 3324.105890658385,
+      "append_floor_items_per_s": 586.0854754932983
+    },
+    {
+      "cell": "postgres--sqlite",
+      "shape": "large-16k",
+      "append_items_per_s": 363.30423594058453,
+      "claim_items_per_s": 1068.4224986676254,
+      "finalize_items_per_s": 1971.529230177006,
+      "append_floor_items_per_s": 90.82605898514613
+    },
+    {
+      "cell": "postgres--sqlite",
+      "shape": "minimal",
+      "append_items_per_s": 11055.514626687258,
+      "claim_items_per_s": 10513.833310046288,
+      "finalize_items_per_s": 10818.262217847001,
+      "append_floor_items_per_s": 2763.8786566718145
+    },
+    {
+      "cell": "postgres--sqlite",
+      "shape": "record-1k",
+      "append_items_per_s": 2160.491918340462,
+      "claim_items_per_s": 2530.7562850869685,
+      "finalize_items_per_s": 5313.683169135306,
+      "append_floor_items_per_s": 540.1229795851154
+    },
+    {
+      "cell": "postgres--turso",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 82.9299058148648,
+      "claim_items_per_s": 180.05332363635753,
+      "finalize_items_per_s": 153.5453499940833,
+      "append_floor_items_per_s": 20.7324764537162
+    },
+    {
+      "cell": "postgres--turso",
+      "shape": "large-16k",
+      "append_items_per_s": 148.5369483553987,
+      "claim_items_per_s": 315.11389555123856,
+      "finalize_items_per_s": 380.82771890273676,
+      "append_floor_items_per_s": 37.13423708884967
+    },
+    {
+      "cell": "postgres--turso",
+      "shape": "minimal",
+      "append_items_per_s": 160.13751530086842,
+      "claim_items_per_s": 1498.2270797155356,
+      "finalize_items_per_s": 706.5714283101233,
+      "append_floor_items_per_s": 40.034378825217104
+    },
+    {
+      "cell": "postgres--turso",
+      "shape": "record-1k",
+      "append_items_per_s": 30.43986954904944,
+      "claim_items_per_s": 517.7194629829679,
+      "finalize_items_per_s": 455.5098947917504,
+      "append_floor_items_per_s": 7.60996738726236
+    },
+    {
+      "cell": "s3--memory",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 991.7244253686803,
+      "claim_items_per_s": 1482.3762072154657,
+      "finalize_items_per_s": 1470.327899245745,
+      "append_floor_items_per_s": 247.93110634217007
+    },
+    {
+      "cell": "s3--memory",
+      "shape": "large-16k",
+      "append_items_per_s": 233.83080269567142,
+      "claim_items_per_s": 250.3220040958503,
+      "finalize_items_per_s": 268.8535528316471,
+      "append_floor_items_per_s": 58.457700673917856
+    },
+    {
+      "cell": "s3--memory",
+      "shape": "minimal",
+      "append_items_per_s": 1915.5887829169344,
+      "claim_items_per_s": 1679.1669233206624,
+      "finalize_items_per_s": 1716.5815503795204,
+      "append_floor_items_per_s": 478.8971957292336
+    },
+    {
+      "cell": "s3--memory",
+      "shape": "record-1k",
+      "append_items_per_s": 2014.5267524116402,
+      "claim_items_per_s": 2158.7378099779876,
+      "finalize_items_per_s": 2247.7010302262865,
+      "append_floor_items_per_s": 503.63168810291006
+    },
+    {
+      "cell": "s3--postgres",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 390.8486575979046,
+      "claim_items_per_s": 224.55857767544933,
+      "finalize_items_per_s": 274.11298035625464,
+      "append_floor_items_per_s": 97.71216439947615
+    },
+    {
+      "cell": "s3--postgres",
+      "shape": "large-16k",
+      "append_items_per_s": 191.25982002865968,
+      "claim_items_per_s": 239.52663579739004,
+      "finalize_items_per_s": 226.5356960243381,
+      "append_floor_items_per_s": 47.81495500716492
+    },
+    {
+      "cell": "s3--postgres",
+      "shape": "minimal",
+      "append_items_per_s": 1187.5099201378018,
+      "claim_items_per_s": 711.145267773895,
+      "finalize_items_per_s": 650.6183867696794,
+      "append_floor_items_per_s": 296.87748003445046
+    },
+    {
+      "cell": "s3--postgres",
+      "shape": "record-1k",
+      "append_items_per_s": 851.6828273165987,
+      "claim_items_per_s": 1286.170842041397,
+      "finalize_items_per_s": 1448.1028102565103,
+      "append_floor_items_per_s": 212.92070682914968
+    },
+    {
+      "cell": "s3--sqlite",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 1162.8288477142398,
+      "claim_items_per_s": 1269.8639141100168,
+      "finalize_items_per_s": 1361.7762133560243,
+      "append_floor_items_per_s": 290.70721192855996
+    },
+    {
+      "cell": "s3--sqlite",
+      "shape": "large-16k",
+      "append_items_per_s": 215.52809666208506,
+      "claim_items_per_s": 189.07695849787328,
+      "finalize_items_per_s": 229.57211940321187,
+      "append_floor_items_per_s": 53.882024165521266
+    },
+    {
+      "cell": "s3--sqlite",
+      "shape": "minimal",
+      "append_items_per_s": 1245.6935033791372,
+      "claim_items_per_s": 1220.223614553251,
+      "finalize_items_per_s": 962.8028463200337,
+      "append_floor_items_per_s": 311.4233758447843
+    },
+    {
+      "cell": "s3--sqlite",
+      "shape": "record-1k",
+      "append_items_per_s": 1670.8226561478266,
+      "claim_items_per_s": 1492.6961214358553,
+      "finalize_items_per_s": 2028.2071107056652,
+      "append_floor_items_per_s": 417.70566403695665
+    },
+    {
+      "cell": "s3--turso",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 44.61061110369345,
+      "claim_items_per_s": 112.22905124953476,
+      "finalize_items_per_s": 140.9983966761126,
+      "append_floor_items_per_s": 11.152652775923363
+    },
+    {
+      "cell": "s3--turso",
+      "shape": "large-16k",
+      "append_items_per_s": 108.21171632985843,
+      "claim_items_per_s": 144.7019995928073,
+      "finalize_items_per_s": 158.98225754259806,
+      "append_floor_items_per_s": 27.05292908246461
+    },
+    {
+      "cell": "s3--turso",
+      "shape": "minimal",
+      "append_items_per_s": 129.15148604119764,
+      "claim_items_per_s": 466.9414050498693,
+      "finalize_items_per_s": 274.34818655807106,
+      "append_floor_items_per_s": 32.28787151029941
+    },
+    {
+      "cell": "s3--turso",
+      "shape": "record-1k",
+      "append_items_per_s": 41.84193698998706,
+      "claim_items_per_s": 304.8531858117621,
+      "finalize_items_per_s": 289.9035735679605,
+      "append_floor_items_per_s": 10.460484247496765
+    },
+    {
+      "cell": "sqlite--memory",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 6024.301727246138,
+      "claim_items_per_s": 6118.567821399816,
+      "finalize_items_per_s": 6999.394012699004,
+      "append_floor_items_per_s": 1506.0754318115346
+    },
+    {
+      "cell": "sqlite--memory",
+      "shape": "large-16k",
+      "append_items_per_s": 523.624081966878,
+      "claim_items_per_s": 2008.1364669298832,
+      "finalize_items_per_s": 1904.1010547558342,
+      "append_floor_items_per_s": 130.9060204917195
+    },
+    {
+      "cell": "sqlite--memory",
+      "shape": "minimal",
+      "append_items_per_s": 14172.464055182154,
+      "claim_items_per_s": 11930.346016943999,
+      "finalize_items_per_s": 9959.401697221792,
+      "append_floor_items_per_s": 3543.1160137955385
+    },
+    {
+      "cell": "sqlite--memory",
+      "shape": "record-1k",
+      "append_items_per_s": 3033.7620246381216,
+      "claim_items_per_s": 8844.61254963429,
+      "finalize_items_per_s": 8468.521216841522,
+      "append_floor_items_per_s": 758.4405061595304
+    },
+    {
+      "cell": "sqlite--postgres",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 550.3352675147354,
+      "claim_items_per_s": 602.7825340482752,
+      "finalize_items_per_s": 3528.471758100884,
+      "append_floor_items_per_s": 137.58381687868385
+    },
+    {
+      "cell": "sqlite--postgres",
+      "shape": "large-16k",
+      "append_items_per_s": 358.2774200870494,
+      "claim_items_per_s": 794.3161528126008,
+      "finalize_items_per_s": 820.025697073517,
+      "append_floor_items_per_s": 89.56935502176235
+    },
+    {
+      "cell": "sqlite--postgres",
+      "shape": "minimal",
+      "append_items_per_s": 3877.6143611027387,
+      "claim_items_per_s": 3206.946212625348,
+      "finalize_items_per_s": 3320.6527540671173,
+      "append_floor_items_per_s": 969.4035902756847
+    },
+    {
+      "cell": "sqlite--postgres",
+      "shape": "record-1k",
+      "append_items_per_s": 1527.2104496697627,
+      "claim_items_per_s": 2407.50309262863,
+      "finalize_items_per_s": 1958.7334660773636,
+      "append_floor_items_per_s": 381.8026124174407
+    },
+    {
+      "cell": "sqlite--sqlite",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 2072.4316231762396,
+      "claim_items_per_s": 2094.43644887694,
+      "finalize_items_per_s": 2312.954905601173,
+      "append_floor_items_per_s": 518.1079057940599
+    },
+    {
+      "cell": "sqlite--sqlite",
+      "shape": "large-16k",
+      "append_items_per_s": 402.5345985481491,
+      "claim_items_per_s": 986.9818360396843,
+      "finalize_items_per_s": 1383.9471619629956,
+      "append_floor_items_per_s": 100.63364963703728
+    },
+    {
+      "cell": "sqlite--sqlite",
+      "shape": "minimal",
+      "append_items_per_s": 5058.300897301559,
+      "claim_items_per_s": 5682.487463214029,
+      "finalize_items_per_s": 7641.1472541700905,
+      "append_floor_items_per_s": 1264.5752243253899
+    },
+    {
+      "cell": "sqlite--sqlite",
+      "shape": "record-1k",
+      "append_items_per_s": 1824.4576245781377,
+      "claim_items_per_s": 2445.511487848677,
+      "finalize_items_per_s": 3857.090210530452,
+      "append_floor_items_per_s": 456.1144061445344
+    },
+    {
+      "cell": "sqlite--turso",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 67.09611701938572,
+      "claim_items_per_s": 128.73401266471285,
+      "finalize_items_per_s": 137.82283734450453,
+      "append_floor_items_per_s": 16.77402925484643
+    },
+    {
+      "cell": "sqlite--turso",
+      "shape": "large-16k",
+      "append_items_per_s": 138.27900944974803,
+      "claim_items_per_s": 238.38952567225004,
+      "finalize_items_per_s": 264.5371807635012,
+      "append_floor_items_per_s": 34.56975236243701
+    },
+    {
+      "cell": "sqlite--turso",
+      "shape": "minimal",
+      "append_items_per_s": 153.8067685968325,
+      "claim_items_per_s": 1396.9820157360339,
+      "finalize_items_per_s": 691.521278762722,
+      "append_floor_items_per_s": 38.45169214920813
+    },
+    {
+      "cell": "sqlite--turso",
+      "shape": "record-1k",
+      "append_items_per_s": 33.709702201604806,
+      "claim_items_per_s": 429.69683767499674,
+      "finalize_items_per_s": 379.7006083396286,
+      "append_floor_items_per_s": 8.427425550401201
+    }
+  ]
+}
