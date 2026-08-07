@@ -130,6 +130,7 @@ async fn open_postgres_runtime_async_is_safe_inside_tokio() {
             mode: PostgresMode::Relational,
             node_id: None,
             coordination: None,
+            claim_pool_size: 0,
         },
         Arc::new(ManualClock(AtomicI64::new(0))),
     )

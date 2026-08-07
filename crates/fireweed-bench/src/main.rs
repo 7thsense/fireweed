@@ -347,6 +347,7 @@ async fn run_postgres(cfg: &Config) {
                 mode: PostgresMode::LogReplay,
                 node_id: None,
                 coordination: None,
+                claim_pool_size: 0,
             },
             Arc::new(SystemClock),
         )
@@ -364,6 +365,7 @@ async fn run_postgres(cfg: &Config) {
                     mode: PostgresMode::LogReplay,
                     node_id: None,
                     coordination: None,
+                    claim_pool_size: 0,
                 },
                 Arc::new(SystemClock),
             )
@@ -383,6 +385,7 @@ async fn run_postgres(cfg: &Config) {
                 mode: PostgresMode::LogReplay,
                 node_id: None,
                 coordination: None,
+                claim_pool_size: 0,
             },
             Arc::new(SystemClock),
         )
@@ -409,6 +412,7 @@ async fn run_postgres_relational(cfg: &Config) {
                 mode: PostgresMode::Relational,
                 node_id: None,
                 coordination: None,
+                claim_pool_size: 0,
             },
             Arc::new(SystemClock),
         )

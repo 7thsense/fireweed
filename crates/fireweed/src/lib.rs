@@ -963,6 +963,24 @@ pub struct PostgresRuntimeConfig {
     pub mode: PostgresMode,
     pub node_id: Option<u8>,
     pub coordination: Option<PostgresCoordinationConfig>,
+    /// Extra SYNC claim connections for [`PostgresMode::Relational`] multi-writer scale-out
+    /// (fireweed-66d64e91 / `FOR UPDATE SKIP LOCKED`). `0` keeps the single-connection posture.
+    /// Ignored for [`PostgresMode::LogReplay`] (use the server's fixed queue-affine pool there).
+    pub claim_pool_size: usize,
+}
+
+impl PostgresRuntimeConfig {
+    /// Single-connection relational/log-replay defaults (`claim_pool_size = 0`).
+    pub fn new(url: ConfigSecret, mode: PostgresMode) -> Self {
+        Self {
+            url,
+            schema: None,
+            mode,
+            node_id: None,
+            coordination: None,
+            claim_pool_size: 0,
+        }
+    }
 }
 
 /// Public log axis: five first-class values (orthogonal storage matrix / API-005).
@@ -5725,6 +5743,7 @@ fn open_postgres_log_cell(
                     mode: PostgresMode::LogReplay,
                     node_id,
                     coordination,
+                    claim_pool_size: 0,
                 },
                 clock,
             ),
@@ -5801,6 +5820,7 @@ fn open_postgres_log_cell(
                         mode: PostgresMode::Relational,
                         node_id,
                         coordination,
+                        claim_pool_size: 0,
                     },
                     clock,
                 )
@@ -6795,6 +6815,7 @@ pub fn open_postgres_runtime(
         mode,
         node_id,
         coordination,
+        claim_pool_size,
     } = config;
     let url = &url.0.0;
     match mode {
@@ -6842,11 +6863,19 @@ pub fn open_postgres_runtime(
             }
         }
         PostgresMode::Relational => {
-            let backend = match schema.as_deref() {
-                Some(schema) => {
+            let backend = match (schema.as_deref(), claim_pool_size) {
+                (Some(schema), 0) => {
                     fireweed_postgres::PostgresRelationalBackend::connect_in_schema(url, schema)?
                 }
-                None => fireweed_postgres::PostgresRelationalBackend::connect(url)?,
+                (None, 0) => fireweed_postgres::PostgresRelationalBackend::connect(url)?,
+                (Some(schema), n) => {
+                    fireweed_postgres::PostgresRelationalBackend::connect_in_schema_with_claim_pool(
+                        url, schema, n,
+                    )?
+                }
+                (None, n) => {
+                    fireweed_postgres::PostgresRelationalBackend::connect_with_claim_pool(url, n)?
+                }
             };
             let backend = Arc::new(match node_id {
                 Some(node_id) => backend.with_node_id(node_id),

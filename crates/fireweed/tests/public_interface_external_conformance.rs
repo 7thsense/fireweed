@@ -233,6 +233,7 @@ fn postgres_config(
         mode,
         node_id: None,
         coordination,
+        claim_pool_size: 0,
     }
 }
 
@@ -737,6 +738,7 @@ async fn postgres_relational_coordinated_node_public_interface() {
                 .expect("valid unique owner id"),
             control_plane: ControlPlaneConfig::default(),
         }),
+        claim_pool_size: 0,
     };
     let fireweed = fireweed::open_postgres_runtime_async(runtime.clone(), Arc::new(SystemClock))
         .await

@@ -25,9 +25,12 @@
 //! `postgres` cargo feature) delegates every engine-port call — and the initial `connect` and the final
 //! `Client` drop — to `tokio::task::spawn_blocking` / a non-reactor OS thread, so no sync postgres call
 //! ever runs on a tokio worker. The launch posture remains a single-node durable-log + in-memory projection
-//! with guarantees identical to sqlite (a connection pool + `FOR UPDATE SKIP LOCKED` multi-node mode is the
-//! separate scale-out refinement). This is NOT a silent sqlite copy — the caveat is the reason the
-//! single-connection backend must only be reached through that blocking boundary.
+//! with guarantees identical to sqlite. Multi-writer scale-out for the **relational** backend is
+//! available via [`PostgresRelationalBackend::connect_with_claim_pool`] (fireweed-66d64e91): extra claim
+//! connections + `FOR UPDATE SKIP LOCKED`. The log-replay [`PostgresBackend`] remains single-connection
+//! under its process Mutex; production multi-queue scale-out for that posture is the server's fixed
+//! queue-affine pool. This is NOT a silent sqlite copy — the caveat is the reason the single-connection
+//! backend must only be reached through that blocking boundary.
 //!
 //! ## Serialization caveat for the future pooling work (recorded from the Chunk-4 fresh-eyes review)
 //!

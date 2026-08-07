@@ -119,6 +119,7 @@ fn lifecycle_over_shapes_postgres_log() {
                 mode: PostgresMode::LogReplay,
                 node_id: None,
                 coordination: None,
+                claim_pool_size: 0,
             },
             Arc::new(SystemClock),
         )
@@ -145,6 +146,7 @@ fn lifecycle_over_shapes_postgres_relational() {
                 mode: PostgresMode::Relational,
                 node_id: None,
                 coordination: None,
+                claim_pool_size: 0,
             },
             Arc::new(SystemClock),
         )

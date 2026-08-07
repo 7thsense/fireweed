@@ -81,6 +81,7 @@ fn two_instances_compete_over_shared_postgres() {
                     instance_id: OwnerId::new(owner).unwrap(),
                     control_plane: ControlPlaneConfig::default(),
                 }),
+                claim_pool_size: 0,
             },
             clock.clone(),
         )
@@ -164,6 +165,7 @@ fn relational_multi_instance_has_item_visibility_and_fence() {
                     instance_id: OwnerId::new(owner).unwrap(),
                     control_plane: ControlPlaneConfig::default(),
                 }),
+                claim_pool_size: 0,
             },
             clock.clone(),
         )

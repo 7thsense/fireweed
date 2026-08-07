@@ -897,6 +897,7 @@ fn production_wrapper_batches_10k_through_native_ports() {
             mode: PostgresMode::Relational,
             node_id: Some(0),
             coordination: None,
+            claim_pool_size: 0,
         },
         Arc::new(SystemClock),
     )
@@ -982,6 +983,7 @@ fn performance_single_deployment_baseline_tests() {
                 mode: PostgresMode::Relational,
                 node_id: Some(0),
                 coordination: None,
+                claim_pool_size: 0,
             },
             Arc::new(SystemClock),
         )

@@ -181,6 +181,7 @@ async fn every_constructor_returns_one_opaque_type() -> fireweed::EngineResult<(
                 instance_id: OwnerId::new("fixture").unwrap(),
                 control_plane: ControlPlaneConfig::default(),
             }),
+            claim_pool_size: 0,
         },
         clock(),
     )?;
@@ -191,6 +192,7 @@ async fn every_constructor_returns_one_opaque_type() -> fireweed::EngineResult<(
             mode: PostgresMode::Relational,
             node_id: Some(1),
             coordination: None,
+            claim_pool_size: 0,
         },
         clock(),
     )

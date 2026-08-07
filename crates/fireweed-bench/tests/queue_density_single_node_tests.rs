@@ -647,6 +647,7 @@ fn queue_density_single_node_durable_tests() {
                         mode: PostgresMode::LogReplay,
                         node_id: None,
                         coordination: None,
+                        claim_pool_size: 0,
                     },
                     Arc::new(SysClock),
                 )

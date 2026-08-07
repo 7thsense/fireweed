@@ -220,6 +220,7 @@ mod postgres_cells {
                     mode: PostgresMode::LogReplay,
                     node_id: None,
                     coordination: None,
+                    claim_pool_size: 0,
                 },
                 Arc::new(SystemClock),
             )
@@ -267,6 +268,7 @@ mod postgres_cells {
                     mode: PostgresMode::Relational,
                     node_id: None,
                     coordination: None,
+                    claim_pool_size: 0,
                 },
                 Arc::new(SystemClock),
             )

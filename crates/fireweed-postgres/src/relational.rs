@@ -14,22 +14,28 @@
 //! allocated by an **atomic** `UPDATE … RETURNING` (increment-and-return in one statement). The SQL is
 //! therefore concurrency-correct **by construction**: were two transactions to run it concurrently, they
 //! would lock-and-skip disjoint candidate sets and could not both read the same sequence value (no
-//! read-check-then-write **TOCTOU** — the I4 hazard the log-backed backend documented). HONEST CAVEAT: in
-//! the single-node launch posture below this backend still holds ONE `Client` behind `Mutex<Inner>`, so
-//! two claims cannot actually run at once — the Mutex is today's serializer and the row lock is not yet
-//! exercised concurrently. The point is that adding the deferred connection pool is SAFE: it does not
-//! reintroduce a TOCTOU or need new locking (unlike the log-backed backend, whose read-then-write guards
-//! would). A live contended-writer test requires that pool; it is not exercisable through one Mutex-guarded
-//! connection.
+//! read-check-then-write **TOCTOU** — the I4 hazard the log-backed backend documented).
+//!
+//! ## Multi-connection claim pool (fireweed-66d64e91)
+//! Construct with [`PostgresRelationalBackend::connect_with_claim_pool`] (or the schema / config variants)
+//! to open **N claim connections** plus the primary client. [`ClaimPort::claim`] borrows a free claim
+//! connection (no process-wide Mutex across claimers), so concurrent workers exercise `FOR UPDATE SKIP
+//! LOCKED` for real. Non-claim ports still use the primary client behind `Mutex<Inner>` (queue-def cache +
+//! live token map). Production `fireweed-server` multi-queue scale-out is separately provided by its fixed
+//! queue-affine relational pool (`fixed_postgres_relational_pool`). That path satisfies multi-queue
+//! writers; this claim pool is the same-backend multi-writer path embedders need.
+//!
+//! Same-queue claimers still take `relational_cursor … FOR UPDATE` for the assignment-epoch fence, so they
+//! pipeline at the DB row lock rather than a process Mutex — and multi-queue claimers never share a cursor
+//! row. Live contended-writer evidence is env-gated on `FIREWEED_PG_TEST_URL`.
 //!
 //! ## Connection / runtime posture (consistent with the crate's recorded post-launch caveat)
 //! Like [`crate::PostgresBackend`], this uses the SYNC `postgres` client behind a `Mutex<Client>` for the
 //! single-node launch posture, and the port bodies make blocking calls inside `std::future::ready` — so it
 //! must be driven OFF a tokio runtime (the conformance/reconnect tests use `futures::executor::block_on`).
-//! Wrapping every call in `spawn_blocking` + a connection POOL (so a tokio `fireweed-server` can drive it
-//! concurrently) is the production wiring; it is a recorded post-launch refinement here too. Crucially,
-//! unlike the log-backed backend, adding that pool is SAFE without new locking: the claim already row-locks
-//! and the sequence allocation is already atomic.
+//! Wrapping every call in `spawn_blocking` + the claim pool (so a tokio `fireweed-server` can drive it
+//! concurrently) is the production wiring. Crucially, unlike the log-backed backend, adding that pool is
+//! SAFE without new locking: the claim already row-locks and the sequence allocation is already atomic.
 //!
 //! ## Lease tokens / timestamps (parity with the sqlite reference)
 //! Lease tokens are stored hash-only (`lease_token_hash`) with an ephemeral in-process `live_tokens` map
@@ -5402,6 +5408,10 @@ fn validate_cohort_lease(
 /// Atomic class.
 pub struct PostgresRelationalBackend {
     inner: Mutex<Inner>,
+    /// Extra SYNC clients used only by [`ClaimPort::claim`] so concurrent claimers do not share the
+    /// process Mutex around the primary client. Empty = single-connection launch posture (claim uses
+    /// `inner` exclusively). Opened by [`Self::connect_with_claim_pool`].
+    claim_pool: Vec<Mutex<Client>>,
     /// This instance's node id, packed into every minted [`ItemId`] (ADR-009). `0` single-instance.
     node_id: u8,
     /// Per-(queue, epoch) item-id sequence — see [`QueueCounters`].
@@ -5728,11 +5738,86 @@ impl PostgresRelationalBackend {
         inner.reload()?;
         let backend = Self {
             inner: Mutex::new(inner),
+            claim_pool: Vec::new(),
             node_id: 0,
             counters: QueueCounters::default(),
         };
         backend.restore_counters()?;
         Ok(backend)
+    }
+
+    /// Open the relational backend with `claim_pool_size` extra connections reserved for concurrent
+    /// [`ClaimPort::claim`] (fireweed-66d64e91). `claim_pool_size == 0` is the single-connection posture.
+    pub fn connect_with_claim_pool(url: &str, claim_pool_size: usize) -> EngineResult<Self> {
+        let mut backend = Self::connect(url)?;
+        backend.attach_claim_pool(
+            || connect(PostgresConnectConfig::new(url)),
+            claim_pool_size,
+            None,
+        )?;
+        Ok(backend)
+    }
+
+    /// Schema-isolated variant of [`Self::connect_with_claim_pool`].
+    pub fn connect_in_schema_with_claim_pool(
+        url: &str,
+        schema: &str,
+        claim_pool_size: usize,
+    ) -> EngineResult<Self> {
+        let mut backend = Self::connect_in_schema(url, schema)?;
+        backend.attach_claim_pool(
+            || connect(PostgresConnectConfig::new(url)),
+            claim_pool_size,
+            Some(schema),
+        )?;
+        Ok(backend)
+    }
+
+    /// Production-config variant of [`Self::connect_with_claim_pool`].
+    pub fn connect_with_config_and_claim_pool(
+        config: PostgresConnectConfig,
+        claim_pool_size: usize,
+    ) -> EngineResult<Self> {
+        let mut backend = Self::connect_with_config(config.clone())?;
+        backend.attach_claim_pool(|| connect(config.clone()), claim_pool_size, None)?;
+        Ok(backend)
+    }
+
+    /// Schema + production-config + claim pool.
+    pub fn connect_with_config_in_schema_with_claim_pool(
+        config: PostgresConnectConfig,
+        schema: &str,
+        claim_pool_size: usize,
+    ) -> EngineResult<Self> {
+        let mut backend = Self::connect_with_config_in_schema(config.clone(), schema)?;
+        backend.attach_claim_pool(|| connect(config.clone()), claim_pool_size, Some(schema))?;
+        Ok(backend)
+    }
+
+    fn attach_claim_pool<F>(
+        &mut self,
+        connect_one: F,
+        claim_pool_size: usize,
+        schema: Option<&str>,
+    ) -> EngineResult<()>
+    where
+        F: Fn() -> EngineResult<Client>,
+    {
+        let mut pool = Vec::with_capacity(claim_pool_size);
+        for _ in 0..claim_pool_size {
+            let mut client = connect_one()?;
+            if let Some(schema) = schema {
+                st(client.batch_execute(&format!("SET search_path TO {schema}")))?;
+            }
+            pool.push(Mutex::new(client));
+        }
+        self.claim_pool = pool;
+        Ok(())
+    }
+
+    /// Declared claim-pool size (extra connections beyond the primary client).
+    pub fn claim_pool_size(&self) -> usize {
+        self.claim_pool.len()
     }
 
     /// Restart recovery from one durable high-water row per queue. Work is proportional to queue count, not
@@ -7376,253 +7461,364 @@ impl ClaimPort for PostgresRelationalBackend {
     /// The TD-002 serialized claim CTE with a REAL `FOR UPDATE SKIP LOCKED` row lock: candidate selection
     /// and the lease land in ONE statement, RETURNING the rich claimed rows.
     ///
-    /// CONCURRENCY (honest framing): in this single-node launch posture the backend holds ONE `Client`
-    /// behind `Mutex<Inner>`, so two claims cannot run at once and the Mutex is the serializer — the
-    /// `FOR UPDATE SKIP LOCKED` row lock is not exercised concurrently yet. Its value is that the SQL is
-    /// **pool-ready**: when the deferred connection pool + `spawn_blocking` lands (so a tokio server drives
-    /// concurrent connections), correct concurrent claiming comes from the row lock with NO Mutex, and the
-    /// atomic `alloc_seq` keeps sequence allocation race-free. A live contended-writer test therefore
-    /// requires that pool; it cannot be exercised through this Mutex-guarded single connection.
+    /// CONCURRENCY: with a non-empty [`Self::claim_pool_size`] (see [`Self::connect_with_claim_pool`]), each
+    /// claimer borrows a free claim connection so concurrent workers do not serialize on the primary
+    /// `Mutex<Inner>`. Contention is handled by `FOR UPDATE SKIP LOCKED` (items) plus the atomic
+    /// `alloc_seq` / assignment-epoch fence on `relational_cursor`. Without a claim pool the single-client
+    /// launch posture still serializes claims on that Mutex (SQL remains pool-correct).
     fn claim(
         &self,
         req: ClaimRequest,
     ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
         let result = (|| {
-            let mut g = self.inner.lock().expect("poisoned");
-            // BQ-14a/b: resolve the claim unit. Item-level (default) keeps the CTE path; WholeGroup /
-            // SameGroupKey select group-aware from fireweed_group_summary; WholeCohort → Unavailable (BQ-14c).
-            let unit = if req.compatibility != ClaimCompatibility::default() {
-                let def = g.queues.get(&req.shard).ok_or(EngineError::NotFound)?;
-                validate_claim_compatibility(&req.compatibility, req.max_items as u64, def)?
-            } else {
-                ClaimUnit::Item
+            if self.claim_pool.is_empty() {
+                let mut g = self.inner.lock().expect("poisoned");
+                let Inner {
+                    client,
+                    queues,
+                    live_tokens,
+                    ..
+                } = &mut *g;
+                return claim_with_client(client, queues, live_tokens, req);
+            }
+            // Multi-connection claim path: resolve claim unit under a brief state lock, then run SQL on a
+            // free claim client without holding the primary Mutex for the network round-trips.
+            let unit = {
+                let g = self.inner.lock().expect("poisoned");
+                if req.compatibility != ClaimCompatibility::default() {
+                    let def = g.queues.get(&req.shard).ok_or(EngineError::NotFound)?;
+                    validate_claim_compatibility(&req.compatibility, req.max_items as u64, def)?
+                } else {
+                    ClaimUnit::Item
+                }
             };
-            // Paused queues yield nothing (neither the CTE nor the group/cohort selection encodes pause).
-            if queue_paused(&mut g.client, &req.shard)? {
-                return Ok(Claimed::default());
-            }
-            let Inner {
-                client,
-                queues,
-                live_tokens,
-                ..
-            } = &mut *g;
-            let (t, q) = parts(&req.shard);
-            let mut tx = st(client.transaction())?;
-            // ADR-009 / TD-003 fence: a superseded owner is rejected BEFORE selecting/leasing — nothing is
-            // claimed. `None` = sole-owner (no fence). The assignment_epoch is the BQ-23 single durable value.
-            let claim_epoch: i64 = st(tx.query_one(
-                "SELECT assignment_epoch FROM relational_cursor WHERE tenant=$1 AND queue=$2 FOR UPDATE",
-                &[&t, &q],
-            ))?
-            .get(0);
-            if req.expected_epoch.is_some_and(|e| e != claim_epoch as u64) {
-                return Err(EngineError::EpochFenced);
-            }
-            // Time-driven summary maintenance is fenced with the claim. An explicit selection-only
-            // eligibility_time must never advance durable summary state, so promotion uses wall-clock
-            // `now`; live candidate predicates below may still use `eligibility_at()`.
-            if !matches!(unit, ClaimUnit::Item)
-                && !promote_due_group_summary_chunk_in_tx(&mut tx, &req.shard, req.now)?
-            {
-                st(tx.commit())?;
-                return Err(EngineError::Unavailable);
-            }
-            let seq = alloc_seq(&mut tx, &t, &q)?;
-            let now_n = ts_nanos(req.now);
-            // Due-ness is resolved at the caller-resolved eligibility epoch (`ClaimRequest::eligibility_at`),
-            // which defaults to `now`. It feeds ONLY the candidate predicates (`not_before<=$3` in the CTE,
-            // the group/cohort selections); `now_n` still stamps `updated_at` and the lease.
-            let elig_n = ts_nanos(req.eligibility_at());
-            let exp = ts_nanos(req.lease_expires_at);
-            let hash = lease_hash(&req.lease_token);
-            let seqi = seq as i64;
-
+            let mut client_guard = self.acquire_claim_client();
+            // Group/cohort claim needs the queue-def map for apply_command_sql; item-level CTE does not.
+            // Hold the state Mutex only for the apply + token steps after durable commit when possible.
             if matches!(unit, ClaimUnit::Item) {
-                // Item-level: the serialized FOR UPDATE SKIP LOCKED CTE (select + lease + RETURNING).
-                let lim = req.max_items as i64;
-                let rows = st(tx.query(
-                    CLAIM_CTE,
-                    &[&t, &q, &elig_n, &lim, &hash, &exp, &now_n, &seqi],
-                ))?;
-                if rows.is_empty() {
-                    return Ok(Claimed::default()); // roll back — no sequence burned (sqlite parity)
-                }
-                let mut claimed_ids = Vec::with_capacity(rows.len());
-                for row in &rows {
-                    let id: String = row.get(0);
-                    claimed_ids
-                        .push(ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?);
-                }
-                let claim_command = QueueCommand::Claim(ClaimCommand {
-                    item_ids: claimed_ids.clone(),
-                    lease_token: req.lease_token.clone(),
-                    lease_expires_at: req.lease_expires_at,
-                    worker_id: Some(req.worker_id.clone()),
-                });
-                let position = CommandPosition::new(req.shard.clone(), claim_epoch as u64, seq);
-                let envelope = direct_command_envelope(
-                    &req.shard,
-                    claim_command,
-                    req.now,
-                    claim_epoch as u64,
-                    seq,
-                );
-                persist_command_envelopes(
-                    &mut tx,
-                    std::slice::from_ref(&position),
-                    std::slice::from_ref(&envelope),
-                )?;
-                let mut gate_keys_by_id = item_gate_keys_by_id(&mut tx, &req.shard, &claimed_ids)?;
-                let mut items = Vec::with_capacity(rows.len());
-                let mut token_ops = Vec::new();
-                for (row, item_id) in rows.into_iter().zip(claimed_ids.iter().copied()) {
-                    let exp_row: Option<i64> = row.get(6);
-                    let exp_row = exp_row.unwrap_or(exp);
-                    let gate_keys = gate_keys_by_id
-                        .remove(&item_id.to_string())
-                        .unwrap_or_default();
-                    items.push(claimed_from_row(
-                        item_id,
-                        req.lease_token.clone(),
-                        row.get(1),
-                        row.get(2),
-                        row.get(3),
-                        row.get(4),
-                        row.get(5),
-                        exp_row,
-                        row.get(7),
-                        row.get(8),
-                        row.get(9),
-                        row.get(10),
-                        gate_keys,
-                    )?);
-                    token_ops.push(TokenOp::Set(item_id, req.lease_token.clone()));
-                }
-                // The CTE bypasses apply_command_sql's Claim arm, so refresh the claimed groups here.
-                let claimed_id_strings: Vec<String> =
-                    claimed_ids.iter().map(ToString::to_string).collect();
-                decrement_group_summaries_for_items(
-                    &mut tx,
-                    &req.shard,
-                    &claimed_id_strings,
-                    req.now,
-                )?;
-                st(tx.commit())?;
-                apply_token_ops(live_tokens, token_ops);
-                return Ok(Claimed {
-                    items,
-                    ..Default::default()
-                });
-            }
-
-            // Group-aware: gather the candidate items under the per-group FOR UPDATE SKIP LOCKED lock, then
-            // lease them via apply_command_sql's Claim arm (which UPDATEs + refreshes the affected groups).
-            let mut selected_cohort: Option<CohortId> = None;
-            let candidates = match unit {
-                ClaimUnit::WholeGroup => {
-                    let max_groups = req
-                        .compatibility
-                        .group_batching
-                        .as_ref()
-                        .map(|gb| gb.max_groups)
-                        .unwrap_or(0);
-                    select_group_batching(
-                        &mut tx,
-                        &req.shard,
-                        req.eligibility_at(),
-                        req.max_items,
-                        max_groups,
-                        &req.compatibility,
-                        req.eligibility_at() != req.now,
-                    )?
-                }
-                ClaimUnit::SameGroupKey => select_same_group(
-                    &mut tx,
-                    &req.shard,
-                    req.eligibility_at(),
-                    req.max_items,
-                    &req.compatibility,
-                    req.eligibility_at() != req.now,
-                )?,
-                ClaimUnit::WholeCohort => {
-                    match select_whole_cohort(
-                        &mut tx,
-                        &req.shard,
-                        req.eligibility_at(),
-                        req.max_items,
-                        &req.compatibility,
-                    )? {
-                        Some(selected) => {
-                            selected_cohort = Some(selected.cohort_id);
-                            selected.item_ids
+                claim_item_level_on_client(&mut client_guard, req)
+                    .and_then(|(claimed, token_ops)| {
+                        if !token_ops.is_empty() {
+                            let mut g = self.inner.lock().expect("poisoned");
+                            apply_token_ops(&mut g.live_tokens, token_ops);
                         }
-                        None => Vec::new(),
-                    }
-                }
-                ClaimUnit::Item => unreachable!("Item handled by the CTE path above"),
-            };
-            if candidates.is_empty() {
-                return Ok(Claimed::default()); // roll back — no sequence burned
-            }
-            let mut token_ops = Vec::new();
-            let claim_command = if let Some(cohort_id) = selected_cohort.clone() {
-                QueueCommand::CohortClaim(CohortClaimCommand {
-                    cohort_id,
-                    item_ids: candidates.clone(),
-                    lease_token: req.lease_token.clone(),
-                    lease_expires_at: req.lease_expires_at,
-                })
+                        Ok(claimed)
+                    })
             } else {
-                QueueCommand::Claim(ClaimCommand {
-                    item_ids: candidates.clone(),
-                    lease_token: req.lease_token.clone(),
-                    lease_expires_at: req.lease_expires_at,
-                    worker_id: Some(req.worker_id.clone()),
-                })
-            };
-            let position = CommandPosition::new(req.shard.clone(), claim_epoch as u64, seq);
-            let envelope = direct_command_envelope(
-                &req.shard,
-                claim_command,
-                req.now,
-                claim_epoch as u64,
-                seq,
-            );
-            persist_command_envelopes(
-                &mut tx,
-                std::slice::from_ref(&position),
-                std::slice::from_ref(&envelope),
-            )?;
-            apply_command_sql(
-                &mut tx,
-                queues,
-                &mut token_ops,
-                &req.shard,
-                seq,
-                req.now,
-                &envelope.command,
-            )?;
-            st(tx.commit())?;
-            apply_token_ops(live_tokens, token_ops); // tokens live only after the durable commit
-            // Render from the now-committed leased rows (the tx released the client on commit); the live
-            // tokens we just applied resolve each id's token.
-            let items = render_claimed(client, &req.shard, &candidates, |id| {
-                live_tokens.get(id).cloned()
-            })?;
-            let mut claimed = Claimed {
-                items,
-                ..Default::default()
-            };
-            if matches!(unit, ClaimUnit::WholeCohort) {
-                claimed.cohort_lease_token = Some(req.lease_token.clone());
-                let _ = apply_whole_cohort_response_shape(&mut claimed.items);
-                claimed.cohort_id = selected_cohort;
+                let mut g = self.inner.lock().expect("poisoned");
+                let Inner {
+                    queues,
+                    live_tokens,
+                    ..
+                } = &mut *g;
+                claim_with_client_unit(&mut client_guard, queues, live_tokens, req, unit)
             }
-            Ok(claimed)
         })();
         std::future::ready(result)
     }
+}
+
+impl PostgresRelationalBackend {
+    /// Borrow a free claim-pool client (blocking). Falls back to parking on slot 0 when all are busy.
+    fn acquire_claim_client(&self) -> std::sync::MutexGuard<'_, Client> {
+        // Prefer a free slot so multi-queue claimers run concurrently without queueing on one Mutex.
+        for slot in &self.claim_pool {
+            if let Ok(guard) = slot.try_lock() {
+                return guard;
+            }
+        }
+        self.claim_pool[0]
+            .lock()
+            .expect("claim pool client poisoned")
+    }
+}
+
+/// Shared claim body used by the single-connection path (and group path under the claim pool).
+fn claim_with_client(
+    client: &mut Client,
+    queues: &mut HashMap<QueueKey, QueueDefinition>,
+    live_tokens: &mut HashMap<ItemId, LeaseToken>,
+    req: ClaimRequest,
+) -> EngineResult<Claimed> {
+    let unit = if req.compatibility != ClaimCompatibility::default() {
+        let def = queues.get(&req.shard).ok_or(EngineError::NotFound)?;
+        validate_claim_compatibility(&req.compatibility, req.max_items as u64, def)?
+    } else {
+        ClaimUnit::Item
+    };
+    claim_with_client_unit(client, queues, live_tokens, req, unit)
+}
+
+fn claim_with_client_unit(
+    client: &mut Client,
+    queues: &mut HashMap<QueueKey, QueueDefinition>,
+    live_tokens: &mut HashMap<ItemId, LeaseToken>,
+    req: ClaimRequest,
+    unit: ClaimUnit,
+) -> EngineResult<Claimed> {
+    // Paused queues yield nothing (neither the CTE nor the group/cohort selection encodes pause).
+    if queue_paused(client, &req.shard)? {
+        return Ok(Claimed::default());
+    }
+    let (t, q) = parts(&req.shard);
+    let mut tx = st(client.transaction())?;
+    // ADR-009 / TD-003 fence: a superseded owner is rejected BEFORE selecting/leasing — nothing is
+    // claimed. `None` = sole-owner (no fence). The assignment_epoch is the BQ-23 single durable value.
+    let claim_epoch: i64 = st(tx.query_one(
+        "SELECT assignment_epoch FROM relational_cursor WHERE tenant=$1 AND queue=$2 FOR UPDATE",
+        &[&t, &q],
+    ))?
+    .get(0);
+    if req.expected_epoch.is_some_and(|e| e != claim_epoch as u64) {
+        return Err(EngineError::EpochFenced);
+    }
+    // Time-driven summary maintenance is fenced with the claim. An explicit selection-only
+    // eligibility_time must never advance durable summary state, so promotion uses wall-clock
+    // `now`; live candidate predicates below may still use `eligibility_at()`.
+    if !matches!(unit, ClaimUnit::Item)
+        && !promote_due_group_summary_chunk_in_tx(&mut tx, &req.shard, req.now)?
+    {
+        st(tx.commit())?;
+        return Err(EngineError::Unavailable);
+    }
+    let seq = alloc_seq(&mut tx, &t, &q)?;
+    let now_n = ts_nanos(req.now);
+    // Due-ness is resolved at the caller-resolved eligibility epoch (`ClaimRequest::eligibility_at`),
+    // which defaults to `now`. It feeds ONLY the candidate predicates (`not_before<=$3` in the CTE,
+    // the group/cohort selections); `now_n` still stamps `updated_at` and the lease.
+    let elig_n = ts_nanos(req.eligibility_at());
+    let exp = ts_nanos(req.lease_expires_at);
+    let hash = lease_hash(&req.lease_token);
+    let seqi = seq as i64;
+
+    if matches!(unit, ClaimUnit::Item) {
+        let Some((claimed, token_ops)) = claim_item_level_in_tx(
+            &mut tx, &req, &t, &q, claim_epoch, seq, elig_n, exp, hash, now_n, seqi,
+        )?
+        else {
+            // Empty candidate set: drop tx without commit so alloc_seq rolls back (sqlite parity).
+            return Ok(Claimed::default());
+        };
+        st(tx.commit())?;
+        apply_token_ops(live_tokens, token_ops);
+        return Ok(claimed);
+    }
+
+    // Group-aware: gather the candidate items under the per-group FOR UPDATE SKIP LOCKED lock, then
+    // lease them via apply_command_sql's Claim arm (which UPDATEs + refreshes the affected groups).
+    let mut selected_cohort: Option<CohortId> = None;
+    let candidates = match unit {
+        ClaimUnit::WholeGroup => {
+            let max_groups = req
+                .compatibility
+                .group_batching
+                .as_ref()
+                .map(|gb| gb.max_groups)
+                .unwrap_or(0);
+            select_group_batching(
+                &mut tx,
+                &req.shard,
+                req.eligibility_at(),
+                req.max_items,
+                max_groups,
+                &req.compatibility,
+                req.eligibility_at() != req.now,
+            )?
+        }
+        ClaimUnit::SameGroupKey => select_same_group(
+            &mut tx,
+            &req.shard,
+            req.eligibility_at(),
+            req.max_items,
+            &req.compatibility,
+            req.eligibility_at() != req.now,
+        )?,
+        ClaimUnit::WholeCohort => {
+            match select_whole_cohort(
+                &mut tx,
+                &req.shard,
+                req.eligibility_at(),
+                req.max_items,
+                &req.compatibility,
+            )? {
+                Some(selected) => {
+                    selected_cohort = Some(selected.cohort_id);
+                    selected.item_ids
+                }
+                None => Vec::new(),
+            }
+        }
+        ClaimUnit::Item => unreachable!("Item handled by the CTE path above"),
+    };
+    if candidates.is_empty() {
+        return Ok(Claimed::default()); // roll back — no sequence burned
+    }
+    let mut token_ops = Vec::new();
+    let claim_command = if let Some(cohort_id) = selected_cohort.clone() {
+        QueueCommand::CohortClaim(CohortClaimCommand {
+            cohort_id,
+            item_ids: candidates.clone(),
+            lease_token: req.lease_token.clone(),
+            lease_expires_at: req.lease_expires_at,
+        })
+    } else {
+        QueueCommand::Claim(ClaimCommand {
+            item_ids: candidates.clone(),
+            lease_token: req.lease_token.clone(),
+            lease_expires_at: req.lease_expires_at,
+            worker_id: Some(req.worker_id.clone()),
+        })
+    };
+    let position = CommandPosition::new(req.shard.clone(), claim_epoch as u64, seq);
+    let envelope =
+        direct_command_envelope(&req.shard, claim_command, req.now, claim_epoch as u64, seq);
+    persist_command_envelopes(
+        &mut tx,
+        std::slice::from_ref(&position),
+        std::slice::from_ref(&envelope),
+    )?;
+    apply_command_sql(
+        &mut tx,
+        queues,
+        &mut token_ops,
+        &req.shard,
+        seq,
+        req.now,
+        &envelope.command,
+    )?;
+    st(tx.commit())?;
+    apply_token_ops(live_tokens, token_ops); // tokens live only after the durable commit
+    // Render from the now-committed leased rows (the tx released the client on commit); the live
+    // tokens we just applied resolve each id's token.
+    let items = render_claimed(client, &req.shard, &candidates, |id| {
+        live_tokens.get(id).cloned()
+    })?;
+    let mut claimed = Claimed {
+        items,
+        ..Default::default()
+    };
+    if matches!(unit, ClaimUnit::WholeCohort) {
+        claimed.cohort_lease_token = Some(req.lease_token.clone());
+        let _ = apply_whole_cohort_response_shape(&mut claimed.items);
+        claimed.cohort_id = selected_cohort;
+    }
+    Ok(claimed)
+}
+
+/// Item-level claim on a dedicated client: returns claimed items + token ops for the caller to apply
+/// under the process state lock (so concurrent claimers do not hold that lock over the SQL round-trip).
+fn claim_item_level_on_client(
+    client: &mut Client,
+    req: ClaimRequest,
+) -> EngineResult<(Claimed, Vec<TokenOp>)> {
+    if queue_paused(client, &req.shard)? {
+        return Ok((Claimed::default(), Vec::new()));
+    }
+    let (t, q) = parts(&req.shard);
+    let mut tx = st(client.transaction())?;
+    let claim_epoch: i64 = st(tx.query_one(
+        "SELECT assignment_epoch FROM relational_cursor WHERE tenant=$1 AND queue=$2 FOR UPDATE",
+        &[&t, &q],
+    ))?
+    .get(0);
+    if req.expected_epoch.is_some_and(|e| e != claim_epoch as u64) {
+        return Err(EngineError::EpochFenced);
+    }
+    let seq = alloc_seq(&mut tx, &t, &q)?;
+    let now_n = ts_nanos(req.now);
+    let elig_n = ts_nanos(req.eligibility_at());
+    let exp = ts_nanos(req.lease_expires_at);
+    let hash = lease_hash(&req.lease_token);
+    let seqi = seq as i64;
+    let Some(out) = claim_item_level_in_tx(
+        &mut tx, &req, &t, &q, claim_epoch, seq, elig_n, exp, hash, now_n, seqi,
+    )?
+    else {
+        // Empty candidate set: drop tx without commit so alloc_seq rolls back (sqlite parity).
+        return Ok((Claimed::default(), Vec::new()));
+    };
+    st(tx.commit())?;
+    Ok(out)
+}
+
+/// `None` means no candidates (caller must roll back so `alloc_seq` is not burned).
+fn claim_item_level_in_tx(
+    tx: &mut postgres::Transaction<'_>,
+    req: &ClaimRequest,
+    t: &str,
+    q: &str,
+    claim_epoch: i64,
+    seq: u64,
+    elig_n: i64,
+    exp: i64,
+    hash: Vec<u8>,
+    now_n: i64,
+    seqi: i64,
+) -> EngineResult<Option<(Claimed, Vec<TokenOp>)>> {
+    // Item-level: the serialized FOR UPDATE SKIP LOCKED CTE (select + lease + RETURNING).
+    let lim = req.max_items as i64;
+    let rows = st(tx.query(
+        CLAIM_CTE,
+        &[&t, &q, &elig_n, &lim, &hash, &exp, &now_n, &seqi],
+    ))?;
+    if rows.is_empty() {
+        return Ok(None); // roll back — no sequence burned (sqlite parity)
+    }
+    let mut claimed_ids = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let id: String = row.get(0);
+        claimed_ids.push(ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?);
+    }
+    let claim_command = QueueCommand::Claim(ClaimCommand {
+        item_ids: claimed_ids.clone(),
+        lease_token: req.lease_token.clone(),
+        lease_expires_at: req.lease_expires_at,
+        worker_id: Some(req.worker_id.clone()),
+    });
+    let position = CommandPosition::new(req.shard.clone(), claim_epoch as u64, seq);
+    let envelope =
+        direct_command_envelope(&req.shard, claim_command, req.now, claim_epoch as u64, seq);
+    persist_command_envelopes(
+        tx,
+        std::slice::from_ref(&position),
+        std::slice::from_ref(&envelope),
+    )?;
+    let mut gate_keys_by_id = item_gate_keys_by_id(tx, &req.shard, &claimed_ids)?;
+    let mut items = Vec::with_capacity(rows.len());
+    let mut token_ops = Vec::new();
+    for (row, item_id) in rows.into_iter().zip(claimed_ids.iter().copied()) {
+        let exp_row: Option<i64> = row.get(6);
+        let exp_row = exp_row.unwrap_or(exp);
+        let gate_keys = gate_keys_by_id
+            .remove(&item_id.to_string())
+            .unwrap_or_default();
+        items.push(claimed_from_row(
+            item_id,
+            req.lease_token.clone(),
+            row.get(1),
+            row.get(2),
+            row.get(3),
+            row.get(4),
+            row.get(5),
+            exp_row,
+            row.get(7),
+            row.get(8),
+            row.get(9),
+            row.get(10),
+            gate_keys,
+        )?);
+        token_ops.push(TokenOp::Set(item_id, req.lease_token.clone()));
+    }
+    // The CTE bypasses apply_command_sql's Claim arm, so refresh the claimed groups here.
+    let claimed_id_strings: Vec<String> = claimed_ids.iter().map(ToString::to_string).collect();
+    decrement_group_summaries_for_items(tx, &req.shard, &claimed_id_strings, req.now)?;
+    Ok(Some((
+        Claimed {
+            items,
+            ..Default::default()
+        },
+        token_ops,
+    )))
 }
 
 impl UpsertPort for PostgresRelationalBackend {
