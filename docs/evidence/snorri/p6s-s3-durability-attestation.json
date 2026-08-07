@@ -9,7 +9,7 @@
     "topology": "host-local Docker P1s S3 + isolated Postgres control plane",
     "preflight": "bash scripts/ci/snorri-runner-preflight.sh"
   },
-  "fireweed_sha": "b474bd49bf366e3fcc31ab6c2c37845f54be2a60",
+  "fireweed_sha": "9baa5110a0553bc90704e860e628491992ef164a",
   "snorri": {
     "checkout": "/home/erik/Projects/snorri",
     "sha": "b67c6ffb7c40cafe1be94418b969346aaf45a491",
