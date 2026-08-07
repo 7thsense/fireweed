@@ -29,3 +29,13 @@ Floors are ~25% of observed smoke rates (physics-scaled, not portable SLAs).
 | filesystem--* | 100 |
 
 Smoke run is **non-authoritative**. Full-tier LKG remains the release record.
+
+## Functional matrix (2026-08-06)
+
+See `functional-t0-t2-20cell-20260806.md`: all 20 log×projection cells passed T0–T2 with
+`skipped=0` under live Postgres + MinIO fixtures.
+
+## Encoding (fireweed-659490cc)
+
+Envelope byte fields now Base64 (~1.33×) instead of JSON integer arrays (~4.28×).
+Expected durable-log volume reduction ~70% on side-record-heavy workloads (snorri).
