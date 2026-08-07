@@ -46,6 +46,96 @@ PRODUCT_WORKFLOW_REQUIREMENTS = [
     "operator_validation_tests",
 ]
 
+# P10w: closed allowlist of executed policy-positive workflow-inline patterns.
+# Each residual scanner hit must match one of these (identity substring + optional
+# context markers) or remain debt for exclusive-owner remediation. Classification
+# alone is forbidden — the zero-debt report re-executes these checks.
+WORKFLOW_INLINE_POLICY_POSITIVES: list[dict[str, object]] = [
+    {
+        "path": ".github/workflows/pages.yml",
+        "identity_contains": (
+            'pages_url="$(gh api "repos/${GITHUB_REPOSITORY}/pages" '
+            '--jq .html_url 2>/dev/null || true)"'
+        ),
+        "context_markers": ["Prefer the official Pages API URL", "github.io"],
+        "reason": "pages_url_api_optional_fallback",
+        "detail": (
+            "policy_positive: Pages API may be unconfigured; || true falls through "
+            "to the deterministic github.io URL; readiness still fail-closed later"
+        ),
+        "exclusive_owner": None,
+        "exact_route": "scripts/ci/workflow-inline-zero-debt-test.sh#pages_url_api_optional_fallback",
+    },
+    {
+        "path": ".github/workflows/pages.yml",
+        "identity_contains": (
+            "code=\"$(curl -sS -o /dev/null -w '%{http_code}' \"${base}/site/\" || true)\""
+        ),
+        "context_markers": ["Wait for Pages to serve the site", "Pages did not become ready"],
+        "reason": "pages_readiness_poll_transport_tolerance",
+        "detail": (
+            "policy_positive: readiness poll tolerates transient curl transport "
+            "errors; only HTTP 200 exits 0, timeout exits 1"
+        ),
+        "exclusive_owner": None,
+        "exact_route": "scripts/ci/workflow-inline-zero-debt-test.sh#pages_readiness_poll_transport_tolerance",
+    },
+    {
+        "path": ".github/workflows/pages.yml",
+        "identity_contains": "exit 0",
+        "context_markers": ["Pages ready (HTTP", "Wait for Pages to serve the site"],
+        "reason": "pages_readiness_success_branch",
+        "detail": (
+            "policy_positive: success branch of the Pages readiness gate "
+            "(HTTP 200); not a skip/no-op"
+        ),
+        "exclusive_owner": None,
+        "exact_route": "scripts/ci/workflow-inline-zero-debt-test.sh#pages_readiness_success_branch",
+    },
+    {
+        "path": ".github/workflows/release.yml",
+        "identity_contains": "chmod -R a-w fireweed-evidence || true",
+        "context_markers": ["Mark evidence tree read-only", "promoted allowlist"],
+        "reason": "release_evidence_best_effort_readonly",
+        "detail": (
+            "policy_positive: best-effort RO enforcement on the evidence tree after "
+            "allowlist write; exclusive owner P17r; non-blocking on platform chmod limits"
+        ),
+        "exclusive_owner": "P17r",
+        "exact_route": "scripts/ci/workflow-inline-zero-debt-test.sh#release_evidence_best_effort_readonly",
+    },
+    {
+        "path": ".github/workflows/release.yml",
+        "identity_contains": "sudo docker image prune --all --force >/dev/null 2>&1 || true",
+        "context_markers": ["Free runner disk space", "df -h"],
+        "reason": "release_runner_best_effort_disk_hygiene",
+        "detail": (
+            "policy_positive: best-effort runner disk hygiene before heavy release "
+            "work; exclusive owner P17r; prune failure must not fail the release job"
+        ),
+        "exclusive_owner": "P17r",
+        "exact_route": "scripts/ci/workflow-inline-zero-debt-test.sh#release_runner_best_effort_disk_hygiene",
+    },
+]
+
+
+def classify_workflow_inline(
+    path: str, line_text: str, surrounding: str
+) -> dict[str, object] | None:
+    """Return a policy-positive record when the hit is an executed allowed pattern."""
+    stripped = line_text.strip()
+    for entry in WORKFLOW_INLINE_POLICY_POSITIVES:
+        if entry["path"] != path:
+            continue
+        identity = str(entry["identity_contains"])
+        if identity not in stripped and identity not in line_text:
+            continue
+        markers = entry.get("context_markers") or []
+        if any(str(marker) not in surrounding for marker in markers):
+            continue
+        return entry
+    return None
+
 
 def run(command: list[str], *, cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -569,9 +659,47 @@ def scan_source_debt(
                 line_text,
                 re.IGNORECASE,
             ):
-                debt["workflow_inline"].append(
-                    debt_row("workflow_inline", path, index, line_text.strip()[:120])
-                )
+                surrounding = "\n".join(lines[max(0, index - 12) : min(len(lines), index + 12)])
+                policy_positive = classify_workflow_inline(path, line_text, surrounding)
+                if policy_positive is not None:
+                    debt["workflow_inline"].append(
+                        debt_row(
+                            "workflow_inline",
+                            path,
+                            index,
+                            line_text.strip()[:120],
+                            status="discovery_negative",
+                            detail=str(policy_positive["detail"]),
+                        )
+                    )
+                else:
+                    # Residual early-success/skip/no-op: exclusive workflow owner must
+                    # remediate with an exact route; P10w does not edit workflow files.
+                    exclusive = []
+                    lower = path.lower()
+                    if "turso" in lower:
+                        exclusive.append("P13t")
+                    if "nightly" in lower or path == ".github/workflows/pages.yml":
+                        # pages + non-release product lanes: P13a owns exclusive workflows
+                        # except turso.yml and release.yml (see P13a executable boundary).
+                        exclusive.append("P13a")
+                    if "release" in lower:
+                        exclusive.append("P17r")
+                    owner_label = exclusive[0] if exclusive else "P10w"
+                    debt["workflow_inline"].append(
+                        debt_row(
+                            "workflow_inline",
+                            path,
+                            index,
+                            line_text.strip()[:120],
+                            status="debt",
+                            detail=(
+                                f"residual_workflow_inline; exclusive_owner={owner_label}; "
+                                "requires exact remediation route (not classifiable as "
+                                "policy_positive); P10w edits no workflow file"
+                            ),
+                        )
+                    )
         if path.endswith(".sh"):
             effective = [
                 line.strip()
@@ -830,6 +958,7 @@ def inventory(with_cargo: bool) -> dict[str, object]:
             "fault-injection skip operations",
             "SQLite chaos skip-point vocabulary",
             "P2 inventory/policy source vocabulary (covered by policy self-tests and shape fixtures)",
+            "P10w executed policy-positive workflow-inline patterns (Pages readiness + release best-effort RO/disk hygiene; covered by workflow-inline-zero-debt-test)",
         ],
     }
 

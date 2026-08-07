@@ -185,6 +185,28 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool)
             require(row["status"] in {"debt", "legacy_false_green", "discovery_negative"}, "debt status")
             if row["status"] != "discovery_negative":
                 debt_count += 1
+    # P10w: after exclusive workflow owners land, every workflow_inline hit is either
+    # an executed policy-positive (discovery_negative) or residual exclusive-owner debt.
+    # Residual debt is forbidden in the checked-in inventory; the zero-debt report
+    # re-proves the classification. No row may pass by status label alone.
+    workflow_inline_debt = [
+        row
+        for row in registries["workflow_inline"]
+        if row["status"] != "discovery_negative"
+    ]
+    require(
+        not workflow_inline_debt,
+        "workflow_inline residual debt after P10w: "
+        + ", ".join(
+            f"{row['path']}:{row['line']}:{row.get('detail', '')[:80]}"
+            for row in workflow_inline_debt
+        ),
+    )
+    for row in registries["workflow_inline"]:
+        require(
+            str(row.get("detail", "")).startswith("policy_positive:"),
+            f"workflow_inline row lacks executed policy_positive detail: {row['id']}",
+        )
     quarantine = document["release_repeat_quarantine"]
     legacy_rows = quarantine["legacy_rows"]
     if legacy_rows:

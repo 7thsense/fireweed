@@ -17097,13 +17097,13 @@
           "P10w",
           "P2f"
         ],
-        "detail": "",
+        "detail": "policy_positive: Pages API may be unconfigured; || true falls through to the deterministic github.io URL; readiness still fail-closed later",
         "id": "b28dc5ef94c78fdbd10c",
         "identity": "pages_url=\"$(gh api \"repos/${GITHUB_REPOSITORY}/pages\" --jq .html_url 2>/dev/null || true)\"",
         "line": 114,
         "owner": "P10w",
         "path": ".github/workflows/pages.yml",
-        "status": "debt"
+        "status": "discovery_negative"
       },
       {
         "category": "workflow_inline",
@@ -17111,13 +17111,13 @@
           "P10w",
           "P2f"
         ],
-        "detail": "",
+        "detail": "policy_positive: readiness poll tolerates transient curl transport errors; only HTTP 200 exits 0, timeout exits 1",
         "id": "a746763ca419993930bc",
         "identity": "code=\"$(curl -sS -o /dev/null -w '%{http_code}' \"${base}/site/\" || true)\"",
         "line": 132,
         "owner": "P10w",
         "path": ".github/workflows/pages.yml",
-        "status": "debt"
+        "status": "discovery_negative"
       },
       {
         "category": "workflow_inline",
@@ -17125,13 +17125,13 @@
           "P10w",
           "P2f"
         ],
-        "detail": "",
+        "detail": "policy_positive: success branch of the Pages readiness gate (HTTP 200); not a skip/no-op",
         "id": "1e1e35d82d1998ca303a",
         "identity": "exit 0",
         "line": 135,
         "owner": "P10w",
         "path": ".github/workflows/pages.yml",
-        "status": "debt"
+        "status": "discovery_negative"
       },
       {
         "category": "workflow_inline",
@@ -17140,13 +17140,13 @@
           "P10w",
           "P2f"
         ],
-        "detail": "",
+        "detail": "policy_positive: best-effort RO enforcement on the evidence tree after allowlist write; exclusive owner P17r; non-blocking on platform chmod limits",
         "id": "d08bc8a53f2ba5a88c04",
         "identity": "chmod -R a-w fireweed-evidence || true",
         "line": 170,
         "owner": "P10w",
         "path": ".github/workflows/release.yml",
-        "status": "debt"
+        "status": "discovery_negative"
       },
       {
         "category": "workflow_inline",
@@ -17155,13 +17155,13 @@
           "P10w",
           "P2f"
         ],
-        "detail": "",
+        "detail": "policy_positive: best-effort runner disk hygiene before heavy release work; exclusive owner P17r; prune failure must not fail the release job",
         "id": "3a3d00d2765fe4540d63",
         "identity": "sudo docker image prune --all --force >/dev/null 2>&1 || true",
         "line": 234,
         "owner": "P10w",
         "path": ".github/workflows/release.yml",
-        "status": "debt"
+        "status": "discovery_negative"
       }
     ],
     "workspace_listing_failures": []
@@ -17170,7 +17170,8 @@
     "Iterator::skip and iterator .skip(...) calls",
     "fault-injection skip operations",
     "SQLite chaos skip-point vocabulary",
-    "P2 inventory/policy source vocabulary (covered by policy self-tests and shape fixtures)"
+    "P2 inventory/policy source vocabulary (covered by policy self-tests and shape fixtures)",
+    "P10w executed policy-positive workflow-inline patterns (Pages readiness + release best-effort RO/disk hygiene; covered by workflow-inline-zero-debt-test)"
   ],
   "fireweed_test_placement": {
     "assertion_bindings": [
@@ -100160,22 +100161,22 @@
   "release_repeat_quarantine": {
     "callers": [
       {
-        "line": 655,
+        "line": 783,
         "path": "scripts/ci/inventory-storage-remediation.py",
         "text": "suite_path = ROOT / \"scripts/ci/release-repeat-suites.toml\""
       },
       {
-        "line": 682,
+        "line": 810,
         "path": "scripts/ci/inventory-storage-remediation.py",
         "text": "\"scripts/ci/release-repeat-suites.toml\","
       },
       {
-        "line": 704,
+        "line": 832,
         "path": "scripts/ci/inventory-storage-remediation.py",
         "text": "\"scripts/ci/release-repeat-suites.toml\","
       },
       {
-        "line": 716,
+        "line": 844,
         "path": "scripts/ci/inventory-storage-remediation.py",
         "text": "if \"release-repeat-suites.toml\" in line or \"verify-product-workflow-names.sh\" in line:"
       },
@@ -100469,7 +100470,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "ad6c9b25cdbcf2d0a9c48335994d9399e62a64e7bc743c217abce585c58ef1b9",
+  "source_inventory_sha256": "8629cdcd9d57fdbe845543023fc69da13e70025a0799a91770adf07eb9a307f8",
   "workspaces": [
     {
       "listing_error_sha256": "",

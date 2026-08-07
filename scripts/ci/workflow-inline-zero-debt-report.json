@@ -1,0 +1,90 @@
+{
+  "bead_id": "fireweed-2b96f2a9",
+  "consumer": "P2f",
+  "executed_commands": [
+    "python3 scripts/ci/inventory-storage-remediation.py --emit",
+    "bash scripts/ci/workflow-inline-zero-debt-test.sh"
+  ],
+  "inventory": {
+    "workflow_inline_debt_count": 0,
+    "workflow_inline_ids": [
+      "b28dc5ef94c78fdbd10c",
+      "a746763ca419993930bc",
+      "1e1e35d82d1998ca303a",
+      "d08bc8a53f2ba5a88c04",
+      "3a3d00d2765fe4540d63"
+    ],
+    "workflow_inline_row_count": 5
+  },
+  "plan_key": "P10w",
+  "policy_positives": [
+    {
+      "detail": "policy_positive: Pages API may be unconfigured; || true falls through to the deterministic github.io URL; readiness still fail-closed later",
+      "exact_route": "scripts/ci/workflow-inline-zero-debt-test.sh#pages_url_api_optional_fallback",
+      "exclusive_owner": null,
+      "identity": "pages_url=\"$(gh api \"repos/${GITHUB_REPOSITORY}/pages\" --jq .html_url 2>/dev/null || true)\"",
+      "line": 114,
+      "path": ".github/workflows/pages.yml",
+      "reason": "pages_url_api_optional_fallback",
+      "status": "discovery_negative"
+    },
+    {
+      "detail": "policy_positive: readiness poll tolerates transient curl transport errors; only HTTP 200 exits 0, timeout exits 1",
+      "exact_route": "scripts/ci/workflow-inline-zero-debt-test.sh#pages_readiness_poll_transport_tolerance",
+      "exclusive_owner": null,
+      "identity": "code=\"$(curl -sS -o /dev/null -w '%{http_code}' \"${base}/site/\" || true)\"",
+      "line": 132,
+      "path": ".github/workflows/pages.yml",
+      "reason": "pages_readiness_poll_transport_tolerance",
+      "status": "discovery_negative"
+    },
+    {
+      "detail": "policy_positive: success branch of the Pages readiness gate (HTTP 200); not a skip/no-op",
+      "exact_route": "scripts/ci/workflow-inline-zero-debt-test.sh#pages_readiness_success_branch",
+      "exclusive_owner": null,
+      "identity": "exit 0",
+      "line": 135,
+      "path": ".github/workflows/pages.yml",
+      "reason": "pages_readiness_success_branch",
+      "status": "discovery_negative"
+    },
+    {
+      "detail": "policy_positive: best-effort RO enforcement on the evidence tree after allowlist write; exclusive owner P17r; non-blocking on platform chmod limits",
+      "exact_route": "scripts/ci/workflow-inline-zero-debt-test.sh#release_evidence_best_effort_readonly",
+      "exclusive_owner": "P17r",
+      "identity": "chmod -R a-w fireweed-evidence || true",
+      "line": 170,
+      "path": ".github/workflows/release.yml",
+      "reason": "release_evidence_best_effort_readonly",
+      "status": "discovery_negative"
+    },
+    {
+      "detail": "policy_positive: best-effort runner disk hygiene before heavy release work; exclusive owner P17r; prune failure must not fail the release job",
+      "exact_route": "scripts/ci/workflow-inline-zero-debt-test.sh#release_runner_best_effort_disk_hygiene",
+      "exclusive_owner": "P17r",
+      "identity": "sudo docker image prune --all --force >/dev/null 2>&1 || true",
+      "line": 234,
+      "path": ".github/workflows/release.yml",
+      "reason": "release_runner_best_effort_disk_hygiene",
+      "status": "discovery_negative"
+    }
+  ],
+  "report_sha256": "9b3146f0b9fe55df67174711cd2b11fc0a2a334ec9f017f0a51c3e9a98f91f11",
+  "residuals": [],
+  "scanner": {
+    "hit_count": 5,
+    "pattern": "continue-on-error:|\\|\\|\\s*true|exit\\s+0|if:.*false|skip",
+    "workflows_scanned": [
+      ".github/workflows/ci.yml",
+      ".github/workflows/governed-product.yml",
+      ".github/workflows/nightly.yml",
+      ".github/workflows/pages.yml",
+      ".github/workflows/release.yml",
+      ".github/workflows/turso.yml"
+    ]
+  },
+  "schema_version": 1,
+  "summary": "Every workflow-inline early-success/skip/no-op is an executed policy-positive (Pages readiness branch + release best-effort RO/disk hygiene). Zero residual debt; exclusive owners P13t/P13a/P17r already landed. P10w edits no workflow file.",
+  "title": "workflow-inline zero-debt report",
+  "zero_debt": true
+}
