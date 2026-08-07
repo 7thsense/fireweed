@@ -1,0 +1,49 @@
+{
+  "content_sha256": "5ba398e433c59d4ccec6830584207353f70e9a49a33828b32a74a103bf93060c",
+  "cpu": {
+    "logical_cpus": 32,
+    "model": "AMD Ryzen 9 5950X 16-Core Processor"
+  },
+  "generated_at": "2026-08-07T08:34:39Z",
+  "host": {
+    "hostname": "sindri",
+    "kernel": "6.6.87.2-microsoft-standard-WSL2",
+    "machine": "x86_64",
+    "os": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "python": "3.14.6"
+  },
+  "isolation": {
+    "load_controls": "single full-matrix driver; no concurrent cargo test --workspace on matrix worktree",
+    "matrix_worktree": "fireweed-wt-slot-a frozen at 25f59301"
+  },
+  "memory": {
+    "meminfo_MemAvailable": "MemAvailable:   94083136 kB",
+    "meminfo_MemTotal": "MemTotal:       98871364 kB"
+  },
+  "postgres": {
+    "cleanup_policy": "per-run unique schemas; DROP SCHEMA CASCADE on fixture teardown",
+    "health": "1",
+    "url_template": "postgres://fireweed:***@127.0.0.1:55432/fireweed(_perf)",
+    "version": "PostgreSQL 16.14 (Debian 16.14-1.pgdg13+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit"
+  },
+  "probes": {
+    "full_matrix_r0_floors": "docs/perf/evidence/tp005/host-full-matrix-r0-floors.json",
+    "million_cycle_local_9": "docs/perf/evidence/tp005/million-cycle-probe-local-9.json",
+    "pg_select_1": "1",
+    "smoke_9_cells": "docs/perf/evidence/tp005/smoke-20260806T215433Z.json"
+  },
+  "s3": {
+    "bucket": "fireweed-qual-*",
+    "endpoint": "http://127.0.0.1:40735",
+    "provider": "minio (P1s qualification)"
+  },
+  "schema": "fireweed-controlled-perf-env-v1",
+  "storage": {
+    "home_df": "/dev/sdd        4.0T  3.6T  261G  94% /",
+    "tmp_df": "/dev/sdd        4.0T  3.6T  261G  94% /"
+  },
+  "toolchain": {
+    "cargo": "cargo 1.97.1 (c980f4866 2026-06-30) (Homebrew)",
+    "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14) (Homebrew)"
+  }
+}
