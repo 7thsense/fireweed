@@ -1,0 +1,111 @@
+{
+  "schema": "fireweed-capacity-tuning-closure-v1",
+  "bead": "fireweed-09571086",
+  "log": "s3",
+  "branch": "capacity-only",
+  "verdict": "no_tuning_warranted",
+  "rationale": "Host-bound policy was not selected for this log class. Capacity-only path: exact full-matrix r0 measurements exist for every log\u00d7projection cell on the attested controlled environment; host-scaled floors (0.25\u00d7 observed append) are recorded; digest/reopen correctness is covered by functional T0\u2013T2 (20/20, zero skips) and TP-003 current evidence. No failing measured phase required product-code tuning before timing closure.",
+  "evidence": {
+    "controlled_env": "docs/perf/evidence/tp005/controlled-env/attestation.json",
+    "floors": "docs/perf/evidence/tp005/host-full-matrix-r0-floors.json",
+    "functional_matrix": "docs/perf/evidence/tp005/functional-t0-t2-p10-20260807.md"
+  },
+  "cells": [
+    {
+      "cell": "s3--memory",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 991.7244253686803,
+      "append_floor_items_per_s": 247.93110634217007
+    },
+    {
+      "cell": "s3--memory",
+      "shape": "large-16k",
+      "append_items_per_s": 233.83080269567142,
+      "append_floor_items_per_s": 58.457700673917856
+    },
+    {
+      "cell": "s3--memory",
+      "shape": "minimal",
+      "append_items_per_s": 1915.5887829169344,
+      "append_floor_items_per_s": 478.8971957292336
+    },
+    {
+      "cell": "s3--memory",
+      "shape": "record-1k",
+      "append_items_per_s": 2014.5267524116402,
+      "append_floor_items_per_s": 503.63168810291006
+    },
+    {
+      "cell": "s3--postgres",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 390.8486575979046,
+      "append_floor_items_per_s": 97.71216439947615
+    },
+    {
+      "cell": "s3--postgres",
+      "shape": "large-16k",
+      "append_items_per_s": 191.25982002865968,
+      "append_floor_items_per_s": 47.81495500716492
+    },
+    {
+      "cell": "s3--postgres",
+      "shape": "minimal",
+      "append_items_per_s": 1187.5099201378018,
+      "append_floor_items_per_s": 296.87748003445046
+    },
+    {
+      "cell": "s3--postgres",
+      "shape": "record-1k",
+      "append_items_per_s": 851.6828273165987,
+      "append_floor_items_per_s": 212.92070682914968
+    },
+    {
+      "cell": "s3--sqlite",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 1162.8288477142398,
+      "append_floor_items_per_s": 290.70721192855996
+    },
+    {
+      "cell": "s3--sqlite",
+      "shape": "large-16k",
+      "append_items_per_s": 215.52809666208506,
+      "append_floor_items_per_s": 53.882024165521266
+    },
+    {
+      "cell": "s3--sqlite",
+      "shape": "minimal",
+      "append_items_per_s": 1245.6935033791372,
+      "append_floor_items_per_s": 311.4233758447843
+    },
+    {
+      "cell": "s3--sqlite",
+      "shape": "record-1k",
+      "append_items_per_s": 1670.8226561478266,
+      "append_floor_items_per_s": 417.70566403695665
+    },
+    {
+      "cell": "s3--turso",
+      "shape": "group-keyed-256",
+      "append_items_per_s": 44.61061110369345,
+      "append_floor_items_per_s": 11.152652775923363
+    },
+    {
+      "cell": "s3--turso",
+      "shape": "large-16k",
+      "append_items_per_s": 108.21171632985843,
+      "append_floor_items_per_s": 27.05292908246461
+    },
+    {
+      "cell": "s3--turso",
+      "shape": "minimal",
+      "append_items_per_s": 129.15148604119764,
+      "append_floor_items_per_s": 32.28787151029941
+    },
+    {
+      "cell": "s3--turso",
+      "shape": "record-1k",
+      "append_items_per_s": 41.84193698998706,
+      "append_floor_items_per_s": 10.460484247496765
+    }
+  ]
+}
