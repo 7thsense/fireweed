@@ -7497,15 +7497,13 @@ impl ClaimPort for PostgresRelationalBackend {
             // Group/cohort claim needs the queue-def map for apply_command_sql; item-level CTE does not.
             // Hold the state Mutex only for the apply + token steps after durable commit when possible.
             if matches!(unit, ClaimUnit::Item) {
-                claim_item_level_on_client(&mut client_guard, req).and_then(
-                    |(claimed, token_ops)| {
-                        if !token_ops.is_empty() {
-                            let mut g = self.inner.lock().expect("poisoned");
-                            apply_token_ops(&mut g.live_tokens, token_ops);
-                        }
-                        Ok(claimed)
-                    },
-                )
+                claim_item_level_on_client(&mut client_guard, req).map(|(claimed, token_ops)| {
+                    if !token_ops.is_empty() {
+                        let mut g = self.inner.lock().expect("poisoned");
+                        apply_token_ops(&mut g.live_tokens, token_ops);
+                    }
+                    claimed
+                })
             } else {
                 let mut g = self.inner.lock().expect("poisoned");
                 let Inner {
