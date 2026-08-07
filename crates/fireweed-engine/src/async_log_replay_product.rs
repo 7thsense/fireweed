@@ -1693,7 +1693,9 @@ where
                         vec![new_item_id],
                         now,
                     );
-                    self.commit_envelope(shard, envelope, Some(epoch)).await?;
+                    // Preserve sole-owner `expected_epoch = None` (genesis log epoch 0 is legal).
+                    // Re-stamping `Some(resolved)` would re-enter the ownership fence and reject 0.
+                    self.commit_envelope(shard, envelope, expected_epoch).await?;
                     Ok(UpsertOutcome::Inserted {
                         item_id: new_item_id,
                     })
@@ -1708,7 +1710,7 @@ where
                         vec![new_item_id],
                         now,
                     );
-                    self.commit_envelope(shard, envelope, Some(epoch)).await?;
+                    self.commit_envelope(shard, envelope, expected_epoch).await?;
                     Ok(UpsertOutcome::Replaced {
                         new_item_id,
                         superseded_item_id: existing_id,

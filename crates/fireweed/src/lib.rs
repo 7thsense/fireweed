@@ -2129,7 +2129,16 @@ mod storage_config_matrix_tests {
             Ok(_) => panic!("the unreachable facade endpoint must fail"),
             Err(error) => error,
         };
-        assert_eq!(facade_error, direct_error);
+        // Endpoint probes embed run-unique create-only keys; compare the stable prefix of the
+        // dispatch failure rather than the whole message (keys differ per open).
+        let normalize = |err: EngineError| -> String {
+            let text = err.to_string();
+            match text.split("detail:").next() {
+                Some(prefix) => prefix.trim().to_owned(),
+                None => text,
+            }
+        };
+        assert_eq!(normalize(facade_error), normalize(direct_error));
     }
 
     #[cfg(all(feature = "objectlog", feature = "postgres"))]

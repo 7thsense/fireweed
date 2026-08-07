@@ -15,7 +15,7 @@ use fireweed::{
 };
 use fireweed_core::{
     ClientItemKey, EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel,
-    PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
+    PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, RecurrenceMode,
     RecurrencePolicy, RetryPolicy, TenantId,
 };
 use fireweed_engine::QueueKey;
@@ -619,7 +619,12 @@ async fn rearm_resets_attempt_and_requeues_the_item() {
     let backend = Arc::new(composed_memory_backend());
     let fireweed = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
-    fireweed.create_queue(qdef()).await.unwrap();
+    let mut def = qdef();
+    def.recurrence = RecurrencePolicy {
+        mode: RecurrenceMode::Recurring,
+        until: Some(UtcTimestamp::new(i64::MAX / 2, 0).unwrap()),
+    };
+    fireweed.create_queue(def).await.unwrap();
     fireweed.push(&q, at(5)).await.unwrap();
     let claimed = fireweed.claim(&q, 1, 30_000).await.unwrap();
     assert_eq!(claimed[0].attempt_count, 1);
