@@ -94483,22 +94483,22 @@
   "release_repeat_quarantine": {
     "callers": [
       {
-        "line": 961,
+        "line": 957,
         "path": "scripts/ci/inventory-storage-remediation.py",
         "text": "suite_path = ROOT / \"scripts/ci/release-repeat-suites.toml\""
       },
       {
-        "line": 988,
+        "line": 984,
         "path": "scripts/ci/inventory-storage-remediation.py",
         "text": "\"scripts/ci/release-repeat-suites.toml\","
       },
       {
-        "line": 1010,
+        "line": 1006,
         "path": "scripts/ci/inventory-storage-remediation.py",
         "text": "\"scripts/ci/release-repeat-suites.toml\","
       },
       {
-        "line": 1022,
+        "line": 1018,
         "path": "scripts/ci/inventory-storage-remediation.py",
         "text": "if \"release-repeat-suites.toml\" in line or \"verify-product-workflow-names.sh\" in line:"
       },
@@ -94792,7 +94792,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "a23e7257ba929a81ca869a1e6510a9e002583e9dfa2c6b6fd04ad7672a18b401",
+  "source_inventory_sha256": "2f4b2cee986afdce84ef1ad0be1b1281a847c4c1b95392e55784b384764a8073",
   "workspaces": [
     {
       "listing_error_sha256": "",
