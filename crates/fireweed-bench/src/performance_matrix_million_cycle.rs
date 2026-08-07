@@ -5,7 +5,7 @@ use std::time::Instant;
 use bytes::Bytes;
 use fireweed::{
     BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateOutcome, BatchUpdateRequest, BatchUpdateValue,
-    ClientItemKey, Fireweed, NewItem, QueueDefinition, QueueKey, RequestId,
+    ClientItemKey, Fireweed, ItemId, NewItem, QueueDefinition, QueueKey, RequestId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -124,9 +124,11 @@ pub async fn run_million_cycle_with(
         i = end;
     }
 
-    // Insert.
+    // Insert. Retain item ids so modify uses O(1) primary-key refs rather than
+    // client-key scans (pathological on Turso/sqlite at 1M scale).
     let insert_start = Instant::now();
     let mut inserted = 0u64;
+    let mut item_ids: Vec<ItemId> = Vec::with_capacity(sizes.insert_items as usize);
     while inserted < sizes.insert_items {
         let end = (inserted + sizes.batch as u64).min(sizes.insert_items);
         let batch: Vec<_> = (inserted..end).map(|n| item(n, 1)).collect();
@@ -142,18 +144,19 @@ pub async fn run_million_cycle_with(
                 outcome.len()
             ));
         }
+        item_ids.extend(outcome.item_ids.iter().copied());
         inserted = end;
     }
     let insert_ns = nanos(insert_start);
 
-    // Modify first modify_items → version 2.
+    // Modify first modify_items → version 2 (by ItemId primary key).
     let modify_start = Instant::now();
     let mut modified = 0u64;
     while modified < sizes.modify_items {
         let end = (modified + sizes.batch as u64).min(sizes.modify_items);
         let updates: Vec<_> = (modified..end)
             .map(|n| BatchUpdateEntry {
-                item_ref: BatchUpdateItemRef::ClientItemKey(client_key(n)),
+                item_ref: BatchUpdateItemRef::ItemId(item_ids[n as usize]),
                 expected_item_version: Some(1),
                 priority: BatchUpdateValue::Keep,
                 not_before: BatchUpdateValue::Keep,

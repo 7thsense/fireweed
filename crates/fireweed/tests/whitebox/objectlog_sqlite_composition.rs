@@ -121,12 +121,22 @@ fn local_config(root: &Path, sqlite: &Path) -> ComposedStorageConfig {
     }
 }
 
+fn open_sqlite_cell(config: ComposedStorageConfig, clock: Arc<dyn Clock>) -> fireweed::Fireweed {
+    match &config.object_log {
+        ObjectLogConfig::Local { .. } => fireweed::open_composed_sqlite(config, clock).unwrap(),
+        ObjectLogConfig::S3Compatible { .. } => {
+            // Whitebox path into crate-private S3 open (same dispatch as public open_objectlog_sqlite).
+            crate::open_s3_composed_sqlite(config, clock).unwrap()
+        }
+    }
+}
+
 fn assert_delete_rebuild(
     config: ComposedStorageConfig,
     queue_id: &str,
 ) -> (fireweed::QueueMetrics, fireweed::ItemId, fireweed::ItemId) {
     let clock = Arc::new(ManualClock::at(1_000));
-    let fireweed = fireweed::open_composed_sqlite(config, clock).unwrap();
+    let fireweed = open_sqlite_cell(config, clock);
     let key = queue(queue_id);
     block_on(fireweed.create_queue(definition(queue_id))).unwrap();
     let request = RequestId::new(format!("request-{queue_id}")).unwrap();
@@ -1231,10 +1241,12 @@ fn public_objectlog_sqlite_namespaces_isolate_shared_object_root() {
 
 #[test]
 fn public_s3_sqlite_delete_and_rebuild() {
-    let endpoint = match runtime_env("S3_TEST_URL") {
+    let endpoint = match runtime_env("S3_TEST_URL").or_else(|_| runtime_env("S3_TEST_ENDPOINT")) {
         Ok(value) => value,
         Err(_) => {
-            panic!("FIREWEED_S3_TEST_URL required (fail-closed live S3; no LOUD skip)");
+            panic!(
+                "FIREWEED_S3_TEST_URL or FIREWEED_S3_TEST_ENDPOINT required (fail-closed live S3; no LOUD skip)"
+            );
         }
     };
     let bucket = runtime_env("S3_TEST_BUCKET").unwrap_or_else(|_| "fireweed-test".into());
