@@ -9690,10 +9690,12 @@ impl PostgresRelational {
     ) -> EngineResult<()> {
         let mut g = self.lock();
         let (tenant, queue) = parts(shard);
+        // Include fenced leased rows: operator Unfence reuses the same lease token, and
+        // post-reopen finalize after Unfence must render cleartext (P11 T3 AC-TXN-2).
         let rows = st(g.client.query(
             "SELECT item_id,lease_token_hash FROM fireweed_items \
              WHERE tenant_id=$1 AND queue_id=$2 AND lifecycle_state='Leased' \
-             AND fenced=false AND superseded=false AND lease_token_hash IS NOT NULL",
+             AND superseded=false AND lease_token_hash IS NOT NULL",
             &[&tenant, &queue],
         ))?;
         for row in rows {

@@ -1103,6 +1103,19 @@ impl ProjectionStore for SqliteProjectionStore {
         SqliteProjectionStore::recovery_counter_high_water(self, shard)
     }
 
+    /// Rehydrate process-local lease cleartext from the authoritative log envelopes.
+    ///
+    /// Durable rows store only `lease_token_hash`. After snapshot-tail recovery, Claim/Reassign
+    /// commands already applied below the high-water are not re-applied, so without this hook
+    /// `live_tokens` stays empty and post-reopen renew/finalize fails closed (P11 T3 AC-TXN).
+    fn restore_process_state(
+        &mut self,
+        shard: &QueueKey,
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        self.rehydrate_lease_cleartext(shard, commands)
+    }
+
     fn eligible_candidates(
         &self,
         shard: &QueueKey,

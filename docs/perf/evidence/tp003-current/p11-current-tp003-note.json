@@ -1,0 +1,55 @@
+{
+  "semantic_current_id": "CURRENT-TP003-TRANSACTION-MATRIX",
+  "plan_key": "P11",
+  "bead": "fireweed-38bd4c7a",
+  "source_revision_at_generation": "97784322b2bfb40899565c2fe2648e2572279207",
+  "run_owned_root": "/tmp/fireweed-p11-current-run/tp003",
+  "historical_six_untouched": true,
+  "artifacts": [
+    {
+      "filename": "tp003-ac-txn-matrix-postgres-storage-pairs.jsonl",
+      "sha256": "e78c2a0a67174ce6169739e7fb1338f70d5870e34cc222b66a6adaeec5069429",
+      "rows": 9,
+      "all_pass": true,
+      "backends": [
+        "postgres\u00d7memory",
+        "postgres\u00d7postgres",
+        "postgres\u00d7sqlite"
+      ],
+      "acs": [
+        "AC-TXN-1",
+        "AC-TXN-2",
+        "AC-TXN-3"
+      ]
+    },
+    {
+      "filename": "tp003-ac-txn-matrix-sqlite-storage-pairs.jsonl",
+      "sha256": "620f70efc48895605eaedc560e1b0b4600f2a69da6ce7cbb52eafa3a0d17f754",
+      "rows": 9,
+      "all_pass": true,
+      "backends": [
+        "sqlite\u00d7memory",
+        "sqlite\u00d7postgres",
+        "sqlite\u00d7sqlite"
+      ],
+      "acs": [
+        "AC-TXN-1",
+        "AC-TXN-2",
+        "AC-TXN-3"
+      ]
+    }
+  ],
+  "class_a_cells_ac_txn_1_2_3": [
+    "sqlite\u00d7memory",
+    "sqlite\u00d7sqlite",
+    "sqlite\u00d7postgres",
+    "postgres\u00d7memory",
+    "postgres\u00d7sqlite",
+    "postgres\u00d7postgres"
+  ],
+  "fixes": [
+    "SqliteProjectionStore::restore_process_state rehydrates lease cleartext from log",
+    "Postgres restore_live_tokens includes fenced leased rows for post-unfence finalize"
+  ],
+  "producer": "scripts/ci/record-current-tp003-td008-evidence.sh"
+}

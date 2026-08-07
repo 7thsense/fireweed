@@ -1,0 +1,9 @@
+{
+  "semantic_current_id": "CURRENT-TD008-DELIVERY-MATRIX",
+  "plan_key": "P11",
+  "bead": "fireweed-38bd4c7a",
+  "source_revision_at_generation": "97784322b2bfb40899565c2fe2648e2572279207",
+  "historical_path_untouched": "docs/perf/evidence/td008-terminal-reap-frontier.jsonl",
+  "producer": "cargo test -p fireweed-release --test td008_evidence",
+  "result": "all 7 tests ok"
+}
