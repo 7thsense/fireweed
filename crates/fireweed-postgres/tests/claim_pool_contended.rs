@@ -97,7 +97,11 @@ fn claim_pool_concurrent_workers_partition_items_via_skip_locked() {
     for id in ids_a.iter().chain(ids_b.iter()) {
         assert!(all.insert(*id), "duplicate claim of {id}");
     }
-    assert_eq!(all.len(), 200, "every pushed item must be claimed exactly once");
+    assert_eq!(
+        all.len(),
+        200,
+        "every pushed item must be claimed exactly once"
+    );
     assert!(
         !ids_a.is_empty() && !ids_b.is_empty(),
         "both claim-pool workers should observe work (SKIP LOCKED multi-connection)"
