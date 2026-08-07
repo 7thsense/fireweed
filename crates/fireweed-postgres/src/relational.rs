@@ -25,9 +25,10 @@
 //! queue-affine relational pool (`fixed_postgres_relational_pool`). That path satisfies multi-queue
 //! writers; this claim pool is the same-backend multi-writer path embedders need.
 //!
-//! Same-queue claimers still take `relational_cursor … FOR UPDATE` for the assignment-epoch fence, so they
-//! pipeline at the DB row lock rather than a process Mutex — and multi-queue claimers never share a cursor
-//! row. Live contended-writer evidence is env-gated on `FIREWEED_PG_TEST_URL`.
+//! Same-queue claimers use `FOR UPDATE SKIP LOCKED` on **items** and only briefly CAS-update
+//! `relational_cursor` for sequence allocation after candidates are leased (so concurrent claimers
+//! pipeline on disjoint item locks, not a long-held cursor row lock). Multi-queue claimers never
+//! share a cursor row. Live contended-writer evidence is env-gated on `FIREWEED_PG_TEST_URL`.
 //!
 //! ## Connection / runtime posture (consistent with the crate's recorded post-launch caveat)
 //! Like [`crate::PostgresBackend`], this uses the SYNC `postgres` client behind a `Mutex<Client>` for the
@@ -7496,14 +7497,15 @@ impl ClaimPort for PostgresRelationalBackend {
             // Group/cohort claim needs the queue-def map for apply_command_sql; item-level CTE does not.
             // Hold the state Mutex only for the apply + token steps after durable commit when possible.
             if matches!(unit, ClaimUnit::Item) {
-                claim_item_level_on_client(&mut client_guard, req)
-                    .and_then(|(claimed, token_ops)| {
+                claim_item_level_on_client(&mut client_guard, req).and_then(
+                    |(claimed, token_ops)| {
                         if !token_ops.is_empty() {
                             let mut g = self.inner.lock().expect("poisoned");
                             apply_token_ops(&mut g.live_tokens, token_ops);
                         }
                         Ok(claimed)
-                    })
+                    },
+                )
             } else {
                 let mut g = self.inner.lock().expect("poisoned");
                 let Inner {
@@ -7519,15 +7521,29 @@ impl ClaimPort for PostgresRelationalBackend {
 }
 
 impl PostgresRelationalBackend {
-    /// Borrow a free claim-pool client (blocking). Falls back to parking on slot 0 when all are busy.
+    /// Borrow a free claim-pool client (blocking). Spins briefly on try_lock then parks on a
+    /// round-robin slot so concurrent claimers do not all pile onto connection 0.
     fn acquire_claim_client(&self) -> std::sync::MutexGuard<'_, Client> {
-        // Prefer a free slot so multi-queue claimers run concurrently without queueing on one Mutex.
-        for slot in &self.claim_pool {
-            if let Ok(guard) = slot.try_lock() {
+        // Prefer a free slot so claimers run concurrently without queueing on one Mutex.
+        for _ in 0..64 {
+            for slot in &self.claim_pool {
+                if let Ok(guard) = slot.try_lock() {
+                    return guard;
+                }
+            }
+            std::thread::yield_now();
+        }
+        // Fair-ish park: rotate starting index so N waiters spread across N connections.
+        static PARK_TICK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let start = PARK_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let n = self.claim_pool.len();
+        for offset in 0..n {
+            let idx = (start + offset) % n;
+            if let Ok(guard) = self.claim_pool[idx].try_lock() {
                 return guard;
             }
         }
-        self.claim_pool[0]
+        self.claim_pool[start % n]
             .lock()
             .expect("claim pool client poisoned")
     }
@@ -7561,9 +7577,21 @@ fn claim_with_client_unit(
         return Ok(Claimed::default());
     }
     let (t, q) = parts(&req.shard);
+
+    // Item-level: lease under SKIP LOCKED first, CAS-allocate seq after (no long-held cursor lock).
+    if matches!(unit, ClaimUnit::Item) {
+        let mut tx = st(client.transaction())?;
+        let Some((claimed, token_ops)) = claim_item_level_in_tx(&mut tx, &req, &t, &q)? else {
+            return Ok(Claimed::default());
+        };
+        st(tx.commit())?;
+        apply_token_ops(live_tokens, token_ops);
+        return Ok(claimed);
+    }
+
     let mut tx = st(client.transaction())?;
-    // ADR-009 / TD-003 fence: a superseded owner is rejected BEFORE selecting/leasing — nothing is
-    // claimed. `None` = sole-owner (no fence). The assignment_epoch is the BQ-23 single durable value.
+    // Group/cohort path still fences with FOR UPDATE on the cursor for the whole transaction —
+    // summary promotion + apply_command_sql share that critical section today.
     let claim_epoch: i64 = st(tx.query_one(
         "SELECT assignment_epoch FROM relational_cursor WHERE tenant=$1 AND queue=$2 FOR UPDATE",
         &[&t, &q],
@@ -7575,34 +7603,11 @@ fn claim_with_client_unit(
     // Time-driven summary maintenance is fenced with the claim. An explicit selection-only
     // eligibility_time must never advance durable summary state, so promotion uses wall-clock
     // `now`; live candidate predicates below may still use `eligibility_at()`.
-    if !matches!(unit, ClaimUnit::Item)
-        && !promote_due_group_summary_chunk_in_tx(&mut tx, &req.shard, req.now)?
-    {
+    if !promote_due_group_summary_chunk_in_tx(&mut tx, &req.shard, req.now)? {
         st(tx.commit())?;
         return Err(EngineError::Unavailable);
     }
     let seq = alloc_seq(&mut tx, &t, &q)?;
-    let now_n = ts_nanos(req.now);
-    // Due-ness is resolved at the caller-resolved eligibility epoch (`ClaimRequest::eligibility_at`),
-    // which defaults to `now`. It feeds ONLY the candidate predicates (`not_before<=$3` in the CTE,
-    // the group/cohort selections); `now_n` still stamps `updated_at` and the lease.
-    let elig_n = ts_nanos(req.eligibility_at());
-    let exp = ts_nanos(req.lease_expires_at);
-    let hash = lease_hash(&req.lease_token);
-    let seqi = seq as i64;
-
-    if matches!(unit, ClaimUnit::Item) {
-        let Some((claimed, token_ops)) = claim_item_level_in_tx(
-            &mut tx, &req, &t, &q, claim_epoch, seq, elig_n, exp, hash, now_n, seqi,
-        )?
-        else {
-            // Empty candidate set: drop tx without commit so alloc_seq rolls back (sqlite parity).
-            return Ok(Claimed::default());
-        };
-        st(tx.commit())?;
-        apply_token_ops(live_tokens, token_ops);
-        return Ok(claimed);
-    }
 
     // Group-aware: gather the candidate items under the per-group FOR UPDATE SKIP LOCKED lock, then
     // lease them via apply_command_sql's Claim arm (which UPDATEs + refreshes the affected groups).
@@ -7716,59 +7721,78 @@ fn claim_item_level_on_client(
     }
     let (t, q) = parts(&req.shard);
     let mut tx = st(client.transaction())?;
-    let claim_epoch: i64 = st(tx.query_one(
-        "SELECT assignment_epoch FROM relational_cursor WHERE tenant=$1 AND queue=$2 FOR UPDATE",
-        &[&t, &q],
-    ))?
-    .get(0);
-    if req.expected_epoch.is_some_and(|e| e != claim_epoch as u64) {
-        return Err(EngineError::EpochFenced);
-    }
-    let seq = alloc_seq(&mut tx, &t, &q)?;
-    let now_n = ts_nanos(req.now);
-    let elig_n = ts_nanos(req.eligibility_at());
-    let exp = ts_nanos(req.lease_expires_at);
-    let hash = lease_hash(&req.lease_token);
-    let seqi = seq as i64;
-    let Some(out) = claim_item_level_in_tx(
-        &mut tx, &req, &t, &q, claim_epoch, seq, elig_n, exp, hash, now_n, seqi,
-    )?
-    else {
-        // Empty candidate set: drop tx without commit so alloc_seq rolls back (sqlite parity).
+    let Some(out) = claim_item_level_in_tx(&mut tx, &req, &t, &q)? else {
         return Ok((Claimed::default(), Vec::new()));
     };
     st(tx.commit())?;
     Ok(out)
 }
 
-/// `None` means no candidates (caller must roll back so `alloc_seq` is not burned).
+/// Item-level claim body: lease candidates under `FOR UPDATE SKIP LOCKED` **before** touching the
+/// cursor row, then CAS-allocate `next_seq` (and epoch-fence) in a short UPDATE. Concurrent same-queue
+/// claimers therefore pipeline on disjoint item locks instead of holding `relational_cursor FOR UPDATE`
+/// across the whole claim (fireweed-66d64e91).
+///
+/// `None` means no candidates (caller rolls back — no sequence burned).
 fn claim_item_level_in_tx(
     tx: &mut postgres::Transaction<'_>,
     req: &ClaimRequest,
     t: &str,
     q: &str,
-    claim_epoch: i64,
-    seq: u64,
-    elig_n: i64,
-    exp: i64,
-    hash: Vec<u8>,
-    now_n: i64,
-    seqi: i64,
 ) -> EngineResult<Option<(Claimed, Vec<TokenOp>)>> {
-    // Item-level: the serialized FOR UPDATE SKIP LOCKED CTE (select + lease + RETURNING).
+    // Read epoch without exclusive lock; fence is re-checked by the CAS alloc below.
+    let claim_epoch: i64 = st(tx.query_one(
+        "SELECT assignment_epoch FROM relational_cursor WHERE tenant=$1 AND queue=$2",
+        &[&t, &q],
+    ))?
+    .get(0);
+    if req.expected_epoch.is_some_and(|e| e != claim_epoch as u64) {
+        return Err(EngineError::EpochFenced);
+    }
+
+    let now_n = ts_nanos(req.now);
+    let elig_n = ts_nanos(req.eligibility_at());
+    let exp = ts_nanos(req.lease_expires_at);
+    let hash = lease_hash(&req.lease_token);
+    // Provisional last_command_sequence; rewritten to the CAS-allocated seq after lease.
+    let provisional_seq: i64 = 0;
     let lim = req.max_items as i64;
     let rows = st(tx.query(
         CLAIM_CTE,
-        &[&t, &q, &elig_n, &lim, &hash, &exp, &now_n, &seqi],
+        &[&t, &q, &elig_n, &lim, &hash, &exp, &now_n, &provisional_seq],
     ))?;
     if rows.is_empty() {
-        return Ok(None); // roll back — no sequence burned (sqlite parity)
+        return Ok(None);
     }
+
+    // CAS: advance next_seq only if the epoch is still the value we fenced on. Failure means another
+    // writer advanced the assignment epoch; ROLLBACK undoes the leases above.
+    let seq_row = st(tx.query_opt(
+        "UPDATE relational_cursor SET next_seq = next_seq + 1 \
+         WHERE tenant=$1 AND queue=$2 AND assignment_epoch=$3 \
+         RETURNING next_seq - 1",
+        &[&t, &q, &claim_epoch],
+    ))?;
+    let Some(seq_row) = seq_row else {
+        return Err(EngineError::EpochFenced);
+    };
+    let seq: i64 = seq_row.get(0);
+    let seq = seq as u64;
+    let seqi = seq as i64;
+
     let mut claimed_ids = Vec::with_capacity(rows.len());
     for row in &rows {
         let id: String = row.get(0);
         claimed_ids.push(ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?);
     }
+    let claimed_id_strings: Vec<String> = claimed_ids.iter().map(ToString::to_string).collect();
+    // Stamp the real command sequence on the leased rows (CTE used provisional 0).
+    st(tx.execute(
+        "UPDATE fireweed_items SET last_command_sequence=$3 \
+         WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($4)",
+        &[&t, &q, &seqi, &claimed_id_strings],
+    ))?;
+
     let claim_command = QueueCommand::Claim(ClaimCommand {
         item_ids: claimed_ids.clone(),
         lease_token: req.lease_token.clone(),
@@ -7810,7 +7834,6 @@ fn claim_item_level_in_tx(
         token_ops.push(TokenOp::Set(item_id, req.lease_token.clone()));
     }
     // The CTE bypasses apply_command_sql's Claim arm, so refresh the claimed groups here.
-    let claimed_id_strings: Vec<String> = claimed_ids.iter().map(ToString::to_string).collect();
     decrement_group_summaries_for_items(tx, &req.shard, &claimed_id_strings, req.now)?;
     Ok(Some((
         Claimed {

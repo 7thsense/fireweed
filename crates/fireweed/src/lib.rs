@@ -930,6 +930,81 @@ impl Default for RecoveryPolicy {
     }
 }
 
+/// Per-queue snapshot and compaction policy (fireweed-1bf34d97).
+///
+/// Lazy by default: below [`Self::min_log_commands_for_snapshot`] the driver should take
+/// **no** snapshots and **no** compaction — full replay of a small log is cheaper than
+/// snapshot write amplification. Policy is runtime-adjustable; embedders own thresholds.
+/// Compaction is never implied by snapshotting: call
+/// [`Fireweed::compact_log_behind_snapshot`] explicitly with retention authorization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotPolicy {
+    /// When false, neither automatic snapshots nor compaction are considered for the queue.
+    pub enabled: bool,
+    /// Minimum authoritative log length (commands) before snapshots are eligible.
+    /// Default `1_000_000` — lazy for small/medium queues (snorri TD-009).
+    pub min_log_commands_for_snapshot: u64,
+    /// Optional cadence hint in milliseconds between automatic snapshots (`None` = threshold-only).
+    pub min_interval_ms: Option<u64>,
+    /// When true, a policy driver may compact log history at-or-before a covering snapshot
+    /// after an explicit retention authorization. Default false (deliberate compaction only).
+    pub compaction_authorized: bool,
+}
+
+impl Default for SnapshotPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_log_commands_for_snapshot: 1_000_000,
+            min_interval_ms: None,
+            compaction_authorized: false,
+        }
+    }
+}
+
+impl SnapshotPolicy {
+    /// Pure policy decision: should a snapshot be taken given current log length and age of
+    /// the latest snapshot (`None` if never snapshotted). Churn-aware input is log length
+    /// (replay cost), not live-record count.
+    pub fn should_snapshot(
+        &self,
+        log_command_count: u64,
+        ms_since_last_snapshot: Option<u64>,
+    ) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        if log_command_count < self.min_log_commands_for_snapshot {
+            return false;
+        }
+        match (self.min_interval_ms, ms_since_last_snapshot) {
+            (Some(min_ms), Some(age_ms)) if age_ms < min_ms => false,
+            _ => true,
+        }
+    }
+
+    /// Pure policy: may compaction run (still requires a covering snapshot at the call site).
+    pub fn may_compact(&self) -> bool {
+        self.enabled && self.compaction_authorized
+    }
+}
+
+/// Introspection for the latest snapshot on a queue (fireweed-3f70c7d1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotInfo {
+    pub position: CommandPosition,
+    pub ref_id: String,
+    /// Authoritative log command count at introspection time when known.
+    pub log_command_count: Option<u64>,
+}
+
+/// Result of an embedder-triggered snapshot (fireweed-3f70c7d1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotNowResult {
+    pub position: CommandPosition,
+    pub ref_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectLogRuntimeConfig {
     pub object_log: ObjectLogStorage,
@@ -6975,9 +7050,27 @@ mod tests {
     use super::{
         ClaimByQueryAt, ClaimRef, CommitEntry, CommitRequest, EntryOutcome, FinalizeKind,
         LogConfig, NewItem, ProjectionStoreConfig, RecoveryPolicy, RequestId, ResponseBarrier,
-        RuntimeCore, SegmentConfig, StorageConfig, SystemClock, apply_owned_renewal_outcomes, open,
-        open_async,
+        RuntimeCore, SegmentConfig, SnapshotPolicy, StorageConfig, SystemClock,
+        apply_owned_renewal_outcomes, open, open_async,
     };
+
+    #[test]
+    fn snapshot_policy_is_lazy_by_default() {
+        let policy = SnapshotPolicy::default();
+        assert!(policy.enabled);
+        assert_eq!(policy.min_log_commands_for_snapshot, 1_000_000);
+        assert!(!policy.compaction_authorized);
+        assert!(!policy.should_snapshot(999_999, None));
+        assert!(policy.should_snapshot(1_000_000, None));
+        assert!(!policy.may_compact());
+        let mut authorized = policy;
+        authorized.compaction_authorized = true;
+        assert!(authorized.may_compact());
+        let mut cadence = policy;
+        cadence.min_interval_ms = Some(60_000);
+        assert!(!cadence.should_snapshot(2_000_000, Some(1_000)));
+        assert!(cadence.should_snapshot(2_000_000, Some(60_000)));
+    }
     #[cfg(feature = "postgres")]
     use super::{ConfigSecret, PostgresMode, open_postgres_async};
     use crate::EngineResult;

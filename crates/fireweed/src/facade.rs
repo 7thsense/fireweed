@@ -994,6 +994,8 @@ pub struct Fireweed {
     mutation: Arc<dyn FireweedMutationPlane>,
     pub(crate) operator: Arc<dyn FireweedOperatorPlane>,
     projection: Option<ProjectionLifecycleHandle>,
+    /// Per-queue snapshot/compaction policy (fireweed-1bf34d97). Lazy defaults until set.
+    snapshot_policies: Arc<std::sync::Mutex<std::collections::HashMap<QueueKey, SnapshotPolicy>>>,
 }
 
 impl fmt::Debug for Fireweed {
@@ -1013,6 +1015,7 @@ impl Fireweed {
             mutation: queue.clone(),
             operator: queue,
             projection: None,
+            snapshot_policies: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -1029,6 +1032,7 @@ impl Fireweed {
             mutation: queue.clone(),
             operator: queue,
             projection: Some(projection),
+            snapshot_policies: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -1271,6 +1275,77 @@ impl Fireweed {
     pub async fn side_record(&self, queue: &QueueKey, key: &[u8]) -> EngineResult<Option<Bytes>> {
         self.inner.side_record(queue, key).await
     }
+
+    /// Batch point-read of opaque non-work side records (entity-state dispatch hot path;
+    /// fireweed-c898cb42). Order matches `keys`. Missing keys yield `None`.
+    ///
+    /// Embedders store latest-wins per-key derived state as side records on
+    /// commit-transition entries; those writes are atomic with the commit, live in
+    /// the projection (and therefore in projection snapshots), and are readable
+    /// here at delta cost.
+    pub async fn side_records(
+        &self,
+        queue: &QueueKey,
+        keys: &[Vec<u8>],
+    ) -> EngineResult<Vec<Option<Bytes>>> {
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
+            out.push(self.inner.side_record(queue, key).await?);
+        }
+        Ok(out)
+    }
+
+    /// Read the runtime snapshot/compaction policy for `queue` (lazy default when unset).
+    pub fn snapshot_policy(&self, queue: &QueueKey) -> SnapshotPolicy {
+        self.snapshot_policies
+            .lock()
+            .expect("snapshot policy map poisoned")
+            .get(queue)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Set per-queue snapshot/compaction policy at runtime (fireweed-1bf34d97).
+    pub fn set_snapshot_policy(&self, queue: QueueKey, policy: SnapshotPolicy) {
+        self.snapshot_policies
+            .lock()
+            .expect("snapshot policy map poisoned")
+            .insert(queue, policy);
+    }
+
+    /// Evaluate whether a snapshot should be taken under the queue's current policy.
+    pub fn should_snapshot(
+        &self,
+        queue: &QueueKey,
+        log_command_count: u64,
+        ms_since_last_snapshot: Option<u64>,
+    ) -> bool {
+        self.snapshot_policy(queue)
+            .should_snapshot(log_command_count, ms_since_last_snapshot)
+    }
+
+    /// Explicit log compaction behind a covering snapshot (fireweed-3f70c7d1 / fireweed-1bf34d97).
+    ///
+    /// Refuses unless the queue policy has `compaction_authorized` and a covering snapshot exists
+    /// at-or-before `covering`. The durable truncate path is backend-specific; backends that have
+    /// not wired object-log retention return [`EngineError::Unavailable`].
+    pub async fn compact_log_behind_snapshot(
+        &self,
+        queue: &QueueKey,
+        covering: &CommandPosition,
+    ) -> EngineResult<()> {
+        let policy = self.snapshot_policy(queue);
+        if !policy.may_compact() {
+            return Err(EngineError::Invalid(
+                "compaction requires SnapshotPolicy.compaction_authorized for this queue",
+            ));
+        }
+        let _ = covering;
+        // Durable retention execution lives in object-log maintenance; expose the fail-closed
+        // contract until the per-backend retention adapter is bound to this facade method.
+        Err(EngineError::Unavailable)
+    }
+
     pub async fn peek(&self, queue: &QueueKey, limit: usize) -> EngineResult<Vec<ItemView>> {
         self.inner.peek(queue, limit).await
     }
