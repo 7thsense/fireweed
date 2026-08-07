@@ -3290,9 +3290,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "7a124c7cab726de56d09",
+        "id": "45e43fa5fdc4ab131122",
         "identity": "\"FIREWEED_PG_TEST_URL or PQUEUE_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\",",
-        "line": 7258,
+        "line": 7259,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -3304,9 +3304,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "97847dddedc695d83edd",
+        "id": "19ccf8ed7672e5455639",
         "identity": "\"FIREWEED_PG_TEST_URL or PQUEUE_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\",",
-        "line": 7338,
+        "line": 7339,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -4737,9 +4737,9 @@
           "P2f"
         ],
         "detail": "pre-existing public-release functional gate failure; repair in the path owner's bead; intentional_lineage_or_compat",
-        "id": "97d5e1cb4a438a58905e",
+        "id": "b3320a84428fb6de955d",
         "identity": "retired uppercase identifier: PQUEUE_PG_TEST_URL: /// (`FIREWEED_PG_TEST_URL`) or legacy (`PQUEUE_PG_TEST_URL`).",
-        "line": 7135,
+        "line": 7136,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -4751,9 +4751,9 @@
           "P2f"
         ],
         "detail": "pre-existing public-release functional gate failure; repair in the path owner's bead; intentional_lineage_or_compat",
-        "id": "4d30905e8f5383a0b6f2",
+        "id": "b27cae2308c89943fe0a",
         "identity": "retired uppercase identifier: PQUEUE_PG_TEST_URL: .or_else(|_| std::env::var(\"PQUEUE_PG_TEST_URL\"))",
-        "line": 7139,
+        "line": 7140,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -4765,9 +4765,9 @@
           "P2f"
         ],
         "detail": "pre-existing public-release functional gate failure; repair in the path owner's bead; intentional_lineage_or_compat",
-        "id": "36949cb66364f6dade92",
+        "id": "bb79f8f95206fa5e23fd",
         "identity": "retired uppercase identifier: PQUEUE_PG_TEST_URL: /// (fireweed-ca319318). When FIREWEED_PG_TEST_URL / PQUEUE_PG_TEST_URL is set,",
-        "line": 7251,
+        "line": 7252,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -4779,9 +4779,9 @@
           "P2f"
         ],
         "detail": "pre-existing public-release functional gate failure; repair in the path owner's bead; intentional_lineage_or_compat",
-        "id": "3947d476506d9cbc947a",
+        "id": "675198945c3ba595aaab",
         "identity": "retired uppercase identifier: PQUEUE_PG_TEST_URL: \"FIREWEED_PG_TEST_URL or PQUEUE_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\",",
-        "line": 7258,
+        "line": 7259,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -4793,9 +4793,9 @@
           "P2f"
         ],
         "detail": "pre-existing public-release functional gate failure; repair in the path owner's bead; intentional_lineage_or_compat",
-        "id": "d11dc224f9bae5df61a5",
+        "id": "995993a147cd2cb7b72e",
         "identity": "retired uppercase identifier: PQUEUE_PG_TEST_URL: \"FIREWEED_PG_TEST_URL or PQUEUE_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\",",
-        "line": 7338,
+        "line": 7339,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -18493,7 +18493,7 @@
     "cargo_status": "listed",
     "errors": [],
     "generated_by": "scripts/ci/fireweed_test_placement.py",
-    "input_sha256": "1d09835aadff7131a3b7447c81ccef3b885db8a0b19a9873a39a69af3ce6ba94",
+    "input_sha256": "c28a5f8f5652a0bc918ca4294d425c0047d5550ae452bebd2c98ad28946ed30d",
     "private_surface": [
       {
         "declaration_kind": "fn",
@@ -18514,7 +18514,7 @@
         "id": "function:open_composed_postgres",
         "item": "open_composed_postgres",
         "kind": "function",
-        "line": 6547,
+        "line": 6548,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -18526,7 +18526,7 @@
         "id": "function:open_composed_postgres_async",
         "item": "open_composed_postgres_async",
         "kind": "function",
-        "line": 6578,
+        "line": 6579,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -18538,7 +18538,7 @@
         "id": "function:open_composed_sqlite",
         "item": "open_composed_sqlite",
         "kind": "function",
-        "line": 6760,
+        "line": 6761,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -18550,7 +18550,7 @@
         "id": "function:open_s3_composed_sqlite",
         "item": "open_s3_composed_sqlite",
         "kind": "function",
-        "line": 6776,
+        "line": 6777,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -94918,7 +94918,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "36f7102a1df2a31fac5adf1481648fb6690bbeeb0833da54ac52cf7f321af5ab",
+  "source_inventory_sha256": "236ebc2214ff4500e874e8ed0fb5b263636078831fa037247017801a5b481b1e",
   "workspaces": [
     {
       "listing_error_sha256": "",
