@@ -10,7 +10,7 @@
 #
 #   operator
 #     Live tracker audit against `.ddx/beads.jsonl`. Operator-only; not for required
-#     CI/release paths. P17r removes remaining temporary tracker callers later.
+#     CI/release paths. Release/CI callers must use candidate mode only.
 #
 # Usage:
 #   bash scripts/ci/verify-build-closure.sh --mode candidate --fixture scripts/ci/fixtures/closure/all-closed.json

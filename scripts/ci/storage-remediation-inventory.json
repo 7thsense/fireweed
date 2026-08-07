@@ -10845,9 +10845,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "b87af91161e6eaf23a4c",
-        "identity": "test \"${GITHUB_SHA}\" = \"$(git rev-parse origin/main)\"",
-        "line": 88,
+        "id": "8ba5cd2718d34e11fd48",
+        "identity": "event_e=\"$(git rev-parse \"${GITHUB_REF}^{commit}\" 2>/dev/null || git rev-parse HEAD)\"",
+        "line": 92,
         "owner": "P10w",
         "path": ".github/workflows/release.yml",
         "status": "debt"
@@ -10860,9 +10860,129 @@
           "P2f"
         ],
         "detail": "",
-        "id": "c8ada8189590854418ce",
-        "identity": "--expected-revision \"$GITHUB_SHA\"",
-        "line": 153,
+        "id": "0ea38bc733c8748d674c",
+        "identity": "out, expected_source, root = sys.argv[1], sys.argv[2], Path(sys.argv[3])",
+        "line": 155,
+        "owner": "P10w",
+        "path": ".github/workflows/release.yml",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P17r",
+          "P10w",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "a1a02eba5f85027054e1",
+        "identity": "json.dump({\"expected_source\": expected_source, \"paths\": paths}, open(out, \"w\"), indent=2)",
+        "line": 166,
+        "owner": "P10w",
+        "path": ".github/workflows/release.yml",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P17r",
+          "P10w",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "416b2dc53e021a7d6b73",
+        "identity": "--source-root . \\",
+        "line": 205,
+        "owner": "P10w",
+        "path": ".github/workflows/release.yml",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P17r",
+          "P10w",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "bcfeb1e50cc276017e02",
+        "identity": "--expected-source \"${{ steps.identity.outputs.measured_source }}\" \\",
+        "line": 206,
+        "owner": "P10w",
+        "path": ".github/workflows/release.yml",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P17r",
+          "P10w",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "84d2f83ffb4e74a13aac",
+        "identity": "--source-root . \\",
+        "line": 211,
+        "owner": "P10w",
+        "path": ".github/workflows/release.yml",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P17r",
+          "P10w",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "d57f73b70bb2a6d52f82",
+        "identity": "--expected-source \"${{ steps.identity.outputs.measured_source }}\" \\",
+        "line": 212,
+        "owner": "P10w",
+        "path": ".github/workflows/release.yml",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P17r",
+          "P10w",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "790f5cfc6c0a07d87a6c",
+        "identity": "test \"$(git rev-parse HEAD)\" = \"${{ steps.identity.outputs.measured_source }}\"",
+        "line": 250,
+        "owner": "P10w",
+        "path": ".github/workflows/release.yml",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P17r",
+          "P10w",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "d4555a7420860c9ae1cf",
+        "identity": "--expected-source \"${{ steps.identity.outputs.measured_source }}\" \\",
+        "line": 261,
+        "owner": "P10w",
+        "path": ".github/workflows/release.yml",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P17r",
+          "P10w",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "de7898bfb868c00d3975",
+        "identity": "--expected-revision \"${{ steps.identity.outputs.measured_source }}\"",
+        "line": 296,
         "owner": "P10w",
         "path": ".github/workflows/release.yml",
         "status": "debt"
@@ -13506,6 +13626,62 @@
           "P2f"
         ],
         "detail": "",
+        "id": "a5d5bac073035a03b82a",
+        "identity": "if grep -nE -- '--expected-revision[[:space:]]+\"\\$GITHUB_SHA\"|--expected-revision[[:space:]]+\\$GITHUB_SHA' \"${WF}\"; then",
+        "line": 39,
+        "owner": "P10px",
+        "path": "scripts/ci/release-workflow-shape-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "8818a54cfec024f6d77d",
+        "identity": "fail \"composite still binds expected-revision to GITHUB_SHA\"",
+        "line": 40,
+        "owner": "P10px",
+        "path": "scripts/ci/release-workflow-shape-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "5ae52f04e7f7059f7d31",
+        "identity": "echo \"--- source producers receive expected-source/remote/ref ---\"",
+        "line": 63,
+        "owner": "P10px",
+        "path": "scripts/ci/release-workflow-shape-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "367c7f6fba4da6aaf714",
+        "identity": "grep -Fq -- '--expected-source' \"${WF}\" || fail \"missing --expected-source\"",
+        "line": 65,
+        "owner": "P10px",
+        "path": "scripts/ci/release-workflow-shape-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
         "id": "6e89bfe2a45baffeb45c",
         "identity": "export SOURCE_REVISION",
         "line": 207,
@@ -13912,9 +14088,23 @@
           "P2f"
         ],
         "detail": "",
-        "id": "eee929f83736a1ff8e78",
-        "identity": "grep -Fq -- '--expected-revision \"$GITHUB_SHA\"' \"$release_workflow\" ||",
-        "line": 116,
+        "id": "11d665c7300d301a04e5",
+        "identity": "if grep -Eq -- '--expected-revision[[:space:]]+\"?\\$\\{?GITHUB_SHA' \"$release_workflow\"; then",
+        "line": 127,
+        "owner": "P10px",
+        "path": "scripts/ci/verify-governed-release-composite-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "62cd053f573456a291b4",
+        "identity": "fail \"release workflow must not bind composite expected-revision to ambient GITHUB_SHA\"",
+        "line": 128,
         "owner": "P10px",
         "path": "scripts/ci/verify-governed-release-composite-test.sh",
         "status": "debt"
@@ -15368,6 +15558,160 @@
           "P2f"
         ],
         "detail": "",
+        "id": "acc1bb4449d4962d11b2",
+        "identity": "GIT_AUTHOR_DATE='2026-01-01T00:00:00Z' GIT_COMMITTER_DATE='2026-01-01T00:00:00Z' \\",
+        "line": 45,
+        "owner": "P10px",
+        "path": "scripts/release/resolve-release-identity-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "7319685dbd7760e961d8",
+        "identity": "printf '{\"schema_version\":1,\"source_revision\":\"%s\",\"authorities\":{\"e0\":\"e0.jsonl\"}}\\n' \"$S\" \\",
+        "line": 56,
+        "owner": "P10px",
+        "path": "scripts/release/resolve-release-identity-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "72d65282f7437ca6bc2c",
+        "identity": "GIT_COMMITTER_NAME='Fireweed Evidence Promoter' GIT_COMMITTER_EMAIL='evidence@invalid' \\",
+        "line": 69,
+        "owner": "P10px",
+        "path": "scripts/release/resolve-release-identity-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "9aa2eeb0eb86310a4014",
+        "identity": "GIT_AUTHOR_DATE='2026-01-02T00:00:00Z' GIT_COMMITTER_DATE='2026-01-02T00:00:00Z' \\",
+        "line": 70,
+        "owner": "P10px",
+        "path": "scripts/release/resolve-release-identity-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "2636caa6b53dc7692173",
+        "identity": "GIT_AUTHOR_NAME='x' GIT_AUTHOR_EMAIL='x@y' GIT_COMMITTER_NAME='x' GIT_COMMITTER_EMAIL='x@y' \\",
+        "line": 155,
+        "owner": "P10px",
+        "path": "scripts/release/resolve-release-identity-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "be110099d2d1e4aea31a",
+        "identity": "GIT_AUTHOR_NAME='x' GIT_AUTHOR_EMAIL='x@y' GIT_COMMITTER_NAME='x' GIT_COMMITTER_EMAIL='x@y' \\",
+        "line": 176,
+        "owner": "P10px",
+        "path": "scripts/release/resolve-release-identity-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "8e3e6e923fb5f6a2e467",
+        "identity": "echo \"--- composite source_revision mismatch ---\"",
+        "line": 185,
+        "owner": "P10px",
+        "path": "scripts/release/resolve-release-identity-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "dfdc986bafae035df34e",
+        "identity": "d[\"source_revision\"]=\"ffffffffffffffffffffffffffffffffffffffff\"",
+        "line": 193,
+        "owner": "P10px",
+        "path": "scripts/release/resolve-release-identity-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "88616f652a39588e1554",
+        "identity": "grep -Eiq 'composite-contract|source_revision' \"$CASE_ROOT/contract_mismatch.err\" ||",
+        "line": 197,
+        "owner": "P10px",
+        "path": "scripts/release/resolve-release-identity-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "a2260ddce1035c1d85a4",
+        "identity": "contract_rev=\"$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding=\"utf-8\"))[\"source_revision\"])' \"$",
+        "line": 95,
+        "owner": "P10px",
+        "path": "scripts/release/resolve-release-identity.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "491f7a3c7ba9b20f1ce3",
+        "identity": "fail \"composite-contract source_revision ${contract_rev} != measured source ${s}\"",
+        "line": 97,
+        "owner": "P10px",
+        "path": "scripts/release/resolve-release-identity.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
         "id": "cf1c0ccbd07f171f6bb1",
         "identity": "GIT_AUTHOR_DATE='2026-01-01T00:00:00Z' GIT_COMMITTER_DATE='2026-01-01T00:00:00Z' git -C \"$repo\" commit -qm fixture",
         "line": 32,
@@ -15441,6 +15785,20 @@
         "id": "c14ba5209143b1aa4788",
         "identity": "--expected-source \"$revision\" --expected-remote origin --expected-ref HEAD \\",
         "line": 70,
+        "owner": "P10px",
+        "path": "scripts/release/source-preview-artifacts-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "e3b9736bce0b3a1f2e55",
+        "identity": "grep -Fq -- '--expected-source' \"$SCRIPT_DIR/../../.github/workflows/release.yml\"",
+        "line": 78,
         "owner": "P10px",
         "path": "scripts/release/source-preview-artifacts-test.sh",
         "status": "debt"
@@ -16783,9 +17141,24 @@
           "P2f"
         ],
         "detail": "",
-        "id": "a2e139a78b255ce78828",
+        "id": "d08bc8a53f2ba5a88c04",
+        "identity": "chmod -R a-w fireweed-evidence || true",
+        "line": 170,
+        "owner": "P10w",
+        "path": ".github/workflows/release.yml",
+        "status": "debt"
+      },
+      {
+        "category": "workflow_inline",
+        "dependency_chain": [
+          "P17r",
+          "P10w",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "3a3d00d2765fe4540d63",
         "identity": "sudo docker image prune --all --force >/dev/null 2>&1 || true",
-        "line": 61,
+        "line": 234,
         "owner": "P10w",
         "path": ".github/workflows/release.yml",
         "status": "debt"
@@ -100096,7 +100469,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "26c2a4b09656b752a104aac4c23cf6b218654d568b13b3f1a5751385f58b0ae1",
+  "source_inventory_sha256": "ad6c9b25cdbcf2d0a9c48335994d9399e62a64e7bc743c217abce585c58ef1b9",
   "workspaces": [
     {
       "listing_error_sha256": "",

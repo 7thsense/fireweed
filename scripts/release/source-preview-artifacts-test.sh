@@ -75,4 +75,11 @@ fi
 
 grep -Fq 'build-source-preview-artifacts.sh' "$SCRIPT_DIR/../../.github/workflows/release.yml"
 grep -Fq 'verify-source-preview-artifacts.sh' "$SCRIPT_DIR/../../.github/workflows/release.yml"
+grep -Fq -- '--expected-source' "$SCRIPT_DIR/../../.github/workflows/release.yml"
+grep -Fq -- '--expected-remote' "$SCRIPT_DIR/../../.github/workflows/release.yml"
+grep -Fq -- '--expected-ref' "$SCRIPT_DIR/../../.github/workflows/release.yml"
+if grep -Eq -- '--revision[[:space:]]+"?\$\{?GITHUB_SHA' "$SCRIPT_DIR/../../.github/workflows/release.yml"; then
+  echo "release workflow still binds source-preview --revision to ambient GITHUB_SHA" >&2
+  exit 1
+fi
 echo "source-preview-artifacts-test: PASS"

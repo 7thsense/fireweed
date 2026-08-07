@@ -9,8 +9,8 @@
 #   - Hosted fast lanes (ci.yml, pages.yml): no services/matrix/docker/kind/perf.
 #   - Focused turso.yml (P13t): path-filtered public-default lane; no services.
 #   - nightly.yml: manual extended lib tests; no services/perf.
-#   - release.yml: owned by P17r — Docker publication exception only is tolerated
-#     here as historical residue; P17r moves service/kind to governed lanes.
+#   - release.yml: owned by P17r — no services/kind; Docker publication exception
+#     only (docker/build-push-action + GHCR login).
 #   - governed-product.yml: sole lane authorized for service-backed matrix/kind/S3
 #     and P8k kafka-compatible broker service *slots*. Exact digests/commands are
 #     P13-populated in governed-product-services.json / allowlist (not workflow YAML).
@@ -233,17 +233,36 @@ print(
 )
 PY
 
-# Hosted lanes other than release.yml must not declare services.
-# release.yml is P17r-owned; its residual services are migration debt for P17r.
+# Hosted lanes other than governed-product.yml must not declare services.
+# release.yml (P17r) retains only the Docker publication exception — no services.
 while IFS= read -r -d '' wf; do
     base="$(basename "${wf}")"
     case "${base}" in
-        release.yml|governed-product.yml) continue ;;
+        governed-product.yml) continue ;;
     esac
     if rg -n 'services:' "${wf}"; then
         echo "hosted workflow ${base} must not declare services (move to governed-product.yml)" >&2
         exit 1
     fi
 done < <(find "${workflow_root}" -maxdepth 1 \( -name '*.yml' -o -name '*.yaml' \) -print0)
+
+# P17r release shape: dual checkout, tag trigger, no ambient GITHUB_SHA source binding.
+release_wf="${workflow_root}/release.yml"
+if [[ -f "${release_wf}" ]]; then
+    grep -Fq 'tags:' "${release_wf}"
+    grep -Fq 'path: fireweed-evidence' "${release_wf}"
+    grep -Fq 'path: fireweed-source' "${release_wf}"
+    grep -Fq 'resolve-release-identity.sh' "${release_wf}"
+    grep -Fq 'docker/build-push-action' "${release_wf}"
+    if rg -n 'services:' "${release_wf}"; then
+        echo "release.yml must not declare services after P17r" >&2
+        exit 1
+    fi
+    if rg -n 'kindest/node|KIND_NODE_IMAGE' "${release_wf}"; then
+        echo "release.yml must not pin kind after P17r" >&2
+        exit 1
+    fi
+    echo "GitHub Actions policy valid: release.yml dual-checkout tag lane (Docker exception only)"
+fi
 
 echo "GitHub Actions policy valid: repository-side governed lane + external-proof prerequisites"

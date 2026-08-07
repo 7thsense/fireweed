@@ -73,4 +73,11 @@ if rg -n -i 'hybrid-strict|hybrid-async|FIREWEED_PROJECTION_BACKEND=hybrid' .git
     exit 1
 fi
 
+echo "--- P17r release workflow shape (dual-checkout, no services) ---"
+bash scripts/ci/release-workflow-shape-test.sh
+if rg -n 'services:' .github/workflows/release.yml; then
+    echo "release.yml must not declare services" >&2
+    exit 1
+fi
+
 echo "github-actions-policy-test: PASS"

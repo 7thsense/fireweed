@@ -111,18 +111,29 @@ grep -Fq -- '--require-smoke-evidence E2,E3' "$release_gate" ||
   fail "release gate does not require fresh E2/E3 smoke evidence"
 grep -Fq -- 'verify-governed-release-composite.sh' "$release_gate" ||
   fail "release gate does not dispatch the governed composite verifier"
-grep -Fq -- '--contract target/tp002-release/composite-contract.json' "$release_workflow" ||
-  fail "release workflow does not name the governed composite contract"
-grep -Fq -- '--expected-revision "$GITHUB_SHA"' "$release_workflow" ||
-  fail "release workflow does not bind the composite to the checked-out revision"
-grep -Fq -- '--manifest target/tp002-release/attestation.json' "$release_workflow" ||
+# P17r: dual-checkout release binds composite/attestation to measured S and an
+# external run-owned promoted evidence root — never ambient GITHUB_SHA.
+grep -Fq -- 'verify-governed-release-composite.sh' "$release_workflow" ||
+  fail "release workflow does not dispatch the governed composite verifier"
+grep -Fq -- 'steps.identity.outputs.measured_source' "$release_workflow" ||
+  fail "release workflow does not bind composite/attestation to measured source S"
+grep -Fq -- 'steps.run.outputs.promoted_evidence' "$release_workflow" ||
+  fail "release workflow does not bind evidence to the external promoted root"
+grep -Fq -- 'fireweed-verify-evidence-attestation' "$release_workflow" ||
   fail "release workflow does not verify the acquired attestation"
-grep -Fq -- '--evidence-root target/tp002-release' "$release_workflow" ||
-  fail "release workflow does not bind attestation evidence to the promoted bundle root"
 # shellcheck disable=SC2016 # Literal GitHub expression under test.
-grep -Fq -- '--tag "${{ steps.release.outputs.tag }}"' "$release_workflow" ||
+grep -Fq -- '--tag "${{ steps.identity.outputs.tag }}"' "$release_workflow" ||
   fail "release workflow does not bind evidence to the resolved release tag"
-grep -Fq -- '--commit "${GITHUB_SHA}"' "$release_workflow" ||
-  fail "release workflow does not bind evidence to the checked-out commit"
+if grep -Eq -- '--expected-revision[[:space:]]+"?\$\{?GITHUB_SHA' "$release_workflow"; then
+  fail "release workflow must not bind composite expected-revision to ambient GITHUB_SHA"
+fi
+if grep -Eq -- '--commit[[:space:]]+"?\$\{?GITHUB_SHA' "$release_workflow"; then
+  fail "release workflow must not bind attestation --commit to ambient GITHUB_SHA"
+fi
+# Dual-checkout path isolation markers.
+grep -Fq 'path: fireweed-evidence' "$release_workflow" ||
+  fail "release workflow missing evidence checkout path"
+grep -Fq 'path: fireweed-source' "$release_workflow" ||
+  fail "release workflow missing source checkout path"
 
 echo "verify-governed-release-composite-test: PASS"

@@ -18,10 +18,14 @@ the functional release checks and exact-revision composite verifier, but does
 not rerun scaled local smoke workloads on a GitHub runner. Its required
 performance authority is the acquired, semantic-verified governed archive.
 
-The tag workflow then verifies `target/tp002-release/attestation.json`. It
-verifies that the resolved tag points to `GITHUB_SHA`, that the attestation
-names that same tag and commit, and that all evidence and input digests match
-before packaging or publication begins.
+The tag workflow (`push.tags: ['v*']`, plus `workflow_dispatch` tag reruns)
+checks out evidence commit `E` (tag peel) and measured source `S` from `E`'s
+promotion metadata into physically separate directories. It never treats ambient
+`GITHUB_SHA` as measured source. S-authored tooling verifies
+`target/tp002-release/attestation.json` (materialized from `E` into a run-owned
+root) against tag `vV` and commit `S`, and all evidence and input digests must
+match before packaging or publication begins. Immutable container tags use
+`sha-${S}`.
 
 The governed E3 authority is portable across hosts: exact command/recovery
 counts, progress, bounded resources, batching, and same-run comparisons are

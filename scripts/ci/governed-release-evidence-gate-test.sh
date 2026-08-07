@@ -113,13 +113,23 @@ governed_line="$(line_of 'verify-governed-release-composite.sh' "${release_gate}
 workflow_smoke_line="$(line_of 'bash scripts/ci/release-gate.sh' "${release_workflow}")"
 workflow_exact_line="$(line_of '--bin fireweed-verify-evidence-attestation' "${release_workflow}")"
 [[ -n "${workflow_smoke_line}" && -n "${workflow_exact_line}" && "${workflow_smoke_line}" -lt "${workflow_exact_line}" ]] ||
-    fail "release workflow must run fresh smoke before exact-tag governed verification"
+    fail "release workflow must run release-gate before exact-tag attestation verification"
 # shellcheck disable=SC2016 # Literal GitHub expression under test.
-grep -Fq -- '--tag "${{ steps.release.outputs.tag }}"' "${release_workflow}" ||
+grep -Fq -- '--tag "${{ steps.identity.outputs.tag }}"' "${release_workflow}" ||
     fail "release workflow must pass the exact resolved tag"
-# shellcheck disable=SC2016 # Literal workflow variable under test.
-grep -Fq -- '--commit "${GITHUB_SHA}"' "${release_workflow}" ||
-    fail "release workflow must pass the exact checked-out commit"
+# shellcheck disable=SC2016 # Literal GitHub expression under test.
+grep -Fq -- 'steps.identity.outputs.measured_source' "${release_workflow}" ||
+    fail "release workflow must pass measured source S (not ambient GITHUB_SHA)"
+if grep -Eq -- '--commit[[:space:]]+"?\$\{?GITHUB_SHA' "${release_workflow}"; then
+    fail "release workflow must not pass ambient GITHUB_SHA as --commit"
+fi
+# Dual-checkout isolation + tag trigger (P17r shape).
+grep -Fq 'path: fireweed-evidence' "${release_workflow}" ||
+    fail "release workflow missing evidence checkout"
+grep -Fq 'path: fireweed-source' "${release_workflow}" ||
+    fail "release workflow missing source checkout"
+grep -Fq 'tags:' "${release_workflow}" ||
+    fail "release workflow missing push.tags trigger"
 if grep -Eq -- '--ledger-dir|find[[:space:]].*docs/perf/evidence' "${HELPER}"; then
     fail "governed helper must not scan an evidence directory"
 fi

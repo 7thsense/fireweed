@@ -1,12 +1,27 @@
+# P17r governed release lane.
+#
+# Triggers:
+#   - push.tags ['v*'] — canonical publication path after product-ready P20pr creates vV → E
+#   - workflow_dispatch — explicit resolved-tag rerun only (never ambient GITHUB_SHA as source)
+#
+# Dual checkout:
+#   - fireweed-evidence  — read-only evidence commit E (tag peel)
+#   - fireweed-source    — measured source S from E promotion metadata only
+#
+# Service/kind work lives on governed-product.yml. This workflow retains only the
+# exact release Docker publication exception (GHCR push via docker/* actions).
 name: release
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to publish, for example v0.21.0"
+        description: "Existing release tag to republish (resolved through the remote to E)"
         required: true
-        default: "v0.21.0"
+        type: string
 
 permissions:
   contents: write
@@ -15,119 +30,249 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: fireweed
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    defaults:
-      run:
-        working-directory: fireweed
+    timeout-minutes: 45
+    # No hosted service containers. Postgres/kind live on governed-product.yml (P13).
     steps:
-      - name: Checkout Fireweed
+      - name: Prepare external run-owned root
+        id: run
+        shell: bash
+        run: |
+          root="${RUNNER_TEMP}/fireweed-release-run"
+          mkdir -p "${root}/out" "${root}/allowlist" "${root}/scratch"
+          {
+            echo "root=${root}"
+            echo "out=${root}/out"
+            echo "allowlist=${root}/allowlist"
+            echo "scratch=${root}/scratch"
+            echo "source_preview=${root}/out/source-preview-dist"
+            echo "release_dist=${root}/out/release-dist"
+            echo "promoted_evidence=${root}/out/tp002-release"
+            echo "image_context=${root}/out/release-image"
+          } >> "${GITHUB_OUTPUT}"
+
+      # Bootstrap a minimal clone solely to resolve tag → E without trusting ambient SHA as S.
+      - name: Bootstrap repository for tag resolution
         uses: actions/checkout@v5
         with:
-          path: fireweed
+          path: fireweed-bootstrap
           fetch-depth: 0
+
+      - name: Resolve tag to evidence commit E and measured source S
+        id: identity
+        shell: bash
+        working-directory: fireweed-bootstrap
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="${{ inputs.tag }}"
+            [[ -n "${tag}" ]] || { echo "workflow_dispatch requires inputs.tag" >&2; exit 1; }
+          fi
+          [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "tag must match vMAJOR.MINOR.PATCH (got ${tag})" >&2
+            exit 1
+          }
+          # Always resolve through the remote so manual reruns never use ambient GITHUB_SHA as E/S.
+          mapfile -t lines < <(
+            bash scripts/release/resolve-release-identity.sh resolve \
+              --repo . \
+              --tag "${tag}" \
+              --remote origin
+          )
+          declare -A id=()
+          for line in "${lines[@]}"; do
+            key="${line%%=*}"
+            val="${line#*=}"
+            id["${key}"]="${val}"
+            echo "${key}=${val}" >> "${GITHUB_OUTPUT}"
+          done
+          # Tag-push path: event peeled commit must equal resolved E (tag ancestry only).
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            event_e="$(git rev-parse "${GITHUB_REF}^{commit}" 2>/dev/null || git rev-parse HEAD)"
+            [[ "${event_e}" == "${id[evidence_commit]}" ]] || {
+              echo "event tag peel ${event_e} != resolved E ${id[evidence_commit]}" >&2
+              exit 1
+            }
+          fi
+          # Refuse to treat ambient GITHUB_SHA as measured source.
+          if [[ -n "${GITHUB_SHA:-}" && "${GITHUB_SHA}" == "${id[measured_source]}" && "${GITHUB_SHA}" == "${id[evidence_commit]}" ]]; then
+            : # degenerate only if S==E which promotion forbids; still ok as coincidence check below
+          fi
+          [[ "${id[measured_source]}" != "${id[evidence_commit]}" ]] || {
+            echo "measured source S must differ from evidence commit E" >&2
+            exit 1
+          }
+          echo "Resolved release identity: tag=${id[tag]} V=${id[version]} E=${id[evidence_commit]} S=${id[measured_source]}"
+
+      - name: Checkout evidence E (read-only promoted evidence)
+        uses: actions/checkout@v5
+        with:
+          path: fireweed-evidence
+          ref: ${{ steps.identity.outputs.evidence_commit }}
+          fetch-depth: 0
+
+      - name: Verify promotion metadata on E and materialize allowlist
+        id: evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t lines < <(
+            bash fireweed-bootstrap/scripts/release/resolve-release-identity.sh parse-e \
+              --evidence-root fireweed-evidence \
+              --expected-version "${{ steps.identity.outputs.version }}"
+          )
+          declare -A id=()
+          for line in "${lines[@]}"; do
+            id["${line%%=*}"]="${line#*=}"
+          done
+          [[ "${id[evidence_commit]}" == "${{ steps.identity.outputs.evidence_commit }}" ]] || {
+            echo "parse-e E mismatch" >&2
+            exit 1
+          }
+          [[ "${id[measured_source]}" == "${{ steps.identity.outputs.measured_source }}" ]] || {
+            echo "parse-e S mismatch (manifest-derived S drift)" >&2
+            exit 1
+          }
+          [[ "${id[source_ref]}" == "${{ steps.identity.outputs.source_ref }}" ]] || {
+            echo "parse-e source_ref mismatch" >&2
+            exit 1
+          }
+          promoted="fireweed-evidence/target/tp002-release"
+          test -d "${promoted}"
+          test -s "${promoted}/composite-contract.json"
+          test -s "${promoted}/attestation.json"
+          # Copy only promoted evidence into the external run-owned root (never use E as source).
+          rm -rf "${{ steps.run.outputs.promoted_evidence }}"
+          mkdir -p "${{ steps.run.outputs.promoted_evidence }}"
+          cp -a "${promoted}/." "${{ steps.run.outputs.promoted_evidence }}/"
+          # Explicit dual-root allowlist (relative to promoted root).
+          python3 - "${{ steps.run.outputs.allowlist }}/promoted.json" \
+            "${{ steps.identity.outputs.measured_source }}" \
+            "${{ steps.run.outputs.promoted_evidence }}" <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          out, expected_source, root = sys.argv[1], sys.argv[2], Path(sys.argv[3])
+          paths = []
+          for dirpath, _, filenames in os.walk(root):
+              for name in filenames:
+                  full = Path(dirpath) / name
+                  if full.is_symlink():
+                      raise SystemExit(f"symlink not permitted in promoted evidence: {full}")
+                  paths.append(full.relative_to(root).as_posix())
+          paths.sort()
+          if not paths:
+              raise SystemExit("promoted evidence allowlist empty")
+          json.dump({"expected_source": expected_source, "paths": paths}, open(out, "w"), indent=2)
+          print(f"promoted allowlist paths={len(paths)}")
+          PY
+          # Mark evidence tree read-only for the remainder of the job.
+          chmod -R a-w fireweed-evidence || true
+
+      - name: Checkout measured source S
+        uses: actions/checkout@v5
+        with:
+          path: fireweed-source
+          ref: ${{ steps.identity.outputs.measured_source }}
+          fetch-depth: 0
+
+      - name: Dual-checkout path isolation guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          e="$(cd fireweed-evidence && pwd -P)"
+          s="$(cd fireweed-source && pwd -P)"
+          b="$(cd fireweed-bootstrap && pwd -P)"
+          [[ "${e}" != "${s}" && "${e}" != "${b}" && "${s}" != "${b}" ]] || {
+            echo "checkout directories must be physically distinct" >&2
+            exit 1
+          }
+          [[ "$(git -C fireweed-evidence rev-parse HEAD)" == "${{ steps.identity.outputs.evidence_commit }}" ]]
+          [[ "$(git -C fireweed-source rev-parse HEAD)" == "${{ steps.identity.outputs.measured_source }}" ]]
+          # E must not be used as source: refuse if S checkout somehow contains promoted evidence tree.
+          if [[ -d fireweed-source/target/tp002-release ]]; then
+            echo "E-source contamination: measured source checkout contains target/tp002-release" >&2
+            exit 1
+          fi
+
+      - name: Verify source checkout (Constraint 11 / shared predicate)
+        shell: bash
+        working-directory: fireweed-source
+        run: |
+          set -euo pipefail
+          bash scripts/release/verify-source-predicate.sh \
+            --mode source \
+            --source-root . \
+            --expected-source "${{ steps.identity.outputs.measured_source }}" \
+            --expected-remote origin \
+            --expected-ref "${{ steps.identity.outputs.source_ref }}"
+          bash scripts/release/verify-source-predicate.sh \
+            --mode e \
+            --source-root . \
+            --expected-source "${{ steps.identity.outputs.measured_source }}" \
+            --expected-remote origin \
+            --expected-ref "${{ steps.identity.outputs.source_ref }}" \
+            --promoted-root "${{ steps.run.outputs.promoted_evidence }}" \
+            --promoted-allowlist "${{ steps.run.outputs.allowlist }}/promoted.json"
 
       - name: Install pinned gitleaks
         shell: bash
+        working-directory: fireweed-source
         run: |
           bash scripts/ci/install-gitleaks.sh "${RUNNER_TEMP}/gitleaks-bin"
           echo "${RUNNER_TEMP}/gitleaks-bin" >> "${GITHUB_PATH}"
 
       - name: Block release on detected secrets
         shell: bash
+        working-directory: fireweed-source
         run: bash scripts/ci/gitleaks-gate.sh
-
-      # No dependency pre-checkouts: cargo resolves every git dep itself and they are all public
-      # (fjord=github.com/7thsense/fjord, heimq, axon), so they clone anonymously over HTTPS.
 
       - name: Free runner disk space
         working-directory: /
         run: |
-          # The release gate (coverage via cargo-llvm-cov builds a second target tree) exhausts the
-          # 14GB free on stock ubuntu-latest runners; v0.8.0 and the first v0.9.0 run both died with
-          # "No space left on device". Drop the large preinstalled toolchains we never use.
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/.ghcup
           sudo docker image prune --all --force >/dev/null 2>&1 || true
           df -h /
 
-      - name: Resolve release tag
-        id: release
+      - name: Verify release identity V at measured source S
         shell: bash
+        working-directory: fireweed-source
         run: |
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            tag="${GITHUB_REF_NAME}"
-          else
-            tag="${{ inputs.tag }}"
-          fi
-          version="${tag#v}"
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-
-      - name: Verify release identity
-        shell: bash
-        run: |
+          set -euo pipefail
           workspace_version="$(
             cargo metadata --no-deps --format-version 1 |
               jq -r '.packages[] | select(.name == "fireweed") | .version'
           )"
-          test "${{ steps.release.outputs.tag }}" = "v${workspace_version}"
-          test "${{ steps.release.outputs.version }}" = "${workspace_version}"
+          test "${{ steps.identity.outputs.tag }}" = "v${workspace_version}"
+          test "${{ steps.identity.outputs.version }}" = "${workspace_version}"
           test -f "docs/releases/v${workspace_version}.md"
-          git fetch origin main --no-tags
-          test "${GITHUB_SHA}" = "$(git rev-parse origin/main)"
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            test "${GITHUB_REF_NAME}" = "v${workspace_version}"
-          else
-            git fetch origin "refs/tags/v${workspace_version}:refs/tags/v${workspace_version}"
-            test "${GITHUB_SHA}" = "$(git rev-list -n 1 "v${workspace_version}")"
-          fi
+          # Tag targets E (not S); do not require tag peel == HEAD of S.
+          test "$(git rev-parse HEAD)" = "${{ steps.identity.outputs.measured_source }}"
 
       - name: Dry-run source archive, SBOM, checksums, and provenance
         shell: bash
+        working-directory: fireweed-source
         run: |
+          set -euo pipefail
           bash scripts/release/build-source-preview-artifacts.sh \
-            --out target/source-preview-dist \
-            --version "${{ steps.release.outputs.version }}" \
-            --revision "${GITHUB_SHA}" \
+            --out "${{ steps.run.outputs.source_preview }}" \
+            --version "${{ steps.identity.outputs.version }}" \
+            --revision "${{ steps.identity.outputs.measured_source }}" \
+            --expected-source "${{ steps.identity.outputs.measured_source }}" \
+            --expected-remote origin \
+            --expected-ref "${{ steps.identity.outputs.source_ref }}" \
             --builder "github-actions:${GITHUB_WORKFLOW_REF}"
           bash scripts/release/verify-source-preview-artifacts.sh \
-            --dist target/source-preview-dist \
-            --version "${{ steps.release.outputs.version }}" \
-            --revision "${GITHUB_SHA}"
-
-      - name: Acquire and preflight exact-revision governed evidence
-        env:
-          FIREWEED_GOVERNED_EVIDENCE_BASE_URL: ${{ vars.FIREWEED_GOVERNED_EVIDENCE_BASE_URL }}
-        run: |
-          test -n "$FIREWEED_GOVERNED_EVIDENCE_BASE_URL"
-          evidence_url="${FIREWEED_GOVERNED_EVIDENCE_BASE_URL%/}/${GITHUB_SHA}.tar.gz"
-          mkdir -p target
-          curl --fail --location --proto '=https' --tlsv1.2 \
-            "$evidence_url" -o target/tp002-release.tar.gz
-          curl --fail --location --proto '=https' --tlsv1.2 \
-            "${evidence_url}.sha256" -o target/tp002-release.tar.gz.sha256
-          expected_sha="$(awk 'NR == 1 { print $1 }' target/tp002-release.tar.gz.sha256)"
-          [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]]
-          echo "$expected_sha  target/tp002-release.tar.gz" | sha256sum -c -
-          test -z "$(tar -tzf target/tp002-release.tar.gz | grep -E '(^/|(^|/)\.\.(/|$))')"
-          tar -xzf target/tp002-release.tar.gz -C target
-          test -s target/tp002-release/composite-contract.json
-          test -s target/tp002-release/attestation.json
+            --dist "${{ steps.run.outputs.source_preview }}" \
+            --version "${{ steps.identity.outputs.version }}" \
+            --revision "${{ steps.identity.outputs.measured_source }}"
 
       - run: rustup toolchain install 1.92.0 --profile minimal --component clippy --component rustfmt --component llvm-tools-preview
+        working-directory: fireweed-source
       - run: rustup toolchain install nightly --profile minimal --component llvm-tools-preview
+        working-directory: fireweed-source
       - run: cargo install --locked cargo-llvm-cov --version 0.8.2
+        working-directory: fireweed-source
 
       - name: Install Helm
         uses: azure/setup-helm@v5
@@ -139,65 +284,76 @@ jobs:
         with:
           version: v1.31.0
 
-      - name: Install kind
-        run: |
-          curl -fsSLo kind https://kind.sigs.k8s.io/dl/v0.25.0/kind-linux-amd64
-          sudo install -m 0755 kind /usr/local/bin/kind
-
       - name: Functional and governed release gate
+        working-directory: fireweed-source
         env:
-          FIREWEED_PG_TEST_URL: postgres://postgres:fireweed@127.0.0.1:5432/postgres
+          FIREWEED_TP002_RELEASE_DIR: ${{ steps.run.outputs.promoted_evidence }}
+          FIREWEED_ALLOW_GOVERNED_PERF_EVIDENCE_ONLY: "1"
         run: |
+          set -euo pipefail
           bash scripts/ci/verify-governed-release-composite.sh \
-            --contract target/tp002-release/composite-contract.json \
-            --expected-revision "$GITHUB_SHA"
+            --contract "${{ steps.run.outputs.promoted_evidence }}/composite-contract.json" \
+            --expected-revision "${{ steps.identity.outputs.measured_source }}"
           bash scripts/ci/release-gate.sh --governed-performance-only
 
-      - name: Bind governed TP-002 evidence to exact release tag
+      - name: Bind governed TP-002 evidence to exact release tag (S-bound tooling)
         shell: bash
+        working-directory: fireweed-source
         run: |
+          set -euo pipefail
           cargo +1.92.0 run -q -p fireweed-release \
             --bin fireweed-verify-evidence-attestation -- \
-            --manifest target/tp002-release/attestation.json \
+            --manifest "${{ steps.run.outputs.promoted_evidence }}/attestation.json" \
             --repo-root . \
-            --evidence-root target/tp002-release \
-            --tag "${{ steps.release.outputs.tag }}" \
-            --commit "${GITHUB_SHA}"
+            --evidence-root "${{ steps.run.outputs.promoted_evidence }}" \
+            --tag "${{ steps.identity.outputs.tag }}" \
+            --commit "${{ steps.identity.outputs.measured_source }}"
 
       - name: Deployment release gate
+        working-directory: fireweed-source
         env:
-          KIND_NODE_IMAGE: kindest/node:v1.31.0
-          FIREWEED_RELEASE_VERSION: ${{ steps.release.outputs.version }}
-          FIREWEED_PG_TEST_URL: postgres://postgres:fireweed@127.0.0.1:5432/postgres
+          FIREWEED_RELEASE_VERSION: ${{ steps.identity.outputs.version }}
         run: bash scripts/ci/deployment-release-gate.sh
 
       - name: Package binaries
-        run: bash scripts/release/package-binaries.sh "${{ steps.release.outputs.version }}"
+        working-directory: fireweed-source
+        run: bash scripts/release/package-binaries.sh "${{ steps.identity.outputs.version }}"
 
       - name: Package Helm chart
+        working-directory: fireweed-source
         run: |
+          set -euo pipefail
+          mkdir -p target/release-dist "${{ steps.run.outputs.release_dist }}"
           bash scripts/release/package-helm-chart.sh \
-            --version "${{ steps.release.outputs.version }}" \
-            --tag "${{ steps.release.outputs.tag }}" \
+            --version "${{ steps.identity.outputs.version }}" \
+            --tag "${{ steps.identity.outputs.tag }}" \
             --destination target/release-dist
+          # Mirror package outputs into the external run-owned release dist.
+          cp -a target/release-dist/. "${{ steps.run.outputs.release_dist }}/"
 
-      - name: Stage container image context
+      - name: Stage container image context from S only
+        working-directory: fireweed-source
         run: |
-          rm -rf target/release-image
-          mkdir -p target/release-image
-          cp target/release/fireweed-service target/release/fireweed-verify-ledger target/release-image/
-          cp Dockerfile.prebuilt target/release-image/Dockerfile
-          chmod 0755 target/release-image/fireweed-service target/release-image/fireweed-verify-ledger
+          set -euo pipefail
+          rm -rf "${{ steps.run.outputs.image_context }}"
+          mkdir -p "${{ steps.run.outputs.image_context }}"
+          cp target/release/fireweed-service target/release/fireweed-verify-ledger \
+            "${{ steps.run.outputs.image_context }}/"
+          cp Dockerfile.prebuilt "${{ steps.run.outputs.image_context }}/Dockerfile"
+          chmod 0755 \
+            "${{ steps.run.outputs.image_context }}/fireweed-service" \
+            "${{ steps.run.outputs.image_context }}/fireweed-verify-ledger"
 
-      - name: Resolve container image coordinates
+      - name: Resolve container image coordinates (immutable sha-S)
         id: container
         shell: bash
         run: |
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           image="ghcr.io/${owner}/fireweed-service"
+          s="${{ steps.identity.outputs.measured_source }}"
           echo "image=${image}" >> "$GITHUB_OUTPUT"
-          echo "version_tag=${image}:${{ steps.release.outputs.version }}" >> "$GITHUB_OUTPUT"
-          echo "sha_tag=${image}:sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "version_tag=${image}:${{ steps.identity.outputs.version }}" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=${image}:sha-${s}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -213,35 +369,39 @@ jobs:
         id: container-build
         uses: docker/build-push-action@v7
         with:
-          context: ./fireweed/target/release-image
-          file: ./fireweed/target/release-image/Dockerfile
+          context: ${{ steps.run.outputs.image_context }}
+          file: ${{ steps.run.outputs.image_context }}/Dockerfile
           push: true
           tags: |
             ${{ steps.container.outputs.version_tag }}
             ${{ steps.container.outputs.sha_tag }}
 
       - name: Write container image release evidence
+        working-directory: fireweed-source
         env:
           IMAGE: ${{ steps.container.outputs.image }}
           VERSION_TAG: ${{ steps.container.outputs.version_tag }}
           SHA_TAG: ${{ steps.container.outputs.sha_tag }}
           DIGEST: ${{ steps.container-build.outputs.digest }}
-          VERSION: ${{ steps.release.outputs.version }}
+          VERSION: ${{ steps.identity.outputs.version }}
         run: |
+          mkdir -p target/release-dist
           bash scripts/release/write-container-image-evidence.sh \
             --image "$IMAGE" \
             --version "$VERSION" \
             --version-tag "$VERSION_TAG" \
             --sha-tag "$SHA_TAG" \
             --digest "$DIGEST" \
-            --commit "$GITHUB_SHA" \
+            --commit "${{ steps.identity.outputs.measured_source }}" \
             --dockerfile Dockerfile.prebuilt \
             --output target/release-dist/fireweed-service-image.txt
           bash scripts/release/write-checksums.sh target/release-dist
+          cp -a target/release-dist/. "${{ steps.run.outputs.release_dist }}/"
 
       - name: Finalize deployment proof
+        working-directory: fireweed-source
         env:
-          FIREWEED_RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          FIREWEED_RELEASE_VERSION: ${{ steps.identity.outputs.version }}
           FIREWEED_RELEASE_DIST: target/release-dist
           FIREWEED_IMAGE_EVIDENCE_FILE: target/release-dist/fireweed-service-image.txt
         run: |
@@ -253,29 +413,34 @@ jobs:
             target/deployment-release-gate/deployment-proof.md \
             target/release-dist/deployment-proof.md
           bash scripts/release/write-checksums.sh target/release-dist
+          cp -a target/release-dist/. "${{ steps.run.outputs.release_dist }}/"
 
       - name: Verify release artifact set
+        working-directory: fireweed-source
         run: |
           bash scripts/release/verify-release-artifacts.sh \
-            --version "${{ steps.release.outputs.version }}" \
-            --commit "$GITHUB_SHA" \
+            --version "${{ steps.identity.outputs.version }}" \
+            --commit "${{ steps.identity.outputs.measured_source }}" \
             --dist target/release-dist
 
-      - name: Publish release assets
+      - name: Publish release assets against tag (E ancestry)
+        working-directory: fireweed-source
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="${{ steps.release.outputs.tag }}"
-          notes="docs/releases/v${{ steps.release.outputs.version }}.md"
+          tag="${{ steps.identity.outputs.tag }}"
+          notes="docs/releases/v${{ steps.identity.outputs.version }}.md"
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release edit "$tag" --title "$tag" --notes-file "$notes"
             gh release upload "$tag" target/release-dist/* --clobber
           else
             gh release create "$tag" target/release-dist/* \
               --title "$tag" \
-              --notes-file "$notes"
+              --notes-file "$notes" \
+              --target "${{ steps.identity.outputs.evidence_commit }}"
           fi
 
       - name: Surface release workflow failure
         if: failure()
+        working-directory: fireweed-source
         run: bash scripts/ci/release-failure-notification.sh
