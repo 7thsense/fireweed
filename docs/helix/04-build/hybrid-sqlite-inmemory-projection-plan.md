@@ -7,18 +7,25 @@ ddx:
     - td-s3-object-log-sqlite-projection-mode
     - tp-verification-acceptance-criteria
   review:
-    self_hash: 8eeb5f778b64b94c12e1487b1072e335ebf6c73bcfe924bb924eca20634d149e
+    self_hash: 92334351be658f312fa8b7551eb3c1b4c22421a4a2ceb3154c6ee62e67a50df5
     deps:
-      adr-orthogonal-log-projection-composition: 778fdbadeadce6b52e101bda39921f88b193c5737ea96d4b8ae8e8a424a4e743
-      td-s3-object-log-sqlite-projection-mode: 56d80c3e6ad5ab54460e300fdf4ddfe535dc75a47b0a2a0e32d0de46c38c7e49
-      td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
-      tp-verification-acceptance-criteria: 450177278bfc6a0d50fa4c5395dea18fc6dc7738087d88bef7b062ce5fce81ab
-    reviewed_at: "2026-07-20T20:00:41Z"
+      adr-orthogonal-log-projection-composition: 5e35283d3ad0cc38c61d57aac7a63ce7c5fc8028bc8ff5f51a2bb4c28a1f13e6
+      td-s3-object-log-sqlite-projection-mode: 7770bb133f4ace189bfc715e3be6472f894f7c62d52adfc051540fea97c6a4b2
+      td-storage-architecture-backend-contracts: 2d88d342aac82f23616fdff6d94f4ac88701ab6e70c80a0315003c5e66432c74
+      tp-verification-acceptance-criteria: c211fd97e18d7693ab736fb6a81ba3a73c8a3772bf22e0d317b8d6f2ea7d7fcc
+    reviewed_at: "2026-08-07T11:25:30Z"
 ---
 
 # Hybrid SQLite + In-Memory Projection Implementation Plan
 
-> **Status (2026-07, post-v0.11.0): EXECUTED.** This plan is retained as the record of intent; the
+> **Status (P19 / storage-closure): SUPERSEDED.** Hybrid is **not** a public projection
+> matrix row. Public product law is the 5×4 log×projection matrix with Turso default
+> ([orthogonal-storage-matrix-brief](../02-design/orthogonal-storage-matrix-brief.md)).
+> Public env/Helm hard-reject `hybrid` / `hybrid-strict` / `hybrid-async`. Historical
+> Hybrid performance evidence is preserved only as non-governing provenance under
+> [tp002-objectlog-hybrid-evidence.md](../../perf/tp002-objectlog-hybrid-evidence.md).
+>
+> **Prior status (2026-07, post-v0.11.0): EXECUTED.** This plan is retained as the record of intent; the
 > "Current State" and "Goal" sections below describe the repository as it was when the plan was
 > written. What shipped since:
 >

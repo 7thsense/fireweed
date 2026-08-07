@@ -1,7 +1,7 @@
 {
   "product": "Fireweed Queue",
   "short_name": "Fireweed",
-  "version": "0.29.2",
+  "version": "0.30.0",
   "status": "source release",
   "descriptor": "A durable priority queue for ordered, recoverable execution.",
   "repository": "https://github.com/7thsense/fireweed",

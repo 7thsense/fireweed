@@ -6,12 +6,15 @@ ddx:
     - production-deployment-readiness
     - orthogonal-storage-matrix-brief
     - storage-matrix-completion-brief
+  status: accepted
   review:
-    self_hash: 654a47a2f3754980ce33f1348dbe42bb15c05a6f64dda4e4e2686bd84cc9f9d0
+    self_hash: 5ba43c1229b88bb13dcced736ff7adfd3346d68ad0af1f3cd771e3b1e2b4f906
     deps:
-      product-vision: d70aaff09b5d5f59211e5ef3ae9156ee30776e95bce7a70398978e83e39d39e8
-      production-deployment-readiness: a8c78f2f4659471b79c52db30c18a22fe6d3d74b0f8a4dd2a62b6c195ea5f6be
-    reviewed_at: "2026-07-23T01:03:20Z"
+      orthogonal-storage-matrix-brief: 3e6dda6559c43fb47179240e3aa0b32e280c93ef1dca15177e37c5f7289134c4
+      product-vision: 745a023af9f66c4b71312a0271dbea18b3947970eb47e051d4312bb6222befeb
+      production-deployment-readiness: 198c3d00238ad2c3e5bfed9384409fef3b48d925327e76d5e36855f5475daa7c
+      storage-matrix-completion-brief: 16a37c5b1c592108039bb5cfa176503112fc8509e1ab3334861643e7866c390f
+    reviewed_at: "2026-08-07T11:25:30Z"
 ---
 
 # Public Preview Boundary
@@ -48,7 +51,7 @@ Backend = LogStore × ProjectionStore × ControlPlane
 | Axis | Public values | Responsibility |
 |------|---------------|----------------|
 | **Log backend** | `memory`, `sqlite`, `postgres`, `filesystem`, `s3` | Command append, epoch/fence authority, replay when durable |
-| **Projection** | `memory`, `sqlite`, `postgres` | Serving, claim selection, validation, apply |
+| **Projection** | `memory`, `sqlite`, `turso` (default), `postgres` | Serving, claim selection, validation, apply |
 | **Control plane** | (unchanged; in-process / postgres, etc.) | Queue definitions, placement, ownership — composed but not redefined here |
 
 There is no public “profile” product type. Pair strings may appear only in test IDs and historical
@@ -58,48 +61,58 @@ manifest, conditional write / authority); multi-writer still requires ownership 
 **Postgres** is a first-class log backend and a first-class projection backend. Feature flags or image
 builds that omit the adapter are packaging choices and must fail closed with a clear message.
 
+**Turso** is the public default projection (embedded/local Turso 0.7, ordinary WAL mode). Remote,
+sync, and MVCC Turso modes are outside this boundary. Server and Helm default projection selection
+to `turso` when unset.
+
+**Not public product values:** `hybrid`, `hybrid-async`, `hybrid-strict`, `objectlog`, `inmemory`,
+and combined-profile SKUs. Public env/Helm hard-reject those names. Historical Hybrid evidence is
+non-governing provenance only
+([tp002-objectlog-hybrid-evidence.md](../perf/tp002-objectlog-hybrid-evidence.md)).
+
 ### Durability classes
 
 | Class | Logs | Authority after restart | Client contract |
 |-------|------|-------------------------|-----------------|
 | **A — Durable log** | `sqlite`, `postgres`, `filesystem`, `s3` | Log is system of record; projection is rebuildable cache | Success ⇒ durable on log and visible in serving projection; recovery via high-water + tail replay; `request_id` resolves ambiguity across crash |
-| **B — Memory log** | `memory` | In-process log for ordering while alive; **after process death only projection remains** | Success ⇒ visible in projection; durable **iff** projection is durable (`sqlite` / `postgres`); no log rebuild, branch, read-as-of, or change-record-from-log |
+| **B — Memory log** | `memory` | In-process log for ordering while alive; **after process death only projection remains** | Success ⇒ visible in projection; durable **iff** projection is durable (`sqlite` / `turso` / `postgres`); no log rebuild, branch, read-as-of, or change-record-from-log |
 
 Class B is a weaker **persistence envelope**, not a second architecture. Every cell remains
 `LogStore × ProjectionStore` with append → apply → acknowledge for that class. Class B cells carry
 an explicit **semantic durability disclaimer**: durability is limited to the projection. That is the
 only Class B caveat—not incompleteness, not “development only,” and not a demoted product row.
 
-### Full matrix (15 cells) — all preview-supported
+### Full matrix (20 cells) — all preview-supported
 
 Every cell is a valid, preview-supported selection. Semantics differ only by durability class.
 Open via typed `StorageConfig` (`Fireweed::open` / `open_async`); server and Helm select the same pair.
+Default projection is `turso`.
 
-| Log \ Projection | `memory` | `sqlite` | `postgres` |
-|------------------|----------|----------|------------|
-| `memory` | Class B · **supported** | Class B · **supported** | Class B · **supported** |
-| `sqlite` | Class A · **supported** | Class A · **supported** | Class A · **supported** |
-| `postgres` | Class A · **supported** | Class A · **supported** | Class A · **supported** |
-| `filesystem` | Class A · **supported** | Class A · **supported** | Class A · **supported** |
-| `s3` | Class A · **supported** | Class A · **supported** | Class A · **supported** |
+| Log \ Projection | `memory` | `sqlite` | `turso` (default) | `postgres` |
+|------------------|----------|----------|-------------------|------------|
+| `memory` | Class B · **supported** | Class B · **supported** | Class B · **supported** | Class B · **supported** |
+| `sqlite` | Class A · **supported** | Class A · **supported** | Class A · **supported** | Class A · **supported** |
+| `postgres` | Class A · **supported** | Class A · **supported** | Class A · **supported** | Class A · **supported** |
+| `filesystem` | Class A · **supported** | Class A · **supported** | Class A · **supported** | Class A · **supported** |
+| `s3` | Class A · **supported** | Class A · **supported** | Class A · **supported** | Class A · **supported** |
 
 ### Preview support posture
 
-All **15** public matrix cells are **preview-supported**. Maintainers accept correctness reports
+All **20** public matrix cells are **preview-supported**. Maintainers accept correctness reports
 against the documented contract for each cell and intend configuration compatibility within the
 0.x minor line (definition above).
 
 | Log backend | Projection | Durability | Preview posture |
 |-------------|------------|------------|-----------------|
 | `memory` | `memory` | Class B | **Supported** — process-local; after process death neither log nor projection remains |
-| `memory` | `sqlite` / `postgres` | Class B | **Supported** — durability limited to the projection; **no** Class A log rebuild, branch, read-as-of, or change-record-from-log claims |
-| `sqlite` | `memory` / `sqlite` / `postgres` | Class A | **Supported** — durable sqlite log; projection as selected |
-| `postgres` | `memory` / `sqlite` / `postgres` | Class A | **Supported** — first-class durable postgres log; projection as selected (`postgres` cargo feature / image packaging may omit the adapter and must fail closed) |
-| `filesystem` / `s3` | `memory` / `sqlite` / `postgres` | Class A | **Supported** — durable object log (filesystem and s3 are peers); projection as selected |
+| `memory` | `sqlite` / `turso` / `postgres` | Class B | **Supported** — durability limited to the projection; **no** Class A log rebuild, branch, read-as-of, or change-record-from-log claims |
+| `sqlite` | `memory` / `sqlite` / `turso` / `postgres` | Class A | **Supported** — durable sqlite log; projection as selected |
+| `postgres` | `memory` / `sqlite` / `turso` / `postgres` | Class A | **Supported** — first-class durable postgres log; projection as selected (`postgres` cargo feature / image packaging may omit the adapter and must fail closed) |
+| `filesystem` / `s3` | `memory` / `sqlite` / `turso` / `postgres` | Class A | **Supported** — durable object log (filesystem and s3 are peers); projection as selected |
 
-Optional implementation details under a durable projection (hot-memory / async knobs, feature-gated
-adapters such as Turso) may exist in the repository for evaluation. They are **not** public matrix
-rows and carry no compatibility promise as product values.
+Response barriers on object-log cells are public `Strict` and `AsyncProjection` (not Hybrid product
+rows). S3 publication authority is NativeConditionalWrite only; provider brand names (including
+historical Garage notes in release history) are not product SKUs.
 
 All preview-supported **Class A** combinations must preserve the same external transaction
 contract: successful mutations are durable and visible, rejected mutations have no durable effect,
@@ -118,10 +131,11 @@ in the public support set; it informs production claims beyond this preview boun
 Experimental surfaces are present in the repository but are not part of the public support claim
 or the public storage matrix:
 
-- Feature-gated adapters (for example Turso) remain validation-oriented until separately promoted.
+- Remote / sync / MVCC Turso modes (local embedded Turso WAL is public and default).
 - Non-matrix implementation knobs under durable projections may change or be removed without
   compatibility aliases.
-- Experimental surfaces may change or be removed without migration guidance.
+- Historical Hybrid product names remain internal/test-only construction paths and are hard-rejected
+  on the public env/Helm surface.
 
 ## Crate Support Classes
 
@@ -143,7 +157,7 @@ classified below so the preview boundary remains explicit and auditable.
 | `fireweed-resp` | Public protocol adapter | Supported RESP surface subject to its documented conformance contract. |
 | `fireweed-memory` | Runtime adapter | Supported Class B memory log and memory projection paths in the matrix. |
 | `fireweed-postgres` | Runtime adapter | Supported first-class log and projection adapter in the matrix. |
-| `fireweed-turso` | Experimental adapter | Feature-gated validation surface; no compatibility promise; not a public matrix value. |
+| `fireweed-turso` | Public projection adapter | Supported default local Turso projection (embedded WAL); not a log or control-plane authority. |
 | `fireweed-conformance` | Test tooling | Contributor-facing contract tests; not a runtime product artifact. |
 | `fireweed-loadgen` | Test tooling | Load and evidence generation; no public runtime API commitment. |
 | `fireweed-release` | Release tooling | Maintainer tooling; not a runtime product artifact. |
@@ -157,17 +171,18 @@ Non-goals for this release boundary:
 - no claim that the product is a workflow engine or dependency graph engine;
 - no promise that the preview support slice will stay frozen across future releases;
 - no performance proof beyond the existing readiness and probe evidence;
-- no support for unbounded custom backends outside the 5×3 matrix;
+- no support for unbounded custom backends outside the 5×4 matrix;
 - no Class A recovery / branch / read-as-of claims for Class B (memory log) cells;
 - no framing of Postgres as an incomplete or deferred product family;
-- no public profile SKUs or demoted-but-selectable projections as product values.
+- no public Hybrid projection backends or profile SKUs;
+- no treating S3 provider brands (including historical Garage) as current product authority.
 
 ## Support
 
 Support posture for public preview is best-effort and release-boundary limited:
 
 - supported issues are correctness regressions, schema drift, reopen/rebuild failures, and mismatches
-  with the documented preview contract (all 15 matrix cells);
+  with the documented preview contract (all 20 matrix cells);
 - unsupported issues include workload sizing, operator hardening, SLA requests, and deployment
   topologies outside the boundary above;
 - production support claims are deferred until the relevant release-readiness gates are explicitly
@@ -177,10 +192,9 @@ Support posture for public preview is best-effort and release-boundary limited:
 
 Deferred production claims include:
 
-- general production support for feature-gated experimental adapters (for example Turso);
+- remote / sync / MVCC Turso modes;
 - provider certification and universal capacity claims for every object store;
-- release-tier cost and 10-million-item recovery claims until their open evidence beads close;
-- multi-region failover, SLA, and capacity leadership claims.
+- release-tier cost and multi-region failover, SLA, and capacity leadership claims.
 
 The repository contains deployment and scale evidence beyond the per-cell correctness bar. That
-evidence informs production readiness; it does not shrink or expand the public 15-cell support set.
+evidence informs production readiness; it does not shrink or expand the public 20-cell support set.

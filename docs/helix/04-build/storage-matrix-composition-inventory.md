@@ -5,58 +5,65 @@ ddx:
     - orthogonal-storage-matrix-brief
     - adr-orthogonal-log-projection-composition
   status: accepted
+  review:
+    self_hash: 051dfe92d4bc7a7844dd81db6c7c185f7b1ccd570cf852039890f3e4f7e3d05e
+    deps:
+      adr-orthogonal-log-projection-composition: 5e35283d3ad0cc38c61d57aac7a63ce7c5fc8028bc8ff5f51a2bb4c28a1f13e6
+      orthogonal-storage-matrix-brief: 3e6dda6559c43fb47179240e3aa0b32e280c93ef1dca15177e37c5f7289134c4
+    reviewed_at: "2026-08-07T11:25:55Z"
 ---
 
-# Storage matrix composition inventory (5×3)
+# Storage matrix composition inventory (5×4)
 
-**Bead**: `fireweed-7ab8e390` (inventory) · updated by Phase-2 wire beads incl. `fireweed-b89a086d`  
+**Bead**: `fireweed-7ab8e390` (inventory) · Phase-2 wire beads · **P19 final
+inventory refresh** (`fireweed-7cb65c7e`, 2026-08-07).
 **Scope**: Map each public log × projection cell to composition path; keep grid
-aligned with server allowlist + match arms after wiring.  
-**Sources read / revalidated** (2026-07-28):
+aligned with server allowlist + match arms after wiring.
+**Sources read / revalidated** (2026-08-07):
 
 | Surface | Path |
 |---------|------|
 | Server composition root | `crates/fireweed-server/src/lib.rs` (`match (log, projection)` in run path) |
-| Env / product allowlist | `crates/fireweed-server/src/env_config.rs` (`parse_backend` wired matrix) |
-| Facade constructors | `crates/fireweed/src/lib.rs` (`open_*`, `StorageConfig`) |
-| Adapter constructors | `fireweed-memory`, `fireweed-sqlite`, `fireweed-postgres`, `fireweed-objectlog` |
+| Env / product allowlist | `crates/fireweed-server/src/env_config.rs` (`parse_backend` wired matrix; Turso default) |
+| Facade constructors | `crates/fireweed/src/lib.rs` (`open` / `open_async(StorageConfig)`, convenience `open_*`) |
+| Adapter constructors | `fireweed-memory`, `fireweed-sqlite`, `fireweed-postgres`, `fireweed-objectlog`, `fireweed-turso` |
+| Chart defaults | `charts/fireweed-queue/values.yaml` (`filesystem` × `turso`) |
 
 ## Public axes
 
 | Axis | Values |
 |------|--------|
 | **Log** | `memory`, `sqlite`, `postgres`, `filesystem`, `s3` |
-| **Projection** | `memory`, `sqlite`, `postgres` |
+| **Projection** | `memory`, `sqlite`, `turso` (**default**), `postgres` |
 
 `filesystem` and `s3` are first-class log names for the segmented object-log family
-(`LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem | S3)`). Legacy env alias
-`objectlog` (+ `FIREWEED_OBJECT_LOG_STORE=local|s3`) still parses to those logs.
+(`LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem | S3)`). Legacy env names
+`objectlog` and `inmemory` are **hard-rejected** on the public env surface.
 
-**Not public matrix projections** (still parseable on server): `hybrid`,
-`hybrid-strict`, `hybrid-async`, `turso`. They are noted only where they share an
-object-log code path; they are **not** matrix rows.
+**Not public matrix projections** (hard-rejected on env/Helm; may remain in the
+type system for direct `Config` tests only): `hybrid`, `hybrid-strict`,
+`hybrid-async`. Hybrid is **not** a matrix row and carries no product claim.
 
-**Config vs open**: `StorageConfig` in `crates/fireweed/src/lib.rs` validates all
-15 pairs as structurally valid. Opening a cell that is not wired still fails at
-composition (server: `unsupported storage configuration…pairing is not wired`;
-facade: no single `open(StorageConfig)` dispatcher yet).
+**Config vs open**: `StorageConfig` + `Fireweed::open` / `open_async` is the sole
+full-matrix entry. Convenience `open_*` helpers are sugar over that model.
+Server/Helm select the same public axes; projection defaults to `turso`.
 
 ## Summary grid (server product wire-up)
 
-| Log \ Projection | `memory` | `sqlite` | `postgres` |
-|------------------|----------|----------|------------|
-| **memory** | yes | yes | yes (`postgres` feature) |
-| **sqlite** | yes | yes | yes (`postgres` feature) |
-| **postgres** | yes | yes | yes |
-| **filesystem** | yes | yes | yes (`postgres` feature) |
-| **s3** | yes | yes | yes (`postgres` feature) |
+| Log \ Projection | `memory` | `sqlite` | `turso` (default) | `postgres` |
+|------------------|----------|----------|-------------------|------------|
+| **memory** | yes | yes | yes | yes (`postgres` feature) |
+| **sqlite** | yes | yes | yes | yes (`postgres` feature) |
+| **postgres** | yes | yes | yes | yes |
+| **filesystem** | yes | yes | yes | yes (`postgres` feature) |
+| **s3** | yes | yes | yes | yes (`postgres` feature) |
 
 Object-log cells (`filesystem` / `s3`) share `LogSpec::ObjectLog(_)` match arms;
-S3 is selected via `ObjectLogSpec::S3` (env `FIREWEED_LOG_BACKEND=s3` or legacy
-`objectlog` + `FIREWEED_OBJECT_LOG_STORE=s3`).
+S3 is selected via `ObjectLogSpec::S3` (env `FIREWEED_LOG_BACKEND=s3`).
 
-**Counts (server public matrix)**: 15 wired (postgres projection cells require the
-`postgres` cargo feature).
+**Counts (server public matrix)**: **20** wired (postgres projection cells require the
+`postgres` cargo feature). Response barriers: `Strict` (all cells) and
+`AsyncProjection` on the eight filesystem/S3 object-log cells.
 
 ---
 
@@ -66,8 +73,8 @@ Legend for **wired**:
 
 - **Server**: accepted by `parse_backend` allowlist and assembled in the server
   `match (log, projection)` composition root.
-- **Facade**: reachable via a public (or documented feature-gated) `open_*`
-  constructor on the `fireweed` crate.
+- **Facade**: reachable via `open`/`open_async(StorageConfig)` and, where noted,
+  convenience `open_*` constructors on the `fireweed` crate.
 
 ### 1. `memory` × `memory`
 
@@ -77,7 +84,7 @@ Legend for **wired**:
 | **Server path** | `env_config.rs`: `(LogSpec::Memory, ProjectionSpec::InMemory) => true`; `lib.rs` match arm `(LogSpec::Memory, ProjectionSpec::InMemory)` → `composed_memory_backend().with_node_id(node_id)` |
 | **Facade** | `fireweed::open_memory` → `fireweed_memory::composed_memory_backend()` |
 | **Constructor** | `fireweed_memory::composed_memory_backend` → `ComposedBackend<MemoryLog, InMemoryProjection, InProcessControlPlane>` |
-| **Notes** | Class B reference cell. Env: `FIREWEED_LOG_BACKEND=memory`, `FIREWEED_PROJECTION_BACKEND=memory` (alias `inmemory`). |
+| **Notes** | Class B reference cell. Env: `FIREWEED_LOG_BACKEND=memory`, `FIREWEED_PROJECTION_BACKEND=memory` (`inmemory` is rejected). |
 
 ### 2. `memory` × `sqlite`
 

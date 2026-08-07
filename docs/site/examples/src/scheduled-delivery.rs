@@ -7,7 +7,7 @@ async fn scheduled_batch_delivery_profile<B: LibBackend>(
 ) -> ScheduledProfileEvidence {
     let q = qk(tenant, "campaign");
     fireweed
-        .create_queue(qdef(
+        .create_queue(qdef_scheduled_actions(
             tenant,
             "campaign",
             PriorityDirection::Ascending,

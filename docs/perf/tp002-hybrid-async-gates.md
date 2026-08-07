@@ -1,5 +1,8 @@
 # TP-002 hybrid-async perf gates + attribution
 
+> **Status (P19 / storage-closure): SUPERSEDED as current product guidance.** Hybrid is not a public projection matrix row; Turso is the default projection. This document is retained as historical review/evidence lineage only.
+
+
 **Bead:** `pqueue-21d63f09`. **Suite:**
 `crates/fireweed-server/tests/performance_object_log_hybrid_tests.rs`.
 

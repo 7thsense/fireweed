@@ -23,7 +23,8 @@ fn lifecycle_over_shapes_sqlite_log() {
     for shape in all_shapes() {
         let path = tmp(&format!("sqlite-{}", shape.name));
         let _ = std::fs::remove_file(&path);
-        let fireweed = open_sqlite(path.to_str().unwrap(), Arc::new(SystemClock)).expect("open sqlite");
+        let fireweed =
+            open_sqlite(path.to_str().unwrap(), Arc::new(SystemClock)).expect("open sqlite");
         run_one("sqlite", &fireweed, &shape, true);
         let _ = std::fs::remove_file(&path);
     }

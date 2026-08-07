@@ -4,11 +4,12 @@ ddx:
   depends_on:
     - plan-hybrid-sqlite-inmemory-projection
   review:
-    self_hash: 575b3529a97ffd63e4b01a1cb1420d531295134f1996b323ff74bb3faec61a61
+    self_hash: 332cf5a6832e5127728f02055524a4fbdd3173fd7f66780c423543059f9f1a3a
     deps:
-      plan-hybrid-sqlite-inmemory-projection: 8eeb5f778b64b94c12e1487b1072e335ebf6c73bcfe924bb924eca20634d149e
-    reviewed_at: "2026-07-20T20:00:41Z"
+      plan-hybrid-sqlite-inmemory-projection: 92334351be658f312fa8b7551eb3c1b4c22421a4a2ceb3154c6ee62e67a50df5
+    reviewed_at: "2026-08-07T11:25:30Z"
 ---
+> **Status (P19 / storage-closure): SUPERSEDED as current product guidance.** Hybrid is not a public projection matrix row; Turso is the default projection. This document is retained as historical review/evidence lineage only.
 
 # Hybrid Plan Review Convergence
 

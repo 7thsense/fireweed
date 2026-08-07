@@ -135,12 +135,15 @@ fail at startup instead of silently selecting another backend.
   covers images, charts, archives, and checksums.
 - [Operator deploy console](docs/site/deploy/index.html) (also linked from the
   legacy [docs/operator](docs/operator/index.html) shim).
-- [v0.29.2 release notes](docs/releases/v0.29.2.md) describe Snorri validate-before-apply
-  fixes, Garage authority matrix, and E3 TP-003 emitter scaffold.
-- [v0.23.2 release notes](docs/releases/v0.23.2.md) describe the completed
-  public 5×3 storage matrix.
-- [v0.23.0 release notes](docs/releases/v0.23.0.md) describe the native-S3
-  authority cutover and provider-neutral E3 runner.
+- [v0.30.0 identity note](docs/releases/v0.30.0.md) reserves package identity
+  `0.30.0` ahead of candidate-source freeze (not a cut tag by itself).
+- [v0.29.2 release notes](docs/releases/v0.29.2.md) (historical) describe Snorri
+  validate-before-apply fixes and E3 TP-003 emitter scaffold.
+- [v0.23.2 release notes](docs/releases/v0.23.2.md) (historical) describe an earlier
+  public 5×3 storage matrix; current product law is the 5×4 matrix with Turso default.
+- [v0.23.0 release notes](docs/releases/v0.23.0.md) (historical) describe the native-S3
+  authority cutover and provider-neutral E3 runner. Current S3 publication authority is
+  NativeConditionalWrite only; provider brands are not product SKUs.
 - [v0.22.0 release notes](docs/releases/v0.22.0.md) describe request-id push
   Fresh/Replayed disposition for Snorri create/enqueue counters.
 - [v0.21.0 release notes](docs/releases/v0.21.0.md) describe the complete

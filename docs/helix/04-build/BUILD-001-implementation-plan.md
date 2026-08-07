@@ -17,7 +17,7 @@ ddx:
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
   review:
-    self_hash: b0bc26d82d3274dd9f41f855410d5e0d5a6631a3a9684914e7bbac841e2f3514
+    self_hash: 71caaa7f397856e914c1f9a5e4d99cc4d8e80fe9d1a579ff16cc16d128a468ef
     deps:
       adr-auth-tenancy-and-storage-isolation: 1d4296498a187d4d4c3bb4a4e37647f7193036c3a20ab2a8b66154a45937ece2
       adr-cqrs-log-projection-storage-model: 63ed2521bc7d0e785529aafbd179b3ef22d51cbf3897d51c511540be52ee9ba3
@@ -30,10 +30,10 @@ ddx:
       td-s3-object-log-sqlite-projection-mode: 7770bb133f4ace189bfc715e3be6472f894f7c62d52adfc051540fea97c6a4b2
       td-sharding-and-shard-ownership: f7309199e3810447398caa11f2f0241ce05c035e9b9d0241aada4ad3759582e1
       td-storage-architecture-backend-contracts: 2d88d342aac82f23616fdff6d94f4ac88701ab6e70c80a0315003c5e66432c74
-      tp-governing-test-traceability: 61cbc8becaacf00f3925f5d282cf33dec77e01e07c0bd077d93a3a2f05cc6d67
+      tp-governing-test-traceability: 1f28a43e7928388a17e76507cc38e3b5ffc411860ecba33bba16fb8f320aa209
       tp-scale-substantiation: 23f20e8dab88330e4ddd165a0d2230151b7ef0f99ca16c016671558ed5719686
       tp-verification-acceptance-criteria: c211fd97e18d7693ab736fb6a81ba3a73c8a3772bf22e0d317b8d6f2ea7d7fcc
-    reviewed_at: "2026-08-04T04:50:53Z"
+    reviewed_at: "2026-08-07T11:25:30Z"
 ---
 
 # Build Plan: BUILD-001 Implementation Sequence
@@ -419,8 +419,9 @@ Completion evidence as of 2026-06-16:
 Addendum as of v0.11.0 (2026-07): TP-002 E2 was reframed to cross-queue
 scale-out (ADR-008) and re-measured live on a multi-node kind cluster; the
 current E2 evidence is `docs/perf/evidence/tp002-e2-cross-queue-remeasured.jsonl`
-(validates via `fireweed-verify-ledger --strict --require-evidence E2`). The
-released runtime additionally ships the TD-004 hybrid projection profiles
-(`objectlog/hybrid`, `objectlog/hybrid-strict`, `objectlog/hybrid-async`) beyond
-the BUILD-001 committed profiles above; their gates are owned by TP-003 §4.1 and
-the hybrid implementation plan, not by this build plan.
+(validates via `fireweed-verify-ledger --strict --require-evidence E2`). Hybrid projection profiles
+(`objectlog/hybrid`, `objectlog/hybrid-strict`, `objectlog/hybrid-async`) are
+**retired product names** (P12a/P19): hard-rejected on public env/Helm and not
+matrix rows. Historical Hybrid gates and evidence remain non-governing provenance
+under TP-002 / `tp002-objectlog-hybrid-evidence.md`; response barriers are the
+public `Strict` / `AsyncProjection` axes, not Hybrid SKUs.

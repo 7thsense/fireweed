@@ -1,5 +1,8 @@
 # TP-002 hybrid-async workload harness
 
+> **Status (P19 / storage-closure): SUPERSEDED as current product guidance.** Hybrid is not a public projection matrix row; Turso is the default projection. This document is retained as historical review/evidence lineage only.
+
+
 **Bead:** `pqueue-3d5bb3df`. **Suite:**
 `crates/fireweed-server/tests/performance_object_log_hybrid_tests.rs`.
 

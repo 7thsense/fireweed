@@ -250,10 +250,11 @@ def page_home(meta: dict) -> str:
 
         <div class="callout">
           <p>
-            v{html.escape(meta["version"])} is a <strong>GitHub source release</strong>.
-            Publication to crates.io and GHCR is deferred. Memory profiles are
-            development-only. Not every compiled storage pairing is supported for
-            production use—see the <a href="support.html">support boundary</a>.
+            v{html.escape(meta["version"])} is a <strong>GitHub source tree</strong>
+            (workspace package identity; annotated tag cut is a separate release step).
+            Publication to crates.io and GHCR is deferred. The public product is the
+            full 5×4 log×projection matrix with Turso as the default projection—see the
+            <a href="support.html">support boundary</a>.
           </p>
         </div>
 
@@ -475,24 +476,26 @@ cargo build -p fireweed-server
         <div class="page-intro">
           <h2>Get started</h2>
           <p>
-            Fireweed v{html.escape(meta["version"])} is a source release.
-            Clone the repository; crates.io and GHCR publication are deferred.
+            Fireweed v{html.escape(meta["version"])} is the current workspace package
+            identity. Clone the repository; crates.io and GHCR publication are deferred.
           </p>
         </div>
         <div class="callout warn">
           <p>
             Prerequisites: Git, rustup, a C toolchain and CMake for native crypto
-            dependencies. The memory backend is disposable and development-only.
+            dependencies. Prefer <code>open(StorageConfig)</code> for the full matrix;
+            convenience open helpers remain sugar over that model.
           </p>
         </div>
         <div class="section-title"><h2>Path A — embed Rust</h2></div>
         {code_block("clone and exercise the facade", embed, "sh")}
         <div class="prose">
           <p>
-            The public root type is concrete <code>Fireweed</code>. Start with
-            <code>open_memory</code> for local experiments, then
-            <code>open_sqlite</code> / <code>open_sqlite_relational</code> /
-            <code>open_objectlog</code> for durable compositions. Walk
+            The public root type is concrete <code>Fireweed</code>. Compose with
+            <code>open</code> / <code>open_async(StorageConfig)</code> (Turso is the
+            default projection), or use convenience helpers such as
+            <code>open_memory</code>, <code>open_sqlite</code>, and
+            <code>open_objectlog</code>. Walk
             <a href="examples/basic-lifecycle.html">basic lifecycle</a> then
             <a href="examples/scheduler-boundary.html">scheduler boundary</a>.
           </p>
@@ -539,25 +542,32 @@ def page_support(meta: dict) -> str:
             within each supported 0.x minor line. It is not a 1.0 SemVer, SLA, capacity,
             or production-readiness claim.
           </p>
+          <p>
+            Storage is the public 5×4 matrix: log
+            (<code>memory</code> | <code>sqlite</code> | <code>postgres</code> |
+            <code>filesystem</code> | <code>s3</code>) × projection
+            (<code>memory</code> | <code>sqlite</code> | <code>turso</code> (default) |
+            <code>postgres</code>). Hybrid and legacy profile names are not product values.
+          </p>
         </div>
         <table class="data">
-          <thead><tr><th>Profile</th><th>Status</th><th>Notes</th></tr></thead>
+          <thead><tr><th>Log × projection</th><th>Status</th><th>Notes</th></tr></thead>
           <tbody>
-            <tr><td><code>sqlite/inmemory</code></td><td><span class="badge ok">supported</span></td><td>Single-process, locally durable embed.</td></tr>
-            <tr><td><code>objectlog/inmemory</code></td><td><span class="badge ok">supported</span></td><td>Durable object log, rebuildable memory projection.</td></tr>
-            <tr><td><code>objectlog/sqlite</code></td><td><span class="badge ok">supported baseline</span></td><td>Reference persistent local projection.</td></tr>
-            <tr><td><code>objectlog/hybrid</code></td><td><span class="badge ok">supported</span></td><td>Hot-memory reads over durable SQLite projection.</td></tr>
-            <tr><td><code>objectlog/hybrid-async</code></td><td><span class="badge warn">supported with limits</span></td><td>Async debt/backpressure required; scale/cost claims deferred.</td></tr>
-            <tr><td><code>memory/inmemory</code></td><td><span class="badge neutral">development only</span></td><td>Does not survive process loss.</td></tr>
-            <tr><td><code>objectlog/turso</code></td><td><span class="badge warn">experimental</span></td><td>Feature-gated; not a supported user profile.</td></tr>
-            <tr><td><code>postgres/*</code></td><td><span class="badge blocked">deferred</span></td><td>Wired and exercised; outside the current support contract.</td></tr>
+            <tr><td><code>memory</code> × <code>memory</code> | <code>sqlite</code> | <code>turso</code> | <code>postgres</code></td><td><span class="badge ok">supported</span></td><td>Class B: durability limited to the projection after process death; no Class A log replay.</td></tr>
+            <tr><td><code>sqlite</code> × all four projections</td><td><span class="badge ok">supported</span></td><td>Class A local durable log; projection as selected.</td></tr>
+            <tr><td><code>postgres</code> × all four projections</td><td><span class="badge ok">supported</span></td><td>Class A; optional postgres cargo feature / image packaging must fail closed when omitted.</td></tr>
+            <tr><td><code>filesystem</code> × all four projections</td><td><span class="badge ok">supported</span></td><td>Class A local/NAS object log; default deploy log axis with Turso projection.</td></tr>
+            <tr><td><code>s3</code> × all four projections</td><td><span class="badge ok">supported</span></td><td>Class A object log; NativeConditionalWrite S3 only—provider brands are not product SKUs.</td></tr>
+            <tr><td><code>turso</code> projection (any log)</td><td><span class="badge ok">supported default</span></td><td>Embedded/local Turso 0.7 WAL; public default when projection is unset. Remote/sync/MVCC modes are out of scope.</td></tr>
+            <tr><td><code>hybrid</code> / <code>hybrid-async</code> / <code>hybrid-strict</code></td><td><span class="badge blocked">retired</span></td><td>Not public selectors; hard-rejected on env/Helm. Historical evidence only.</td></tr>
+            <tr><td><code>objectlog</code> / <code>inmemory</code> aliases</td><td><span class="badge blocked">retired</span></td><td>Use <code>filesystem</code>|<code>s3</code> and <code>memory</code>.</td></tr>
           </tbody>
         </table>
         <div class="prose">
-          <h2>What this release ships</h2>
+          <h2>What this source tree ships</h2>
           <ul>
-            <li>Public repository and annotated source tag v{html.escape(meta["version"])}</li>
-            <li>Concrete <code>Fireweed</code> Rust facade and RESP service path</li>
+            <li>Workspace package identity v{html.escape(meta["version"])} (source tree; tag cut is a separate release step)</li>
+            <li>Concrete <code>Fireweed</code> Rust facade (<code>open</code> / <code>open_async(StorageConfig)</code>) and RESP service path</li>
             <li>Issues-only contribution policy; MIT OR Apache-2.0</li>
           </ul>
           <h2>Explicitly deferred</h2>
@@ -566,7 +576,15 @@ def page_support(meta: dict) -> str:
             <li>GHCR container publication</li>
             <li>Universal performance bounds, multi-region failover, provider certification</li>
             <li>Historical query (<code>read_as_of</code>) as a supported facade API</li>
+            <li>Remote / sync / MVCC Turso modes</li>
           </ul>
+          <h2>Public examples</h2>
+          <p>
+            Microsite examples are excerpts of real tests for illustration. Example-only
+            harness status strings (for example Python RESP <code>SKIP:</code> in
+            optional local scenarios) are non-governing and never satisfy a required
+            product or CI route. Required work is proven only by governing routes and gates.
+          </p>
           <p>
             Full boundary:
             <a href="../helix/00-discover/public-preview-boundary.md">support policy</a>.
@@ -802,13 +820,11 @@ def page_api_rust(meta: dict) -> str:
         <table class="data">
           <thead><tr><th>Constructor</th><th>Typical use</th><th>Support note</th></tr></thead>
           <tbody>
-            <tr><td><code>open_memory</code></td><td>Local experiments</td><td>Development only</td></tr>
-            <tr><td><code>open_sqlite</code></td><td>SQLite log + memory projection</td><td>Supported path</td></tr>
-            <tr><td><code>open_sqlite_relational</code></td><td>Relational projection + discovery</td><td>Supported path</td></tr>
-            <tr><td><code>open_objectlog</code></td><td>Local object log + memory projection</td><td>Supported path</td></tr>
-            <tr><td><code>open_objectlog_sqlite</code></td><td>Object log + SQLite projection</td><td>Supported baseline composition</td></tr>
-            <tr><td><code>open_objectlog_postgres*</code></td><td>Composed OL + Postgres projection</td><td>Outside current support contract</td></tr>
-            <tr><td><code>open_postgres*</code></td><td>Postgres-backed profiles</td><td>Deferred in support boundary</td></tr>
+            <tr><td><code>open</code> / <code>open_async</code></td><td>Full matrix via <code>StorageConfig</code></td><td>Canonical 5×4 entry; Turso is the default projection</td></tr>
+            <tr><td><code>open_memory</code></td><td>Memory log × memory projection</td><td>Class B convenience sugar</td></tr>
+            <tr><td><code>open_sqlite</code> / <code>open_sqlite_*</code></td><td>SQLite log convenience helpers</td><td>Supported Class A cells</td></tr>
+            <tr><td><code>open_objectlog</code> / <code>open_objectlog_*</code></td><td>Filesystem object-log helpers</td><td>Supported Class A; prefer typed <code>StorageConfig</code> for S3</td></tr>
+            <tr><td><code>open_postgres</code> / <code>open_postgres_*</code></td><td>Postgres log convenience helpers</td><td>Supported Class A (feature-gated packaging fails closed)</td></tr>
           </tbody>
         </table>
         <div class="prose">
@@ -951,11 +967,11 @@ def page_deploy(meta: dict) -> str:
         </div>
         <div class="callout warn">
           <p>
-            Chart values may expose backends that are not currently supported.
             Align production intent with the
             <a href="../support.html">support boundary</a> and
             <a href="../../helix/04-build/DEPLOYMENT-READINESS.md">deployment readiness</a>
-            contracts—not merely with what Helm renders.
+            contracts. Public chart values match the 5×4 matrix; legacy
+            <code>objectlog</code>/<code>inmemory</code>/<code>hybrid*</code> names fail schema validation.
           </p>
         </div>
         <div class="operator-grid">
@@ -984,7 +1000,7 @@ gh release download "$TAG" --repo "${{OWNER}}/${{REPO}}" \\
 (cd "$DIST_DIR" &amp;&amp; shasum -a 256 -c SHA256SUMS)</code></pre>
               </div>
               <div class="command-block">
-                <div class="label"><span>helm install</span><span>objectlog path</span></div>
+                <div class="label"><span>helm install</span><span>filesystem × turso</span></div>
                 <pre><code>NAMESPACE=fireweed
 RELEASE=fireweed
 IMAGE="ghcr.io/${{OWNER}}/fireweed-service"
@@ -995,13 +1011,13 @@ helm install "$RELEASE" "$DIST_DIR/fireweed-queue-${{VERSION}}.tgz" \\
   --namespace "$NAMESPACE" \\
   --set image.repository="$IMAGE" \\
   --set image.tag="$VERSION" \\
-  --set storage.log.backend=objectlog \\
-  --set storage.projection.backend=inmemory</code></pre>
+  --set storage.log.backend=filesystem \\
+  --set storage.projection.backend=turso</code></pre>
               </div>
               <div class="command-block">
                 <div class="label"><span>kind smoke</span><span>local proof</span></div>
                 <pre><code>bash scripts/ci/helm-gate.sh
-bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend inmemory</code></pre>
+bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend turso</code></pre>
               </div>
             </div>
           </section>
@@ -1014,11 +1030,11 @@ bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend i
               <div class="storage-axis-list">
                 <article class="storage-axis">
                   <h3>log backend</h3>
-                  <p>Chart values may expose <code>objectlog</code> and <code>postgres</code>. Prefer supported object-log compositions unless you knowingly operate outside the support contract.</p>
+                  <p>Public values: <code>memory</code>, <code>sqlite</code>, <code>postgres</code>, <code>filesystem</code> (chart default), <code>s3</code>. Object-log roots use <code>storage.log.objectLog.*</code> for filesystem/S3 only.</p>
                 </article>
                 <article class="storage-axis">
                   <h3>projection backend</h3>
-                  <p>Chart values may expose <code>inmemory</code>, <code>sqlite</code>, <code>hybrid</code>, <code>hybrid-async</code>, and <code>postgres</code>. Unsupported pairings fail at startup.</p>
+                  <p>Public values: <code>memory</code>, <code>sqlite</code>, <code>turso</code> (default), <code>postgres</code>. Chart defaults render <code>FIREWEED_PROJECTION_BACKEND=turso</code> and <code>FIREWEED_TURSO_PROJECTION_PATH</code>.</p>
                 </article>
               </div>
             </section>
@@ -1029,12 +1045,12 @@ bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend i
               </div>
               <div class="status-list">
                 <article class="status-row">
-                  <h3><span class="badge ok">supported</span> objectlog + inmemory/sqlite/hybrid</h3>
-                  <p>Supported when release evidence and readiness gates pass for your topology.</p>
+                  <h3><span class="badge ok">supported</span> full 5×4 matrix</h3>
+                  <p>All twenty log×projection cells are preview-supported. Class B memory-log cells carry a durability disclaimer only.</p>
                 </article>
                 <article class="status-row">
-                  <h3><span class="badge blocked">deferred</span> postgres chart paths</h3>
-                  <p>May render and even test, but remains outside the support contract until promoted.</p>
+                  <h3><span class="badge ok">default</span> filesystem × turso</h3>
+                  <p>Chart and server defaults select local/NAS object log with embedded Turso projection.</p>
                 </article>
                 <article class="status-row">
                   <h3><span class="badge warn">verify</span> release artifacts</h3>
@@ -1061,12 +1077,12 @@ bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend i
                 <path d="M565 55 L585 65 L565 75" fill="none" stroke="#161616" stroke-width="3"/>
                 <rect x="585" y="30" width="155" height="70" rx="6" fill="#fff0d8" stroke="#b45309"/>
                 <text x="620" y="62">Projection</text>
-                <text x="620" y="84" class="thin">sqlite / memory</text>
+                <text x="620" y="84" class="thin">turso default</text>
                 <path d="M380 100 V158" stroke="#161616" stroke-width="3"/>
                 <path d="M370 148 L380 168 L390 148" fill="none" stroke="#161616" stroke-width="3"/>
                 <rect x="225" y="168" width="170" height="62" rx="6" fill="#fde2e2" stroke="#b91c1c"/>
-                <text x="255" y="194">Object log</text>
-                <text x="255" y="216" class="thin">durable log</text>
+                <text x="255" y="194">Durable log</text>
+                <text x="255" y="216" class="thin">filesystem / s3 / …</text>
                 <rect x="425" y="168" width="185" height="62" rx="6" fill="#fffffb" stroke="#161616"/>
                 <text x="455" y="194">Projection store</text>
                 <text x="455" y="216" class="thin">storage mount</text>
@@ -1099,7 +1115,7 @@ bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend i
               </article>
               <article class="doc-row">
                 <h3><a href="../../deployment/kind-helm-integration.md">kind smoke</a></h3>
-                <p>kind RESP smoke for objectlog projections.</p>
+                <p>kind RESP smoke for public log×projection pairs (Turso default).</p>
               </article>
             </div>
           </section>

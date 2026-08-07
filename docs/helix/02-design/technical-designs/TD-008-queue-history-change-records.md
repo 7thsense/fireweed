@@ -9,14 +9,14 @@ ddx:
     - td-s3-object-log-sqlite-projection-mode
   status: accepted
   review:
-    self_hash: 1a69a5ebd1be38b7f17c3be7a1f1319dc6111581fc905fec2c7a894bb3b77bf0
+    self_hash: 1744898d68be2d75ace9da0b8778dd69c827a518506a0598486e9d2480ad1598
     deps:
-      adr-cqrs-log-projection-storage-model: 849c0bd7e15200ab056c2e5fcedb4b04a116aba520993fb4bab63b1195146107
-      adr-fjord-embedded-change-log-consumer-surface: 278c336d35ab55c302a1cc321c74a11afca0001545201875fe322a9dd31ebdae
-      adr-log-single-source-of-truth: 35052eb1b94371aa8abb8e8b348a21b459522c7d5feaba04b7146745a04bda62
-      td-s3-object-log-sqlite-projection-mode: 56d80c3e6ad5ab54460e300fdf4ddfe535dc75a47b0a2a0e32d0de46c38c7e49
-      td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
-    reviewed_at: "2026-07-20T00:01:27Z"
+      adr-cqrs-log-projection-storage-model: 63ed2521bc7d0e785529aafbd179b3ef22d51cbf3897d51c511540be52ee9ba3
+      adr-fjord-embedded-change-log-consumer-surface: ebc28c2a895033a35d04b61aca9f8e0e37338ca96ca3aa0a7636a8b6cd96dcee
+      adr-log-single-source-of-truth: c88063a069f43bd90f31e4875ad8b35fca9876de5b52cb777908d314d46abd1b
+      td-s3-object-log-sqlite-projection-mode: 7770bb133f4ace189bfc715e3be6472f894f7c62d52adfc051540fea97c6a4b2
+      td-storage-architecture-backend-contracts: 2d88d342aac82f23616fdff6d94f4ac88701ab6e70c80a0315003c5e66432c74
+    reviewed_at: "2026-08-07T11:25:30Z"
 ---
 
 # TD-008: Queue history via change-record emission, plus longer terminal retention
@@ -28,7 +28,7 @@ ingest path for SES exhaust, so delivery history lands beside delivery exhaust; 
 fireweed-server, as the Kafka-protocol change-log interface provider (see "Delivery interfaces" and
 ADR-014).
 
-> **Reconciled with the 5×3 storage product (2026-08-03).** ADR-014 specifies
+> **Reconciled with the 5×4 storage product (2026-08-03).** ADR-014 specifies
 > that fjord delivery is an **in-process** append to the embedded broker's Rust log (librdkafka
 > removed; the optional external-Kafka producer is pure-Rust `rskafka`). The record and delivery
 > invariants remain unchanged, but they apply only where a Class A log can reconstruct the tail.

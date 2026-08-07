@@ -1,5 +1,8 @@
 ## Target
 
+> **Status (P19 / storage-closure): SUPERSEDED as current product guidance.** Hybrid is not a public projection matrix row; Turso is the default projection. This document is retained as historical review/evidence lineage only.
+
+
 Review `docs/helix/04-build/hybrid-sqlite-inmemory-projection-plan.md`.
 
 ## Governing Artifacts And Code

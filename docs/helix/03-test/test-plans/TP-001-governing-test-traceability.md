@@ -18,24 +18,24 @@ ddx:
     - td-s3-object-log-sqlite-projection-mode
     - tp-scale-substantiation
   review:
-    self_hash: a987698e797f33f52168aba5ba54f41bcc18bd3fcabe278af085afdea7b82768
+    self_hash: 1f28a43e7928388a17e76507cc38e3b5ffc411860ecba33bba16fb8f320aa209
     deps:
-      adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
-      adr-cqrs-log-projection-storage-model: 849c0bd7e15200ab056c2e5fcedb4b04a116aba520993fb4bab63b1195146107
-      adr-granularity-mapping-and-claim-domain: 29444ade97bb5bce95a3f9d3c8878f5dc1ec2ea0bfe562f914ae17ff84984a18
-      adr-queue-as-shard-unit-and-projection-families: 50fb11c85cbf40fa182469b036ef5210b304f330171a17ab371ae485524cb924
-      adr-rust-workspace-and-toolchain-policy: 7d743ad4ee99e4fb53736f83eb854924be3af511a439d1e510eb1135351461eb
-      api-native-client-interface: ae6c682dbf6e269b6792351f1677477f2324fb24cb4cc4f85392f6369fd43b0b
-      api-operator-repair-contract: 92d0dae8debf7fc9ac68fae06fdbe6d9a330f2914a58329c046331da9d5b4c6e
-      api-workload-integration-profiles: 3206a0ad7896fa01deb790f1dca95bddab1cbe9d8f69a761cfb041a34498450e
-      prd: 2d97b05f9c0c0db576149bdfef21c729d66e07dbb674c95f6b7135ddcffa3b91
-      td-postgres-native-reference-mode: 1b657638258f7d3fa15e46b7536d33d766ade1a0948a32598dc5c9ae65b7828b
-      td-resp-wire-adapter: d33d11d4e7e087384828e3ca3289d4f0b7bb6aefd88a4245ddb7f441f0706bc6
-      td-s3-object-log-sqlite-projection-mode: 56d80c3e6ad5ab54460e300fdf4ddfe535dc75a47b0a2a0e32d0de46c38c7e49
-      td-sharding-and-shard-ownership: b98590bc7a51f8e904052d64aaa6ab4d8a9c9729d155d17ee0823ffcf6b64a0d
-      td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
-      tp-scale-substantiation: e0ca180cb81c98e7c451341f1ea912bf152ac2c75d422a3b315516fc9f8ee7d3
-    reviewed_at: "2026-07-20T20:00:41Z"
+      adr-auth-tenancy-and-storage-isolation: 1d4296498a187d4d4c3bb4a4e37647f7193036c3a20ab2a8b66154a45937ece2
+      adr-cqrs-log-projection-storage-model: 63ed2521bc7d0e785529aafbd179b3ef22d51cbf3897d51c511540be52ee9ba3
+      adr-granularity-mapping-and-claim-domain: c44740df25ed32569e86f4c3459ed07839d33325367cdafc49fb1317deab606d
+      adr-queue-as-shard-unit-and-projection-families: 64a7c7b0e2e5f4caa2c7d775b84c87a9a1e4484ae3df9dccbe3d145d22681a7e
+      adr-rust-workspace-and-toolchain-policy: df18055fca75337c9dc5e7e099d14afd44428e4883a0784af0a0c1e2192e98f6
+      api-native-client-interface: b99403ef55afffd134ac3ef1a71065c497558c94de379c2b257b119000a0f488
+      api-operator-repair-contract: f4fdf0e4e8e29431d8ff2f89a8bc843497dca743ad5e32439996a4ad7c611197
+      api-workload-integration-profiles: 3c3dd594f1723e987015d4790634b1088016f5f41a049e661eba4b752cfb4c39
+      prd: cd3004bd0dc9ac531d1cd2596e875e51c2de4601e330007fee60da1ea7b3d5ce
+      td-postgres-native-reference-mode: 4088399aca0beb5840c4ace629039ad655bf4ff928bc22f86072b94857bdbd3e
+      td-resp-wire-adapter: 351f429307d19a5b4ba3c3e39e9d9168e999a5b067b07d15f67636e5fd5d8040
+      td-s3-object-log-sqlite-projection-mode: 7770bb133f4ace189bfc715e3be6472f894f7c62d52adfc051540fea97c6a4b2
+      td-sharding-and-shard-ownership: f7309199e3810447398caa11f2f0241ce05c035e9b9d0241aada4ad3759582e1
+      td-storage-architecture-backend-contracts: 2d88d342aac82f23616fdff6d94f4ac88701ab6e70c80a0315003c5e66432c74
+      tp-scale-substantiation: 23f20e8dab88330e4ddd165a0d2230151b7ef0f99ca16c016671558ed5719686
+    reviewed_at: "2026-08-07T11:25:30Z"
 ---
 
 # Test Plan: TP-001 Governing Test Traceability
@@ -124,8 +124,8 @@ queue's persisted progress contract.
 | API-003 workload integration profile | API-003 / API-001 / API-002 | The scheduled-batch-delivery profile maps producer/worker/finalize obligations onto native primitives; finalize maps only to the five outcomes (`complete`/`fail`/`retry`/`release`/`rearm`); the downstream-rate non-goal is preserved (caller-driven pacing only); archive/retention defers to API-002. Anchored by `product_workflow_scheduled_action_delivery_e2e`. |
 | TD-001 durability | TD-001 / API-005 | After success, Class A recovers the command and projection state from its durable log. Class B reopens from the selected projection only: SQLite/Postgres preserves latest state; memory preserves nothing across process death. Tests must prove that exact boundary and reject log-history claims for every Class B row. |
 | Public storage matrix | API-005 / orthogonal-storage-matrix-brief | Enumerate exactly 15 canonical cells: `memory`, `sqlite`, `postgres`, `filesystem`, and `s3` logs × `memory`, `sqlite`, and `postgres` projections. Every row opens, runs lifecycle and transaction assertions, and reports a result. Missing fixture, disabled required feature, ignored test, or unregistered cell is a failure, not a skip. |
-| TD-001 backend conformance (conformance-as-contract) | TD-001 / ADR-008 | Every cell passes the shared conformance suite before it is selectable: the **core** class (substrate-independent behavior incl. ordering, eligibility, claim atomicity, idempotency, lease/epoch fencing, per-queue progress) binds all 15 cells; the **Class A log** class (replay/snapshot+tail/segment-commit as applicable) binds the 12 durable-log cells; the **Class B projection-persistence** class binds the three memory-log cells and proves that no log-history capability is claimed. All three public projection implementations are held behaviorally identical by this suite. |
-| Response barriers | API-005 / TD-004 | `Strict` and `AsyncProjection(AsyncProjectionSpec)` are policy axes independent of projection identity. AC-TXN-5 and AC-TXN-5A exercise their success, poison, order, backpressure, and unknown-outcome boundaries. Each of the 15 cells has an explicit barrier disposition; an unsupported durability tuple must fail typed configuration validation before I/O and never disappear as a skipped test. |
+| TD-001 backend conformance (conformance-as-contract) | TD-001 / ADR-008 | Every cell passes the shared conformance suite before it is selectable: the **core** class (substrate-independent behavior incl. ordering, eligibility, claim atomicity, idempotency, lease/epoch fencing, per-queue progress) binds all 20 cells; the **Class A log** class (replay/snapshot+tail/segment-commit as applicable) binds the 12 durable-log cells; the **Class B projection-persistence** class binds the three memory-log cells and proves that no log-history capability is claimed. All four public projection implementations are held behaviorally identical by this suite. |
+| Response barriers | API-005 / TD-004 | `Strict` and `AsyncProjection(AsyncProjectionSpec)` are policy axes independent of projection identity. AC-TXN-5 and AC-TXN-5A exercise their success, poison, order, backpressure, and unknown-outcome boundaries. Each of the 20 cells has an explicit barrier disposition; an unsupported durability tuple must fail typed configuration validation before I/O and never disappear as a skipped test. |
 | TD-002 Postgres fencing | TD-002 | Stale `assignment_epoch` appends are rejected; current epoch appends succeed. |
 | TD-002 Postgres locking | TD-002 | `FOR UPDATE SKIP LOCKED` claim tests prove single active lease under concurrent workers. |
 | TD-003 queue ownership | TD-003 | Deterministic queue-to-owner assignment (target vs active owner), durable epoch fence at acquire, stale-epoch append reject, graceful drain without loss/duplication, interrupted-drain single-writer safety, reassignment recovery from snapshot + log tail, per-queue local progress, and stalled/unowned-queue visibility. |
@@ -145,7 +145,7 @@ Implementation beads should create or extend these suites:
 - `core_eligibility_precedence_tests`
 - `core_recurrence_rearm_tests`
 - `storage_conformance_durability_tests`
-- `storage_matrix_transaction_contract_tests` (exact 15-cell registry; zero
+- `storage_matrix_transaction_contract_tests` (exact 20-cell registry; zero
   missing, ignored, or fixture-skipped rows)
 - `storage_conformance_claim_tests`
 - `storage_conformance_progress_tests`
@@ -211,7 +211,7 @@ are owned by TP-002 (`tp-scale-substantiation`); see that plan for their pass ba
 except `external_transaction_contract_matrix_tests`, whose acceptance bars are the
 AC-TXN rows in TP-003 §3.10. Historical
 `docs/perf/evidence/tp003-ac-txn-matrix*.jsonl` records predate the canonical
-15-cell register and cannot by themselves qualify the current matrix.
+20-cell register and cannot by themselves qualify the current matrix.
 
 ## Performance Evidence
 
