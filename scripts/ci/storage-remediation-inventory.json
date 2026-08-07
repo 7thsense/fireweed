@@ -3052,9 +3052,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "07b47186c32ea77b333d",
+        "id": "58637451716db08c2e16",
         "identity": "/// queue MUST be contiguous and start at that queue's `next_seq` (already-applied prefixes are skipped",
-        "line": 643,
+        "line": 682,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-sqlite/src/relational/projection.rs",
         "status": "discovery_negative"
@@ -94792,7 +94792,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "2f4b2cee986afdce84ef1ad0be1b1281a847c4c1b95392e55784b384764a8073",
+  "source_inventory_sha256": "9ac7c63c279693873e25ebf8478c4321f25ebff01fa6250567cd09b6ed16dfff",
   "workspaces": [
     {
       "listing_error_sha256": "",
