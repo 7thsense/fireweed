@@ -6204,9 +6204,10 @@ fn open_s3_log_cell(
                             max_latency_ms: segments.max_latency_ms,
                         },
                     )?;
+                    // Forward the caller's AsyncProjectionSpec; never re-default at the S3 boundary.
                     let async_spec = match response_barrier {
                         ResponseBarrier::Strict => None,
-                        ResponseBarrier::AsyncProjection => Some(AsyncProjectionSpec::default()),
+                        ResponseBarrier::AsyncProjection => async_projection,
                     };
                     let backend = Arc::new(turso_compose::assemble_objectlog_turso(
                         log, path, async_spec,
