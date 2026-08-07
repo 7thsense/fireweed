@@ -99771,22 +99771,22 @@
         "text": "\"release-repeat-suites.toml drift; regenerate with --write\","
       },
       {
-        "line": 69,
+        "line": 78,
         "path": "scripts/ci/pr-gate.sh",
         "text": "bash \"${SCRIPT_DIR}/verify-product-workflow-names.sh\" --self-test"
       },
       {
-        "line": 70,
+        "line": 79,
         "path": "scripts/ci/pr-gate.sh",
         "text": "bash \"${SCRIPT_DIR}/verify-product-workflow-names.sh\" \"${SCRIPT_DIR}/release-repeat-suites.toml\""
       },
       {
-        "line": 115,
+        "line": 124,
         "path": "scripts/ci/pr-gate.sh",
         "text": "bash \"${SCRIPT_DIR}/verify-product-workflow-names.sh\" --self-test"
       },
       {
-        "line": 116,
+        "line": 125,
         "path": "scripts/ci/pr-gate.sh",
         "text": "bash \"${SCRIPT_DIR}/verify-product-workflow-names.sh\" \"${SCRIPT_DIR}/release-repeat-suites.toml\""
       },
@@ -100040,7 +100040,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "831ef3dc44c74d597ddd91fd622f4d99320db29d776ead6f0e65df20477df0d2",
+  "source_inventory_sha256": "d480e71cc8debc59f1faceac6566332b2d509c9ac939492138cb10cbfcd8d0c3",
   "workspaces": [
     {
       "listing_error_sha256": "",
