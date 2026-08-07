@@ -972,7 +972,8 @@ fn assert_claimed_entry_parity(entry: &redis::streams::StreamId, claimed: &Claim
     );
     assert_eq!(
         entry.get::<String>("metadata").as_deref(),
-        Some(r#"{"tenant_segment":{"String":"vip"}}"#)
+        // Natural JSON encoding (fireweed-c744be3e); legacy `{"String":"vip"}` still accepted on write.
+        Some(r#"{"tenant_segment":"vip"}"#)
     );
     assert!(
         entry.get::<String>("gate_keys").is_none(),

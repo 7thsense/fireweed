@@ -301,7 +301,12 @@ pub fn default_max_rank_error() -> u32 {
     0
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+/// Structured metadata value. Nested maps and arrays are first-class — embedders do not need to
+/// stringify JSON into a [`MetadataValue::String`] (that path forced ~1.5–2× envelope inflation).
+///
+/// Wire / storage encoding is **natural JSON** (objects, arrays, scalars). The legacy externally
+/// tagged form (`{"String":"x"}`, `{"Object":{"entries":…}}`) still deserializes for stored rows.
+#[derive(Debug, Clone, PartialEq)]
 pub enum MetadataValue {
     Null,
     Bool(bool),
@@ -312,9 +317,173 @@ pub enum MetadataValue {
     Object(Metadata),
 }
 
-#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+/// Flat or nested string→value map. Serializes as a JSON object (no `entries` wrapper).
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Metadata {
     entries: BTreeMap<String, MetadataValue>,
+}
+
+impl serde::Serialize for Metadata {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.entries.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Metadata {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Accept natural `{"k":…}` and legacy `{"entries":{…}}` (from older Object tags).
+        let value = serde_json::Value::deserialize(deserializer)?;
+        metadata_from_json_value(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl serde::Serialize for MetadataValue {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            MetadataValue::Null => serializer.serialize_none(),
+            MetadataValue::Bool(v) => serializer.serialize_bool(*v),
+            MetadataValue::Integer(v) => serializer.serialize_i64(*v),
+            MetadataValue::Number(v) => v.serialize(serializer),
+            MetadataValue::String(v) => serializer.serialize_str(v),
+            MetadataValue::Array(v) => v.serialize(serializer),
+            MetadataValue::Object(v) => v.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for MetadataValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        metadata_value_from_json(value).map_err(serde::de::Error::custom)
+    }
+}
+
+fn metadata_from_json_value(value: serde_json::Value) -> Result<Metadata, String> {
+    match value {
+        serde_json::Value::Object(mut map) => {
+            // Legacy Metadata wrapper: {"entries": {…}}
+            if map.len() == 1 {
+                if let Some(entries) = map.remove("entries") {
+                    if let serde_json::Value::Object(entries) = entries {
+                        let mut out = BTreeMap::new();
+                        for (k, v) in entries {
+                            out.insert(k, metadata_value_from_json(v)?);
+                        }
+                        return Ok(Metadata::from_entries(out));
+                    }
+                }
+            }
+            let mut out = BTreeMap::new();
+            for (k, v) in map {
+                out.insert(k, metadata_value_from_json(v)?);
+            }
+            Ok(Metadata::from_entries(out))
+        }
+        other => Err(format!(
+            "metadata must be a JSON object, got {}",
+            json_value_kind(&other)
+        )),
+    }
+}
+
+fn metadata_value_from_json(value: serde_json::Value) -> Result<MetadataValue, String> {
+    // Legacy externally-tagged variants: {"String":"x"}, {"Bool":true}, …
+    if let serde_json::Value::Object(ref map) = value {
+        if map.len() == 1 {
+            let (tag, inner) = map.iter().next().expect("len==1");
+            match tag.as_str() {
+                "Null" => return Ok(MetadataValue::Null),
+                "Bool" => {
+                    return match inner {
+                        serde_json::Value::Bool(b) => Ok(MetadataValue::Bool(*b)),
+                        _ => Err("legacy Bool tag requires bool".into()),
+                    };
+                }
+                "Integer" => {
+                    return match inner {
+                        serde_json::Value::Number(n) => n
+                            .as_i64()
+                            .map(MetadataValue::Integer)
+                            .ok_or_else(|| "legacy Integer out of i64 range".into()),
+                        _ => Err("legacy Integer tag requires number".into()),
+                    };
+                }
+                "Number" => {
+                    let dec: DecimalValue = serde_json::from_value(inner.clone())
+                        .map_err(|e| format!("legacy Number: {e}"))?;
+                    return Ok(MetadataValue::Number(dec));
+                }
+                "String" => {
+                    return match inner {
+                        serde_json::Value::String(s) => Ok(MetadataValue::String(s.clone())),
+                        _ => Err("legacy String tag requires string".into()),
+                    };
+                }
+                "Array" => {
+                    return match inner {
+                        serde_json::Value::Array(items) => {
+                            let mut out = Vec::with_capacity(items.len());
+                            for item in items {
+                                out.push(metadata_value_from_json(item.clone())?);
+                            }
+                            Ok(MetadataValue::Array(out))
+                        }
+                        _ => Err("legacy Array tag requires array".into()),
+                    };
+                }
+                "Object" => {
+                    return Ok(MetadataValue::Object(metadata_from_json_value(
+                        inner.clone(),
+                    )?));
+                }
+                _ => {}
+            }
+        }
+        // Natural decimal object: {"mantissa":…,"scale":…} only.
+        if map.len() == 2 && map.contains_key("mantissa") && map.contains_key("scale") {
+            let dec: DecimalValue = serde_json::from_value(value.clone())
+                .map_err(|e| format!("decimal metadata value: {e}"))?;
+            return Ok(MetadataValue::Number(dec));
+        }
+    }
+
+    match value {
+        serde_json::Value::Null => Ok(MetadataValue::Null),
+        serde_json::Value::Bool(b) => Ok(MetadataValue::Bool(b)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(MetadataValue::Integer(i))
+            } else if let Some(u) = n.as_u64() {
+                if u <= i64::MAX as u64 {
+                    Ok(MetadataValue::Integer(u as i64))
+                } else {
+                    Err("metadata integer exceeds i64".into())
+                }
+            } else {
+                Err("metadata number must be an integer or decimal object".into())
+            }
+        }
+        serde_json::Value::String(s) => Ok(MetadataValue::String(s)),
+        serde_json::Value::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(metadata_value_from_json(item)?);
+            }
+            Ok(MetadataValue::Array(out))
+        }
+        serde_json::Value::Object(_) => Ok(MetadataValue::Object(metadata_from_json_value(value)?)),
+    }
+}
+
+fn json_value_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
 
 impl Metadata {
@@ -1522,6 +1691,82 @@ mod coverage_tests {
         let creation = QueueCreationPolicy::default();
         assert_eq!(creation.default_max_gate_keys_per_item, 1);
         assert_eq!(creation.default_max_gates_per_request, 1);
+    }
+
+    #[test]
+    fn structured_metadata_encodes_as_natural_json_without_string_escape_tax() {
+        // Nested document embedders would otherwise stuff into MetadataValue::String.
+        let mut nested = Metadata::new();
+        nested.insert("zone", MetadataValue::String("east".into()));
+        nested.insert("tier", MetadataValue::Integer(3));
+        nested.insert(
+            "tags",
+            MetadataValue::Array(vec![
+                MetadataValue::String("alpha".into()),
+                MetadataValue::String("beta".into()),
+            ]),
+        );
+        let mut md = Metadata::new();
+        md.insert("snorri.execution.v1", MetadataValue::Object(nested.clone()));
+        md.insert("flag", MetadataValue::Bool(true));
+
+        let encoded = serde_json::to_string(&md).expect("encode metadata");
+        // Natural JSON: nested object is structural, not a quoted string value.
+        assert!(
+            encoded.contains(r#""snorri.execution.v1":{"#),
+            "nested object must be a JSON object, got {encoded}"
+        );
+        assert!(
+            !encoded.contains(r#""Object""#) && !encoded.contains(r#""String""#),
+            "must not use external tags on write: {encoded}"
+        );
+        assert!(
+            !encoded.contains(r#"\"zone\""#),
+            "must not string-escape nested structure: {encoded}"
+        );
+
+        let round: Metadata = serde_json::from_str(&encoded).expect("decode natural");
+        assert_eq!(round, md);
+
+        // Legacy externally-tagged rows still load.
+        let legacy = r#"{"flag":{"Bool":true},"snorri.execution.v1":{"Object":{"entries":{"zone":{"String":"east"},"tier":{"Integer":3},"tags":{"Array":[{"String":"alpha"},{"String":"beta"}]}}}}}"#;
+        let from_legacy: Metadata = serde_json::from_str(legacy).expect("decode legacy");
+        assert_eq!(from_legacy.get("flag"), Some(&MetadataValue::Bool(true)));
+        assert_eq!(
+            from_legacy.get("snorri.execution.v1"),
+            Some(&MetadataValue::Object(nested))
+        );
+
+        // Size bound (bead AC): an embedded structured value costs ≤ ~1.1× its canonical size.
+        let nested_for_size = match from_legacy.get("snorri.execution.v1") {
+            Some(MetadataValue::Object(o)) => o.clone(),
+            _ => panic!("expected nested object"),
+        };
+        let canonical_nested =
+            serde_json::to_string(&nested_for_size.clone().into_inner()).expect("canonical");
+        let structured_value = serde_json::to_string(&MetadataValue::Object(nested_for_size))
+            .expect("structured value");
+        let ratio = structured_value.len() as f64 / canonical_nested.len() as f64;
+        assert!(
+            ratio <= 1.1,
+            "structured value ratio {ratio:.3} exceeds 1.1× (structured={} canonical={})",
+            structured_value.len(),
+            canonical_nested.len()
+        );
+        assert_eq!(
+            structured_value, canonical_nested,
+            "natural Object encoding must equal the bare map JSON"
+        );
+
+        // Contrast: JSON-in-JSON string form pays escaping tax well above 1.1×.
+        let stringified_value =
+            serde_json::to_string(&MetadataValue::String(canonical_nested.clone()))
+                .expect("string value");
+        let string_ratio = stringified_value.len() as f64 / canonical_nested.len() as f64;
+        assert!(
+            string_ratio > 1.1,
+            "stringified path should exceed 1.1× so the Object path is the structural win"
+        );
     }
 
     #[test]
