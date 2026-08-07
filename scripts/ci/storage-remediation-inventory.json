@@ -18493,7 +18493,7 @@
     "cargo_status": "listed",
     "errors": [],
     "generated_by": "scripts/ci/fireweed_test_placement.py",
-    "input_sha256": "eee5023688c1b6fa4b21b3279f5341761cc58a45e7111c252aac192b66716c3d",
+    "input_sha256": "1d09835aadff7131a3b7447c81ccef3b885db8a0b19a9873a39a69af3ce6ba94",
     "private_surface": [
       {
         "declaration_kind": "fn",
@@ -94918,7 +94918,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "ad3a5317e8996d50784666e8b68e2c75376a876187953623e93492b4551bf440",
+  "source_inventory_sha256": "36f7102a1df2a31fac5adf1481648fb6690bbeeb0833da54ac52cf7f321af5ab",
   "workspaces": [
     {
       "listing_error_sha256": "",
