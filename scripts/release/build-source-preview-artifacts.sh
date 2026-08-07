@@ -1,22 +1,57 @@
 #!/usr/bin/env bash
+# Build source-preview dry-run artifacts from an explicit measured source S.
+# Invokes the shared source predicate; never trusts ambient GITHUB_SHA or bare HEAD.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 repo="$REPO_ROOT" out="" version="" revision="" builder="local-dry-run"
+expected_source="" expected_remote="" expected_ref=""
 while (($#)); do
   case "$1" in
-    --repo) repo="$2"; shift 2 ;; --out) out="$2"; shift 2 ;;
-    --version) version="$2"; shift 2 ;; --revision) revision="$2"; shift 2 ;;
-    --builder) builder="$2"; shift 2 ;; *) echo "unknown argument: $1" >&2; exit 64 ;;
+    --repo) repo="$2"; shift 2 ;;
+    --out) out="$2"; shift 2 ;;
+    --version) version="$2"; shift 2 ;;
+    --revision) revision="$2"; shift 2 ;;
+    --builder) builder="$2"; shift 2 ;;
+    --expected-source) expected_source="$2"; shift 2 ;;
+    --expected-remote) expected_remote="$2"; shift 2 ;;
+    --expected-ref) expected_ref="$2"; shift 2 ;;
+    *) echo "unknown argument: $1" >&2; exit 64 ;;
   esac
 done
 [[ -n "$out" && -n "$version" && -n "$revision" && -n "$builder" ]] || {
-  echo "usage: $0 --out <dir> --version <semver> --revision <sha> [--repo <dir>] [--builder <id>]" >&2; exit 64;
+  echo "usage: $0 --out <dir> --version <semver> --revision <sha> --expected-source <sha> --expected-remote <url-or-name> --expected-ref <ref> [--repo <dir>] [--builder <id>]" >&2
+  exit 64
 }
-repo="$(realpath "$repo")"
+[[ -n "$expected_source" && -n "$expected_remote" && -n "$expected_ref" ]] || {
+  echo "usage: $0 requires --expected-source --expected-remote --expected-ref (no ambient SHA)" >&2
+  exit 64
+}
+repo="$(cd "$repo" && pwd -P)"
 revision="$(git -C "$repo" rev-parse "${revision}^{commit}")"
 [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || { echo "revision must resolve to a full commit" >&2; exit 1; }
-[[ "$revision" == "$(git -C "$repo" rev-parse HEAD)" ]] || { echo "revision must equal checked-out HEAD" >&2; exit 1; }
+[[ "$revision" == "$expected_source" ]] || {
+  echo "revision must equal --expected-source (${expected_source})" >&2
+  exit 1
+}
+
+bash "$SCRIPT_DIR/verify-source-predicate.sh" \
+  --mode source \
+  --source-root "$repo" \
+  --expected-source "$expected_source" \
+  --expected-remote "$expected_remote" \
+  --expected-ref "$expected_ref"
+
+out="$(realpath -m "$out")"
+case "$out" in
+  "$repo"/*) echo "output must be outside the source checkout: $out" >&2; exit 1 ;;
+esac
+# Also reject writing into the tooling repository when repo is a detached worktree of it.
+tooling_root="$(cd "$REPO_ROOT" && pwd -P)"
+case "$out" in
+  "$tooling_root"/*) echo "output must be outside the repository: $out" >&2; exit 1 ;;
+esac
+
 [[ ! -e "$out" ]] || { echo "output already exists: $out" >&2; exit 1; }
 mkdir -p "$out"
 archive="fireweed-${version}-source.tar.gz"

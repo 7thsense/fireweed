@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "owner": "P17e",
+  "consumer": "P17r",
+  "note": "Exact non-workflow release producer/promoter caller contracts. P17r alone edits release.yml to pass measured S/remote/ref rather than ambient GITHUB_SHA.",
+  "contracts": {
+    "build-source-preview-artifacts": {
+      "entrypoint": "scripts/release/build-source-preview-artifacts.sh",
+      "required_args": [
+        "--out",
+        "--version",
+        "--revision",
+        "--expected-source",
+        "--expected-remote",
+        "--expected-ref"
+      ],
+      "optional_args": ["--repo", "--builder"],
+      "output_policy": "absolute path outside source checkout and outside product repository",
+      "source_binding": "shared predicate scripts/release/verify-source-predicate.sh --mode source",
+      "forbidden": ["ambient GITHUB_SHA", "revision == HEAD without expected-source", "in-repo output"]
+    },
+    "build-governed-evidence-bundle": {
+      "entrypoint": "scripts/release/build-governed-evidence-bundle.sh",
+      "required_args": [
+        "--source-dir",
+        "--e3-source-dir",
+        "--out",
+        "--revision",
+        "--expected-source",
+        "--expected-remote",
+        "--expected-ref"
+      ],
+      "optional_args": ["--source-root", "--tag", "--produced-at", "--reviewed-at"],
+      "output_policy": "basename tp002-release; absolute path outside source checkout and product repository",
+      "source_binding": "shared predicate scripts/release/verify-source-predicate.sh --mode source",
+      "forbidden": ["ambient GITHUB_SHA", "revision == HEAD without expected-source", "in-repo output", "target/ scan substitution"]
+    },
+    "promote-governed-evidence": {
+      "entrypoint": "scripts/release/promote-governed-evidence.sh",
+      "required_args": [
+        "--source-root",
+        "--expected-source",
+        "--expected-remote",
+        "--expected-ref",
+        "--campaign",
+        "--bundle-root",
+        "--allowlist",
+        "--promotion-root"
+      ],
+      "output_policy": "prints evidence commit E; promotion-root is external worktree; never mutates source tooling checkout",
+      "source_binding": "shared predicate scripts/release/verify-source-predicate.sh --mode source",
+      "allowlist_schema": {
+        "expected_source": "40-hex",
+        "campaign": "string",
+        "paths": ["relative new-current paths"],
+        "historical_paths": ["paths that must not be written"],
+        "digests": {"relative-path": "sha256"}
+      },
+      "forbidden": ["historical overwrite", "non-allowlisted diff", "in-repo bundle or promotion root"]
+    },
+    "verify-source-predicate": {
+      "entrypoint": "scripts/release/verify-source-predicate.sh",
+      "required_args": [
+        "--mode",
+        "--source-root",
+        "--expected-source",
+        "--expected-remote",
+        "--expected-ref"
+      ],
+      "mode_source": "fast/remediation gates",
+      "mode_e_extra_args": ["--promoted-root", "--promoted-allowlist"],
+      "mode_e_usage": "P18/P20 dual-root: tooling from S checkout; promoted evidence only from E allowlist"
+    }
+  }
+}

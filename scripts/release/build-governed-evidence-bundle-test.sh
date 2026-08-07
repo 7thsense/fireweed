@@ -3,12 +3,26 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-REVISION="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+# Isolated clean source root so product WIP cannot break the shared predicate.
+SOURCE_WT="$(mktemp -d "${TMPDIR:-/tmp}/fireweed-governed-source.XXXXXX")"
+git -C "$REPO_ROOT" worktree add --detach "$SOURCE_WT" HEAD >/dev/null
+REVISION="$(git -C "$SOURCE_WT" rev-parse HEAD)"
+EXPECTED_REMOTE="$(git -C "$SOURCE_WT" remote get-url origin 2>/dev/null || echo origin)"
+if git -C "$SOURCE_WT" remote get-url origin >/dev/null 2>&1; then
+  EXPECTED_REMOTE_ARG="origin"
+else
+  git -C "$SOURCE_WT" remote add origin "https://example.invalid/fireweed.git"
+  EXPECTED_REMOTE_ARG="origin"
+fi
 TAG="v0.0.0-archive-test"
 PRODUCED_AT="2026-07-20T00:00:00Z"
 REVIEWED_AT="2026-07-20T00:05:00Z"
 CASE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/fireweed-governed-archive-test.XXXXXX")"
-trap 'rm -rf "$CASE_ROOT"' EXIT
+cleanup() {
+  rm -rf "$CASE_ROOT"
+  git -C "$REPO_ROOT" worktree remove --force "$SOURCE_WT" >/dev/null 2>&1 || rm -rf "$SOURCE_WT"
+}
+trap cleanup EXIT
 
 fail() {
   echo "build-governed-evidence-bundle-test: $*" >&2
@@ -55,13 +69,23 @@ apply_fake_rustup() {
   chmod +x "$path"
 }
 
+common_args() {
+  printf '%s\n' \
+    --source-root "$SOURCE_WT" \
+    --expected-source "$REVISION" \
+    --expected-remote "$EXPECTED_REMOTE_ARG" \
+    --expected-ref HEAD
+}
+
 run_stage() {
   local case_dir="$1"
+  # shellcheck disable=SC2046
   PATH="$case_dir/bin:$PATH" bash "$SCRIPT_DIR/build-governed-evidence-bundle.sh" \
     --source-dir "$case_dir/source" \
     --e3-source-dir "$case_dir/e3" \
     --out "$case_dir/tp002-release" \
     --revision "$REVISION" \
+    $(common_args) \
     --tag "$TAG" \
     --produced-at "$PRODUCED_AT" \
     --reviewed-at "$REVIEWED_AT"
@@ -118,15 +142,26 @@ make_inputs "$CASE_ROOT/wrong-revision"
 expect_failure wrong_revision env PATH="$CASE_ROOT/wrong-revision/bin:$PATH" \
   bash "$SCRIPT_DIR/build-governed-evidence-bundle.sh" \
   --source-dir "$CASE_ROOT/wrong-revision/source" --e3-source-dir "$CASE_ROOT/wrong-revision/e3" \
-  --out "$CASE_ROOT/wrong-revision/tp002-release" --revision "$wrong_revision"
+  --out "$CASE_ROOT/wrong-revision/tp002-release" --revision "$wrong_revision" \
+  --source-root "$SOURCE_WT" --expected-source "$wrong_revision" \
+  --expected-remote "$EXPECTED_REMOTE_ARG" --expected-ref HEAD
+
+# Missing expected-source flags (ambient SHA path) must fail.
+make_inputs "$CASE_ROOT/missing-expected"
+expect_failure missing_expected env PATH="$CASE_ROOT/missing-expected/bin:$PATH" \
+  bash "$SCRIPT_DIR/build-governed-evidence-bundle.sh" \
+  --source-dir "$CASE_ROOT/missing-expected/source" --e3-source-dir "$CASE_ROOT/missing-expected/e3" \
+  --out "$CASE_ROOT/missing-expected/tp002-release" --revision "$REVISION"
 
 make_inputs "$CASE_ROOT/inside"
 inside="$(mktemp -d "$REPO_ROOT/target/governed-archive-inside.XXXXXX")"
-trap 'rm -rf "$CASE_ROOT" "$inside"' EXIT
+trap 'rm -rf "$CASE_ROOT" "$inside"; git -C "$REPO_ROOT" worktree remove --force "$SOURCE_WT" >/dev/null 2>&1 || true' EXIT
 expect_failure inside_repo env PATH="$CASE_ROOT/inside/bin:$PATH" \
   bash "$SCRIPT_DIR/build-governed-evidence-bundle.sh" \
   --source-dir "$CASE_ROOT/inside/source" --e3-source-dir "$CASE_ROOT/inside/e3" \
-  --out "$inside/tp002-release" --revision "$REVISION"
+  --out "$inside/tp002-release" --revision "$REVISION" \
+  --source-root "$SOURCE_WT" --expected-source "$REVISION" \
+  --expected-remote "$EXPECTED_REMOTE_ARG" --expected-ref HEAD
 
 make_inputs "$CASE_ROOT/stale-archive"
 touch "$CASE_ROOT/stale-archive/$REVISION.tar.gz"
@@ -134,8 +169,21 @@ expect_failure stale_archive env PATH="$CASE_ROOT/stale-archive/bin:$PATH" \
   bash "$SCRIPT_DIR/build-governed-evidence-bundle.sh" \
   --source-dir "$CASE_ROOT/stale-archive/source" --e3-source-dir "$CASE_ROOT/stale-archive/e3" \
   --out "$CASE_ROOT/stale-archive/tp002-release" --revision "$REVISION" \
+  --source-root "$SOURCE_WT" --expected-source "$REVISION" \
+  --expected-remote "$EXPECTED_REMOTE_ARG" --expected-ref HEAD \
   --tag "$TAG" --produced-at "$PRODUCED_AT" --reviewed-at "$REVIEWED_AT"
 [[ ! -e "$CASE_ROOT/stale-archive/tp002-release" ]] ||
   fail "stale archive rejection still staged a substitute bundle"
+
+# Dirty product path outside .ddx must fail the shared predicate.
+make_inputs "$CASE_ROOT/dirty-source"
+printf 'dirty\n' >>"$SOURCE_WT/Cargo.toml"
+expect_failure dirty_source env PATH="$CASE_ROOT/dirty-source/bin:$PATH" \
+  bash "$SCRIPT_DIR/build-governed-evidence-bundle.sh" \
+  --source-dir "$CASE_ROOT/dirty-source/source" --e3-source-dir "$CASE_ROOT/dirty-source/e3" \
+  --out "$CASE_ROOT/dirty-source/tp002-release" --revision "$REVISION" \
+  --source-root "$SOURCE_WT" --expected-source "$REVISION" \
+  --expected-remote "$EXPECTED_REMOTE_ARG" --expected-ref HEAD
+git -C "$SOURCE_WT" checkout -- Cargo.toml
 
 echo "build-governed-evidence-bundle-test: PASS"

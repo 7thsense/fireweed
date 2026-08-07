@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Stage an exact-revision TP-002 composite from explicit producer outputs.
 # This script does not invent evidence and never scans target/ for substitutes.
+# Measured source S is bound through the shared source predicate (no ambient SHA).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source_dir="" e3_dir="" out="" revision="" tag="" produced_at="" reviewed_at=""
+source_root="$REPO_ROOT" expected_source="" expected_remote="" expected_ref=""
 while (($#)); do
   case "$1" in
     --source-dir) source_dir="$2"; shift 2 ;;
@@ -15,18 +17,41 @@ while (($#)); do
     --tag) tag="$2"; shift 2 ;;
     --produced-at) produced_at="$2"; shift 2 ;;
     --reviewed-at) reviewed_at="$2"; shift 2 ;;
+    --source-root) source_root="$2"; shift 2 ;;
+    --expected-source) expected_source="$2"; shift 2 ;;
+    --expected-remote) expected_remote="$2"; shift 2 ;;
+    --expected-ref) expected_ref="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 64 ;;
   esac
 done
 [[ -d "$source_dir" && -d "$e3_dir" && -n "$out" && "$revision" =~ ^[0-9a-f]{40}$ ]] || {
-  echo "usage: $0 --source-dir <dir> --e3-source-dir <dir> --out <dir> --revision <sha>" >&2; exit 64;
+  echo "usage: $0 --source-dir <dir> --e3-source-dir <dir> --out <dir> --revision <sha> --expected-source <sha> --expected-remote <url-or-name> --expected-ref <ref> [--source-root <dir>]" >&2
+  exit 64
 }
-[[ "$revision" == "$(git -C "$REPO_ROOT" rev-parse HEAD)" ]] || { echo "revision must equal checked-out HEAD" >&2; exit 1; }
+[[ -n "$expected_source" && -n "$expected_remote" && -n "$expected_ref" ]] || {
+  echo "usage: $0 requires --expected-source --expected-remote --expected-ref (no ambient SHA)" >&2
+  exit 64
+}
+[[ "$revision" == "$expected_source" ]] || {
+  echo "revision must equal --expected-source (${expected_source})" >&2
+  exit 1
+}
+
+source_root="$(cd "$source_root" && pwd -P)"
+bash "$SCRIPT_DIR/verify-source-predicate.sh" \
+  --mode source \
+  --source-root "$source_root" \
+  --expected-source "$expected_source" \
+  --expected-remote "$expected_remote" \
+  --expected-ref "$expected_ref"
+
 out="$(realpath -m "$out")"
-repo_root="$(realpath "$REPO_ROOT")"
 case "$out" in
-  "$repo_root"/*) echo "output must be outside the repository: $out" >&2; exit 1 ;;
-  *) ;;
+  "$source_root"/*) echo "output must be outside the source checkout: $out" >&2; exit 1 ;;
+esac
+tooling_root="$(cd "$REPO_ROOT" && pwd -P)"
+case "$out" in
+  "$tooling_root"/*) echo "output must be outside the repository: $out" >&2; exit 1 ;;
 esac
 [[ "$(basename "$out")" == tp002-release ]] || {
   echo "output basename must be tp002-release so the release workflow extracts the governed path" >&2
@@ -76,10 +101,10 @@ bash "$REPO_ROOT/scripts/ci/verify-governed-release-composite.sh" \
   --contract "$out/composite-contract.json" --expected-revision "$revision"
 if [[ -n "$tag$produced_at$reviewed_at" ]]; then
   rustup run 1.92.0 cargo run -q -p fireweed-release --bin fireweed-build-evidence-attestation -- \
-    --repo-root "$REPO_ROOT" --bundle-root "$out" --tag "$tag" --commit "$revision" \
+    --repo-root "$source_root" --bundle-root "$out" --tag "$tag" --commit "$revision" \
     --produced-at "$produced_at" --reviewed-at "$reviewed_at" --out "$out/attestation.json"
   rustup run 1.92.0 cargo run -q -p fireweed-release --bin fireweed-verify-evidence-attestation -- \
-    --manifest "$out/attestation.json" --repo-root "$REPO_ROOT" --evidence-root "$out" \
+    --manifest "$out/attestation.json" --repo-root "$source_root" --evidence-root "$out" \
     --tag "$tag" --commit "$revision"
 
   archive_tmp="$(mktemp "$archive_dir/.${revision}.tar.XXXXXX")"
