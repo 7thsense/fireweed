@@ -372,6 +372,8 @@ impl SqliteProjectionStore {
         let mut cohorts: BTreeMap<String, (u64, u64)> = BTreeMap::new();
         let mut group_additions: BTreeMap<String, u64> = BTreeMap::new();
         let now_nanos = ts_nanos(now);
+        let mut item_id_list: Vec<String> = Vec::with_capacity(items.len());
+        let mut client_key_list: Vec<String> = Vec::with_capacity(items.len());
         for item in items {
             let item_id = item.item_id.to_string();
             if !item_ids.insert(item_id.clone()) {
@@ -381,30 +383,8 @@ impl SqliteProjectionStore {
             if !client_keys.insert(client_key.clone()) {
                 return Err(EngineError::Conflict);
             }
-            let occupied: Option<i64> = st(g
-                .conn
-                .query_row(
-                    "SELECT 1 FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
-                     AND (item_id=?3 OR (client_item_key=?4 AND superseded=0)) LIMIT 1",
-                    params![tenant, queue, item_id, client_key],
-                    |row| row.get(0),
-                )
-                .optional())?;
-            if occupied.is_some() {
-                return Err(EngineError::Conflict);
-            }
-            let retained_until: Option<i64> = st(g
-                .conn
-                .query_row(
-                    "SELECT expires_at FROM fireweed_item_key_retention \
-                     WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3",
-                    params![tenant, queue, client_key],
-                    |row| row.get(0),
-                )
-                .optional())?;
-            if retained_until.is_some_and(|until| until > now_nanos) {
-                return Err(EngineError::Conflict);
-            }
+            item_id_list.push(item_id);
+            client_key_list.push(client_key);
 
             if let Some(group) = &item.group_key {
                 *group_additions
@@ -438,6 +418,65 @@ impl SqliteProjectionStore {
                     entry.1 += 1;
                 }
                 _ => {}
+            }
+        }
+        // Batch conflict checks (fireweed-310f7a64): one indexed probe for item_id /
+        // active client_item_key, one for retention tombstones — not 2N point queries.
+        if !item_id_list.is_empty() {
+            let id_placeholders = (0..item_id_list.len())
+                .map(|i| format!("?{}", i + 3))
+                .collect::<Vec<_>>()
+                .join(",");
+            let key_placeholders = (0..client_key_list.len())
+                .map(|i| format!("?{}", i + 3 + item_id_list.len()))
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut params: Vec<rusqlite::types::Value> =
+                Vec::with_capacity(2 + item_id_list.len() + client_key_list.len());
+            params.push(tenant.clone().into());
+            params.push(queue.clone().into());
+            params.extend(item_id_list.iter().cloned().map(Into::into));
+            params.extend(client_key_list.iter().cloned().map(Into::into));
+            let sql = format!(
+                "SELECT 1 FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
+                 AND (item_id IN ({id_placeholders}) \
+                      OR (client_item_key IN ({key_placeholders}) AND superseded=0)) \
+                 LIMIT 1"
+            );
+            let occupied: Option<i64> = st(g
+                .conn
+                .query_row(&sql, rusqlite::params_from_iter(params.iter()), |row| {
+                    row.get(0)
+                })
+                .optional())?;
+            if occupied.is_some() {
+                return Err(EngineError::Conflict);
+            }
+            let ret_placeholders = (0..client_key_list.len())
+                .map(|i| format!("?{}", i + 4))
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut ret_params: Vec<rusqlite::types::Value> =
+                Vec::with_capacity(3 + client_key_list.len());
+            ret_params.push(tenant.clone().into());
+            ret_params.push(queue.clone().into());
+            ret_params.push(now_nanos.into());
+            ret_params.extend(client_key_list.iter().cloned().map(Into::into));
+            let ret_sql = format!(
+                "SELECT 1 FROM fireweed_item_key_retention \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND expires_at>?3 \
+                 AND client_item_key IN ({ret_placeholders}) LIMIT 1"
+            );
+            let retained: Option<i64> = st(g
+                .conn
+                .query_row(
+                    &ret_sql,
+                    rusqlite::params_from_iter(ret_params.iter()),
+                    |row| row.get(0),
+                )
+                .optional())?;
+            if retained.is_some() {
+                return Err(EngineError::Conflict);
             }
         }
 
