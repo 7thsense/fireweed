@@ -9,7 +9,7 @@
     "topology": "host-local Docker P1s S3 + isolated Postgres control plane",
     "preflight": "bash scripts/ci/snorri-runner-preflight.sh"
   },
-  "fireweed_sha": "9baa5110a0553bc90704e860e628491992ef164a",
+  "fireweed_sha": "e78e4b76436c389a71cdb22c0dc8f053bb910eaa",
   "snorri": {
     "checkout": "/home/erik/Projects/snorri",
     "sha": "b67c6ffb7c40cafe1be94418b969346aaf45a491",
@@ -82,5 +82,15 @@
     "scripts/ci/snorri-s3-durability-acceptance.sh",
     "crates/fireweed/tests/p6s_s3_durability_acceptance.rs"
   ],
-  "fireweed_worktree_sha_at_execution": "248474a147726b9e11d1ff0c4856b1d2f9474b4d"
+  "fireweed_worktree_sha_at_execution": "248474a147726b9e11d1ff0c4856b1d2f9474b4d",
+  "fireweed_landing_commits": [
+    "9baa5110a0553bc90704e860e628491992ef164a",
+    "c0f0468bae0f2bfdd63b82e9d02b04782d6b4559",
+    "e78e4b76436c389a71cdb22c0dc8f053bb910eaa"
+  ],
+  "pr_gate_bootstrap": {
+    "status": "blocked_preexisting_main_failures",
+    "note": "workspace cargo test fails on pre-existing rearm/product_validation/fingerprint tests unrelated to P6s; focused p6s harness + fmt + clippy + semantic ledger exit 0",
+    "focused_commands_exit_0": true
+  }
 }
