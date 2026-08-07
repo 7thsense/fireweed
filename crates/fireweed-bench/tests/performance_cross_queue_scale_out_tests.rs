@@ -410,14 +410,13 @@ fn tool_present(tool: &str, probe: &str) -> bool {
 #[test]
 fn live_multi_node_object_log_sqlite_projection_e2() {
     if std::env::var("FIREWEED_E2_LIVE").is_err() {
-        eprintln!(
+        panic!(
             "TP-002 E2 LIVE multi-node object_log_sqlite_projection headline SKIPPED — set FIREWEED_E2_LIVE=1 \
              to provision a kind cluster (scripts/perf/tp002-e2-kind.sh: CPU-limited owner pods at 2/4/8 + a \
              lean in-cluster load Job) and assert the four E2 release bars (ingest non-decreasing 2->4->8; \
              all owner counts and every queue make progress; measured rates/ratios are capacity diagnostics; \
              one-owner-per-queue). The headline is DEFERRED here (not measured), never a hidden pass."
         );
-        return;
     }
 
     // Locate the orchestrator + repo root (crates/fireweed-bench/../.. == repo root).

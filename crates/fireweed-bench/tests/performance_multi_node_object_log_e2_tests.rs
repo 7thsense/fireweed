@@ -626,13 +626,12 @@ fn env_u64(key: &str, default: u64) -> u64 {
 #[test]
 fn performance_multi_node_object_log_e2_tests() {
     if env::var("FIREWEED_E2_MULTINODE").is_err() {
-        eprintln!(
+        panic!(
             "TP-002 E2 LIVE MULTI-NODE object_log_sqlite_projection SKIPPED — set FIREWEED_E2_MULTINODE=1 (and \
              build the service: `cargo build -p fireweed-server --release --bin fireweed-service`) to run the \
              headline cross-queue scale-out at owner counts 2/4/8 as bridge containers. The >=3.5x-at-8 \
              multiple + worst-per-queue floor evidence is DEFERRED (not measured), never a hidden pass."
         );
-        return;
     }
 
     let bin = locate_binary();

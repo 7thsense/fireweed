@@ -20,7 +20,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use bytes::Bytes;
 use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::{SerializeMap, Serializer};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 /// Encode raw bytes as a standard Base64 string for JSON (and as raw bytes for
 /// binary serializers).
@@ -471,7 +471,7 @@ pub fn base64_expansion(raw_len: usize) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::{Deserialize, Serialize};
+    use serde::Deserialize;
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     struct Sample {

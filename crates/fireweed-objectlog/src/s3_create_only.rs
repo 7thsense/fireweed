@@ -204,10 +204,9 @@ mod tests {
 
     #[tokio::test]
     async fn live_minio_probe_enforced_create_only_when_env_set() {
-        let Ok(endpoint) = std::env::var("FIREWEED_S3_TEST_ENDPOINT") else {
-            eprintln!("SKIP live create-only probe: FIREWEED_S3_TEST_ENDPOINT unset");
-            return;
-        };
+        let endpoint = std::env::var("FIREWEED_S3_TEST_ENDPOINT").expect(
+            "FIREWEED_S3_TEST_ENDPOINT required for live create-only probe (fail-closed; no LOUD skip)",
+        );
         let bucket = std::env::var("FIREWEED_S3_TEST_BUCKET").expect("bucket");
         let region =
             std::env::var("FIREWEED_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());

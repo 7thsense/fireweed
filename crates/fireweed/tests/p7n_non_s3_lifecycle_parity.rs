@@ -374,8 +374,7 @@ mod postgres_cells {
     #[tokio::test(flavor = "current_thread")]
     async fn p7n_memory_postgres_lifecycle() {
         let Some(url) = pg_url() else {
-            eprintln!("p7n_memory_postgres_lifecycle: FIREWEED_PG_TEST_URL unset — skipping");
-            return;
+            panic!("p7n_memory_postgres_lifecycle: FIREWEED_PG_TEST_URL unset — skipping");
         };
         let mut cfg = StorageConfig::memory();
         cfg.projection = ProjectionStoreConfig::Postgres {
@@ -393,8 +392,7 @@ mod postgres_cells {
     #[tokio::test(flavor = "current_thread")]
     async fn p7n_sqlite_postgres_lifecycle() {
         let Some(url) = pg_url() else {
-            eprintln!("p7n_sqlite_postgres_lifecycle: FIREWEED_PG_TEST_URL unset — skipping");
-            return;
+            panic!("p7n_sqlite_postgres_lifecycle: FIREWEED_PG_TEST_URL unset — skipping");
         };
         let root = FixtureRoot::new("sqlite_postgres");
         let mut cfg = StorageConfig::memory();
@@ -416,8 +414,7 @@ mod postgres_cells {
     #[tokio::test(flavor = "current_thread")]
     async fn p7n_postgres_memory_lifecycle() {
         let Some(url) = pg_url() else {
-            eprintln!("p7n_postgres_memory_lifecycle: FIREWEED_PG_TEST_URL unset — skipping");
-            return;
+            panic!("p7n_postgres_memory_lifecycle: FIREWEED_PG_TEST_URL unset — skipping");
         };
         run_cell_async("postgres--memory", async {
             fireweed::open_postgres_async(&url, Arc::new(SystemClock))
@@ -430,8 +427,7 @@ mod postgres_cells {
     #[tokio::test(flavor = "current_thread")]
     async fn p7n_postgres_sqlite_lifecycle() {
         let Some(url) = pg_url() else {
-            eprintln!("p7n_postgres_sqlite_lifecycle: FIREWEED_PG_TEST_URL unset — skipping");
-            return;
+            panic!("p7n_postgres_sqlite_lifecycle: FIREWEED_PG_TEST_URL unset — skipping");
         };
         let root = FixtureRoot::new("postgres_sqlite");
         let schema = format!("p7n_pg_sqlite_{}", std::process::id());
@@ -458,8 +454,7 @@ mod postgres_cells {
     #[tokio::test(flavor = "current_thread")]
     async fn p7n_postgres_postgres_lifecycle() {
         let Some(url) = pg_url() else {
-            eprintln!("p7n_postgres_postgres_lifecycle: FIREWEED_PG_TEST_URL unset — skipping");
-            return;
+            panic!("p7n_postgres_postgres_lifecycle: FIREWEED_PG_TEST_URL unset — skipping");
         };
         // Isolate relational schema so concurrent matrix runs do not collide.
         let schema = format!("p7n_pg_pg_{}", std::process::id());
@@ -483,8 +478,7 @@ mod postgres_cells {
     #[tokio::test(flavor = "current_thread")]
     async fn p7n_filesystem_postgres_lifecycle() {
         let Some(url) = pg_url() else {
-            eprintln!("p7n_filesystem_postgres_lifecycle: FIREWEED_PG_TEST_URL unset — skipping");
-            return;
+            panic!("p7n_filesystem_postgres_lifecycle: FIREWEED_PG_TEST_URL unset — skipping");
         };
         let root = FixtureRoot::new("filesystem_postgres");
         let cfg = fireweed::ObjectLogRuntimeConfig {
