@@ -38,8 +38,17 @@ echo "=== pr-gate [mode=${MODE}] ==="
 echo "--- release artifact verifier fixtures ---"
 bash "${SCRIPT_DIR}/../release/verify-release-artifacts-test.sh"
 
+echo "--- release identity freeze fixtures (P17v) ---"
+bash "${SCRIPT_DIR}/../release/verify-release-identity-test.sh"
+
+echo "--- source predicate fixtures (P17a) ---"
+bash "${SCRIPT_DIR}/../release/verify-source-predicate-test.sh"
+
 echo "--- governed evidence archive fixtures ---"
 bash "${SCRIPT_DIR}/../release/build-governed-evidence-bundle-test.sh"
+
+echo "--- governed evidence promoter fixtures (P17e) ---"
+bash "${SCRIPT_DIR}/../release/promote-governed-evidence-test.sh"
 
 POLICY_MODE="remediation"
 if [[ "$MODE" == "enforcing" || "$MODE" == "closure" ]]; then
