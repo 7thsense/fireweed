@@ -362,16 +362,14 @@ fn metadata_from_json_value(value: serde_json::Value) -> Result<Metadata, String
     match value {
         serde_json::Value::Object(mut map) => {
             // Legacy Metadata wrapper: {"entries": {…}}
-            if map.len() == 1 {
-                if let Some(entries) = map.remove("entries") {
-                    if let serde_json::Value::Object(entries) = entries {
-                        let mut out = BTreeMap::new();
-                        for (k, v) in entries {
-                            out.insert(k, metadata_value_from_json(v)?);
-                        }
-                        return Ok(Metadata::from_entries(out));
-                    }
+            if map.len() == 1
+                && let Some(serde_json::Value::Object(entries)) = map.remove("entries")
+            {
+                let mut out = BTreeMap::new();
+                for (k, v) in entries {
+                    out.insert(k, metadata_value_from_json(v)?);
                 }
+                return Ok(Metadata::from_entries(out));
             }
             let mut out = BTreeMap::new();
             for (k, v) in map {
