@@ -1,10 +1,10 @@
-# Governed product lane framework (P13a).
+# Governed product lane (P13a framework + P13 populated allowlist/services).
 #
 # Destination for service-backed storage-matrix, Helm/kind, supported S3, and
-# deterministic reduced-count runner/schema checks that must not run on the
+# deterministic reduced-count functional/schema checks that must not run on the
 # three-minute hosted ci.yml lane.
 #
-# Product-release readiness is NOT claimed by this framework alone:
+# Product-release readiness is NOT claimed by this lane alone:
 #   - P13 populates scripts/ci/governed-product-allowlist.json commands and
 #     scripts/ci/governed-product-services.json kafka image_digest/command.
 #   - P13b provisions runner/credentials/ruleset and emits external proof.
@@ -16,9 +16,7 @@ name: governed-product
 on:
   workflow_dispatch:
   # Path filters kept broad intentionally; required-check installation is P13b.
-  # pull_request/push triggers may be enabled once P13 populates commands and
-  # P13b attaches the ruleset — framework ships dispatch-first so hosted CI
-  # remains bounded.
+  # pull_request/push triggers may be enabled once P13b attaches the ruleset.
 
 permissions:
   contents: read
@@ -53,67 +51,102 @@ jobs:
       - name: Verify workflow policy (zero-arg)
         run: bash scripts/ci/verify-github-actions-policy.sh
 
-      - name: Validate governed allowlist framework
+      - name: Validate P13-populated allowlist + services
         run: |
+          python3 scripts/ci/generate-governed-product-allowlist.py --check
           python3 - <<'PY'
           import json
+          import re
           from pathlib import Path
           allow = json.loads(Path("scripts/ci/governed-product-allowlist.json").read_text())
           services = json.loads(Path("scripts/ci/governed-product-services.json").read_text())
-          assert allow["commands"] == [], "P13 populates commands; framework must stay empty until then"
           assert allow["product_release_readiness_claimed"] is False
+          assert len(allow["commands"]) >= 8
           kafka = services["services"]["kafka_compatible_broker"]
           assert kafka["authorized"] is True
-          assert kafka["image_digest"] is None, "P13 populates image_digest"
-          assert kafka["command"] is None, "P13 populates command"
-          print("governed-product framework: allowlist empty; kafka slot authorized; digests unpopulated")
+          assert re.fullmatch(r"sha256:[0-9a-f]{64}", kafka["image_digest"])
+          assert isinstance(kafka["command"], list) and kafka["command"][0] == "redpanda"
+          print(
+              f"governed-product: {len(allow['commands'])} commands; "
+              f"kafka={kafka['image_repository']}@{kafka['image_digest'][:19]}…; "
+              "product_release_readiness_claimed=false"
+          )
           PY
 
-      - name: Authorized service slot — kafka_compatible_broker (P8k)
-        # Policy/schema authorization only. P13 populates exact image_digest and
-        # command into scripts/ci/governed-product-services.json and may expand
-        # this step into a digest-pinned service/container start. Do not author
-        # a concrete @sha256 digest or broker command here.
-        run: |
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-          services = json.loads(Path("scripts/ci/governed-product-services.json").read_text())
-          kafka = services["services"]["kafka_compatible_broker"]
-          assert kafka["authorized"] is True
-          assert kafka["requirements"]["image_must_be_digest_pinned"] is True
-          if kafka["image_digest"] is None or kafka["command"] is None:
-              print(
-                  "kafka_compatible_broker slot authorized; "
-                  "image_digest/command awaiting P13 population — skipping start"
-              )
-          else:
-              raise SystemExit(
-                  "P13 populated kafka digest/command but start logic is owned by P13; "
-                  "update this step when populating allowlist/services"
-              )
-          PY
-
-      - name: Execute P13-populated allowlist commands
+      - name: Authorized kafka_compatible_broker pin (P8k / P13)
+        # Pin lives in scripts/ci/governed-product-services.json only. This step
+        # verifies the image is present (or pullable) and records the pin; the
+        # allowlist p8k-external-kafka-fixture-preflight entry owns readiness/
+        # sentinel produce-fetch on a run-owned ephemeral container.
         run: |
           python3 - <<'PY'
           import json
           import subprocess
           import sys
           from pathlib import Path
+
+          services = json.loads(Path("scripts/ci/governed-product-services.json").read_text())
+          kafka = services["services"]["kafka_compatible_broker"]
+          assert kafka["authorized"] is True
+          digest = kafka["image_digest"]
+          pinned = kafka.get("image_pinned") or f"{kafka['image_repository']}@{digest}"
+          cmd = kafka["command"]
+          assert isinstance(cmd, list) and cmd[0] == "redpanda"
+          print(f"kafka_compatible_broker authorized pin: {pinned}")
+          print(f"static command: {' '.join(cmd)}")
+
+          inspect = subprocess.run(
+              ["docker", "image", "inspect", pinned],
+              capture_output=True,
+              text=True,
+          )
+          if inspect.returncode != 0:
+              print(f"pulling pinned image {pinned}", flush=True)
+              pull = subprocess.run(["docker", "pull", pinned], check=False)
+              if pull.returncode != 0:
+                  print(
+                      "WARNING: pinned Redpanda image not available locally; "
+                      "allowlist p8k preflight will fail closed if docker/image missing",
+                      file=sys.stderr,
+                  )
+              else:
+                  print("pinned image pulled")
+          else:
+              print("pinned image present locally")
+          PY
+
+      - name: Execute P13-populated allowlist commands
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
           allow = json.loads(Path("scripts/ci/governed-product-allowlist.json").read_text())
+          assert allow["product_release_readiness_claimed"] is False
           commands = allow["commands"]
           if not commands:
-              print(
-                  "governed-product allowlist empty (P13 populates); "
-                  "framework syntax/policy pass only — not product-release readiness"
-              )
-              sys.exit(0)
+              raise SystemExit("governed-product allowlist empty after P13 population")
+
+          # Refuse accidental authoritative-performance promotion in this lane.
+          for token in allow.get("forbidden_in_lane", []):
+              for entry in commands:
+                  joined = " ".join(entry["command"])
+                  if token in joined:
+                      raise SystemExit(f"forbidden token {token!r} in {entry['id']}")
+
           for entry in commands:
-              command = entry["command"] if isinstance(entry, dict) else entry
-              print(f"--- governed command: {command!r} ---", flush=True)
+              entry_id = entry["id"]
+              command = entry["command"]
+              print(f"--- governed command [{entry_id}]: {command!r} ---", flush=True)
               completed = subprocess.run(command, check=False)
               if completed.returncode != 0:
+                  print(f"governed command failed: {entry_id} exit={completed.returncode}", file=sys.stderr)
                   sys.exit(completed.returncode)
-          print("governed-product allowlist: all commands passed")
+          print(
+              f"governed-product allowlist: all {len(commands)} commands passed; "
+              "product_release_readiness_claimed=false"
+          )
           PY

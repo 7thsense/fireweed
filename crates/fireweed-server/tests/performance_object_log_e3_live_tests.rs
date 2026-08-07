@@ -3842,7 +3842,6 @@ async fn performance_object_log_e3_live_tests() {
 /// release branch of `performance_object_log_e3_live_tests` (see
 /// `prove_native_create_only_fence` under `FIREWEED_PERF_ENV` + release shape).
 /// A unit test below asserts this file no longer carries `#[ignore]` routes.
-
 fn synthetic_ack(
     label: &'static str,
     throughput_per_s: f64,

@@ -12,7 +12,7 @@ use fireweed_core::{ItemId, QueueDefinition};
 use crate::{
     AsyncClaimPlan, AsyncClaimPlanner, AsyncControlPlane, AsyncLogStore, AsyncProjectionStore,
     ClaimCommand, ClaimRequest, ClaimUnit, CohortClaimCommand, CommandChecksum, CommandEnvelope,
-    EngineError, EngineResult, IdGen, OwnedTask, QueueCommand, QueueKey, RawCommitRequest,
+    EngineResult, IdGen, OwnedTask, QueueCommand, QueueKey, RawCommitRequest,
 };
 
 /// Claim planner shared by native-async object-log/relational projection compositions.
@@ -222,7 +222,7 @@ mod tests {
             &self,
             _definition: QueueDefinition,
         ) -> Ready<EngineResult<CreateQueueOutcome>> {
-            ready(Err(EngineError::Unavailable))
+            ready(Err(crate::EngineError::Unavailable))
         }
 
         fn queue_definition(&self, _key: QueueKey) -> Ready<EngineResult<QueueDefinition>> {
@@ -230,7 +230,7 @@ mod tests {
         }
 
         fn list_queues(&self, _tenant: TenantId) -> Ready<EngineResult<Vec<QueueId>>> {
-            ready(Err(EngineError::Unavailable))
+            ready(Err(crate::EngineError::Unavailable))
         }
     }
 
@@ -240,7 +240,7 @@ mod tests {
         }
 
         fn ensure_shard(&self, _shard: QueueKey) -> Ready<EngineResult<()>> {
-            ready(Err(EngineError::Unavailable))
+            ready(Err(crate::EngineError::Unavailable))
         }
 
         fn current_epoch(&self, _shard: QueueKey) -> Ready<EngineResult<u64>> {
@@ -248,7 +248,7 @@ mod tests {
         }
 
         fn acquire_epoch(&self, _shard: QueueKey) -> Ready<EngineResult<u64>> {
-            ready(Err(EngineError::Unavailable))
+            ready(Err(crate::EngineError::Unavailable))
         }
 
         fn append(
@@ -257,7 +257,7 @@ mod tests {
             _commands: Vec<CommandEnvelope>,
             _expected_epoch: u64,
         ) -> Ready<EngineResult<Vec<CommandPosition>>> {
-            ready(Err(EngineError::Unavailable))
+            ready(Err(crate::EngineError::Unavailable))
         }
 
         fn read_from(
@@ -266,11 +266,11 @@ mod tests {
             _from: Option<CommandPosition>,
             _limit: usize,
         ) -> Ready<EngineResult<CommandPage>> {
-            ready(Err(EngineError::Unavailable))
+            ready(Err(crate::EngineError::Unavailable))
         }
 
         fn high_water(&self, _shard: QueueKey) -> Ready<EngineResult<Option<CommandPosition>>> {
-            ready(Err(EngineError::Unavailable))
+            ready(Err(crate::EngineError::Unavailable))
         }
 
         fn set_high_water(
@@ -278,19 +278,19 @@ mod tests {
             _shard: QueueKey,
             _position: CommandPosition,
         ) -> Ready<EngineResult<()>> {
-            ready(Err(EngineError::Unavailable))
+            ready(Err(crate::EngineError::Unavailable))
         }
     }
 
     impl AsyncProjectionStore for TestAxes {
         fn ensure_shard(&self, _definition: QueueDefinition) -> Ready<EngineResult<()>> {
-            ready(Err(EngineError::Unavailable))
+            ready(Err(crate::EngineError::Unavailable))
         }
 
         fn admit_mutation(&self, _shard: QueueKey) -> Ready<EngineResult<()>> {
             self.admission_calls.fetch_add(1, Ordering::SeqCst);
             ready(if self.reject_admission.load(Ordering::SeqCst) {
-                Err(EngineError::Unavailable)
+                Err(crate::EngineError::Unavailable)
             } else {
                 Ok(())
             })
@@ -301,7 +301,7 @@ mod tests {
             _positions: Vec<CommandPosition>,
             _commands: Vec<CommandEnvelope>,
         ) -> Ready<EngineResult<()>> {
-            ready(Err(EngineError::Unavailable))
+            ready(Err(crate::EngineError::Unavailable))
         }
 
         fn apply_recovery(
@@ -309,7 +309,7 @@ mod tests {
             _positions: Vec<CommandPosition>,
             _commands: Vec<CommandEnvelope>,
         ) -> Ready<EngineResult<()>> {
-            ready(Err(EngineError::Unavailable))
+            ready(Err(crate::EngineError::Unavailable))
         }
 
         fn eligible_candidates(
@@ -388,18 +388,18 @@ mod tests {
             _shard: QueueKey,
             _id: ItemId,
         ) -> Ready<EngineResult<Option<fireweed_core::ItemState>>> {
-            ready(Err(EngineError::Unavailable))
+            ready(Err(crate::EngineError::Unavailable))
         }
 
         fn item_version(&self, _shard: QueueKey, _id: ItemId) -> Ready<EngineResult<Option<u64>>> {
-            ready(Err(EngineError::Unavailable))
+            ready(Err(crate::EngineError::Unavailable))
         }
 
         fn recovery_high_water(
             &self,
             _shard: QueueKey,
         ) -> Ready<EngineResult<Option<CommandPosition>>> {
-            ready(Err(EngineError::Unavailable))
+            ready(Err(crate::EngineError::Unavailable))
         }
 
         fn recover_definitions(&self) -> Ready<EngineResult<Vec<QueueDefinition>>> {
@@ -586,7 +586,7 @@ mod tests {
             futures::executor::block_on(backend.claim(request(Some(7), false))).unwrap_err();
         assert_eq!(
             error,
-            crate::AsyncClaimError::BeforeCommit(EngineError::EpochFenced)
+            crate::AsyncClaimError::BeforeCommit(crate::EngineError::EpochFenced)
         );
         assert!(commits.lock().unwrap().is_empty());
         assert_eq!(axes.next_id.load(Ordering::SeqCst), 0);
@@ -625,7 +625,7 @@ mod tests {
             futures::executor::block_on(backend.claim(request(Some(5), false))).unwrap_err();
         assert_eq!(
             error,
-            crate::AsyncClaimError::BeforeCommit(EngineError::Unavailable)
+            crate::AsyncClaimError::BeforeCommit(crate::EngineError::Unavailable)
         );
         assert_eq!(axes.admission_calls.load(Ordering::SeqCst), 1);
         assert_eq!(axes.next_id.load(Ordering::SeqCst), 0);

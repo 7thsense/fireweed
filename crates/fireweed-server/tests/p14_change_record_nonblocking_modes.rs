@@ -3,7 +3,7 @@ use fireweed_core::{
     EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
 };
-use fireweed_engine::EngineError;
+use fireweed_engine::{ControlPlaneStore, EngineError};
 use fireweed_memory::composed_memory_backend;
 use fireweed_server::{
     BackendSpec, ChangeRecordSinkConfig, ChangeRecordSinkMode, Config, ControlPlaneSpec, LogSpec,

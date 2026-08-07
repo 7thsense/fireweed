@@ -13,7 +13,7 @@
 #     here as historical residue; P17r moves service/kind to governed lanes.
 #   - governed-product.yml: sole lane authorized for service-backed matrix/kind/S3
 #     and P8k kafka-compatible broker service *slots*. Exact digests/commands are
-#     P13-populated placeholders until P13 fills them.
+#     P13-populated in governed-product-services.json / allowlist (not workflow YAML).
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -132,10 +132,12 @@ fi
 python3 - "${allowlist_path}" "${services_path}" "${governed_workflow}" <<'PY'
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 allowlist_path, services_path, workflow_path = map(Path, sys.argv[1:])
+repo_root = workflow_path.resolve().parents[2]
 allowlist = json.loads(allowlist_path.read_text())
 services = json.loads(services_path.read_text())
 workflow = workflow_path.read_text()
@@ -143,37 +145,92 @@ workflow = workflow_path.read_text()
 assert allowlist["schema_version"] == 1, "allowlist schema_version"
 assert allowlist["workflow"] == ".github/workflows/governed-product.yml"
 assert allowlist["lane"] == "governed-product"
-assert allowlist["product_release_readiness_claimed"] is False
+assert allowlist["product_release_readiness_claimed"] is False, (
+    "product_release_readiness_claimed must stay false until P13b"
+)
 assert allowlist["command_population_owner"] == "P13"
 assert isinstance(allowlist["commands"], list), "commands must be a list"
-# P13a ships empty command list; P13 populates exact entries later.
-assert allowlist["commands"] == [], "P13a must leave commands empty for P13 population"
+assert len(allowlist["commands"]) >= 8, "P13 must populate the governed command set"
 assert "P13" in allowlist["disclaimer"] or "P13b" in allowlist["disclaimer"]
+
+forbidden = allowlist.get("forbidden_in_lane") or [
+    "scripts/perf/",
+    "fireweed-bench",
+    "cargo bench",
+    "authoritative-performance",
+    "performance_",
+]
+seen_ids: set[str] = set()
+categories: set[str] = set()
+for entry in allowlist["commands"]:
+    assert isinstance(entry, dict), "each allowlist command must be an object"
+    assert "id" in entry and "command" in entry, "command entries need id+command"
+    assert entry["id"] not in seen_ids, f"duplicate allowlist id {entry['id']}"
+    seen_ids.add(entry["id"])
+    cmd = entry["command"]
+    assert isinstance(cmd, list) and cmd and all(isinstance(p, str) for p in cmd), (
+        f"{entry['id']} command must be a non-empty string list"
+    )
+    joined = " ".join(cmd)
+    for token in forbidden:
+        assert token not in joined, f"{entry['id']} hits forbidden_in_lane {token!r}"
+    categories.add(entry.get("category") or "")
+
+for required_cat in ("functional", "T4", "reduced-count", "external-kafka", "policy"):
+    assert required_cat in categories, f"allowlist missing category {required_cat}"
 
 assert services["schema_version"] == 1, "services schema_version"
 assert services["workflow"] == ".github/workflows/governed-product.yml"
 kafka = services["services"]["kafka_compatible_broker"]
 assert kafka["authorized"] is True
-assert kafka["image_digest"] is None, "P13a must not author kafka image_digest (P13 populates)"
-assert kafka["command"] is None, "P13a must not author kafka command (P13 populates)"
 assert kafka["digest_population_owner"] == "P13"
 assert kafka["command_population_owner"] == "P13"
 assert kafka["requirements"]["image_must_be_digest_pinned"] is True
 assert kafka["requirements"]["tag_only_image_forbidden"] is True
 assert "sha256" in kafka["requirements"]["immutable_digest_form"]
+digest = kafka["image_digest"]
+assert isinstance(digest, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", digest), (
+    "P13 must populate kafka image_digest as sha256:<64-hex>"
+)
+command = kafka["command"]
+assert isinstance(command, list) and command and command[0] == "redpanda", (
+    "P13 must populate kafka command as redpanda start argv list"
+)
+assert kafka["image_repository"] == "redpandadata/redpanda"
+pinned = kafka.get("image_pinned") or f"{kafka['image_repository']}@{digest}"
+assert pinned == f"redpandadata/redpanda@{digest}"
 
-# Workflow must reference the authorization documents and the P8k slot markers
-# without embedding a concrete digest or docker command for the broker.
+# Workflow references authorization docs; pin lives in services JSON only (not YAML image:).
 assert "governed-product-services.json" in workflow or "kafka_compatible_broker" in workflow
 assert "kafka_compatible_broker" in workflow
-assert "P13 populates" in workflow or "P13_POPULATES" in workflow
-# No authored digest pin yet.
-if re.search(r"redpandadata/redpanda@sha256:[0-9a-f]{64}", workflow):
-    raise SystemExit("governed-product.yml must not author the kafka image digest; P13 populates it")
+assert "governed-product-allowlist.json" in workflow
+if re.search(r"image:\s*redpandadata/redpanda@", workflow):
+    raise SystemExit(
+        "governed-product.yml must not embed kafka image pin in workflow YAML; "
+        "pin lives in governed-product-services.json"
+    )
 if re.search(r"image:\s*redpandadata/redpanda:", workflow):
-    raise SystemExit("tag-only redpanda image is forbidden; digest pin required when populated")
+    raise SystemExit("tag-only redpanda image is forbidden; digest pin required")
 
-print("GitHub Actions policy valid: governed-product allowlist/services framework")
+# On-disk allowlist/services must match the P13 generator (manifest-derived).
+gen = repo_root / "scripts/ci/generate-governed-product-allowlist.py"
+assert gen.is_file(), "missing generate-governed-product-allowlist.py"
+check = subprocess.run(
+    [sys.executable, str(gen), "--check"],
+    cwd=repo_root,
+    check=False,
+    capture_output=True,
+    text=True,
+)
+if check.returncode != 0:
+    sys.stderr.write(check.stdout + check.stderr)
+    raise SystemExit("governed allowlist/services drift from P13 generator")
+
+print(
+    "GitHub Actions policy valid: governed-product allowlist populated "
+    f"({len(allowlist['commands'])} commands); kafka digest pinned; "
+    "product_release_readiness_claimed=false"
+)
 PY
 
 # Hosted lanes other than release.yml must not declare services.

@@ -170,10 +170,12 @@ for cargo_args, items in sorted(groups.items()):
             sys.stderr.write(f"exact leaf not listed: {leaf_id} filter={filt}\n")
             sys.exit(1)
         print(f"  listed {leaf_id}", flush=True)
+        # Registry leaf_ids use feature_on/feature_off (underscore); feature_tuple
+        # strings use hyphen. Accept either so the pair cannot silently empty-out.
         if leaf_id.startswith("external_kafka:"):
-            if "feature-on" in leaf_id:
+            if "feature_on" in leaf_id or "feature-on" in leaf_id:
                 seen_kafka.add("feature-on")
-            if "feature-off" in leaf_id:
+            if "feature_off" in leaf_id or "feature-off" in leaf_id:
                 seen_kafka.add("feature-off")
 
 if seen_kafka != {"feature-on", "feature-off"}:

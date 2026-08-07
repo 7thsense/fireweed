@@ -89,7 +89,7 @@ fn p14_bounded_sync_bridge_rejects_epoch_zero_ownership_stamps() {
     ));
     assert_eq!(resolve_bounded_epoch(3, Some(3)).unwrap(), 3);
     assert_eq!(resolve_write_epoch_sync(None, || Ok(0)).unwrap(), 0);
-    assert!(MIN_ASSIGNMENT_EPOCH >= 1);
+    const { assert!(MIN_ASSIGNMENT_EPOCH >= 1) };
 }
 #[tokio::test(flavor = "current_thread")]
 async fn p14_async_pre_resolution_is_pure_after_await() {

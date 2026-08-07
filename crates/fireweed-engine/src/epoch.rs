@@ -189,7 +189,7 @@ mod tests {
 
         fn once_poll<T>(fut: impl Future<Output = T>) -> T {
             let waker = Waker::noop();
-            let mut cx = Context::from_waker(&waker);
+            let mut cx = Context::from_waker(waker);
             let mut fut = std::pin::pin!(fut);
             match fut.as_mut().poll(&mut cx) {
                 Poll::Ready(v) => v,

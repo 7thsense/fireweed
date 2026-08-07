@@ -40,21 +40,31 @@ echo "--- governed-product framework present ---"
 test -f .github/workflows/governed-product.yml
 test -f scripts/ci/governed-product-allowlist.json
 test -f scripts/ci/governed-product-services.json
+test -f scripts/ci/generate-governed-product-allowlist.py
 grep -Fq 'kafka_compatible_broker' .github/workflows/governed-product.yml
-grep -Fq 'P13 populates' .github/workflows/governed-product.yml
+grep -Fq 'governed-product-allowlist.json' .github/workflows/governed-product.yml
 
-echo "--- kafka digest/command unauthored (P13 populates) ---"
+echo "--- P13 populated allowlist + kafka pin (generator check) ---"
+python3 scripts/ci/generate-governed-product-allowlist.py --check
 python3 - <<'PY'
 import json
+import re
 from pathlib import Path
+allow = json.loads(Path("scripts/ci/governed-product-allowlist.json").read_text())
 services = json.loads(Path("scripts/ci/governed-product-services.json").read_text())
+assert allow["product_release_readiness_claimed"] is False
+assert len(allow["commands"]) >= 8
+cats = {e.get("category") for e in allow["commands"]}
+for required in ("functional", "T4", "reduced-count", "external-kafka", "policy"):
+    assert required in cats, required
 kafka = services["services"]["kafka_compatible_broker"]
-assert kafka["image_digest"] is None
-assert kafka["command"] is None
 assert kafka["authorized"] is True
+assert re.fullmatch(r"sha256:[0-9a-f]{64}", kafka["image_digest"])
+assert isinstance(kafka["command"], list) and kafka["command"][0] == "redpanda"
 wf = Path(".github/workflows/governed-product.yml").read_text()
-assert "redpandadata/redpanda@sha256:" not in wf
-print("kafka authorization slot: PASS")
+assert "image: redpandadata/redpanda@" not in wf
+assert "image: redpandadata/redpanda:" not in wf
+print("kafka pin + allowlist population: PASS")
 PY
 
 echo "--- Hybrid product selectors absent from workflows ---"
