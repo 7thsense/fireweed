@@ -882,9 +882,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "c86be6c467818c9dd066",
+        "id": "74a40a4dce43d1782e8d",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 1919,
+        "line": 1962,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/async_objectlog_postgres.rs",
         "status": "discovery_negative"
@@ -896,9 +896,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "adb226a401393fc52f5a",
+        "id": "ef45a58c7e0d100204c2",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 1975,
+        "line": 2018,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/async_objectlog_postgres.rs",
         "status": "discovery_negative"
@@ -910,9 +910,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "02cd870c42faaa9b6818",
+        "id": "e6b4606de8d26df68033",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 2071,
+        "line": 2114,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/async_objectlog_postgres.rs",
         "status": "discovery_negative"
@@ -938,9 +938,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "79022bfaff32125ba01c",
+        "id": "46a62cc1ad8d998ccf18",
         "identity": "//! `fireweed_group_summary` (the BQ-12 fresh-eyes BLOCKING fix). LOUD-skips without a live DB. Reads the",
-        "line": 11847,
+        "line": 11887,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -952,9 +952,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "f637cf64378a78abdf54",
+        "id": "0d52da034f5bd0311770",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 11928,
+        "line": 11968,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -966,9 +966,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "a1f6092467cea313f934",
+        "id": "a529bfbd333cc28b8561",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 12019,
+        "line": 12059,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -980,9 +980,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "b291fe9908dfea2413d2",
+        "id": "edb523e1416c2c45b250",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 12094,
+        "line": 12134,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -994,9 +994,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "551fdec1a1c4669954ec",
+        "id": "df3f35f54fcad0f76e44",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 12122,
+        "line": 12162,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1008,9 +1008,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "9965ac5cd3332eae457a",
+        "id": "808717738cc184c97089",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 12178,
+        "line": 12218,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1022,9 +1022,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "5e5676e3e2294799d466",
+        "id": "7c375785e541506c3ae3",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 12222,
+        "line": 12262,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1036,9 +1036,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "abb7be3fbc67eb05d7b0",
+        "id": "4aa3abab6c2868f8d188",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 12266,
+        "line": 12306,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1050,9 +1050,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "4adfe42dfcc95b783b58",
+        "id": "89341a3ef4090f09f699",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 12372,
+        "line": 12412,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1064,9 +1064,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "085a931af35b84bea02c",
+        "id": "d628639cc86c1a5a2b69",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 12395,
+        "line": 12435,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1078,9 +1078,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "4646bd55bfda329df15a",
+        "id": "0f3a4b550068935dd3a7",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 12525,
+        "line": 12565,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1092,9 +1092,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "511c028c7b721b9b89da",
+        "id": "9830c59bc9eac3f551d4",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 12568,
+        "line": 12608,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1106,9 +1106,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "171975348bed101f6aed",
+        "id": "d42bb8a927d3dd3e3277",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 12625,
+        "line": 12665,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1120,9 +1120,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "553ed3db92cf9b5fab9e",
+        "id": "f699430e23c4b815403a",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 12674,
+        "line": 12714,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1134,9 +1134,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "e42df9f9077fb319c7fa",
+        "id": "27378cc80667d74a72a3",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 12826,
+        "line": 12866,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1148,9 +1148,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "d291d12fa4cb2051d634",
+        "id": "a2bb8db81b6e26af7f54",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 12964,
+        "line": 13004,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1162,9 +1162,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "5517543fe994034322b2",
+        "id": "6777329db2672e9d379c",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 13040,
+        "line": 13080,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1176,9 +1176,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "95beba2d4256bf06058f",
+        "id": "e61e4c92a9ea16988786",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 13145,
+        "line": 13185,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1190,9 +1190,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "e3b50e85e834f06f6c2e",
+        "id": "07cb2fca1fa8ba80248f",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 13229,
+        "line": 13269,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1204,9 +1204,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "5b64c56af2bb7f22d453",
+        "id": "31acf346669a90e92fd9",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 13284,
+        "line": 13324,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1218,9 +1218,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "18b58da6998bb3015999",
+        "id": "3a5312648bc805fbb94b",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 13342,
+        "line": 13382,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1232,9 +1232,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "c5f8a7264fef80a2ee57",
+        "id": "f68631a68076f84fdda2",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 13364,
+        "line": 13404,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1246,9 +1246,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "140e65d4373d11ef82ae",
+        "id": "a2d63a06a3a131215571",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 13410,
+        "line": 13450,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1260,9 +1260,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "a8a0f0a1a6fb15570130",
+        "id": "38995994f9f32a431dc9",
         "identity": "/// BQ-14b: group_batching leases whole groups oldest-first (env-gated; LOUD-skips without a DB).",
-        "line": 13504,
+        "line": 13544,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1274,9 +1274,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "eb2b2a255dc103cfd2f6",
+        "id": "8b77840584e341b223ac",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 13508,
+        "line": 13548,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1288,9 +1288,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "bf9dcf24ab80808cd78d",
+        "id": "7d6229f4d941e2838419",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 13561,
+        "line": 13601,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1302,9 +1302,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "ac2fdf1c3a3d953b3d53",
+        "id": "1fcceb0b6427aadc4a2e",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 13627,
+        "line": 13667,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1316,9 +1316,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "b2a98f1e9737b5d8cc79",
+        "id": "5ce58eadd9dbdd40428e",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 13699,
+        "line": 13739,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1330,9 +1330,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "55376c0efa5739fad2b3",
+        "id": "384266d5989aa4ee576f",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 13761,
+        "line": 13801,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1344,9 +1344,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "abbd847e80f76ce4dabc",
+        "id": "e857260c3cbe1131d558",
         "identity": "// A held g1 lock must be skipped so the next canonical candidate, g2, is selected.",
-        "line": 13835,
+        "line": 13875,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1358,9 +1358,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "e2916a165e687d786b84",
+        "id": "18f1b1cb56fd13ebbd08",
         "identity": "/// BQ-14c: whole_cohort leases a complete, all-eligible cohort (env-gated; LOUD-skips without a DB).",
-        "line": 13874,
+        "line": 13914,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1372,9 +1372,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "a5e514d7b014082cfc05",
+        "id": "48fabb35c2f51aa29ff9",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 13878,
+        "line": 13918,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1386,9 +1386,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "c57f59015f5c7a0b0671",
+        "id": "93a7c47190b91fdeae5b",
         "identity": "/// crossings, reports deferred at-risk as None, and drops fully-leased scopes (env-gated; LOUD skip).",
-        "line": 13935,
+        "line": 13975,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1400,9 +1400,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "5e37647938b88e98ce79",
+        "id": "dd368ed0a90ef31ed69d",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 13939,
+        "line": 13979,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1414,9 +1414,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "d5e523e91354384a7457",
+        "id": "5a07b67b30543a1820e4",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 14138,
+        "line": 14178,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1428,9 +1428,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "9bfbcea28b36f769262e",
+        "id": "d6106a4a9028ac189f6d",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 14196,
+        "line": 14236,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1442,9 +1442,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "a5d7c7ff50e32273d18c",
+        "id": "91f7ffa56a4a29720c91",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 14243,
+        "line": 14283,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1456,9 +1456,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "92fde2e69ebcd68ccfdb",
+        "id": "92f0fcda8bf555d707e3",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 14281,
+        "line": 14321,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1470,9 +1470,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "6f4f306f6492d3f38988",
+        "id": "dfb16e5888599f90d9db",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 14348,
+        "line": 14388,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1484,23 +1484,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "2dd17cde6dda49434574",
+        "id": "a36c5df4ca9af53783f8",
         "identity": "panic!(\"POSTGRES COMMAND LOG TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14422,
-        "owner": "P10pp",
-        "path": "crates/fireweed-postgres/src/relational.rs",
-        "status": "discovery_negative"
-      },
-      {
-        "category": "loud_skip",
-        "dependency_chain": [
-          "P10pp",
-          "P2f"
-        ],
-        "detail": "fail_closed=true",
-        "id": "5b5b65d366ce915b7d68",
-        "identity": "panic!(\"POSTGRES COMMAND LOG TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14479,
+        "line": 14462,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1526,9 +1512,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "0154547781461eaec155",
+        "id": "8bba0834561f0edfc2c1",
         "identity": "panic!(\"POSTGRES COMMAND LOG TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14543,
+        "line": 14559,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1540,9 +1526,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "52ea3e524d1def0fbbdd",
+        "id": "4664fe0741c77cdd2a3a",
         "identity": "panic!(\"POSTGRES COMMAND LOG TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14581,
+        "line": 14583,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1554,9 +1540,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "12f1172e2fb8976c1a49",
+        "id": "076931bde6e6093bfee2",
         "identity": "panic!(\"POSTGRES COMMAND LOG TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14616,
+        "line": 14621,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1568,9 +1554,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "c20cbbee85db21772dfc",
+        "id": "9bcf4eafc85601839708",
         "identity": "panic!(\"POSTGRES COMMAND LOG TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14657,
+        "line": 14656,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1582,9 +1568,23 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "d6f048671c5a95696e23",
+        "id": "70977be0cce560aa7d7e",
+        "identity": "panic!(\"POSTGRES COMMAND LOG TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
+        "line": 14697,
+        "owner": "P10pp",
+        "path": "crates/fireweed-postgres/src/relational.rs",
+        "status": "discovery_negative"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10pp",
+          "P2f"
+        ],
+        "detail": "fail_closed=true",
+        "id": "76c603fbf0a61fc44caf",
         "identity": "panic!(\"POSTGRES BATCH UPDATE TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14708,
+        "line": 14748,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1596,9 +1596,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "710729432d8e058c3ee8",
+        "id": "8bdf80630329cfbf9a4a",
         "identity": "panic!(\"POSTGRES BATCH UPDATE TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14754,
+        "line": 14794,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -1610,9 +1610,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "9b7e7a6de871f05931df",
+        "id": "9f71e9371047d9472cf1",
         "identity": "panic!(\"POSTGRES COMMAND LOG TEST SKIPPED \u2014 set FIREWEED_PG_TEST_URL\");",
-        "line": 14816,
+        "line": 14856,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/relational.rs",
         "status": "discovery_negative"
@@ -3290,9 +3290,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "22544b2077cac5e7af08",
+        "id": "7a124c7cab726de56d09",
         "identity": "\"FIREWEED_PG_TEST_URL or PQUEUE_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\",",
-        "line": 7225,
+        "line": 7258,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -3304,9 +3304,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "a307af2aefe6f14b8bde",
+        "id": "97847dddedc695d83edd",
         "identity": "\"FIREWEED_PG_TEST_URL or PQUEUE_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\",",
-        "line": 7305,
+        "line": 7338,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -4737,9 +4737,9 @@
           "P2f"
         ],
         "detail": "pre-existing public-release functional gate failure; repair in the path owner's bead; intentional_lineage_or_compat",
-        "id": "011146b18f787c0d244f",
+        "id": "97d5e1cb4a438a58905e",
         "identity": "retired uppercase identifier: PQUEUE_PG_TEST_URL: /// (`FIREWEED_PG_TEST_URL`) or legacy (`PQUEUE_PG_TEST_URL`).",
-        "line": 7093,
+        "line": 7135,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -4751,9 +4751,9 @@
           "P2f"
         ],
         "detail": "pre-existing public-release functional gate failure; repair in the path owner's bead; intentional_lineage_or_compat",
-        "id": "7e693a08773dd9569036",
+        "id": "4d30905e8f5383a0b6f2",
         "identity": "retired uppercase identifier: PQUEUE_PG_TEST_URL: .or_else(|_| std::env::var(\"PQUEUE_PG_TEST_URL\"))",
-        "line": 7097,
+        "line": 7139,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -4765,9 +4765,9 @@
           "P2f"
         ],
         "detail": "pre-existing public-release functional gate failure; repair in the path owner's bead; intentional_lineage_or_compat",
-        "id": "8ccca64da6a8a8413690",
+        "id": "36949cb66364f6dade92",
         "identity": "retired uppercase identifier: PQUEUE_PG_TEST_URL: /// (fireweed-ca319318). When FIREWEED_PG_TEST_URL / PQUEUE_PG_TEST_URL is set,",
-        "line": 7209,
+        "line": 7251,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -4779,9 +4779,9 @@
           "P2f"
         ],
         "detail": "pre-existing public-release functional gate failure; repair in the path owner's bead; intentional_lineage_or_compat",
-        "id": "e6f649dd8b9fa1d6b69d",
+        "id": "3947d476506d9cbc947a",
         "identity": "retired uppercase identifier: PQUEUE_PG_TEST_URL: \"FIREWEED_PG_TEST_URL or PQUEUE_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\",",
-        "line": 7216,
+        "line": 7258,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -4793,9 +4793,9 @@
           "P2f"
         ],
         "detail": "pre-existing public-release functional gate failure; repair in the path owner's bead; intentional_lineage_or_compat",
-        "id": "000be018208eb0853d67",
+        "id": "d11dc224f9bae5df61a5",
         "identity": "retired uppercase identifier: PQUEUE_PG_TEST_URL: \"FIREWEED_PG_TEST_URL or PQUEUE_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\",",
-        "line": 7296,
+        "line": 7338,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -4987,9 +4987,9 @@
           "P2f"
         ],
         "detail": "rustdoc fence must have a listed exact behavioral route; compile-only/ignored is debt; rustdoc_route_or_fence",
-        "id": "070e6fe3fa11af80722e",
+        "id": "545ac31b1666614fcd01",
         "identity": "no_run",
-        "line": 3471,
+        "line": 3473,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -10849,22 +10849,20 @@
     "test_boundary_debt": [
       {
         "boundary_owners": [
-          "P6",
-          "P7"
+          "P6"
         ],
         "category": "test_boundary_debt",
         "dependency_chain": [
           "P2a",
           "P6",
-          "P7",
           "P2r",
           "P2f"
         ],
-        "detail": "temporary crate-internal white-box placement; final public re-expression owners=P6,P7; intentional_whitebox_suite",
+        "detail": "temporary crate-internal white-box placement; final public re-expression owners=P6; intentional_whitebox_suite",
         "id": "b58b5789e38c4d0bea04",
         "identity": "active_scope_routing.rs",
         "line": 1,
-        "owner": "P6/P7",
+        "owner": "P6",
         "path": "crates/fireweed/tests/whitebox/active_scope_routing.rs",
         "private_refs": [
           "RuntimeCore"
@@ -10899,24 +10897,20 @@
       },
       {
         "boundary_owners": [
-          "P3b",
-          "P5a",
-          "P7"
+          "P3b"
         ],
         "category": "test_boundary_debt",
         "dependency_chain": [
           "P2a",
           "P3b",
-          "P5a",
-          "P7",
           "P2r",
           "P2f"
         ],
-        "detail": "temporary crate-internal white-box placement; final public re-expression owners=P3b,P5a,P7; intentional_whitebox_suite",
+        "detail": "temporary crate-internal white-box placement; final public re-expression owners=P3b; intentional_whitebox_suite",
         "id": "403abae9ac25c8b923a3",
         "identity": "encapsulation.rs",
         "line": 1,
-        "owner": "P3b/P5a/P7",
+        "owner": "P3b",
         "path": "crates/fireweed/tests/whitebox/encapsulation.rs",
         "private_refs": [
           "CommitResponseBarrier",
@@ -10933,7 +10927,6 @@
       },
       {
         "boundary_owners": [
-          "P3b",
           "P5a",
           "P6",
           "P7",
@@ -10943,7 +10936,6 @@
         "category": "test_boundary_debt",
         "dependency_chain": [
           "P2a",
-          "P3b",
           "P5a",
           "P6",
           "P7",
@@ -10952,11 +10944,11 @@
           "P2r",
           "P2f"
         ],
-        "detail": "temporary crate-internal white-box placement; final public re-expression owners=P3b,P5a,P6,P7,P8,P9; intentional_whitebox_suite",
+        "detail": "temporary crate-internal white-box placement; final public re-expression owners=P5a,P6,P7,P8,P9; intentional_whitebox_suite",
         "id": "cc94cf71c0f04885e4c9",
         "identity": "facade.rs",
         "line": 1,
-        "owner": "P3b/P5a/P6/P7/P8/P9",
+        "owner": "P5a/P6/P7/P8/P9",
         "path": "crates/fireweed/tests/whitebox/facade.rs",
         "private_refs": [
           "RuntimeCore"
@@ -11120,22 +11112,20 @@
       },
       {
         "boundary_owners": [
-          "P5a",
-          "P7"
+          "P5a"
         ],
         "category": "test_boundary_debt",
         "dependency_chain": [
           "P2a",
           "P5a",
-          "P7",
           "P2r",
           "P2f"
         ],
-        "detail": "temporary crate-internal white-box placement; final public re-expression owners=P5a,P7; intentional_whitebox_suite",
+        "detail": "temporary crate-internal white-box placement; final public re-expression owners=P5a; intentional_whitebox_suite",
         "id": "393d1924eac67f65f0ca",
         "identity": "queue_template.rs",
         "line": 1,
-        "owner": "P5a/P7",
+        "owner": "P5a",
         "path": "crates/fireweed/tests/whitebox/queue_template.rs",
         "private_refs": [
           "CommitResponseBarrier",
@@ -12376,6 +12366,26 @@
         "source": "facade.rs",
         "temporary_id": "Cargo.toml::fireweed::fireweed::test::test_facade::retry_aliases_match_absolute_relative_and_exhaustion_behavior",
         "test_id": "retry_aliases_match_absolute_relative_and_exhaustion_behavior"
+      },
+      {
+        "baseline": false,
+        "boundary_kind": "crate_private_white_box",
+        "boundary_owners": [
+          "P7"
+        ],
+        "final_id": "Cargo.toml::fireweed::facade::test::snapshot_now_records_position_and_ref_on_memory",
+        "key": "facade.rs::snapshot_now_records_position_and_ref_on_memory",
+        "observed_count": 1,
+        "observed_ids": [
+          "Cargo.toml::fireweed::fireweed::test::test_facade::snapshot_now_records_position_and_ref_on_memory"
+        ],
+        "old_id": "Cargo.toml::fireweed::facade::test::snapshot_now_records_position_and_ref_on_memory",
+        "private_refs": [
+          "RuntimeCore"
+        ],
+        "source": "facade.rs",
+        "temporary_id": "Cargo.toml::fireweed::fireweed::test::test_facade::snapshot_now_records_position_and_ref_on_memory",
+        "test_id": "snapshot_now_records_position_and_ref_on_memory"
       },
       {
         "baseline": true,
@@ -18468,7 +18478,7 @@
     "cargo_status": "listed",
     "errors": [],
     "generated_by": "scripts/ci/fireweed_test_placement.py",
-    "input_sha256": "3624194811ba03b222e59dece83dd48e87331a2431cbe99c499f5e0f91db5d81",
+    "input_sha256": "5ded0a10ce708eecf1d2facecb4c379ff1a3de7ddc430c23a899dc91d1de1f64",
     "private_surface": [
       {
         "declaration_kind": "fn",
@@ -18489,7 +18499,7 @@
         "id": "function:open_composed_postgres",
         "item": "open_composed_postgres",
         "kind": "function",
-        "line": 6505,
+        "line": 6547,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -18501,7 +18511,7 @@
         "id": "function:open_composed_postgres_async",
         "item": "open_composed_postgres_async",
         "kind": "function",
-        "line": 6536,
+        "line": 6578,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -18513,7 +18523,7 @@
         "id": "function:open_composed_sqlite",
         "item": "open_composed_sqlite",
         "kind": "function",
-        "line": 6718,
+        "line": 6760,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -18549,7 +18559,7 @@
         "id": "type:ComposedRuntime",
         "item": "ComposedRuntime",
         "kind": "type",
-        "line": 2771,
+        "line": 2780,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -18573,7 +18583,7 @@
         "id": "type:LibBackend",
         "item": "LibBackend",
         "kind": "type",
-        "line": 3329,
+        "line": 3338,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -18609,7 +18619,7 @@
         "id": "type:ProjectionLifecycleCapabilities",
         "item": "ProjectionLifecycleCapabilities",
         "kind": "type",
-        "line": 2668,
+        "line": 2677,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -18621,7 +18631,7 @@
         "id": "type:ProjectionLifecycleHandle",
         "item": "ProjectionLifecycleHandle",
         "kind": "type",
-        "line": 2719,
+        "line": 2728,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -18633,7 +18643,7 @@
         "id": "type:ProjectionRebuildState",
         "item": "ProjectionRebuildState",
         "kind": "type",
-        "line": 2682,
+        "line": 2691,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -18669,7 +18679,7 @@
         "id": "type:ProjectionVerificationState",
         "item": "ProjectionVerificationState",
         "kind": "type",
-        "line": 2675,
+        "line": 2684,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -18681,7 +18691,7 @@
         "id": "type:RuntimeCore",
         "item": "RuntimeCore",
         "kind": "type",
-        "line": 3863,
+        "line": 3874,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -20256,6 +20266,26 @@
         "id": "Cargo.toml::fireweed::fireweed::test::test_facade::retry_aliases_match_absolute_relative_and_exhaustion_behavior",
         "target": "fireweed",
         "test_id": "test_facade::retry_aliases_match_absolute_relative_and_exhaustion_behavior"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.92.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "test_facade::snapshot_now_records_position_and_ref_on_memory",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::test_facade::snapshot_now_records_position_and_ref_on_memory",
+        "target": "fireweed",
+        "test_id": "test_facade::snapshot_now_records_position_and_ref_on_memory"
       },
       {
         "exact_invocation": [
@@ -28147,7 +28177,7 @@
       },
       {
         "exists": true,
-        "listed_test_count": 27,
+        "listed_test_count": 28,
         "listed_test_ids": [
           "Cargo.toml::fireweed::fireweed::test::test_facade::ack_of_non_leased_id_is_a_structured_error",
           "Cargo.toml::fireweed::fireweed::test::test_facade::api001_reservation_policy_is_recorded_or_enforced",
@@ -28171,6 +28201,7 @@
           "Cargo.toml::fireweed::fireweed::test::test_facade::request_id_push_is_idempotent_on_memory_backend",
           "Cargo.toml::fireweed::fireweed::test::test_facade::request_id_push_replays_over_sqlite_relational_facade",
           "Cargo.toml::fireweed::fireweed::test::test_facade::retry_aliases_match_absolute_relative_and_exhaustion_behavior",
+          "Cargo.toml::fireweed::fireweed::test::test_facade::snapshot_now_records_position_and_ref_on_memory",
           "Cargo.toml::fireweed::fireweed::test::test_facade::two_handles_on_one_backend_do_not_collide_ids",
           "Cargo.toml::fireweed::fireweed::test::test_facade::typed_json_payload_round_trips_push_claim_and_commit_lifecycle",
           "Cargo.toml::fireweed::fireweed::test::test_facade::update_fields_merges_versions_and_cas_over_memory",
@@ -83930,6 +83961,34 @@
         "-p",
         "fireweed",
         "--lib",
+        "test_facade::snapshot_now_records_position_and_ref_on_memory",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "test_facade::snapshot_now_records_position_and_ref_on_memory",
+      "id": "Cargo.toml::fireweed::fireweed::test::test_facade::snapshot_now_records_position_and_ref_on_memory",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
         "test_facade::two_handles_on_one_backend_do_not_collide_ids",
         "--",
         "--exact"
@@ -94785,14 +94844,14 @@
         "-p",
         "fireweed",
         "--doc",
-        "crates/fireweed/src/lib.rs - ClaimAt (line 3462)",
+        "crates/fireweed/src/lib.rs - ClaimAt (line 3473)",
         "--",
         "--exact"
       ],
       "expected_ran": 1,
-      "harness_id": "crates/fireweed/src/lib.rs - ClaimAt (line 3462)",
-      "id": "Cargo.toml::fireweed::rustdoc::crates/fireweed/src/lib.rs - ClaimAt (line 3462)",
-      "line": 3462,
+      "harness_id": "crates/fireweed/src/lib.rs - ClaimAt (line 3473)",
+      "id": "Cargo.toml::fireweed::rustdoc::crates/fireweed/src/lib.rs - ClaimAt (line 3473)",
+      "line": 3473,
       "normalized_block_sha256": "9ae1cd582e6d6a2d9b8c8904f04323a100c653bf6e6b8a0cda2696dec40e0c46",
       "observed_ran": 1,
       "owner_item": "ClaimAt",
@@ -94831,7 +94890,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "243266a85216af780757fd4bfd350f33c8e1dbdd310fa7704595829c05667ecf",
+  "source_inventory_sha256": "344342fadd5aab664155f899e7d0a3b9c078172bf9b2462c37f9d9f499ed3221",
   "workspaces": [
     {
       "listing_error_sha256": "",

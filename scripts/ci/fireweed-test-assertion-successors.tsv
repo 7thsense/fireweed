@@ -30,6 +30,7 @@ facade.rs	renew_extends_lease_without_charging_a_delivery	Cargo.toml::fireweed::
 facade.rs	request_id_push_is_idempotent_on_memory_backend	Cargo.toml::fireweed::facade::test::request_id_push_is_idempotent_on_memory_backend	P7
 facade.rs	request_id_push_replays_over_sqlite_relational_facade	Cargo.toml::fireweed::facade::test::request_id_push_replays_over_sqlite_relational_facade	P5a,P7
 facade.rs	retry_aliases_match_absolute_relative_and_exhaustion_behavior	Cargo.toml::fireweed::facade::test::retry_aliases_match_absolute_relative_and_exhaustion_behavior	P7
+facade.rs	snapshot_now_records_position_and_ref_on_memory	Cargo.toml::fireweed::facade::test::snapshot_now_records_position_and_ref_on_memory	P7
 facade.rs	two_handles_on_one_backend_do_not_collide_ids	Cargo.toml::fireweed::facade::test::two_handles_on_one_backend_do_not_collide_ids	P7
 facade.rs	typed_json_payload_round_trips_push_claim_and_commit_lifecycle	Cargo.toml::fireweed::facade::test::typed_json_payload_round_trips_push_claim_and_commit_lifecycle	P7,P9
 facade.rs	update_fields_merges_versions_and_cas_over_memory	Cargo.toml::fireweed::facade::test::update_fields_merges_versions_and_cas_over_memory	P8
