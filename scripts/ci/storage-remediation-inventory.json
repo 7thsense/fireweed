@@ -14262,9 +14262,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "5e20c7754cb2aaa90f7a",
+        "id": "f620660a5d321c7f2a2d",
         "identity": "printf '{\"source_revision\":\"%s\",\"authority\":\"%s\"}\\n' \"$REVISION\" \"$name\" >\"$case_dir/source/$name.jsonl\"",
-        "line": 30,
+        "line": 44,
         "owner": "P10px",
         "path": "scripts/release/build-governed-evidence-bundle-test.sh",
         "status": "debt"
@@ -14276,9 +14276,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "3b61c1b63e98632c0efb",
+        "id": "591f43eef4805c280ee5",
         "identity": "printf '{\"source_revision\":\"%s\"}\\n' \"$REVISION\" >\"$case_dir/source/e2-failover.json\"",
-        "line": 33,
+        "line": 47,
         "owner": "P10px",
         "path": "scripts/release/build-governed-evidence-bundle-test.sh",
         "status": "debt"
@@ -14290,9 +14290,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "ea28694502884d8d55fb",
+        "id": "d1320dfa90b1e9a0305a",
         "identity": "printf '{\"source_revision\":\"%s\",\"authority\":\"e3\"}\\n' \"$REVISION\" >\"$case_dir/e3/e3.jsonl\"",
-        "line": 34,
+        "line": 48,
         "owner": "P10px",
         "path": "scripts/release/build-governed-evidence-bundle-test.sh",
         "status": "debt"
@@ -14304,11 +14304,221 @@
           "P2f"
         ],
         "detail": "",
-        "id": "9550f4af94574863f619",
+        "id": "73d58d9315e62542564d",
         "identity": "printf '{\"source_revision\":\"%s\",\"authority\":\"tp003\"}\\n' \"$REVISION\" >\"$case_dir/e3/tp003.jsonl\"",
+        "line": 49,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "dc38db0b1417be90154c",
+        "identity": "printf '{\"source_revision\":\"%s\",\"authority\":\"fencing\"}\\n' \"$REVISION\" >\"$case_dir/e3/fencing.json\"",
+        "line": 50,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "b47f5de57f4368160474",
+        "identity": "--source-root \"$SOURCE_WT\" \\",
+        "line": 74,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "2e9e13069482083f5e76",
+        "identity": "--expected-source \"$REVISION\" \\",
+        "line": 75,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "3e870a331c25390207ae",
+        "identity": "--source-root \"$SOURCE_WT\" --expected-source \"$wrong_revision\" \\",
+        "line": 146,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "23a3cb89113255c68c66",
+        "identity": "# Missing expected-source flags (ambient SHA path) must fail.",
+        "line": 149,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "ada24b79a67a18867989",
+        "identity": "--source-root \"$SOURCE_WT\" --expected-source \"$REVISION\" \\",
+        "line": 163,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "515086f0893983a8c6a8",
+        "identity": "--source-root \"$SOURCE_WT\" --expected-source \"$REVISION\" \\",
+        "line": 172,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "3090477f09b5b0afaa45",
+        "identity": "--source-root \"$SOURCE_WT\" --expected-source \"$REVISION\" \\",
+        "line": 185,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "458a1df2acb428649fb5",
+        "identity": "source_root=\"$REPO_ROOT\" expected_source=\"\" expected_remote=\"\" expected_ref=\"\"",
+        "line": 10,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "3dfce880754e67582c08",
+        "identity": "--source-root) source_root=\"$2\"; shift 2 ;;",
+        "line": 20,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "fc2e086a107b6d44ea31",
+        "identity": "--expected-source) expected_source=\"$2\"; shift 2 ;;",
+        "line": 21,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "9b009f7138839cf26b2e",
+        "identity": "echo \"usage: $0 --source-dir <dir> --e3-source-dir <dir> --out <dir> --revision <sha> --expected-source <sha> --expected",
+        "line": 28,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "2d5bde7cd092f446016f",
+        "identity": "[[ -n \"$expected_source\" && -n \"$expected_remote\" && -n \"$expected_ref\" ]] || {",
+        "line": 31,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "40dd231b84de821ba22d",
+        "identity": "echo \"usage: $0 requires --expected-source --expected-remote --expected-ref (no ambient SHA)\" >&2",
+        "line": 32,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "8f6eb39313fe8d2e591b",
+        "identity": "[[ \"$revision\" == \"$expected_source\" ]] || {",
         "line": 35,
         "owner": "P10px",
-        "path": "scripts/release/build-governed-evidence-bundle-test.sh",
+        "path": "scripts/release/build-governed-evidence-bundle.sh",
         "status": "debt"
       },
       {
@@ -14318,11 +14528,11 @@
           "P2f"
         ],
         "detail": "",
-        "id": "4f4ce325c30e0436e4f7",
-        "identity": "printf '{\"source_revision\":\"%s\",\"authority\":\"fencing\"}\\n' \"$REVISION\" >\"$case_dir/e3/fencing.json\"",
+        "id": "f9a22376a729a61dce19",
+        "identity": "echo \"revision must equal --expected-source (${expected_source})\" >&2",
         "line": 36,
         "owner": "P10px",
-        "path": "scripts/release/build-governed-evidence-bundle-test.sh",
+        "path": "scripts/release/build-governed-evidence-bundle.sh",
         "status": "debt"
       },
       {
@@ -14332,9 +14542,65 @@
           "P2f"
         ],
         "detail": "",
-        "id": "cd47909b4fd0687bd7de",
+        "id": "28a253ba3e6c7cf3aff2",
+        "identity": "source_root=\"$(cd \"$source_root\" && pwd -P)\"",
+        "line": 40,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "37356edb7b856eb80940",
+        "identity": "--source-root \"$source_root\" \\",
+        "line": 43,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "86778e26451589933ac2",
+        "identity": "--expected-source \"$expected_source\" \\",
+        "line": 44,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "5ebd51a4d643a9c11354",
+        "identity": "\"$source_root\"/*) echo \"output must be outside the source checkout: $out\" >&2; exit 1 ;;",
+        "line": 50,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "e2e69dc56c146f2bbfc6",
         "identity": "contract = {\"schema_version\": 1, \"source_revision\": revision, \"authorities\": {",
-        "line": 68,
+        "line": 93,
         "owner": "P10px",
         "path": "scripts/release/build-governed-evidence-bundle.sh",
         "status": "debt"
@@ -14346,11 +14612,165 @@
           "P2f"
         ],
         "detail": "",
-        "id": "b8589fa2cba8634b7a68",
+        "id": "e2ebccd175805f96d028",
         "identity": "--contract \"$out/composite-contract.json\" --expected-revision \"$revision\"",
-        "line": 76,
+        "line": 101,
         "owner": "P10px",
         "path": "scripts/release/build-governed-evidence-bundle.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "46bc99952ec81a7c914d",
+        "identity": "--repo-root \"$source_root\" --bundle-root \"$out\" --tag \"$tag\" --commit \"$revision\" \\",
+        "line": 104,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "d38129d56bbf047c03fd",
+        "identity": "--manifest \"$out/attestation.json\" --repo-root \"$source_root\" --evidence-root \"$out\" \\",
+        "line": 107,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "d98c194472f16f8d0272",
+        "identity": "expected_source=\"\" expected_remote=\"\" expected_ref=\"\"",
+        "line": 8,
+        "owner": "P10px",
+        "path": "scripts/release/build-source-preview-artifacts.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "500588dda15f4d54e260",
+        "identity": "--expected-source) expected_source=\"$2\"; shift 2 ;;",
+        "line": 16,
+        "owner": "P10px",
+        "path": "scripts/release/build-source-preview-artifacts.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "2c627a7e6274b63cc102",
+        "identity": "echo \"usage: $0 --out <dir> --version <semver> --revision <sha> --expected-source <sha> --expected-remote <url-or-name> ",
+        "line": 23,
+        "owner": "P10px",
+        "path": "scripts/release/build-source-preview-artifacts.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "0a035d5d7f18b9ab4a69",
+        "identity": "[[ -n \"$expected_source\" && -n \"$expected_remote\" && -n \"$expected_ref\" ]] || {",
+        "line": 26,
+        "owner": "P10px",
+        "path": "scripts/release/build-source-preview-artifacts.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "cc581a319f09d513c5e5",
+        "identity": "echo \"usage: $0 requires --expected-source --expected-remote --expected-ref (no ambient SHA)\" >&2",
+        "line": 27,
+        "owner": "P10px",
+        "path": "scripts/release/build-source-preview-artifacts.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "4f2edcd40bbdfb544f04",
+        "identity": "[[ \"$revision\" == \"$expected_source\" ]] || {",
+        "line": 33,
+        "owner": "P10px",
+        "path": "scripts/release/build-source-preview-artifacts.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "8765a9767202727092db",
+        "identity": "echo \"revision must equal --expected-source (${expected_source})\" >&2",
+        "line": 34,
+        "owner": "P10px",
+        "path": "scripts/release/build-source-preview-artifacts.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "f7d032f4f5c877697028",
+        "identity": "--source-root \"$repo\" \\",
+        "line": 40,
+        "owner": "P10px",
+        "path": "scripts/release/build-source-preview-artifacts.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "ac2e4f6868c84d619183",
+        "identity": "--expected-source \"$expected_source\" \\",
+        "line": 41,
+        "owner": "P10px",
+        "path": "scripts/release/build-source-preview-artifacts.sh",
         "status": "debt"
       },
       {
@@ -14374,9 +14794,625 @@
           "P2f"
         ],
         "detail": "",
-        "id": "5e33158cd23e3dd9a6e0",
+        "id": "735bbd8c054f3c83edd7",
+        "identity": "\"expected_source\": source,",
+        "line": 35,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "db638929fb30e5d2fd25",
+        "identity": "--source-root \"$repo\" \\",
+        "line": 49,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "9acde3b5f4b726c43ec4",
+        "identity": "--expected-source \"$S\" \\",
+        "line": 50,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "8852b03333b572fb883e",
+        "identity": "\"expected_source\": source,",
+        "line": 79,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "0affae50ffef25f08299",
+        "identity": "--source-root \"$repo\" --expected-source \"$S\" --expected-remote origin --expected-ref HEAD \\",
+        "line": 89,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "8224ba8da1a04ad3efb7",
+        "identity": "--source-root \"$repo\" --expected-source \"$S\" --expected-remote origin --expected-ref HEAD \\",
+        "line": 97,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "f5623e5c780c0fc59c1e",
+        "identity": "--source-root \"$repo\" --expected-source \"$S\" --expected-remote origin --expected-ref HEAD \\",
+        "line": 104,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "8b37109e738f57ed1f21",
+        "identity": "\"expected_source\": source,",
+        "line": 117,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "e8e1c41a1fde1d1cc2c5",
+        "identity": "--source-root \"$repo\" --expected-source \"$S\" --expected-remote origin --expected-ref HEAD \\",
+        "line": 127,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "143ccd743ff2ab042e9b",
+        "identity": "--source-root \"$repo\" --expected-source \"0000000000000000000000000000000000000000\" \\",
+        "line": 133,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "4f48eceaeedfadac083b",
+        "identity": "--source-root \"$repo\" --expected-source \"$S\" --expected-remote origin --expected-ref HEAD \\",
+        "line": 141,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "4cad5ac0e578bad3b7d2",
+        "identity": "--source-root \"$repo\" --expected-source \"$S\" --expected-remote origin --expected-ref HEAD \\",
+        "line": 148,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "439bea7d9a479e648919",
+        "identity": "\"expected_source\": source,",
+        "line": 172,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "8426e3b732219b9a1d5b",
+        "identity": "--source-root \"$repo\" --expected-source \"$S\" --expected-remote origin --expected-ref HEAD \\",
+        "line": 182,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "497b8c3d2531a0adbaed",
+        "identity": "\"expected_source\": source,",
+        "line": 193,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "0dcc8eeb4d954ed370e3",
+        "identity": "--source-root \"$repo\" --expected-source \"$S\" --expected-remote origin --expected-ref HEAD \\",
+        "line": 207,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "2365782429a2c7741164",
+        "identity": "source_root=\"\" bundle_root=\"\" allowlist=\"\" expected_source=\"\" expected_remote=\"\" expected_ref=\"\"",
+        "line": 18,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "4fe26caf77683e1ba48e",
+        "identity": "--source-root <S-checkout> \\",
+        "line": 24,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "5699222b5714ff90f11b",
+        "identity": "--expected-source <40-hex> \\",
+        "line": 25,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "ee3863a2f3cf18f62b1e",
+        "identity": "--source-root) source_root=\"$2\"; shift 2 ;;",
+        "line": 37,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "5c735c29b8851100ae72",
+        "identity": "--expected-source) expected_source=\"$2\"; shift 2 ;;",
+        "line": 38,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "d4d3439c52fe1a9832de",
+        "identity": "[[ -n \"$source_root\" && -n \"$expected_source\" && -n \"$expected_remote\" && -n \"$expected_ref\" \\",
+        "line": 50,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "4c8d1ad42dbe48f32cbe",
+        "identity": "source_root=\"$(cd \"$source_root\" && pwd -P)\"",
+        "line": 56,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "c40db2c645e0b0580831",
+        "identity": "\"$source_root\"/*) echo \"bundle-root must be outside source-root\" >&2; exit 1 ;;",
+        "line": 62,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "31ab821dce9a60a8c48b",
+        "identity": "\"$source_root\"/*) echo \"promotion-root must be outside source-root\" >&2; exit 1 ;;",
+        "line": 65,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "ff9c0a7c4f6fbe0315d6",
+        "identity": "--source-root \"$source_root\" \\",
+        "line": 72,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "329793a3cab7616ab897",
+        "identity": "--expected-source \"$expected_source\" \\",
+        "line": 73,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "8a2e5401ef308b591ce3",
+        "identity": "python3 - \"$source_root\" \"$bundle_root\" \"$allowlist\" \"$expected_source\" \"$campaign\" \"$promotion_root\" \"$expected_ref\" <<",
+        "line": 77,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "871fd16c0738075357c8",
+        "identity": "source_root = Path(sys.argv[1]).resolve()",
+        "line": 85,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "3b4df481d1c38efd24ed",
+        "identity": "expected_source = sys.argv[4]",
+        "line": 88,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "8e1e73a5501991611965",
+        "identity": "if raw.get(\"expected_source\") not in (None, expected_source):",
+        "line": 98,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "c5aaad62a2b7cc894b9b",
+        "identity": "raise SystemExit(\"allowlist expected_source mismatch\")",
+        "line": 99,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "7ce50d4c008944bddb4f",
+        "identity": "[\"git\", \"-C\", str(source_root), \"worktree\", \"add\", \"--detach\", str(promotion_root), expected_source],",
+        "line": 149,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "6e6fd0da3d95e01dcdce",
+        "identity": "f\"Measured-source: {expected_source}\\n\"",
+        "line": 178,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "96c6cd3e41f9286c1608",
+        "identity": "env.setdefault(\"GIT_COMMITTER_NAME\", env[\"GIT_AUTHOR_NAME\"])",
+        "line": 185,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "69bd779ed45edc853b81",
+        "identity": "env.setdefault(\"GIT_COMMITTER_EMAIL\", env[\"GIT_AUTHOR_EMAIL\"])",
+        "line": 186,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "b6af9e851efd79d47e29",
+        "identity": "if parent != expected_source:",
+        "line": 199,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "5e8c1b2d1389aeb97513",
+        "identity": "raise SystemExit(f\"E parent {parent} != S {expected_source}\")",
+        "line": 200,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "28ed425cda45efc1febe",
+        "identity": "[\"git\", \"-C\", str(promotion_root), \"diff\", \"--name-only\", expected_source, e_sha],",
+        "line": 203,
+        "owner": "P10px",
+        "path": "scripts/release/promote-governed-evidence.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "cf1c0ccbd07f171f6bb1",
         "identity": "GIT_AUTHOR_DATE='2026-01-01T00:00:00Z' GIT_COMMITTER_DATE='2026-01-01T00:00:00Z' git -C \"$repo\" commit -qm fixture",
-        "line": 9,
+        "line": 32,
+        "owner": "P10px",
+        "path": "scripts/release/source-preview-artifacts-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "e72fba55dfebf7d8c73c",
+        "identity": "# source-root declarations; product roots must be covered by fixture .gitignore",
+        "line": 36,
+        "owner": "P10px",
+        "path": "scripts/release/source-preview-artifacts-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "a489b6f0418feda67f70",
+        "identity": "# source-root's .gitignore.",
+        "line": 38,
+        "owner": "P10px",
+        "path": "scripts/release/source-preview-artifacts-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "1e4bcc09508e1b3b9665",
+        "identity": "--expected-source \"$revision\" \\",
+        "line": 47,
+        "owner": "P10px",
+        "path": "scripts/release/source-preview-artifacts-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "584d83488a8332cf577f",
+        "identity": "echo \"missing expected-source flags were accepted\" >&2",
+        "line": 63,
+        "owner": "P10px",
+        "path": "scripts/release/source-preview-artifacts-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "c14ba5209143b1aa4788",
+        "identity": "--expected-source \"$revision\" --expected-remote origin --expected-ref HEAD \\",
+        "line": 70,
         "owner": "P10px",
         "path": "scripts/release/source-preview-artifacts-test.sh",
         "status": "debt"
@@ -14393,6 +15429,846 @@
         "line": 115,
         "owner": "P10px",
         "path": "scripts/release/verify-release-identity.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "803b70192cccc5e4ec7e",
+        "identity": "--mode source --source-root \"$repo\" --expected-source \"$S\" \\",
+        "line": 22,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "1762700f9e3b2872f5d5",
+        "identity": "--mode source --source-root \"$repo\" --expected-source \"0000000000000000000000000000000000000000\" \\",
+        "line": 27,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "10198fdc2142aaebec3e",
+        "identity": "fail \"wrong expected-source accepted\"",
+        "line": 29,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "06e20e547d132336f7d6",
+        "identity": "--mode source --source-root \"$repo\" --expected-source \"$S\" \\",
+        "line": 35,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "2de430f4dcd739a9f392",
+        "identity": "--mode source --source-root \"$repo\" --expected-source \"$S\" \\",
+        "line": 44,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "653928248651f857bf6c",
+        "identity": "--mode source --source-root \"$repo\" --expected-source \"$S\" \\",
+        "line": 53,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "82be29807223a174acac",
+        "identity": "--mode source --source-root \"$repo\" --expected-source \"$S\" \\",
+        "line": 61,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "80cebb8f0700689c94c1",
+        "identity": "json.dump({\"expected_source\": sys.argv[2], \"paths\": [\"row.json\"]}, open(sys.argv[1], \"w\"))",
+        "line": 73,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "59111af4fb8001e523a2",
+        "identity": "--mode e --source-root \"$repo\" --expected-source \"$S\" \\",
+        "line": 76,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "31491f8d7688468ba821",
+        "identity": "--mode e --source-root \"$repo\" --expected-source \"$S\" \\",
+        "line": 82,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "b229f0bbbe397e49cf68",
+        "identity": "#   e       \u2014 dual-root E mode: tooling from --source-root at S; promoted",
+        "line": 10,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "5c78719afb455b1ea459",
+        "identity": "SOURCE_ROOT=\"\"",
+        "line": 18,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "33d685dffa2b0adad1fa",
+        "identity": "EXPECTED_SOURCE=\"\"",
+        "line": 20,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "8d5bb56ccd2b5820b613",
+        "identity": "--source-root <dir> --expected-source <40-hex> \\",
+        "line": 29,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "2f8970b06a0a101eb60d",
+        "identity": "--source-root) SOURCE_ROOT=\"${2:-}\"; shift 2 ;;",
+        "line": 39,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "807eb0baccdae24e81cf",
+        "identity": "--expected-source) EXPECTED_SOURCE=\"${2:-}\"; shift 2 ;;",
+        "line": 41,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "f9141bbf3a59361952f4",
+        "identity": "[[ -n \"$SOURCE_ROOT\" && -d \"$SOURCE_ROOT\" ]] || fail \"--source-root must be an existing directory\"",
+        "line": 57,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "a81b0cd26437532e8034",
+        "identity": "[[ \"$EXPECTED_SOURCE\" =~ ^[0-9a-f]{40}$ ]] || fail \"--expected-source must be a full 40-hex SHA\"",
+        "line": 58,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "3cbcd35dc592eb500bf0",
+        "identity": "source_canon=\"$(cd \"$SOURCE_ROOT\" && pwd -P)\"",
+        "line": 66,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "62be21d852926559c99d",
+        "identity": "[[ \"$source_canon\" != \"$promoted_canon\" ]] || fail \"source-root and promoted-root must be distinct directories\"",
+        "line": 68,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "ddebf688a13a355e12ad",
+        "identity": "SOURCE_ROOT=\"$(cd \"$SOURCE_ROOT\" && pwd -P)\"",
+        "line": 71,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "00f29fb599d8bc8be8fb",
+        "identity": "if [[ -e \"${SOURCE_ROOT}/${forbidden}\" || -L \"${SOURCE_ROOT}/${forbidden}\" ]]; then",
+        "line": 76,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "cb7416492205e4debb0e",
+        "identity": "head_sha=\"$(git -C \"$SOURCE_ROOT\" rev-parse HEAD)\"",
+        "line": 88,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "3b08a2839b5034989e40",
+        "identity": "[[ \"$head_sha\" == \"$EXPECTED_SOURCE\" ]] ||",
+        "line": 89,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "eef97d23a2e4b668ab2f",
+        "identity": "fail \"HEAD ${head_sha} != --expected-source ${EXPECTED_SOURCE}\"",
+        "line": 90,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "4cb1db35571e00348db0",
+        "identity": "resolved_ref=\"$(git -C \"$SOURCE_ROOT\" rev-parse -q --verify \"${EXPECTED_REF}^{commit}\" 2>/dev/null || true)\"",
+        "line": 92,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "6b27c9bf6e431fe132bb",
+        "identity": "[[ \"$resolved_ref\" == \"$EXPECTED_SOURCE\" ]] ||",
+        "line": 93,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "58010b2e26c8913f5bac",
+        "identity": "fail \"expected-ref ${EXPECTED_REF} resolves to '${resolved_ref:-missing}', not ${EXPECTED_SOURCE}\"",
+        "line": 94,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "5f400274a894fec640fb",
+        "identity": "if git -C \"$SOURCE_ROOT\" remote get-url \"$EXPECTED_REMOTE\" >/dev/null 2>&1; then",
+        "line": 98,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "59b3de58cdb1644159f6",
+        "identity": "done < <(git -C \"$SOURCE_ROOT\" remote -v | awk '{print $2}' | sort -u)",
+        "line": 103,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "278d9b65d599002b6254",
+        "identity": "git -C \"$SOURCE_ROOT\" diff --name-only --diff-filter=ACDMRTUXB",
+        "line": 110,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "26dba8875b5a82bf35a8",
+        "identity": "git -C \"$SOURCE_ROOT\" diff --cached --name-only --diff-filter=ACDMRTUXB",
+        "line": 111,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "5d78ad3f66cddadb6c60",
+        "identity": "mapfile -t ddx_tracked < <(git -C \"$SOURCE_ROOT\" ls-files '.ddx/**' | sort || true)",
+        "line": 121,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "3275d784db505c77ed84",
+        "identity": "git -C \"$SOURCE_ROOT\" -c core.excludesFile=/dev/null ls-files --others --directory \\",
+        "line": 124,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "242a4af5d4342d5f7a66",
+        "identity": "python3 - \"$SOURCE_ROOT\" <<'PY'",
+        "line": 128,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "c49661f8af8baa5b0ec9",
+        "identity": "git -C \"$SOURCE_ROOT\" -c core.excludesFile=/dev/null status --porcelain=v1 -uall \\",
+        "line": 142,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "1c93a33be9f9abe7f331",
+        "identity": "python3 - \"$SOURCE_ROOT\" \"$AUTHORITY_MANIFEST\" \"${raw_untracked[@]+${raw_untracked[@]}}\" <<'PY'",
+        "line": 146,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "7a3c70d32270c4594a68",
+        "identity": "-e '\\.ddx/' -e 'beads\\.jsonl' \"$SOURCE_ROOT\" 2>/dev/null \\",
+        "line": 300,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "0538e0d3d6b2d09c0a49",
+        "identity": "python3 - \"$PROMOTED_ROOT\" \"$PROMOTED_ALLOWLIST\" \"$EXPECTED_SOURCE\" <<'PY'",
+        "line": 309,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "3015ed8f1936a68f696d",
+        "identity": "expected_source = sys.argv[3]",
+        "line": 317,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "950fe34093e35cc60a19",
+        "identity": "if raw.get(\"expected_source\") and raw[\"expected_source\"] != expected_source:",
+        "line": 321,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "ddddba827d21417d0b72",
+        "identity": "f\"promoted allowlist expected_source {raw['expected_source']} != {expected_source}\"",
+        "line": 323,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "50306319683f478f0571",
+        "identity": "echo \"verify-source-predicate: ok mode=${MODE} source=${EXPECTED_SOURCE} ref=${EXPECTED_REF}\"",
+        "line": 343,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "0a2cc6f2c14de4daaf83",
+        "identity": "source_root=\"\"",
+        "line": 10,
+        "owner": "P10px",
+        "path": "scripts/verify-public-identity.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "0a530f170e8df0922ea1",
+        "identity": "expected_source=\"\"",
+        "line": 12,
+        "owner": "P10px",
+        "path": "scripts/verify-public-identity.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "ca26c4081184000c5b5b",
+        "identity": "--source-root)",
+        "line": 35,
+        "owner": "P10px",
+        "path": "scripts/verify-public-identity.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "7aacd4c68bf6265b03e8",
+        "identity": "source_root=\"$2\"",
+        "line": 36,
+        "owner": "P10px",
+        "path": "scripts/verify-public-identity.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "d15b36f4ddb3431e1a25",
+        "identity": "--expected-source)",
+        "line": 43,
+        "owner": "P10px",
+        "path": "scripts/verify-public-identity.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "7d899b0fdee96d017efb",
+        "identity": "expected_source=\"$2\"",
+        "line": 44,
+        "owner": "P10px",
+        "path": "scripts/verify-public-identity.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "7d7433cf105e4930d13e",
+        "identity": "echo \"usage: verify-public-identity.sh [--mode source|e] [--allowlist FILE] [--root DIR] [--files-from FILE] [--source-r",
+        "line": 60,
+        "owner": "P10px",
+        "path": "scripts/verify-public-identity.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "e7d6e65aaa6595387ec5",
+        "identity": "[[ -n \"$source_root\" && -n \"$expected_source\" && -n \"$expected_remote\" && -n \"$expected_ref\" ]] || {",
+        "line": 73,
+        "owner": "P10px",
+        "path": "scripts/verify-public-identity.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "694a6af316c78a06dd70",
+        "identity": "echo \"e mode requires --source-root --expected-source --expected-remote --expected-ref\" >&2",
+        "line": 74,
+        "owner": "P10px",
+        "path": "scripts/verify-public-identity.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "037deeee81bea9659f00",
+        "identity": "--source-root \"$source_root\" \\",
+        "line": 83,
+        "owner": "P10px",
+        "path": "scripts/verify-public-identity.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "25a79a3373c10902e7eb",
+        "identity": "--expected-source \"$expected_source\" \\",
+        "line": 84,
+        "owner": "P10px",
+        "path": "scripts/verify-public-identity.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "4d3f69540c914503ede0",
+        "identity": "elif [[ -n \"$expected_source\" ]]; then",
+        "line": 90,
+        "owner": "P10px",
+        "path": "scripts/verify-public-identity.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "3abcf0932abeb1c673ff",
+        "identity": "[[ -n \"$source_root\" && -n \"$expected_remote\" && -n \"$expected_ref\" ]] || {",
+        "line": 92,
+        "owner": "P10px",
+        "path": "scripts/verify-public-identity.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "0857f15d1f26286f36bf",
+        "identity": "echo \"source binding requires --source-root --expected-remote --expected-ref\" >&2",
+        "line": 93,
+        "owner": "P10px",
+        "path": "scripts/verify-public-identity.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "8c5f34d085eecb211841",
+        "identity": "--source-root \"$source_root\" \\",
+        "line": 98,
+        "owner": "P10px",
+        "path": "scripts/verify-public-identity.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "232c702c6cecb38937a9",
+        "identity": "--expected-source \"$expected_source\" \\",
+        "line": 99,
+        "owner": "P10px",
+        "path": "scripts/verify-public-identity.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "de3fb2ce77916b5922cb",
+        "identity": "scan_root=\"${scan_root:-$source_root}\"",
+        "line": 102,
+        "owner": "P10px",
+        "path": "scripts/verify-public-identity.sh",
         "status": "debt"
       }
     ],
@@ -98164,7 +100040,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "337a0d7605afa1906afb5454adefe87370f132dbf7b291a623262b59256f8cde",
+  "source_inventory_sha256": "831ef3dc44c74d597ddd91fd622f4d99320db29d776ead6f0e65df20477df0d2",
   "workspaces": [
     {
       "listing_error_sha256": "",
