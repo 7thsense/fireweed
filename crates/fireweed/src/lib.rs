@@ -977,10 +977,10 @@ impl SnapshotPolicy {
         if log_command_count < self.min_log_commands_for_snapshot {
             return false;
         }
-        match (self.min_interval_ms, ms_since_last_snapshot) {
-            (Some(min_ms), Some(age_ms)) if age_ms < min_ms => false,
-            _ => true,
-        }
+        !matches!(
+            (self.min_interval_ms, ms_since_last_snapshot),
+            (Some(min_ms), Some(age_ms)) if age_ms < min_ms
+        )
     }
 
     /// Pure policy: may compaction run (still requires a covering snapshot at the call site).
