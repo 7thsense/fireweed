@@ -115,7 +115,9 @@ pub use control_plane::{
 };
 pub use density::{RenewSweep, ResidentQueues, renew_all_resident};
 pub use epoch::{
-    MIN_ASSIGNMENT_EPOCH, resolve_bounded_epoch, resolve_bounded_epoch_sync, resolve_epoch_fence,
+    MIN_ASSIGNMENT_EPOCH, resolve_bounded_epoch, resolve_bounded_epoch_async,
+    resolve_bounded_epoch_sync, resolve_epoch_fence, resolve_write_epoch,
+    resolve_write_epoch_async, resolve_write_epoch_sync,
 };
 pub use idempotency::{IdempotencyDecision, QueueIdempotencyCache};
 pub use maintenance::{

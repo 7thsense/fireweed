@@ -320,11 +320,10 @@ impl AsyncObjectLogHybridBackend {
         shard: &QueueKey,
         expected_epoch: Option<u64>,
     ) -> EngineResult<u64> {
-        let epoch = AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?;
-        if expected_epoch.is_some_and(|expected| expected != epoch) {
-            return Err(EngineError::EpochFenced);
-        }
-        Ok(epoch)
+        fireweed_engine::resolve_write_epoch_async(expected_epoch, || {
+            AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone())
+        })
+        .await
     }
 
     async fn submit_envelopes(
@@ -1139,11 +1138,11 @@ impl fireweed_engine::ItemMutationPort for AsyncObjectLogHybridBackend {
                             })?;
                             return Ok(plan.response);
                         }
-                        let epoch =
-                            AsyncLogStore::current_epoch(log.as_ref(), shard.clone()).await?;
-                        if expected_epoch.is_some_and(|expected| expected != epoch) {
-                            return Err(EngineError::EpochFenced);
-                        }
+                        let epoch = fireweed_engine::resolve_write_epoch_async(
+                            expected_epoch,
+                            || AsyncLogStore::current_epoch(log.as_ref(), shard.clone()),
+                        )
+                        .await?;
                         let mut plan = projection.with_store_mut(|p| {
                             ProjectionStore::plan_item_mutation(p, &shard, &request)
                         })?;

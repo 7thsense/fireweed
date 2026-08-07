@@ -92,13 +92,10 @@ where
             projection
                 .renew_validate(request.shard.clone(), request.targets.clone(), request.now)
                 .await?;
-            let epoch = log.current_epoch(request.shard.clone()).await?;
-            if request
-                .expected_epoch
-                .is_some_and(|expected| expected != epoch)
-            {
-                return Err(EngineError::EpochFenced);
-            }
+            let epoch = crate::resolve_write_epoch_async(request.expected_epoch, || {
+                log.current_epoch(request.shard.clone())
+            })
+            .await?;
             let item_ids = request
                 .targets
                 .iter()
@@ -156,13 +153,10 @@ where
             projection
                 .renew_validate(request.shard.clone(), request.targets.clone(), request.now)
                 .await?;
-            let epoch = log.current_epoch(request.shard.clone()).await?;
-            if request
-                .expected_epoch
-                .is_some_and(|expected| expected != epoch)
-            {
-                return Err(EngineError::EpochFenced);
-            }
+            let epoch = crate::resolve_write_epoch_async(request.expected_epoch, || {
+                log.current_epoch(request.shard.clone())
+            })
+            .await?;
             let item_ids = request
                 .targets
                 .iter()
@@ -237,10 +231,10 @@ where
                     "async finalize validation returned the wrong item footprint".into(),
                 ));
             }
-            let epoch = log.current_epoch(request.shard.clone()).await?;
-            if request.expected_epoch.is_some_and(|e| e != epoch) {
-                return Err(EngineError::EpochFenced);
-            }
+            let epoch = crate::resolve_write_epoch_async(request.expected_epoch, || {
+                log.current_epoch(request.shard.clone())
+            })
+            .await?;
             let mut outcomes = Vec::with_capacity(request.targets.len());
             for (target, attempt) in request.targets.into_iter().zip(attempts) {
                 let applied_state = match target.kind {
@@ -297,10 +291,10 @@ where
             let present = projection
                 .purge_validate(request.shard.clone(), request.item_ids, request.force)
                 .await?;
-            let epoch = log.current_epoch(request.shard.clone()).await?;
-            if request.expected_epoch.is_some_and(|e| e != epoch) {
-                return Err(EngineError::EpochFenced);
-            }
+            let epoch = crate::resolve_write_epoch_async(request.expected_epoch, || {
+                log.current_epoch(request.shard.clone())
+            })
+            .await?;
             let env = CommandEnvelope {
                 command_id: ids.next_command_id(),
                 request_id: None,

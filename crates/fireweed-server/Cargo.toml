@@ -113,6 +113,10 @@ rskafka = { version = "0.6", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [[test]]
+name = "p14_change_record_nonblocking_modes"
+path = "tests/p14_change_record_nonblocking_modes.rs"
+
+[[test]]
 name = "performance_object_log_e3_live_tests"
 path = "tests/performance_object_log_e3_live_tests.rs"
 

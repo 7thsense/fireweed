@@ -101,13 +101,11 @@ where
             // Read the durable epoch only after selection, immediately before constructing the commit. A
             // supplied acquire-time epoch is never replaced with this fresh value: disagreement fails closed,
             // and the commit strategy checks the same resolved epoch again at its mutation boundary.
-            let epoch = log.current_epoch(request.shard.clone()).await?;
-            if request
-                .expected_epoch
-                .is_some_and(|expected| expected != epoch)
-            {
-                return Err(EngineError::EpochFenced);
-            }
+            // P14: async pre-resolution + pure write fence (no reactor block_on).
+            let epoch = crate::resolve_write_epoch_async(request.expected_epoch, || {
+                log.current_epoch(request.shard.clone())
+            })
+            .await?;
 
             let item_ids = selection.item_ids;
             let cohort_id = selection.cohort_id;

@@ -87,13 +87,10 @@ where
             }
 
             projection.admit_mutation(request.shard.clone()).await?;
-            let epoch = log.current_epoch(request.shard.clone()).await?;
-            if request
-                .expected_epoch
-                .is_some_and(|expected| expected != epoch)
-            {
-                return Err(EngineError::EpochFenced);
-            }
+            let epoch = crate::resolve_write_epoch_async(request.expected_epoch, || {
+                log.current_epoch(request.shard.clone())
+            })
+            .await?;
             let base = counters.reserve(&request.shard, epoch, request.items.len() as u32);
             let (items, item_ids) = build_push_items(
                 request.items,

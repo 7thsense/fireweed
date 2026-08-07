@@ -119,13 +119,10 @@ where
             if item_ids.is_empty() {
                 return Ok(AsyncReclaimPlan::empty());
             }
-            let epoch = log.current_epoch(request.shard.clone()).await?;
-            if request
-                .expected_epoch
-                .is_some_and(|expected| expected != epoch)
-            {
-                return Err(EngineError::EpochFenced);
-            }
+            let epoch = crate::resolve_write_epoch_async(request.expected_epoch, || {
+                log.current_epoch(request.shard.clone())
+            })
+            .await?;
             let envelope = CommandEnvelope {
                 command_id: ids.next_command_id(),
                 request_id: None,

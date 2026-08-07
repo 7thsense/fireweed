@@ -1122,11 +1122,11 @@ where
         shard: &QueueKey,
         expected_epoch: Option<u64>,
     ) -> EngineResult<u64> {
-        let epoch = AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?;
-        if expected_epoch.is_some_and(|expected| expected != epoch) {
-            return Err(EngineError::EpochFenced);
-        }
-        Ok(epoch)
+        // P14: async pre-resolution then pure fence (no block_on on the reactor).
+        crate::resolve_write_epoch_async(expected_epoch, || {
+            AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone())
+        })
+        .await
     }
 
     async fn commit_envelope(
@@ -2146,11 +2146,13 @@ where
             validate_entity(schema.as_ref(), item.entity.as_ref())?;
         }
         let max_attempts = def.retry_policy.max_attempts;
+        // P14: bounded sync read + pure write fence. No silent unwrap_or(0).
         let epoch = match expected_epoch {
-            Some(epoch) => epoch,
-            None => self
-                .log
-                .with_store(|log| LogStore::current_epoch(log, shard))?,
+            Some(e) => crate::resolve_bounded_epoch(e, Some(e))?,
+            None => crate::resolve_write_epoch_sync(None, || {
+                self.log
+                    .with_store(|log| LogStore::current_epoch(log, shard))
+            })?,
         };
         let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
         let (push_items, ids) =

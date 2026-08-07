@@ -71,10 +71,13 @@ where
             validate_entity(schema.as_ref(), item.entity.as_ref())?;
         }
         let max_attempts = def.retry_policy.max_attempts;
-        let epoch = expected_epoch.unwrap_or_else(|| {
-            crate::block_on_objectlog(AsyncLogStore::current_epoch(self.log, shard.clone()))
-                .unwrap_or(0)
-        });
+        // P14: bounded sync bridge for harness-only probe. No silent epoch-0 on read failure.
+        let epoch = match expected_epoch {
+            Some(e) => fireweed_engine::resolve_bounded_epoch(e, Some(e))?,
+            None => fireweed_engine::resolve_write_epoch_sync(None, || {
+                crate::block_on_objectlog(AsyncLogStore::current_epoch(self.log, shard.clone()))
+            })?,
+        };
         let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
         let (push_items, ids) =
             build_push_items(items, epoch, self.node_id, counter_base, max_attempts);

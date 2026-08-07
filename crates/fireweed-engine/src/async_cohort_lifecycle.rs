@@ -198,11 +198,7 @@ async fn validate_epoch<L: AsyncLogStore>(
     shard: QueueKey,
     expected: Option<u64>,
 ) -> EngineResult<u64> {
-    let epoch = log.current_epoch(shard).await?;
-    if expected.is_some_and(|expected| expected != epoch) {
-        return Err(EngineError::EpochFenced);
-    }
-    Ok(epoch)
+    crate::resolve_write_epoch_async(expected, || log.current_epoch(shard)).await
 }
 
 impl<C, L, P, I> AsyncCohortLifecyclePlanner for ProjectionCohortLifecyclePlanner<C, L, P, I>
