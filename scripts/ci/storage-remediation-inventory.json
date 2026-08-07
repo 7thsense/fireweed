@@ -14360,11 +14360,39 @@
           "P2f"
         ],
         "detail": "",
+        "id": "4986038b4ed0d4e6d5d4",
+        "identity": "if git rev-parse -q --verify \"refs/tags/${target_release}\" >/dev/null 2>&1; then",
+        "line": 112,
+        "owner": "P10px",
+        "path": "scripts/release/list-public-version-sources.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
         "id": "5e33158cd23e3dd9a6e0",
         "identity": "GIT_AUTHOR_DATE='2026-01-01T00:00:00Z' GIT_COMMITTER_DATE='2026-01-01T00:00:00Z' git -C \"$repo\" commit -qm fixture",
         "line": 9,
         "owner": "P10px",
         "path": "scripts/release/source-preview-artifacts-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "0716e78da05a2ed5942b",
+        "identity": "if git rev-parse -q --verify \"refs/tags/${TAG}\" >/dev/null 2>&1; then",
+        "line": 115,
+        "owner": "P10px",
+        "path": "scripts/release/verify-release-identity.sh",
         "status": "debt"
       }
     ],
@@ -98136,7 +98164,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "2025b6f945d9b4ce42dd4cd6652aed3fdb1d05a29f59e2bf699903461876e452",
+  "source_inventory_sha256": "337a0d7605afa1906afb5454adefe87370f132dbf7b291a623262b59256f8cde",
   "workspaces": [
     {
       "listing_error_sha256": "",
