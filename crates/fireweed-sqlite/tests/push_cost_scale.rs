@@ -24,13 +24,7 @@ fn push_batch(backend: &SqliteRelationalBackend, n: usize, offset: usize) {
             ..Default::default()
         })
         .collect();
-    bo(backend.push(
-        &shard,
-        specs,
-        UtcTimestamp::new(0, 0).unwrap(),
-        None,
-    ))
-    .expect("push");
+    bo(backend.push(&shard, specs, UtcTimestamp::new(0, 0).unwrap(), None)).expect("push");
 }
 
 #[test]
