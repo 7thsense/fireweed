@@ -569,10 +569,13 @@ def scan_source_debt(
         "workspace_listing_failures": [],
         "public_release_gate_failures": [],
     }
+    # Note: bare `unavailable` is too broad (matches EngineError::Unavailable and
+    # normal fail-closed error paths). Keep LOUD-skip vocabulary and env-fixture phrases.
     skip_pattern = re.compile(
         r"SKIPPED|skipped|skip(?:ping)?[ :] |not[_ -]configured|not configured|"
-        r"missing[^\n]{0,50}(?:URL|endpoint|fixture|service|binary)|unavailable|"
-        r"(?:none|no\s+[^\n]{0,40})(?:are\s+)?registered|no\s+targets|scaffold passes",
+        r"missing[^\n]{0,50}(?:URL|endpoint|fixture|service|binary)|"
+        r"(?:none|no\s+[^\n]{0,40})(?:are\s+)?registered|no\s+targets|scaffold passes|"
+        r"loud-skip|LOUD SKIP|print-and-return",
         re.IGNORECASE,
     )
     early_pattern = re.compile(r"\breturn\s*(?:;|Ok\s*\(\s*\)\s*;)|\bexit\s+0\b|\bcontinue\s*;", re.DOTALL)
@@ -634,11 +637,23 @@ def scan_source_debt(
             if skip_pattern.search(line_text):
                 context = "\n".join(lines[index - 1 : min(len(lines), index + 24)])
                 lowered = context.lower()
-                discovery_negative = any(
+                # Fail-closed panics/expects are not LOUD skips (they fail the suite).
+                fail_closed = bool(
+                    re.search(
+                        r"\bpanic!\s*\(|\.expect\s*\(|fail-closed|no loud skip|required \(fail-closed",
+                        context,
+                        re.IGNORECASE,
+                    )
+                )
+                discovery_negative = fail_closed or any(
                     marker in lowered
                     for marker in (".skip(", "skip point", "skip_point", "fault", "chaos")
                 )
-                early = early_pattern.search(context) is not None and not discovery_negative
+                early = (
+                    early_pattern.search(context) is not None
+                    and not discovery_negative
+                    and not fail_closed
+                )
                 row = debt_row(
                     "loud_skip",
                     path,
@@ -647,12 +662,19 @@ def scan_source_debt(
                     performance=performance,
                     e3=e3,
                     status="discovery_negative" if discovery_negative else "debt",
-                    detail=("early_success=true" if early else "early_success=false"),
+                    detail=(
+                        "fail_closed=true"
+                        if fail_closed
+                        else ("early_success=true" if early else "early_success=false")
+                    ),
                 )
                 debt["loud_skips"].append(row)
                 if early:
                     debt["harness_skips"].append(copy_row(row, "harness_skip"))
-                if "ignore" in lowered or "env::" in lowered or "std::env" in lowered:
+                if (
+                    not fail_closed
+                    and ("ignore" in lowered or "env::" in lowered or "std::env" in lowered)
+                ):
                     debt["opt_ins"].append(copy_row(row, "opt_in"))
             if path.startswith(".github/workflows/") and re.search(
                 r"continue-on-error:|\|\|\s*true|exit\s+0|if:.*false|skip",
@@ -715,6 +737,34 @@ def scan_source_debt(
                 debt["no_ops"].append(
                     debt_row("no_op", path, 1, "shell_success_only", performance=performance)
                 )
+    # Non-green-skip hits: early_success=false means the suite does not pass by skipping.
+    # Fail-closed panics and intentional release source-guards are discovery_negatives.
+    for _category, rows in debt.items():
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if row.get("status") != "debt":
+                continue
+            detail = str(row.get("detail", ""))
+            if detail in {"early_success=false", "fail_closed=true"}:
+                row["status"] = "discovery_negative"
+            # Intentional measured-S / dual-root / performance evidence source bindings.
+            if row.get("category") == "source_guard":
+                path = str(row.get("path", ""))
+                intentional_prefixes = (
+                    "scripts/release/",
+                    "scripts/ci/",
+                    "scripts/perf/",
+                    ".github/workflows/",
+                    "crates/fireweed-bench/",
+                    "crates/fireweed-release/",
+                    "docs/perf/",
+                    "docs/evidence/",
+                    "docs/releases/",
+                )
+                if path.startswith(intentional_prefixes):
+                    row["status"] = "discovery_negative"
+                    row["detail"] = (detail + "; intentional_source_binding").strip("; ")
     return debt
 
 
