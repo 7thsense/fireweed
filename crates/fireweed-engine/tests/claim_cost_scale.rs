@@ -108,9 +108,7 @@ async fn measure_claim_after_history(history: usize, pending: usize) -> (u128, u
             .iter()
             .map(|item| FinalizeOutcome::new(item.item_id, FinalizeKind::Complete))
             .collect();
-        b.finalize(&shard(), outcomes, ts(11), None)
-            .await
-            .unwrap();
+        b.finalize(&shard(), outcomes, ts(11), None).await.unwrap();
         drained += claimed.items.len();
         step += 1;
     }
@@ -121,10 +119,7 @@ async fn measure_claim_after_history(history: usize, pending: usize) -> (u128, u
             push_spec(&format!("p-{history}-{i}"), rank)
         })
         .collect();
-    let pending_ids = b
-        .push(&shard(), pending_specs, ts(20), None)
-        .await
-        .unwrap();
+    let pending_ids = b.push(&shard(), pending_specs, ts(20), None).await.unwrap();
     assert_eq!(pending_ids.len(), pending);
     let start = Instant::now();
     let claimed = b
@@ -154,7 +149,10 @@ async fn measure_claim_after_history(history: usize, pending: usize) -> (u128, u
             )
         })
         .unwrap();
-    assert!(empty.is_empty(), "leased items must leave the claim secondary index");
+    assert!(
+        empty.is_empty(),
+        "leased items must leave the claim secondary index"
+    );
     (elapsed_ms, claimed.items.len())
 }
 

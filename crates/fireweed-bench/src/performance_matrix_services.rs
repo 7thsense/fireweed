@@ -15,6 +15,15 @@ use sha2::{Digest, Sha256};
 const LOCK_NAME: &str = "fireweed-performance-matrix-v1";
 const LOCK_KEY: &str = "fireweed-perf/v1/_locks/matrix.lock";
 
+/// Weak passwords that collide with public product vocabulary and must not be
+/// treated as secret substrings during evidence redaction.
+///
+/// Exactly one normalized member is the historical local S3-compat password
+/// token `"garage"`. Project/service names that also appear in public evidence
+/// (`fireweed`, `postgres`) stay listed so local test URLs do not false-positive
+/// the credential scanner. No member is duplicated.
+const WEAK_PASSWORD_DENYLIST: &[&str] = &["fireweed", "postgres", "garage"];
+
 #[derive(Clone)]
 pub struct PostgresService {
     pub url: String,
@@ -50,8 +59,10 @@ impl SecretRedactor {
                 // (the local test service uses `fireweed`). In that case a raw
                 // substring scan cannot distinguish a leak from the project
                 // name; URL-authority and forbidden-field scans remain active.
+                // `garage` is the sole provider-neutral weak-password denylist
+                // member retained for historical local S3-compat fixtures.
                 .filter(|password| {
-                    !["fireweed", "fireweed", "postgres", "garage"]
+                    !WEAK_PASSWORD_DENYLIST
                         .contains(&password.to_ascii_lowercase().as_str())
                 })
             {
@@ -425,14 +436,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn weak_password_denylist_is_unique_and_includes_garage() {
+        let mut seen = std::collections::BTreeSet::new();
+        for member in WEAK_PASSWORD_DENYLIST {
+            assert!(
+                seen.insert(*member),
+                "weak-password denylist must not duplicate {member}"
+            );
+        }
+        assert!(
+            WEAK_PASSWORD_DENYLIST.contains(&"garage"),
+            "exactly one normalized weak-password denylist member must be garage"
+        );
+        assert_eq!(
+            WEAK_PASSWORD_DENYLIST
+                .iter()
+                .filter(|m| **m == "garage")
+                .count(),
+            1
+        );
+        assert_eq!(
+            WEAK_PASSWORD_DENYLIST
+                .iter()
+                .filter(|m| **m == "fireweed")
+                .count(),
+            1,
+            "duplicate fireweed denylist entry must be removed"
+        );
+    }
+
+    #[test]
+    fn weak_password_denylist_skips_public_vocabulary_secrets() {
+        let pg = PostgresService {
+            url: "postgres://alice:garage@db.invalid/fireweed".into(),
+        };
+        let redactor = SecretRedactor::new(Some(&pg), None);
+        // garage is denylisted: not treated as a redactable secret value.
+        let safe = redactor.redact(format!("{} still-visible-garage-token", pg.url));
+        assert!(
+            safe.contains("garage"),
+            "denylisted weak password must not be substring-redacted from evidence"
+        );
+        assert!(
+            !redactor.values.iter().any(|v| v.eq_ignore_ascii_case("garage")),
+            "denylisted weak password must not enter redaction values"
+        );
+    }
+
+    #[test]
     fn redacts_configured_values_and_url_userinfo() {
         let pg = PostgresService {
             url: "postgres://alice:hunter2@db.invalid/fireweed".into(),
         };
         let s3 = ObjectStoreService {
-            endpoint: "http://garage.invalid".into(),
+            endpoint: "http://s3-fixture.invalid".into(),
             bucket: "bench".into(),
-            region: "garage".into(),
+            region: "us-east-1".into(),
             access: "access-key".into(),
             secret: "secret-key".into(),
         };
@@ -472,9 +531,9 @@ mod tests {
                 url: "postgres://alice:hunter2@db.invalid/fireweed".into(),
             }),
             Some(&ObjectStoreService {
-                endpoint: "http://garage.invalid".into(),
+                endpoint: "http://s3-fixture.invalid".into(),
                 bucket: "bench".into(),
-                region: "garage".into(),
+                region: "us-east-1".into(),
                 access: "access-key".into(),
                 secret: "secret-key".into(),
             }),

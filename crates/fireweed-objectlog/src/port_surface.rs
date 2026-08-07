@@ -626,7 +626,7 @@ where
             context.eligibility_at(),
         )
     })?;
-        let lease_expires_at = context.lease_expires_at(request.lease_duration_ms);
+    let lease_expires_at = context.lease_expires_at(request.lease_duration_ms);
     let (lease_token, claim_item_ids) = if item_ids.is_empty() {
         (
             LeaseToken::new("empty-claim").expect("valid token"),
