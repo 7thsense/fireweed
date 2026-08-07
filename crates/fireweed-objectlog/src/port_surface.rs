@@ -615,43 +615,18 @@ where
         IdempotencyDecision::Proceed => {}
     }
 
-    let eligible: HashSet<ItemId> = projection
-        .with_store(|p| {
-            ProjectionStore::eligible_candidates(p, shard, context.eligibility_at(), usize::MAX)
-        })?
-        .into_iter()
-        .collect();
-    let page_size = request.max_items.clamp(1, 1_000);
-    let mut cursor = None;
-    let mut item_ids = Vec::new();
-    while item_ids.len() < request.max_items as usize {
-        let page = projection.with_store(|p| {
-            ProjectionStore::range_scan(
-                p,
-                shard,
-                RangeScanRequest {
-                    index: request.index.clone(),
-                    filters: request.filters.clone(),
-                    order_by: vec![request.order_by.clone()],
-                    page_size,
-                    cursor,
-                },
-            )
-        })?;
-        item_ids.extend(
-            page.rows
-                .into_iter()
-                .map(|row| row.item_id)
-                .filter(|item_id| eligible.contains(item_id)),
-        );
-        item_ids.truncate(request.max_items as usize);
-        cursor = page.next_cursor;
-        if cursor.is_none() {
-            break;
-        }
-    }
-
-    let lease_expires_at = context.lease_expires_at(request.lease_duration_ms);
+    let item_ids = projection.with_store(|p| {
+        ProjectionStore::select_claim_by_query(
+            p,
+            shard,
+            request.index.as_deref(),
+            &request.filters,
+            &request.order_by,
+            request.max_items as usize,
+            context.eligibility_at(),
+        )
+    })?;
+        let lease_expires_at = context.lease_expires_at(request.lease_duration_ms);
     let (lease_token, claim_item_ids) = if item_ids.is_empty() {
         (
             LeaseToken::new("empty-claim").expect("valid token"),

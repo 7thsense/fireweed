@@ -1298,6 +1298,19 @@ pub trait ProjectionStore: Send {
         Err(EngineError::Unavailable)
     }
 
+    /// Select claimable ids for claim_by_query without scanning leased/terminal corpus history.
+    fn select_claim_by_query(
+        &self,
+        _shard: &QueueKey,
+        _index: Option<&str>,
+        _filters: &[fireweed_core::QueryFilter],
+        _order_by: &fireweed_core::OrderField,
+        _max_items: usize,
+        _now: UtcTimestamp,
+    ) -> EngineResult<Vec<ItemId>> {
+        Err(EngineError::Unavailable)
+    }
+
     fn grouped_aggregate(
         &self,
         _shard: &QueueKey,

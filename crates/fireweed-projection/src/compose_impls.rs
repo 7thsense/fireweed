@@ -942,6 +942,19 @@ impl ProjectionStore for InMemoryProjection {
         self.get(shard)?.range_scan(request)
     }
 
+    fn select_claim_by_query(
+        &self,
+        shard: &QueueKey,
+        index: Option<&str>,
+        filters: &[fireweed_core::QueryFilter],
+        order_by: &fireweed_core::OrderField,
+        max_items: usize,
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<ItemId>> {
+        self.get(shard)?
+            .select_claim_by_query(index, filters, order_by, max_items, now)
+    }
+
     fn grouped_aggregate(
         &self,
         shard: &QueueKey,

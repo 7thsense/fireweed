@@ -554,6 +554,14 @@ enum SecondaryIndex {
     NonUnique(BTreeMap<Vec<u8>, BTreeSet<ItemId>>),
 }
 
+fn empty_secondary_index(unique: bool) -> SecondaryIndex {
+    if unique {
+        SecondaryIndex::Unique(BTreeMap::new())
+    } else {
+        SecondaryIndex::NonUnique(BTreeMap::new())
+    }
+}
+
 enum IndexLookupSpec<'a> {
     Legacy(&'a IndexSpec),
     Typed(&'a QueueIndex),
@@ -1658,8 +1666,13 @@ pub struct ProjectionData {
     /// the named gates rather than total resident queue cardinality.
     gate_members: FastHashMap<String, BTreeSet<ItemId>>,
     /// Per-queue secondary indexes, keyed by declaration name. Built once from the queue's specs and
-    /// maintained in the same `apply_command` arms that maintain `eligible`.
+    /// maintained in the same `apply_command` arms that maintain `eligible`. Holds ALL non-superseded
+    /// items (including leased/terminal) so range_scan / unique occupancy stay complete.
     indexes: BTreeMap<String, SecondaryIndex>,
+    /// Claim-path secondary indexes: same key space as `indexes`, but only **Pending** items.
+    /// `claim_by_query` walks this map so cost is O(claimed + skipped not-yet-due pending), not
+    /// O(total leased/terminal history still present in the full secondary index) (fireweed-cd0e5255).
+    claim_indexes: BTreeMap<String, SecondaryIndex>,
     /// Legacy secondary-index declarations (field lists), needed to recompute keys from a record's fields.
     index_specs: Vec<IndexSpec>,
     /// Typed secondary-index declarations, keyed by `QueueIndex.name`.
@@ -1684,13 +1697,10 @@ impl ProjectionData {
         specs: &[IndexSpec],
     ) -> Self {
         let mut indexes = BTreeMap::new();
+        let mut claim_indexes = BTreeMap::new();
         for spec in specs {
-            let index = if spec.unique {
-                SecondaryIndex::Unique(BTreeMap::new())
-            } else {
-                SecondaryIndex::NonUnique(BTreeMap::new())
-            };
-            indexes.insert(spec.name.clone(), index);
+            indexes.insert(spec.name.clone(), empty_secondary_index(spec.unique));
+            claim_indexes.insert(spec.name.clone(), empty_secondary_index(spec.unique));
         }
         Self {
             items: FastHashMap::default(),
@@ -1713,6 +1723,7 @@ impl ProjectionData {
             max_gates_per_request: None,
             gate_members: FastHashMap::default(),
             indexes,
+            claim_indexes,
             index_specs: specs.to_vec(),
             typed_index_specs: Vec::new(),
             side_records: BTreeMap::new(),
@@ -1723,15 +1734,14 @@ impl ProjectionData {
     /// Attach typed indexes to the projection. Intended for tests and typed queue projections.
     pub fn with_typed_indexes(mut self, specs: &[QueueIndex]) -> Self {
         for spec in specs {
-            let index = if match &spec.declaration {
+            let unique = match &spec.declaration {
                 IndexDeclaration::Single(def) => def.unique,
                 IndexDeclaration::Compound(def) => def.unique,
-            } {
-                SecondaryIndex::Unique(BTreeMap::new())
-            } else {
-                SecondaryIndex::NonUnique(BTreeMap::new())
             };
-            self.indexes.insert(spec.name.clone(), index);
+            self.indexes
+                .insert(spec.name.clone(), empty_secondary_index(unique));
+            self.claim_indexes
+                .insert(spec.name.clone(), empty_secondary_index(unique));
         }
         self.typed_index_specs = specs.to_vec();
         self
@@ -1798,6 +1808,9 @@ impl ProjectionData {
                 let keys =
                     projection.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
                 projection.index_insert_keys(rec.item_id, &keys);
+                if rec.state == ItemState::Pending {
+                    projection.claim_index_insert_keys(rec.item_id, &keys);
+                }
             }
             if rec.state == ItemState::Pending
                 && !rec.superseded
@@ -1842,8 +1855,21 @@ impl ProjectionData {
     /// Add `(item_id, keys)` to every covering index (Unique: set/replace the holder; NonUnique: add to
     /// the key's id set). Keys are precomputed by the caller so this can run after other borrows release.
     fn index_insert_keys(&mut self, item_id: ItemId, keys: &[(String, Vec<u8>)]) {
+        Self::insert_keys_into(&mut self.indexes, item_id, keys);
+    }
+
+    /// Pending-only claim path index (see `claim_indexes`).
+    fn claim_index_insert_keys(&mut self, item_id: ItemId, keys: &[(String, Vec<u8>)]) {
+        Self::insert_keys_into(&mut self.claim_indexes, item_id, keys);
+    }
+
+    fn insert_keys_into(
+        indexes: &mut BTreeMap<String, SecondaryIndex>,
+        item_id: ItemId,
+        keys: &[(String, Vec<u8>)],
+    ) {
         for (name, key) in keys {
-            match self.indexes.get_mut(name) {
+            match indexes.get_mut(name) {
                 Some(SecondaryIndex::Unique(map)) => {
                     map.insert(key.clone(), item_id);
                 }
@@ -1858,8 +1884,20 @@ impl ProjectionData {
     /// Remove `item_id` from every covering index for `keys` (Unique: drop the entry only if it still
     /// maps to this id; NonUnique: drop the id from the set, dropping the set when it empties).
     fn index_remove_keys(&mut self, item_id: ItemId, keys: &[(String, Vec<u8>)]) {
+        Self::remove_keys_from(&mut self.indexes, item_id, keys);
+    }
+
+    fn claim_index_remove_keys(&mut self, item_id: ItemId, keys: &[(String, Vec<u8>)]) {
+        Self::remove_keys_from(&mut self.claim_indexes, item_id, keys);
+    }
+
+    fn remove_keys_from(
+        indexes: &mut BTreeMap<String, SecondaryIndex>,
+        item_id: ItemId,
+        keys: &[(String, Vec<u8>)],
+    ) {
         for (name, key) in keys {
-            match self.indexes.get_mut(name) {
+            match indexes.get_mut(name) {
                 Some(SecondaryIndex::Unique(map)) => {
                     if map.get(key) == Some(&item_id) {
                         map.remove(key);
@@ -1975,6 +2013,7 @@ impl ProjectionData {
         }
         let keys = self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
         self.index_insert_keys(rec.item_id, &keys);
+        self.claim_index_insert_keys(rec.item_id, &keys);
         self.items.insert(rec.item_id, rec);
         self.metrics.pending += 1;
         Ok(())
@@ -2086,6 +2125,21 @@ impl ProjectionData {
         if new_key.is_some() {
             let rec = self.items.get(id).ok_or(EngineError::NotFound)?;
             self.eligible.insert(rec, &self.items, &self.priority_model);
+        }
+        // Claim secondary index holds only Pending rows so claim_by_query never re-walks a growing
+        // leased/terminal prefix (fireweed-cd0e5255).
+        if old_state == ItemState::Pending && new_state != ItemState::Pending {
+            let keys = {
+                let rec = self.items.get(id).ok_or(EngineError::NotFound)?;
+                self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?
+            };
+            self.claim_index_remove_keys(*id, &keys);
+        } else if old_state != ItemState::Pending && new_state == ItemState::Pending {
+            let keys = {
+                let rec = self.items.get(id).ok_or(EngineError::NotFound)?;
+                self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?
+            };
+            self.claim_index_insert_keys(*id, &keys);
         }
         self.metrics_transition(old_state, new_state);
         Ok(new_state)
@@ -2401,6 +2455,14 @@ impl ProjectionData {
                     .collect();
                 self.index_remove_keys(item_id, &removed);
                 self.index_insert_keys(item_id, &added);
+                if self
+                    .items
+                    .get(&item_id)
+                    .is_some_and(|r| r.state == ItemState::Pending && !r.superseded)
+                {
+                    self.claim_index_remove_keys(item_id, &removed);
+                    self.claim_index_insert_keys(item_id, &added);
+                }
                 self.replace_gate_memberships(item_id, &old_gate_keys, &new_gate_keys);
                 // Re-key the eligibility index for a repriced/rescheduled Pending item (no-op otherwise —
                 // a non-reprice/non-reschedule or a Leased item leaves the eligibility set unchanged).
@@ -2500,6 +2562,12 @@ impl ProjectionData {
                                 .collect::<Vec<_>>();
                             self.index_remove_keys(mutation.item_id, &removed);
                             self.index_insert_keys(mutation.item_id, &added);
+                            if old.state == ItemState::Pending && !old.superseded {
+                                self.claim_index_remove_keys(mutation.item_id, &old_index_keys);
+                            }
+                            if values.state == ItemState::Pending {
+                                self.claim_index_insert_keys(mutation.item_id, &new_index_keys);
+                            }
                             self.replace_gate_memberships(
                                 mutation.item_id,
                                 &old.gate_keys,
@@ -2656,6 +2724,7 @@ impl ProjectionData {
                 }
                 if let Some(keys) = superseded_keys {
                     self.index_remove_keys(c.superseded_item_id, &keys);
+                    self.claim_index_remove_keys(c.superseded_item_id, &keys);
                 }
                 self.replace_gate_memberships(c.superseded_item_id, &superseded_gate_keys, &[]);
                 self.by_key.remove(&c.client_item_key);
@@ -3684,6 +3753,7 @@ impl ProjectionData {
         }
         let keys = self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
         self.index_remove_keys(rec.item_id, &keys);
+        self.claim_index_remove_keys(rec.item_id, &keys);
         Ok(())
     }
 
@@ -4371,6 +4441,100 @@ impl ProjectionData {
             }
         }
         Ok(Some(RangeScanRow { item_id, fields }))
+    }
+
+    /// Select claimable item ids for `claim_by_query` by walking the **Pending-only** claim secondary
+    /// index in declared order. Cost is O(claimed + skipped not-yet-due pending), independent of
+    /// leased/terminal corpus size still occupying the full query secondary index (fireweed-cd0e5255).
+    pub fn select_claim_by_query(
+        &self,
+        index_name: Option<&str>,
+        filters: &[fireweed_core::QueryFilter],
+        order_by: &OrderField,
+        max_items: usize,
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<ItemId>> {
+        if self.paused || max_items == 0 {
+            return Ok(Vec::new());
+        }
+        let spec = self.typed_range_index(index_name)?;
+        let fields = index_fields(spec);
+        if !fields
+            .iter()
+            .any(|(field, _)| *field == order_by.field.as_str())
+        {
+            return Err(EngineError::Invalid("unindexed-field"));
+        }
+        let descending = order_by.direction == fireweed_core::SortDirection::Descending;
+        let Some(index) = self.claim_indexes.get(&spec.name) else {
+            return Ok(Vec::new());
+        };
+        let mut selected = Vec::with_capacity(max_items.min(64));
+        let consider = |item_id: ItemId, selected: &mut Vec<ItemId>| -> EngineResult<bool> {
+            let Some(rec) = self.items.get(&item_id) else {
+                return Ok(false);
+            };
+            if rec.state != ItemState::Pending || rec.superseded || rec.fenced {
+                return Ok(false);
+            }
+            if rec.cohort_size.is_some() {
+                return Ok(false);
+            }
+            if rec.not_before.is_some_and(|nb| nb > now) {
+                return Ok(false);
+            }
+            if gate_keys_blocked(&self.blocked_gates, &rec.gate_keys) {
+                return Ok(false);
+            }
+            let Some(entity) = rec.entity_document.as_ref() else {
+                return Ok(false);
+            };
+            let Some(row) = self.range_scan_row(spec, rec.item_id, entity)? else {
+                return Ok(false);
+            };
+            if !self.range_scan_matches(spec, filters, &row)? {
+                return Ok(false);
+            }
+            selected.push(item_id);
+            Ok(selected.len() >= max_items)
+        };
+        match index {
+            SecondaryIndex::Unique(map) => {
+                if descending {
+                    for item_id in map.values().rev() {
+                        if consider(*item_id, &mut selected)? {
+                            break;
+                        }
+                    }
+                } else {
+                    for item_id in map.values() {
+                        if consider(*item_id, &mut selected)? {
+                            break;
+                        }
+                    }
+                }
+            }
+            SecondaryIndex::NonUnique(map) => {
+                if descending {
+                    'outer_desc: for ids in map.values().rev() {
+                        for item_id in ids {
+                            if consider(*item_id, &mut selected)? {
+                                break 'outer_desc;
+                            }
+                        }
+                    }
+                } else {
+                    'outer_asc: for ids in map.values() {
+                        for item_id in ids {
+                            if consider(*item_id, &mut selected)? {
+                                break 'outer_asc;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(selected)
     }
 
     /// Ordered scan over a declared typed index with stable cursor pagination.
