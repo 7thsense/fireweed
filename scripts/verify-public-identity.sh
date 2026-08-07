@@ -6,6 +6,13 @@ repo_root="$(git -C "$script_dir/.." rev-parse --show-toplevel)"
 allowlist="$script_dir/public-identity-allowlist.json"
 files_from=""
 scan_root="$repo_root"
+mode="source"
+source_root=""
+promoted_root=""
+expected_source=""
+expected_remote=""
+expected_ref=""
+promoted_allowlist=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -21,8 +28,36 @@ while [[ $# -gt 0 ]]; do
             scan_root="$2"
             shift 2
             ;;
+        --mode)
+            mode="$2"
+            shift 2
+            ;;
+        --source-root)
+            source_root="$2"
+            shift 2
+            ;;
+        --promoted-root)
+            promoted_root="$2"
+            shift 2
+            ;;
+        --expected-source)
+            expected_source="$2"
+            shift 2
+            ;;
+        --expected-remote)
+            expected_remote="$2"
+            shift 2
+            ;;
+        --expected-ref)
+            expected_ref="$2"
+            shift 2
+            ;;
+        --promoted-allowlist)
+            promoted_allowlist="$2"
+            shift 2
+            ;;
         -h|--help)
-            echo "usage: verify-public-identity.sh [--allowlist FILE] [--root DIR] [--files-from FILE]" >&2
+            echo "usage: verify-public-identity.sh [--mode source|e] [--allowlist FILE] [--root DIR] [--files-from FILE] [--source-root DIR --expected-source SHA --expected-remote R --expected-ref REF] [--promoted-root DIR --promoted-allowlist FILE]" >&2
             exit 0
             ;;
         *)
@@ -31,6 +66,41 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Dual-root E mode: tooling/predicate from dedicated S checkout; scan only the
+# promoted evidence root under an explicit allowlist.
+if [[ "$mode" == "e" ]]; then
+    [[ -n "$source_root" && -n "$expected_source" && -n "$expected_remote" && -n "$expected_ref" ]] || {
+        echo "e mode requires --source-root --expected-source --expected-remote --expected-ref" >&2
+        exit 2
+    }
+    [[ -n "$promoted_root" && -n "$promoted_allowlist" ]] || {
+        echo "e mode requires --promoted-root --promoted-allowlist" >&2
+        exit 2
+    }
+    bash "$script_dir/release/verify-source-predicate.sh" \
+        --mode e \
+        --source-root "$source_root" \
+        --expected-source "$expected_source" \
+        --expected-remote "$expected_remote" \
+        --expected-ref "$expected_ref" \
+        --promoted-root "$promoted_root" \
+        --promoted-allowlist "$promoted_allowlist"
+    scan_root="$promoted_root"
+elif [[ -n "$expected_source" ]]; then
+    # Optional source-mode binding when callers pass measured S.
+    [[ -n "$source_root" && -n "$expected_remote" && -n "$expected_ref" ]] || {
+        echo "source binding requires --source-root --expected-remote --expected-ref" >&2
+        exit 2
+    }
+    bash "$script_dir/release/verify-source-predicate.sh" \
+        --mode source \
+        --source-root "$source_root" \
+        --expected-source "$expected_source" \
+        --expected-remote "$expected_remote" \
+        --expected-ref "$expected_ref"
+    scan_root="${scan_root:-$source_root}"
+fi
 
 python3 - "$scan_root" "$allowlist" "$files_from" <<'PY'
 import json

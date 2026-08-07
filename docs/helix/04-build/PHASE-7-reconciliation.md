@@ -4,8 +4,9 @@
 > are accurate **only** for the hexagonal migration that completed 2026-06. The project has since
 > cascaded through ADR-008 (queue = unit of sharding) → ADR-009…014 (Fjord change-log surface,
 > orthogonal composition, typed indexes) and beyond. **Do not read this as current status.** Current
-> status lives in `docs/helix/04-build/DEPLOYMENT-READINESS.md`, `gap-closure-plan.md`, and the live
-> `.ddx` tracker.
+> product status lives in governing docs such as `docs/helix/04-build/DEPLOYMENT-READINESS.md` and
+> `gap-closure-plan.md`. The operator-local `.ddx/` tree is administrative campaign tracking only;
+> it is **not** product authority, release evidence, or a source/evidence input for S-bound tools.
 
 Final gap review of the finished system against `hexagonal-migration-plan.md`, item by item. Status
 vocabulary: **DONE** = implemented + tested (cited); **OWED** = intentionally deferred with reason (not

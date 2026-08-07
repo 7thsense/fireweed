@@ -26,59 +26,399 @@
       "removal_condition": "Retain while the naming analysis remains an auditable decision input."
     },
     {
-      "id": "pre-fireweed-release-notes",
+      "id": "historical-release-note-v0.6.0",
       "class": "historical/audit",
       "paths": [
-        "docs/releases/v0.6.0.md",
-        "docs/releases/v0.14.0.md",
-        "docs/releases/v0.15.0.md",
-        "docs/releases/v0.15.1.md",
-        "docs/releases/v0.16.0.md",
-        "docs/releases/v0.17.0.md",
-        "docs/releases/v0.17.1.md",
-        "docs/releases/v0.17.2.md",
-        "docs/releases/v0.17.3.md",
-        "docs/releases/v0.18.0.md",
-        "docs/releases/v0.19.0.md",
-        "docs/releases/v0.19.1.md",
-        "docs/releases/v0.19.2.md",
-        "docs/releases/v0.19.3.md",
-        "docs/releases/v0.19.4.md",
-        "docs/releases/v0.19.5.md",
-        "docs/releases/v0.19.6.md"
+        "docs/releases/v0.6.0.md"
       ],
       "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
-      "reason": "These versioned notes describe releases made before the hard Fireweed cutover and are immutable release history.",
+      "reason": "Versioned note describing a release made before the hard Fireweed cutover; immutable historical/audit public-identity residue.",
       "owner_surface": "Published pre-cutover release record",
       "removal_condition": "Retain while the corresponding pre-cutover release tags remain part of project history."
     },
     {
-      "id": "pre-fireweed-performance-evidence",
+      "id": "historical-release-note-v0.14.0",
       "class": "historical/audit",
       "paths": [
-        "docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_100k.jsonl",
-        "docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_10m.jsonl",
-        "docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_1m.jsonl",
-        "docs/perf/evidence/performance_object_log_hybrid_smoke.jsonl",
-        "docs/perf/evidence/sp01-byte-admission-smoke.md",
-        "docs/perf/evidence/td008-terminal-reap-frontier.jsonl",
-        "docs/perf/evidence/tp002-e0-postgres-release-10m.jsonl",
-        "docs/perf/evidence/tp002-e1-postgres-release-10m.jsonl",
-        "docs/perf/evidence/tp002-e2-cross-queue-remeasured.jsonl",
-        "docs/perf/evidence/tp002-e2-density-durable.jsonl",
-        "docs/perf/evidence/tp002-e2-multinode-kind-release.jsonl",
-        "docs/perf/evidence/tp002-e2-multinode-smoke.jsonl",
-        "docs/perf/evidence/tp002-e2-objectlog-sqlite-failover-kind.json",
-        "docs/perf/evidence/tp002-e3-cost-model.jsonl",
-        "docs/perf/evidence/tp002-e3-objectlog-minio-historical-invalid.jsonl",
-        "docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl",
-        "docs/perf/evidence/tp003-ac-txn-matrix-postgres.jsonl",
-        "docs/perf/evidence/tp003-ac-txn-matrix.jsonl",
+        "docs/releases/v0.14.0.md"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Immutable pre-cutover release note retained as inert non-governing provenance for historical .ddx hyperlinks; structural scan may classify them but dereference/current-doc use or new occurrence fails (P17a).",
+      "owner_surface": "P17a inert .ddx hyperlink provenance",
+      "removal_condition": "Retain while the corresponding pre-cutover release tags remain part of project history."
+    },
+    {
+      "id": "historical-release-note-v0.15.0",
+      "class": "historical/audit",
+      "paths": [
+        "docs/releases/v0.15.0.md"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Versioned note describing a release made before the hard Fireweed cutover; immutable historical/audit public-identity residue.",
+      "owner_surface": "Published pre-cutover release record",
+      "removal_condition": "Retain while the corresponding pre-cutover release tags remain part of project history."
+    },
+    {
+      "id": "historical-release-note-v0.15.1",
+      "class": "historical/audit",
+      "paths": [
+        "docs/releases/v0.15.1.md"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Versioned note describing a release made before the hard Fireweed cutover; immutable historical/audit public-identity residue.",
+      "owner_surface": "Published pre-cutover release record",
+      "removal_condition": "Retain while the corresponding pre-cutover release tags remain part of project history."
+    },
+    {
+      "id": "historical-release-note-v0.16.0",
+      "class": "historical/audit",
+      "paths": [
+        "docs/releases/v0.16.0.md"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Versioned note describing a release made before the hard Fireweed cutover; immutable historical/audit public-identity residue.",
+      "owner_surface": "Published pre-cutover release record",
+      "removal_condition": "Retain while the corresponding pre-cutover release tags remain part of project history."
+    },
+    {
+      "id": "historical-release-note-v0.17.0",
+      "class": "historical/audit",
+      "paths": [
+        "docs/releases/v0.17.0.md"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Versioned note describing a release made before the hard Fireweed cutover; immutable historical/audit public-identity residue.",
+      "owner_surface": "Published pre-cutover release record",
+      "removal_condition": "Retain while the corresponding pre-cutover release tags remain part of project history."
+    },
+    {
+      "id": "historical-release-note-v0.17.1",
+      "class": "historical/audit",
+      "paths": [
+        "docs/releases/v0.17.1.md"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Versioned note describing a release made before the hard Fireweed cutover; immutable historical/audit public-identity residue.",
+      "owner_surface": "Published pre-cutover release record",
+      "removal_condition": "Retain while the corresponding pre-cutover release tags remain part of project history."
+    },
+    {
+      "id": "historical-release-note-v0.17.2",
+      "class": "historical/audit",
+      "paths": [
+        "docs/releases/v0.17.2.md"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Versioned note describing a release made before the hard Fireweed cutover; immutable historical/audit public-identity residue.",
+      "owner_surface": "Published pre-cutover release record",
+      "removal_condition": "Retain while the corresponding pre-cutover release tags remain part of project history."
+    },
+    {
+      "id": "historical-release-note-v0.17.3",
+      "class": "historical/audit",
+      "paths": [
+        "docs/releases/v0.17.3.md"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Versioned note describing a release made before the hard Fireweed cutover; immutable historical/audit public-identity residue.",
+      "owner_surface": "Published pre-cutover release record",
+      "removal_condition": "Retain while the corresponding pre-cutover release tags remain part of project history."
+    },
+    {
+      "id": "historical-release-note-v0.18.0",
+      "class": "historical/audit",
+      "paths": [
+        "docs/releases/v0.18.0.md"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Versioned note describing a release made before the hard Fireweed cutover; immutable historical/audit public-identity residue.",
+      "owner_surface": "Published pre-cutover release record",
+      "removal_condition": "Retain while the corresponding pre-cutover release tags remain part of project history."
+    },
+    {
+      "id": "historical-release-note-v0.19.0",
+      "class": "historical/audit",
+      "paths": [
+        "docs/releases/v0.19.0.md"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Versioned note describing a release made before the hard Fireweed cutover; immutable historical/audit public-identity residue.",
+      "owner_surface": "Published pre-cutover release record",
+      "removal_condition": "Retain while the corresponding pre-cutover release tags remain part of project history."
+    },
+    {
+      "id": "historical-release-note-v0.19.1",
+      "class": "historical/audit",
+      "paths": [
+        "docs/releases/v0.19.1.md"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Versioned note describing a release made before the hard Fireweed cutover; immutable historical/audit public-identity residue.",
+      "owner_surface": "Published pre-cutover release record",
+      "removal_condition": "Retain while the corresponding pre-cutover release tags remain part of project history."
+    },
+    {
+      "id": "historical-release-note-v0.19.2",
+      "class": "historical/audit",
+      "paths": [
+        "docs/releases/v0.19.2.md"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Versioned note describing a release made before the hard Fireweed cutover; immutable historical/audit public-identity residue.",
+      "owner_surface": "Published pre-cutover release record",
+      "removal_condition": "Retain while the corresponding pre-cutover release tags remain part of project history."
+    },
+    {
+      "id": "historical-release-note-v0.19.3",
+      "class": "historical/audit",
+      "paths": [
+        "docs/releases/v0.19.3.md"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Versioned note describing a release made before the hard Fireweed cutover; immutable historical/audit public-identity residue.",
+      "owner_surface": "Published pre-cutover release record",
+      "removal_condition": "Retain while the corresponding pre-cutover release tags remain part of project history."
+    },
+    {
+      "id": "historical-release-note-v0.19.4",
+      "class": "historical/audit",
+      "paths": [
+        "docs/releases/v0.19.4.md"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Versioned note describing a release made before the hard Fireweed cutover; immutable historical/audit public-identity residue.",
+      "owner_surface": "Published pre-cutover release record",
+      "removal_condition": "Retain while the corresponding pre-cutover release tags remain part of project history."
+    },
+    {
+      "id": "historical-release-note-v0.19.5",
+      "class": "historical/audit",
+      "paths": [
+        "docs/releases/v0.19.5.md"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Versioned note describing a release made before the hard Fireweed cutover; immutable historical/audit public-identity residue.",
+      "owner_surface": "Published pre-cutover release record",
+      "removal_condition": "Retain while the corresponding pre-cutover release tags remain part of project history."
+    },
+    {
+      "id": "historical-release-note-v0.19.6",
+      "class": "historical/audit",
+      "paths": [
+        "docs/releases/v0.19.6.md"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Versioned note describing a release made before the hard Fireweed cutover; immutable historical/audit public-identity residue.",
+      "owner_surface": "Published pre-cutover release record",
+      "removal_condition": "Retain while the corresponding pre-cutover release tags remain part of project history."
+    },
+    {
+      "id": "historical-performance-evidence-hybrid-scale-performance_object_log_hybrid_release_100k-jsonl",
+      "class": "historical/audit",
+      "paths": [
+        "docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_100k.jsonl"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Immutable historical performance evidence path retained for public-identity audit; not current governing product evidence (P1/P17a per-artifact transition).",
+      "owner_surface": "Historical performance evidence corpus",
+      "removal_condition": "Retain while these evidence rows are kept for historical comparison and audit."
+    },
+    {
+      "id": "historical-performance-evidence-hybrid-scale-performance_object_log_hybrid_release_10m-jsonl",
+      "class": "historical/audit",
+      "paths": [
+        "docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_10m.jsonl"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Immutable historical performance evidence path retained for public-identity audit; not current governing product evidence (P1/P17a per-artifact transition).",
+      "owner_surface": "Historical performance evidence corpus",
+      "removal_condition": "Retain while these evidence rows are kept for historical comparison and audit."
+    },
+    {
+      "id": "historical-performance-evidence-hybrid-scale-performance_object_log_hybrid_release_1m-jsonl",
+      "class": "historical/audit",
+      "paths": [
+        "docs/perf/evidence/hybrid-scale/performance_object_log_hybrid_release_1m.jsonl"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Immutable historical performance evidence path retained for public-identity audit; not current governing product evidence (P1/P17a per-artifact transition).",
+      "owner_surface": "Historical performance evidence corpus",
+      "removal_condition": "Retain while these evidence rows are kept for historical comparison and audit."
+    },
+    {
+      "id": "historical-performance-evidence-performance_object_log_hybrid_smoke-jsonl",
+      "class": "historical/audit",
+      "paths": [
+        "docs/perf/evidence/performance_object_log_hybrid_smoke.jsonl"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Immutable historical performance evidence path retained for public-identity audit; not current governing product evidence (P1/P17a per-artifact transition).",
+      "owner_surface": "Historical performance evidence corpus",
+      "removal_condition": "Retain while these evidence rows are kept for historical comparison and audit."
+    },
+    {
+      "id": "historical-performance-evidence-sp01-byte-admission-smoke-md",
+      "class": "historical/audit",
+      "paths": [
+        "docs/perf/evidence/sp01-byte-admission-smoke.md"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Immutable historical performance evidence path retained for public-identity audit; not current governing product evidence (P1/P17a per-artifact transition).",
+      "owner_surface": "Historical performance evidence corpus",
+      "removal_condition": "Retain while these evidence rows are kept for historical comparison and audit."
+    },
+    {
+      "id": "historical-performance-evidence-td008-terminal-reap-frontier-jsonl",
+      "class": "historical/audit",
+      "paths": [
+        "docs/perf/evidence/td008-terminal-reap-frontier.jsonl"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Immutable historical performance evidence path retained for public-identity audit; not current governing product evidence (P1/P17a per-artifact transition).",
+      "owner_surface": "Historical performance evidence corpus",
+      "removal_condition": "Retain while these evidence rows are kept for historical comparison and audit."
+    },
+    {
+      "id": "historical-performance-evidence-tp002-e0-postgres-release-10m-jsonl",
+      "class": "historical/audit",
+      "paths": [
+        "docs/perf/evidence/tp002-e0-postgres-release-10m.jsonl"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Immutable historical performance evidence path retained for public-identity audit; not current governing product evidence (P1/P17a per-artifact transition).",
+      "owner_surface": "Historical performance evidence corpus",
+      "removal_condition": "Retain while these evidence rows are kept for historical comparison and audit."
+    },
+    {
+      "id": "historical-performance-evidence-tp002-e1-postgres-release-10m-jsonl",
+      "class": "historical/audit",
+      "paths": [
+        "docs/perf/evidence/tp002-e1-postgres-release-10m.jsonl"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Immutable historical performance evidence path retained for public-identity audit; not current governing product evidence (P1/P17a per-artifact transition).",
+      "owner_surface": "Historical performance evidence corpus",
+      "removal_condition": "Retain while these evidence rows are kept for historical comparison and audit."
+    },
+    {
+      "id": "historical-performance-evidence-tp002-e2-cross-queue-remeasured-jsonl",
+      "class": "historical/audit",
+      "paths": [
+        "docs/perf/evidence/tp002-e2-cross-queue-remeasured.jsonl"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Immutable historical performance evidence path retained for public-identity audit; not current governing product evidence (P1/P17a per-artifact transition).",
+      "owner_surface": "Historical performance evidence corpus",
+      "removal_condition": "Retain while these evidence rows are kept for historical comparison and audit."
+    },
+    {
+      "id": "historical-performance-evidence-tp002-e2-density-durable-jsonl",
+      "class": "historical/audit",
+      "paths": [
+        "docs/perf/evidence/tp002-e2-density-durable.jsonl"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Immutable historical performance evidence path retained for public-identity audit; not current governing product evidence (P1/P17a per-artifact transition).",
+      "owner_surface": "Historical performance evidence corpus",
+      "removal_condition": "Retain while these evidence rows are kept for historical comparison and audit."
+    },
+    {
+      "id": "historical-performance-evidence-tp002-e2-multinode-kind-release-jsonl",
+      "class": "historical/audit",
+      "paths": [
+        "docs/perf/evidence/tp002-e2-multinode-kind-release.jsonl"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Immutable historical performance evidence path retained for public-identity audit; not current governing product evidence (P1/P17a per-artifact transition).",
+      "owner_surface": "Historical performance evidence corpus",
+      "removal_condition": "Retain while these evidence rows are kept for historical comparison and audit."
+    },
+    {
+      "id": "historical-performance-evidence-tp002-e2-multinode-smoke-jsonl",
+      "class": "historical/audit",
+      "paths": [
+        "docs/perf/evidence/tp002-e2-multinode-smoke.jsonl"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Immutable historical performance evidence path retained for public-identity audit; not current governing product evidence (P1/P17a per-artifact transition).",
+      "owner_surface": "Historical performance evidence corpus",
+      "removal_condition": "Retain while these evidence rows are kept for historical comparison and audit."
+    },
+    {
+      "id": "historical-performance-evidence-tp002-e2-objectlog-sqlite-failover-kind-json",
+      "class": "historical/audit",
+      "paths": [
+        "docs/perf/evidence/tp002-e2-objectlog-sqlite-failover-kind.json"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Immutable historical performance evidence path retained for public-identity audit; not current governing product evidence (P1/P17a per-artifact transition).",
+      "owner_surface": "Historical performance evidence corpus",
+      "removal_condition": "Retain while these evidence rows are kept for historical comparison and audit."
+    },
+    {
+      "id": "historical-performance-evidence-tp002-e3-cost-model-jsonl",
+      "class": "historical/audit",
+      "paths": [
+        "docs/perf/evidence/tp002-e3-cost-model.jsonl"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Immutable historical performance evidence path retained for public-identity audit; not current governing product evidence (P1/P17a per-artifact transition).",
+      "owner_surface": "Historical performance evidence corpus",
+      "removal_condition": "Retain while these evidence rows are kept for historical comparison and audit."
+    },
+    {
+      "id": "historical-performance-evidence-tp002-e3-objectlog-minio-historical-invalid-jsonl",
+      "class": "historical/audit",
+      "paths": [
+        "docs/perf/evidence/tp002-e3-objectlog-minio-historical-invalid.jsonl"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Immutable historical performance evidence path retained for public-identity audit; not current governing product evidence (P1/P17a per-artifact transition).",
+      "owner_surface": "Historical performance evidence corpus",
+      "removal_condition": "Retain while these evidence rows are kept for historical comparison and audit."
+    },
+    {
+      "id": "historical-performance-evidence-tp003-ac-txn-matrix-postgres-storage-pairs-jsonl",
+      "class": "historical/audit",
+      "paths": [
+        "docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Immutable historical performance evidence path retained for public-identity audit; not current governing product evidence (P1/P17a per-artifact transition).",
+      "owner_surface": "Historical performance evidence corpus",
+      "removal_condition": "Retain while these evidence rows are kept for historical comparison and audit."
+    },
+    {
+      "id": "historical-performance-evidence-tp003-ac-txn-matrix-postgres-jsonl",
+      "class": "historical/audit",
+      "paths": [
+        "docs/perf/evidence/tp003-ac-txn-matrix-postgres.jsonl"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Immutable historical performance evidence path retained for public-identity audit; not current governing product evidence (P1/P17a per-artifact transition).",
+      "owner_surface": "Historical performance evidence corpus",
+      "removal_condition": "Retain while these evidence rows are kept for historical comparison and audit."
+    },
+    {
+      "id": "historical-performance-evidence-tp003-ac-txn-matrix-jsonl",
+      "class": "historical/audit",
+      "paths": [
+        "docs/perf/evidence/tp003-ac-txn-matrix.jsonl"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Immutable historical performance evidence path retained for public-identity audit; not current governing product evidence (P1/P17a per-artifact transition).",
+      "owner_surface": "Historical performance evidence corpus",
+      "removal_condition": "Retain while these evidence rows are kept for historical comparison and audit."
+    },
+    {
+      "id": "historical-performance-evidence-tp003-ac-txn-parity-postgres-storage-pairs-jsonl",
+      "class": "historical/audit",
+      "paths": [
         "docs/perf/evidence/tp003-ac-txn-parity-postgres-storage-pairs.jsonl"
       ],
       "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
-      "reason": "These files are captured command/result evidence from pre-cutover revisions; editing their recorded commands would falsify the evidence.",
-      "owner_surface": "Immutable pre-cutover performance evidence",
+      "reason": "Immutable historical performance evidence path retained for public-identity audit; not current governing product evidence (P1/P17a per-artifact transition).",
+      "owner_surface": "Historical performance evidence corpus",
       "removal_condition": "Retain while these evidence rows are kept for historical comparison and audit."
     },
     {
@@ -130,6 +470,17 @@
       "reason": "These exact compile-fail fixtures and their runner name retired Rust symbols only to prove that downstream code cannot use them.",
       "owner_surface": "Public Rust API negative tests",
       "removal_condition": "Retain while compile-fail coverage guards against reintroducing the retired facade."
+    },
+    {
+      "id": "historical-release-note-v0.29.0",
+      "class": "historical/audit",
+      "paths": [
+        "docs/releases/v0.29.0.md"
+      ],
+      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
+      "reason": "Immutable published release note with historical Garage claims; bytes frozen as non-current public identity (P17a).",
+      "owner_surface": "P17a published garage claim history",
+      "removal_condition": "Retain while the corresponding release tags remain part of project history."
     }
   ]
 }
