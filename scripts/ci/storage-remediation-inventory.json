@@ -3276,9 +3276,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "0c8c67c4dfee3ca6af68",
+        "id": "eb0b7daca3032420929c",
         "identity": "\"storage_config_open: postgres cell skipped (FIREWEED_PG_TEST_URL unset)\"",
-        "line": 2481,
+        "line": 2490,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -3290,9 +3290,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "9d80472a50cc8f925efa",
+        "id": "22544b2077cac5e7af08",
         "identity": "\"FIREWEED_PG_TEST_URL or PQUEUE_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\",",
-        "line": 7216,
+        "line": 7225,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -3304,9 +3304,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "06ad7cde15847111f322",
+        "id": "a307af2aefe6f14b8bde",
         "identity": "\"FIREWEED_PG_TEST_URL or PQUEUE_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\",",
-        "line": 7296,
+        "line": 7305,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -4987,9 +4987,9 @@
           "P2f"
         ],
         "detail": "rustdoc fence must have a listed exact behavioral route; compile-only/ignored is debt; rustdoc_route_or_fence",
-        "id": "c19de473386c29795ad7",
+        "id": "070e6fe3fa11af80722e",
         "identity": "no_run",
-        "line": 3462,
+        "line": 3471,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -10849,20 +10849,22 @@
     "test_boundary_debt": [
       {
         "boundary_owners": [
-          "P6"
+          "P6",
+          "P7"
         ],
         "category": "test_boundary_debt",
         "dependency_chain": [
           "P2a",
           "P6",
+          "P7",
           "P2r",
           "P2f"
         ],
-        "detail": "temporary crate-internal white-box placement; final public re-expression owners=P6; intentional_whitebox_suite",
+        "detail": "temporary crate-internal white-box placement; final public re-expression owners=P6,P7; intentional_whitebox_suite",
         "id": "b58b5789e38c4d0bea04",
         "identity": "active_scope_routing.rs",
         "line": 1,
-        "owner": "P6",
+        "owner": "P6/P7",
         "path": "crates/fireweed/tests/whitebox/active_scope_routing.rs",
         "private_refs": [
           "RuntimeCore"
@@ -10897,20 +10899,24 @@
       },
       {
         "boundary_owners": [
-          "P3b"
+          "P3b",
+          "P5a",
+          "P7"
         ],
         "category": "test_boundary_debt",
         "dependency_chain": [
           "P2a",
           "P3b",
+          "P5a",
+          "P7",
           "P2r",
           "P2f"
         ],
-        "detail": "temporary crate-internal white-box placement; final public re-expression owners=P3b; intentional_whitebox_suite",
+        "detail": "temporary crate-internal white-box placement; final public re-expression owners=P3b,P5a,P7; intentional_whitebox_suite",
         "id": "403abae9ac25c8b923a3",
         "identity": "encapsulation.rs",
         "line": 1,
-        "owner": "P3b",
+        "owner": "P3b/P5a/P7",
         "path": "crates/fireweed/tests/whitebox/encapsulation.rs",
         "private_refs": [
           "CommitResponseBarrier",
@@ -10927,6 +10933,7 @@
       },
       {
         "boundary_owners": [
+          "P3b",
           "P5a",
           "P6",
           "P7",
@@ -10936,6 +10943,7 @@
         "category": "test_boundary_debt",
         "dependency_chain": [
           "P2a",
+          "P3b",
           "P5a",
           "P6",
           "P7",
@@ -10944,11 +10952,11 @@
           "P2r",
           "P2f"
         ],
-        "detail": "temporary crate-internal white-box placement; final public re-expression owners=P5a,P6,P7,P8,P9; intentional_whitebox_suite",
+        "detail": "temporary crate-internal white-box placement; final public re-expression owners=P3b,P5a,P6,P7,P8,P9; intentional_whitebox_suite",
         "id": "cc94cf71c0f04885e4c9",
         "identity": "facade.rs",
         "line": 1,
-        "owner": "P5a/P6/P7/P8/P9",
+        "owner": "P3b/P5a/P6/P7/P8/P9",
         "path": "crates/fireweed/tests/whitebox/facade.rs",
         "private_refs": [
           "RuntimeCore"
@@ -11112,20 +11120,22 @@
       },
       {
         "boundary_owners": [
-          "P5a"
+          "P5a",
+          "P7"
         ],
         "category": "test_boundary_debt",
         "dependency_chain": [
           "P2a",
           "P5a",
+          "P7",
           "P2r",
           "P2f"
         ],
-        "detail": "temporary crate-internal white-box placement; final public re-expression owners=P5a; intentional_whitebox_suite",
+        "detail": "temporary crate-internal white-box placement; final public re-expression owners=P5a,P7; intentional_whitebox_suite",
         "id": "393d1924eac67f65f0ca",
         "identity": "queue_template.rs",
         "line": 1,
-        "owner": "P5a",
+        "owner": "P5a/P7",
         "path": "crates/fireweed/tests/whitebox/queue_template.rs",
         "private_refs": [
           "CommitResponseBarrier",
@@ -94821,7 +94831,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "827f060f40a0a7a3f93ef20fcedf725466de4089e471c1278bd2c23bfb43ac04",
+  "source_inventory_sha256": "243266a85216af780757fd4bfd350f33c8e1dbdd310fa7704595829c05667ecf",
   "workspaces": [
     {
       "listing_error_sha256": "",
