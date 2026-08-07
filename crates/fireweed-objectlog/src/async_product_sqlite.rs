@@ -1409,11 +1409,11 @@ impl fireweed_engine::ItemMutationPort for AsyncObjectLogSqliteBackend {
                             })?;
                             return Ok(plan.response);
                         }
-                        let epoch = fireweed_engine::resolve_write_epoch_async(
-                            expected_epoch,
-                            || AsyncLogStore::current_epoch(log.as_ref(), shard.clone()),
-                        )
-                        .await?;
+                        let epoch =
+                            fireweed_engine::resolve_write_epoch_async(expected_epoch, || {
+                                AsyncLogStore::current_epoch(log.as_ref(), shard.clone())
+                            })
+                            .await?;
                         let mut plan = projection.with_store_mut(|projection| {
                             ProjectionStore::plan_item_mutation(projection, &shard, &request)
                         })?;

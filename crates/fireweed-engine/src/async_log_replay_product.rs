@@ -19,8 +19,8 @@ use fireweed_core::{
     BodyHash, BoundedMutationRequest, BoundedMutationResponse, ClaimByItemIdClass,
     ClaimByItemIdsDisposition, ClaimByItemIdsOutcome, ClaimByItemIdsRequest, ClaimByQueryRequest,
     ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, MetricsByQueryRequest,
-    PriorityValue, QueryCapabilityFlags, QueueDefinition, QueueId, RequestId,
-    TenantId, UtcTimestamp,
+    PriorityValue, QueryCapabilityFlags, QueueDefinition, QueueId, RequestId, TenantId,
+    UtcTimestamp,
 };
 
 use crate::{
@@ -2641,7 +2641,7 @@ where
                                 context.eligibility_at(),
                             )
                         })?;
-                                                let lease_expires_at = context.lease_expires_at(request.lease_duration_ms);
+                        let lease_expires_at = context.lease_expires_at(request.lease_duration_ms);
                         let (lease_token, claim_item_ids) = if item_ids.is_empty() {
                             (
                                 LeaseToken::new("empty-claim").expect("valid token"),

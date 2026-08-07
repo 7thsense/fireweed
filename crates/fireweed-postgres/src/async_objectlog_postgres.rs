@@ -1195,11 +1195,11 @@ impl fireweed_engine::ItemMutationPort for AsyncObjectLogPostgresBackend {
                                 })
                                 .await;
                         }
-                        let epoch = fireweed_engine::resolve_write_epoch_async(
-                            expected_epoch,
-                            || AsyncLogStore::current_epoch(log.as_ref(), shard.clone()),
-                        )
-                        .await?;
+                        let epoch =
+                            fireweed_engine::resolve_write_epoch_async(expected_epoch, || {
+                                AsyncLogStore::current_epoch(log.as_ref(), shard.clone())
+                            })
+                            .await?;
                         let plan_shard = shard.clone();
                         let mut plan = projection
                             .execute(move |store| {
