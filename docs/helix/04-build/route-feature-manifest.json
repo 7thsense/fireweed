@@ -1,0 +1,1173 @@
+{
+  "authority_manifest_sha256": "2ce5d2d755f036a6111212859c91c4555088f1b7b715ea4db54c9fb2debe7569",
+  "authority_revision": "P1-2026-08-04-turso-default+P4-method-contracts",
+  "campaign_values": [
+    "shared",
+    "storage",
+    "product-ready"
+  ],
+  "cargo_registration_audit": {
+    "audited": true,
+    "ok": true,
+    "omissions": [],
+    "repaired": false,
+    "schema": "p2a_placement",
+    "source_count": 49
+  },
+  "full_execution_claimed": false,
+  "generated_by": "scripts/ci/p2r_route_bindings.py",
+  "hybrid": {
+    "provider_neutral_routes_execute": true,
+    "retired_selector_negatives_bound": true
+  },
+  "matrix": {
+    "cells": [
+      "memory--memory",
+      "memory--sqlite",
+      "memory--turso",
+      "memory--postgres",
+      "sqlite--memory",
+      "sqlite--sqlite",
+      "sqlite--turso",
+      "sqlite--postgres",
+      "postgres--memory",
+      "postgres--sqlite",
+      "postgres--turso",
+      "postgres--postgres",
+      "filesystem--memory",
+      "filesystem--sqlite",
+      "filesystem--turso",
+      "filesystem--postgres",
+      "s3--memory",
+      "s3--sqlite",
+      "s3--turso",
+      "s3--postgres"
+    ],
+    "default_projection": "turso",
+    "p10r_leaf_count": 97,
+    "strict_leaf_ids": [
+      "strict:filesystem--memory",
+      "strict:filesystem--postgres",
+      "strict:filesystem--sqlite",
+      "strict:filesystem--turso",
+      "strict:memory--memory",
+      "strict:memory--postgres",
+      "strict:memory--sqlite",
+      "strict:memory--turso",
+      "strict:postgres--memory",
+      "strict:postgres--postgres",
+      "strict:postgres--sqlite",
+      "strict:postgres--turso",
+      "strict:s3--memory",
+      "strict:s3--postgres",
+      "strict:s3--sqlite",
+      "strict:s3--turso",
+      "strict:sqlite--memory",
+      "strict:sqlite--postgres",
+      "strict:sqlite--sqlite",
+      "strict:sqlite--turso"
+    ]
+  },
+  "operator_validation_job": {
+    "executable": true,
+    "forbids_always_pass": true,
+    "kind": "operator_validation_campaign",
+    "name": "operator_validation_tests",
+    "namespace": "operator_validation",
+    "never_empty": true,
+    "not_cargo_leaf": true,
+    "stages": {
+      "S": {
+        "campaigns": {
+          "product-ready": {
+            "in_campaign": true,
+            "leaves": [
+              {
+                "exact_invocation": [
+                  "rustup",
+                  "run",
+                  "1.92.0",
+                  "cargo",
+                  "test",
+                  "--manifest-path",
+                  "Cargo.toml",
+                  "--locked",
+                  "-p",
+                  "fireweed-engine",
+                  "--lib",
+                  "auth::tests::authorize_operator_requires_operator_prefix",
+                  "--",
+                  "--exact"
+                ],
+                "expected_ran": 1,
+                "harness_id": "auth::tests::authorize_operator_requires_operator_prefix",
+                "kind": "api002_smoke",
+                "leaf_id": "Cargo.toml::fireweed-engine::fireweed_engine::test::auth::tests::authorize_operator_requires_operator_prefix"
+              },
+              {
+                "exact_invocation": [
+                  "rustup",
+                  "run",
+                  "1.92.0",
+                  "cargo",
+                  "test",
+                  "--manifest-path",
+                  "Cargo.toml",
+                  "--locked",
+                  "-p",
+                  "fireweed-engine",
+                  "--lib",
+                  "operator::tests::replay_same_request_returns_same_operation",
+                  "--",
+                  "--exact"
+                ],
+                "expected_ran": 1,
+                "harness_id": "operator::tests::replay_same_request_returns_same_operation",
+                "kind": "api002_smoke",
+                "leaf_id": "Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::replay_same_request_returns_same_operation"
+              },
+              {
+                "exact_invocation": [
+                  "rustup",
+                  "run",
+                  "1.92.0",
+                  "cargo",
+                  "test",
+                  "--manifest-path",
+                  "Cargo.toml",
+                  "--locked",
+                  "-p",
+                  "fireweed-engine",
+                  "--lib",
+                  "operator::tests::get_returns_recorded_operation_and_none_for_unknown",
+                  "--",
+                  "--exact"
+                ],
+                "expected_ran": 1,
+                "harness_id": "operator::tests::get_returns_recorded_operation_and_none_for_unknown",
+                "kind": "api002_smoke",
+                "leaf_id": "Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::get_returns_recorded_operation_and_none_for_unknown"
+              },
+              {
+                "exact_invocation": [
+                  "rustup",
+                  "run",
+                  "1.92.0",
+                  "cargo",
+                  "test",
+                  "--manifest-path",
+                  "Cargo.toml",
+                  "--locked",
+                  "-p",
+                  "fireweed-engine",
+                  "--lib",
+                  "operator::tests::check_then_record_flow_never_starts_a_second_operation",
+                  "--",
+                  "--exact"
+                ],
+                "expected_ran": 1,
+                "harness_id": "operator::tests::check_then_record_flow_never_starts_a_second_operation",
+                "kind": "api002_smoke",
+                "leaf_id": "Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::check_then_record_flow_never_starts_a_second_operation"
+              },
+              {
+                "exact_invocation": [
+                  "rustup",
+                  "run",
+                  "1.92.0",
+                  "cargo",
+                  "test",
+                  "--manifest-path",
+                  "Cargo.toml",
+                  "--locked",
+                  "-p",
+                  "fireweed-engine",
+                  "--lib",
+                  "operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact",
+                  "--",
+                  "--exact"
+                ],
+                "expected_ran": 1,
+                "harness_id": "operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact",
+                "kind": "api002_smoke",
+                "leaf_id": "Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact"
+              },
+              {
+                "exact_invocation": [
+                  "rustup",
+                  "run",
+                  "1.92.0",
+                  "cargo",
+                  "test",
+                  "--manifest-path",
+                  "Cargo.toml",
+                  "--locked",
+                  "-p",
+                  "fireweed",
+                  "--lib",
+                  "test_product_validation::operator_repair_redrive_e2e",
+                  "--",
+                  "--exact"
+                ],
+                "expected_ran": 1,
+                "harness_id": "test_product_validation::operator_repair_redrive_e2e",
+                "kind": "ac_e2e_7",
+                "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::operator_repair_redrive_e2e"
+              }
+            ],
+            "notes": "smoke + full AC-E2E-7"
+          },
+          "shared": {
+            "in_campaign": true,
+            "leaves": [
+              {
+                "exact_invocation": [
+                  "rustup",
+                  "run",
+                  "1.92.0",
+                  "cargo",
+                  "test",
+                  "--manifest-path",
+                  "Cargo.toml",
+                  "--locked",
+                  "-p",
+                  "fireweed-engine",
+                  "--lib",
+                  "auth::tests::authorize_operator_requires_operator_prefix",
+                  "--",
+                  "--exact"
+                ],
+                "expected_ran": 1,
+                "harness_id": "auth::tests::authorize_operator_requires_operator_prefix",
+                "kind": "api002_smoke",
+                "leaf_id": "Cargo.toml::fireweed-engine::fireweed_engine::test::auth::tests::authorize_operator_requires_operator_prefix"
+              },
+              {
+                "exact_invocation": [
+                  "rustup",
+                  "run",
+                  "1.92.0",
+                  "cargo",
+                  "test",
+                  "--manifest-path",
+                  "Cargo.toml",
+                  "--locked",
+                  "-p",
+                  "fireweed-engine",
+                  "--lib",
+                  "operator::tests::replay_same_request_returns_same_operation",
+                  "--",
+                  "--exact"
+                ],
+                "expected_ran": 1,
+                "harness_id": "operator::tests::replay_same_request_returns_same_operation",
+                "kind": "api002_smoke",
+                "leaf_id": "Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::replay_same_request_returns_same_operation"
+              },
+              {
+                "exact_invocation": [
+                  "rustup",
+                  "run",
+                  "1.92.0",
+                  "cargo",
+                  "test",
+                  "--manifest-path",
+                  "Cargo.toml",
+                  "--locked",
+                  "-p",
+                  "fireweed-engine",
+                  "--lib",
+                  "operator::tests::get_returns_recorded_operation_and_none_for_unknown",
+                  "--",
+                  "--exact"
+                ],
+                "expected_ran": 1,
+                "harness_id": "operator::tests::get_returns_recorded_operation_and_none_for_unknown",
+                "kind": "api002_smoke",
+                "leaf_id": "Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::get_returns_recorded_operation_and_none_for_unknown"
+              },
+              {
+                "exact_invocation": [
+                  "rustup",
+                  "run",
+                  "1.92.0",
+                  "cargo",
+                  "test",
+                  "--manifest-path",
+                  "Cargo.toml",
+                  "--locked",
+                  "-p",
+                  "fireweed-engine",
+                  "--lib",
+                  "operator::tests::check_then_record_flow_never_starts_a_second_operation",
+                  "--",
+                  "--exact"
+                ],
+                "expected_ran": 1,
+                "harness_id": "operator::tests::check_then_record_flow_never_starts_a_second_operation",
+                "kind": "api002_smoke",
+                "leaf_id": "Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::check_then_record_flow_never_starts_a_second_operation"
+              },
+              {
+                "exact_invocation": [
+                  "rustup",
+                  "run",
+                  "1.92.0",
+                  "cargo",
+                  "test",
+                  "--manifest-path",
+                  "Cargo.toml",
+                  "--locked",
+                  "-p",
+                  "fireweed-engine",
+                  "--lib",
+                  "operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact",
+                  "--",
+                  "--exact"
+                ],
+                "expected_ran": 1,
+                "harness_id": "operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact",
+                "kind": "api002_smoke",
+                "leaf_id": "Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact"
+              },
+              {
+                "exact_invocation": [
+                  "rustup",
+                  "run",
+                  "1.92.0",
+                  "cargo",
+                  "test",
+                  "--manifest-path",
+                  "Cargo.toml",
+                  "--locked",
+                  "-p",
+                  "fireweed",
+                  "--lib",
+                  "test_product_validation::operator_repair_redrive_e2e",
+                  "--",
+                  "--exact"
+                ],
+                "expected_ran": 1,
+                "harness_id": "test_product_validation::operator_repair_redrive_e2e",
+                "kind": "ac_e2e_7",
+                "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::operator_repair_redrive_e2e"
+              }
+            ]
+          },
+          "storage": {
+            "in_campaign": false,
+            "leaves": [
+              {
+                "exact_invocation": [
+                  "rustup",
+                  "run",
+                  "1.92.0",
+                  "cargo",
+                  "test",
+                  "--manifest-path",
+                  "Cargo.toml",
+                  "--locked",
+                  "-p",
+                  "fireweed-engine",
+                  "--lib",
+                  "auth::tests::authorize_operator_requires_operator_prefix",
+                  "--",
+                  "--exact"
+                ],
+                "expected_ran": 1,
+                "harness_id": "auth::tests::authorize_operator_requires_operator_prefix",
+                "kind": "api002_smoke",
+                "leaf_id": "Cargo.toml::fireweed-engine::fireweed_engine::test::auth::tests::authorize_operator_requires_operator_prefix"
+              },
+              {
+                "exact_invocation": [
+                  "rustup",
+                  "run",
+                  "1.92.0",
+                  "cargo",
+                  "test",
+                  "--manifest-path",
+                  "Cargo.toml",
+                  "--locked",
+                  "-p",
+                  "fireweed-engine",
+                  "--lib",
+                  "operator::tests::replay_same_request_returns_same_operation",
+                  "--",
+                  "--exact"
+                ],
+                "expected_ran": 1,
+                "harness_id": "operator::tests::replay_same_request_returns_same_operation",
+                "kind": "api002_smoke",
+                "leaf_id": "Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::replay_same_request_returns_same_operation"
+              },
+              {
+                "exact_invocation": [
+                  "rustup",
+                  "run",
+                  "1.92.0",
+                  "cargo",
+                  "test",
+                  "--manifest-path",
+                  "Cargo.toml",
+                  "--locked",
+                  "-p",
+                  "fireweed-engine",
+                  "--lib",
+                  "operator::tests::get_returns_recorded_operation_and_none_for_unknown",
+                  "--",
+                  "--exact"
+                ],
+                "expected_ran": 1,
+                "harness_id": "operator::tests::get_returns_recorded_operation_and_none_for_unknown",
+                "kind": "api002_smoke",
+                "leaf_id": "Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::get_returns_recorded_operation_and_none_for_unknown"
+              },
+              {
+                "exact_invocation": [
+                  "rustup",
+                  "run",
+                  "1.92.0",
+                  "cargo",
+                  "test",
+                  "--manifest-path",
+                  "Cargo.toml",
+                  "--locked",
+                  "-p",
+                  "fireweed-engine",
+                  "--lib",
+                  "operator::tests::check_then_record_flow_never_starts_a_second_operation",
+                  "--",
+                  "--exact"
+                ],
+                "expected_ran": 1,
+                "harness_id": "operator::tests::check_then_record_flow_never_starts_a_second_operation",
+                "kind": "api002_smoke",
+                "leaf_id": "Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::check_then_record_flow_never_starts_a_second_operation"
+              },
+              {
+                "exact_invocation": [
+                  "rustup",
+                  "run",
+                  "1.92.0",
+                  "cargo",
+                  "test",
+                  "--manifest-path",
+                  "Cargo.toml",
+                  "--locked",
+                  "-p",
+                  "fireweed-engine",
+                  "--lib",
+                  "operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact",
+                  "--",
+                  "--exact"
+                ],
+                "expected_ran": 1,
+                "harness_id": "operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact",
+                "kind": "api002_smoke",
+                "leaf_id": "Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact"
+              },
+              {
+                "exact_invocation": [
+                  "rustup",
+                  "run",
+                  "1.92.0",
+                  "cargo",
+                  "test",
+                  "--manifest-path",
+                  "Cargo.toml",
+                  "--locked",
+                  "-p",
+                  "fireweed",
+                  "--lib",
+                  "test_product_validation::operator_repair_redrive_e2e",
+                  "--",
+                  "--exact"
+                ],
+                "expected_ran": 1,
+                "harness_id": "test_product_validation::operator_repair_redrive_e2e",
+                "kind": "ac_e2e_7",
+                "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::operator_repair_redrive_e2e"
+              }
+            ],
+            "notes": "storage marks only stage-S operator binding out-of-campaign",
+            "out_of_campaign": true
+          }
+        }
+      },
+      "pre_s": {
+        "campaigns": [
+          "shared",
+          "storage",
+          "product-ready"
+        ],
+        "leaves": [
+          {
+            "exact_invocation": [
+              "rustup",
+              "run",
+              "1.92.0",
+              "cargo",
+              "test",
+              "--manifest-path",
+              "Cargo.toml",
+              "--locked",
+              "-p",
+              "fireweed-engine",
+              "--lib",
+              "auth::tests::authorize_operator_requires_operator_prefix",
+              "--",
+              "--exact"
+            ],
+            "expected_ran": 1,
+            "harness_id": "auth::tests::authorize_operator_requires_operator_prefix",
+            "kind": "api002_smoke",
+            "leaf_id": "Cargo.toml::fireweed-engine::fireweed_engine::test::auth::tests::authorize_operator_requires_operator_prefix"
+          },
+          {
+            "exact_invocation": [
+              "rustup",
+              "run",
+              "1.92.0",
+              "cargo",
+              "test",
+              "--manifest-path",
+              "Cargo.toml",
+              "--locked",
+              "-p",
+              "fireweed-engine",
+              "--lib",
+              "operator::tests::replay_same_request_returns_same_operation",
+              "--",
+              "--exact"
+            ],
+            "expected_ran": 1,
+            "harness_id": "operator::tests::replay_same_request_returns_same_operation",
+            "kind": "api002_smoke",
+            "leaf_id": "Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::replay_same_request_returns_same_operation"
+          },
+          {
+            "exact_invocation": [
+              "rustup",
+              "run",
+              "1.92.0",
+              "cargo",
+              "test",
+              "--manifest-path",
+              "Cargo.toml",
+              "--locked",
+              "-p",
+              "fireweed-engine",
+              "--lib",
+              "operator::tests::get_returns_recorded_operation_and_none_for_unknown",
+              "--",
+              "--exact"
+            ],
+            "expected_ran": 1,
+            "harness_id": "operator::tests::get_returns_recorded_operation_and_none_for_unknown",
+            "kind": "api002_smoke",
+            "leaf_id": "Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::get_returns_recorded_operation_and_none_for_unknown"
+          },
+          {
+            "exact_invocation": [
+              "rustup",
+              "run",
+              "1.92.0",
+              "cargo",
+              "test",
+              "--manifest-path",
+              "Cargo.toml",
+              "--locked",
+              "-p",
+              "fireweed-engine",
+              "--lib",
+              "operator::tests::check_then_record_flow_never_starts_a_second_operation",
+              "--",
+              "--exact"
+            ],
+            "expected_ran": 1,
+            "harness_id": "operator::tests::check_then_record_flow_never_starts_a_second_operation",
+            "kind": "api002_smoke",
+            "leaf_id": "Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::check_then_record_flow_never_starts_a_second_operation"
+          },
+          {
+            "exact_invocation": [
+              "rustup",
+              "run",
+              "1.92.0",
+              "cargo",
+              "test",
+              "--manifest-path",
+              "Cargo.toml",
+              "--locked",
+              "-p",
+              "fireweed-engine",
+              "--lib",
+              "operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact",
+              "--",
+              "--exact"
+            ],
+            "expected_ran": 1,
+            "harness_id": "operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact",
+            "kind": "api002_smoke",
+            "leaf_id": "Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact"
+          }
+        ],
+        "notes": "API-002/smoke leaves shared across campaigns"
+      }
+    }
+  },
+  "overlay_assignment_count": 37,
+  "overlay_sha256": "c5b0cc136294a6e1c95bd0a138f65d48811b448204b546cd63d9e5ffef68ff39",
+  "plan_key": "P2r",
+  "product_suites": [
+    {
+      "command": [
+        "bash",
+        "scripts/ci/run-exact-suite-leaves.sh",
+        "product_validation_tests"
+      ],
+      "executable": true,
+      "kind": "product_workflow",
+      "leaves": [
+        {
+          "exact_invocation": [
+            "rustup",
+            "run",
+            "1.92.0",
+            "cargo",
+            "test",
+            "--manifest-path",
+            "Cargo.toml",
+            "--locked",
+            "-p",
+            "fireweed",
+            "--lib",
+            "test_product_validation::scheduled_action_delivery_e2e",
+            "--",
+            "--exact"
+          ],
+          "expected_ran": 1,
+          "harness_id": "test_product_validation::scheduled_action_delivery_e2e",
+          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::scheduled_action_delivery_e2e"
+        },
+        {
+          "exact_invocation": [
+            "rustup",
+            "run",
+            "1.92.0",
+            "cargo",
+            "test",
+            "--manifest-path",
+            "Cargo.toml",
+            "--locked",
+            "-p",
+            "fireweed",
+            "--lib",
+            "test_product_validation::marketo_group_batching_e2e",
+            "--",
+            "--exact"
+          ],
+          "expected_ran": 1,
+          "harness_id": "test_product_validation::marketo_group_batching_e2e",
+          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::marketo_group_batching_e2e"
+        },
+        {
+          "exact_invocation": [
+            "rustup",
+            "run",
+            "1.92.0",
+            "cargo",
+            "test",
+            "--manifest-path",
+            "Cargo.toml",
+            "--locked",
+            "-p",
+            "fireweed",
+            "--lib",
+            "test_product_validation::callback_cohort_e2e",
+            "--",
+            "--exact"
+          ],
+          "expected_ran": 1,
+          "harness_id": "test_product_validation::callback_cohort_e2e",
+          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::callback_cohort_e2e"
+        },
+        {
+          "exact_invocation": [
+            "rustup",
+            "run",
+            "1.92.0",
+            "cargo",
+            "test",
+            "--manifest-path",
+            "Cargo.toml",
+            "--locked",
+            "-p",
+            "fireweed",
+            "--lib",
+            "test_product_validation::jobs_connectors_recurring_e2e",
+            "--",
+            "--exact"
+          ],
+          "expected_ran": 1,
+          "harness_id": "test_product_validation::jobs_connectors_recurring_e2e",
+          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::jobs_connectors_recurring_e2e"
+        },
+        {
+          "exact_invocation": [
+            "rustup",
+            "run",
+            "1.92.0",
+            "cargo",
+            "test",
+            "--manifest-path",
+            "Cargo.toml",
+            "--locked",
+            "-p",
+            "fireweed",
+            "--lib",
+            "test_product_validation::worker_crash_recovery_e2e",
+            "--",
+            "--exact"
+          ],
+          "expected_ran": 1,
+          "harness_id": "test_product_validation::worker_crash_recovery_e2e",
+          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::worker_crash_recovery_e2e"
+        },
+        {
+          "exact_invocation": [
+            "rustup",
+            "run",
+            "1.92.0",
+            "cargo",
+            "test",
+            "--manifest-path",
+            "Cargo.toml",
+            "--locked",
+            "-p",
+            "fireweed",
+            "--lib",
+            "test_product_validation::noisy_neighbor_scale_e2e",
+            "--",
+            "--exact"
+          ],
+          "expected_ran": 1,
+          "harness_id": "test_product_validation::noisy_neighbor_scale_e2e",
+          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::noisy_neighbor_scale_e2e"
+        },
+        {
+          "exact_invocation": [
+            "rustup",
+            "run",
+            "1.92.0",
+            "cargo",
+            "test",
+            "--manifest-path",
+            "Cargo.toml",
+            "--locked",
+            "-p",
+            "fireweed",
+            "--lib",
+            "test_product_validation::generic_priority_bounded_relaxed_e2e",
+            "--",
+            "--exact"
+          ],
+          "expected_ran": 1,
+          "harness_id": "test_product_validation::generic_priority_bounded_relaxed_e2e",
+          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::generic_priority_bounded_relaxed_e2e"
+        },
+        {
+          "exact_invocation": [
+            "rustup",
+            "run",
+            "1.92.0",
+            "cargo",
+            "test",
+            "--manifest-path",
+            "Cargo.toml",
+            "--locked",
+            "-p",
+            "fireweed",
+            "--lib",
+            "test_product_validation::downstream_pacing_non_goal_e2e",
+            "--",
+            "--exact"
+          ],
+          "expected_ran": 1,
+          "harness_id": "test_product_validation::downstream_pacing_non_goal_e2e",
+          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::downstream_pacing_non_goal_e2e"
+        }
+      ],
+      "name": "product_validation_tests",
+      "namespace": "product_workflow"
+    },
+    {
+      "command": [
+        "bash",
+        "scripts/ci/run-exact-suite-leaves.sh",
+        "product_workflow_scheduled_action_delivery_e2e"
+      ],
+      "executable": true,
+      "kind": "product_workflow",
+      "leaves": [
+        {
+          "exact_invocation": [
+            "rustup",
+            "run",
+            "1.92.0",
+            "cargo",
+            "test",
+            "--manifest-path",
+            "Cargo.toml",
+            "--locked",
+            "-p",
+            "fireweed",
+            "--lib",
+            "test_product_validation::scheduled_action_delivery_e2e",
+            "--",
+            "--exact"
+          ],
+          "expected_ran": 1,
+          "harness_id": "test_product_validation::scheduled_action_delivery_e2e",
+          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::scheduled_action_delivery_e2e"
+        }
+      ],
+      "name": "product_workflow_scheduled_action_delivery_e2e",
+      "namespace": "product_workflow"
+    },
+    {
+      "command": [
+        "bash",
+        "scripts/ci/run-exact-suite-leaves.sh",
+        "product_workflow_marketo_group_batching_e2e"
+      ],
+      "executable": true,
+      "kind": "product_workflow",
+      "leaves": [
+        {
+          "exact_invocation": [
+            "rustup",
+            "run",
+            "1.92.0",
+            "cargo",
+            "test",
+            "--manifest-path",
+            "Cargo.toml",
+            "--locked",
+            "-p",
+            "fireweed",
+            "--lib",
+            "test_product_validation::marketo_group_batching_e2e",
+            "--",
+            "--exact"
+          ],
+          "expected_ran": 1,
+          "harness_id": "test_product_validation::marketo_group_batching_e2e",
+          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::marketo_group_batching_e2e"
+        }
+      ],
+      "name": "product_workflow_marketo_group_batching_e2e",
+      "namespace": "product_workflow"
+    },
+    {
+      "command": [
+        "bash",
+        "scripts/ci/run-exact-suite-leaves.sh",
+        "product_workflow_callback_cohort_e2e"
+      ],
+      "executable": true,
+      "kind": "product_workflow",
+      "leaves": [
+        {
+          "exact_invocation": [
+            "rustup",
+            "run",
+            "1.92.0",
+            "cargo",
+            "test",
+            "--manifest-path",
+            "Cargo.toml",
+            "--locked",
+            "-p",
+            "fireweed",
+            "--lib",
+            "test_product_validation::callback_cohort_e2e",
+            "--",
+            "--exact"
+          ],
+          "expected_ran": 1,
+          "harness_id": "test_product_validation::callback_cohort_e2e",
+          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::callback_cohort_e2e"
+        }
+      ],
+      "name": "product_workflow_callback_cohort_e2e",
+      "namespace": "product_workflow"
+    },
+    {
+      "command": [
+        "bash",
+        "scripts/ci/run-exact-suite-leaves.sh",
+        "product_workflow_jobs_connectors_recurring_e2e"
+      ],
+      "executable": true,
+      "kind": "product_workflow",
+      "leaves": [
+        {
+          "exact_invocation": [
+            "rustup",
+            "run",
+            "1.92.0",
+            "cargo",
+            "test",
+            "--manifest-path",
+            "Cargo.toml",
+            "--locked",
+            "-p",
+            "fireweed",
+            "--lib",
+            "test_product_validation::jobs_connectors_recurring_e2e",
+            "--",
+            "--exact"
+          ],
+          "expected_ran": 1,
+          "harness_id": "test_product_validation::jobs_connectors_recurring_e2e",
+          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::jobs_connectors_recurring_e2e"
+        }
+      ],
+      "name": "product_workflow_jobs_connectors_recurring_e2e",
+      "namespace": "product_workflow"
+    },
+    {
+      "command": [
+        "bash",
+        "scripts/ci/run-exact-suite-leaves.sh",
+        "product_workflow_worker_crash_recovery_e2e"
+      ],
+      "executable": true,
+      "kind": "product_workflow",
+      "leaves": [
+        {
+          "exact_invocation": [
+            "rustup",
+            "run",
+            "1.92.0",
+            "cargo",
+            "test",
+            "--manifest-path",
+            "Cargo.toml",
+            "--locked",
+            "-p",
+            "fireweed",
+            "--lib",
+            "test_product_validation::worker_crash_recovery_e2e",
+            "--",
+            "--exact"
+          ],
+          "expected_ran": 1,
+          "harness_id": "test_product_validation::worker_crash_recovery_e2e",
+          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::worker_crash_recovery_e2e"
+        }
+      ],
+      "name": "product_workflow_worker_crash_recovery_e2e",
+      "namespace": "product_workflow"
+    },
+    {
+      "command": [
+        "bash",
+        "scripts/ci/run-exact-suite-leaves.sh",
+        "product_workflow_noisy_neighbor_scale_e2e"
+      ],
+      "executable": true,
+      "kind": "product_workflow",
+      "leaves": [
+        {
+          "exact_invocation": [
+            "rustup",
+            "run",
+            "1.92.0",
+            "cargo",
+            "test",
+            "--manifest-path",
+            "Cargo.toml",
+            "--locked",
+            "-p",
+            "fireweed",
+            "--lib",
+            "test_product_validation::noisy_neighbor_scale_e2e",
+            "--",
+            "--exact"
+          ],
+          "expected_ran": 1,
+          "harness_id": "test_product_validation::noisy_neighbor_scale_e2e",
+          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::noisy_neighbor_scale_e2e"
+        }
+      ],
+      "name": "product_workflow_noisy_neighbor_scale_e2e",
+      "namespace": "product_workflow"
+    },
+    {
+      "command": [
+        "bash",
+        "scripts/ci/run-exact-suite-leaves.sh",
+        "product_workflow_generic_priority_bounded_relaxed_e2e"
+      ],
+      "executable": true,
+      "kind": "product_workflow",
+      "leaves": [
+        {
+          "exact_invocation": [
+            "rustup",
+            "run",
+            "1.92.0",
+            "cargo",
+            "test",
+            "--manifest-path",
+            "Cargo.toml",
+            "--locked",
+            "-p",
+            "fireweed",
+            "--lib",
+            "test_product_validation::generic_priority_bounded_relaxed_e2e",
+            "--",
+            "--exact"
+          ],
+          "expected_ran": 1,
+          "harness_id": "test_product_validation::generic_priority_bounded_relaxed_e2e",
+          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::generic_priority_bounded_relaxed_e2e"
+        }
+      ],
+      "name": "product_workflow_generic_priority_bounded_relaxed_e2e",
+      "namespace": "product_workflow"
+    },
+    {
+      "command": [
+        "bash",
+        "scripts/ci/run-exact-suite-leaves.sh",
+        "product_workflow_downstream_pacing_non_goal_e2e"
+      ],
+      "executable": true,
+      "kind": "product_workflow",
+      "leaves": [
+        {
+          "exact_invocation": [
+            "rustup",
+            "run",
+            "1.92.0",
+            "cargo",
+            "test",
+            "--manifest-path",
+            "Cargo.toml",
+            "--locked",
+            "-p",
+            "fireweed",
+            "--lib",
+            "test_product_validation::downstream_pacing_non_goal_e2e",
+            "--",
+            "--exact"
+          ],
+          "expected_ran": 1,
+          "harness_id": "test_product_validation::downstream_pacing_non_goal_e2e",
+          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::downstream_pacing_non_goal_e2e"
+        }
+      ],
+      "name": "product_workflow_downstream_pacing_non_goal_e2e",
+      "namespace": "product_workflow"
+    },
+    {
+      "command": [
+        "bash",
+        "scripts/ci/run-exact-suite-leaves.sh",
+        "product_workflow_operator_repair_redrive_e2e"
+      ],
+      "executable": true,
+      "kind": "product_workflow",
+      "leaves": [
+        {
+          "exact_invocation": [
+            "rustup",
+            "run",
+            "1.92.0",
+            "cargo",
+            "test",
+            "--manifest-path",
+            "Cargo.toml",
+            "--locked",
+            "-p",
+            "fireweed",
+            "--lib",
+            "test_product_validation::operator_repair_redrive_e2e",
+            "--",
+            "--exact"
+          ],
+          "expected_ran": 1,
+          "harness_id": "test_product_validation::operator_repair_redrive_e2e",
+          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::operator_repair_redrive_e2e"
+        }
+      ],
+      "name": "product_workflow_operator_repair_redrive_e2e",
+      "namespace": "product_workflow"
+    }
+  ],
+  "product_workflow_namespace": "product_workflow",
+  "product_workflow_required_names": [
+    "product_validation_tests",
+    "product_workflow_scheduled_action_delivery_e2e",
+    "product_workflow_marketo_group_batching_e2e",
+    "product_workflow_callback_cohort_e2e",
+    "product_workflow_jobs_connectors_recurring_e2e",
+    "product_workflow_worker_crash_recovery_e2e",
+    "product_workflow_noisy_neighbor_scale_e2e",
+    "product_workflow_generic_priority_bounded_relaxed_e2e",
+    "product_workflow_downstream_pacing_non_goal_e2e",
+    "product_workflow_operator_repair_redrive_e2e"
+  ],
+  "route_sources_sha256": "55615503713ccdc76a74717a699c62689d1bd5ba808aa5ae064cdbae204e31a3",
+  "schema_version": 1,
+  "semantic_requirement_count": 37,
+  "semantic_requirements_sha256": "c1a116bc73b74e806fa82587b25f9334ac047925295a9b6236ed1a899567bf0d",
+  "stage_values": [
+    "pre_s",
+    "S"
+  ],
+  "storage_campaign_operator_stage_s": "out_of_campaign",
+  "storage_diagnostic_suites": [
+    {
+      "command": [
+        "bash",
+        "scripts/ci/run-exact-suite-leaves.sh",
+        "--manifest-leaf",
+        "strict:filesystem--memory"
+      ],
+      "executable": true,
+      "kind": "storage_diagnostic",
+      "leaves": [
+        {
+          "expected_ran": 1,
+          "harness_id": "strict_filesystem_memory",
+          "leaf_id": "p10r::strict:filesystem--memory",
+          "list_invocation": [
+            "rustup",
+            "run",
+            "1.92.0",
+            "cargo",
+            "test",
+            "-p",
+            "fireweed",
+            "--features",
+            "memory,sqlite,objectlog,postgres,turso",
+            "--test",
+            "functional_matrix_route_sources",
+            "--",
+            "--list",
+            "strict_filesystem_memory",
+            "--exact"
+          ],
+          "mode": "list_only"
+        }
+      ],
+      "name": "storage_matrix_route_source_strict_list",
+      "namespace": "storage_matrix"
+    }
+  ]
+}

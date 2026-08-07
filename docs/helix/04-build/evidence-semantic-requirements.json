@@ -1,0 +1,412 @@
+{
+  "requirements": [
+    {
+      "capability": "core",
+      "durability_class": "A-or-B",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "scheduled action delivery product workflow",
+      "id": "AC-E2E-1"
+    },
+    {
+      "capability": "core",
+      "durability_class": "A-or-B",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "Marketo group batching product workflow",
+      "id": "AC-E2E-2"
+    },
+    {
+      "capability": "core",
+      "durability_class": "A-or-B",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "callback cohort product workflow",
+      "id": "AC-E2E-3"
+    },
+    {
+      "capability": "core",
+      "durability_class": "A-or-B",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "jobs/connectors recurring product workflow",
+      "id": "AC-E2E-4"
+    },
+    {
+      "capability": "core",
+      "durability_class": "A-or-B",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "worker crash recovery product workflow",
+      "id": "AC-E2E-5"
+    },
+    {
+      "capability": "core",
+      "durability_class": "A-or-B",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "noisy neighbor scale product workflow",
+      "id": "AC-E2E-6"
+    },
+    {
+      "capability": "core",
+      "durability_class": "A-or-B",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "operator repair/redrive product workflow",
+      "id": "AC-E2E-7"
+    },
+    {
+      "capability": "core",
+      "durability_class": "A-or-B",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "generic priority bounded-relaxed product workflow",
+      "id": "AC-E2E-8"
+    },
+    {
+      "capability": "core",
+      "durability_class": "A-or-B",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "downstream pacing non-goal product workflow",
+      "id": "AC-E2E-9"
+    },
+    {
+      "capability": "projection_reopen",
+      "durability_class": "A",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition AC-TURSO-1 (retained) current selector AC-TURSO-1",
+      "id": "AC-TURSO-1"
+    },
+    {
+      "capability": "projection_reopen",
+      "durability_class": "A",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition AC-TURSO-2 (retained) current selector AC-TURSO-2",
+      "id": "AC-TURSO-2"
+    },
+    {
+      "capability": "projection_reopen",
+      "durability_class": "A",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition AC-TURSO-3 (retained) current selector AC-TURSO-3",
+      "id": "AC-TURSO-3"
+    },
+    {
+      "capability": "projection_reopen",
+      "durability_class": "A",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition AC-TURSO-4 (retained) current selector AC-TURSO-4",
+      "id": "AC-TURSO-4"
+    },
+    {
+      "capability": "projection_reopen",
+      "durability_class": "A",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "explicit-na",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition AC-TURSO-5.DISABLED (negative) current selector AC-TURSO-5.DISABLED",
+      "id": "AC-TURSO-5-DISABLED"
+    },
+    {
+      "capability": "projection_reopen",
+      "durability_class": "A",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition AC-TURSO-5.ENABLED (retained) current selector AC-TURSO-5.ENABLED",
+      "id": "AC-TURSO-5-ENABLED"
+    },
+    {
+      "capability": "projection_reopen",
+      "durability_class": "A",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition AC-TURSO-6 (retained) current selector AC-TURSO-6",
+      "id": "AC-TURSO-6"
+    },
+    {
+      "capability": "durable_log_replay",
+      "durability_class": "A",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition AC-TXN-5-HYBRID-SELECTOR (replaced) current selector AC-TXN-5",
+      "id": "AC-TXN-5"
+    },
+    {
+      "capability": "durable_log_replay",
+      "durability_class": "A",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition AC-TXN-5A-HYBRID-SELECTOR (replaced) current selector AC-TXN-5A",
+      "id": "AC-TXN-5A"
+    },
+    {
+      "capability": "eventual_apply",
+      "durability_class": "A",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition LEGACY-HYBRID-ASYNC-THRESHOLDS (replaced) current selector ASYNC-PROJECTION-SPEC",
+      "id": "ASYNC-PROJECTION-SPEC"
+    },
+    {
+      "capability": "in_process_log_read",
+      "durability_class": "B",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "explicit-na",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition TD008-CLASS-B-HISTORY (negative) current selector CHANGE-RECORDS-REQUIRE-DURABLE-LOG",
+      "id": "CHANGE-RECORDS-REQUIRE-DURABLE-LOG"
+    },
+    {
+      "capability": "core",
+      "durability_class": "A-or-B",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition PRIVATE-SURFACE-FIXED-COUNT (replaced) current selector DYNAMIC-PRIVATE-SURFACE-DISCOVERY",
+      "id": "DYNAMIC-PRIVATE-SURFACE-DISCOVERY"
+    },
+    {
+      "capability": "core",
+      "durability_class": "A-or-B",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "explicit-na",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "retired Hybrid public selectors are rejected (negatives)",
+      "id": "HYBRID-SELECTOR-RETIRED"
+    },
+    {
+      "capability": "core",
+      "durability_class": "A-or-B",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition SERVER-LOG-HELP-PARSER-MISMATCH (replaced) current selector LOG-HELP-PARSER-BIJECTION",
+      "id": "LOG-HELP-PARSER-BIJECTION"
+    },
+    {
+      "capability": "core",
+      "durability_class": "A-or-B",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "default public matrix has exactly 20 strict cells with Turso default projection",
+      "id": "MATRIX-STRICT-20"
+    },
+    {
+      "capability": "durable_log_replay",
+      "durability_class": "A",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition LEGACY-POSTGRES-PUBLICATION-AUTHORITY (replaced) current selector NATIVE-CONDITIONAL-WRITE-AUTHORITY",
+      "id": "NATIVE-CONDITIONAL-WRITE-AUTHORITY"
+    },
+    {
+      "capability": "core",
+      "durability_class": "A-or-B",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition OPERATOR-VALIDATION-CAMPAIGN-BINDING (retained) current selector OPERATOR-VALIDATION-CAMPAIGN-BINDING",
+      "id": "OPERATOR-VALIDATION-CAMPAIGN-BINDING"
+    },
+    {
+      "capability": "core",
+      "durability_class": "A-or-B",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "product_validation_tests aggregate binds non-operator AC-E2E smoke leaves",
+      "id": "PRODUCT-VALIDATION-AGGREGATE"
+    },
+    {
+      "capability": "core",
+      "durability_class": "A-or-B",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition SERVER-PROJECTION-HELP-PARSER-MISMATCH (replaced) current selector PROJECTION-HELP-PARSER-BIJECTION",
+      "id": "PROJECTION-HELP-PARSER-BIJECTION"
+    },
+    {
+      "capability": "core",
+      "durability_class": "A-or-B",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition TP004-ELDIR-HOST (replaced) current selector PROVISIONED-QUALIFICATION-RUNNER",
+      "id": "PROVISIONED-QUALIFICATION-RUNNER"
+    },
+    {
+      "capability": "durable_log_replay",
+      "durability_class": "A",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition TP004-GARAGE-PROVIDER (replaced) current selector S3-NATIVE-CAS-CAPABILITY-ATTESTATION",
+      "id": "S3-NATIVE-CAS-CAPABILITY-ATTESTATION"
+    },
+    {
+      "capability": "durable_log_replay",
+      "durability_class": "A",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition TP004-GARAGE-PROJECTION-REBUILD (replaced) current selector SNORRI-PROJECTION-REBUILD",
+      "id": "SNORRI-PROJECTION-REBUILD"
+    },
+    {
+      "capability": "durable_log_replay",
+      "durability_class": "A",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition TP004-GARAGE-REOPEN (replaced) current selector SNORRI-REOPEN",
+      "id": "SNORRI-REOPEN"
+    },
+    {
+      "capability": "durable_log_replay",
+      "durability_class": "A",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition TP004-GARAGE-RETRY-IDEMPOTENCY (replaced) current selector SNORRI-RETRY-ONCE",
+      "id": "SNORRI-RETRY-ONCE"
+    },
+    {
+      "capability": "core",
+      "durability_class": "A-or-B",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition TD004-LEGACY-CURRENT-EPOCH-FENCING (replaced) current selector TD004-CURRENT-EPOCH-FENCING",
+      "id": "TD004-CURRENT-EPOCH-FENCING"
+    },
+    {
+      "capability": "durable_log_replay",
+      "durability_class": "A",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition TD004-LEGACY-DURABLE-MANIFEST-REOPEN (replaced) current selector TD004-DURABLE-MANIFEST-REOPEN",
+      "id": "TD004-DURABLE-MANIFEST-REOPEN"
+    },
+    {
+      "capability": "durable_log_replay",
+      "durability_class": "A",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition TD004-LEGACY-MISSING-CAS-REJECTION (replaced) current selector TD004-MISSING-NATIVE-CONDITIONAL-WRITE",
+      "id": "TD004-MISSING-NATIVE-CONDITIONAL-WRITE"
+    },
+    {
+      "capability": "core",
+      "durability_class": "A-or-B",
+      "evidence_semantics": {
+        "artifact_class": "run-owned",
+        "required_result": "pass",
+        "stale_input_fails": true
+      },
+      "governing_assertion": "P1 disposition TD004-LEGACY-ONE-OBJECT-PER-COMMAND (replaced) current selector TD004-PRODUCTION-GROUP-COMMIT-REQUIRED",
+      "id": "TD004-PRODUCTION-GROUP-COMMIT-REQUIRED"
+    }
+  ],
+  "schema_version": 1
+}

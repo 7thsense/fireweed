@@ -1,0 +1,265 @@
+{
+  "assignments": [
+    {
+      "requirement_id": "AC-E2E-1",
+      "routes": [
+        "Cargo.toml::fireweed::fireweed::test::test_product_validation::scheduled_action_delivery_e2e"
+      ]
+    },
+    {
+      "requirement_id": "AC-E2E-2",
+      "routes": [
+        "Cargo.toml::fireweed::fireweed::test::test_product_validation::marketo_group_batching_e2e"
+      ]
+    },
+    {
+      "requirement_id": "AC-E2E-3",
+      "routes": [
+        "Cargo.toml::fireweed::fireweed::test::test_product_validation::callback_cohort_e2e"
+      ]
+    },
+    {
+      "requirement_id": "AC-E2E-4",
+      "routes": [
+        "Cargo.toml::fireweed::fireweed::test::test_product_validation::jobs_connectors_recurring_e2e"
+      ]
+    },
+    {
+      "requirement_id": "AC-E2E-5",
+      "routes": [
+        "Cargo.toml::fireweed::fireweed::test::test_product_validation::worker_crash_recovery_e2e"
+      ]
+    },
+    {
+      "requirement_id": "AC-E2E-6",
+      "routes": [
+        "Cargo.toml::fireweed::fireweed::test::test_product_validation::noisy_neighbor_scale_e2e"
+      ]
+    },
+    {
+      "requirement_id": "AC-E2E-7",
+      "routes": [
+        "Cargo.toml::fireweed::fireweed::test::test_product_validation::operator_repair_redrive_e2e"
+      ]
+    },
+    {
+      "requirement_id": "AC-E2E-8",
+      "routes": [
+        "Cargo.toml::fireweed::fireweed::test::test_product_validation::generic_priority_bounded_relaxed_e2e"
+      ]
+    },
+    {
+      "requirement_id": "AC-E2E-9",
+      "routes": [
+        "Cargo.toml::fireweed::fireweed::test::test_product_validation::downstream_pacing_non_goal_e2e"
+      ]
+    },
+    {
+      "requirement_id": "AC-TURSO-1",
+      "routes": [
+        "Cargo.toml::fireweed-server::fireweed_server::test::env_config::tests::turso_projection_is_accepted_on_public_env_surface"
+      ]
+    },
+    {
+      "requirement_id": "AC-TURSO-2",
+      "routes": [
+        "Cargo.toml::fireweed-server::fireweed_server::test::env_config::tests::all_five_log_specs_accept_turso"
+      ]
+    },
+    {
+      "requirement_id": "AC-TURSO-3",
+      "routes": [
+        "Cargo.toml::fireweed-server::fireweed_server::test::class_b_memory_log_tests::class_b_memory_turso_t0_t3"
+      ]
+    },
+    {
+      "requirement_id": "AC-TURSO-4",
+      "routes": [
+        "Cargo.toml::fireweed-server::fireweed_server::test::env_config::tests::turso_projection_is_the_public_env_default"
+      ]
+    },
+    {
+      "requirement_id": "AC-TURSO-5-DISABLED",
+      "routes": [
+        "Cargo.toml::fireweed-server::fireweed_server::test::env_config::tests::demoted_hybrid_projection_is_rejected_on_public_env_surface"
+      ]
+    },
+    {
+      "requirement_id": "AC-TURSO-5-ENABLED",
+      "routes": [
+        "Cargo.toml::fireweed-server::fireweed_server::test::env_config::tests::turso_projection_is_accepted_on_public_env_surface"
+      ]
+    },
+    {
+      "requirement_id": "AC-TURSO-6",
+      "routes": [
+        "Cargo.toml::fireweed-server::turso_workflow_shape::test::turso_workflow_qualifies_the_public_default_projection"
+      ]
+    },
+    {
+      "requirement_id": "AC-TXN-5",
+      "routes": [
+        "p10r::ac_txn_dry_run:ac_txn_dry_run_async_invalid_enumerates_all_12_non_object_log_cells",
+        "p10r::ac_txn_dry_run:ac_txn_dry_run_object_log_async_enumerates_all_8_cells",
+        "p10r::ac_txn_dry_run:ac_txn_dry_run_strict_enumerates_all_20_manifest_cells",
+        "p10r::object_log_async:filesystem--memory"
+      ]
+    },
+    {
+      "requirement_id": "AC-TXN-5A",
+      "routes": [
+        "p10r::ac_txn_dry_run:ac_txn_dry_run_async_invalid_enumerates_all_12_non_object_log_cells",
+        "p10r::ac_txn_dry_run:ac_txn_dry_run_object_log_async_enumerates_all_8_cells",
+        "p10r::ac_txn_dry_run:ac_txn_dry_run_strict_enumerates_all_20_manifest_cells",
+        "p10r::object_log_async:filesystem--postgres"
+      ]
+    },
+    {
+      "requirement_id": "ASYNC-PROJECTION-SPEC",
+      "routes": [
+        "Cargo.toml::fireweed-engine::fireweed_engine::test::async_projection_spec::tests::async_projection_spec_preserves_legacy_defaults"
+      ]
+    },
+    {
+      "requirement_id": "CHANGE-RECORDS-REQUIRE-DURABLE-LOG",
+      "routes": [
+        "Cargo.toml::fireweed-engine::fireweed_engine::test::error::commit_rejection_tests::change_records_require_durable_log_mirror_round_trips_in_mapping_fixtures"
+      ]
+    },
+    {
+      "requirement_id": "DYNAMIC-PRIVATE-SURFACE-DISCOVERY",
+      "routes": [
+        "audit::fireweed_test_placement::private_surface"
+      ]
+    },
+    {
+      "requirement_id": "HYBRID-SELECTOR-RETIRED",
+      "routes": [
+        "Cargo.toml::fireweed-server::fireweed_server::test::env_config::tests::demoted_hybrid_projection_is_rejected_on_public_env_surface",
+        "Cargo.toml::fireweed-server::fireweed_server::test::env_config::tests::demoted_hybrid_strict_and_async_are_rejected_for_any_log_backend",
+        "Cargo.toml::fireweed-server::fireweed_server::test::env_config::tests::hybrid_pairing_is_rejected_for_any_public_log",
+        "Cargo.toml::fireweed-server::fireweed_server::test::env_config::tests::legacy_product_aliases_are_hard_rejected"
+      ]
+    },
+    {
+      "requirement_id": "LOG-HELP-PARSER-BIJECTION",
+      "routes": [
+        "Cargo.toml::fireweed-server::env_config::test::service_help_advertises_only_fireweed_runtime_names"
+      ]
+    },
+    {
+      "requirement_id": "MATRIX-STRICT-20",
+      "routes": [
+        "p10r::strict:filesystem--memory",
+        "p10r::strict:filesystem--postgres",
+        "p10r::strict:filesystem--sqlite",
+        "p10r::strict:filesystem--turso",
+        "p10r::strict:memory--memory",
+        "p10r::strict:memory--postgres",
+        "p10r::strict:memory--sqlite",
+        "p10r::strict:memory--turso",
+        "p10r::strict:postgres--memory",
+        "p10r::strict:postgres--postgres",
+        "p10r::strict:postgres--sqlite",
+        "p10r::strict:postgres--turso",
+        "p10r::strict:s3--memory",
+        "p10r::strict:s3--postgres",
+        "p10r::strict:s3--sqlite",
+        "p10r::strict:s3--turso",
+        "p10r::strict:sqlite--memory",
+        "p10r::strict:sqlite--postgres",
+        "p10r::strict:sqlite--sqlite",
+        "p10r::strict:sqlite--turso"
+      ]
+    },
+    {
+      "requirement_id": "NATIVE-CONDITIONAL-WRITE-AUTHORITY",
+      "routes": [
+        "Cargo.toml::fireweed-server::production_s3_object_log_config::test::p1s_attestation_is_minio_native_cas_not_garage"
+      ]
+    },
+    {
+      "requirement_id": "OPERATOR-VALIDATION-CAMPAIGN-BINDING",
+      "routes": [
+        "job::operator_validation_tests::stage=pre_s",
+        "job::operator_validation_tests::stage=S,campaign=product-ready",
+        "job::operator_validation_tests::campaign=storage,stage=S:out_of_campaign"
+      ]
+    },
+    {
+      "requirement_id": "PRODUCT-VALIDATION-AGGREGATE",
+      "routes": [
+        "Cargo.toml::fireweed::fireweed::test::test_product_validation::scheduled_action_delivery_e2e",
+        "Cargo.toml::fireweed::fireweed::test::test_product_validation::marketo_group_batching_e2e",
+        "Cargo.toml::fireweed::fireweed::test::test_product_validation::callback_cohort_e2e",
+        "Cargo.toml::fireweed::fireweed::test::test_product_validation::jobs_connectors_recurring_e2e",
+        "Cargo.toml::fireweed::fireweed::test::test_product_validation::worker_crash_recovery_e2e",
+        "Cargo.toml::fireweed::fireweed::test::test_product_validation::noisy_neighbor_scale_e2e",
+        "Cargo.toml::fireweed::fireweed::test::test_product_validation::generic_priority_bounded_relaxed_e2e",
+        "Cargo.toml::fireweed::fireweed::test::test_product_validation::downstream_pacing_non_goal_e2e"
+      ]
+    },
+    {
+      "requirement_id": "PROJECTION-HELP-PARSER-BIJECTION",
+      "routes": [
+        "Cargo.toml::fireweed-server::env_config::test::service_help_advertises_only_fireweed_runtime_names"
+      ]
+    },
+    {
+      "requirement_id": "PROVISIONED-QUALIFICATION-RUNNER",
+      "routes": [
+        "Cargo.toml::fireweed-server::production_s3_object_log_config::test::production_s3_object_log_config_uses_p1s_attested_endpoint"
+      ]
+    },
+    {
+      "requirement_id": "S3-NATIVE-CAS-CAPABILITY-ATTESTATION",
+      "routes": [
+        "Cargo.toml::fireweed-server::production_s3_object_log_config::test::p1s_attestation_is_minio_native_cas_not_garage"
+      ]
+    },
+    {
+      "requirement_id": "SNORRI-PROJECTION-REBUILD",
+      "routes": [
+        "Cargo.toml::fireweed::p6s_s3_durability_acceptance::test::snorri_projection_rebuild_s3_sqlite"
+      ]
+    },
+    {
+      "requirement_id": "SNORRI-REOPEN",
+      "routes": [
+        "Cargo.toml::fireweed::p6s_s3_durability_acceptance::test::snorri_reopen_s3_memory"
+      ]
+    },
+    {
+      "requirement_id": "SNORRI-RETRY-ONCE",
+      "routes": [
+        "Cargo.toml::fireweed::p6s_s3_durability_acceptance::test::snorri_retry_once_s3_memory"
+      ]
+    },
+    {
+      "requirement_id": "TD004-CURRENT-EPOCH-FENCING",
+      "routes": [
+        "Cargo.toml::fireweed-engine::claim_by_item_ids::test::claim_by_item_ids_lease_is_first_class_inspect_reclaim_fence"
+      ]
+    },
+    {
+      "requirement_id": "TD004-DURABLE-MANIFEST-REOPEN",
+      "routes": [
+        "Cargo.toml::fireweed::p5an_non_s3_class_a_reopen_parity::test::p5an_filesystem_memory_reopen"
+      ]
+    },
+    {
+      "requirement_id": "TD004-MISSING-NATIVE-CONDITIONAL-WRITE",
+      "routes": [
+        "Cargo.toml::fireweed-server::production_s3_object_log_config::test::unsupported_s3_endpoint_fails_closed_without_garage_identity"
+      ]
+    },
+    {
+      "requirement_id": "TD004-PRODUCTION-GROUP-COMMIT-REQUIRED",
+      "routes": [
+        "Cargo.toml::fireweed-server::fireweed_server::test::byte_admission_wiring_tests::object_log_commit_recovery_tests_rejects_production_one_object_per_command_config"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "semantic_requirements_sha256": "c1a116bc73b74e806fa82587b25f9334ac047925295a9b6236ed1a899567bf0d"
+}

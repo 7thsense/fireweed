@@ -186,13 +186,39 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool)
             if row["status"] != "discovery_negative":
                 debt_count += 1
     quarantine = document["release_repeat_quarantine"]
-    require(len(quarantine["legacy_rows"]) == 9, "legacy repeat row count drift")
-    require(
-        all(row["kind"] == "legacy_false_green" and row["executable"] is False for row in quarantine["legacy_rows"]),
-        "legacy repeat rows must be non-executable debt fixtures",
-    )
-    require(len(quarantine["required_contract_debts"]) == 11, "contract debt count drift")
-    require(quarantine["current_verifier_semantics"] == "missing_only_required_minus_names", "verifier characterization")
+    legacy_rows = quarantine["legacy_rows"]
+    if legacy_rows:
+        # Pre-P2r quarantine: nine false-green fixtures and eleven contract debts.
+        require(len(legacy_rows) == 9, "legacy repeat row count drift")
+        require(
+            all(
+                row["kind"] == "legacy_false_green" and row["executable"] is False
+                for row in legacy_rows
+            ),
+            "legacy repeat rows must be non-executable debt fixtures",
+        )
+        require(len(quarantine["required_contract_debts"]) == 11, "contract debt count drift")
+        require(
+            quarantine["current_verifier_semantics"] == "missing_only_required_minus_names",
+            "verifier characterization",
+        )
+    else:
+        # Post-P2r: real generated product_workflow + operator_validation bindings.
+        require(
+            quarantine["current_verifier_semantics"]
+            == "exact_set_product_workflow_namespace",
+            "post-P2r verifier characterization",
+        )
+        require(
+            not quarantine["required_contract_debts"],
+            "post-P2r residual release_repeat_contract debt",
+        )
+        generated = quarantine.get("generated_product_workflow_names") or []
+        require(len(generated) == 10, "post-P2r product workflow name count")
+        require(
+            quarantine.get("generated_operator_job") == "operator_validation_tests",
+            "post-P2r operator job missing",
+        )
     require(quarantine["required_jobs_executed_or_counted"] is False, "false execution claim")
 
     if policy == "closure":

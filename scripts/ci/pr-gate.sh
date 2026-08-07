@@ -65,7 +65,8 @@ if [[ "$MODE" == "enforcing" ]]; then
     bash "${SCRIPT_DIR}/check-lcov-coverage.py" --fixture "${SCRIPT_DIR}/fixtures/lcov/core-pass.info" --crate fireweed-core --min-lines 90 --min-branches 85
     bash "${SCRIPT_DIR}/check-lcov-coverage.py" --fixture "${SCRIPT_DIR}/fixtures/lcov/engine-pass.info" --crate fireweed-engine --min-lines 80
 
-    echo "--- product workflow suite names ---"
+    echo "--- product workflow suite names (P2r exact set) ---"
+    bash "${SCRIPT_DIR}/verify-product-workflow-names.sh" --self-test
     bash "${SCRIPT_DIR}/verify-product-workflow-names.sh" "${SCRIPT_DIR}/release-repeat-suites.toml"
 
     # nightly-gate.sh already runs release-gate.sh (then adds deferral linting), so we invoke it
@@ -106,5 +107,12 @@ python3 "${SCRIPT_DIR}/api005_suite_ownership.py" --self-test
 
 echo "--- functional-matrix route sources (P10r exact leaves) ---"
 python3 "${SCRIPT_DIR}/functional_matrix_route_sources.py" --check --self-test
+
+echo "--- P2r route bindings / assertion overlay ---"
+python3 "${SCRIPT_DIR}/p2r_route_bindings.py" --check --self-test
+
+echo "--- product workflow suite names (P2r exact set) ---"
+bash "${SCRIPT_DIR}/verify-product-workflow-names.sh" --self-test
+bash "${SCRIPT_DIR}/verify-product-workflow-names.sh" "${SCRIPT_DIR}/release-repeat-suites.toml"
 
 echo "=== pr-gate [${MODE}] PASSED ==="

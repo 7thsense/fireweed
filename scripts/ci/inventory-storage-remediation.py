@@ -656,27 +656,48 @@ def add_release_repeat_debt(debt: dict[str, list[dict[str, object]]]) -> dict[st
     data = tomllib.loads(suite_path.read_text())
     suites = data.get("suites", [])
     legacy_rows = []
+    generated_product: list[str] = []
+    generated_operator = None
     for index, suite in enumerate(suites):
         name = suite.get("name", "")
         command = suite.get("command", [])
-        legacy_rows.append(
-            {
-                "name": name,
-                "command": command,
-                "kind": suite.get("kind"),
-                "executable": suite.get("executable"),
-            }
-        )
-        debt["no_ops"].append(
-            debt_row(
-                "legacy_false_green",
-                "scripts/ci/release-repeat-suites.toml",
-                index + 1,
-                name,
-                detail="hand-maintained row points at a success-only fixture and is non-executable debt",
+        kind = suite.get("kind")
+        executable = suite.get("executable")
+        namespace = suite.get("namespace")
+        row = {
+            "name": name,
+            "command": command,
+            "kind": kind,
+            "executable": executable,
+            "namespace": namespace,
+        }
+        # Pre-P2r debt fixtures only.
+        if kind == "legacy_false_green" or (
+            isinstance(command, list) and any("always-pass.sh" in str(part) for part in command)
+        ):
+            legacy_rows.append(row)
+            debt["no_ops"].append(
+                debt_row(
+                    "legacy_false_green",
+                    "scripts/ci/release-repeat-suites.toml",
+                    index + 1,
+                    name,
+                    detail="hand-maintained row points at a success-only fixture and is non-executable debt",
+                )
             )
-        )
-    for name in PRODUCT_WORKFLOW_REQUIREMENTS:
+            continue
+        if namespace == "product_workflow" or (
+            namespace is None and name in PRODUCT_WORKFLOW_REQUIREMENTS[:10]
+        ):
+            generated_product.append(name)
+        if name == "operator_validation_tests":
+            generated_operator = name
+    # Contract debt only for required names still lacking a real generated binding.
+    generated_set = set(generated_product)
+    if generated_operator:
+        generated_set.add(generated_operator)
+    remaining = [name for name in PRODUCT_WORKFLOW_REQUIREMENTS if name not in generated_set]
+    for name in remaining:
         debt["release_repeat_contract"].append(
             debt_row(
                 "release_repeat_contract",
@@ -694,10 +715,16 @@ def add_release_repeat_debt(debt: dict[str, list[dict[str, object]]]) -> dict[st
         for index, line in enumerate(text.splitlines(), start=1):
             if "release-repeat-suites.toml" in line or "verify-product-workflow-names.sh" in line:
                 caller_matches.append({"path": path, "line": index, "text": line.strip()})
+    if legacy_rows:
+        verifier = "missing_only_required_minus_names"
+    else:
+        verifier = "exact_set_product_workflow_namespace"
     return {
         "legacy_rows": legacy_rows,
-        "required_contract_debts": PRODUCT_WORKFLOW_REQUIREMENTS,
-        "current_verifier_semantics": "missing_only_required_minus_names",
+        "required_contract_debts": remaining,
+        "generated_product_workflow_names": sorted(generated_product),
+        "generated_operator_job": generated_operator,
+        "current_verifier_semantics": verifier,
         "required_jobs_executed_or_counted": False,
         "callers": caller_matches,
     }

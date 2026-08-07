@@ -9684,132 +9684,6 @@
         "owner": "P10px",
         "path": "scripts/ci/fixtures/repeat/always-pass.sh",
         "status": "debt"
-      },
-      {
-        "category": "legacy_false_green",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "hand-maintained row points at a success-only fixture and is non-executable debt",
-        "id": "0a7c9d7e1a4c5ab7ce13",
-        "identity": "product_validation_tests",
-        "line": 1,
-        "owner": "P10px",
-        "path": "scripts/ci/release-repeat-suites.toml",
-        "status": "debt"
-      },
-      {
-        "category": "legacy_false_green",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "hand-maintained row points at a success-only fixture and is non-executable debt",
-        "id": "bc3e9bea5630a6fe8dd2",
-        "identity": "product_workflow_scheduled_action_delivery_e2e",
-        "line": 2,
-        "owner": "P10px",
-        "path": "scripts/ci/release-repeat-suites.toml",
-        "status": "debt"
-      },
-      {
-        "category": "legacy_false_green",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "hand-maintained row points at a success-only fixture and is non-executable debt",
-        "id": "d5e1aa58830216bb4bb4",
-        "identity": "product_workflow_marketo_group_batching_e2e",
-        "line": 3,
-        "owner": "P10px",
-        "path": "scripts/ci/release-repeat-suites.toml",
-        "status": "debt"
-      },
-      {
-        "category": "legacy_false_green",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "hand-maintained row points at a success-only fixture and is non-executable debt",
-        "id": "d6a6cf362f16e393b976",
-        "identity": "product_workflow_callback_cohort_e2e",
-        "line": 4,
-        "owner": "P10px",
-        "path": "scripts/ci/release-repeat-suites.toml",
-        "status": "debt"
-      },
-      {
-        "category": "legacy_false_green",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "hand-maintained row points at a success-only fixture and is non-executable debt",
-        "id": "0f66cd6a4ad8223fb46d",
-        "identity": "product_workflow_jobs_connectors_recurring_e2e",
-        "line": 5,
-        "owner": "P10px",
-        "path": "scripts/ci/release-repeat-suites.toml",
-        "status": "debt"
-      },
-      {
-        "category": "legacy_false_green",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "hand-maintained row points at a success-only fixture and is non-executable debt",
-        "id": "264352a2be59e6d6efef",
-        "identity": "product_workflow_worker_crash_recovery_e2e",
-        "line": 6,
-        "owner": "P10px",
-        "path": "scripts/ci/release-repeat-suites.toml",
-        "status": "debt"
-      },
-      {
-        "category": "legacy_false_green",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "hand-maintained row points at a success-only fixture and is non-executable debt",
-        "id": "27ad73d1d4e8c8e1bce4",
-        "identity": "product_workflow_noisy_neighbor_scale_e2e",
-        "line": 7,
-        "owner": "P10px",
-        "path": "scripts/ci/release-repeat-suites.toml",
-        "status": "debt"
-      },
-      {
-        "category": "legacy_false_green",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "hand-maintained row points at a success-only fixture and is non-executable debt",
-        "id": "b195d71d7aee0c49276f",
-        "identity": "product_workflow_generic_priority_bounded_relaxed_e2e",
-        "line": 8,
-        "owner": "P10px",
-        "path": "scripts/ci/release-repeat-suites.toml",
-        "status": "debt"
-      },
-      {
-        "category": "legacy_false_green",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "hand-maintained row points at a success-only fixture and is non-executable debt",
-        "id": "6bc5b4d55c2aad10112e",
-        "identity": "product_workflow_downstream_pacing_non_goal_e2e",
-        "line": 9,
-        "owner": "P10px",
-        "path": "scripts/ci/release-repeat-suites.toml",
-        "status": "debt"
       }
     ],
     "opt_ins": [
@@ -10609,162 +10483,7 @@
       }
     ],
     "quarantine": [],
-    "release_repeat_contract": [
-      {
-        "category": "release_repeat_contract",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "P2r must generate one real campaign-aware binding",
-        "id": "24024d065577247fc9b8",
-        "identity": "product_validation_tests",
-        "line": 1,
-        "owner": "P10px",
-        "path": "scripts/ci/release-repeat-suites.toml",
-        "status": "debt"
-      },
-      {
-        "category": "release_repeat_contract",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "P2r must generate one real campaign-aware binding",
-        "id": "b4e69db9d54166424427",
-        "identity": "product_workflow_scheduled_action_delivery_e2e",
-        "line": 1,
-        "owner": "P10px",
-        "path": "scripts/ci/release-repeat-suites.toml",
-        "status": "debt"
-      },
-      {
-        "category": "release_repeat_contract",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "P2r must generate one real campaign-aware binding",
-        "id": "9b0e0f587f4e33f7d708",
-        "identity": "product_workflow_marketo_group_batching_e2e",
-        "line": 1,
-        "owner": "P10px",
-        "path": "scripts/ci/release-repeat-suites.toml",
-        "status": "debt"
-      },
-      {
-        "category": "release_repeat_contract",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "P2r must generate one real campaign-aware binding",
-        "id": "c0faa72e9a8e534619fc",
-        "identity": "product_workflow_callback_cohort_e2e",
-        "line": 1,
-        "owner": "P10px",
-        "path": "scripts/ci/release-repeat-suites.toml",
-        "status": "debt"
-      },
-      {
-        "category": "release_repeat_contract",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "P2r must generate one real campaign-aware binding",
-        "id": "64860af012645e036dd0",
-        "identity": "product_workflow_jobs_connectors_recurring_e2e",
-        "line": 1,
-        "owner": "P10px",
-        "path": "scripts/ci/release-repeat-suites.toml",
-        "status": "debt"
-      },
-      {
-        "category": "release_repeat_contract",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "P2r must generate one real campaign-aware binding",
-        "id": "c51a63d583c5ba5a0750",
-        "identity": "product_workflow_worker_crash_recovery_e2e",
-        "line": 1,
-        "owner": "P10px",
-        "path": "scripts/ci/release-repeat-suites.toml",
-        "status": "debt"
-      },
-      {
-        "category": "release_repeat_contract",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "P2r must generate one real campaign-aware binding",
-        "id": "29a57b59d36939952aba",
-        "identity": "product_workflow_noisy_neighbor_scale_e2e",
-        "line": 1,
-        "owner": "P10px",
-        "path": "scripts/ci/release-repeat-suites.toml",
-        "status": "debt"
-      },
-      {
-        "category": "release_repeat_contract",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "P2r must generate one real campaign-aware binding",
-        "id": "207f4352caec536b83f8",
-        "identity": "product_workflow_generic_priority_bounded_relaxed_e2e",
-        "line": 1,
-        "owner": "P10px",
-        "path": "scripts/ci/release-repeat-suites.toml",
-        "status": "debt"
-      },
-      {
-        "category": "release_repeat_contract",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "P2r must generate one real campaign-aware binding",
-        "id": "4e958fb65d5630bc4d97",
-        "identity": "product_workflow_downstream_pacing_non_goal_e2e",
-        "line": 1,
-        "owner": "P10px",
-        "path": "scripts/ci/release-repeat-suites.toml",
-        "status": "debt"
-      },
-      {
-        "category": "release_repeat_contract",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "P2r must generate one real campaign-aware binding",
-        "id": "376e6ccad2c0c9c55478",
-        "identity": "product_workflow_operator_repair_redrive_e2e",
-        "line": 1,
-        "owner": "P10px",
-        "path": "scripts/ci/release-repeat-suites.toml",
-        "status": "debt"
-      },
-      {
-        "category": "release_repeat_contract",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "P2r must generate one real campaign-aware binding",
-        "id": "23dec6f3321869ad03ea",
-        "identity": "operator_validation_tests",
-        "line": 1,
-        "owner": "P10px",
-        "path": "scripts/ci/release-repeat-suites.toml",
-        "status": "debt"
-      }
-    ],
+    "release_repeat_contract": [],
     "rustdoc_unlisted_or_compile_only": [
       {
         "category": "rustdoc_unlisted",
@@ -95872,128 +95591,102 @@
         "text": "suite_path = ROOT / \"scripts/ci/release-repeat-suites.toml\""
       },
       {
-        "line": 673,
+        "line": 682,
         "path": "scripts/ci/inventory-storage-remediation.py",
         "text": "\"scripts/ci/release-repeat-suites.toml\","
       },
       {
-        "line": 683,
+        "line": 704,
         "path": "scripts/ci/inventory-storage-remediation.py",
         "text": "\"scripts/ci/release-repeat-suites.toml\","
       },
       {
-        "line": 695,
+        "line": 716,
         "path": "scripts/ci/inventory-storage-remediation.py",
         "text": "if \"release-repeat-suites.toml\" in line or \"verify-product-workflow-names.sh\" in line:"
       },
       {
+        "line": 15,
+        "path": "scripts/ci/p2r_route_bindings.py",
+        "text": "- scripts/ci/release-repeat-suites.toml"
+      },
+      {
+        "line": 40,
+        "path": "scripts/ci/p2r_route_bindings.py",
+        "text": "SUITES_OUT = ROOT / \"scripts/ci/release-repeat-suites.toml\""
+      },
+      {
+        "line": 926,
+        "path": "scripts/ci/p2r_route_bindings.py",
+        "text": "require(SUITES_OUT.is_file(), \"missing release-repeat-suites.toml\")"
+      },
+      {
+        "line": 929,
+        "path": "scripts/ci/p2r_route_bindings.py",
+        "text": "\"release-repeat-suites.toml drift; regenerate with --write\","
+      },
+      {
         "line": 69,
+        "path": "scripts/ci/pr-gate.sh",
+        "text": "bash \"${SCRIPT_DIR}/verify-product-workflow-names.sh\" --self-test"
+      },
+      {
+        "line": 70,
         "path": "scripts/ci/pr-gate.sh",
         "text": "bash \"${SCRIPT_DIR}/verify-product-workflow-names.sh\" \"${SCRIPT_DIR}/release-repeat-suites.toml\""
       },
       {
-        "line": 5,
+        "line": 115,
+        "path": "scripts/ci/pr-gate.sh",
+        "text": "bash \"${SCRIPT_DIR}/verify-product-workflow-names.sh\" --self-test"
+      },
+      {
+        "line": 116,
+        "path": "scripts/ci/pr-gate.sh",
+        "text": "bash \"${SCRIPT_DIR}/verify-product-workflow-names.sh\" \"${SCRIPT_DIR}/release-repeat-suites.toml\""
+      },
+      {
+        "line": 7,
         "path": "scripts/ci/verify-product-workflow-names.sh",
-        "text": "echo \"usage: verify-product-workflow-names.sh <suite-list.toml>\" >&2"
+        "text": "#   verify-product-workflow-names.sh <suite-list.toml> [required-names.json]"
+      },
+      {
+        "line": 8,
+        "path": "scripts/ci/verify-product-workflow-names.sh",
+        "text": "#   verify-product-workflow-names.sh --self-test"
+      },
+      {
+        "line": 46,
+        "path": "scripts/ci/verify-product-workflow-names.sh",
+        "text": "suites_path = root / \"scripts/ci/release-repeat-suites.toml\""
+      },
+      {
+        "line": 110,
+        "path": "scripts/ci/verify-product-workflow-names.sh",
+        "text": "echo \"usage: verify-product-workflow-names.sh <suite-list.toml> [required-names.json]\" >&2"
+      },
+      {
+        "line": 111,
+        "path": "scripts/ci/verify-product-workflow-names.sh",
+        "text": "echo \"       verify-product-workflow-names.sh --self-test\" >&2"
       }
     ],
-    "current_verifier_semantics": "missing_only_required_minus_names",
-    "legacy_rows": [
-      {
-        "command": [
-          "bash",
-          "scripts/ci/fixtures/repeat/always-pass.sh"
-        ],
-        "executable": false,
-        "kind": "legacy_false_green",
-        "name": "product_validation_tests"
-      },
-      {
-        "command": [
-          "bash",
-          "scripts/ci/fixtures/repeat/always-pass.sh"
-        ],
-        "executable": false,
-        "kind": "legacy_false_green",
-        "name": "product_workflow_scheduled_action_delivery_e2e"
-      },
-      {
-        "command": [
-          "bash",
-          "scripts/ci/fixtures/repeat/always-pass.sh"
-        ],
-        "executable": false,
-        "kind": "legacy_false_green",
-        "name": "product_workflow_marketo_group_batching_e2e"
-      },
-      {
-        "command": [
-          "bash",
-          "scripts/ci/fixtures/repeat/always-pass.sh"
-        ],
-        "executable": false,
-        "kind": "legacy_false_green",
-        "name": "product_workflow_callback_cohort_e2e"
-      },
-      {
-        "command": [
-          "bash",
-          "scripts/ci/fixtures/repeat/always-pass.sh"
-        ],
-        "executable": false,
-        "kind": "legacy_false_green",
-        "name": "product_workflow_jobs_connectors_recurring_e2e"
-      },
-      {
-        "command": [
-          "bash",
-          "scripts/ci/fixtures/repeat/always-pass.sh"
-        ],
-        "executable": false,
-        "kind": "legacy_false_green",
-        "name": "product_workflow_worker_crash_recovery_e2e"
-      },
-      {
-        "command": [
-          "bash",
-          "scripts/ci/fixtures/repeat/always-pass.sh"
-        ],
-        "executable": false,
-        "kind": "legacy_false_green",
-        "name": "product_workflow_noisy_neighbor_scale_e2e"
-      },
-      {
-        "command": [
-          "bash",
-          "scripts/ci/fixtures/repeat/always-pass.sh"
-        ],
-        "executable": false,
-        "kind": "legacy_false_green",
-        "name": "product_workflow_generic_priority_bounded_relaxed_e2e"
-      },
-      {
-        "command": [
-          "bash",
-          "scripts/ci/fixtures/repeat/always-pass.sh"
-        ],
-        "executable": false,
-        "kind": "legacy_false_green",
-        "name": "product_workflow_downstream_pacing_non_goal_e2e"
-      }
-    ],
-    "required_contract_debts": [
+    "current_verifier_semantics": "exact_set_product_workflow_namespace",
+    "generated_operator_job": "operator_validation_tests",
+    "generated_product_workflow_names": [
       "product_validation_tests",
-      "product_workflow_scheduled_action_delivery_e2e",
-      "product_workflow_marketo_group_batching_e2e",
       "product_workflow_callback_cohort_e2e",
-      "product_workflow_jobs_connectors_recurring_e2e",
-      "product_workflow_worker_crash_recovery_e2e",
-      "product_workflow_noisy_neighbor_scale_e2e",
-      "product_workflow_generic_priority_bounded_relaxed_e2e",
       "product_workflow_downstream_pacing_non_goal_e2e",
+      "product_workflow_generic_priority_bounded_relaxed_e2e",
+      "product_workflow_jobs_connectors_recurring_e2e",
+      "product_workflow_marketo_group_batching_e2e",
+      "product_workflow_noisy_neighbor_scale_e2e",
       "product_workflow_operator_repair_redrive_e2e",
-      "operator_validation_tests"
+      "product_workflow_scheduled_action_delivery_e2e",
+      "product_workflow_worker_crash_recovery_e2e"
     ],
+    "legacy_rows": [],
+    "required_contract_debts": [],
     "required_jobs_executed_or_counted": false
   },
   "rustdoc_routes": [
@@ -96202,7 +95895,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "851cdac162ac688cc800d0f25b03dc904c2e8ef0b15423c1a4a9e284cdfb0c08",
+  "source_inventory_sha256": "85df046365f5dda2c974a83445489a9e976b3145559c387e5cc2e557a48d8d77",
   "workspaces": [
     {
       "listing_error_sha256": "",
