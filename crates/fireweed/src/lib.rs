@@ -5192,8 +5192,9 @@ impl<B: LibBackend> RuntimeCore<B> {
     /// this delivery, resets `attempt_count` to 0, and defers re-eligibility until `not_before` — so an idle
     /// recurring item is ineligible (and excluded from oldest-eligible selection) between occurrences. If the
     /// queue's [`RecurrencePolicy::until`] is set and `not_before` falls strictly past it, the series has
-    /// ended: the item is driven **terminal** (Complete) instead of re-arming. Maps to `Finalize{Rearm}`
-    /// carrying the next-occurrence `not_before`.
+    /// ended: the call rejects with [`EngineError::Terminal`] and **must not** change lifecycle (API-001 /
+    /// FR-52); stop re-arming until an explicit complete/fail finalize or `PurgeItems`. Maps to
+    /// `Finalize{Rearm}` carrying the next-occurrence `not_before`.
     pub async fn rearm_at(
         &self,
         queue: &QueueKey,

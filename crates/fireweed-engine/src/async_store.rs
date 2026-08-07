@@ -901,17 +901,31 @@ pub trait AsyncProjectionStore: Send + Sync {
     /// Resolve item-id lifecycle targets while preserving projection-owned rejection precedence.
     /// Implementations with a lock or transaction should override this so validation and rendering
     /// observe one projection image.
+    ///
+    /// Default precedence when a rendered lease set is incomplete (mirrors
+    /// projection `validate_leased`): absent → [`EngineError::NotFound`], terminal →
+    /// [`EngineError::Terminal`], otherwise → [`EngineError::StaleLease`].
     fn resolve_lease_targets(
         &self,
         shard: QueueKey,
         ids: Vec<ItemId>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
         async move {
-            let items = self.render_claimed(shard, ids.clone()).await?;
-            if items.len() != ids.len() {
-                return Err(EngineError::StaleLease);
+            let items = self.render_claimed(shard.clone(), ids.clone()).await?;
+            if items.len() == ids.len() {
+                return Ok(items);
             }
-            Ok(items)
+            for id in ids {
+                if items.iter().any(|item| item.item_id == id) {
+                    continue;
+                }
+                match self.item_state(shard.clone(), id).await? {
+                    None => return Err(EngineError::NotFound),
+                    Some(state) if state.is_terminal() => return Err(EngineError::Terminal),
+                    Some(_) => return Err(EngineError::StaleLease),
+                }
+            }
+            Err(EngineError::StaleLease)
         }
     }
 

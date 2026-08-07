@@ -1806,9 +1806,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "f555dc07848b8de4ce97",
+        "id": "d7fbde28de27cdf43c6d",
         "identity": "return Err(EngineError::Unavailable);",
-        "line": 2188,
+        "line": 2199,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-engine/src/async_log_replay_product.rs",
         "status": "debt"
@@ -1820,9 +1820,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "8e62a9c51979cae018f2",
+        "id": "753310309aa12aef0cdb",
         "identity": "return Err(EngineError::Unavailable);",
-        "line": 2221,
+        "line": 2232,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-engine/src/async_log_replay_product.rs",
         "status": "debt"
@@ -1834,9 +1834,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "b8fe4d5a74fa59ea8bce",
+        "id": "963193426a1a028e644e",
         "identity": "return Err(EngineError::Unavailable);",
-        "line": 3098,
+        "line": 3109,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-engine/src/async_log_replay_product.rs",
         "status": "debt"
@@ -2497,7 +2497,7 @@
         "line": 888,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-engine/src/async_store.rs",
-        "status": "debt"
+        "status": "discovery_negative"
       },
       {
         "category": "loud_skip",
@@ -2511,7 +2511,7 @@
         "line": 898,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-engine/src/async_store.rs",
-        "status": "debt"
+        "status": "discovery_negative"
       },
       {
         "category": "loud_skip",
@@ -2520,9 +2520,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "52c1f2e800d78a5be05a",
+        "id": "f9b62ed595a1cf023027",
         "identity": "std::future::ready(Err(EngineError::Unavailable))",
-        "line": 971,
+        "line": 985,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-engine/src/async_store.rs",
         "status": "debt"
@@ -2534,9 +2534,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "1056630b6d14c8d80800",
+        "id": "47cc94af62ea050cadf5",
         "identity": "std::future::ready(Err(EngineError::Unavailable))",
-        "line": 980,
+        "line": 994,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-engine/src/async_store.rs",
         "status": "debt"
@@ -2548,9 +2548,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "de77c985c8d85cf7e866",
+        "id": "d232e5e71f6261619666",
         "identity": "std::future::ready(Err(EngineError::Unavailable))",
-        "line": 991,
+        "line": 1005,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-engine/src/async_store.rs",
         "status": "debt"
@@ -2562,9 +2562,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "cd37db4707a622fd8051",
+        "id": "0f9995ef69006758e05a",
         "identity": "return Err(EngineError::Unavailable);",
-        "line": 1026,
+        "line": 1040,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-engine/src/async_store.rs",
         "status": "debt"
@@ -2576,9 +2576,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "8d7876d621d65db61abb",
+        "id": "e3ec0c04e2b3e7c88592",
         "identity": "std::future::ready(Err(EngineError::Unavailable))",
-        "line": 1042,
+        "line": 1056,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-engine/src/async_store.rs",
         "status": "debt"
@@ -2590,9 +2590,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "724c70208d7f928159ed",
+        "id": "98609f83abefdc00a277",
         "identity": "ready(Err(EngineError::Unavailable))",
-        "line": 2026,
+        "line": 2040,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-engine/src/async_store.rs",
         "status": "debt"
@@ -2604,9 +2604,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "60e2e614c901771f4cfa",
+        "id": "a38d355f387e7707ddcf",
         "identity": "assert!(matches!(result, Err(EngineError::Unavailable)));",
-        "line": 2207,
+        "line": 2221,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-engine/src/async_store.rs",
         "status": "discovery_negative"
@@ -2618,9 +2618,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "ae892636be8c660e151e",
+        "id": "0adff0101699434ebf6c",
         "identity": "Err(EngineError::Unavailable)",
-        "line": 2219,
+        "line": 2233,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-engine/src/async_store.rs",
         "status": "debt"
@@ -2632,9 +2632,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "e0da818daf44045822ac",
+        "id": "90a3d6712f27ef4e526c",
         "identity": "Err(EngineError::Unavailable)",
-        "line": 2223,
+        "line": 2237,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-engine/src/async_store.rs",
         "status": "debt"
@@ -2646,9 +2646,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "adba8a8684e49eccc7da",
+        "id": "cb37b47345fc30622fb9",
         "identity": "Err(EngineError::Unavailable)",
-        "line": 2235,
+        "line": 2249,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-engine/src/async_store.rs",
         "status": "debt"
@@ -8834,9 +8834,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "d40b0f0a769a3b524070",
+        "id": "d786fec59a5c0052176f",
         "identity": "/// included). Memory/sqlite previously skipped `validate_rearm`, which let a non-recurring profile",
-        "line": 592,
+        "line": 598,
         "owner": "P10pf",
         "path": "crates/fireweed/tests/whitebox/product_validation_tests.rs",
         "status": "debt"
@@ -8848,9 +8848,23 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "f265756041737979cad3",
+        "id": "e1b25fcdc76d331964e8",
+        "identity": "// qdef_scheduled_actions; memory/sqlite previously skipped validate_rearm.",
+        "line": 1272,
+        "owner": "P10pf",
+        "path": "crates/fireweed/tests/whitebox/product_validation_tests.rs",
+        "status": "discovery_negative"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10pf",
+          "P2f"
+        ],
+        "detail": "early_success=false",
+        "id": "1427b21fe5453802dd50",
         "identity": "/// skipped (no partial-cohort leak, INV-7).",
-        "line": 1843,
+        "line": 1865,
         "owner": "P10pf",
         "path": "crates/fireweed/tests/whitebox/product_validation_tests.rs",
         "status": "discovery_negative"
@@ -8862,9 +8876,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "5c3b53feb8fbd6e11348",
+        "id": "ac8e5ee3412c19334c5a",
         "identity": "// incomplete cohort is skipped (all-or-nothing \u2014 no partial cohort leaks, INV-7).",
-        "line": 1982,
+        "line": 2004,
         "owner": "P10pf",
         "path": "crates/fireweed/tests/whitebox/product_validation_tests.rs",
         "status": "discovery_negative"
@@ -8876,9 +8890,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "40367a67d8ca3c19696a",
+        "id": "00abfc8a9295c5da939d",
         "identity": "\"a cohort-enabled queue rejects items without group_key+cohort_size; whole_cohort compatibility errors remain distinct (",
-        "line": 2011,
+        "line": 2033,
         "owner": "P10pf",
         "path": "crates/fireweed/tests/whitebox/product_validation_tests.rs",
         "status": "debt"
@@ -8890,9 +8904,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "31a0400a4e21f930123d",
+        "id": "c92a2ca119e918cdcbf0",
         "identity": "// Claim a fresh pending item to reassign (it is now leased). Non-conditional so the proof can't be skipped.",
-        "line": 2451,
+        "line": 2473,
         "owner": "P10pf",
         "path": "crates/fireweed/tests/whitebox/product_validation_tests.rs",
         "status": "debt"
@@ -21349,7 +21363,7 @@
     "cargo_status": "listed",
     "errors": [],
     "generated_by": "scripts/ci/fireweed_test_placement.py",
-    "input_sha256": "6f4e5036593511def406e3e6f142a9d90011e284b3886f86cf9a62943ede8537",
+    "input_sha256": "e9422edc9e9df81ac18e281d2f0ee83b378e08df8e5b7c795e1b1f065514c05d",
     "private_surface": [
       {
         "declaration_kind": "fn",
@@ -95895,7 +95909,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "85df046365f5dda2c974a83445489a9e976b3145559c387e5cc2e557a48d8d77",
+  "source_inventory_sha256": "84dc2eb9f079c426032c3351e5c46edd22920cbd2b2351f316c1cf6b4e6b0f5e",
   "workspaces": [
     {
       "listing_error_sha256": "",

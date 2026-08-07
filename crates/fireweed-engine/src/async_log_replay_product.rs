@@ -382,6 +382,17 @@ where
         AsyncProjectionStore::render_claimed(self.inner.as_ref(), shard, ids)
     }
 
+    fn resolve_lease_targets(
+        &self,
+        shard: QueueKey,
+        ids: Vec<ItemId>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<crate::ClaimedItem>>> + Send {
+        // Forward so InProcessProjectionStore can apply renew_validate precedence
+        // (absent → NotFound, not leased → structured error) instead of the default
+        // render_claimed count-mismatch → StaleLease path (API-001 late finalize after purge).
+        AsyncProjectionStore::resolve_lease_targets(self.inner.as_ref(), shard, ids)
+    }
+
     fn item_state(
         &self,
         shard: QueueKey,

@@ -292,10 +292,13 @@ async fn downstream_pacing_non_goal_e2e() {
             next_priority += 1;
         }
         max_batch_seen = max_batch_seen.max(got.len());
-        fireweed
-            .ack(&q, got.iter().map(|c| c.item_id))
-            .await
-            .unwrap();
+        // Empty claim batches are valid (no rate/admission withhold); finalize forbids empty.
+        if !got.is_empty() {
+            fireweed
+                .ack(&q, got.iter().map(|c| c.item_id))
+                .await
+                .unwrap();
+        }
         claimed_total += got.len() as u64;
         remaining -= got.len() as i64;
         batches += 1;
@@ -303,6 +306,9 @@ async fn downstream_pacing_non_goal_e2e() {
     // Drain whatever remains so we can prove the totals.
     while fireweed.metrics(&q).await.unwrap().pending > 0 {
         let got = fireweed.claim(&q, 100, 3_600_000).await.unwrap();
+        if got.is_empty() {
+            break;
+        }
         fireweed
             .ack(&q, got.iter().map(|c| c.item_id))
             .await
@@ -1252,26 +1258,31 @@ async fn assert_keyed_upsert_converges<B: LibBackend>(
 ///     count). COUNTERFACTUAL with the SAME `max_attempts`: a `Retry`-nacked item terminalizes at the bound;
 ///   - PurgeItems is idempotent (a second purge of the same id is a no-op) and a late finalize after purge
 ///     returns `not_found`.
-/// ASSERTED (BQ pqueue-8cbae731): rearm idle-period — `rearm_at` sets a new not_before so a recurring item
-/// is INELIGIBLE between occurrences (excluded from eligible/oldest-eligible selection) until its cycle time,
-/// then the SAME id returns; and RecurrencePolicy.until — a rearm whose next occurrence falls past `until`
-/// drives the item terminal (Complete) instead of re-arming.
+/// ASSERTED (BQ pqueue-8cbae731 / API-001 FR-52): rearm idle-period — `rearm_at` sets a new not_before so a
+/// recurring item is INELIGIBLE between occurrences (excluded from eligible/oldest-eligible selection) until
+/// its cycle time, then the SAME id returns; and RecurrencePolicy.until — a rearm whose next occurrence falls
+/// past `until` rejects with `terminal` without changing lifecycle (series stops re-arming; explicit complete
+/// or PurgeItems ends the item).
 #[tokio::test]
 async fn jobs_connectors_recurring_e2e() {
     let (fireweed, clock) = deployment();
 
     // max_attempts = 2 so the retry-exhaustion counterfactual bites in two cycles.
+    // API-001: rearm requires recurrence.mode=recurring (+ until). Same profile as
+    // qdef_scheduled_actions; memory/sqlite previously skipped validate_rearm.
     let rec_q = qk("jobs", "connectors");
-    fireweed
-        .create_queue(qdef_attempts(
-            "jobs",
-            "connectors",
-            PriorityDirection::Ascending,
-            OrderingMode::Strict,
-            2,
-        ))
-        .await
-        .unwrap();
+    let mut rec_def = qdef_attempts(
+        "jobs",
+        "connectors",
+        PriorityDirection::Ascending,
+        OrderingMode::Strict,
+        2,
+    );
+    rec_def.recurrence = RecurrencePolicy {
+        mode: RecurrenceMode::Recurring,
+        until: Some(ts(i64::MAX / 4)),
+    };
+    fireweed.create_queue(rec_def).await.unwrap();
 
     // --- recurring singleton: one logical poll-cursor item, repeated claim→rearm cycles ---
     let job = fireweed
@@ -1409,16 +1420,27 @@ async fn jobs_connectors_recurring_e2e() {
         "a rearm whose next occurrence is AT `until` keeps the series alive"
     );
     assert_eq!(still[0].item_id, bounded);
-    // A rearm for an occurrence PAST `until` (t=101) drives the item terminal — the series has ended.
-    fireweed
-        .rearm_at(&until_q, [bounded], ts(101))
-        .await
-        .unwrap();
+    // A rearm for an occurrence PAST `until` (t=101) is rejected per-item with `terminal`
+    // (API-001 / FR-52): the series stops re-arming and lifecycle is unchanged until an explicit
+    // terminal finalize or PurgeItems — it does NOT auto-complete.
+    let past = fireweed.rearm_at(&until_q, [bounded], ts(101)).await;
+    assert!(
+        matches!(past, Err(EngineError::Terminal)),
+        "rearm past recurrence.until MUST reject with terminal: {past:?}"
+    );
+    let um_leased = fireweed.metrics(&until_q).await.unwrap();
+    assert_eq!(
+        (um_leased.pending, um_leased.leased, um_leased.complete),
+        (0, 1, 0),
+        "past-until rearm MUST NOT change lifecycle; item stays leased until terminal finalize"
+    );
+    // Explicit terminal finalize ends the series (as API-001 requires after until stops re-arming).
+    fireweed.ack(&until_q, [bounded]).await.unwrap();
     let um = fireweed.metrics(&until_q).await.unwrap();
     assert_eq!(
         (um.pending, um.leased, um.complete),
         (0, 0, 1),
-        "a rearm past recurrence.until ends the series: the item is terminal (Complete), not re-armed"
+        "explicit complete after past-until rejection leaves the item terminal"
     );
     let until_terminalizes = um.complete == 1 && um.pending == 0;
     // and it never recurs again, no matter how far the clock advances.
@@ -1498,7 +1520,7 @@ async fn jobs_connectors_recurring_e2e() {
     emit_ac(
         "AC-E2E-4",
         &[],
-        "recurring singleton cycles as one row with monotonic item_version; rearm resets the delivery count (does NOT consume retry budget — counterfactual: a Retry-nack terminalizes at max_attempts); rearm_at sets a new not_before so an idle recurring item is ineligible (excluded from eligible/oldest-eligible selection) between occurrences then the same id returns; a rearm past recurrence.until drives the item terminal; PurgeItems idempotent + late finalize -> not_found [approx-counter convergence is a durable-backend concern (exact here)]",
+        "recurring singleton cycles as one row with monotonic item_version; rearm resets the delivery count (does NOT consume retry budget — counterfactual: a Retry-nack terminalizes at max_attempts); rearm_at sets a new not_before so an idle recurring item is ineligible (excluded from eligible/oldest-eligible selection) between occurrences then the same id returns; a rearm past recurrence.until rejects terminal without auto-complete; PurgeItems idempotent + late finalize -> not_found [approx-counter convergence is a durable-backend concern (exact here)]",
         BTreeMap::from([
             ("rearm_cycles".into(), serde_json::json!(cycles)),
             ("item_versions".into(), serde_json::json!(versions)),
