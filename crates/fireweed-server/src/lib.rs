@@ -38,6 +38,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 mod change_record_sink;
+#[cfg(feature = "turso-projection")]
+mod operator_adapter;
 mod tokio_dispatcher;
 pub use change_record_sink::{
     ChangeRecordSinkConfig, ChangeRecordSinkMode, FjordChangeRecordSink, NiflheimChangeRecordSink,
@@ -48,6 +50,13 @@ pub use fireweed_objectlog::SegmentConfig;
 /// Public Turso adapter types (default projection axis). Direct dep so cargo-machete tracks usage.
 #[cfg(feature = "turso-projection")]
 pub use fireweed_turso::{TursoConfig, TursoRelational};
+#[cfg(feature = "turso-projection")]
+pub use operator_adapter::{
+    Fireweed, OPERATOR_ARCHIVED_METADATA_KEY, OperationHandle, OperationId, OperatorAsyncAccept,
+    OperatorAuditRecord, OperatorItemView, OperatorOpKind, OperatorOpPayload,
+    OperatorOperationState, OperatorProgress, QueueAdminState, RepairAction, RetryCountMode,
+    data_plane_principal, operator_plane_available, operator_principal,
+};
 /// Recovery-window default for object-log reopen budgets (FIREWEED_RECOVERY_MAX_TAIL_COMMANDS).
 pub const DEFAULT_RECOVERY_MAX_TAIL: u64 = 1_000_000;
 pub use tokio_dispatcher::TokioTaskDispatcher;

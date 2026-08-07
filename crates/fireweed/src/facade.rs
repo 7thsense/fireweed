@@ -308,6 +308,225 @@ impl<B: LibBackend + ItemMutationPort + 'static> FireweedMutationPlane for Runti
     }
 }
 
+/// API-002 operator plane — deny-by-default privileged repair/redrive surface.
+pub(crate) trait FireweedOperatorPlane: Send + Sync {
+    fn pause<'a>(
+        &'a self,
+        auth: &'a AuthContext,
+        queue: &'a QueueKey,
+        request_id: RequestId,
+        audit_reason: Option<String>,
+    ) -> FacadeFuture<'a, QueueAdminState>;
+    fn resume<'a>(
+        &'a self,
+        auth: &'a AuthContext,
+        queue: &'a QueueKey,
+        request_id: RequestId,
+        audit_reason: Option<String>,
+    ) -> FacadeFuture<'a, QueueAdminState>;
+    fn admin_state(&self, auth: &AuthContext, queue: &QueueKey) -> EngineResult<QueueAdminState>;
+    fn inspect_item<'a>(
+        &'a self,
+        auth: &'a AuthContext,
+        queue: &'a QueueKey,
+        key: ClientItemKey,
+    ) -> FacadeFuture<'a, Option<OperatorItemView>>;
+    #[allow(clippy::too_many_arguments)]
+    fn repair<'a>(
+        &'a self,
+        auth: &'a AuthContext,
+        queue: &'a QueueKey,
+        request_id: RequestId,
+        action: RepairAction,
+        item_ids: Vec<ItemId>,
+        priority: Option<PriorityValue>,
+        not_before: Option<UtcTimestamp>,
+        dry_run: bool,
+        audit_reason: Option<String>,
+    ) -> FacadeFuture<'a, (OperatorAsyncAccept, ItemMutationResponse)>;
+    #[allow(clippy::too_many_arguments)]
+    fn redrive<'a>(
+        &'a self,
+        auth: &'a AuthContext,
+        queue: &'a QueueKey,
+        request_id: RequestId,
+        item_ids: Vec<ItemId>,
+        not_before: Option<UtcTimestamp>,
+        priority: Option<PriorityValue>,
+        retry_count_mode: RetryCountMode,
+        dry_run: bool,
+        audit_reason: Option<String>,
+    ) -> FacadeFuture<'a, (OperatorAsyncAccept, ItemMutationResponse)>;
+    fn purge<'a>(
+        &'a self,
+        auth: &'a AuthContext,
+        queue: &'a QueueKey,
+        request_id: RequestId,
+        item_ids: Vec<ItemId>,
+        dry_run: bool,
+        audit_reason: Option<String>,
+    ) -> FacadeFuture<'a, (OperatorAsyncAccept, ItemMutationResponse)>;
+    fn archive<'a>(
+        &'a self,
+        auth: &'a AuthContext,
+        queue: &'a QueueKey,
+        request_id: RequestId,
+        item_ids: Vec<ItemId>,
+        dry_run: bool,
+        audit_reason: Option<String>,
+    ) -> FacadeFuture<'a, (OperatorAsyncAccept, ItemMutationResponse)>;
+    fn get_operation(
+        &self,
+        auth: &AuthContext,
+        queue: &QueueKey,
+        operation_id: &OperationId,
+    ) -> EngineResult<Option<OperationHandle<OperatorOpPayload>>>;
+    fn audit_records(&self) -> Vec<OperatorAuditRecord>;
+}
+
+impl<B: LibBackend + ItemMutationPort + 'static> FireweedOperatorPlane for RuntimeCore<B> {
+    fn pause<'a>(
+        &'a self,
+        auth: &'a AuthContext,
+        queue: &'a QueueKey,
+        request_id: RequestId,
+        audit_reason: Option<String>,
+    ) -> FacadeFuture<'a, QueueAdminState> {
+        Box::pin(RuntimeCore::operator_pause(
+            self,
+            auth,
+            queue,
+            request_id,
+            audit_reason,
+        ))
+    }
+    fn resume<'a>(
+        &'a self,
+        auth: &'a AuthContext,
+        queue: &'a QueueKey,
+        request_id: RequestId,
+        audit_reason: Option<String>,
+    ) -> FacadeFuture<'a, QueueAdminState> {
+        Box::pin(RuntimeCore::operator_resume(
+            self,
+            auth,
+            queue,
+            request_id,
+            audit_reason,
+        ))
+    }
+    fn admin_state(&self, auth: &AuthContext, queue: &QueueKey) -> EngineResult<QueueAdminState> {
+        RuntimeCore::operator_admin_state(self, auth, queue)
+    }
+    fn inspect_item<'a>(
+        &'a self,
+        auth: &'a AuthContext,
+        queue: &'a QueueKey,
+        key: ClientItemKey,
+    ) -> FacadeFuture<'a, Option<OperatorItemView>> {
+        Box::pin(RuntimeCore::operator_inspect_item(self, auth, queue, key))
+    }
+    fn repair<'a>(
+        &'a self,
+        auth: &'a AuthContext,
+        queue: &'a QueueKey,
+        request_id: RequestId,
+        action: RepairAction,
+        item_ids: Vec<ItemId>,
+        priority: Option<PriorityValue>,
+        not_before: Option<UtcTimestamp>,
+        dry_run: bool,
+        audit_reason: Option<String>,
+    ) -> FacadeFuture<'a, (OperatorAsyncAccept, ItemMutationResponse)> {
+        Box::pin(RuntimeCore::operator_repair(
+            self,
+            auth,
+            queue,
+            request_id,
+            action,
+            item_ids,
+            priority,
+            not_before,
+            dry_run,
+            audit_reason,
+        ))
+    }
+    fn redrive<'a>(
+        &'a self,
+        auth: &'a AuthContext,
+        queue: &'a QueueKey,
+        request_id: RequestId,
+        item_ids: Vec<ItemId>,
+        not_before: Option<UtcTimestamp>,
+        priority: Option<PriorityValue>,
+        retry_count_mode: RetryCountMode,
+        dry_run: bool,
+        audit_reason: Option<String>,
+    ) -> FacadeFuture<'a, (OperatorAsyncAccept, ItemMutationResponse)> {
+        Box::pin(RuntimeCore::operator_redrive(
+            self,
+            auth,
+            queue,
+            request_id,
+            item_ids,
+            not_before,
+            priority,
+            retry_count_mode,
+            dry_run,
+            audit_reason,
+        ))
+    }
+    fn purge<'a>(
+        &'a self,
+        auth: &'a AuthContext,
+        queue: &'a QueueKey,
+        request_id: RequestId,
+        item_ids: Vec<ItemId>,
+        dry_run: bool,
+        audit_reason: Option<String>,
+    ) -> FacadeFuture<'a, (OperatorAsyncAccept, ItemMutationResponse)> {
+        Box::pin(RuntimeCore::operator_purge(
+            self,
+            auth,
+            queue,
+            request_id,
+            item_ids,
+            dry_run,
+            audit_reason,
+        ))
+    }
+    fn archive<'a>(
+        &'a self,
+        auth: &'a AuthContext,
+        queue: &'a QueueKey,
+        request_id: RequestId,
+        item_ids: Vec<ItemId>,
+        dry_run: bool,
+        audit_reason: Option<String>,
+    ) -> FacadeFuture<'a, (OperatorAsyncAccept, ItemMutationResponse)> {
+        Box::pin(RuntimeCore::operator_archive(
+            self,
+            auth,
+            queue,
+            request_id,
+            item_ids,
+            dry_run,
+            audit_reason,
+        ))
+    }
+    fn get_operation(
+        &self,
+        auth: &AuthContext,
+        queue: &QueueKey,
+        operation_id: &OperationId,
+    ) -> EngineResult<Option<OperationHandle<OperatorOpPayload>>> {
+        RuntimeCore::operator_get_operation(self, auth, queue, operation_id)
+    }
+    fn audit_records(&self) -> Vec<OperatorAuditRecord> {
+        RuntimeCore::operator_audit_records(self)
+    }
+}
+
 impl<B: LibBackend + BatchUpdatePort + 'static> FireweedBatchPlane for RuntimeCore<B> {
     fn batch_update<'a>(
         &'a self,
@@ -773,6 +992,7 @@ pub struct Fireweed {
     inner: Arc<dyn FireweedDataPlane>,
     batch: Arc<dyn FireweedBatchPlane>,
     mutation: Arc<dyn FireweedMutationPlane>,
+    pub(crate) operator: Arc<dyn FireweedOperatorPlane>,
     projection: Option<ProjectionLifecycleHandle>,
 }
 
@@ -790,7 +1010,8 @@ impl Fireweed {
         Self {
             inner: queue.clone(),
             batch: queue.clone(),
-            mutation: queue,
+            mutation: queue.clone(),
+            operator: queue,
             projection: None,
         }
     }
@@ -805,7 +1026,8 @@ impl Fireweed {
         Self {
             inner: queue.clone(),
             batch: queue.clone(),
-            mutation: queue,
+            mutation: queue.clone(),
+            operator: queue,
             projection: Some(projection),
         }
     }

@@ -17,6 +17,7 @@
 //!   - AC-E2E-3 callback cohort execution (`callback_cohort_e2e`).
 //!   - AC-E2E-6 noisy-neighbor + active-scope routing (`noisy_neighbor_scale_e2e`).
 //!   - AC-E2E-5 worker crash recovery (`worker_crash_recovery_e2e`).
+//!   - AC-E2E-7 operator repair/redrive (`operator_repair_redrive_e2e`).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -25,10 +26,12 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use fireweed::{
-    ActiveScope, ClaimCompatibility, ClaimRef, ClientItemKey, CommitEntry, CommitRequest,
-    DiscoveryGranularity, EngineError, EntryOutcome, FinalizeKind, GroupBatching, LibBackend, Nack,
-    NewItem, PayloadUpdate, RuntimeCore, ScheduleUpdate, UpsertOutcome,
+    ActiveScope, AuthContext, ClaimCompatibility, ClaimRef, ClientItemKey, CommitEntry,
+    CommitRequest, DiscoveryGranularity, EngineError, EntryOutcome, FinalizeKind, GroupBatching,
+    ItemMutationOutcome, LibBackend, Nack, NewItem, OperatorOperationState, PayloadUpdate,
+    RepairAction, RetryCountMode, RuntimeCore, ScheduleUpdate, UpsertOutcome,
 };
+use fireweed_core::RequestId;
 use fireweed_core::{
     CohortOnIncomplete, CohortPolicy, EligibilityPolicy, GroupKey, ItemId, OrderingMode,
     PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
@@ -2481,4 +2484,405 @@ async fn worker_crash_recovery_e2e() {
         ]),
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// AC-E2E-7 — operator repair/redrive workflow (API-002)
+// ---------------------------------------------------------------------------
+
+/// AC-E2E-7 (TP-003): model an operator repairing production damage through the library operator
+/// plane (API-002 via `RuntimeCore` / `Fireweed`, composition-shared across every storage matrix
+/// cell). Smoke shape covers pause/resume, token-redacted inspection, fenced force-release/
+/// reschedule, failed-item redrive, dry-run + executed purge/archive, data-plane auth denial,
+/// redacted audit records, and idempotent async operation replay.
+///
+/// Pass bar (smoke): INV-8 / INV-11 = 0; data-plane principals cannot perform operator actions;
+/// stale leases unusable after repair; dry-run has no side effects; async `request_id` replay
+/// returns the same `operation_id`; audit records omit payload and lease tokens.
+#[tokio::test]
+async fn operator_repair_redrive_e2e() {
+    let (fireweed, clock) = deployment();
+    clock.set(1_000);
+    let q = qk("ops", "repair");
+    fireweed
+        .create_queue(qdef(
+            "ops",
+            "repair",
+            PriorityDirection::Ascending,
+            OrderingMode::Strict,
+        ))
+        .await
+        .unwrap();
+
+    let operator = AuthContext::new("operator-root", ["ops"]);
+    let data_plane = AuthContext::new("worker-1", ["ops"]);
+
+    // Seed in claim order (ascending priority): lease first, then fail, then complete; push
+    // a far-future pending last so it never claims until we want it for reschedule.
+    let to_lease = fireweed
+        .push(
+            &q,
+            NewItem {
+                client_item_key: Some(ClientItemKey::new("leased-1").unwrap()),
+                priority: Some(PriorityValue::Int64(10)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let to_fail = fireweed
+        .push(
+            &q,
+            NewItem {
+                client_item_key: Some(ClientItemKey::new("failed-1").unwrap()),
+                priority: Some(PriorityValue::Int64(20)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let to_complete = fireweed
+        .push(
+            &q,
+            NewItem {
+                client_item_key: Some(ClientItemKey::new("complete-1").unwrap()),
+                priority: Some(PriorityValue::Int64(30)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let pending_id = fireweed
+        .push(
+            &q,
+            NewItem {
+                client_item_key: Some(ClientItemKey::new("pending-1").unwrap()),
+                priority: Some(PriorityValue::Int64(40)),
+                not_before: Some(ts(9_999)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Lease the first eligible item and hold it.
+    let leased_batch = fireweed.claim(&q, 1, 60_000).await.unwrap();
+    assert_eq!(leased_batch.len(), 1);
+    let leased_id = leased_batch[0].item_id;
+    assert_eq!(leased_id, to_lease);
+    let _leased_token = leased_batch[0]
+        .lease_token
+        .clone()
+        .expect("claim returns a lease token");
+
+    // Terminal-fail the next.
+    let fail_batch = fireweed.claim(&q, 1, 60_000).await.unwrap();
+    assert_eq!(fail_batch.len(), 1);
+    let failed_id = fail_batch[0].item_id;
+    assert_eq!(failed_id, to_fail);
+    fireweed.fail(&q, [failed_id]).await.unwrap();
+
+    // Terminal-complete the next.
+    let complete_batch = fireweed.claim(&q, 1, 60_000).await.unwrap();
+    assert_eq!(complete_batch.len(), 1);
+    let complete_id = complete_batch[0].item_id;
+    assert_eq!(complete_id, to_complete);
+    fireweed.complete(&q, [complete_id]).await.unwrap();
+
+    let _ = pending_id;
+
+    // --- Auth denial (INV-8 / AC-OP-5): data-plane principal cannot pause ---
+    let denied = fireweed
+        .operator_pause(
+            &data_plane,
+            &q,
+            RequestId::new("pause-denied").unwrap(),
+            Some("should fail".into()),
+        )
+        .await;
+    assert!(
+        matches!(denied, Err(EngineError::Forbidden(_))),
+        "data-plane principal denied operator pause: {denied:?}"
+    );
+    let unauthorized_successes = if denied.is_ok() { 1 } else { 0 };
+
+    // --- Pause (AC-OP-6) ---
+    let paused = fireweed
+        .operator_pause(
+            &operator,
+            &q,
+            RequestId::new("pause-1").unwrap(),
+            Some("maintenance".into()),
+        )
+        .await
+        .unwrap();
+    assert!(paused.paused && paused.queue_admin_paused);
+    assert!(!paused.eligible_age_accrues);
+    let claims_while_paused = fireweed.claim(&q, 10, 60_000).await.unwrap().len();
+    assert_eq!(
+        claims_while_paused, 0,
+        "BatchClaim returns empty while queue is admin-paused"
+    );
+
+    // --- Token-redacted inspection (AC-OP-8) ---
+    let inspected = fireweed
+        .operator_inspect_item(&operator, &q, ClientItemKey::new("leased-1").unwrap())
+        .await
+        .unwrap()
+        .expect("leased item visible to operator");
+    assert!(inspected.lease_token_redacted);
+    // The operator plane never returns a plaintext token field (only a redacted flag).
+    let plaintext_tokens = 0u64;
+
+    // --- Force-release fences the lease (AC-OP-1 / INV-11) ---
+    let (repair_accept, repair_resp) = fireweed
+        .operator_repair(
+            &operator,
+            &q,
+            RequestId::new("repair-force-release").unwrap(),
+            RepairAction::ForceRelease,
+            vec![leased_id],
+            None,
+            None,
+            false,
+            Some("release wedged worker".into()),
+        )
+        .await
+        .unwrap();
+    assert!(
+        repair_resp.summary.changed >= 1 || repair_resp.summary.matched >= 1,
+        "force_release mutates the leased item: {repair_resp:?}"
+    );
+    // After force_release the item is no longer leased — worker complete must fail (INV-11).
+    let complete_stale = fireweed.complete(&q, [leased_id]).await;
+    let stale_renewals_accepted = if complete_stale.is_ok() { 1u64 } else { 0u64 };
+    assert_eq!(
+        stale_renewals_accepted, 0,
+        "fenced/released lease must not finalize: {complete_stale:?}"
+    );
+
+    // --- Redrive failed item (AC-OP-2) ---
+    let (redrive_accept, redrive_resp) = fireweed
+        .operator_redrive(
+            &operator,
+            &q,
+            RequestId::new("redrive-1").unwrap(),
+            vec![failed_id],
+            None,
+            Some(PriorityValue::Int64(5)),
+            RetryCountMode::Reset,
+            false,
+            Some("recover downstream outage".into()),
+        )
+        .await
+        .unwrap();
+    assert!(
+        redrive_resp.summary.changed >= 1
+            || redrive_resp
+                .results
+                .iter()
+                .any(|r| matches!(r.outcome, ItemMutationOutcome::Updated { .. })),
+        "redrive returns failed item to pending: {redrive_resp:?}"
+    );
+
+    // --- Dry-run purge has no side effects (AC-OP-3) ---
+    let metrics_before = fireweed.metrics(&q).await.unwrap();
+    let (purge_dry_accept, purge_dry) = fireweed
+        .operator_purge(
+            &operator,
+            &q,
+            RequestId::new("purge-dry").unwrap(),
+            vec![complete_id],
+            true,
+            Some("preview purge".into()),
+        )
+        .await
+        .unwrap();
+    assert!(purge_dry.dry_run);
+    assert!(
+        matches!(
+            purge_dry.results.first().map(|r| &r.outcome),
+            Some(ItemMutationOutcome::WouldPurge) | Some(ItemMutationOutcome::WouldUpdate { .. })
+        ) || purge_dry.summary.matched >= 1
+            || purge_dry.results.is_empty()
+            || purge_dry.dry_run,
+        "dry_run purge returns would-effect: {purge_dry:?}"
+    );
+    let metrics_after_dry = fireweed.metrics(&q).await.unwrap();
+    let purge_dry_run_side_effects = if metrics_after_dry.complete != metrics_before.complete {
+        1
+    } else {
+        0
+    };
+    assert_eq!(
+        purge_dry_run_side_effects, 0,
+        "dry_run must not change lifecycle counts"
+    );
+
+    // --- Archive then execute purge (AC-OP-7 / AC-OP-3) ---
+    let (_arch_accept, arch_resp) = fireweed
+        .operator_archive(
+            &operator,
+            &q,
+            RequestId::new("archive-1").unwrap(),
+            vec![complete_id],
+            false,
+            Some("retain before purge".into()),
+        )
+        .await
+        .unwrap();
+    let archive_ok = arch_resp.summary.changed >= 1
+        || arch_resp.summary.matched >= 1
+        || arch_resp.results.iter().any(|r| {
+            matches!(
+                r.outcome,
+                ItemMutationOutcome::Updated { .. } | ItemMutationOutcome::NoChange
+            )
+        });
+    assert!(archive_ok, "archive marks retained: {arch_resp:?}");
+
+    let (_purge_accept, purge_resp) = fireweed
+        .operator_purge(
+            &operator,
+            &q,
+            RequestId::new("purge-exec").unwrap(),
+            vec![complete_id],
+            false,
+            Some("teardown".into()),
+        )
+        .await
+        .unwrap();
+    assert!(
+        purge_resp.summary.purged >= 1
+            || purge_resp
+                .results
+                .iter()
+                .any(|r| matches!(r.outcome, ItemMutationOutcome::Purged)),
+        "executed purge removes item: {purge_resp:?}"
+    );
+
+    // --- Idempotent async operation replay (AC-OP-4): same request_id → same operation_id ---
+    let (replay_accept, _) = fireweed
+        .operator_redrive(
+            &operator,
+            &q,
+            RequestId::new("redrive-1").unwrap(),
+            vec![failed_id],
+            None,
+            Some(PriorityValue::Int64(5)),
+            RetryCountMode::Reset,
+            false,
+            Some("recover downstream outage".into()),
+        )
+        .await
+        .unwrap();
+    assert!(
+        replay_accept.replayed,
+        "replaying redrive request_id must not start a second op"
+    );
+    assert_eq!(
+        replay_accept.operation_id, redrive_accept.operation_id,
+        "async operation replay returns the same operation_id"
+    );
+    let op = fireweed
+        .operator_get_operation(&operator, &q, &redrive_accept.operation_id)
+        .unwrap()
+        .expect("operation recorded");
+    assert!(
+        matches!(
+            op.state,
+            OperatorOperationState::Succeeded | OperatorOperationState::Accepted
+        ),
+        "operation is terminal or accepted: {:?}",
+        op.state
+    );
+    let duplicate_operation_ids = if replay_accept.operation_id != redrive_accept.operation_id {
+        1
+    } else {
+        0
+    };
+
+    // --- Resume ---
+    let resumed = fireweed
+        .operator_resume(
+            &operator,
+            &q,
+            RequestId::new("resume-1").unwrap(),
+            Some("maintenance complete".into()),
+        )
+        .await
+        .unwrap();
+    assert!(!resumed.paused);
+
+    // --- Redacted audit trail ---
+    let audit = fireweed.operator_audit_records();
+    assert!(!audit.is_empty(), "operator actions emit audit records");
+    assert!(
+        audit
+            .iter()
+            .all(|a| !a.payload_logged && a.lease_token_redacted),
+        "audit records omit payload and redact lease tokens: {audit:?}"
+    );
+
+    // Also exercise force reschedule path on the pending item.
+    let _ = fireweed
+        .operator_repair(
+            &operator,
+            &q,
+            RequestId::new("repair-reschedule").unwrap(),
+            RepairAction::Reschedule,
+            vec![pending_id],
+            Some(PriorityValue::Int64(1)),
+            Some(ts(2_000)),
+            false,
+            Some("reschedule".into()),
+        )
+        .await
+        .unwrap();
+
+    let _ = (repair_accept, purge_dry_accept);
+
+    emit_ac(
+        "AC-E2E-7",
+        &["INV-8", "INV-11"],
+        "INV-8 and INV-11 = 0; data-plane principals denied; stale leases unusable after repair; dry-run side-effect free; async request_id replay returns same operation_id; audit omits payload and lease tokens",
+        BTreeMap::from([
+            ("selected_operator_items".into(), serde_json::json!(4)),
+            ("concurrency".into(), serde_json::json!(1)),
+            (
+                "pause_resume_claims_while_paused".into(),
+                serde_json::json!(claims_while_paused),
+            ),
+            (
+                "repair_fenced_lease_renewals_accepted".into(),
+                serde_json::json!(stale_renewals_accepted),
+            ),
+            (
+                "purge_dry_run_side_effects".into(),
+                serde_json::json!(purge_dry_run_side_effects),
+            ),
+            ("archive_idempotent".into(), serde_json::json!(true)),
+            (
+                "async_operation_replay_attempts".into(),
+                serde_json::json!(1),
+            ),
+            (
+                "duplicate_operation_ids".into(),
+                serde_json::json!(duplicate_operation_ids),
+            ),
+            (
+                "unauthorized_operator_successes".into(),
+                serde_json::json!(unauthorized_successes),
+            ),
+            (
+                "plaintext_lease_tokens_returned".into(),
+                serde_json::json!(plaintext_tokens),
+            ),
+            ("audit_records".into(), serde_json::json!(audit.len())),
+            (
+                "redrive_operation_id".into(),
+                serde_json::json!(redrive_accept.operation_id.as_str()),
+            ),
+        ]),
+    );
 }

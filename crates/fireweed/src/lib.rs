@@ -41,6 +41,7 @@ use std::sync::{Arc, Mutex};
 #[cfg(any(feature = "sqlite", feature = "objectlog", feature = "postgres", test))]
 mod blocking_backend;
 mod facade;
+mod operator;
 #[cfg(feature = "turso")]
 pub mod turso_compose;
 
@@ -83,20 +84,23 @@ pub use fireweed_core::{
     WorkerId,
 };
 pub use fireweed_engine::{
-    ActiveScope, AddressedMutation, AsyncProjectionSpec, BatchUpdateEntry, BatchUpdateItemRef,
-    BatchUpdateOutcome, BatchUpdateRequest, BatchUpdateResponse, BatchUpdateValue,
-    ClaimByItemIdsResponse, ClaimCompatibility, ClaimRef, Claimed, ClaimedItem, Clock,
-    CommandPosition, CommitCapabilities, CommitEntryStatus, CommitRecovery, ControlPlaneConfig,
-    CreateQueueOutcome, DiscoveryGranularity, EngineError, EngineResult, EntityEdit,
-    EntityEditOperation, EntityPredicateValue, EntryRecovery, FinalizeKind, GateChange,
+    ActiveScope, AddressedMutation, AsyncProjectionSpec, AuthContext, BatchUpdateEntry,
+    BatchUpdateItemRef, BatchUpdateOutcome, BatchUpdateRequest, BatchUpdateResponse,
+    BatchUpdateValue, ClaimByItemIdsResponse, ClaimCompatibility, ClaimRef, Claimed, ClaimedItem,
+    Clock, CommandPosition, CommitCapabilities, CommitEntryStatus, CommitRecovery,
+    ControlPlaneConfig, CreateQueueOutcome, DiscoveryGranularity, EngineError, EngineResult,
+    EntityEdit, EntityEditOperation, EntityPredicateValue, EntryRecovery, FinalizeKind, GateChange,
     GateKeyDelta, GroupBatching, IndexHit, InstanceFence, ItemMutationOperation,
     ItemMutationOutcome, ItemMutationPrecondition, ItemMutationRequest, ItemMutationResponse,
     ItemMutationResult, ItemMutationReturning, ItemMutationSelectorAggregate, ItemMutationSnapshot,
     ItemMutationSummary, ItemPatch, ItemPredicate, ItemSelector, ItemSelectorScope, ItemView,
-    LeaseGuard, LifecyclePatch, LiveItemView, PayloadUpdate, PushBatchOutcome, PushDisposition,
-    QueueKey, QueueMetrics, ScheduleUpdate, SelectedMutation, SideRecord, TimestampComparison,
-    UpsertOutcome,
+    LeaseGuard, LifecyclePatch, LiveItemView, OperationHandle, OperationId, OperatorAsyncAccept,
+    OperatorAuditRecord, OperatorItemView, OperatorOpKind, OperatorOpPayload,
+    OperatorOperationState, OperatorProgress, PayloadUpdate, PushBatchOutcome, PushDisposition,
+    QueueAdminState, QueueKey, QueueMetrics, RepairAction, RetryCountMode, ScheduleUpdate,
+    SelectedMutation, SideRecord, TimestampComparison, UpsertOutcome,
 };
+pub use operator::OPERATOR_ARCHIVED_METADATA_KEY;
 
 /// An active-scope result stamped with the exact queue and granularity used for discovery.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3768,6 +3772,8 @@ pub(crate) struct RuntimeCore<B> {
     clock: Arc<dyn Clock>,
     ids: AtomicU64,
     coordination: Coordination,
+    /// API-002 operator control-plane state (async ops, pause mirror, redacted audit).
+    operator: Mutex<operator::OperatorRuntimeState>,
 }
 
 fn apply_owned_renewal_outcomes(
@@ -3815,6 +3821,7 @@ impl<B: LibBackend> RuntimeCore<B> {
             clock,
             ids: AtomicU64::new(0),
             coordination: Coordination::Sole,
+            operator: Mutex::new(operator::OperatorRuntimeState::default()),
         }
     }
 
@@ -3874,6 +3881,7 @@ impl<B: LibBackend> RuntimeCore<B> {
                 sessions: Mutex::new(HashMap::new()),
                 draining: Mutex::new(HashSet::new()),
             },
+            operator: Mutex::new(operator::OperatorRuntimeState::default()),
         }
     }
 
@@ -3898,6 +3906,7 @@ impl<B: LibBackend> RuntimeCore<B> {
             backend,
             clock,
             ids: AtomicU64::new(0),
+            operator: Mutex::new(operator::OperatorRuntimeState::default()),
             coordination: Coordination::Owner {
                 owner_id: instance_id,
                 control_plane,

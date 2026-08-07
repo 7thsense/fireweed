@@ -127,7 +127,12 @@ pub use object_log_segment_safety::{
     PRODUCTION_OBJECT_LOG_MAX_BATCHES, PRODUCTION_ONE_OBJECT_PER_COMMAND_ERROR,
     validate_production_object_log_segment_shape,
 };
-pub use operator::{OperationHandle, OperationId, OperatorOperationState, OperatorOperationStore};
+pub use operator::{
+    OperationHandle, OperationId, OperatorAsyncAccept, OperatorAuditRecord, OperatorItemView,
+    OperatorOpKind, OperatorOpPayload, OperatorOperationState, OperatorOperationStore,
+    OperatorProgress, QueueAdminState, RepairAction, RetryCountMode, deterministic_operation_id,
+    operator_body_fingerprint,
+};
 pub use ownership::{OwnedSession, OwnershipOutcome, acquire_and_fence, owner_liveness_violation};
 
 pub use axon_esf::CompiledSchema;

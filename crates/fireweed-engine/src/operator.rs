@@ -3,9 +3,8 @@
 //! "idempotency": replaying a create `request_id` returns the SAME `operation_id` and does not start a
 //! second operation; a different body under the same `request_id` is `request-id-conflict`).
 //!
-//! NOT YET WIRED: built ahead of the operator command path / async shard driver. Wiring into the
-//! redrive/purge/archive/retention handlers (and the `advance` lifecycle transitions from that driver)
-//! lands with those units. See build-progress.md.
+//! The library facade (`fireweed`) and server composition root wire these types into the operator
+//! repair/redrive surface (pause/resume, repair, redrive, purge/archive, inspection, auth, audit).
 //!
 //! ## Why this does NOT reuse `QueueIdempotencyCache` (deliberate deviation from the build plan)
 //!
@@ -43,7 +42,9 @@ use crate::error::{EngineError, EngineResult};
 
 /// Server-assigned async operation handle (API-002). Opaque + stable across replays of its create
 /// `request_id`. The engine does not interpret its structure; the adapter chooses the format.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct OperationId(String);
 
 impl OperationId {
@@ -59,7 +60,8 @@ impl OperationId {
 ///
 /// `Partial` means some shards/items committed and others failed and remain re-drivable (resumable,
 /// NOT terminal). Terminal states are `Succeeded`, `Failed`, and `Canceled`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OperatorOperationState {
     Accepted,
     Running,
@@ -242,6 +244,176 @@ impl<R: Clone> OperatorOperationStore<R> {
             payload: record.payload.clone(),
         })
     }
+
+    /// List recorded operations newest-first by insertion order (stable for small smoke sets).
+    pub fn list(&self) -> Vec<OperationHandle<R>> {
+        self.operations
+            .iter()
+            .map(|(operation_id, record)| OperationHandle {
+                operation_id: operation_id.clone(),
+                state: record.state,
+                payload: record.payload.clone(),
+            })
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// API-002 operator domain types (transport-neutral)
+// ---------------------------------------------------------------------------
+
+/// Operator repair action (API-002 `RepairItems.action`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepairAction {
+    Reschedule,
+    ForceRetry,
+    ForceFail,
+    ForceComplete,
+    ForceRelease,
+    ClearLease,
+}
+
+/// How redrive/force_retry adjusts `retry_count` / attempt budget.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryCountMode {
+    #[default]
+    Reset,
+    Preserve,
+    Increment,
+}
+
+/// Kind of a recorded async operator operation (selector-scoped mutations).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorOpKind {
+    Repair,
+    Redrive,
+    Purge,
+    Archive,
+    Pause,
+    Resume,
+}
+
+/// Progress counters for an async operator operation (API-002 `operation.progress`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OperatorProgress {
+    pub matched: u64,
+    pub affected: u64,
+    pub failed: u64,
+    pub updated_at_ms: i64,
+}
+
+/// Payload retained on the async operation record (redacted: no payloads/lease tokens).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OperatorOpPayload {
+    pub kind: OperatorOpKind,
+    pub queue_tenant: String,
+    pub queue_id: String,
+    pub request_id: String,
+    pub dry_run: bool,
+    pub audit_reason: Option<String>,
+    pub progress: OperatorProgress,
+    /// Selector fingerprint (hash of the request body) for audit without logging the full selector.
+    pub selector_fingerprint: u64,
+}
+
+/// Queue admin state returned by pause/resume/get (API-002 `GetQueueAdminState`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct QueueAdminState {
+    pub paused: bool,
+    pub queue_admin_paused: bool,
+    /// While paused, no eligible age accrues (single Eligibility Precedence).
+    pub eligible_age_accrues: bool,
+}
+
+/// Operator-visible item view: never carries a lease token (API-002 GetItem / INV AC-SEC-2).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OperatorItemView {
+    pub item_id: String,
+    pub client_item_key: String,
+    pub item_version: u64,
+    pub lifecycle_state: String,
+    pub priority: Option<String>,
+    pub not_before_ms: Option<i64>,
+    pub attempt_count: u32,
+    pub worker_id: Option<String>,
+    pub lease_expires_at_ms: Option<i64>,
+    /// Always false in the operator plane — tokens are redacted, never returned.
+    pub lease_token_present: bool,
+    pub lease_token_redacted: bool,
+}
+
+/// Redacted operator audit record (no payloads, no lease tokens).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OperatorAuditRecord {
+    pub request_id: String,
+    pub operation_id: Option<String>,
+    pub principal_id: String,
+    pub kind: OperatorOpKind,
+    pub tenant_id: String,
+    pub queue_id: String,
+    pub selector_fingerprint: u64,
+    pub matched: u64,
+    pub affected: u64,
+    pub dry_run: bool,
+    pub audit_reason: Option<String>,
+    /// Always empty on the operator plane — payloads are never logged by default.
+    pub payload_logged: bool,
+    /// Always true when a lease was involved — only a hash is retained, never the plaintext.
+    pub lease_token_redacted: bool,
+}
+
+/// Result of an async operator create (accepted or terminal for small item_refs).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OperatorAsyncAccept {
+    pub request_id: String,
+    pub operation_id: OperationId,
+    pub state: OperatorOperationState,
+    pub progress: OperatorProgress,
+    pub dry_run: bool,
+    /// When the create was a pure replay of a prior `request_id`, true.
+    pub replayed: bool,
+}
+
+/// Fingerprint a stable operator request body for permanent `request_id` dedup.
+pub fn operator_body_fingerprint(kind: OperatorOpKind, body: &str) -> BodyHash {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{kind:?}").as_bytes());
+    hasher.update(body.as_bytes());
+    let digest = hasher.finalize();
+    BodyHash(u64::from_be_bytes(
+        digest[..8]
+            .try_into()
+            .expect("SHA-256 prefix is eight bytes"),
+    ))
+}
+
+/// Deterministic operation id from (tenant, queue, kind, request_id) — permanent dedup anchor.
+pub fn deterministic_operation_id(
+    tenant: &str,
+    queue: &str,
+    kind: OperatorOpKind,
+    request_id: &str,
+) -> OperationId {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(tenant.as_bytes());
+    hasher.update(b"|");
+    hasher.update(queue.as_bytes());
+    hasher.update(b"|");
+    hasher.update(format!("{kind:?}").as_bytes());
+    hasher.update(b"|");
+    hasher.update(request_id.as_bytes());
+    let digest = hasher.finalize();
+    let hex = digest
+        .iter()
+        .take(16)
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    OperationId::new(format!("oper_{hex}"))
 }
 
 #[cfg(test)]
