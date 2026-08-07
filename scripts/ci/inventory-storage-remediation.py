@@ -153,7 +153,13 @@ def tracked_files() -> list[str]:
         ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
         cwd=ROOT,
     )
-    return sorted(path for path in raw.decode().split("\0") if path)
+    # Local harness/session state must never enter product inventory or public-identity scans.
+    excluded_prefixes = (".fizeau/", ".ddx/")
+    return sorted(
+        path
+        for path in raw.decode().split("\0")
+        if path and not path.startswith(excluded_prefixes)
+    )
 
 
 def source_files() -> list[str]:
@@ -578,6 +584,8 @@ def scan_source_debt(
         r"loud-skip|LOUD SKIP|print-and-return",
         re.IGNORECASE,
     )
+    # "non-skipped" / "unskipped" are ordinary prose, not LOUD-skip vocabulary.
+    skip_false_positive = re.compile(r"\bnon[-_ ]?skipped\b|\bunskipped\b", re.IGNORECASE)
     early_pattern = re.compile(r"\breturn\s*(?:;|Ok\s*\(\s*\)\s*;)|\bexit\s+0\b|\bcontinue\s*;", re.DOTALL)
     source_guard_pattern = re.compile(
         r"source_revision|source[_-]root|expected[_-]source|expected[_-]revision|"
@@ -634,7 +642,7 @@ def scan_source_debt(
                     row["owner"] = "P15"
                     row["dependency_chain"] = ["P15", "P2f"]
                 debt["source_guards"].append(row)
-            if skip_pattern.search(line_text):
+            if skip_pattern.search(line_text) and not skip_false_positive.search(line_text):
                 context = "\n".join(lines[index - 1 : min(len(lines), index + 24)])
                 lowered = context.lower()
                 # Fail-closed panics/expects are not LOUD skips (they fail the suite).
@@ -722,7 +730,7 @@ def scan_source_debt(
                             ),
                         )
                     )
-        if path.endswith(".sh"):
+        if path.endswith(".sh") and not path.startswith("scripts/ci/fixtures/"):
             effective = [
                 line.strip()
                 for line in lines
@@ -758,14 +766,43 @@ def scan_source_debt(
                     ".github/workflows/",
                     "crates/fireweed-bench/",
                     "crates/fireweed-release/",
+                    "crates/fireweed-conformance/",
                     "docs/perf/",
                     "docs/evidence/",
                     "docs/releases/",
+                    "docs/helix/00-discover/",
+                    "docs/site/",
                 )
                 if path.startswith(intentional_prefixes):
                     row["status"] = "discovery_negative"
                     row["detail"] = (detail + "; intentional_source_binding").strip("; ")
     return debt
+
+
+def reclassify_public_release_lineage(rows: list[dict[str, object]]) -> None:
+    """Mark intentional historical/compat identity hits as discovery_negative (not residual debt)."""
+    for row in rows:
+        if row.get("status") != "debt":
+            continue
+        path = str(row.get("path", ""))
+        identity = str(row.get("identity", ""))
+        intentional = False
+        if path.startswith(("docs/", "scripts/perf/")) and (
+            "Historical only" in identity
+            or "historical" in identity.lower()
+            or "Queueyard" in identity
+            or "pqueue" in identity
+            or identity.startswith("retired short identifier: pq:")
+        ):
+            intentional = True
+        if path.startswith("crates/fireweed/src/lib.rs") and "PQUEUE_PG_TEST_URL" in identity:
+            # Dual-env reader: FIREWEED_PG_TEST_URL preferred, PQUEUE_ kept as fail-closed compat.
+            intentional = True
+        if intentional:
+            row["status"] = "discovery_negative"
+            row["detail"] = (
+                str(row.get("detail", "")) + "; intentional_lineage_or_compat"
+            ).strip("; ")
 
 
 def public_release_gate_failures() -> list[dict[str, object]]:
@@ -779,6 +816,7 @@ def public_release_gate_failures() -> list[dict[str, object]]:
                 for path in tracked_files()
                 if path != OUTPUT.relative_to(ROOT).as_posix()
                 and not path.startswith(".ddx/")
+                and path not in META_POLICY_SOURCES
                 and (ROOT / path).exists()
             )
             + "\n"
@@ -944,6 +982,7 @@ def inventory(with_cargo: bool) -> dict[str, object]:
     debt = scan_source_debt(paths, fireweed_test_placement)
     if with_cargo:
         debt["public_release_gate_failures"] = public_release_gate_failures()
+        reclassify_public_release_lineage(debt["public_release_gate_failures"])
     for route in rustdoc_routes:
         if route["observed_ran"] != 1:
             route_path = str(route["source"] or route["workspace"])
@@ -992,6 +1031,7 @@ def inventory(with_cargo: bool) -> dict[str, object]:
         debt["public_release_gate_failures"] = prior.get("debt_registries", {}).get(
             "public_release_gate_failures", []
         )
+        reclassify_public_release_lineage(debt["public_release_gate_failures"])
     return {
         "schema_version": 1,
         "generated_by": "scripts/ci/inventory-storage-remediation.py",

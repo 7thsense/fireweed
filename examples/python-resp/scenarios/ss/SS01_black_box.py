@@ -396,9 +396,9 @@ def run(ctx: ScenarioContext) -> ScenarioResult:
 
     # --- Latency soft/strict bars ---
     lat_fail: list[str] = []
-    pq = details["phases"]["point_query"]["hgetall_p95_ms"]
-    if pq >= bars["hgetall_p95_ms"]:
-        lat_fail.append(f"hgetall_p95_ms {pq:.2f} >= {bars['hgetall_p95_ms']}")
+    hgetall_p95 = details["phases"]["point_query"]["hgetall_p95_ms"]
+    if hgetall_p95 >= bars["hgetall_p95_ms"]:
+        lat_fail.append(f"hgetall_p95_ms {hgetall_p95:.2f} >= {bars['hgetall_p95_ms']}")
     xa = details["phases"]["scheduled_seed"]["xadd_batch_p95_ms"]
     if xa >= bars["xadd_batch_p95_ms"]:
         lat_fail.append(f"xadd_batch_p95_ms {xa:.2f} >= {bars['xadd_batch_p95_ms']}")
@@ -419,7 +419,7 @@ def run(ctx: ScenarioContext) -> ScenarioResult:
     ctx.log(
         "SUMMARY "
         f"ss_n={n} strict={strict} "
-        f"hgetall_p95={pq:.2f}ms xadd_p95={xa:.2f}ms claim_ack_p95={ca:.2f}ms "
+        f"hgetall_p95={hgetall_p95:.2f}ms xadd_p95={xa:.2f}ms claim_ack_p95={ca:.2f}ms "
         f"first_claim_ms={first_claim_latency_ms}"
     )
 
