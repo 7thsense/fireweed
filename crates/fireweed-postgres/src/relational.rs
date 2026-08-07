@@ -11186,6 +11186,23 @@ impl ProjectionStore for PostgresRelational {
             .range_scan(request)
     }
 
+    /// Log-replay × Postgres cells advertise `claim_by_query`; select via the same
+    /// hydrated hot-query projection used by range_scan (pending-only claim index).
+    fn select_claim_by_query(
+        &self,
+        shard: &QueueKey,
+        index: Option<&str>,
+        filters: &[fireweed_core::QueryFilter],
+        order_by: &fireweed_core::OrderField,
+        max_items: usize,
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<ItemId>> {
+        let mut g = self.lock();
+        let definition = g.queues.get(shard).ok_or(EngineError::NotFound)?.clone();
+        hot_query_projection_sql(&mut g.client, &definition, shard, index)?
+            .select_claim_by_query(index, filters, order_by, max_items, now)
+    }
+
     fn grouped_aggregate(
         &self,
         shard: &QueueKey,

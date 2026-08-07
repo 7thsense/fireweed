@@ -1529,6 +1529,21 @@ impl ProjectionStore for SqliteProjectionStore {
         self.projection_data(shard)?.range_scan(request)
     }
 
+    /// Log-replay cells advertise `claim_by_query`; select via the hydrated pending-only
+    /// claim secondary index (same image path as range_scan / hot queries).
+    fn select_claim_by_query(
+        &self,
+        shard: &QueueKey,
+        index: Option<&str>,
+        filters: &[fireweed_core::QueryFilter],
+        order_by: &fireweed_core::OrderField,
+        max_items: usize,
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<ItemId>> {
+        self.projection_data(shard)?
+            .select_claim_by_query(index, filters, order_by, max_items, now)
+    }
+
     fn grouped_aggregate(
         &self,
         shard: &QueueKey,

@@ -4605,7 +4605,12 @@ impl<B: LibBackend> RuntimeCore<B> {
             self.session_epoch_at(queue, common_time).await?;
         }
 
-        let claims = targets.into_iter().map(|target| async move {
+        // Sequential per-target claims: concurrent join_all races adapter-private offload
+        // and process-local lease-token maps when ItemId sequences collide across queues
+        // (memory×postgres / multi-schema Postgres projections). Independent commits stay
+        // per-queue; multi-queue atomicity is not claimed here (see commit_multi_claim).
+        let mut results = Vec::with_capacity(targets.len());
+        for target in targets {
             let queue = target.queue;
             let mut claim = target.claim;
             claim.lease_time = Some(common_time);
@@ -4613,9 +4618,9 @@ impl<B: LibBackend> RuntimeCore<B> {
                 claim.eligibility_time = Some(common_time);
             }
             let result = self.claim_response_at(&queue, claim).await;
-            MultiQueueClaimResult { queue, result }
-        });
-        Ok(futures::future::join_all(claims).await)
+            results.push(MultiQueueClaimResult { queue, result });
+        }
+        Ok(results)
     }
 
     /// Complete (ack) the given leased items. All-or-nothing (a fenced/superseded/non-leased id rejects
