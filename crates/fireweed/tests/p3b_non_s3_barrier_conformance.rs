@@ -398,6 +398,9 @@ fn backend_semantic_hybrid_names_are_confined_to_explicit_legacy_boundaries() {
         "mod hybrid;",
         "pub use hybrid::*;",
         "assert_eq!(product_class_for_log_name(\"hybrid\"), None);",
+        // Provider-neutral guards that name the banned token to forbid it.
+        "assert!(!id.contains(\"hybrid\"), \"retired Hybrid selector forbidden\");",
+        "for banned in [\"garage\", \"minio\", \"hybrid\", \"objectlog\"] {",
     ]);
     let guard_path = "crates/fireweed/tests/p3b_non_s3_barrier_conformance.rs";
 
