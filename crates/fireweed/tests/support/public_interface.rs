@@ -1,3 +1,8 @@
+// Shared by multiple `[[test]]` binaries; each binary only calls a subset of the
+// helpers, so unused-item lints are not meaningful at this layer.
+#![allow(dead_code)]
+#![allow(clippy::collapsible_if)]
+
 use std::collections::BTreeMap;
 use std::future::Future;
 

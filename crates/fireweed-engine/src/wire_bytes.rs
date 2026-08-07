@@ -76,7 +76,7 @@ fn deserialize_raw_bytes<'de, D: Deserializer<'de>>(deserializer: D) -> Result<V
 pub mod vec_u8 {
     use super::*;
 
-    pub fn serialize<S: Serializer>(value: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(value: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
         serialize_raw_bytes(value, serializer)
     }
 
@@ -471,7 +471,7 @@ pub fn base64_expansion(raw_len: usize) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::Deserialize;
+    use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     struct Sample {

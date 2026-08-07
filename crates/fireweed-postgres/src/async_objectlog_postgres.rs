@@ -1661,6 +1661,10 @@ impl fireweed_engine::HotProjectionQueryPort for AsyncObjectLogPostgresBackend {
 }
 impl fireweed_engine::HistoricalProjectionRead for AsyncObjectLogPostgresBackend {
     type AsOfProjection = fireweed_projection::InMemoryProjection;
+
+    // Trait signature uses `impl Future` RPIT; keep the form so we match the
+    // engine trait without changing the public port shape.
+    #[allow(clippy::manual_async_fn)]
     fn current_position(
         &self,
         shard: &QueueKey,
@@ -1673,6 +1677,8 @@ impl fireweed_engine::HistoricalProjectionRead for AsyncObjectLogPostgresBackend
                 .ok_or(EngineError::NotFound)
         }
     }
+
+    #[allow(clippy::manual_async_fn)]
     fn read_as_of<T, F>(
         &self,
         _shard: &QueueKey,
