@@ -104,4 +104,7 @@ bash "${SCRIPT_DIR}/microsite-gate.sh"
 echo "--- API-005 suite ownership map ---"
 python3 "${SCRIPT_DIR}/api005_suite_ownership.py" --self-test
 
+echo "--- functional-matrix route sources (P10r exact leaves) ---"
+python3 "${SCRIPT_DIR}/functional_matrix_route_sources.py" --check --self-test
+
 echo "=== pr-gate [${MODE}] PASSED ==="

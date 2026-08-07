@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
-# storage-matrix-gate.sh — Release/CI gate for the public 15-cell storage matrix.
+# storage-matrix-gate.sh — Release/CI gate for the public 20-cell storage matrix.
 #
-# The public product storage surface is exactly the 5×3 matrix
-# (log ∈ {memory,sqlite,postgres,filesystem,s3} × projection ∈ {memory,sqlite,postgres}).
-# This gate binds T0–T2 / focused server matrix suites, legacy product-name
-# hygiene, and Helm matrix fixtures so a release cannot ship with a failed
-# required cell.
+# The public product storage surface is exactly the 5×4 matrix
+# (log ∈ {memory,sqlite,postgres,filesystem,s3} ×
+#  projection ∈ {memory,sqlite,turso,postgres}).
+# This gate binds exact P10r functional-matrix source leaves (compile/list +
+# focused cargo invocations), legacy product-name hygiene, and Helm matrix
+# fixtures so a release cannot ship with a failed required cell.
+#
+# Broad substring cargo filters are forbidden (P10r). Every cargo test filter is
+# an exact harness ID from:
+#   docs/helix/04-build/functional-matrix-route-sources.json
 #
 # Governing bars:
 #   docs/helix/04-build/storage-matrix-completion-brief.md §2 (Phase 6)
 #   docs/helix/04-build/DEPLOYMENT-READINESS.md (product storage model)
-#   scripts/ci/s3-matrix-job-requirements.md
+#   scripts/ci/s3-matrix-job-requirements.md (generated from authority manifest)
+#   docs/helix/04-build/storage-authority-manifest.json
 #
 # Usage:
 #   bash scripts/ci/storage-matrix-gate.sh
@@ -24,25 +30,10 @@
 # Local/dev runs may execute without live S3 or Postgres: cargo tests document
 # skip for cells that need FIREWEED_S3_TEST_ENDPOINT / FIREWEED_PG_TEST_URL.
 #
-# Required product / release CI that claims the full 15-cell surface MUST:
+# Required product / release CI that claims the full 20-cell surface MUST:
 #   1. export FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1
 #   2. provision S3-compatible + Postgres fixtures (see Fixture requirements)
 #   3. treat a missing fixture as gate failure (this script enforces that)
-#
-# Fixture requirements (full matrix)
-# ----------------------------------
-# Postgres (any cell with postgres log or projection):
-#   FIREWEED_PG_TEST_URL=postgres://user:pass@host:5432/db
-#   cargo builds use --features postgres on the fireweed library package
-#
-# S3 (log axis s3 — three cells):
-#   FIREWEED_S3_TEST_ENDPOINT=http://<minio-or-compatible>:9000
-#   FIREWEED_S3_TEST_BUCKET=fireweed-test          # recommended
-#   FIREWEED_S3_TEST_ACCESS_KEY=minioadmin         # recommended
-#   FIREWEED_S3_TEST_SECRET_KEY=minioadmin         # recommended
-#   FIREWEED_S3_TEST_REGION=us-east-1              # optional
-# Endpoint must support native create-only (If-None-Match: *). See:
-#   scripts/ci/s3-matrix-job-requirements.md
 #
 # Optional flags:
 #   --skip-helm     skip helm-gate.sh (matrix suite + legacy assert still run)
@@ -57,6 +48,7 @@ CARGO="${CARGO:-rustup run 1.92.0 cargo}"
 REQUIRE_FULL="${FIREWEED_STORAGE_MATRIX_REQUIRE_FULL:-0}"
 SKIP_HELM=0
 SKIP_CARGO=0
+ROUTE_SOURCES="${REPO_ROOT}/docs/helix/04-build/functional-matrix-route-sources.json"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -76,7 +68,7 @@ done
 
 err() { echo "storage-matrix-gate: $*" >&2; }
 
-echo "=== storage-matrix-gate: public 15-cell StorageConfig matrix ==="
+echo "=== storage-matrix-gate: public 20-cell StorageConfig matrix ==="
 echo "repo: ${REPO_ROOT}"
 echo "REQUIRE_FULL=${REQUIRE_FULL}"
 
@@ -101,10 +93,21 @@ if [[ "${REQUIRE_FULL}" == "1" || "${REQUIRE_FULL}" == "true" || "${REQUIRE_FULL
         echo "  FIREWEED_PG_TEST_URL is set"
     fi
     if ((missing != 0)); then
-        err "refusing to claim full 15-cell matrix with missing fixtures (skip ≠ pass)"
+        err "refusing to claim full 20-cell matrix with missing fixtures (skip ≠ pass)"
         exit 1
     fi
 fi
+
+# ---------------------------------------------------------------------------
+# 0. Manifest selectors + exact route source registry (P10r)
+# ---------------------------------------------------------------------------
+echo "--- functional-matrix route sources (manifest selectors; exact leaves) ---"
+if [[ ! -f "${ROUTE_SOURCES}" ]]; then
+    err "missing ${ROUTE_SOURCES}; run:"
+    err "  python3 scripts/ci/functional_matrix_route_sources.py --write"
+    exit 1
+fi
+python3 "${SCRIPT_DIR}/functional_matrix_route_sources.py" --check --self-test
 
 # ---------------------------------------------------------------------------
 # 1. Legacy product-name hygiene (always; fast fail)
@@ -113,52 +116,96 @@ echo "--- assert-no-legacy-storage-product-names ---"
 bash "${SCRIPT_DIR}/assert-no-legacy-storage-product-names.sh"
 
 # ---------------------------------------------------------------------------
-# 2. Library 15-cell T0–T2 harness
+# 2. Exact cargo source leaves (no substring filters)
 # ---------------------------------------------------------------------------
 if ((SKIP_CARGO == 0)); then
-    # Prefer postgres feature so postgres-axis cells can run when FIREWEED_PG_TEST_URL is set.
-    FIREWEED_FEATURES="memory,sqlite,objectlog,postgres"
+    FIREWEED_FEATURES="memory,sqlite,objectlog,postgres,turso"
 
-    echo "--- cargo test -p fireweed --test storage_matrix_t0_t2 (features=${FIREWEED_FEATURES}) ---"
-    ${CARGO} test -p fireweed --features "${FIREWEED_FEATURES}" --test storage_matrix_t0_t2 -- --nocapture
+    echo "--- compile/list functional-matrix route source leaves ---"
+    python3 "${SCRIPT_DIR}/functional_matrix_route_sources.py" --list-leaves
 
-    # ---------------------------------------------------------------------------
-    # 3. Server composition-root matrix suites (filter substrings match module names)
-    #    class_b           — memory log × {memory,sqlite,postgres} Class B T0–T3
-    #    sqlite_log_matrix — sqlite log three projections
-    #    filesystem_matrix — filesystem object-log three projections
-    #    s3_object_log     — s3 log three projections (+ unit/T4)
-    # ---------------------------------------------------------------------------
-    SERVER_FILTERS=(class_b sqlite_log_matrix filesystem_matrix s3_object_log)
-    for filter in "${SERVER_FILTERS[@]}"; do
-        echo "--- cargo test -p fireweed-server --lib ${filter} ---"
-        # fireweed-server wires postgres behind its own `postgres` feature.
-        ${CARGO} test -p fireweed-server --features postgres --lib "${filter}" -- --nocapture
-    done
+    echo "--- cargo test -p fireweed --test functional_matrix_route_sources (dry-run leaves) ---"
+    # Execute only the P10r dry-run source module. Full T0–T2 / live matrix execution is P10.
+    ${CARGO} test -p fireweed --features "${FIREWEED_FEATURES}" \
+        --test functional_matrix_route_sources -- --nocapture
+
+    echo "--- exact T0–T2 registration leaf (no live fixture execution claim) ---"
+    ${CARGO} test -p fireweed --features "${FIREWEED_FEATURES}" \
+        --test storage_matrix_t0_t2 -- \
+        storage_matrix_registers_exactly_20_distinct_cells --exact --nocapture
+
+    # Exact server --lib + external-kafka leaves: compile/list only (P10r boundary).
+    # Full execution of fixture-bound cells is owned by P10 after P2r bindings.
+    echo "--- exact fireweed-server --lib leaves (compile/list) ---"
+    REPO_ROOT="${REPO_ROOT}" CARGO="${CARGO}" python3 - <<'PY'
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(os.environ["REPO_ROOT"])
+registry = json.loads((root / "docs/helix/04-build/functional-matrix-route-sources.json").read_text())
+cargo = os.environ.get("CARGO", "rustup run 1.92.0 cargo").split()
+kinds = {"class_b_server", "inline_lib", "external_kafka"}
+groups: dict[tuple[str, ...], list[tuple[str, str]]] = {}
+for leaf in registry["leaves"]:
+    if leaf["kind"] not in kinds:
+        continue
+    key = tuple(leaf["cargo_args"])
+    groups.setdefault(key, []).append((leaf["leaf_id"], leaf["test_filter"]))
+
+seen_kafka = set()
+for cargo_args, items in sorted(groups.items()):
+    list_cmd = cargo + list(cargo_args) + ["--", "--list"]
+    print("list:", " ".join(list_cmd), flush=True)
+    listed = subprocess.run(list_cmd, cwd=root, text=True, capture_output=True)
+    if listed.returncode != 0:
+        sys.stderr.write(listed.stdout + listed.stderr)
+        sys.exit(listed.returncode)
+    text = listed.stdout + listed.stderr
+    for leaf_id, filt in items:
+        short = filt.split("::")[-1]
+        if short not in text and filt not in text:
+            sys.stderr.write(f"exact leaf not listed: {leaf_id} filter={filt}\n")
+            sys.exit(1)
+        print(f"  listed {leaf_id}", flush=True)
+        if leaf_id.startswith("external_kafka:"):
+            if "feature-on" in leaf_id:
+                seen_kafka.add("feature-on")
+            if "feature-off" in leaf_id:
+                seen_kafka.add("feature-off")
+
+if seen_kafka != {"feature-on", "feature-off"}:
+    sys.stderr.write(f"external-kafka tuples incomplete: {seen_kafka}\n")
+    sys.exit(1)
+print("exact server --lib + external-kafka leaves listed")
+PY
 else
     if [[ "${REQUIRE_FULL}" == "1" || "${REQUIRE_FULL}" == "true" || "${REQUIRE_FULL}" == "yes" ]]; then
         err "refusing --skip-cargo under FIREWEED_STORAGE_MATRIX_REQUIRE_FULL (skip ≠ pass)"
         exit 1
     fi
-    echo "--- cargo matrix suites: SKIPPED (--skip-cargo; non-full local only) ---"
+    echo "--- cargo matrix suites: local-only skip (--skip-cargo; non-full local only) ---"
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Helm gate — lint/render/kubeconform for all 15-cell CI values fixtures
+# 3. Helm gate — lint/render/kubeconform for all matrix CI values fixtures
 # ---------------------------------------------------------------------------
 if ((SKIP_HELM == 0)); then
-    echo "--- helm-gate (15-cell matrix fixtures + shared variants) ---"
+    echo "--- helm-gate (matrix fixtures + shared variants) ---"
     bash "${SCRIPT_DIR}/helm-gate.sh"
 else
     if [[ "${REQUIRE_FULL}" == "1" || "${REQUIRE_FULL}" == "true" || "${REQUIRE_FULL}" == "yes" ]]; then
         err "refusing --skip-helm under FIREWEED_STORAGE_MATRIX_REQUIRE_FULL (skip ≠ pass)"
         exit 1
     fi
-    echo "--- helm-gate: SKIPPED (--skip-helm; non-full local only) ---"
+    echo "--- helm-gate: local-only skip (--skip-helm; non-full local only) ---"
 fi
 
 echo "=== storage-matrix-gate: PASSED ==="
-echo "Release storage surface: 15 cells (StorageConfig log × projection)."
+echo "Release storage surface: 20 cells (StorageConfig log × projection)."
+echo "Route sources: ${ROUTE_SOURCES}"
 echo "Full CI claims require FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1 + S3/PG fixtures."
 echo "S3 fixture contract: scripts/ci/s3-matrix-job-requirements.md"
 exit 0

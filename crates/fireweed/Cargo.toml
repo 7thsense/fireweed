@@ -226,3 +226,8 @@ required-features = ["objectlog", "sqlite", "postgres"]
 name = "p3b_non_s3_barrier_conformance"
 path = "tests/p3b_non_s3_barrier_conformance.rs"
 required-features = ["memory", "objectlog", "sqlite", "postgres"]
+
+[[test]]
+name = "functional_matrix_route_sources"
+path = "tests/functional_matrix_route_sources.rs"
+required-features = ["memory", "sqlite", "objectlog", "postgres", "turso"]
