@@ -432,9 +432,9 @@
           "P2f"
         ],
         "detail": "intentional_env_or_release_ignore",
-        "id": "63e81d2762ed033f884f",
+        "id": "2395b1ea7c2cecf29daa",
         "identity": "#[ignore = \"US-009 recovery proof requires FIREWEED_PG_TEST_URL\"]",
-        "line": 760,
+        "line": 777,
         "owner": "P10pf",
         "path": "crates/fireweed/tests/whitebox/objectlog_postgres_composition.rs",
         "status": "discovery_negative"
@@ -3864,9 +3864,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "145e6a19b589f1e47b4a",
+        "id": "95af225bf9c28a2ca617",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 742,
+        "line": 759,
         "owner": "P10pf",
         "path": "crates/fireweed/tests/whitebox/objectlog_postgres_composition.rs",
         "status": "discovery_negative"
@@ -3878,9 +3878,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "ed22834f70fe947fc089",
-        "identity": "panic!(\"FIREWEED_S3_TEST_URL required (fail-closed live S3; no LOUD skip)\");",
-        "line": 1237,
+        "id": "2cf23de4ed8e4faa1443",
+        "identity": "\"FIREWEED_S3_TEST_URL or FIREWEED_S3_TEST_ENDPOINT required (fail-closed live S3; no LOUD skip)\"",
+        "line": 1248,
         "owner": "P10pf",
         "path": "crates/fireweed/tests/whitebox/objectlog_sqlite_composition.rs",
         "status": "discovery_negative"
@@ -11081,7 +11081,8 @@
           "ProjectionRecoveryPolicy",
           "SecretValue",
           "SegmentSettings",
-          "open_composed_sqlite"
+          "open_composed_sqlite",
+          "open_s3_composed_sqlite"
         ],
         "status": "discovery_negative"
       },
@@ -13954,7 +13955,8 @@
           "ProjectionRecoveryPolicy",
           "SecretValue",
           "SegmentSettings",
-          "open_composed_sqlite"
+          "open_composed_sqlite",
+          "open_s3_composed_sqlite"
         ],
         "source": "objectlog_sqlite_composition.rs",
         "temporary_id": "Cargo.toml::fireweed::fireweed::test::test_objectlog_sqlite_composition::public_objectlog_sqlite_async_supports_authoritative_log_commit",
@@ -13982,7 +13984,8 @@
           "ProjectionRecoveryPolicy",
           "SecretValue",
           "SegmentSettings",
-          "open_composed_sqlite"
+          "open_composed_sqlite",
+          "open_s3_composed_sqlite"
         ],
         "source": "objectlog_sqlite_composition.rs",
         "temporary_id": "Cargo.toml::fireweed::fireweed::test::test_objectlog_sqlite_composition::public_objectlog_sqlite_async_verify_drains_deferred_checkpoint",
@@ -14010,7 +14013,8 @@
           "ProjectionRecoveryPolicy",
           "SecretValue",
           "SegmentSettings",
-          "open_composed_sqlite"
+          "open_composed_sqlite",
+          "open_s3_composed_sqlite"
         ],
         "source": "objectlog_sqlite_composition.rs",
         "temporary_id": "Cargo.toml::fireweed::fireweed::test::test_objectlog_sqlite_composition::public_objectlog_sqlite_bounded_mutation_replays_from_authoritative_log",
@@ -14038,7 +14042,8 @@
           "ProjectionRecoveryPolicy",
           "SecretValue",
           "SegmentSettings",
-          "open_composed_sqlite"
+          "open_composed_sqlite",
+          "open_s3_composed_sqlite"
         ],
         "source": "objectlog_sqlite_composition.rs",
         "temporary_id": "Cargo.toml::fireweed::fireweed::test::test_objectlog_sqlite_composition::public_objectlog_sqlite_delete_and_rebuild",
@@ -14066,7 +14071,8 @@
           "ProjectionRecoveryPolicy",
           "SecretValue",
           "SegmentSettings",
-          "open_composed_sqlite"
+          "open_composed_sqlite",
+          "open_s3_composed_sqlite"
         ],
         "source": "objectlog_sqlite_composition.rs",
         "temporary_id": "Cargo.toml::fireweed::fireweed::test::test_objectlog_sqlite_composition::public_objectlog_sqlite_filtered_claim_survives_delete_and_rebuild",
@@ -14094,7 +14100,8 @@
           "ProjectionRecoveryPolicy",
           "SecretValue",
           "SegmentSettings",
-          "open_composed_sqlite"
+          "open_composed_sqlite",
+          "open_s3_composed_sqlite"
         ],
         "source": "objectlog_sqlite_composition.rs",
         "temporary_id": "Cargo.toml::fireweed::fireweed::test::test_objectlog_sqlite_composition::public_objectlog_sqlite_filtered_metrics_survive_delete_and_rebuild",
@@ -14122,7 +14129,8 @@
           "ProjectionRecoveryPolicy",
           "SecretValue",
           "SegmentSettings",
-          "open_composed_sqlite"
+          "open_composed_sqlite",
+          "open_s3_composed_sqlite"
         ],
         "source": "objectlog_sqlite_composition.rs",
         "temporary_id": "Cargo.toml::fireweed::fireweed::test::test_objectlog_sqlite_composition::public_objectlog_sqlite_lifecycle_interleaves_without_replay_gaps",
@@ -14150,7 +14158,8 @@
           "ProjectionRecoveryPolicy",
           "SecretValue",
           "SegmentSettings",
-          "open_composed_sqlite"
+          "open_composed_sqlite",
+          "open_s3_composed_sqlite"
         ],
         "source": "objectlog_sqlite_composition.rs",
         "temporary_id": "Cargo.toml::fireweed::fireweed::test::test_objectlog_sqlite_composition::public_objectlog_sqlite_lifecycle_seals_already_buffered_writes_before_reset",
@@ -14178,7 +14187,8 @@
           "ProjectionRecoveryPolicy",
           "SecretValue",
           "SegmentSettings",
-          "open_composed_sqlite"
+          "open_composed_sqlite",
+          "open_s3_composed_sqlite"
         ],
         "source": "objectlog_sqlite_composition.rs",
         "temporary_id": "Cargo.toml::fireweed::fireweed::test::test_objectlog_sqlite_composition::public_objectlog_sqlite_multi_claim_continuation_rebuilds_exactly_once",
@@ -14206,7 +14216,8 @@
           "ProjectionRecoveryPolicy",
           "SecretValue",
           "SegmentSettings",
-          "open_composed_sqlite"
+          "open_composed_sqlite",
+          "open_s3_composed_sqlite"
         ],
         "source": "objectlog_sqlite_composition.rs",
         "temporary_id": "Cargo.toml::fireweed::fireweed::test::test_objectlog_sqlite_composition::public_objectlog_sqlite_namespaces_isolate_shared_object_root",
@@ -14234,7 +14245,8 @@
           "ProjectionRecoveryPolicy",
           "SecretValue",
           "SegmentSettings",
-          "open_composed_sqlite"
+          "open_composed_sqlite",
+          "open_s3_composed_sqlite"
         ],
         "source": "objectlog_sqlite_composition.rs",
         "temporary_id": "Cargo.toml::fireweed::fireweed::test::test_objectlog_sqlite_composition::public_objectlog_sqlite_strict_commit_transition_round_trip",
@@ -14262,7 +14274,8 @@
           "ProjectionRecoveryPolicy",
           "SecretValue",
           "SegmentSettings",
-          "open_composed_sqlite"
+          "open_composed_sqlite",
+          "open_s3_composed_sqlite"
         ],
         "source": "objectlog_sqlite_composition.rs",
         "temporary_id": "Cargo.toml::fireweed::fireweed::test::test_objectlog_sqlite_composition::public_objectlog_sqlite_strict_writes_fail_closed_while_projection_is_deleted",
@@ -14290,7 +14303,8 @@
           "ProjectionRecoveryPolicy",
           "SecretValue",
           "SegmentSettings",
-          "open_composed_sqlite"
+          "open_composed_sqlite",
+          "open_s3_composed_sqlite"
         ],
         "source": "objectlog_sqlite_composition.rs",
         "temporary_id": "Cargo.toml::fireweed::fireweed::test::test_objectlog_sqlite_composition::public_objectlog_sqlite_verification_is_exact_per_queue",
@@ -14318,7 +14332,8 @@
           "ProjectionRecoveryPolicy",
           "SecretValue",
           "SegmentSettings",
-          "open_composed_sqlite"
+          "open_composed_sqlite",
+          "open_s3_composed_sqlite"
         ],
         "source": "objectlog_sqlite_composition.rs",
         "temporary_id": "Cargo.toml::fireweed::fireweed::test::test_objectlog_sqlite_composition::public_s3_sqlite_delete_and_rebuild",
@@ -18478,7 +18493,7 @@
     "cargo_status": "listed",
     "errors": [],
     "generated_by": "scripts/ci/fireweed_test_placement.py",
-    "input_sha256": "5ded0a10ce708eecf1d2facecb4c379ff1a3de7ddc430c23a899dc91d1de1f64",
+    "input_sha256": "eee5023688c1b6fa4b21b3279f5341761cc58a45e7111c252aac192b66716c3d",
     "private_surface": [
       {
         "declaration_kind": "fn",
@@ -18524,6 +18539,18 @@
         "item": "open_composed_sqlite",
         "kind": "function",
         "line": 6760,
+        "observed_diagnostic": "E0603",
+        "observed_rejected": true,
+        "path": "crates/fireweed/src/lib.rs"
+      },
+      {
+        "declaration_kind": "fn",
+        "expected_diagnostic": "E0603",
+        "fixture_id": "private-0e677861d4a59091",
+        "id": "function:open_s3_composed_sqlite",
+        "item": "open_s3_composed_sqlite",
+        "kind": "function",
+        "line": 6776,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -28343,7 +28370,8 @@
           "ProjectionRecoveryPolicy",
           "SecretValue",
           "SegmentSettings",
-          "open_composed_sqlite"
+          "open_composed_sqlite",
+          "open_s3_composed_sqlite"
         ],
         "source": "crates/fireweed/tests/whitebox/objectlog_sqlite_composition.rs"
       },
@@ -94890,7 +94918,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "344342fadd5aab664155f899e7d0a3b9c078172bf9b2462c37f9d9f499ed3221",
+  "source_inventory_sha256": "ad3a5317e8996d50784666e8b68e2c75376a876187953623e93492b4551bf440",
   "workspaces": [
     {
       "listing_error_sha256": "",
