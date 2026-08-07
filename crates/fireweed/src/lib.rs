@@ -98,7 +98,7 @@ pub use fireweed_engine::{
     OperatorAuditRecord, OperatorItemView, OperatorOpKind, OperatorOpPayload,
     OperatorOperationState, OperatorProgress, PayloadUpdate, PushBatchOutcome, PushDisposition,
     QueueAdminState, QueueKey, QueueMetrics, RepairAction, RetryCountMode, ScheduleUpdate,
-    SelectedMutation, SideRecord, TimestampComparison, UpsertOutcome,
+    SelectedMutation, SideRecord, SnapshotStore, TimestampComparison, UpsertOutcome,
 };
 pub use operator::OPERATOR_ARCHIVED_METADATA_KEY;
 
@@ -3356,6 +3356,7 @@ pub(crate) trait LibBackend:
     + DiscoveryPort
     + HotProjectionQueryPort
     + ControlPlaneStore
+    + SnapshotStore
     + Send
     + Sync
 {
@@ -3382,6 +3383,7 @@ impl<T> LibBackend for T where
         + DiscoveryPort
         + HotProjectionQueryPort
         + ControlPlaneStore
+        + SnapshotStore
         + Send
         + Sync
 {
@@ -4869,6 +4871,37 @@ impl<B: LibBackend> RuntimeCore<B> {
     /// The current durable command position for `queue` (thin wrapper over `high_water`).
     pub async fn current_position(&self, queue: &QueueKey) -> EngineResult<CommandPosition> {
         self.backend.current_position(queue).await
+    }
+
+    /// Capture a projection snapshot at the current durable position (fireweed-3f70c7d1).
+    ///
+    /// Payload is an empty opaque blob when the backend does not export a typed image through this
+    /// plane; object-log / log-replay backends still record a position-anchored snapshot ref for
+    /// reopen + tail recovery.
+    pub async fn snapshot_now(&self, queue: &QueueKey) -> EngineResult<SnapshotNowResult> {
+        let position = self.backend.current_position(queue).await?;
+        let snap = fireweed_engine::ProjectionSnapshot {
+            payload: Vec::new(),
+        };
+        let r =
+            SnapshotStore::write_snapshot(&*self.backend, queue, position.clone(), snap).await?;
+        Ok(SnapshotNowResult {
+            position: r.position,
+            ref_id: r.ref_id,
+        })
+    }
+
+    /// Latest snapshot introspection for `queue`, if any.
+    pub async fn latest_snapshot_info(
+        &self,
+        queue: &QueueKey,
+    ) -> EngineResult<Option<SnapshotInfo>> {
+        let latest = SnapshotStore::latest_snapshot(&*self.backend, queue).await?;
+        Ok(latest.map(|r| SnapshotInfo {
+            position: r.position,
+            ref_id: r.ref_id,
+            log_command_count: None,
+        }))
     }
 
     /// Reconstruct `queue`'s projection as of `position`, run `query` against it, and discard it.

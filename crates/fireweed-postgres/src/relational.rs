@@ -6682,6 +6682,46 @@ impl Backend for PostgresRelationalBackend {
     }
 }
 
+/// Relational Postgres is not the disposable projection snapshot plane; use the log-replay
+/// PostgresBackend SnapshotStore (or object-log products) for embedder snapshot capture.
+impl fireweed_engine::SnapshotStore for PostgresRelationalBackend {
+    fn write_snapshot(
+        &self,
+        _shard: &QueueKey,
+        _position: CommandPosition,
+        _snapshot: fireweed_engine::ProjectionSnapshot,
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::SnapshotRef>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+    fn latest_snapshot(
+        &self,
+        _shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<Option<fireweed_engine::SnapshotRef>>> + Send
+    {
+        std::future::ready(Ok(None))
+    }
+    fn read_snapshot(
+        &self,
+        _snapshot_ref: &fireweed_engine::SnapshotRef,
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::ProjectionSnapshot>> + Send
+    {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+    fn high_water(
+        &self,
+        _shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<Option<CommandPosition>>> + Send {
+        std::future::ready(Ok(None))
+    }
+    fn set_high_water(
+        &self,
+        _shard: &QueueKey,
+        _position: CommandPosition,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+}
+
 impl ControlPlaneStore for PostgresRelationalBackend {
     fn create_queue(
         &self,

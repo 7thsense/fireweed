@@ -29,12 +29,12 @@ use fireweed_engine::{
     InProcessLogStore, IndexQueryPort, InlineOwnedTaskDispatcher, ItemMutationPort,
     ItemMutationRequest, ItemMutationResponse, ItemView, LeaseView, LiveItemView, LogStore,
     OwnedTask, PendingPage, PendingSummary, ProjectionClaimPlanner, ProjectionLifecyclePlanner,
-    ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner, PurgePort, PushPort, PushSpec,
-    QueueCommand, QueueCounters, QueueKey, QueueMetrics, RawCommitFault, RawCommitOutcome,
-    RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RenewLeasePort, RenewTarget, SeparateReplayCommit, SeparateReplayCommitter, SeqIdGen,
-    SetGatesPort, TerminalEmissionMetrics, TickReport, UnifiedAtomicCommit, UnifiedAtomicCommitter,
-    UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner, ProjectionSnapshot, PurgePort,
+    PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics, RawCommitFault,
+    RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
+    ReclaimPort, RenewLeasePort, RenewTarget, SeparateReplayCommit, SeparateReplayCommitter,
+    SeqIdGen, SetGatesPort, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
+    UnifiedAtomicCommit, UnifiedAtomicCommitter, UpdateFieldsPort, UpsertOutcome, UpsertPort,
 };
 use fireweed_projection::InMemoryProjection;
 use fireweed_turso::{TursoConfig, TursoRelational};
@@ -1034,6 +1034,56 @@ macro_rules! impl_turso_product_ports {
                 F: FnOnce(&Self::AsOfProjection) -> EngineResult<T> + Send + 'static,
             {
                 std::future::ready(Err(EngineError::Unavailable))
+            }
+        }
+
+        // SnapshotStore: Turso products share the log-axis high-water / snapshot plane.
+        impl SnapshotStore for $ty {
+            fn write_snapshot(
+                &self,
+                shard: &QueueKey,
+                position: CommandPosition,
+                snapshot: ProjectionSnapshot,
+            ) -> impl std::future::Future<Output = EngineResult<SnapshotRef>> + Send {
+                AsyncLogStore::write_snapshot(
+                    self.log.as_ref(),
+                    shard.clone(),
+                    position,
+                    snapshot,
+                )
+            }
+            fn latest_snapshot(
+                &self,
+                shard: &QueueKey,
+            ) -> impl std::future::Future<Output = EngineResult<Option<SnapshotRef>>> + Send {
+                AsyncLogStore::latest_snapshot(self.log.as_ref(), shard.clone())
+            }
+            fn read_snapshot(
+                &self,
+                snapshot_ref: &SnapshotRef,
+            ) -> impl std::future::Future<Output = EngineResult<ProjectionSnapshot>> + Send {
+                AsyncLogStore::read_snapshot(self.log.as_ref(), snapshot_ref.clone())
+            }
+            fn snapshot_at_or_before(
+                &self,
+                shard: &QueueKey,
+                position: &CommandPosition,
+            ) -> impl std::future::Future<Output = EngineResult<Option<SnapshotRef>>> + Send {
+                let position = position.clone();
+                AsyncLogStore::snapshot_at_or_before(self.log.as_ref(), shard.clone(), position)
+            }
+            fn high_water(
+                &self,
+                shard: &QueueKey,
+            ) -> impl std::future::Future<Output = EngineResult<Option<CommandPosition>>> + Send {
+                AsyncLogStore::high_water(self.log.as_ref(), shard.clone())
+            }
+            fn set_high_water(
+                &self,
+                shard: &QueueKey,
+                position: CommandPosition,
+            ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+                AsyncLogStore::set_high_water(self.log.as_ref(), shard.clone(), position)
             }
         }
 

@@ -1207,3 +1207,23 @@ async fn claim_at_resolves_eligibility_at_an_explicit_epoch_over_memory() {
         "lease expiry is lease_time + duration"
     );
 }
+
+#[tokio::test]
+async fn snapshot_now_records_position_and_ref_on_memory() {
+    let backend = Arc::new(composed_memory_backend());
+    let fireweed = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
+    let q = qkey();
+    fireweed.create_queue(qdef()).await.unwrap();
+    fireweed.push(&q, at(5)).await.unwrap();
+    fireweed.push(&q, at(6)).await.unwrap();
+
+    let snap = fireweed.snapshot_now(&q).await.expect("snapshot_now");
+    assert!(!snap.ref_id.is_empty());
+    let info = fireweed
+        .latest_snapshot_info(&q)
+        .await
+        .expect("latest_snapshot_info")
+        .expect("snapshot exists");
+    assert_eq!(info.ref_id, snap.ref_id);
+    assert_eq!(info.position, snap.position);
+}

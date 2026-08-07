@@ -133,6 +133,11 @@ trait FireweedDataPlane: Send + Sync {
     ) -> FacadeFuture<'a, Option<Bytes>>;
     fn peek<'a>(&'a self, queue: &'a QueueKey, limit: usize) -> FacadeFuture<'a, Vec<ItemView>>;
     fn current_position<'a>(&'a self, queue: &'a QueueKey) -> FacadeFuture<'a, CommandPosition>;
+    fn snapshot_now<'a>(&'a self, queue: &'a QueueKey) -> FacadeFuture<'a, SnapshotNowResult>;
+    fn latest_snapshot_info<'a>(
+        &'a self,
+        queue: &'a QueueKey,
+    ) -> FacadeFuture<'a, Option<SnapshotInfo>>;
     fn discover_active_scopes<'a>(
         &'a self,
         queue: &'a QueueKey,
@@ -755,6 +760,15 @@ impl<B: LibBackend + 'static> FireweedDataPlane for RuntimeCore<B> {
     fn current_position<'a>(&'a self, queue: &'a QueueKey) -> FacadeFuture<'a, CommandPosition> {
         Box::pin(RuntimeCore::current_position(self, queue))
     }
+    fn snapshot_now<'a>(&'a self, queue: &'a QueueKey) -> FacadeFuture<'a, SnapshotNowResult> {
+        Box::pin(RuntimeCore::snapshot_now(self, queue))
+    }
+    fn latest_snapshot_info<'a>(
+        &'a self,
+        queue: &'a QueueKey,
+    ) -> FacadeFuture<'a, Option<SnapshotInfo>> {
+        Box::pin(RuntimeCore::latest_snapshot_info(self, queue))
+    }
     fn discover_active_scopes<'a>(
         &'a self,
         queue: &'a QueueKey,
@@ -1326,9 +1340,9 @@ impl Fireweed {
 
     /// Explicit log compaction behind a covering snapshot (fireweed-3f70c7d1 / fireweed-1bf34d97).
     ///
-    /// Refuses unless the queue policy has `compaction_authorized` and a covering snapshot exists
+    /// Refuses unless the queue policy has `compaction_authorized` **and** a covering snapshot exists
     /// at-or-before `covering`. The durable truncate path is backend-specific; backends that have
-    /// not wired object-log retention return [`EngineError::Unavailable`].
+    /// not wired object-log retention return [`EngineError::Unavailable`] after those checks.
     pub async fn compact_log_behind_snapshot(
         &self,
         queue: &QueueKey,
@@ -1340,19 +1354,24 @@ impl Fireweed {
                 "compaction requires SnapshotPolicy.compaction_authorized for this queue",
             ));
         }
-        let _ = covering;
-        // Durable retention execution lives in object-log maintenance; expose the fail-closed
-        // contract until the per-backend retention adapter is bound to this facade method.
+        let latest = self.latest_snapshot_info(queue).await?;
+        let Some(info) = latest else {
+            return Err(EngineError::Invalid(
+                "compaction requires a covering snapshot; none recorded for this queue",
+            ));
+        };
+        if !(info.position.precedes(covering) || info.position == *covering) {
+            return Err(EngineError::Invalid(
+                "compaction requires a covering snapshot at-or-before the requested position",
+            ));
+        }
+        // Durable retention execution lives in object-log maintenance; fail closed until wired.
         Err(EngineError::Unavailable)
     }
 
-    /// Manual snapshot-now for a named queue (fireweed-3f70c7d1). Backends that have not bound
-    /// [`SnapshotStore`] on the facade return [`EngineError::Unavailable`]; object-log products
-    /// surface this via projection lifecycle rebuild tooling until the log snapshot plane is
-    /// plumbed through [`FireweedDataPlane`].
+    /// Manual snapshot-now for a named queue (fireweed-3f70c7d1).
     pub async fn snapshot_now(&self, queue: &QueueKey) -> EngineResult<SnapshotNowResult> {
-        let _ = queue;
-        Err(EngineError::Unavailable)
+        self.inner.snapshot_now(queue).await
     }
 
     /// Latest snapshot introspection for a queue (position/ref when present).
@@ -1360,11 +1379,10 @@ impl Fireweed {
         &self,
         queue: &QueueKey,
     ) -> EngineResult<Option<SnapshotInfo>> {
-        let _ = queue;
-        Ok(None)
+        self.inner.latest_snapshot_info(queue).await
     }
 
-    /// Recovery stats from the last projection rebuild when the control plane is present.
+    /// Recovery stats from the last projection rebuild when available.
     pub fn last_rebuild_stats(&self) -> Option<ProjectionRebuild> {
         None
     }

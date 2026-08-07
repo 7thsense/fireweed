@@ -928,6 +928,74 @@ impl<B: super::LibBackend + 'static> HistoricalProjectionRead for BlockingLibBac
     }
 }
 
+impl<B: super::LibBackend + 'static> SnapshotStore for BlockingLibBackend<B> {
+    fn write_snapshot(
+        &self,
+        shard: &QueueKey,
+        position: CommandPosition,
+        snapshot: ProjectionSnapshot,
+    ) -> impl Future<Output = EngineResult<SnapshotRef>> + Send {
+        let q = shard.clone();
+        self.dispatch(q.clone(), move |i| async move {
+            SnapshotStore::write_snapshot(i.as_ref(), &q, position, snapshot).await
+        })
+    }
+
+    fn latest_snapshot(
+        &self,
+        shard: &QueueKey,
+    ) -> impl Future<Output = EngineResult<Option<SnapshotRef>>> + Send {
+        let q = shard.clone();
+        self.dispatch(q.clone(), move |i| async move {
+            SnapshotStore::latest_snapshot(i.as_ref(), &q).await
+        })
+    }
+
+    fn read_snapshot(
+        &self,
+        snapshot_ref: &SnapshotRef,
+    ) -> impl Future<Output = EngineResult<ProjectionSnapshot>> + Send {
+        let r = snapshot_ref.clone();
+        let q = r.queue.clone();
+        self.dispatch(q, move |i| async move {
+            SnapshotStore::read_snapshot(i.as_ref(), &r).await
+        })
+    }
+
+    fn snapshot_at_or_before(
+        &self,
+        shard: &QueueKey,
+        position: &CommandPosition,
+    ) -> impl Future<Output = EngineResult<Option<SnapshotRef>>> + Send {
+        let q = shard.clone();
+        let p = position.clone();
+        self.dispatch(q.clone(), move |i| async move {
+            SnapshotStore::snapshot_at_or_before(i.as_ref(), &q, &p).await
+        })
+    }
+
+    fn high_water(
+        &self,
+        shard: &QueueKey,
+    ) -> impl Future<Output = EngineResult<Option<CommandPosition>>> + Send {
+        let q = shard.clone();
+        self.dispatch(q.clone(), move |i| async move {
+            SnapshotStore::high_water(i.as_ref(), &q).await
+        })
+    }
+
+    fn set_high_water(
+        &self,
+        shard: &QueueKey,
+        position: CommandPosition,
+    ) -> impl Future<Output = EngineResult<()>> + Send {
+        let q = shard.clone();
+        self.dispatch(q.clone(), move |i| async move {
+            SnapshotStore::set_high_water(i.as_ref(), &q, position).await
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
