@@ -32,11 +32,8 @@ struct FixtureRoot(PathBuf);
 impl FixtureRoot {
     fn new(label: &str) -> Self {
         let n = ORD.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "fireweed-p8n-{}-{}-{n}",
-            label,
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("fireweed-p8n-{}-{}-{n}", label, std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         Self(path)
@@ -63,13 +60,15 @@ fn segments() -> SegmentConfig {
 #[cfg(feature = "postgres")]
 fn pg_url() -> String {
     std::env::var("FIREWEED_PG_TEST_URL").unwrap_or_else(|_| {
-        panic!(
-            "FIREWEED_PG_TEST_URL must be set for P8N live Postgres cells (zero silent skips)"
-        )
+        panic!("FIREWEED_PG_TEST_URL must be set for P8N live Postgres cells (zero silent skips)")
     })
 }
 
-async fn run_cell(cell: &str, _expect_projection_control: bool, open_fw: impl FnOnce() -> Fireweed) {
+async fn run_cell(
+    cell: &str,
+    _expect_projection_control: bool,
+    open_fw: impl FnOnce() -> Fireweed,
+) {
     let fw = open_fw();
     public_interface::run_p8_surface(cell, &fw).await;
     drop(fw);

@@ -1505,8 +1505,7 @@ pub fn assemble_postgres_log_turso(
     // Offload sync postgres LogStore calls so assemble/recover never runs the
     // blocking client on a Tokio worker (Client methods and Drop both panic
     // with nested-runtime when a handle is present on the thread).
-    let log =
-        InProcessLogStore::new_with_blocking_offload(log, DEFAULT_BLOCKING_AXIS_IN_FLIGHT)?;
+    let log = InProcessLogStore::new_with_blocking_offload(log, DEFAULT_BLOCKING_AXIS_IN_FLIGHT)?;
     // Dedicated multi-thread runtime on this OS thread only for the async
     // assemble future. PostgresLog Drop offloads Client close to a bare thread.
     let rt = tokio::runtime::Builder::new_multi_thread()

@@ -53,11 +53,7 @@ pub async fn run_with_commit_boundary(
 ///
 /// Excludes P7 claim/finalize, P8 mutation/maintenance, and P9 commit so leaf
 /// ownership stays clean while still exercising every P6 method contract.
-pub async fn run_p6_surface(
-    cell: &str,
-    fireweed: &Fireweed,
-    expect_projection_control: bool,
-) {
+pub async fn run_p6_surface(cell: &str, fireweed: &Fireweed, expect_projection_control: bool) {
     let mut failures = Vec::new();
     exercise_control(cell, fireweed, &mut failures).await;
     exercise_push_read_and_index(cell, fireweed, &mut failures).await;
@@ -88,11 +84,7 @@ pub async fn run_p8_surface(cell: &str, fireweed: &Fireweed) {
 
 /// P9-owned surface: claim/finalize path scaffolding plus commit, multi-claim,
 /// commit_capabilities, explain, side records, and atomic rejection.
-pub async fn run_p9_surface(
-    cell: &str,
-    fireweed: &Fireweed,
-    expect_atomic_commit: bool,
-) {
+pub async fn run_p9_surface(cell: &str, fireweed: &Fireweed, expect_atomic_commit: bool) {
     let mut failures = Vec::new();
     exercise_control(cell, fireweed, &mut failures).await;
     exercise_push_read_and_index(cell, fireweed, &mut failures).await;
@@ -2334,7 +2326,11 @@ async fn exercise_metrics_and_claimed(cell: &str, fw: &Fireweed, failures: &mut 
         failures,
         fw.push_batch(
             &queue,
-            vec![item("metrics-a", 1), item("metrics-b", 2), item("metrics-c", 3)],
+            vec![
+                item("metrics-a", 1),
+                item("metrics-b", 2),
+                item("metrics-c", 3),
+            ],
         ),
     )
     .await;
@@ -2384,13 +2380,7 @@ async fn exercise_metrics_and_claimed(cell: &str, fw: &Fireweed, failures: &mut 
             );
         }
     }
-    let after = call(
-        cell,
-        "metrics[after-claim]",
-        failures,
-        fw.metrics(&queue),
-    )
-    .await;
+    let after = call(cell, "metrics[after-claim]", failures, fw.metrics(&queue)).await;
     check(
         cell,
         "metrics[after-claim]",

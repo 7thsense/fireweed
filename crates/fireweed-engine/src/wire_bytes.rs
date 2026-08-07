@@ -18,9 +18,9 @@ use std::fmt;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use bytes::Bytes;
+use serde::Deserialize;
 use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::{SerializeMap, Serializer};
-use serde::Deserialize;
 
 /// Encode raw bytes as a standard Base64 string for JSON (and as raw bytes for
 /// binary serializers).
