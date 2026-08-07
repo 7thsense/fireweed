@@ -134,4 +134,29 @@ printf '%s\n' \
     >"$tmp_dir/compatibility-allowlist.json"
 expect_allowlist_rejects "$tmp_dir/compatibility-allowlist.json" "compatibility-class"
 
+# P17a: new markdown hyperlinks into .ddx/** fail structural scan; inert
+# historical v0.14.0 targets are classified when present under that exact path.
+mkdir -p "$tmp_dir/docs/releases"
+printf '%s\n' 'See [.ddx/executions/new/note.md](../../.ddx/executions/new/note.md).' \
+    >"$tmp_dir/docs/releases/v0.99.0.md"
+expect_rejects "docs/releases/v0.99.0.md" "new-ddx-hyperlink"
+
+printf '%s\n' \
+    'Authoritative evidence: [.ddx/executions/20260715T043214-936c36b0/release-evidence-correction.md](../../.ddx/executions/20260715T043214-936c36b0/release-evidence-correction.md).' \
+    >"$tmp_dir/docs/releases/v0.14.0.md"
+# v0.14.0 inert hyperlink alone (no retired identity token) must accept.
+list_file="$tmp_dir/files-inert-ddx.txt"
+printf '%s\n' 'docs/releases/v0.14.0.md' >"$list_file"
+if ! "$script_dir/verify-public-identity.sh" --root "$tmp_dir" --files-from "$list_file" \
+    >"$tmp_dir/inert-ddx.out" 2>"$tmp_dir/inert-ddx.err"; then
+    echo "inert historical .ddx hyperlink unexpectedly rejected" >&2
+    cat "$tmp_dir/inert-ddx.err" >&2
+    exit 1
+fi
+grep -Fq 'inert .ddx hyperlinks classified=' "$tmp_dir/inert-ddx.out" || {
+    echo "structural scan did not classify inert .ddx hyperlinks" >&2
+    cat "$tmp_dir/inert-ddx.out" >&2
+    exit 1
+}
+
 echo "public identity residue verifier focused tests passed"

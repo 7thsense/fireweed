@@ -314,8 +314,76 @@ if violations:
         print(f"... {remaining} additional violation(s) omitted", file=sys.stderr)
     sys.exit(1)
 
+# P17a structural scan: exact historical release-note `.ddx` hyperlink bytes are
+# inert non-governing provenance. Classify them; any new markdown hyperlink to
+# `.ddx/**` outside the frozen historical allowlist fails. Prose that names
+# `.ddx/` as administrative/non-product is permitted.
+inert_ddx_hyperlink_files = {
+    "docs/releases/v0.14.0.md",
+}
+# Exact hyperlink targets frozen from the immutable v0.14.0 note.
+allowed_ddx_link_targets = {
+    ".ddx/executions/20260715T043214-936c36b0/release-evidence-correction.md",
+    ".ddx/executions/20260714T184540-9153544a/review-gate.md",
+    ".ddx/executions/20260715T043214-936c36b0/pr-gate-enforcing.log",
+}
+md_link = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+ddx_href = re.compile(r"(?:^|/|\.\./)*(?:\.ddx/[^)\s#]+)")
+structural = []
+classified = 0
+for rel in tracked_files():
+    if not rel.endswith(".md"):
+        continue
+    path = root / rel
+    if not path.is_file():
+        continue
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        continue
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        for match in md_link.finditer(line):
+            href = match.group(1).strip()
+            # Ignore external URLs.
+            if "://" in href:
+                continue
+            # Normalize relative markdown links that point into .ddx/
+            if ".ddx/" not in href and not href.startswith(".ddx/"):
+                continue
+            # Strip anchors/query
+            href_path = href.split("#", 1)[0].split("?", 1)[0]
+            # Collapse ../ segments only for classification of the .ddx tail.
+            parts = []
+            for part in href_path.split("/"):
+                if part in ("", "."):
+                    continue
+                if part == "..":
+                    if parts:
+                        parts.pop()
+                    continue
+                parts.append(part)
+            # Find .ddx/... suffix
+            try:
+                idx = parts.index(".ddx")
+            except ValueError:
+                continue
+            target = "/".join(parts[idx:])
+            if rel in inert_ddx_hyperlink_files and target in allowed_ddx_link_targets:
+                classified += 1
+                continue
+            structural.append(
+                f"{rel}:{line_no}: new or non-inert .ddx hyperlink: {href} -> {target}"
+            )
+
+if structural:
+    print("unapproved .ddx hyperlink structural scan failures:", file=sys.stderr)
+    for row in structural[:100]:
+        print(row, file=sys.stderr)
+    sys.exit(1)
+
 print(
     f"public identity residue verified: {checked_files} files scanned, "
-    f"{approved_occurrences} approved historical/negative-test occurrence(s)"
+    f"{approved_occurrences} approved historical/negative-test occurrence(s); "
+    f"inert .ddx hyperlinks classified={classified}"
 )
 PY

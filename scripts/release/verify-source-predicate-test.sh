@@ -85,4 +85,41 @@ if bash "$SCRIPT_DIR/verify-source-predicate.sh" \
   fail "identical dual roots accepted"
 fi
 
+# Local/global exclude masking must NOT hide raw untracked product paths.
+# Tracked .gitignore rules alone are policy authority (P0/P17a).
+mkdir -p "$repo/.git/info"
+printf 'masked-by-exclude.txt\n' >"$repo/.git/info/exclude"
+printf 'secret-product\n' >"$repo/masked-by-exclude.txt"
+if bash "$SCRIPT_DIR/verify-source-predicate.sh" \
+  --mode source --source-root "$repo" --expected-source "$S" \
+  --expected-remote origin --expected-ref HEAD >/dev/null 2>&1; then
+  fail "info/exclude-masked untracked product path accepted"
+fi
+rm -f "$repo/masked-by-exclude.txt" "$repo/.git/info/exclude"
+
+# Tracked dirty path outside .ddx fails; dirty only under .ddx is inventoried, not product-dirty.
+mkdir -p "$repo/.ddx"
+printf 'operator\n' >"$repo/.ddx/operator-note.txt"
+# untracked .ddx is inventory-only; product tree must still pass
+bash "$SCRIPT_DIR/verify-source-predicate.sh" \
+  --mode source --source-root "$repo" --expected-source "$S" \
+  --expected-remote origin --expected-ref HEAD \
+  | tee "$CASE_ROOT/ddx-inventory.out" >/dev/null
+grep -Eq 'ddx_untracked_count=[1-9]' "$CASE_ROOT/ddx-inventory.out" ||
+  fail "untracked .ddx inventory not reported"
+rm -rf "$repo/.ddx"
+
+# Tracked product dirty outside .ddx still fails after .ddx inventory path.
+printf 'x\n' >"$repo/extra-product.txt"
+git -C "$repo" add extra-product.txt
+git -C "$repo" commit -qm extra
+S2="$(git -C "$repo" rev-parse HEAD)"
+printf 'dirty-tracked\n' >>"$repo/extra-product.txt"
+if bash "$SCRIPT_DIR/verify-source-predicate.sh" \
+  --mode source --source-root "$repo" --expected-source "$S2" \
+  --expected-remote origin --expected-ref HEAD >/dev/null 2>&1; then
+  fail "tracked-outside-.ddx dirty path accepted"
+fi
+git -C "$repo" checkout -- extra-product.txt
+
 echo "verify-source-predicate-test: PASS"

@@ -135,15 +135,11 @@ printf 'verify-source-predicate: ddx_tracked_count=%s ddx_untracked_count=%s\n' 
     "${#ddx_tracked[@]}" "${#ddx_untracked[@]}"
 
 # Raw untracked product paths under tracked .gitignore classification only.
-# Disable info/exclude by pointing excludesFile at empty and using
-# --exclude-per-directory=.gitignore only. git still reads info/exclude for
-# some porcelain; reclassify with a pure python check of tracked rules.
-mapfile -t raw_untracked < <(
-    git -C "$SOURCE_ROOT" -c core.excludesFile=/dev/null status --porcelain=v1 -uall \
-        | awk '/^\?\? / {print substr($0,4)}' | sort -u
-)
-
-python3 - "$SOURCE_ROOT" "$AUTHORITY_MANIFEST" "${raw_untracked[@]+${raw_untracked[@]}}" <<'PY'
+# IMPORTANT: git status / ls-files still honor .git/info/exclude and global
+# excludesFile even with -c core.excludesFile=/dev/null. Enumerate untracked
+# paths by filesystem walk against `git ls-files` so local/global excludes
+# cannot mask product residue (P0/P17a policy).
+python3 - "$SOURCE_ROOT" "$AUTHORITY_MANIFEST" <<'PY'
 import fnmatch
 import json
 import os
@@ -153,7 +149,6 @@ from pathlib import Path
 
 root = Path(sys.argv[1]).resolve()
 manifest = json.load(open(sys.argv[2], encoding="utf-8"))
-raw = sys.argv[3:]
 
 policy = manifest["tracked_ignore_policy"]
 assert policy["authority"] == "tracked_gitignore_only"
@@ -162,6 +157,35 @@ assert policy["local_or_global_excludes_have_policy_authority"] is False
 admin_roots = list(policy["classes"]["administrative"]["roots"])
 build_roots = list(policy["classes"]["build_dependency_cache"]["roots"])
 forbidden = set(policy["forbidden_in_repository_paths"])
+
+tracked = set(
+    subprocess.check_output(
+        ["git", "-C", str(root), "ls-files", "-z"],
+        text=True,
+    ).split("\0")
+)
+tracked.discard("")
+
+# Filesystem walk: every non-.git path not in the index is untracked for policy,
+# regardless of info/exclude or global excludes.
+raw: list[str] = []
+for dirpath, dirnames, filenames in os.walk(root):
+    rel_dir = Path(dirpath).relative_to(root)
+    # Never descend into .git
+    dirnames[:] = [d for d in dirnames if d != ".git" and not str(rel_dir / d).startswith(".git/")]
+    for name in filenames:
+        full = Path(dirpath) / name
+        if full.is_symlink() and not full.exists():
+            # dangling symlink still counts as untracked product residue
+            rel = full.relative_to(root).as_posix()
+        else:
+            rel = full.relative_to(root).as_posix()
+        if rel in tracked:
+            continue
+        if rel == ".git" or rel.startswith(".git/"):
+            continue
+        raw.append(rel)
+raw.sort()
 
 # Load tracked .gitignore patterns only (repo root + nested).
 patterns: list[tuple[Path, str]] = []
@@ -242,10 +266,34 @@ for rel in raw:
     # Untracked and not classified: must be covered by tracked ignore as non-product?
     # Policy: zero non-ignored untracked product paths.
     if ignored_by_tracked_rules(rel):
-        # Ignored but unclassified beyond P1 roots — fail closed so P1 stays exhaustive.
-        raise SystemExit(
-            f"ignored untracked path is outside P1 administrative/build classes: {rel}"
-        )
+        # Path is ignored by tracked rules. If it falls under a P1 class root by
+        # prefix (e.g. target/foo), reclass; else fail closed so P1 stays exhaustive.
+        reclass = class_for(rel)
+        if reclass == "administrative":
+            admin_untracked.append(rel)
+            continue
+        if reclass == "build_dependency_cache":
+            build_untracked.append(rel)
+            continue
+        # Basename-style ignore (node_modules/, __pycache__/) under nested roots:
+        # map to build_dependency_cache when any path component matches a build root basename.
+        parts = Path(rel).parts
+        for br in build_roots:
+            base = br.rstrip("/").split("/")[-1]
+            if base in parts:
+                build_untracked.append(rel)
+                break
+        else:
+            for ar in admin_roots:
+                base = ar.rstrip("/").split("/")[-1]
+                if base in parts:
+                    admin_untracked.append(rel)
+                    break
+            else:
+                raise SystemExit(
+                    f"ignored untracked path is outside P1 administrative/build classes: {rel}"
+                )
+        continue
     product_untracked.append(rel)
 
 if product_untracked:
@@ -291,17 +339,88 @@ print(
     "tracked_ignore_ok "
     f"admin_untracked={len(admin_untracked)} build_untracked={len(build_untracked)}"
 )
+print("local_global_exclude_masking_has_no_authority=true")
 PY
 
 # S-bound tools must not treat .ddx or administrative roots as source/evidence.
-# Prove no executable under scripts/release reads .ddx as governing input in source mode.
+# Inventory administrative roots with no-reader proof and build/cache roots with
+# non-authority disposition. Local/global excludes have zero policy authority:
+# product untracked paths remain product even when listed only in info/exclude.
 if [[ "$MODE" == "source" ]]; then
-    if rg -n --glob 'scripts/release/*' --glob 'scripts/ci/governed-release*' \
-        -e '\.ddx/' -e 'beads\.jsonl' "$SOURCE_ROOT" 2>/dev/null \
-        | rg -v 'verify-source-predicate|ddx_tracked|administrative|operator-local|\.ddx/\*\*' \
-        | rg -n 'product authority|promoted evidence|source of truth' >/dev/null 2>&1; then
-        fail "S-bound release tooling claims .ddx product/source authority"
-    fi
+    python3 - "$SOURCE_ROOT" "$AUTHORITY_MANIFEST" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+manifest = json.load(open(sys.argv[2], encoding="utf-8"))
+policy = manifest["tracked_ignore_policy"]
+admin_roots = list(policy["classes"]["administrative"]["roots"])
+build_roots = list(policy["classes"]["build_dependency_cache"]["roots"])
+
+# Collect S-bound release/CI reader surfaces that must never treat .ddx as product.
+scan_globs = [
+    root / "scripts" / "release",
+    root / "scripts" / "ci",
+]
+forbidden_claim = re.compile(
+    r"(product\s+authority|promoted\s+evidence|source\s+of\s+truth|governing\s+input)",
+    re.I,
+)
+ddx_token = re.compile(r"(?:\.ddx/|beads\.jsonl)")
+allow_comment = re.compile(
+    r"(verify-source-predicate|ddx_tracked|administrative|operator-local|"
+    r"operator metadata|not\s+product|\.ddx/\*\*|campaign tracking only)",
+    re.I,
+)
+violations = []
+for base in scan_globs:
+    if not base.is_dir():
+        continue
+    for path in base.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix not in {".sh", ".py", ".rs", ".json", ".toml", ".md"}:
+            continue
+        rel = path.relative_to(root).as_posix()
+        # Predicate and inventory tooling may mention .ddx for exclusion proofs.
+        if "verify-source-predicate" in rel or "inventory" in rel or "storage-remediation" in rel:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            if not ddx_token.search(line):
+                continue
+            if allow_comment.search(line):
+                continue
+            if forbidden_claim.search(line):
+                violations.append(f"{rel}:{line_no}:{line.strip()[:160]}")
+if violations:
+    print("S-bound tooling claims .ddx product/source authority:", file=sys.stderr)
+    for row in violations[:40]:
+        print(f"  {row}", file=sys.stderr)
+    raise SystemExit("no-reader proof failed for administrative .ddx roots")
+
+# Emit admin/build root inventory with required proof labels (P1 classes).
+admin_proofs = policy["classes"]["administrative"]["required_proofs"]
+build_proofs = policy["classes"]["build_dependency_cache"]["required_proofs"]
+print(
+    "admin_roots_ok roots="
+    + ",".join(admin_roots)
+    + " proofs="
+    + ",".join(admin_proofs)
+)
+print(
+    "build_cache_roots_ok roots="
+    + ",".join(build_roots)
+    + " proofs="
+    + ",".join(build_proofs)
+)
+print("no_s_bound_reader_ok administrative=.ddx/")
+PY
 fi
 
 if [[ "$MODE" == "e" ]]; then
