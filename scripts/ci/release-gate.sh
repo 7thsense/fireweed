@@ -135,7 +135,17 @@ if [[ "${RUN_LOCAL_PERFORMANCE}" == true ]]; then
         --strict \
         --require-smoke-evidence E2,E3
 else
-    echo "--- local performance execution skipped; exact-revision governed evidence is authoritative ---"
+    # Policy-negative (fail-closed): local performance is not silently green when unexecuted.
+    # Hosted/release paths must either set RUN_LOCAL_PERFORMANCE=true or prove governed evidence
+    # already covers the required smoke evidence ids for this exact source revision.
+    echo "--- local performance execution omitted; asserting governed-evidence policy-negative ---"
+    if [[ -z "${FIREWEED_ALLOW_GOVERNED_PERF_EVIDENCE_ONLY:-}" ]]; then
+        echo "release-gate: RUN_LOCAL_PERFORMANCE is false and FIREWEED_ALLOW_GOVERNED_PERF_EVIDENCE_ONLY is unset" >&2
+        echo "  set RUN_LOCAL_PERFORMANCE=true to execute local suites, or" >&2
+        echo "  FIREWEED_ALLOW_GOVERNED_PERF_EVIDENCE_ONLY=1 to accept exact-revision governed evidence only" >&2
+        exit 1
+    fi
+    echo "  FIREWEED_ALLOW_GOVERNED_PERF_EVIDENCE_ONLY=1: local perf suites not run; governed evidence is required next"
 fi
 
 echo "--- governed TP-002 composite semantic contract ---"

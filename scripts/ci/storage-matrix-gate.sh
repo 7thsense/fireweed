@@ -136,7 +136,11 @@ if ((SKIP_CARGO == 0)); then
         ${CARGO} test -p fireweed-server --features postgres --lib "${filter}" -- --nocapture
     done
 else
-    echo "--- cargo matrix suites: SKIPPED (--skip-cargo) ---"
+    if [[ "${REQUIRE_FULL}" == "1" || "${REQUIRE_FULL}" == "true" || "${REQUIRE_FULL}" == "yes" ]]; then
+        err "refusing --skip-cargo under FIREWEED_STORAGE_MATRIX_REQUIRE_FULL (skip ≠ pass)"
+        exit 1
+    fi
+    echo "--- cargo matrix suites: SKIPPED (--skip-cargo; non-full local only) ---"
 fi
 
 # ---------------------------------------------------------------------------
@@ -146,7 +150,11 @@ if ((SKIP_HELM == 0)); then
     echo "--- helm-gate (15-cell matrix fixtures + shared variants) ---"
     bash "${SCRIPT_DIR}/helm-gate.sh"
 else
-    echo "--- helm-gate: SKIPPED (--skip-helm) ---"
+    if [[ "${REQUIRE_FULL}" == "1" || "${REQUIRE_FULL}" == "true" || "${REQUIRE_FULL}" == "yes" ]]; then
+        err "refusing --skip-helm under FIREWEED_STORAGE_MATRIX_REQUIRE_FULL (skip ≠ pass)"
+        exit 1
+    fi
+    echo "--- helm-gate: SKIPPED (--skip-helm; non-full local only) ---"
 fi
 
 echo "=== storage-matrix-gate: PASSED ==="

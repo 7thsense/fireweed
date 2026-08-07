@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import platform
 import time
 import traceback
@@ -214,4 +215,18 @@ def run_suite(
         f"evidence={evidence_root} ---",
         flush=True,
     )
+    # Fail-closed: skips are not green unless the operator explicitly allows them
+    # (FIREWEED_EXAMPLE_ALLOW_SKIP=1). Governing example runs must not hide work.
+    allow_skip = os.environ.get("FIREWEED_EXAMPLE_ALLOW_SKIP", "").strip() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if skipped and not allow_skip:
+        print(
+            f"FAIL: {skipped} scenario(s) skipped; set FIREWEED_EXAMPLE_ALLOW_SKIP=1 "
+            "only for non-governing local subsets (fail-closed; no LOUD skip)",
+            flush=True,
+        )
+        return 1
     return 1 if failed else 0
