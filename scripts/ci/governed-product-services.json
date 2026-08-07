@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "workflow": ".github/workflows/governed-product.yml",
+  "lane": "governed-product",
+  "services": {
+    "kafka_compatible_broker": {
+      "authorized": true,
+      "purpose": "P8k hermetic ExternalKafka qualification fixture surface",
+      "image_repository": "redpandadata/redpanda",
+      "image_digest": null,
+      "command": null,
+      "digest_population_owner": "P13",
+      "command_population_owner": "P13",
+      "requirements": {
+        "image_must_be_digest_pinned": true,
+        "tag_only_image_forbidden": true,
+        "shared_external_cluster_forbidden": true,
+        "immutable_digest_form": "repository@sha256:<64-hex>"
+      },
+      "notes": [
+        "P13a authorizes the service slot and pin shape only.",
+        "P13 populates exact image_digest and command values; no other bead may invent them."
+      ]
+    }
+  },
+  "forbidden_service_names_outside_governed_lane": [
+    "postgres",
+    "kafka",
+    "redpanda",
+    "minio",
+    "zookeeper"
+  ]
+}

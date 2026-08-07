@@ -1,0 +1,119 @@
+# Governed product lane framework (P13a).
+#
+# Destination for service-backed storage-matrix, Helm/kind, supported S3, and
+# deterministic reduced-count runner/schema checks that must not run on the
+# three-minute hosted ci.yml lane.
+#
+# Product-release readiness is NOT claimed by this framework alone:
+#   - P13 populates scripts/ci/governed-product-allowlist.json commands and
+#     scripts/ci/governed-product-services.json kafka image_digest/command.
+#   - P13b provisions runner/credentials/ruleset and emits external proof.
+#   - TP-005 authoritative performance remains forbidden in all CI.
+#
+# Hybrid product selectors are forbidden. release.yml remains P17r-owned.
+name: governed-product
+
+on:
+  workflow_dispatch:
+  # Path filters kept broad intentionally; required-check installation is P13b.
+  # pull_request/push triggers may be enabled once P13 populates commands and
+  # P13b attaches the ruleset — framework ships dispatch-first so hosted CI
+  # remains bounded.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: governed-product-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  product:
+    # Self-hosted/governed runner label is installed by P13b. Local syntax and
+    # policy verification do not require the runner to exist.
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      FIREWEED_GOVERNED_PRODUCT_LANE: "1"
+      # product_release_readiness_claimed remains false until P13b proof exists.
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust 1.92.0
+        run: rustup toolchain install 1.92.0 --profile minimal --component rustfmt --component clippy
+
+      - name: Reuse Cargo build state
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Verify workflow policy (zero-arg)
+        run: bash scripts/ci/verify-github-actions-policy.sh
+
+      - name: Validate governed allowlist framework
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          allow = json.loads(Path("scripts/ci/governed-product-allowlist.json").read_text())
+          services = json.loads(Path("scripts/ci/governed-product-services.json").read_text())
+          assert allow["commands"] == [], "P13 populates commands; framework must stay empty until then"
+          assert allow["product_release_readiness_claimed"] is False
+          kafka = services["services"]["kafka_compatible_broker"]
+          assert kafka["authorized"] is True
+          assert kafka["image_digest"] is None, "P13 populates image_digest"
+          assert kafka["command"] is None, "P13 populates command"
+          print("governed-product framework: allowlist empty; kafka slot authorized; digests unpopulated")
+          PY
+
+      - name: Authorized service slot — kafka_compatible_broker (P8k)
+        # Policy/schema authorization only. P13 populates exact image_digest and
+        # command into scripts/ci/governed-product-services.json and may expand
+        # this step into a digest-pinned service/container start. Do not author
+        # a concrete @sha256 digest or broker command here.
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          services = json.loads(Path("scripts/ci/governed-product-services.json").read_text())
+          kafka = services["services"]["kafka_compatible_broker"]
+          assert kafka["authorized"] is True
+          assert kafka["requirements"]["image_must_be_digest_pinned"] is True
+          if kafka["image_digest"] is None or kafka["command"] is None:
+              print(
+                  "kafka_compatible_broker slot authorized; "
+                  "image_digest/command awaiting P13 population — skipping start"
+              )
+          else:
+              raise SystemExit(
+                  "P13 populated kafka digest/command but start logic is owned by P13; "
+                  "update this step when populating allowlist/services"
+              )
+          PY
+
+      - name: Execute P13-populated allowlist commands
+        run: |
+          python3 - <<'PY'
+          import json
+          import subprocess
+          import sys
+          from pathlib import Path
+          allow = json.loads(Path("scripts/ci/governed-product-allowlist.json").read_text())
+          commands = allow["commands"]
+          if not commands:
+              print(
+                  "governed-product allowlist empty (P13 populates); "
+                  "framework syntax/policy pass only — not product-release readiness"
+              )
+              sys.exit(0)
+          for entry in commands:
+              command = entry["command"] if isinstance(entry, dict) else entry
+              print(f"--- governed command: {command!r} ---", flush=True)
+              completed = subprocess.run(command, check=False)
+              if completed.returncode != 0:
+                  sys.exit(completed.returncode)
+          print("governed-product allowlist: all commands passed")
+          PY

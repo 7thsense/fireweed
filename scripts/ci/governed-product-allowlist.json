@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "workflow": ".github/workflows/governed-product.yml",
+  "lane": "governed-product",
+  "product_release_readiness_claimed": false,
+  "disclaimer": "Repository-side framework only. Live ruleset/required-check proof is P13b. Final command/profile entries are owned by P13.",
+  "commands": [],
+  "command_population_owner": "P13",
+  "forbidden_in_lane": [
+    "scripts/perf/",
+    "fireweed-bench",
+    "cargo bench",
+    "authoritative-performance",
+    "performance_"
+  ],
+  "notes": [
+    "P13 alone populates commands with manifest-generated functional/T4/reduced-count entries.",
+    "Empty commands array is intentional at P13a; syntax/policy must still pass."
+  ]
+}
