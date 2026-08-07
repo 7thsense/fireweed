@@ -475,6 +475,11 @@ impl<S: Sequencer<Meta = ()>> ObjectLogEngineStore<S> {
     }
 
     /// Persist a monotonic emission cursor after a successful sink emit.
+    ///
+    /// On S3 (`DefinitionAuthority::S3CreateOnly`), advances use **native CAS**:
+    /// create-only (`If-None-Match: *`) for the first cursor write and compare-and-swap
+    /// (`If-Match: <etag>`) for subsequent advances (P8cs / P1s-attested conditional update).
+    /// Filesystem and process-local paths keep the P8c metadata-permit + overwrite put.
     pub async fn set_emission_cursor(
         &self,
         shard: &QueueKey,
@@ -485,20 +490,81 @@ impl<S: Sequencer<Meta = ()>> ObjectLogEngineStore<S> {
         }
         let permit = self.metadata_permit(shard);
         let _guard = permit.lock().await;
-        if let Some(current) = self.emission_cursor(shard).await?
-            && !current.precedes(&position)
-            && current != position
-        {
-            return Err(EngineError::Invalid("emission cursor regression"));
+        match &self.definition_authority {
+            DefinitionAuthority::S3CreateOnly { put } => {
+                self.set_emission_cursor_s3_cas(put.as_ref(), shard, position)
+                    .await
+            }
+            DefinitionAuthority::Local { .. }
+            | DefinitionAuthority::ProcessLocal
+            | DefinitionAuthority::ConditionalCreateUnavailable => {
+                if let Some(current) = self.emission_cursor(shard).await?
+                    && !current.precedes(&position)
+                    && current != position
+                {
+                    return Err(EngineError::Invalid("emission cursor regression"));
+                }
+                self.put_json(
+                    &self.emission_cursor_key(shard),
+                    &HighWaterDoc {
+                        backend_epoch: position.backend_epoch,
+                        sequence: position.sequence,
+                    },
+                )
+                .await
+            }
         }
-        self.put_json(
-            &self.emission_cursor_key(shard),
-            &HighWaterDoc {
+    }
+
+    /// S3 native CAS advance for the emission cursor (P8cs).
+    ///
+    /// Retry budget covers concurrent writers that lose an If-Match race; each attempt
+    /// re-reads the durable cursor and re-checks monotonicity before writing.
+    async fn set_emission_cursor_s3_cas(
+        &self,
+        put: &S3CreateOnlyPut,
+        shard: &QueueKey,
+        position: CommandPosition,
+    ) -> EngineResult<()> {
+        let key = self.emission_cursor_key(shard);
+        let payload = Bytes::from(
+            serde_json::to_vec(&HighWaterDoc {
                 backend_epoch: position.backend_epoch,
                 sequence: position.sequence,
-            },
-        )
-        .await
+            })
+            .map_err(store_err)?,
+        );
+        for _attempt in 0..16u8 {
+            match put.get_with_etag(&key).await? {
+                None => {
+                    // First durable cursor: create-only so two writers cannot both invent
+                    // a cursor under a lost-update overwrite.
+                    if put.put_if_absent(&key, payload.clone()).await? {
+                        return Ok(());
+                    }
+                    // Lost the create race — re-read and decide idempotent vs advance.
+                    continue;
+                }
+                Some((bytes, etag)) => {
+                    let doc: HighWaterDoc = serde_json::from_slice(&bytes).map_err(store_err)?;
+                    let current =
+                        CommandPosition::new(shard.clone(), doc.backend_epoch, doc.sequence);
+                    if current == position {
+                        return Ok(());
+                    }
+                    if !current.precedes(&position) {
+                        return Err(EngineError::Invalid("emission cursor regression"));
+                    }
+                    if put.put_if_match(&key, payload.clone(), &etag).await? {
+                        return Ok(());
+                    }
+                    // Lost CAS race — another writer advanced; retry with a fresh ETag.
+                }
+            }
+        }
+        Err(EngineError::Storage(
+            "emission cursor CAS exhausted after concurrent S3 conditional-write races".into(),
+        ))
     }
 
     pub fn supports_emission_cursor(&self) -> bool {
@@ -756,7 +822,7 @@ pub fn flush_config_from_segment(target_bytes: usize, max_latency_ms: u64) -> Fl
 }
 
 impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
-    /// Emit durable change-record tail from the emission cursor (TD-008 / P8c filesystem cursor).
+    /// Emit durable change-record tail from the emission cursor (TD-008 / P8c filesystem, P8cs S3 CAS).
     pub async fn emit_change_record_tail<Sk>(
         &self,
         shard: &QueueKey,
@@ -1113,6 +1179,8 @@ fn _parse_partition_smoke(key: &PartitionKey) -> Option<QueueKey> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use fireweed_core::{
         EligibilityPolicy, OrderingMode, PriorityModel, QueueDefinition, QueueId, RecurrencePolicy,
         RetryPolicy, TenantId, UtcTimestamp,
@@ -1646,5 +1714,118 @@ mod tests {
             Some(positions[1].clone())
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// P8cs: live S3 emission cursor uses native CAS (create-only + If-Match) and survives reopen.
+    #[tokio::test]
+    async fn s3_emission_cursor_native_cas_monotonic_and_reopen() {
+        let endpoint = std::env::var("FIREWEED_S3_TEST_ENDPOINT").expect(
+            "FIREWEED_S3_TEST_ENDPOINT required for P8cs S3 emission-cursor CAS (fail-closed; no LOUD skip)",
+        );
+        let bucket = std::env::var("FIREWEED_S3_TEST_BUCKET").expect("FIREWEED_S3_TEST_BUCKET");
+        let region =
+            std::env::var("FIREWEED_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
+        let access =
+            std::env::var("FIREWEED_S3_TEST_ACCESS_KEY").expect("FIREWEED_S3_TEST_ACCESS_KEY");
+        let secret =
+            std::env::var("FIREWEED_S3_TEST_SECRET_KEY").expect("FIREWEED_S3_TEST_SECRET_KEY");
+        let tag = format!(
+            "p8cs-cursor-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let data_prefix = format!("fwlog-{tag}/");
+        let meta_prefix = format!("fwmeta-{tag}/");
+        let log = ObjectLogEngineStore::open_s3_with_prefixes(
+            &endpoint,
+            &region,
+            &bucket,
+            &access,
+            &secret,
+            data_prefix.clone(),
+            meta_prefix.clone(),
+            zero_linger(),
+        )
+        .await
+        .expect("open S3 log with unique prefixes");
+        let mut definition = qdef();
+        definition.emit_change_records = true;
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        log.create_or_read_definition(definition).await.unwrap();
+        log.ensure_shard(shard.clone()).await.unwrap();
+        let epoch = log.acquire_epoch(shard.clone()).await.unwrap();
+        let env = |id: &str| CommandEnvelope {
+            command_id: CommandId::new(id),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: Vec::new(),
+            command: QueueCommand::PauseQueue(Default::default()),
+            checksum: CommandChecksum(0),
+            created_at: UtcTimestamp::new(1, 0).unwrap(),
+        };
+        let positions = log
+            .append(
+                shard.clone(),
+                vec![env("s3-a"), env("s3-b"), env("s3-c"), env("s3-d")],
+                epoch,
+            )
+            .await
+            .unwrap();
+        assert_eq!(positions.len(), 4);
+        assert!(log.supports_emission_cursor());
+        assert_eq!(log.emission_cursor(&shard).await.unwrap(), None);
+
+        // Concurrent CAS advances: both targets are valid monotonic steps.
+        let log = Arc::new(log);
+        let p1 = positions[1].clone();
+        let p2 = positions[2].clone();
+        let key1 = shard.clone();
+        let key2 = shard.clone();
+        let l1 = Arc::clone(&log);
+        let l2 = Arc::clone(&log);
+        let (r1, r2) = tokio::join!(
+            async move { l1.set_emission_cursor(&key1, p1).await },
+            async move { l2.set_emission_cursor(&key2, p2).await },
+        );
+        assert!(
+            r1.is_ok() || r2.is_ok(),
+            "at least one concurrent S3 CAS advance must succeed: {r1:?} / {r2:?}"
+        );
+        let final_cursor = log.emission_cursor(&shard).await.unwrap().expect("cursor");
+        assert!(
+            final_cursor == positions[1] || final_cursor == positions[2],
+            "final cursor must be one of the concurrent targets: {final_cursor:?}"
+        );
+
+        log.set_emission_cursor(&shard, positions[3].clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            log.set_emission_cursor(&shard, positions[0].clone()).await,
+            Err(EngineError::Invalid("emission cursor regression"))
+        );
+
+        // Failover resume: drop handle, reopen same prefixes, cursor survives (CL-5 substrate).
+        drop(log);
+        let reopened = ObjectLogEngineStore::open_s3_with_prefixes(
+            &endpoint,
+            &region,
+            &bucket,
+            &access,
+            &secret,
+            data_prefix,
+            meta_prefix,
+            zero_linger(),
+        )
+        .await
+        .expect("reopen S3 log");
+        assert_eq!(
+            reopened.emission_cursor(&shard).await.unwrap(),
+            Some(positions[3].clone())
+        );
     }
 }

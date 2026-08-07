@@ -1,11 +1,12 @@
-//! S3 create-only (put-if-absent) publication for queue-definition authority.
+//! S3 conditional writes for NativeConditionalWrite authority.
 //!
 //! The crates.io `object_log::BlobStore` port exposes overwrite-only `put`. Fireweed
-//! needs enforced create-only for immutable per-queue definition objects under
-//! `NativeConditionalWrite`. This module issues `PutObject` with `If-None-Match: *`
-//! against the same endpoint/credentials used for the log blob store.
+//! needs:
+//! - **Create-only** (`If-None-Match: *`) for immutable per-queue definition objects
+//! - **Compare-and-swap** (`If-Match: <etag>`) for the durable emission cursor (P8cs)
 //!
-//! Endpoint must actually reject a second create (HTTP 412). P1s-qualified MinIO
+//! Both issue against the same endpoint/credentials used for the log blob store.
+//! Endpoint must enforce preconditions (HTTP 412 on failure). P1s-qualified MinIO
 //! does; Garage v2.2.0 does not and remains unsupported.
 
 use aws_sdk_s3::Client;
@@ -20,7 +21,7 @@ use bytes::Bytes;
 use fireweed_engine::{EngineError, EngineResult};
 use std::time::Duration;
 
-/// PutObject + If-None-Match:* publisher for one bucket.
+/// S3 conditional PutObject/GetObject helper for one bucket (create-only + CAS).
 pub struct S3CreateOnlyPut {
     client: Client,
     bucket: String,
@@ -123,6 +124,89 @@ impl S3CreateOnlyPut {
         Ok(())
     }
 
+    /// Get object body + ETag for native CAS (P8cs emission cursor).
+    ///
+    /// `None` means the key is absent (NoSuchKey / 404). Other failures map to Storage.
+    pub async fn get_with_etag(&self, key: &str) -> EngineResult<Option<(Bytes, String)>> {
+        let result = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await;
+        match result {
+            Ok(output) => {
+                let etag = output
+                    .e_tag()
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        EngineError::Storage(format!(
+                            "S3 GetObject for key {key} returned no ETag (required for emission-cursor CAS)"
+                        ))
+                    })?;
+                let body = output
+                    .body
+                    .collect()
+                    .await
+                    .map_err(|err| {
+                        EngineError::Storage(format!(
+                            "S3 GetObject body collect failed for key {key}: {err}"
+                        ))
+                    })?
+                    .into_bytes();
+                Ok(Some((body, etag)))
+            }
+            Err(err) => {
+                if is_not_found(&err) {
+                    Ok(None)
+                } else {
+                    Err(EngineError::Storage(format!(
+                        "S3 GetObject failed for key {key}: {err}"
+                    )))
+                }
+            }
+        }
+    }
+
+    /// Conditional put: replace `key` only when its current ETag matches `expected_etag`.
+    ///
+    /// `Ok(true)` = this call won the CAS and wrote `value`.
+    /// `Ok(false)` = precondition failed (412 / concurrent 409 after retries) — caller must
+    /// re-read and retry. Other errors map to [`EngineError::Storage`].
+    pub async fn put_if_match(
+        &self,
+        key: &str,
+        value: Bytes,
+        expected_etag: &str,
+    ) -> EngineResult<bool> {
+        for attempt in 0..4u8 {
+            let result = self
+                .client
+                .put_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .if_match(expected_etag)
+                .body(ByteStream::from(value.clone()))
+                .send()
+                .await;
+            match result {
+                Ok(_) => return Ok(true),
+                Err(err) => match classify_put_error(&err) {
+                    PutClassify::AlreadyExists => return Ok(false),
+                    PutClassify::ConflictRetry if attempt + 1 < 4 => continue,
+                    PutClassify::ConflictRetry => return Ok(false),
+                    PutClassify::Other => {
+                        return Err(EngineError::Storage(format!(
+                            "S3 CAS PutObject (If-Match) failed for key {key}: {err}"
+                        )));
+                    }
+                },
+            }
+        }
+        Ok(false)
+    }
+
     /// Prove the endpoint **enforces** create-only: first put creates, second put must
     /// not create (412 / already-exists). Fail closed if the second put succeeds as a
     /// create (non-enforcing stores such as Garage v2.2.0).
@@ -189,6 +273,23 @@ fn classify_put_error(err: &SdkError<PutObjectError>) -> PutClassify {
         return PutClassify::ConflictRetry;
     }
     PutClassify::Other
+}
+
+fn is_not_found<E>(err: &SdkError<E>) -> bool
+where
+    E: std::fmt::Display + std::fmt::Debug,
+{
+    if let SdkError::ServiceError(ctx) = err {
+        let status = ctx.raw().status().as_u16();
+        if status == 404 {
+            return true;
+        }
+    }
+    let text = err.to_string().to_ascii_lowercase();
+    text.contains("nosuchkey")
+        || text.contains("not found")
+        || text.contains("404")
+        || text.contains("notfound")
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {

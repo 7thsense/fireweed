@@ -2602,7 +2602,8 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             }),
             ProjectionSpec::InMemory,
         ) => {
-            // Canonical S3 object-log × in-memory projection (P3vs barrier-threaded).
+            // Canonical S3 object-log × in-memory projection (P3vs barrier-threaded; P8cs
+            // emission via finalize_objectlog_async_owned → shared finalizer).
             let _ = (
                 objectlog_byte_budget,
                 config_objectlog_queue_limit,
@@ -2696,7 +2697,8 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             }),
             ProjectionSpec::Sqlite { path },
         ) => {
-            // Canonical S3 object-log × durable sqlite projection (P3vs barrier-threaded).
+            // Canonical S3 object-log × durable sqlite projection (P3vs barrier-threaded; P8cs
+            // emission via finalize_objectlog_async_owned → shared finalizer).
             let _ = (
                 objectlog_byte_budget,
                 config_objectlog_queue_limit,
@@ -3107,7 +3109,8 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             }),
             ProjectionSpec::Postgres { url },
         ) => {
-            // Canonical S3 object-log × durable Postgres projection (P3vs barrier-threaded).
+            // Canonical S3 object-log × durable Postgres projection (P3vs barrier-threaded; P8cs
+            // emission via finalize_objectlog_blocking_owned → shared finalizer).
             // Sync Postgres client work is confined inside projection applies. LogEngine owns flush.
             let _ = (
                 objectlog_byte_budget,
