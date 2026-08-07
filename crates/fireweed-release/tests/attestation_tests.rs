@@ -233,3 +233,47 @@ fn symlinked_digest_ancestor_cannot_escape_repo_root() {
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(outside).unwrap();
 }
+
+/// P17e: unpromoted attestation evidence is staged only under an external
+/// run-owned root; promoted-path identity remains `target/tp002-release/*`.
+#[test]
+fn external_bundle_attestation_rejects_in_repo_output_and_accepts_run_owned() {
+    use fireweed_release::RunOwned;
+
+    let root = temp_repo("attestation-external-source");
+    let external = std::env::temp_dir().join(format!(
+        "fireweed-attestation-external-bundle-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&external);
+    fs::create_dir_all(&external).unwrap();
+    fs::write(external.join("e0-e3.jsonl"), "{\"bars_met\":true}\n").unwrap();
+
+    // In-repo attestation output is rejected by the run-owned boundary.
+    let in_repo_out = root.join("docs/perf/evidence/attestation.json");
+    if let Some(parent) = in_repo_out.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    let denied = RunOwned::new(&root, root.join("docs/perf/evidence"), &in_repo_out);
+    assert!(
+        denied.is_err(),
+        "in-repo attestation output must be rejected"
+    );
+
+    // External run root accepts attestation writes and binds promoted-prefix paths.
+    let run_root = external.clone();
+    let out = run_root.join("attestation.json");
+    let authorized = RunOwned::new(&root, &run_root, &out).expect("external attestation out");
+    let mut attestation = manifest(&root);
+    attestation.evidence = vec![DigestBinding {
+        path: format!("{PROMOTED_EVIDENCE_PREFIX}/e0-e3.jsonl"),
+        sha256: digest_path(&external.join("e0-e3.jsonl")).unwrap(),
+    }];
+    let body = serde_json::to_vec_pretty(&attestation).unwrap();
+    authorized.write(&body).expect("write external attestation");
+    verify_attestation_with_evidence_root(&attestation, &root, &external, TAG, COMMIT)
+        .expect("external evidence root verifies against promoted path identity");
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(external).unwrap();
+}

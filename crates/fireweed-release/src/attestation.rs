@@ -1,4 +1,12 @@
 //! Fail-closed source and freshness binding for governed release evidence.
+//!
+//! P17e path contract:
+//! - Candidate/bundle staging is always an absolute run-owned root **outside**
+//!   the product checkout (see [`crate::RunOwned`]).
+//! - [`PROMOTED_EVIDENCE_PREFIX`] is the **post-promotion path identity** recorded
+//!   in attestation digests (not a license to write into the live `target/` tree
+//!   during staging). Unpromoted verification must use
+//!   [`verify_attestation_with_evidence_root`] with the external bundle root.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -10,6 +18,9 @@ use sha2::{Digest, Sha256};
 pub const SCHEMA_VERSION: u32 = 1;
 pub const POLICY: &str = "exact-tag-rerun";
 pub const SCOPE: &str = "tp002-release-v1";
+/// Post-promotion path identity for TP-002 composite evidence (E-side layout).
+/// Staging writes go to an external run-owned root; this prefix is never an
+/// in-repo staging directory for unpromoted producers.
 pub const PROMOTED_EVIDENCE_PREFIX: &str = "target/tp002-release";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

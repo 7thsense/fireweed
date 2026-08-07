@@ -186,4 +186,28 @@ expect_failure dirty_source env PATH="$CASE_ROOT/dirty-source/bin:$PATH" \
   --expected-remote "$EXPECTED_REMOTE_ARG" --expected-ref HEAD
 git -C "$SOURCE_WT" checkout -- Cargo.toml
 
+# Local/global exclude masking must not admit raw untracked product paths.
+# Worktrees use a .git file; write excludes into the linked common git dir.
+make_inputs "$CASE_ROOT/exclude-mask"
+git_common="$(git -C "$SOURCE_WT" rev-parse --git-path info)"
+mkdir -p "$git_common"
+printf 'masked-producer.txt\n' >"$git_common/exclude"
+printf 'hidden\n' >"$SOURCE_WT/masked-producer.txt"
+expect_failure exclude_mask env PATH="$CASE_ROOT/exclude-mask/bin:$PATH" \
+  bash "$SCRIPT_DIR/build-governed-evidence-bundle.sh" \
+  --source-dir "$CASE_ROOT/exclude-mask/source" --e3-source-dir "$CASE_ROOT/exclude-mask/e3" \
+  --out "$CASE_ROOT/exclude-mask/tp002-release" --revision "$REVISION" \
+  --source-root "$SOURCE_WT" --expected-source "$REVISION" \
+  --expected-remote "$EXPECTED_REMOTE_ARG" --expected-ref HEAD
+rm -f "$SOURCE_WT/masked-producer.txt" "$git_common/exclude"
+
+# Remote mismatch must fail (no ambient remote trust).
+make_inputs "$CASE_ROOT/remote-mismatch"
+expect_failure remote_mismatch env PATH="$CASE_ROOT/remote-mismatch/bin:$PATH" \
+  bash "$SCRIPT_DIR/build-governed-evidence-bundle.sh" \
+  --source-dir "$CASE_ROOT/remote-mismatch/source" --e3-source-dir "$CASE_ROOT/remote-mismatch/e3" \
+  --out "$CASE_ROOT/remote-mismatch/tp002-release" --revision "$REVISION" \
+  --source-root "$SOURCE_WT" --expected-source "$REVISION" \
+  --expected-remote "https://evil.example/fireweed.git" --expected-ref HEAD
+
 echo "build-governed-evidence-bundle-test: PASS"

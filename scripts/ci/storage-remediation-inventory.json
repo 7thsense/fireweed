@@ -14430,6 +14430,34 @@
           "P2f"
         ],
         "detail": "",
+        "id": "b191cad7f06768697f7c",
+        "identity": "--source-root \"$SOURCE_WT\" --expected-source \"$REVISION\" \\",
+        "line": 200,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "e6b2d22ca51ba9d12fd9",
+        "identity": "--source-root \"$SOURCE_WT\" --expected-source \"$REVISION\" \\",
+        "line": 210,
+        "owner": "P10px",
+        "path": "scripts/release/build-governed-evidence-bundle-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
         "id": "458a1df2acb428649fb5",
         "identity": "source_root=\"$REPO_ROOT\" expected_source=\"\" expected_remote=\"\" expected_ref=\"\"",
         "line": 10,
@@ -15578,6 +15606,48 @@
           "P2f"
         ],
         "detail": "",
+        "id": "fb34cfee5060adfc097c",
+        "identity": "--mode source --source-root \"$repo\" --expected-source \"$S\" \\",
+        "line": 94,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "6845a7ad4a6398347978",
+        "identity": "--mode source --source-root \"$repo\" --expected-source \"$S\" \\",
+        "line": 105,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "0f534328e72e9e81c74d",
+        "identity": "--mode source --source-root \"$repo\" --expected-source \"$S2\" \\",
+        "line": 119,
+        "owner": "P10px",
+        "path": "scripts/release/verify-source-predicate-test.sh",
+        "status": "debt"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "",
         "id": "b229f0bbbe397e49cf68",
         "identity": "#   e       \u2014 dual-root E mode: tooling from --source-root at S; promoted",
         "line": 10,
@@ -15928,8 +15998,8 @@
           "P2f"
         ],
         "detail": "",
-        "id": "c49661f8af8baa5b0ec9",
-        "identity": "git -C \"$SOURCE_ROOT\" -c core.excludesFile=/dev/null status --porcelain=v1 -uall \\",
+        "id": "54d327536239c8210a61",
+        "identity": "python3 - \"$SOURCE_ROOT\" \"$AUTHORITY_MANIFEST\" <<'PY'",
         "line": 142,
         "owner": "P10px",
         "path": "scripts/release/verify-source-predicate.sh",
@@ -15942,9 +16012,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "1c93a33be9f9abe7f331",
-        "identity": "python3 - \"$SOURCE_ROOT\" \"$AUTHORITY_MANIFEST\" \"${raw_untracked[@]+${raw_untracked[@]}}\" <<'PY'",
-        "line": 146,
+        "id": "ae27d62cfb9f0bcffa43",
+        "identity": "python3 - \"$SOURCE_ROOT\" \"$AUTHORITY_MANIFEST\" <<'PY'",
+        "line": 350,
         "owner": "P10px",
         "path": "scripts/release/verify-source-predicate.sh",
         "status": "debt"
@@ -15956,23 +16026,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "7a3c70d32270c4594a68",
-        "identity": "-e '\\.ddx/' -e 'beads\\.jsonl' \"$SOURCE_ROOT\" 2>/dev/null \\",
-        "line": 300,
-        "owner": "P10px",
-        "path": "scripts/release/verify-source-predicate.sh",
-        "status": "debt"
-      },
-      {
-        "category": "source_guard",
-        "dependency_chain": [
-          "P10px",
-          "P2f"
-        ],
-        "detail": "",
-        "id": "0538e0d3d6b2d09c0a49",
+        "id": "2b4cf61febfe5a23c7aa",
         "identity": "python3 - \"$PROMOTED_ROOT\" \"$PROMOTED_ALLOWLIST\" \"$EXPECTED_SOURCE\" <<'PY'",
-        "line": 309,
+        "line": 428,
         "owner": "P10px",
         "path": "scripts/release/verify-source-predicate.sh",
         "status": "debt"
@@ -15984,9 +16040,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "3015ed8f1936a68f696d",
+        "id": "821cf227b935d6a52960",
         "identity": "expected_source = sys.argv[3]",
-        "line": 317,
+        "line": 436,
         "owner": "P10px",
         "path": "scripts/release/verify-source-predicate.sh",
         "status": "debt"
@@ -15998,9 +16054,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "950fe34093e35cc60a19",
+        "id": "401ac7fcbcec7e1d4785",
         "identity": "if raw.get(\"expected_source\") and raw[\"expected_source\"] != expected_source:",
-        "line": 321,
+        "line": 440,
         "owner": "P10px",
         "path": "scripts/release/verify-source-predicate.sh",
         "status": "debt"
@@ -16012,9 +16068,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "ddddba827d21417d0b72",
+        "id": "43ccdc300f2050cb16e6",
         "identity": "f\"promoted allowlist expected_source {raw['expected_source']} != {expected_source}\"",
-        "line": 323,
+        "line": 442,
         "owner": "P10px",
         "path": "scripts/release/verify-source-predicate.sh",
         "status": "debt"
@@ -16026,9 +16082,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "50306319683f478f0571",
+        "id": "a96e9f06e0217702b9bf",
         "identity": "echo \"verify-source-predicate: ok mode=${MODE} source=${EXPECTED_SOURCE} ref=${EXPECTED_REF}\"",
-        "line": 343,
+        "line": 462,
         "owner": "P10px",
         "path": "scripts/release/verify-source-predicate.sh",
         "status": "debt"
@@ -100040,7 +100096,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "d480e71cc8debc59f1faceac6566332b2d509c9ac939492138cb10cbfcd8d0c3",
+  "source_inventory_sha256": "26c2a4b09656b752a104aac4c23cf6b218654d568b13b3f1a5751385f58b0ae1",
   "workspaces": [
     {
       "listing_error_sha256": "",
