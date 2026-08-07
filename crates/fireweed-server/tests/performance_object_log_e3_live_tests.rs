@@ -3503,16 +3503,8 @@ fn profile_row(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn performance_object_log_e3_live_tests() {
-    let Ok(endpoint) = std::env::var("FIREWEED_S3_TEST_ENDPOINT") else {
-        eprintln!(
-            "\n================================================================\n\
-             TP-002 E3 LIVE OBJECT-LOG HARNESS SKIPPED (performance_object_log_e3_live_tests)\n\
-             set FIREWEED_S3_TEST_ENDPOINT=<s3-compatible-endpoint> and its bucket/region/credentials to run it.\n\
-             The E3 matrix evidence is DEFERRED, not a hidden pass.\n\
-             ================================================================\n"
-        );
-        return;
-    };
+    let endpoint = std::env::var("FIREWEED_S3_TEST_ENDPOINT")
+        .expect("FIREWEED_S3_TEST_ENDPOINT required (fail-closed live S3; no LOUD skip)");
     let s3 = S3Env {
         endpoint,
         bucket: std::env::var("FIREWEED_S3_TEST_BUCKET")
@@ -4217,8 +4209,7 @@ fn recovery_queue_ids_isolate_concurrent_and_repeated_runs() {
 
 fn live_e3_s3_env() -> Option<S3Env> {
     let Ok(endpoint) = std::env::var("FIREWEED_S3_TEST_ENDPOINT") else {
-        eprintln!("TEST SKIPPED: FIREWEED_S3_TEST_ENDPOINT is required for live E3 recovery");
-        return None;
+        panic!("TEST SKIPPED: FIREWEED_S3_TEST_ENDPOINT is required for live E3 recovery");
     };
     Some(S3Env {
         endpoint,

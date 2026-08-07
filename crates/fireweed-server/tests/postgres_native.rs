@@ -264,8 +264,7 @@ async fn postgres_native_start_reports_connection_error_off_reactor() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_native_one_instance_pool_progresses_other_queue_during_pg_sleep() {
     let Ok(base_url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-        eprintln!("POSTGRES NATIVE POOL E0 SKIPPED — set FIREWEED_PG_TEST_URL to a live DB");
-        return;
+        panic!("POSTGRES NATIVE POOL E0 SKIPPED — set FIREWEED_PG_TEST_URL to a live DB");
     };
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -483,12 +482,8 @@ async fn postgres_native_one_instance_pool_progresses_other_queue_during_pg_slee
 /// push -> claim -> ack over RESP with a stock Redis client. LOUD-skips when no DB is configured.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_native_live_push_claim_ack_over_resp() {
-    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-        eprintln!(
-            "POSTGRES NATIVE SERVER SMOKE SKIPPED (push/claim/ack) — set FIREWEED_PG_TEST_URL to a live DB"
-        );
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
     // A unique search_path so reruns and parallel suites never collide on the shared queue tables.
     let schema = format!("fireweed_native_{}", std::process::id());
     let url = if url.contains("?options=") || url.contains("&options=") {

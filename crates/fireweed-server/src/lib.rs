@@ -5831,8 +5831,7 @@ mod byte_admission_wiring_tests {
     #[test]
     fn sqlite_log_postgres_projection_constructs_when_pg_available() {
         let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!("SQLITE/POSTGRES CONSTRUCT SKIPPED — set FIREWEED_PG_TEST_URL to a live DB");
-            return;
+            panic!("SQLITE/POSTGRES CONSTRUCT SKIPPED — set FIREWEED_PG_TEST_URL to a live DB");
         };
         let schema = format!("fireweed_sqlite_pg_{}", std::process::id());
 
@@ -5935,12 +5934,8 @@ mod byte_admission_wiring_tests {
     #[cfg(feature = "postgres")]
     #[test]
     fn filesystem_object_log_postgres_projection_constructs_when_pg_available() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "FILESYSTEM/POSTGRES CONSTRUCT SKIPPED — set FIREWEED_PG_TEST_URL to a live DB"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         let schema = format!("fireweed_fs_pg_{}", std::process::id());
         let mut client =
             fireweed_postgres::connect(fireweed_postgres::PostgresConnectConfig::new(&url))
@@ -6460,15 +6455,10 @@ mod class_b_memory_log_tests {
     async fn run_class_b_cell_t0_t3(proj: ClassBProjection) {
         let cell_id = format!("memory×{}", proj.name());
 
-        if matches!(proj, ClassBProjection::Postgres)
-            && std::env::var("FIREWEED_PG_TEST_URL").is_err()
-        {
-            eprintln!(
-                "class_b T0-T3: {cell_id} skipped (FIREWEED_PG_TEST_URL unset; rebuild with --features postgres when live PG is available)"
+        if matches!(proj, ClassBProjection::Postgres) {
+            let _ = std::env::var("FIREWEED_PG_TEST_URL").expect(
+                "FIREWEED_PG_TEST_URL required for class_b postgres T0-T3 (fail-closed; no LOUD skip)",
             );
-            // T3 claims still enforced offline — no durable_log_replay even when the live cell skips.
-            assert_class_b_t3_claims(proj);
-            return;
         }
 
         let root = FixtureRoot::new(proj.name());
@@ -6995,12 +6985,8 @@ mod sqlite_log_matrix_tests {
     #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn sqlite_log_postgres_lifecycle_and_reopen() {
-        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-            eprintln!(
-                "sqlite_log_postgres_lifecycle_and_reopen SKIPPED — set FIREWEED_PG_TEST_URL"
-            );
-            return;
-        };
+        let url = std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
         use fireweed::{
             ConfigSecret, LogConfig, NewItem, ProjectionStoreConfig, RecoveryPolicy,
             ResponseBarrier, SegmentConfig, StorageConfig, SystemClock, open_async,
@@ -7553,8 +7539,9 @@ mod postgres_log_matrix_tests {
             .expect("authorize run-owned TP-003 output")
     }
 
-    fn pg_url() -> Option<String> {
-        std::env::var("FIREWEED_PG_TEST_URL").ok()
+    fn pg_url() -> String {
+        std::env::var("FIREWEED_PG_TEST_URL")
+            .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)")
     }
 
     fn schema_name(prefix: &str) -> String {
@@ -7639,13 +7626,7 @@ mod postgres_log_matrix_tests {
     #[cfg(feature = "postgres")]
     #[test]
     fn postgres_log_memory_lifecycle_and_reopen() {
-        let Some(url) = pg_url() else {
-            eprintln!(
-                "postgres_log_memory_lifecycle_and_reopen SKIPPED — set FIREWEED_PG_TEST_URL \
-                 (cell postgres×memory remains registered)"
-            );
-            return;
-        };
+        let url = pg_url();
         let cell = "postgres×memory";
         let schema = schema_name("mem");
         {
@@ -7708,13 +7689,7 @@ mod postgres_log_matrix_tests {
     #[cfg(feature = "postgres")]
     #[test]
     fn postgres_log_sqlite_lifecycle_and_reopen() {
-        let Some(url) = pg_url() else {
-            eprintln!(
-                "postgres_log_sqlite_lifecycle_and_reopen SKIPPED — set FIREWEED_PG_TEST_URL \
-                 (cell postgres×sqlite remains registered)"
-            );
-            return;
-        };
+        let url = pg_url();
         let cell = "postgres×sqlite";
         let schema = schema_name("sqlite");
         let root = fixture_root("sqlite");
@@ -7789,13 +7764,7 @@ mod postgres_log_matrix_tests {
     #[cfg(feature = "postgres")]
     #[test]
     fn postgres_log_postgres_lifecycle_and_reopen() {
-        let Some(url) = pg_url() else {
-            eprintln!(
-                "postgres_log_postgres_lifecycle_and_reopen SKIPPED — set FIREWEED_PG_TEST_URL \
-                 (cell postgres×postgres remains registered)"
-            );
-            return;
-        };
+        let url = pg_url();
         let cell = "postgres×postgres";
         let schema = schema_name("pgpg");
         {
@@ -7899,14 +7868,7 @@ mod postgres_log_matrix_tests {
         let mut failures: Vec<String> = Vec::new();
         let base = fixture_root("t3");
 
-        let Some(url) = pg_url() else {
-            assert!(
-                std::env::var_os("FIREWEED_TP003_POSTGRES_EVIDENCE_OUT").is_none(),
-                "governed postgres TP-003 evidence requires FIREWEED_PG_TEST_URL"
-            );
-            cleanup_root(&base);
-            return;
-        };
+        let url = pg_url();
 
         // --- postgres×memory ---
         {

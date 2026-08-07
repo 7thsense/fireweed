@@ -884,8 +884,7 @@ fn nonpassing_e0_row_remains_identified_smoke_evidence() {
 #[test]
 fn production_wrapper_batches_10k_through_native_ports() {
     let Ok(observer_url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-        eprintln!("POSTGRES WRAPPER 10K BATCH PROOF SKIPPED — set FIREWEED_PG_TEST_URL");
-        return;
+        panic!("POSTGRES WRAPPER 10K BATCH PROOF SKIPPED — set FIREWEED_PG_TEST_URL");
     };
     let schema = fresh_schema();
     let application_name = format!("fireweed_e0_batch_proof_{}", std::process::id());
@@ -941,14 +940,8 @@ fn production_wrapper_batches_10k_through_native_ports() {
 
 #[test]
 fn performance_single_deployment_baseline_tests() {
-    let Ok(observer_url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-        eprintln!(
-            "POSTGRES E0/E1 SINGLE-DEPLOYMENT BASELINE SKIPPED — set FIREWEED_PG_TEST_URL to a live DB. \
-             Portable correctness, configured-progress, bounded-resource, and capacity evidence is \
-             DEFERRED (not measured), not a hidden pass."
-        );
-        return;
-    };
+    let observer_url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
     // A designated PERF environment may emit RELEASE-tier evidence. Without it, this is a SMOKE lane that
     // measures the same invariants but never satisfies a release gate. Host speed never decides either lane.
     let perf_env = std::env::var("FIREWEED_PERF_ENV").is_ok();

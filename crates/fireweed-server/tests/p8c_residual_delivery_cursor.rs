@@ -148,8 +148,9 @@ fn kafka_sink() -> ChangeRecordSinkConfig {
 const EXTERNAL_KAFKA_FEATURE_REQUIRED: &str = "external-kafka change record sink requires the `external-kafka` cargo feature (pure-Rust rskafka); \
      the default in-process embedded surface needs no endpoint";
 
-fn pg_url() -> Option<String> {
-    std::env::var("FIREWEED_PG_TEST_URL").ok()
+fn pg_url() -> String {
+    std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)")
 }
 
 fn url_with_schema(url: &str, schema: &str) -> String {
@@ -452,12 +453,7 @@ async fn p8c_residual_class_a_non_pg_embedded_delivery_smokes() {
 /// Postgres-axis Class A cells (env-gated): Embedded delivery smokes through Server lifecycle.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p8c_residual_class_a_postgres_axis_embedded_delivery_smokes() {
-    let Some(url) = pg_url() else {
-        eprintln!(
-            "P8C RESIDUAL PG CELLS SKIPPED (embedded delivery smokes) — set FIREWEED_PG_TEST_URL"
-        );
-        return;
-    };
+    let url = pg_url();
     let _guard = RESIDUAL_SERVER_LOCK.lock().await;
 
     // sqlite × postgres
@@ -817,12 +813,7 @@ async fn p8c_residual_filesystem_log_cursor_lifecycle() {
 /// Postgres-log cursor lifecycle (env-gated; synthetic, cursor-store only).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn p8c_residual_postgres_log_cursor_lifecycle() {
-    let Some(url) = pg_url() else {
-        eprintln!(
-            "P8C RESIDUAL PG CURSOR LIFECYCLE SKIPPED — set FIREWEED_PG_TEST_URL to a live DB"
-        );
-        return;
-    };
+    let url = pg_url();
     let schema = unique_tag("pg_cursor").replace('-', "_");
     create_schema(&url, &schema).await;
 

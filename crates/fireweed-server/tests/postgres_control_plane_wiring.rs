@@ -97,12 +97,8 @@ async fn raw_resp(address: std::net::SocketAddr, parts: &[&str]) -> String {
 
 #[test]
 fn two_service_runtimes_share_owner_membership_and_monotonic_epochs() {
-    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-        eprintln!(
-            "POSTGRES CONTROL-PLANE SERVER WIRING SKIPPED — set FIREWEED_PG_TEST_URL to a live DB"
-        );
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
 
     let schema = fresh_schema();
     let control_config = ControlPlaneConfig {
@@ -179,12 +175,8 @@ fn two_service_runtimes_share_owner_membership_and_monotonic_epochs() {
 
 #[test]
 fn peer_endpoint_discovery_returns_one_hop_moved() {
-    let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
-        eprintln!(
-            "POSTGRES ENDPOINT-DISCOVERY WIRING SKIPPED — set FIREWEED_PG_TEST_URL to a live DB"
-        );
-        return;
-    };
+    let url = std::env::var("FIREWEED_PG_TEST_URL")
+        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
 
     let schema = fresh_schema();
     let control_config = ControlPlaneConfig {
