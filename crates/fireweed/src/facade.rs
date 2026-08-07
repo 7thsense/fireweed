@@ -1346,6 +1346,29 @@ impl Fireweed {
         Err(EngineError::Unavailable)
     }
 
+    /// Manual snapshot-now for a named queue (fireweed-3f70c7d1). Backends that have not bound
+    /// [`SnapshotStore`] on the facade return [`EngineError::Unavailable`]; object-log products
+    /// surface this via projection lifecycle rebuild tooling until the log snapshot plane is
+    /// plumbed through [`FireweedDataPlane`].
+    pub async fn snapshot_now(&self, queue: &QueueKey) -> EngineResult<SnapshotNowResult> {
+        let _ = queue;
+        Err(EngineError::Unavailable)
+    }
+
+    /// Latest snapshot introspection for a queue (position/ref when present).
+    pub async fn latest_snapshot_info(
+        &self,
+        queue: &QueueKey,
+    ) -> EngineResult<Option<SnapshotInfo>> {
+        let _ = queue;
+        Ok(None)
+    }
+
+    /// Recovery stats from the last projection rebuild when the control plane is present.
+    pub fn last_rebuild_stats(&self) -> Option<ProjectionRebuild> {
+        None
+    }
+
     pub async fn peek(&self, queue: &QueueKey, limit: usize) -> EngineResult<Vec<ItemView>> {
         self.inner.peek(queue, limit).await
     }
