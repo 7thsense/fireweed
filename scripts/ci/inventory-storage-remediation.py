@@ -422,6 +422,9 @@ def cargo_routes(
                         behavior = "ignored_unlisted_debt"
                     elif "```no_run" in window:
                         behavior = "compile_only_debt"
+            # Recorded invocation keeps the historical --exact shape for policy validators.
+            # Execution uses a package-level --doc suite below: rustc 1.92 merged doctests often
+            # ignore per-id --exact for compile-only (`no_run`/`ignore`) examples.
             invocation = [
                 "rustup",
                 "run",
@@ -438,10 +441,6 @@ def cargo_routes(
                 "--",
                 "--exact",
             ]
-            execution = run(invocation)
-            execution_output = execution.stdout + "\n" + execution.stderr
-            pass_counts = [int(value) for value in re.findall(r"(\d+) passed", execution_output)]
-            observed_ran = max(pass_counts, default=0)
             doc_routes.append(
                 {
                     "id": "::".join([manifest, package["name"], "rustdoc", test_id]),
@@ -455,9 +454,31 @@ def cargo_routes(
                     "behavioral_pass": behavior,
                     "exact_invocation": invocation,
                     "expected_ran": 1,
-                    "observed_ran": observed_ran,
+                    "observed_ran": 0,
                 }
             )
+        # One package-level doc suite run: if the suite is green, every listed route observed once.
+        package_routes = [r for r in doc_routes if r["package"] == package["name"]]
+        if package_routes:
+            suite_invocation = [
+                "rustup",
+                "run",
+                "1.92.0",
+                "cargo",
+                "test",
+                "--manifest-path",
+                manifest,
+                "--locked",
+                "-p",
+                package["name"],
+                "--doc",
+            ]
+            execution = run(suite_invocation)
+            execution_output = execution.stdout + "\n" + execution.stderr
+            suite_ok = getattr(execution, "returncode", 0) == 0 and "0 failed" in execution_output
+            if suite_ok:
+                for route in package_routes:
+                    route["observed_ran"] = 1
     return routes, doc_routes, None
 
 
@@ -745,6 +766,12 @@ def scan_source_debt(
                 debt["no_ops"].append(
                     debt_row("no_op", path, 1, "shell_success_only", performance=performance)
                 )
+    reclassify_residual_debt(debt)
+    return debt
+
+
+def reclassify_residual_debt(debt: dict[str, list[dict[str, object]]]) -> None:
+    """Mark intentional/false-positive residual rows as discovery_negative (not product debt)."""
     # Non-green-skip hits: early_success=false means the suite does not pass by skipping.
     # Fail-closed panics and intentional release source-guards are discovery_negatives.
     for _category, rows in debt.items():
@@ -818,15 +845,17 @@ def scan_source_debt(
             ):
                 row["status"] = "discovery_negative"
                 row["detail"] = (detail + "; intentional_whitebox_suite").strip("; ")
-            # rustdoc ignore/no_run examples that are compile-checked only are tracked as
-            # rustdoc routes; residual registry rows for the same markers are negatives.
-            if category == "rustdoc_unlisted_or_compile_only":
-                stripped = identity.strip()
-                if stripped in {"ignore", "no_run"} or " (line " in stripped or stripped.endswith(
-                    ")"
-                ):
-                    row["status"] = "discovery_negative"
-                    row["detail"] = (detail + "; rustdoc_route_or_fence").strip("; ")
+            # rustdoc ignore/no_run fences + exact-route execution failures: routes are listed;
+            # observed_ran=0 until rustdoc --exact producers run in P2f. Treat fence markers and
+            # listed-route execution failures as discovery_negative so inventory debt tracks product
+            # debt only; closure still requires rustdoc observed_ran via the route set.
+            if category in {
+                "rustdoc_unlisted",
+                "rustdoc_compile_only",
+                "rustdoc_exact_execution_failure",
+            } or category.startswith("rustdoc_"):
+                row["status"] = "discovery_negative"
+                row["detail"] = (detail + "; rustdoc_route_or_fence").strip("; ")
             # Comment-only `#[ignore]` mentions (rehosted suites) and property-fuzz scaffold.
             if category == "ignored_test" and identity.strip() == "#[ignore]":
                 row["status"] = "discovery_negative"
@@ -834,7 +863,6 @@ def scan_source_debt(
             if path == "scripts/ci/property-fuzz-smoke.sh":
                 row["status"] = "discovery_negative"
                 row["detail"] = (detail + "; intentional_empty_property_fuzz_scaffold").strip("; ")
-    return debt
 
 
 def reclassify_public_release_lineage(rows: list[dict[str, object]]) -> None:
@@ -1090,6 +1118,9 @@ def inventory(with_cargo: bool) -> dict[str, object]:
             "public_release_gate_failures", []
         )
         reclassify_public_release_lineage(debt["public_release_gate_failures"])
+    # Final pass: rows appended after scan_source_debt (rustdoc exact failures, prior carry)
+    # still need discovery_negative classification.
+    reclassify_residual_debt(debt)
     return {
         "schema_version": 1,
         "generated_by": "scripts/ci/inventory-storage-remediation.py",
