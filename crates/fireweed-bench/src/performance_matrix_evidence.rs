@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::performance_matrix::{OperationSamples, RepetitionResult};
 use crate::performance_matrix_analysis::{Comparison, build_comparisons};
+use crate::performance_matrix_cells::is_maintenance_cell;
 use crate::performance_matrix_lifecycle::{ProjectionMaintenanceResult, RecoveryResult};
 use crate::performance_matrix_provenance::Provenance;
 
@@ -105,13 +106,12 @@ pub fn build_schedule(tier: &str) -> Result<Vec<ScheduleEntry>, String> {
                 }
             }
         }
-        // Maintenance: disposable projection rebuild for filesystem/s3 × non-memory projection.
-        for (cell, _) in FULL_CELLS.iter().filter(|(cell, _)| {
-            let Some((log, proj)) = cell.split_once("--") else {
-                return false;
-            };
-            matches!(log, "filesystem" | "s3") && proj != "memory"
-        }) {
+        // Maintenance: disposable projection rebuild for filesystem|s3 × sqlite|postgres.
+        // Turso has no rebuild control plane; memory projection is not durable to rebuild.
+        for (cell, _) in FULL_CELLS
+            .iter()
+            .filter(|(cell, _)| is_maintenance_cell(cell))
+        {
             for repetition in 0..3 {
                 push("maintenance", repetition, "record-1k", cell);
             }
@@ -768,11 +768,7 @@ fn verify_evidence(evidence: &MatrixEvidence) -> Result<(), String> {
         let maintenance_cells = FULL_CELLS
             .iter()
             .map(|(cell, _)| *cell)
-            .filter(|cell| {
-                cell.split_once("--").is_some_and(|(log, proj)| {
-                    matches!(log, "filesystem" | "s3") && proj != "memory"
-                })
-            })
+            .filter(|cell| is_maintenance_cell(cell))
             .collect::<BTreeSet<_>>();
         let expected_maintenance = maintenance_cells.len() * 3;
         if evidence.maintenance.len() != expected_maintenance {
