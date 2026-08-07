@@ -137,13 +137,13 @@ kind storage matrix only and is not CI matrix proof.
 The chart exposes separate storage axes isomorphic to `StorageConfig`:
 
 - log backend: `memory` | `sqlite` | `postgres` | `filesystem` | `s3`
-- projection backend: `memory` | `sqlite` | `postgres`
+- projection backend: `memory` | `sqlite` | `turso` (default) | `postgres`
 
 Only those public product values are chart-selectable. The static Helm gate
 names and verifies schema rejection of demoted and legacy backend names, so
 non-public implementation paths cannot be mistaken for public deployment support.
+Chart defaults and the named `helm_defaults_to_turso_projection` case select Turso.
 
-The current live-kind matrix covers `filesystem` plus `memory` or `sqlite`, and
-`postgres` plus `memory`, `sqlite`, or `postgres`. Other rendered combinations
-remain outside the live deployment claim until their matrix entries and evidence
-land.
+The live-kind matrix covers `filesystem` × {`memory`, `sqlite`, `turso`} and
+`postgres` × {`memory`, `sqlite`, `turso`, `postgres`}. The full 20-cell matrix is
+statically proven by `scripts/ci/helm-gate.sh` CI values fixtures.

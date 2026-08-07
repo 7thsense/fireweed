@@ -41,3 +41,6 @@ data:
   {{- if eq .Values.storage.projection.backend "sqlite" }}
   FIREWEED_SQLITE_PROJECTION_PATH: {{ .Values.storage.projection.sqlite.path | quote }}
   {{- end }}
+  {{- if eq .Values.storage.projection.backend "turso" }}
+  FIREWEED_TURSO_PROJECTION_PATH: {{ .Values.storage.projection.turso.path | quote }}
+  {{- end }}

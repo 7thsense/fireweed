@@ -1,0 +1,13 @@
+# Fireweed Queue CI values: sqlite log × turso projection (Class A; distinct local paths).
+storage:
+  log:
+    backend: sqlite
+    sqlite:
+      path: /var/lib/fireweed/projection/fireweed-log.db
+  projection:
+    backend: turso
+    turso:
+      path: /var/lib/fireweed/projection/projection.turso
+image:
+  tag: ci
+replicaCount: 1

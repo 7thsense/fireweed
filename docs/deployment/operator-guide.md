@@ -32,11 +32,10 @@ shape (see [container-runtime-contract.md](container-runtime-contract.md)).
 | Projection | `storage.projection.backend` | `memory`, `sqlite`, `turso` (server default), `postgres` |
 | Control plane | `storage.controlPlane.backend` | `inprocess`, `postgres` |
 
-Stock `fireweed-service` defaults `FIREWEED_PROJECTION_BACKEND` to `turso` and
-uses `FIREWEED_TURSO_PROJECTION_PATH` (default
-`/var/lib/fireweed/fireweed-projection.turso`). Helm chart defaulting to Turso
-is a separate deployment-gate deliverable; until that lands, set the projection
-axis explicitly in values when you need Turso under Helm.
+Stock `fireweed-service` and the Helm chart both default the projection axis to
+`turso`. The service uses `FIREWEED_TURSO_PROJECTION_PATH` (default
+`/var/lib/fireweed/fireweed-projection.turso` on bare metal; the chart mounts
+`/var/lib/fireweed/projection/projection.turso` under the storage volume).
 
 ### Durability classes
 
@@ -82,9 +81,9 @@ storage:
   log:
     backend: memory
   projection:
-    backend: sqlite   # or memory | postgres
-    sqlite:
-      path: /var/lib/fireweed/projection/projection.db
+    backend: turso   # or memory | sqlite | postgres
+    turso:
+      path: /var/lib/fireweed/projection/projection.turso
 ```
 
 **`sqlite` (Class A).** Durable local log path.
@@ -96,7 +95,9 @@ storage:
     sqlite:
       path: /var/lib/fireweed/projection/fireweed-log.db
   projection:
-    backend: memory   # or sqlite | postgres
+    backend: turso   # or memory | sqlite | postgres
+    turso:
+      path: /var/lib/fireweed/projection/projection.turso
 ```
 
 **`postgres` (Class A).** First-class durable log; DSN via Secret only.
@@ -109,7 +110,9 @@ storage:
       existingSecret: fireweed-postgres-log
       databaseUrlKey: database-url
   projection:
-    backend: memory   # or sqlite | postgres
+    backend: turso   # or memory | sqlite | postgres
+    turso:
+      path: /var/lib/fireweed/projection/projection.turso
 ```
 
 **`filesystem` (Class A).** Local disk or NAS object-log root (peer of `s3`).
@@ -121,7 +124,9 @@ storage:
     objectLog:
       root: /var/lib/fireweed/projection/object-log
   projection:
-    backend: memory   # or sqlite | postgres
+    backend: turso   # or memory | sqlite | postgres
+    turso:
+      path: /var/lib/fireweed/projection/projection.turso
 ```
 
 **`s3` (Class A).** S3-compatible object log; credentials via Secret.
@@ -139,20 +144,26 @@ storage:
           existingSecret: fireweed-objectlog-s3
   projection:
     backend: turso   # or memory | sqlite | postgres
+    turso:
+      path: /var/lib/fireweed/projection/projection.turso
 ```
 
 #### Projection axis (four public values)
 
 | Projection | When to use | Structured fields / env |
 |------------|-------------|-------------------------|
-| `turso` (default) | Local durable serving projection (stock default) | `FIREWEED_TURSO_PROJECTION_PATH` (server); Helm Turso path wiring is a follow-on chart gate |
+| `turso` (default) | Local durable serving projection (stock default) | `storage.projection.turso.path` → `FIREWEED_TURSO_PROJECTION_PATH` |
 | `memory` | Rebuildable / process-local serving | none |
 | `sqlite` | Local durable serving projection (explicit alternative) | `storage.projection.sqlite.path` |
 | `postgres` | Shared durable serving projection | `storage.projection.postgres.existingSecret` + `databaseUrlKey` |
 
 ```yaml
-# turso projection (server default; set path via FIREWEED_TURSO_PROJECTION_PATH)
-# Helm values for turso are owned by the T4 deployment bead (P12).
+# turso projection (chart + server default)
+storage:
+  projection:
+    backend: turso
+    turso:
+      path: /var/lib/fireweed/projection/projection.turso
 
 # memory projection (no extra fields)
 storage:

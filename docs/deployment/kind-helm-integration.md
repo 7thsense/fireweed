@@ -8,16 +8,23 @@ Use public storage axes:
 ```sh
 bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend memory
 bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend sqlite
+bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend turso
 bash scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend memory
 bash scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend sqlite
+bash scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend turso
 bash scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend postgres
 ```
 
-The release smoke path covers durable filesystem object-log projections and the
-postgres log axis cells above. The `sqlite` projection persists its relational
-state on the chart's storage volume; `memory` is ephemeral and rebuilds from a
-durable log after restart when the log axis is durable. Other chart axis
-combinations are documented in the deployment-readiness matrix.
+The live kind smoke set is the chart-installable deployable set above
+(filesystem × {memory,sqlite,turso} and postgres × {memory,sqlite,turso,postgres}).
+That set equals the harness allow-list and the documented runtime cells in this
+file. The full 20-cell matrix is statically proven by `scripts/ci/helm-gate.sh`;
+process-local Class B cells (memory log) rely on T0–T3 and do not claim multi-node
+kind coverage.
+
+The `sqlite` and `turso` projections persist relational state on the chart's
+storage volume; `memory` is ephemeral and rebuilds from a durable log after
+restart when the log axis is durable. Chart defaults select Turso.
 
 The harness builds `fireweed-service:ci`, creates a kind cluster, loads the image, installs
 the chart with the matching CI values, waits for rollout, checks RESP `PING`,

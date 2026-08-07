@@ -23,7 +23,7 @@ Public product values:
 | Axis | Helm key | Values |
 |------|----------|--------|
 | **Log** | `storage.log.backend` | `memory`, `sqlite`, `postgres`, `filesystem`, `s3` |
-| **Projection** | `storage.projection.backend` | `memory`, `sqlite`, `postgres` |
+| **Projection** | `storage.projection.backend` | `memory`, `sqlite`, `turso` (default), `postgres` |
 | **Control plane** | `storage.controlPlane.backend` | `inprocess`, `postgres` |
 
 `filesystem` and `s3` are first-class object-log peers (same segment/manifest
@@ -36,6 +36,8 @@ protocol). Configure them with structured fields:
 - **SQLite log** — `storage.log.backend=sqlite` and `storage.log.sqlite.path`
 - **Postgres log / projection** — Secret-ref DSN blocks under
   `storage.log.postgres` / `storage.projection.postgres`
+- **Turso projection (default)** — `storage.projection.backend=turso` and
+  `storage.projection.turso.path` (renders `FIREWEED_TURSO_PROJECTION_PATH`)
 - **SQLite projection** — `storage.projection.backend=sqlite` and
   `storage.projection.sqlite.path`
 
@@ -45,8 +47,9 @@ protocol). Configure them with structured fields:
   durable on the log and visible in the projection; recovery uses high-water +
   tail when the log remains.
 - **Class B** (`memory` log): success means visible in the projection; durable
-  only if the projection is durable. After process death only the projection
-  remains — no Class A log-rebuild claims for a memory log.
+  only if the projection is durable (`sqlite` / `turso` / `postgres`). After
+  process death only the projection remains — no Class A log-rebuild claims for
+  a memory log.
 
 ### Public names only
 
@@ -86,7 +89,9 @@ storage:
     objectLog:
       root: /var/lib/fireweed/projection/object-log
   projection:
-    backend: memory
+    backend: turso
+    turso:
+      path: /var/lib/fireweed/projection/projection.turso
 ```
 
 The chart renders:
@@ -96,17 +101,24 @@ The chart renders:
 - `FIREWEED_OBJECT_LOG_ROOT` when the log is `filesystem`
 - `FIREWEED_OBJECT_LOG_S3_*` when the log is `s3`
 - `FIREWEED_SQLITE_LOG_PATH` when the log is `sqlite`
+- `FIREWEED_TURSO_PROJECTION_PATH` when the projection is `turso`
 - `FIREWEED_SQLITE_PROJECTION_PATH` when the projection is `sqlite`
 - Postgres log/projection/control-plane database URL Secret refs when those
   axes use `postgres`
+
+CI values under `charts/fireweed-queue/ci/` map injectively onto the 20
+canonical cell IDs (`log--projection`) for Helm T4 proof. Explicit
+`memory`/`sqlite`/`postgres` projection fixtures remain for non-default
+selections.
 
 The service exposes the RESP port and uses TCP liveness/readiness probes.
 
 ## Shared S3 multi-replica values
 
 `values-shared-s3.yaml` selects a replica-safe shared S3 object log, Postgres
-ownership control plane, and pod-local rebuildable SQLite projection. Prefer
-public spellings in operator-owned values:
+ownership control plane, and a pod-local rebuildable projection (`sqlite` or
+`turso`). Multi-replica validation uses durability/control-plane rules rather
+than hard-coding SQLite. Prefer public spellings in operator-owned values:
 
 ```yaml
 replicaCount: 3
@@ -123,7 +135,9 @@ storage:
   controlPlane:
     backend: postgres
   projection:
-    backend: sqlite
+    backend: turso   # or sqlite
+    turso:
+      path: /var/lib/fireweed/projection/projection.turso
 persistence:
   enabled: false
 ```

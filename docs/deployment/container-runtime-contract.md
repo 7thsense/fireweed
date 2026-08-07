@@ -182,9 +182,10 @@ into the stock container image.
 |-----|----------|---------|---------|
 | `FIREWEED_LISTEN_ADDR` | no | `0.0.0.0:8080` | RESP listen address. |
 | `FIREWEED_LOG_BACKEND` | no | `filesystem` | **Injection** for log axis. Public values only: `memory`, `sqlite`, `postgres`, `filesystem`, `s3`. |
-| `FIREWEED_PROJECTION_BACKEND` | no | `memory` | **Injection** for projection axis. Public values only: `memory`, `sqlite`, `postgres`. |
+| `FIREWEED_PROJECTION_BACKEND` | no | `turso` | **Injection** for projection axis. Public values only: `memory`, `sqlite`, `turso`, `postgres`. |
 | `FIREWEED_OBJECT_LOG_ROOT` | when log is `filesystem` | `/var/lib/fireweed/object-log` | Local/filesystem object-log root. |
 | `FIREWEED_SQLITE_LOG_PATH` | when log is `sqlite` | `/var/lib/fireweed/fireweed-log.db` | Local SQLite log path. |
+| `FIREWEED_TURSO_PROJECTION_PATH` | when projection is `turso` | `/var/lib/fireweed/fireweed-projection.turso` | Local Turso materialized projection path (chart default under the storage volume: `/var/lib/fireweed/projection/projection.turso`). |
 | `FIREWEED_SQLITE_PROJECTION_PATH` | when projection is `sqlite` | `/var/lib/fireweed/fireweed-projection.db` | Local SQLite materialized projection path. |
 | `FIREWEED_OBJECT_LOG_MODE` | no | `file` | Object-log substrate: `file` (per-command) or `segmented` (group-commit, the production form). |
 | `FIREWEED_SEGMENT_TARGET_BYTES` | no | `262144` | `segmented`: byte-size seal trigger. |

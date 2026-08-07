@@ -1,0 +1,12 @@
+# Fireweed Queue CI values: memory log × turso projection (Class B, public StorageConfig axes).
+# Durability limited to the Turso projection image; no Class A log rebuild claims.
+storage:
+  log:
+    backend: memory
+  projection:
+    backend: turso
+    turso:
+      path: /var/lib/fireweed/projection/projection.turso
+image:
+  tag: ci
+replicaCount: 1

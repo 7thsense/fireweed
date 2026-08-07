@@ -191,9 +191,10 @@ fi
 
 # ---------------------------------------------------------------------------
 # 3. Helm gate — lint/render/kubeconform for all matrix CI values fixtures
+#    Deployment/T4 portion: 20 canonical cells, Turso default, topology variants.
 # ---------------------------------------------------------------------------
 if ((SKIP_HELM == 0)); then
-    echo "--- helm-gate (matrix fixtures + shared variants) ---"
+    echo "--- helm-gate (20-cell matrix fixtures + shared variants + turso default) ---"
     bash "${SCRIPT_DIR}/helm-gate.sh"
 else
     if [[ "${REQUIRE_FULL}" == "1" || "${REQUIRE_FULL}" == "true" || "${REQUIRE_FULL}" == "yes" ]]; then
@@ -205,6 +206,7 @@ fi
 
 echo "=== storage-matrix-gate: PASSED ==="
 echo "Release storage surface: 20 cells (StorageConfig log × projection)."
+echo "AsyncProjection: 8 object-log positives + 12 non-object-log pre-I/O negatives (manifest)."
 echo "Route sources: ${ROUTE_SOURCES}"
 echo "Full CI claims require FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1 + S3/PG fixtures."
 echo "S3 fixture contract: scripts/ci/s3-matrix-job-requirements.md"

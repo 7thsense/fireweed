@@ -1,0 +1,14 @@
+# Fireweed Queue static render values: postgres log with turso projection axis selected.
+# Class A cell; log DSN via Secret; Turso projection on the chart storage volume.
+storage:
+  log:
+    backend: postgres
+    postgres:
+      existingSecret: fireweed-postgres-log
+      databaseUrlKey: database-url
+  projection:
+    backend: turso
+    turso:
+      path: /var/lib/fireweed/projection/projection.turso
+image:
+  tag: ci

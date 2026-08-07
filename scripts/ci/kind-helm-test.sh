@@ -46,6 +46,8 @@ STORAGE BACKENDS (runnable live smokes; public product names only):
   filesystem + memory    ephemeral projection over a durable filesystem object log
   filesystem + sqlite    durable SQLite relational projection over the filesystem
                          object log, persisted on the chart's storage volume
+  filesystem + turso     durable Turso relational projection over the filesystem
+                         object log (product default projection), on the chart volume
   postgres   + memory    durable postgres command log + in-memory projection
                          (the wired managed-postgres profile). The harness stands
                          up a throwaway in-cluster postgres and injects its DSN as
@@ -53,6 +55,8 @@ STORAGE BACKENDS (runnable live smokes; public product names only):
   postgres   + sqlite    durable postgres command log + a derived SQLite relational
                          projection on the chart's storage volume. Same in-cluster
                          postgres as above for the log axis; no projection Secret.
+  postgres   + turso     durable postgres command log + Turso relational projection
+                         on the chart's storage volume.
   postgres   + postgres  durable postgres command log + a SEPARATE postgres-backed
                          relational projection (distinct table sets, no collision).
                          The harness reuses the one throwaway in-cluster postgres for
@@ -123,10 +127,12 @@ values_file_for() {
     case "$1:$2" in
         filesystem:memory) echo "${CHART_DIR}/ci/filesystem-memory-values.yaml" ;;
         filesystem:sqlite) echo "${CHART_DIR}/ci/filesystem-sqlite-values.yaml" ;;
+        filesystem:turso) echo "${CHART_DIR}/ci/filesystem-turso-values.yaml" ;;
         postgres:memory) echo "${CHART_DIR}/ci/postgres-memory-values.yaml" ;;
         postgres:sqlite) echo "${CHART_DIR}/ci/postgres-sqlite-values.yaml" ;;
+        postgres:turso) echo "${CHART_DIR}/ci/postgres-turso-values.yaml" ;;
         postgres:postgres) echo "${CHART_DIR}/ci/postgres-postgres-values.yaml" ;;
-        *) die "no runtime CI values file for log=$1 projection=$2 (public: filesystem|postgres × memory|sqlite|postgres)" ;;
+        *) die "no runtime CI values file for log=$1 projection=$2 (public: filesystem × memory|sqlite|turso; postgres × memory|sqlite|turso|postgres)" ;;
     esac
 }
 
@@ -266,10 +272,12 @@ validate_config() {
     case "${LOG_BACKEND}:${PROJECTION_BACKEND}" in
         filesystem:memory) ;;
         filesystem:sqlite) ;;
+        filesystem:turso) ;;
         postgres:memory) ;;
         postgres:sqlite) ;;
+        postgres:turso) ;;
         postgres:postgres) ;;
-        *) die "runtime smoke supports public axes only: log=filesystem projection={memory,sqlite}, and log=postgres projection={memory,sqlite,postgres} (requested log=${LOG_BACKEND} projection=${PROJECTION_BACKEND})" ;;
+        *) die "runtime smoke supports public axes only: log=filesystem projection={memory,sqlite,turso}, and log=postgres projection={memory,sqlite,turso,postgres} (requested log=${LOG_BACKEND} projection=${PROJECTION_BACKEND})" ;;
     esac
     [[ "${IMAGE}" == *:* ]] || die "--image must include an explicit tag, for example fireweed-service:ci"
     [[ -d "${IMAGE_CONTEXT}" ]] || die "--image-context must be an existing directory: ${IMAGE_CONTEXT}"

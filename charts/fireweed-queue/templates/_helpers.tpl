@@ -86,9 +86,18 @@ True when the selected log axis is S3-compatible object storage.
 
 {{/*
 True when the selected projection needs a local durable image path under the storage volume.
+sqlite and turso are pod-local durable projections (rebuildable from a durable log).
 */}}
 {{- define "fireweed-queue.projectionNeedsLocalVolume" -}}
-{{- eq .Values.storage.projection.backend "sqlite" -}}
+{{- or (eq .Values.storage.projection.backend "sqlite") (eq .Values.storage.projection.backend "turso") -}}
+{{- end -}}
+
+{{/*
+True when the selected projection is a pod-local rebuildable image (not shared postgres/memory).
+Used by multi-replica durability rules: shared S3 log + postgres control plane + local projection.
+*/}}
+{{- define "fireweed-queue.projectionIsPodLocalRebuildable" -}}
+{{- or (eq .Values.storage.projection.backend "sqlite") (eq .Values.storage.projection.backend "turso") -}}
 {{- end -}}
 
 {{/*
@@ -99,20 +108,26 @@ True when the pod needs a local data volume (filesystem/sqlite log or durable lo
 {{- end -}}
 
 {{/*
-Fail closed when a multi-replica deployment is not using the replica-safe shared
-S3/Postgres profile. Local filesystem object-log storage stays single-replica only.
-Shared profile: log=s3 × controlPlane=postgres × projection=sqlite.
+Fail closed when a multi-replica deployment is not using a replica-safe shared
+profile. Local filesystem object-log storage stays single-replica only.
+
+Durability/control-plane rules (not a hard-coded SQLite projection):
+  log=s3 (shared durable command log)
+  controlPlane=postgres (ownership)
+  projection is pod-local rebuildable (sqlite|turso)
+  persistence.enabled=false (emptyDir so each pod keeps a private projection image)
 */}}
 {{- define "fireweed-queue.validateReplicaProfile" -}}
 {{- $replicas := int .Values.replicaCount -}}
 {{- $s3Log := eq (include "fireweed-queue.logIsS3" .) "true" -}}
-{{- $shared := and $s3Log (eq .Values.storage.controlPlane.backend "postgres") (eq .Values.storage.projection.backend "sqlite") -}}
+{{- $localProj := eq (include "fireweed-queue.projectionIsPodLocalRebuildable" .) "true" -}}
+{{- $shared := and $s3Log (eq .Values.storage.controlPlane.backend "postgres") $localProj -}}
 {{- if gt $replicas 1 -}}
 {{- if not $shared -}}
-{{- fail "replicaCount > 1 requires storage.log.backend=s3, storage.controlPlane.backend=postgres, storage.projection.backend=sqlite, and persistence.enabled=false" -}}
+{{- fail "replicaCount > 1 requires storage.log.backend=s3, storage.controlPlane.backend=postgres, a pod-local rebuildable projection (sqlite|turso), and persistence.enabled=false" -}}
 {{- end -}}
 {{- if .Values.persistence.enabled -}}
-{{- fail "replicaCount > 1 requires persistence.enabled=false so SQLite projections stay pod-local" -}}
+{{- fail "replicaCount > 1 requires persistence.enabled=false so pod-local projections (sqlite|turso) stay private per pod" -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

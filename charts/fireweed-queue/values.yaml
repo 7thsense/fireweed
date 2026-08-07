@@ -100,7 +100,7 @@ storage:
       leaseTtlMs: 15000
   # Structured storage axes (isomorphic to server StorageConfig / BackendSpec).
   # Public logs: memory | sqlite | postgres | filesystem | s3
-  # Public projections: memory | sqlite | postgres
+  # Public projections: memory | sqlite | turso | postgres
   log:
     # Product default is filesystem (local/NAS object log).
     backend: filesystem
@@ -125,10 +125,13 @@ storage:
       existingSecret: ""
       databaseUrlKey: database-url
   projection:
-    # Product default is memory. Public projections: memory | sqlite | postgres
-    backend: memory
+    # Product default is turso (TD-010 / ADR-016). Public: memory | sqlite | turso | postgres
+    backend: turso
     sqlite:
       path: /var/lib/fireweed/projection/projection.db
+    turso:
+      # Pod-local path under storage.volume.mountPath (maps to FIREWEED_TURSO_PROJECTION_PATH).
+      path: /var/lib/fireweed/projection/projection.turso
     postgres:
       existingSecret: ""
       databaseUrlKey: database-url
