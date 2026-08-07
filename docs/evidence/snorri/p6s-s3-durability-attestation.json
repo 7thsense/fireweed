@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "capability_id": "SNORRI-S3-DURABILITY-ACCEPTANCE",
+  "plan_key": "P6s",
+  "bead_id": "fireweed-2886078a",
+  "attested_at": "2026-08-07T02:27:06Z",
+  "runner": {
+    "identity": "fireweed-p6p-snorri@sindri",
+    "topology": "host-local Docker P1s S3 + isolated Postgres control plane",
+    "preflight": "bash scripts/ci/snorri-runner-preflight.sh"
+  },
+  "fireweed_sha": "b474bd49bf366e3fcc31ab6c2c37845f54be2a60",
+  "snorri": {
+    "checkout": "/home/erik/Projects/snorri",
+    "sha": "b67c6ffb7c40cafe1be94418b969346aaf45a491",
+    "status": "passed",
+    "re_run": "SNORRI_CHECKOUT=/path/to/snorri bash scripts/ci/snorri-s3-durability-acceptance.sh",
+    "note": "Fireweed-side p6s_s3_durability_acceptance is the contract proof; snorri re-run binds the downstream pin after provider-neutral migration.",
+    "commit_message": "test(fireweed): provider-neutral live S3 durability harness for P6s"
+  },
+  "provider": {
+    "selected_provider": "minio",
+    "endpoint": "http://127.0.0.1:40735",
+    "bucket": "fireweed-qual-4e47448fea",
+    "region": "us-east-1",
+    "native_atomic_conditional_create": true,
+    "native_atomic_conditional_update": true,
+    "p1s_attestation_path": "/tmp/fireweed-s3-secrets/s3-native-cas-capability-attestation.json",
+    "p1s_bead_id": "fireweed-f5fa7380",
+    "garage_eldir_implicit": false
+  },
+  "postgres_control_plane": {
+    "url_template_nonsecret": "postgres://fireweed:***@127.0.0.1:55432/fireweed_snorri_p6p",
+    "database": "fireweed_snorri_p6p",
+    "env": "FIREWEED_PG_TEST_URL / SNORRI_FIREWEED_POSTGRES_URL"
+  },
+  "semantic_ids": {
+    "SNORRI-REOPEN": {
+      "cells": [
+        "s3--memory",
+        "s3--sqlite",
+        "s3--postgres"
+      ],
+      "status": "passed",
+      "command": "rustup run 1.92.0 cargo test -p fireweed --features objectlog,sqlite,postgres --test p6s_s3_durability_acceptance snorri_reopen_ -- --nocapture"
+    },
+    "SNORRI-PROJECTION-REBUILD": {
+      "cells": [
+        "s3--sqlite",
+        "s3--postgres"
+      ],
+      "unsupported_negative": "s3--memory projection_control=None",
+      "status": "passed",
+      "command": "rustup run 1.92.0 cargo test -p fireweed --features objectlog,sqlite,postgres --test p6s_s3_durability_acceptance snorri_projection_rebuild_ -- --nocapture"
+    },
+    "SNORRI-RETRY-ONCE": {
+      "cells": [
+        "s3--memory",
+        "s3--sqlite",
+        "s3--postgres"
+      ],
+      "status": "passed",
+      "command": "rustup run 1.92.0 cargo test -p fireweed --features objectlog,sqlite,postgres --test p6s_s3_durability_acceptance snorri_retry_once_ -- --nocapture"
+    }
+  },
+  "commands": [
+    "bash scripts/ci/snorri-runner-preflight.sh",
+    "rustup run 1.92.0 cargo test -p fireweed --features objectlog,sqlite,postgres --test p6s_s3_durability_acceptance -- --nocapture",
+    "python3 scripts/ci/snorri-semantic-verifier.py --ledger scripts/ci/fixtures/snorri/p6s-s3-durability.json --cells s3 --ids SNORRI-REOPEN,SNORRI-PROJECTION-REBUILD,SNORRI-RETRY-ONCE",
+    "bash scripts/test-s3-live-mutations.sh  # snorri@4216ccd781dfff8715f242b816d6d72e52513ea6"
+  ],
+  "results": {
+    "status": "passed",
+    "zero_skips": true,
+    "fireweed_harness": "passed",
+    "snorri_external": "passed"
+  },
+  "governing_refs": [
+    "docs/helix/03-test/test-plans/TP-004-fireweed-facade-and-snorri-acceptance.md",
+    "docs/evidence/snorri/p6p-runner-provisioning.md",
+    "scripts/ci/snorri-runner-preflight.sh",
+    "scripts/ci/snorri-s3-durability-acceptance.sh",
+    "crates/fireweed/tests/p6s_s3_durability_acceptance.rs"
+  ],
+  "fireweed_worktree_sha_at_execution": "248474a147726b9e11d1ff0c4856b1d2f9474b4d"
+}

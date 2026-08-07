@@ -203,6 +203,11 @@ path = "tests/p5as3_s3_reopen_parity.rs"
 required-features = ["objectlog", "sqlite", "postgres"]
 
 [[test]]
+name = "p6s_s3_durability_acceptance"
+path = "tests/p6s_s3_durability_acceptance.rs"
+required-features = ["objectlog", "sqlite", "postgres"]
+
+[[test]]
 name = "p6s3_s3_query_parity"
 path = "tests/p6s3_s3_query_parity.rs"
 required-features = ["objectlog", "sqlite", "postgres"]

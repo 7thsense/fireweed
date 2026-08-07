@@ -78,6 +78,13 @@ CLASS_B_CELLS = (
     "memory--postgres",
 )
 
+# Live S3 product cells (P6s): s3 log × {memory,sqlite,postgres} (+ turso when exercised).
+S3_CELLS = (
+    "s3--memory",
+    "s3--sqlite",
+    "s3--postgres",
+)
+
 # Forbidden provider-brand tokens in fixtures / cell IDs (P1s / P4 neutrality).
 FORBIDDEN_BRANDS = re.compile(
     r"(?i)\b(garage|minio|eldir|aws|gcs|azure|r2|cloudflare|digitalocean)\b"
@@ -178,6 +185,64 @@ LIFECYCLE_COMMANDS: dict[str, list[list[str]]] = {
     ],
 }
 
+# P6s live S3 durability command matrix (provider-neutral; requires P1s env).
+S3_DURABILITY_COMMANDS: dict[str, list[list[str]]] = {
+    "SNORRI-REOPEN": [
+        [
+            "rustup",
+            "run",
+            "1.92.0",
+            "cargo",
+            "test",
+            "-p",
+            "fireweed",
+            "--features",
+            "objectlog,sqlite,postgres",
+            "--test",
+            "p6s_s3_durability_acceptance",
+            "snorri_reopen_",
+            "--",
+            "--nocapture",
+        ],
+    ],
+    "SNORRI-PROJECTION-REBUILD": [
+        [
+            "rustup",
+            "run",
+            "1.92.0",
+            "cargo",
+            "test",
+            "-p",
+            "fireweed",
+            "--features",
+            "objectlog,sqlite,postgres",
+            "--test",
+            "p6s_s3_durability_acceptance",
+            "snorri_projection_rebuild_",
+            "--",
+            "--nocapture",
+        ],
+    ],
+    "SNORRI-RETRY-ONCE": [
+        [
+            "rustup",
+            "run",
+            "1.92.0",
+            "cargo",
+            "test",
+            "-p",
+            "fireweed",
+            "--features",
+            "objectlog,sqlite,postgres",
+            "--test",
+            "p6s_s3_durability_acceptance",
+            "snorri_retry_once_",
+            "--",
+            "--nocapture",
+        ],
+    ],
+}
+
 
 def die(msg: str, code: int = 1) -> None:
     print(f"snorri-semantic-verifier: {msg}", file=sys.stderr)
@@ -197,9 +262,14 @@ def resolve_cells(name: str) -> tuple[str, ...]:
         return NON_S3_LOCAL_CELLS
     if name == "class-b":
         return CLASS_B_CELLS
+    if name == "s3":
+        return S3_CELLS
     if name == "all-listed":
         return NON_S3_CELLS
-    die(f"unknown cell set {name!r} (expected non-s3|non-s3-local|class-b)", code=2)
+    die(
+        f"unknown cell set {name!r} (expected non-s3|non-s3-local|class-b|s3)",
+        code=2,
+    )
     return ()  # unreachable
 
 
@@ -274,11 +344,12 @@ def print_matrix(cells: tuple[str, ...], ids: tuple[str, ...]) -> None:
         print(f"  {c}")
 
 
-def execute_commands(ids: tuple[str, ...]) -> None:
+def execute_commands(ids: tuple[str, ...], *, cells_name: str = "non-s3") -> None:
+    command_map = S3_DURABILITY_COMMANDS if cells_name == "s3" else LIFECYCLE_COMMANDS
     for sid in ids:
-        cmds = LIFECYCLE_COMMANDS.get(sid)
+        cmds = command_map.get(sid)
         if not cmds:
-            die(f"no commands registered for {sid}")
+            die(f"no commands registered for {sid} (cells={cells_name})")
         for cmd in cmds:
             print(f"+ {' '.join(cmd)}", flush=True)
             proc = subprocess.run(cmd, cwd=REPO_ROOT, check=False)
@@ -297,7 +368,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--cells",
         default="non-s3",
-        choices=("non-s3", "non-s3-local", "class-b", "all-listed"),
+        choices=("non-s3", "non-s3-local", "class-b", "s3", "all-listed"),
         help="Cell set to require for lifecycle/reopen ledgers (default non-s3 = 12 cells)",
     )
     parser.add_argument(
@@ -335,7 +406,7 @@ def main(argv: list[str] | None = None) -> int:
         validate_ledger(args.ledger, ids, cells)
 
     if args.execute:
-        execute_commands(ids)
+        execute_commands(ids, cells_name=args.cells)
 
     return 0
 

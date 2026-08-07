@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "plan_key": "P6s",
+  "bead_id": "fireweed-2886078a",
+  "description": "Provider-neutral Snorri S3 durability acceptance: SNORRI-REOPEN, SNORRI-PROJECTION-REBUILD, SNORRI-RETRY-ONCE on live P1s-attested S3 rows with zero skips. Brand-specific endpoints are not accepted as implicit provisioning.",
+  "entries": [
+    {
+      "semantic_id": "SNORRI-REOPEN",
+      "cell_id": "s3--memory",
+      "status": "passed",
+      "command": "cargo test -p fireweed --features objectlog,sqlite,postgres --test p6s_s3_durability_acceptance snorri_reopen_s3_memory -- --exact --nocapture",
+      "methods": ["create_queue", "push_with_request_id", "reopen", "queue_definition", "metrics"],
+      "notes": "Class A round-trip reopen from durable s3 log; request_id Replayed"
+    },
+    {
+      "semantic_id": "SNORRI-REOPEN",
+      "cell_id": "s3--sqlite",
+      "status": "passed",
+      "command": "cargo test -p fireweed --features objectlog,sqlite,postgres --test p6s_s3_durability_acceptance snorri_reopen_s3_sqlite -- --exact --nocapture",
+      "methods": ["create_queue", "push_with_request_id", "reopen", "queue_definition", "metrics"],
+      "notes": "Class A round-trip reopen; sqlite projection"
+    },
+    {
+      "semantic_id": "SNORRI-REOPEN",
+      "cell_id": "s3--postgres",
+      "status": "passed",
+      "command": "cargo test -p fireweed --features objectlog,sqlite,postgres --test p6s_s3_durability_acceptance snorri_reopen_s3_postgres -- --exact --nocapture",
+      "methods": ["create_queue", "push_with_request_id", "reopen", "queue_definition", "metrics"],
+      "notes": "Class A round-trip reopen; postgres control-plane projection"
+    },
+    {
+      "semantic_id": "SNORRI-PROJECTION-REBUILD",
+      "cell_id": "s3--sqlite",
+      "status": "passed",
+      "command": "cargo test -p fireweed --features objectlog,sqlite,postgres --test p6s_s3_durability_acceptance snorri_projection_rebuild_s3_sqlite -- --exact --nocapture",
+      "methods": ["projection_control", "verify", "delete", "rebuild", "push_with_request_id"],
+      "notes": "Disposable sqlite projection verify/delete/rebuild; same item/request_id image"
+    },
+    {
+      "semantic_id": "SNORRI-PROJECTION-REBUILD",
+      "cell_id": "s3--postgres",
+      "status": "passed",
+      "command": "cargo test -p fireweed --features objectlog,sqlite,postgres --test p6s_s3_durability_acceptance snorri_projection_rebuild_s3_postgres_control_plane -- --exact --nocapture",
+      "methods": ["projection_control", "verify", "delete", "rebuild", "push_with_request_id"],
+      "notes": "Postgres-control-plane delete/rebuild on s3--postgres"
+    },
+    {
+      "semantic_id": "SNORRI-PROJECTION-REBUILD",
+      "cell_id": "s3--memory",
+      "status": "passed",
+      "command": "cargo test -p fireweed --features objectlog,sqlite,postgres --test p6s_s3_durability_acceptance snorri_projection_rebuild_s3_memory_has_no_control -- --exact --nocapture",
+      "methods": ["projection_control"],
+      "notes": "Unsupported negative retained: s3×memory projection_control is None"
+    },
+    {
+      "semantic_id": "SNORRI-RETRY-ONCE",
+      "cell_id": "s3--memory",
+      "status": "passed",
+      "command": "cargo test -p fireweed --features objectlog,sqlite,postgres --test p6s_s3_durability_acceptance snorri_retry_once_s3_memory -- --exact --nocapture",
+      "methods": ["push_with_request_id", "RequestIdConflict", "reopen"],
+      "notes": "Fresh → Replayed; conflicting body fails; survives reopen"
+    },
+    {
+      "semantic_id": "SNORRI-RETRY-ONCE",
+      "cell_id": "s3--sqlite",
+      "status": "passed",
+      "command": "cargo test -p fireweed --features objectlog,sqlite,postgres --test p6s_s3_durability_acceptance snorri_retry_once_s3_sqlite -- --exact --nocapture",
+      "methods": ["push_with_request_id", "RequestIdConflict", "reopen"]
+    },
+    {
+      "semantic_id": "SNORRI-RETRY-ONCE",
+      "cell_id": "s3--postgres",
+      "status": "passed",
+      "command": "cargo test -p fireweed --features objectlog,sqlite,postgres --test p6s_s3_durability_acceptance snorri_retry_once_s3_postgres -- --exact --nocapture",
+      "methods": ["push_with_request_id", "RequestIdConflict", "reopen"]
+    }
+  ]
+}
