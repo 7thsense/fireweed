@@ -12,7 +12,7 @@
     "omissions": [],
     "repaired": false,
     "schema": "p2a_placement",
-    "source_count": 49
+    "source_count": 50
   },
   "full_execution_claimed": false,
   "generated_by": "scripts/ci/p2r_route_bindings.py",
