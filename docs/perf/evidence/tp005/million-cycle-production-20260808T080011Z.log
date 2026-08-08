@@ -1,0 +1,28 @@
+MC production restart 2026-08-08T08:00:11Z HEAD=4626893c
+prior partial: memory--memory PASS, memory--sqlite PASS (see million-cycle-production-partial.log)
+=== CELL sqlite--memory 08:00:11Z ===
+PASS sqlite--memory: insert=27.8s modify=14.9s read=0.6s reopen=true
+wrote target/tp005-million-cycle/sqlite-memory-production-20260808T080011Z.json
+million-cycle passed: 1 cell(s)
+PASS sqlite--memory -> target/tp005-million-cycle/sqlite-memory-production-20260808T080011Z.json
+=== CELL sqlite--sqlite 08:01:05Z ===
+PASS sqlite--sqlite: insert=32.0s modify=164.9s read=2.5s reopen=true
+wrote target/tp005-million-cycle/sqlite-sqlite-production-20260808T080105Z.json
+million-cycle passed: 1 cell(s)
+PASS sqlite--sqlite -> target/tp005-million-cycle/sqlite-sqlite-production-20260808T080105Z.json
+=== CELL filesystem--memory 08:04:41Z ===
+PASS filesystem--memory: insert=63.5s modify=38.5s read=0.8s reopen=true
+wrote target/tp005-million-cycle/filesystem-memory-production-20260808T080441Z.json
+million-cycle passed: 1 cell(s)
+PASS filesystem--memory -> target/tp005-million-cycle/filesystem-memory-production-20260808T080441Z.json
+=== CELL filesystem--sqlite 08:06:51Z ===
+PASS filesystem--sqlite: insert=62.4s modify=40.2s read=0.9s reopen=true
+wrote target/tp005-million-cycle/filesystem-sqlite-production-20260808T080651Z.json
+million-cycle passed: 1 cell(s)
+PASS filesystem--sqlite -> target/tp005-million-cycle/filesystem-sqlite-production-20260808T080651Z.json
+=== CELL memory--postgres 08:09:01Z ===
+PASS memory--postgres: insert=101.5s modify=853.9s read=7.5s reopen=true
+wrote target/tp005-million-cycle/memory-postgres-production-20260808T080901Z.json
+million-cycle passed: 1 cell(s)
+PASS memory--postgres -> target/tp005-million-cycle/memory-postgres-production-20260808T080901Z.json
+=== CELL sqlite--postgres 08:26:05Z ===
