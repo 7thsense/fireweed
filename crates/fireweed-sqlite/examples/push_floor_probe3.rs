@@ -4,7 +4,7 @@ use std::time::Instant;
 use fireweed_conformance::{qdef, shard, ts};
 use fireweed_core::{ClientItemKey, ItemId};
 use fireweed_engine::{
-    CommandChecksum, CommandEnvelope, CommandId, ControlPlaneStore, LogStore, PushCommand,
+    CommandChecksum, CommandEnvelope, CommandId, LogStore, PushCommand,
     PushItem, QueueCommand,
 };
 use fireweed_sqlite::SqliteLog;
