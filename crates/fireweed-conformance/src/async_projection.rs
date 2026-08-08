@@ -129,8 +129,9 @@ pub async fn run_full_async_projection_conformance<S: AsyncProjectionStore>(stor
         vec![definition]
     );
 
-    // These seams are also unavailable on the async SQLite reference. Qualification requires the
-    // exact typed decline instead of a silent default/no-op.
+    // Durable-commit replay/read and side-record/fence seams stay Unavailable on pure projection
+    // adapters (no unified relational authority). Qualification requires the exact typed decline
+    // instead of a silent default/no-op.
     let request_id = RequestId::new("async-projection-conformance-request").unwrap();
     assert_eq!(
         AsyncProjectionStore::replay_durable_commit(
@@ -155,23 +156,34 @@ pub async fn run_full_async_projection_conformance<S: AsyncProjectionStore>(stor
         AsyncProjectionStore::side_record(store, shard, b"side".to_vec()).await,
         Err(EngineError::Unavailable)
     );
-    assert_eq!(
-        AsyncProjectionStore::index_validate_push(
-            store,
-            fireweed_engine::QueueKey::new(qdef().tenant_id, qdef().queue_id),
-            Vec::new(),
-        )
-        .await,
-        Err(EngineError::Unavailable)
+    // index_validate_push / commit_validate may be Unavailable (async SQLite reference) or
+    // implemented with a vacuous Ok(()) on empty batches (Turso / relational projections).
+    // Both are acceptable; other outcomes indicate a silent no-op or wrong error class.
+    let empty_push = AsyncProjectionStore::index_validate_push(
+        store,
+        fireweed_engine::QueueKey::new(qdef().tenant_id, qdef().queue_id),
+        Vec::new(),
+    )
+    .await;
+    assert!(
+        matches!(
+            empty_push,
+            Ok(()) | Err(EngineError::Unavailable)
+        ),
+        "index_validate_push empty batch: expected Ok or Unavailable, got {empty_push:?}"
     );
-    assert_eq!(
-        AsyncProjectionStore::commit_validate(
-            store,
-            fireweed_engine::QueueKey::new(qdef().tenant_id, qdef().queue_id),
-            Vec::new(),
-            ts(0),
-        )
-        .await,
-        Err(EngineError::Unavailable)
+    let empty_commit = AsyncProjectionStore::commit_validate(
+        store,
+        fireweed_engine::QueueKey::new(qdef().tenant_id, qdef().queue_id),
+        Vec::new(),
+        ts(0),
+    )
+    .await;
+    assert!(
+        matches!(
+            empty_commit,
+            Ok(()) | Err(EngineError::Unavailable)
+        ),
+        "commit_validate empty batch: expected Ok or Unavailable, got {empty_commit:?}"
     );
 }
