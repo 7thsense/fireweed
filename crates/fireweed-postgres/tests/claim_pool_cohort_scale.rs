@@ -19,15 +19,27 @@
 //!
 //! Snorri's workload ("three-cohort-split-derived") claims `whole_cohort`, so it hits exactly this
 //! path; fireweed's own `claim_pool_scale` bench only exercises `ClaimUnit::Item` and never observed
-//! it. Test A below reproduces the negative/flat scaling fireweed-side (AC1). Test B demonstrates the
-//! configuration that recovers scaling: partition the workload across independent queues (one queue
-//! per worker), each with its own `relational_cursor` row and therefore its own lock — exactly the
-//! multi-queue posture `relational.rs`'s module doc already names as the production scale-out path
-//! (`fixed_postgres_relational_pool`). That configuration clears the same >=1.25x bar
-//! `claim_pool_scale.rs` uses for the item-level path (AC2). Snorri re-measures its own end-to-end
-//! harness under that same-queue-per-worker posture separately (AC3, external, residual).
+//! it. Test A below reproduces the negative/flat scaling fireweed-side (AC1).
 //!
-//! Env-gated on `FIREWEED_PG_TEST_URL` (fail-closed).
+//! CORRECTION (repair cycle 1): partitioning queues on ONE shared `PostgresRelationalBackend` does
+//! NOT recover scaling. `ClaimPort::claim` (relational.rs:7504-7561) shows that even with a non-empty
+//! claim pool, any non-`Item` claim unit takes `self.inner.lock()` — the SAME process-wide
+//! `Mutex<Inner>` the no-pool posture uses — and holds it for the ENTIRE `claim_with_client_unit`
+//! call (all SQL round-trips, promotion, selection, append, apply, commit), regardless of which queue
+//! it targets. So four whole-cohort workers on one backend instance fully serialize on that mutex no
+//! matter how many queues or claim-pool connections exist; the original AC2 test's premise (disjoint
+//! `relational_cursor` rows imply disjoint locks) ignored this in-process fence and its >=1.25x
+//! assertion did not hold when actually run. Test B now uses one independent
+//! `PostgresRelationalBackend` instance per worker (own `Mutex<Inner>`, own connection, own queue) —
+//! genuinely disjoint locks, both in-process and at the DB row level — which is what actually clears
+//! the same >=1.25x bar `claim_pool_scale.rs` uses for the item-level path (AC2). Narrowing the
+//! group/cohort mutex itself (so a single shared backend can scale) is a separate, larger production
+//! change, out of scope for this repro/repair; flagged here as follow-up for whoever picks up the
+//! production fix. Snorri re-measures its own end-to-end harness under the one-backend-per-worker
+//! posture separately (AC3, external, residual).
+//!
+//! Env-gated on `FIREWEED_PG_TEST_URL` (fail-closed). Measured locally against a live postgres
+//! (see the commit message this test landed in for the actual run's numbers).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
@@ -150,18 +162,22 @@ fn drain_one_queue(backend: Arc<PostgresRelationalBackend>, queue_id: &str, work
     (total, t0.elapsed().as_millis())
 }
 
-/// Drain `queue_ids.len()` independent queues concurrently, one worker pinned to each queue — no two
-/// workers ever contend on the same `relational_cursor` row.
+/// Drain `queue_ids.len()` independent queues concurrently, one worker per queue, each worker on its
+/// OWN `PostgresRelationalBackend` instance (own `Mutex<Inner>`, own connection — not sharing a claim
+/// pool). Unlike partitioning queues on one shared backend, this actually avoids the process-wide
+/// `Mutex<Inner>` that `claim_with_client_unit` still holds for the whole group/cohort claim
+/// regardless of queue (see the module doc above) — no two workers ever contend on the same mutex OR
+/// the same `relational_cursor` row.
 fn drain_one_queue_per_worker(
-    backend: Arc<PostgresRelationalBackend>,
+    backends: Vec<PostgresRelationalBackend>,
     queue_ids: &[String],
 ) -> (usize, u128) {
-    let workers = queue_ids.len();
+    let workers = backends.len();
+    assert_eq!(workers, queue_ids.len());
     let barrier = Arc::new(Barrier::new(workers));
     let start_gate = Arc::new(Barrier::new(workers + 1));
     let mut handles = Vec::with_capacity(workers);
-    for (w, queue_id) in queue_ids.iter().enumerate() {
-        let backend = Arc::clone(&backend);
+    for (w, (backend, queue_id)) in backends.into_iter().zip(queue_ids.iter()).enumerate() {
         let barrier = Arc::clone(&barrier);
         let start_gate = Arc::clone(&start_gate);
         let shard = shard_for(queue_id);
@@ -231,20 +247,28 @@ fn cohort_claim_pool_does_not_scale_on_one_queue() {
         pooled_rps / single_rps.max(1.0)
     );
 
-    // Physics bar for the BUG: same-queue cohort claims must NOT clear the item-level scale-out bar
-    // (claim_pool_scale.rs requires pooled >= 1.25x single for Item claims). Cohort claims stay flat
-    // or go backwards because they still fully serialize on one cursor row.
+    // Physics bar for the BUG: pooled/multi-worker same-queue cohort claims must be no faster than
+    // single-connection — not merely "under the 1.25x scale-out bar", since the root cause (a
+    // process-wide Mutex<Inner> held for the whole group/cohort claim, see the module doc) gives
+    // pooled workers zero added parallelism plus extra acquire_claim_client/lock-wait overhead on
+    // top, so pooled should be flat-to-worse, never faster. This is expected to start failing once
+    // the group/cohort mutex is narrowed — that is the fix this test exists to motivate.
     assert!(
-        pooled_rps < single_rps * 1.25,
-        "pooled same-queue cohort claim rate {pooled_rps:.0} items/s unexpectedly cleared the \
-         item-level scale-out bar ({single_rps:.0} items/s single) — the whole-cohort long-held \
-         cursor lock in claim_with_client_unit may have been removed; re-derive this test's bar"
+        pooled_rps < single_rps,
+        "pooled same-queue cohort claim rate {pooled_rps:.0} items/s unexpectedly beat the \
+         single-connection rate {single_rps:.0} items/s — the process-wide Mutex<Inner> serializing \
+         claim_with_client_unit (relational.rs ClaimPort::claim) may have been narrowed; re-derive \
+         this test's bar against the new claim path"
     );
 }
 
-/// AC2 — a configuration exists where end-to-end throughput at w=4 exceeds w=1: partition the SAME
-/// total cohort corpus across one independent queue per worker (each has its own `relational_cursor`
-/// row, so no cross-worker lock contention) instead of racing on one shared queue.
+/// AC2 — a configuration exists where end-to-end throughput at w=4 exceeds w=1: one independent
+/// `PostgresRelationalBackend` per worker (own `Mutex<Inner>`, own connection), each draining its OWN
+/// queue of `COHORT_COUNT` cohorts — the SAME per-queue corpus size as the single-worker baseline, so
+/// the comparison isolates worker/connection parallelism from any working-set-size effect. Sharing one
+/// backend across queues (this test's first version) does NOT recover scaling — see the module doc's
+/// correction — because `claim_with_client_unit` still serializes on that backend's single
+/// `Mutex<Inner>` no matter which queue each caller targets.
 #[test]
 fn cohort_claim_one_queue_per_worker_scales_with_workers() {
     let url = std::env::var("FIREWEED_PG_TEST_URL")
@@ -260,26 +284,24 @@ fn cohort_claim_one_queue_per_worker_scales_with_workers() {
     };
 
     const WORKERS: usize = 4;
-    let per_queue = COHORT_COUNT / WORKERS;
-    assert_eq!(per_queue * WORKERS, COHORT_COUNT, "corpus must split evenly");
     let multi_queue = {
         let schema = fresh_schema("partitioned");
-        let backend = Arc::new(
-            PostgresRelationalBackend::connect_in_schema_with_claim_pool(&url, &schema, WORKERS)
-                .unwrap(),
-        );
         let queue_ids: Vec<String> = (0..WORKERS).map(|w| format!("q{w}")).collect();
+        let mut backends = Vec::with_capacity(WORKERS);
         for queue_id in &queue_ids {
-            seed_cohorts(&backend, queue_id, 0, per_queue);
+            let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+            seed_cohorts(&backend, queue_id, 0, COHORT_COUNT);
+            backends.push(backend);
         }
-        drain_one_queue_per_worker(backend, &queue_ids)
+        drain_one_queue_per_worker(backends, &queue_ids)
     };
 
-    let expect = COHORT_COUNT * COHORT_SIZE as usize;
-    assert_eq!(single.0, expect, "single-worker baseline must drain every cohort");
+    let expect_single = COHORT_COUNT * COHORT_SIZE as usize;
+    let expect_multi = expect_single * WORKERS;
+    assert_eq!(single.0, expect_single, "single-worker baseline must drain every cohort");
     assert_eq!(
-        multi_queue.0, expect,
-        "one-queue-per-worker must drain the same total corpus"
+        multi_queue.0, expect_multi,
+        "one-backend-per-worker must drain every worker's full-size queue"
     );
 
     let single_rps = rps(single.0, single.1);
@@ -290,11 +312,12 @@ fn cohort_claim_one_queue_per_worker_scales_with_workers() {
         multi_rps / single_rps.max(1.0)
     );
 
-    // Same bar claim_pool_scale.rs uses for the item-level path: pooled multi-worker is at least
-    // 1.25x the single-connection baseline once workers stop contending on one queue's cursor row.
+    // Same bar claim_pool_scale.rs uses for the item-level path: multi-worker aggregate throughput is
+    // at least 1.25x the single-connection baseline once workers stop contending on one backend's
+    // Mutex<Inner> and one queue's cursor row.
     assert!(
         multi_rps >= single_rps * 1.25,
-        "one-queue-per-worker claim rate {multi_rps:.0} items/s must be >= 1.25x single-queue \
+        "one-backend-per-worker claim rate {multi_rps:.0} items/s must be >= 1.25x single-queue \
          baseline {single_rps:.0} items/s (fireweed-01d7cf09 AC2 configuration bar)"
     );
 }
