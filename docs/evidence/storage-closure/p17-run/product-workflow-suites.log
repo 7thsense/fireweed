@@ -1,0 +1,65 @@
+=== product workflow suites at 2026-08-08T07:57:53Z HEAD=356042c5 ===
+=== suite product_validation_tests ===
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::scheduled_action_delivery_e2e -- --exact
+ran=1 ok: rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::scheduled_action_delivery_e2e -- --exact
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::marketo_group_batching_e2e -- --exact
+ran=1 ok: rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::marketo_group_batching_e2e -- --exact
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::callback_cohort_e2e -- --exact
+ran=1 ok: rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::callback_cohort_e2e -- --exact
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::jobs_connectors_recurring_e2e -- --exact
+ran=1 ok: rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::jobs_connectors_recurring_e2e -- --exact
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::worker_crash_recovery_e2e -- --exact
+ran=1 ok: rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::worker_crash_recovery_e2e -- --exact
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::noisy_neighbor_scale_e2e -- --exact
+ran=1 ok: rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::noisy_neighbor_scale_e2e -- --exact
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::generic_priority_bounded_relaxed_e2e -- --exact
+ran=1 ok: rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::generic_priority_bounded_relaxed_e2e -- --exact
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::downstream_pacing_non_goal_e2e -- --exact
+ran=1 ok: rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::downstream_pacing_non_goal_e2e -- --exact
+suite product_validation_tests: 8 exact leaves, each ran=1
+PASS suite product_validation_tests
+=== suite product_workflow_scheduled_action_delivery_e2e ===
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::scheduled_action_delivery_e2e -- --exact
+ran=1 ok: rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::scheduled_action_delivery_e2e -- --exact
+suite product_workflow_scheduled_action_delivery_e2e: 1 exact leaves, each ran=1
+PASS suite product_workflow_scheduled_action_delivery_e2e
+=== suite product_workflow_marketo_group_batching_e2e ===
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::marketo_group_batching_e2e -- --exact
+ran=1 ok: rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::marketo_group_batching_e2e -- --exact
+suite product_workflow_marketo_group_batching_e2e: 1 exact leaves, each ran=1
+PASS suite product_workflow_marketo_group_batching_e2e
+=== suite product_workflow_callback_cohort_e2e ===
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::callback_cohort_e2e -- --exact
+ran=1 ok: rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::callback_cohort_e2e -- --exact
+suite product_workflow_callback_cohort_e2e: 1 exact leaves, each ran=1
+PASS suite product_workflow_callback_cohort_e2e
+=== suite product_workflow_jobs_connectors_recurring_e2e ===
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::jobs_connectors_recurring_e2e -- --exact
+ran=1 ok: rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::jobs_connectors_recurring_e2e -- --exact
+suite product_workflow_jobs_connectors_recurring_e2e: 1 exact leaves, each ran=1
+PASS suite product_workflow_jobs_connectors_recurring_e2e
+=== suite product_workflow_worker_crash_recovery_e2e ===
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::worker_crash_recovery_e2e -- --exact
+ran=1 ok: rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::worker_crash_recovery_e2e -- --exact
+suite product_workflow_worker_crash_recovery_e2e: 1 exact leaves, each ran=1
+PASS suite product_workflow_worker_crash_recovery_e2e
+=== suite product_workflow_noisy_neighbor_scale_e2e ===
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::noisy_neighbor_scale_e2e -- --exact
+ran=1 ok: rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::noisy_neighbor_scale_e2e -- --exact
+suite product_workflow_noisy_neighbor_scale_e2e: 1 exact leaves, each ran=1
+PASS suite product_workflow_noisy_neighbor_scale_e2e
+=== suite product_workflow_generic_priority_bounded_relaxed_e2e ===
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::generic_priority_bounded_relaxed_e2e -- --exact
+ran=1 ok: rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::generic_priority_bounded_relaxed_e2e -- --exact
+suite product_workflow_generic_priority_bounded_relaxed_e2e: 1 exact leaves, each ran=1
+PASS suite product_workflow_generic_priority_bounded_relaxed_e2e
+=== suite product_workflow_downstream_pacing_non_goal_e2e ===
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::downstream_pacing_non_goal_e2e -- --exact
+ran=1 ok: rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::downstream_pacing_non_goal_e2e -- --exact
+suite product_workflow_downstream_pacing_non_goal_e2e: 1 exact leaves, each ran=1
+PASS suite product_workflow_downstream_pacing_non_goal_e2e
+=== suite product_workflow_operator_repair_redrive_e2e ===
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::operator_repair_redrive_e2e -- --exact
+ran=1 ok: rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::operator_repair_redrive_e2e -- --exact
+suite product_workflow_operator_repair_redrive_e2e: 1 exact leaves, each ran=1
+PASS suite product_workflow_operator_repair_redrive_e2e

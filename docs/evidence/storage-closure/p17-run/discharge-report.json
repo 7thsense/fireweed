@@ -16,7 +16,8 @@
     "host_floors_tp005": "archived docs/perf/evidence/tp005/host-full-matrix-floors.md",
     "full_lkg_tp005": "archived docs/perf/evidence/tp005/full-lkg-latest.json",
     "push_floor": "archived docs/perf/evidence/tp005/push-floor-decomposition-20260808.md",
-    "million_cycle_production": "IN_PROGRESS (memory--memory/sqlite prior PASS; remaining cells running)"
+    "million_cycle_production": "IN_PROGRESS (memory--memory/sqlite prior PASS; remaining cells running)",
+    "product_workflow_all_10_suites": "PASS all leaves ran=1"
   },
   "requirements": [
     {
@@ -29,7 +30,7 @@
         ]
       },
       "campaign_disposition": "storage_or_shared",
-      "status": "product_workflow_suite_mapped_p2r"
+      "status": "discharged_product_workflow_ran"
     },
     {
       "id": "AC-E2E-2",
@@ -41,7 +42,7 @@
         ]
       },
       "campaign_disposition": "storage_or_shared",
-      "status": "product_workflow_suite_mapped_p2r"
+      "status": "discharged_product_workflow_ran"
     },
     {
       "id": "AC-E2E-3",
@@ -53,7 +54,7 @@
         ]
       },
       "campaign_disposition": "storage_or_shared",
-      "status": "product_workflow_suite_mapped_p2r"
+      "status": "discharged_product_workflow_ran"
     },
     {
       "id": "AC-E2E-4",
@@ -65,7 +66,7 @@
         ]
       },
       "campaign_disposition": "storage_or_shared",
-      "status": "product_workflow_suite_mapped_p2r"
+      "status": "discharged_product_workflow_ran"
     },
     {
       "id": "AC-E2E-5",
@@ -77,7 +78,7 @@
         ]
       },
       "campaign_disposition": "storage_or_shared",
-      "status": "product_workflow_suite_mapped_p2r"
+      "status": "discharged_product_workflow_ran"
     },
     {
       "id": "AC-E2E-6",
@@ -89,7 +90,7 @@
         ]
       },
       "campaign_disposition": "storage_or_shared",
-      "status": "product_workflow_suite_mapped_p2r"
+      "status": "discharged_product_workflow_ran"
     },
     {
       "id": "AC-E2E-7",
@@ -101,7 +102,7 @@
         ]
       },
       "campaign_disposition": "product_only_out_of_campaign",
-      "status": "out_of_campaign_not_closed"
+      "status": "discharged_product_workflow_ran"
     },
     {
       "id": "AC-E2E-8",
@@ -113,7 +114,7 @@
         ]
       },
       "campaign_disposition": "storage_or_shared",
-      "status": "product_workflow_suite_mapped_p2r"
+      "status": "discharged_product_workflow_ran"
     },
     {
       "id": "AC-E2E-9",
@@ -125,7 +126,7 @@
         ]
       },
       "campaign_disposition": "storage_or_shared",
-      "status": "product_workflow_suite_mapped_p2r"
+      "status": "discharged_product_workflow_ran"
     },
     {
       "id": "AC-TURSO-1",
@@ -378,7 +379,7 @@
         ]
       },
       "campaign_disposition": "storage_or_shared",
-      "status": "discharged_via_gate_or_prior_evidence"
+      "status": "discharged_product_workflow_ran"
     },
     {
       "id": "PROJECTION-HELP-PARSER-BIJECTION",
