@@ -1,0 +1,23 @@
+{
+  "failures": [],
+  "results": [
+    {
+      "cell": "s3--memory",
+      "insert_items": 1000000,
+      "insert_ns": 49861505200,
+      "modify_items": 500000,
+      "modify_ns": 23230280910,
+      "read_items": 1000000,
+      "read_verify_ns": 582536344,
+      "reopen_ok": true
+    }
+  ],
+  "sizes": {
+    "batch": 1000,
+    "insert": 1000000,
+    "modify": 500000,
+    "warmup": 10000
+  },
+  "status": "passed",
+  "tier": "production"
+}

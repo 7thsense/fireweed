@@ -1,0 +1,23 @@
+{
+  "failures": [],
+  "results": [
+    {
+      "cell": "filesystem--postgres",
+      "insert_items": 1000000,
+      "insert_ns": 106330001261,
+      "modify_items": 500000,
+      "modify_ns": 780160849448,
+      "read_items": 1000000,
+      "read_verify_ns": 627719495,
+      "reopen_ok": true
+    }
+  ],
+  "sizes": {
+    "batch": 1000,
+    "insert": 1000000,
+    "modify": 500000,
+    "warmup": 10000
+  },
+  "status": "passed",
+  "tier": "production"
+}

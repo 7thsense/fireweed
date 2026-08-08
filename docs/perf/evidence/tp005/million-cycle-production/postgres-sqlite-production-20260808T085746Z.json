@@ -1,0 +1,23 @@
+{
+  "failures": [],
+  "results": [
+    {
+      "cell": "postgres--sqlite",
+      "insert_items": 1000000,
+      "insert_ns": 26153691204,
+      "modify_items": 500000,
+      "modify_ns": 138420864763,
+      "read_items": 1000000,
+      "read_verify_ns": 2259024304,
+      "reopen_ok": true
+    }
+  ],
+  "sizes": {
+    "batch": 1000,
+    "insert": 1000000,
+    "modify": 500000,
+    "warmup": 10000
+  },
+  "status": "passed",
+  "tier": "production"
+}
