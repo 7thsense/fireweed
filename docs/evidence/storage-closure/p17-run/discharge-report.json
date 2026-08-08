@@ -17,7 +17,8 @@
     "full_lkg_tp005": "archived docs/perf/evidence/tp005/full-lkg-latest.json",
     "push_floor": "archived docs/perf/evidence/tp005/push-floor-decomposition-20260808.md",
     "million_cycle_production": "IN_PROGRESS (memory--memory/sqlite prior PASS; remaining cells running)",
-    "product_workflow_all_10_suites": "PASS all leaves ran=1"
+    "product_workflow_all_10_suites": "PASS all leaves ran=1",
+    "snorri_s3_durability_acceptance": "PASS (script ok; attestation refreshed)"
   },
   "requirements": [
     {
@@ -427,7 +428,7 @@
         ]
       },
       "campaign_disposition": "storage_or_shared",
-      "status": "discharged_via_gate_or_prior_evidence"
+      "status": "discharged_snorri_s3_acceptance"
     },
     {
       "id": "SNORRI-REOPEN",
@@ -439,7 +440,7 @@
         ]
       },
       "campaign_disposition": "storage_or_shared",
-      "status": "discharged_via_gate_or_prior_evidence"
+      "status": "discharged_snorri_s3_acceptance"
     },
     {
       "id": "SNORRI-RETRY-ONCE",
@@ -451,7 +452,7 @@
         ]
       },
       "campaign_disposition": "storage_or_shared",
-      "status": "discharged_via_gate_or_prior_evidence"
+      "status": "discharged_snorri_s3_acceptance"
     },
     {
       "id": "TD004-CURRENT-EPOCH-FENCING",

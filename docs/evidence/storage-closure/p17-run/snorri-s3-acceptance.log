@@ -1,0 +1,602 @@
+snorri-s3-durability-acceptance: preflight
+snorri-runner-preflight: runner_identity=fireweed-p6p-snorri@sindri
+snorri-runner-preflight: secret_dir=/tmp/fireweed-s3-secrets (outside repo)
+snorri-runner-preflight: attestation_present=yes
+p1s_provider=minio selected=True
+s3_tcp_ok host=127.0.0.1 port=33223 ms=0
+s3_head_bucket_ok status=200 bucket=fireweed-qual-733a93d688
+s3_put_delete_probe_ok key_prefix=fireweed-p6p-reachability/
+s3_endpoint_nonsecret=http://127.0.0.1:33223
+s3_region=us-east-1
+s3_provider_note=use P1s attestation; garage/eldir not accepted as implicit provisioning
+postgres_ok url=postgres://fireweed@***@127.0.0.1:55432/fireweed database=fireweed user=fireweed
+snorri-runner-preflight: ok
+snorri-runner-preflight: to export env for Snorri live harness: eval "$(bash scripts/ci/snorri-runner-preflight.sh --export-env)"
+snorri-s3-durability-acceptance: fireweed harness: p6s_s3_durability_acceptance
+   Compiling fireweed v0.30.1 (/home/erik/Projects/fireweed/crates/fireweed)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.71s
+     Running tests/p6s_s3_durability_acceptance.rs (target/debug/deps/p6s_s3_durability_acceptance-258e14a08d685c84)
+
+running 9 tests
+P6s provenance: endpoint=http://127.0.0.1:33223 bucket=fireweed-qual-733a93d688 provider=minio native_cas=create+update
+P6s provenance: endpoint=http://127.0.0.1:33223 bucket=fireweed-qual-733a93d688 provider=minio native_cas=create+update
+P6s provenance: endpoint=http://127.0.0.1:33223 bucket=fireweed-qual-733a93d688 provider=minio native_cas=create+update
+P6s provenance: endpoint=http://127.0.0.1:33223 bucket=fireweed-qual-733a93d688 provider=minio native_cas=create+update
+P6s provenance: endpoint=http://127.0.0.1:33223 bucket=fireweed-qual-733a93d688 provider=minio native_cas=create+update
+P6s provenance: endpoint=http://127.0.0.1:33223 bucket=fireweed-qual-733a93d688 provider=minio native_cas=create+update
+P6s provenance: endpoint=http://127.0.0.1:33223 bucket=fireweed-qual-733a93d688 provider=minio native_cas=create+update
+P6s provenance: endpoint=http://127.0.0.1:33223 bucket=fireweed-qual-733a93d688 provider=minio native_cas=create+update
+P6s provenance: endpoint=http://127.0.0.1:33223 bucket=fireweed-qual-733a93d688 provider=minio native_cas=create+update
+P6s PASS SNORRI-PROJECTION-REBUILD unsupported-negative s3--memory control=None
+test snorri_projection_rebuild_s3_memory_has_no_control ... ok
+P6s PASS SNORRI-RETRY-ONCE s3--memory
+P6s PASS SNORRI-REOPEN s3--memory
+test snorri_retry_once_s3_memory ... ok
+test snorri_reopen_s3_memory ... ok
+P6s PASS SNORRI-REOPEN s3--sqlite
+test snorri_reopen_s3_sqlite ... ok
+P6s PASS SNORRI-PROJECTION-REBUILD s3--sqlite tail=1 seq=0
+test snorri_projection_rebuild_s3_sqlite ... ok
+P6s PASS SNORRI-RETRY-ONCE s3--sqlite
+test snorri_retry_once_s3_sqlite ... ok
+P6s PASS SNORRI-REOPEN s3--postgres
+test snorri_reopen_s3_postgres ... ok
+P6s PASS SNORRI-RETRY-ONCE s3--postgres
+test snorri_retry_once_s3_postgres ... ok
+P6s PASS SNORRI-PROJECTION-REBUILD s3--postgres tail=1 seq=0
+test snorri_projection_rebuild_s3_postgres_control_plane ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.64s
+
+snorri-s3-durability-acceptance: semantic verifier ledger
+snorri-semantic-verifier: ledger OK (/home/erik/Projects/fireweed/scripts/ci/fixtures/snorri/p6s-s3-durability.json; ids=SNORRI-REOPEN,SNORRI-PROJECTION-REBUILD,SNORRI-RETRY-ONCE; cells=3)
+snorri-s3-durability-acceptance: external snorri checkout=/home/erik/Projects/snorri sha=eef2864301357889aed984a5e371192aa36d7b55
+   Compiling snorri-core v0.15.0 (/home/erik/Projects/snorri/crates/snorri-core)
+warning: unused import: `BTreeSet`
+  --> crates/snorri-core/src/workflow_queue.rs:13:34
+   |
+13 | use std::collections::{BTreeMap, BTreeSet};
+   |                                  ^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Result`
+  --> crates/snorri-core/src/workflow_queue.rs:20:21
+   |
+20 |     ArtifactDigest, Result, StateStoreDescriptor, SubjectContext, WorkflowInstanceId,
+   |                     ^^^^^^
+
+warning: unused imports: `StateStoreDescriptor`, `TransitionCommitBatchSetOutcome`, `TransitionCommitBatchSet`, `TransitionCommitBatch`, `TransitionCommitOutcome`, and `WorkflowStateMachineManifest`
+  --> crates/snorri-core/src/workflow_state_store.rs:26:36
+   |
+26 |     QueryVisibilityResult, Result, StateStoreDescriptor, SummaryCounts, TransitionCommitBatch,
+   |                                    ^^^^^^^^^^^^^^^^^^^^                 ^^^^^^^^^^^^^^^^^^^^^
+27 |     TransitionCommitBatchSet, TransitionCommitBatchSetOutcome, TransitionCommitOutcome,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^
+...
+30 |     WorkflowQueueMutation, WorkflowQueueMutationResult, WorkflowStateMachineManifest,
+   |                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `EffectDispatch` and `EffectResult`
+  --> crates/snorri-core/src/workflow_state_store.rs:33:13
+   |
+33 | use crate::{EffectDispatch, EffectResult};
+   |             ^^^^^^^^^^^^^^  ^^^^^^^^^^^^
+
+warning: function `scalar_state_store_requirement` is never used
+    --> crates/snorri-core/src/lib.rs:1920:4
+     |
+1920 | fn scalar_state_store_requirement() -> StateStoreActivationRequirement {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: missing documentation for a struct field
+   --> crates/snorri-core/src/lib.rs:476:5
+    |
+476 |     pub tenant_id: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+    |
+note: the lint level is defined here
+   --> crates/snorri-core/src/lib.rs:2:9
+    |
+  2 | #![warn(missing_docs)]
+    |         ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/snorri-core/src/lib.rs:477:5
+    |
+477 |     pub workflow_id: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/snorri-core/src/lib.rs:478:5
+    |
+478 |     pub workflow_version: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/snorri-core/src/lib.rs:479:5
+    |
+479 |     pub artifact_digest: ArtifactDigest,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/snorri-core/src/lib.rs:487:18
+    |
+487 |     BlankField { field: &'static str },
+    |                  ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/snorri-core/src/lib.rs:490:34
+    |
+490 |     NonCanonicalArtifactDigest { digest: String },
+    |                                  ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/snorri-core/src/lib.rs:496:9
+    |
+496 |         identity_digest: String,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/snorri-core/src/lib.rs:497:9
+    |
+497 |         artifact_digest: String,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/snorri-core/src/instance_migration.rs:940:5
+    |
+940 |     pub record_id: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/snorri-core/src/instance_migration.rs:941:5
+    |
+941 |     pub record_kind: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/snorri-core/src/instance_migration.rs:944:5
+    |
+944 |     pub state_version: u64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/snorri-core/src/instance_migration.rs:945:5
+    |
+945 |     pub state_digest: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/snorri-core/src/instance_migration.rs:967:5
+    |
+967 |     pub principal_kind: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/snorri-core/src/instance_migration.rs:970:5
+    |
+970 |     pub decision_id: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/snorri-core/src/instance_migration.rs:971:5
+    |
+971 |     pub evidence_ref: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/snorri-core/src/instance_migration.rs:972:5
+    |
+972 |     pub reason: String,
+    |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/snorri-core/src/instance_migration.rs:975:5
+    |
+975 |     pub policy_version: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/snorri-core/src/instance_migration.rs:978:5
+    |
+978 |     pub workflow_id: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/snorri-core/src/instance_migration.rs:979:5
+    |
+979 |     pub workflow_instance_id: WorkflowInstanceId,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/snorri-core/src/instance_migration.rs:984:5
+    |
+984 |     pub authorization_expires_at: OffsetDateTime,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/snorri-core/src/instance_migration.rs:987:5
+    |
+987 |     pub source_id: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/snorri-core/src/instance_migration.rs:988:5
+    |
+988 |     pub source_generation: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/snorri-core/src/instance_migration.rs:989:5
+    |
+989 |     pub verifier_version: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> crates/snorri-core/src/workflow_queue.rs:254:5
+    |
+254 |     pub fn add(&mut self, other: Self) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> crates/snorri-core/src/workflow_queue.rs:1086:5
+     |
+1086 |     pub fn matches(&self, item: &NewWorkflowWorkItem) -> bool {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+    --> crates/snorri-core/src/workflow_queue.rs:1257:5
+     |
+1257 |     pub fn request_id(&self) -> &str {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+   Compiling snorri-runtime v0.15.0 (/home/erik/Projects/snorri/crates/snorri-runtime)
+   Compiling snorri-compiler v0.15.0 (/home/erik/Projects/snorri/crates/snorri-compiler)
+warning: unused imports: `EffectRequest` and `effect_handler_descriptor_activation_matches`
+  --> crates/snorri-runtime/src/handlers.rs:10:54
+   |
+10 |     EffectHandlerStatus, EffectIdempotencySemantics, EffectRequest, ExternalEffectTransport,
+   |                                                      ^^^^^^^^^^^^^
+11 |     Result, SubjectMutationIntent, SubjectMutationStatus, SubjectProvider, SubjectRef,
+12 |     canonical_payload_digest, effect_handler_descriptor_activation_matches,
+   |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `EffectHandlerActivationRequirement` and `effect_handler_descriptor_activation_matches`
+  --> crates/snorri-runtime/src/lib.rs:21:5
+   |
+21 |     EffectHandlerActivationRequirement, EffectHandlerDescriptor, EffectHandlerOutcome,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+35 |     effect_handler_descriptor_activation_matches,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+   --> crates/snorri-runtime/src/handlers.rs:430:17
+    |
+430 |             let mut state = self
+    |                 ----^^^^^
+    |                 |
+    |                 help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> crates/snorri-runtime/src/lib.rs:1815:9
+     |
+1815 |         mut state_store: S,
+     |         ----^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: function `completed_outcome` is never used
+   --> crates/snorri-runtime/src/handlers.rs:642:4
+    |
+642 | fn completed_outcome(
+    |    ^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `validate_json_against_wit`
+  --> crates/snorri-compiler/src/state_schema.rs:42:28
+   |
+42 | use snorri_core::{WitType, validate_json_against_wit};
+   |                            ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `BatchResourceLimits`, `EffectHandlerDescriptor`, and `effect_handler_descriptor_activation_matches`
+  --> crates/snorri-compiler/src/lib.rs:20:50
+   |
+20 |     ArtifactDigest, ArtifactProviderRequirement, BatchResourceLimits, BatchTransportSemantics,
+   |                                                  ^^^^^^^^^^^^^^^^^^^
+21 |     EffectHandlerActivationRequirement, EffectHandlerCapability, EffectHandlerDescriptor,
+   |                                                                  ^^^^^^^^^^^^^^^^^^^^^^^
+...
+32 |     effect_handler_descriptor_activation_matches, external_event_await_key,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `from_state_id` is never read
+    --> crates/snorri-compiler/src/lib.rs:3035:5
+     |
+3034 | struct ProductionEdgeSpec {
+     |        ------------------ field in this struct
+3035 |     from_state_id: String,
+     |     ^^^^^^^^^^^^^
+     |
+     = note: `ProductionEdgeSpec` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `production_json_field_pattern` is never used
+    --> crates/snorri-compiler/src/lib.rs:3375:4
+     |
+3375 | fn production_json_field_pattern(field: &str, literal: &serde_json::Value) -> Option<String> {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+   Compiling snorri-workflow v0.15.0 (/home/erik/Projects/snorri/crates/snorri-workflow)
+warning: `snorri-runtime` (lib) generated 5 warnings (run `cargo fix --lib -p snorri-runtime` to apply 4 suggestions)
+warning: `snorri-core` (lib) generated 31 warnings (run `cargo fix --lib -p snorri-core` to apply 4 suggestions)
+warning: `snorri-compiler` (lib) generated 4 warnings (run `cargo fix --lib -p snorri-compiler` to apply 2 suggestions)
+warning: unused import: `snorri_core as snorri_core_api`
+  --> crates/snorri-workflow/src/lib.rs:18:5
+   |
+18 | use snorri_core as snorri_core_api;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused macro definition: `impl_core_runtime_state_store_port_via_runtime`
+  --> crates/snorri-workflow/src/lib.rs:74:14
+   |
+74 | macro_rules! impl_core_runtime_state_store_port_via_runtime {
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_macros)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `snorri_runtime::RuntimeStateStorePort`
+  --> crates/snorri-workflow/src/lib.rs:19:5
+   |
+19 | use snorri_runtime::RuntimeStateStorePort as _;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `descriptor` is never read
+    --> crates/snorri-workflow/src/lib.rs:3503:5
+     |
+3501 | pub(crate) struct InMemoryWorkflowQueueStore {
+     |                   -------------------------- field in this struct
+3502 |     inner: Arc<Mutex<InMemoryQueueState>>,
+3503 |     descriptor: WorkflowQueueStoreDescriptor,
+     |     ^^^^^^^^^^
+     |
+     = note: `InMemoryWorkflowQueueStore` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: methods `claim_due_actions`, `schedule_retry`, and `backoff_inactive_job` are never used
+    --> crates/snorri-workflow/src/lib.rs:3531:18
+     |
+3522 | impl InMemoryWorkflowQueueStore {
+     | ------------------------------- methods in this implementation
+...
+3531 |     pub async fn claim_due_actions(
+     |                  ^^^^^^^^^^^^^^^^^
+...
+3603 |     pub async fn schedule_retry(
+     |                  ^^^^^^^^^^^^^^
+...
+3666 |     pub async fn backoff_inactive_job(
+     |                  ^^^^^^^^^^^^^^^^^^^^
+
+warning: field `backoff_attempts` is never read
+    --> crates/snorri-workflow/src/lib.rs:4816:5
+     |
+4801 | struct StoredWorkflowItem {
+     |        ------------------ field in this struct
+...
+4816 |     backoff_attempts: u32,
+     |     ^^^^^^^^^^^^^^^^
+     |
+     = note: `StoredWorkflowItem` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `next_processing_at` and `retry_count` are never read
+    --> crates/snorri-workflow/src/lib.rs:4822:5
+     |
+4821 | struct RetrySchedule {
+     |        ------------- fields in this struct
+4822 |     next_processing_at: OffsetDateTime,
+     |     ^^^^^^^^^^^^^^^^^^
+4823 |     retry_count: u32,
+     |     ^^^^^^^^^^^
+     |
+     = note: `RetrySchedule` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `due_scheduled_at` is never used
+    --> crates/snorri-workflow/src/lib.rs:4880:8
+     |
+4826 | impl StoredWorkflowItem {
+     | ----------------------- method in this implementation
+...
+4880 |     fn due_scheduled_at(
+     |        ^^^^^^^^^^^^^^^^
+
+warning: method `descriptor` is never used
+    --> crates/snorri-workflow/src/lib.rs:5019:8
+     |
+5018 | impl InMemoryWorkflowQueueStore {
+     | ------------------------------- method in this implementation
+5019 |     fn descriptor(&self) -> WorkflowQueueStoreDescriptor {
+     |        ^^^^^^^^^^
+
+warning: function `axon_subject_provider_descriptor` is never used
+    --> crates/snorri-workflow/src/lib.rs:7257:4
+     |
+7257 | fn axon_subject_provider_descriptor() -> SubjectProviderDescriptor {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `axon_subject_wit_type` is never used
+    --> crates/snorri-workflow/src/lib.rs:7289:4
+     |
+7289 | fn axon_subject_wit_type() -> WitType {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `effect_handler_descriptor` is never used
+    --> crates/snorri-workflow/src/lib.rs:7309:4
+     |
+7309 | fn effect_handler_descriptor(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `REFERENCE_EMAIL_RESPONSE_EVENT_TYPE` is never used
+    --> crates/snorri-workflow/src/lib.rs:7442:7
+     |
+7442 | const REFERENCE_EMAIL_RESPONSE_EVENT_TYPE: &str = "email.send.result";
+     |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `snorri-workflow` (lib) generated 13 warnings (run `cargo fix --lib -p snorri-workflow` to apply 1 suggestion)
+   Compiling snorri-fireweed v0.15.0 (/home/erik/Projects/snorri/crates/snorri-fireweed)
+warning: unused import: `LeaseToken`
+  --> crates/snorri-fireweed/src/lib.rs:46:61
+   |
+46 |     ItemSelector, ItemSelectorScope, ItemState, LeaseGuard, LeaseToken, LifecyclePatch, Metadata,
+   |                                                             ^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `EffectHandlerDescriptor`, `EffectHandlerOutcome`, `EffectHandlerReceipt`, and `EffectHandlerStatus`
+  --> crates/snorri-fireweed/src/lib.rs:69:47
+   |
+69 |     CoreError, EffectDispatch, EffectHandler, EffectHandlerDescriptor, EffectHandlerOutcome,
+   |                                               ^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+70 |     EffectHandlerReceipt, EffectHandlerRegistration, EffectHandlerRegistry, EffectHandlerStatus,
+   |     ^^^^^^^^^^^^^^^^^^^^                                                    ^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `AtomicUsize`, `Mutex`, and `Ordering`
+     --> crates/snorri-fireweed/src/lib.rs:14439:9
+      |
+14439 |         Mutex,
+      |         ^^^^^
+14440 |         atomic::{AtomicUsize, Ordering},
+      |                  ^^^^^^^^^^^  ^^^^^^^^
+
+warning: unused import: `canonical_payload_digest`
+     --> crates/snorri-fireweed/src/lib.rs:14457:9
+      |
+14457 |         canonical_payload_digest,
+      |         ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `ActivateWorkflowRequest`, `CompileWorkflowRequest`, `CreateRunRequest`, `DispatchEffectsRequest`, `InspectRunRequest`, `ObserveEffectsRequest`, `PendingWorkRequest`, `RunWorkflowRequest`, `ValidateWorkflowRequest`, `WorkflowEngineBuilder`, `WorkflowRunStatus`, and `WorkflowSourceFormat`
+     --> crates/snorri-fireweed/src/lib.rs:14484:9
+      |
+14484 |         ActivateWorkflowRequest, CompileWorkflowRequest, CreateRunRequest, DefaultWorkflowEngine,
+      |         ^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+14485 |         DispatchEffectsRequest, InspectRunRequest, ObserveEffectsRequest, PendingWorkRequest,
+      |         ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+14486 |         QueryVisibilityRequest, RunWorkflowRequest, ValidateWorkflowRequest, WorkflowEngine,
+      |                                 ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^
+14487 |         WorkflowEngineBuilder, WorkflowRunStatus, WorkflowSourceFormat,
+      |         ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+     --> crates/snorri-fireweed/src/lib.rs:21460:14
+      |
+21460 |         let (mut store, registry) = dispatch_pipeline.into_parts();
+      |              ----^^^^^
+      |              |
+      |              help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `stage`
+     --> crates/snorri-fireweed/src/lib.rs:25582:38
+      |
+25582 |         let effect_key = effect.map(|stage| format!("offline-effect-{transition_index}"));
+      |                                      ^^^^^ help: if this is intentional, prefix it with an underscore: `_stage`
+      |
+      = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+     --> crates/snorri-fireweed/src/lib.rs:24384:13
+      |
+24384 |         let mut store = objectlog_sqlite_state_store(config, projection.clone())?;
+      |             ----^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> crates/snorri-fireweed/src/lib.rs:26310:13
+      |
+26310 |         let mut store = match Arc::try_unwrap(store) {
+      |             ----^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: constant `WORKFLOW_EXECUTION_METADATA_KEY` is never used
+   --> crates/snorri-fireweed/src/lib.rs:102:7
+    |
+102 | const WORKFLOW_EXECUTION_METADATA_KEY: &str = "snorri.execution.v1";
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `WorkflowRecoveryRef` is never constructed
+   --> crates/snorri-fireweed/src/lib.rs:556:8
+    |
+556 | struct WorkflowRecoveryRef {
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: method `dispatch_ready_effects` is never used
+     --> crates/snorri-fireweed/src/lib.rs:10234:8
+      |
+10162 | impl WorkflowReadState {
+      | ---------------------- method in this implementation
+...
+10234 |     fn dispatch_ready_effects(
+      |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `workflow_item_ids` is never used
+     --> crates/snorri-fireweed/src/lib.rs:13041:4
+      |
+13041 | fn workflow_item_ids<'a>(
+      |    ^^^^^^^^^^^^^^^^^
+
+warning: function `sanitize_queue_fragment` is never used
+     --> crates/snorri-fireweed/src/lib.rs:14254:4
+      |
+14254 | fn sanitize_queue_fragment(value: &str) -> String {
+      |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `postgres_url` is never read
+     --> crates/snorri-fireweed/src/lib.rs:24688:9
+      |
+24682 |     struct S3LiveTestConfig {
+      |            ---------------- field in this struct
+...
+24688 |         postgres_url: String,
+      |         ^^^^^^^^^^^^
+
+warning: `snorri-fireweed` (lib test) generated 15 warnings (run `cargo fix --lib -p snorri-fireweed --tests` to apply 9 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 24.10s
+     Running unittests src/lib.rs (target/debug/deps/snorri_fireweed-ccfbcc366ef093d1)
+
+running 1 test
+test tests::live_mutations_are_authoritative_through_s3_sqlite_facade ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 133 filtered out; finished in 6.70s
+
+Traceback (most recent call last):
+  File "<stdin>", line 30, in <module>
+  File "/home/erik/.cache/uv/archive-v0/vv4p1sWlO8OTbfOF/lib/python3.13/site-packages/botocore/client.py", line 606, in _api_call
+    return self._make_api_call(operation_name, kwargs)
+           ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/erik/.cache/uv/archive-v0/vv4p1sWlO8OTbfOF/lib/python3.13/site-packages/botocore/context.py", line 123, in wrapper
+    return func(*args, **kwargs)
+  File "/home/erik/.cache/uv/archive-v0/vv4p1sWlO8OTbfOF/lib/python3.13/site-packages/botocore/client.py", line 1094, in _make_api_call
+    raise error_class(parsed_response, operation_name)
+botocore.exceptions.ClientError: An error occurred (MissingContentMD5) when calling the DeleteObjects operation: Missing required header for this request: Content-Md5.
+S3 cleanup verified: unique encoded test prefix is empty
+snorri-s3-durability-acceptance: attestation=/home/erik/Projects/fireweed/docs/evidence/snorri/p6s-s3-durability-attestation.json
+snorri-s3-durability-acceptance: fireweed_sha=15e03182e9a19c9d238b5260cf0735c2c57a1562
+snorri-s3-durability-acceptance: snorri_status=passed snorri_sha=eef2864301357889aed984a5e371192aa36d7b55
+snorri-s3-durability-acceptance: ok
