@@ -8098,8 +8098,8 @@ impl CommitTransitionPort for PostgresRelationalBackend {
                     continue;
                 }
 
-                let side_record_keys: Vec<Vec<u8>> =
-                    entry.side_records.iter().map(|r| r.key.clone()).collect();
+                // fireweed-bf03cbf5: not retained — see `EntryRecovery::side_record_keys`.
+                let side_record_keys: Vec<Vec<u8>> = Vec::new();
                 let instance = entry
                     .instance_fence
                     .as_ref()

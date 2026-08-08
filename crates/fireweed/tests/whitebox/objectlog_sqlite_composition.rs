@@ -358,10 +358,9 @@ fn assert_strict_commit_transition_round_trip(config: ComposedStorageConfig, que
         .expect("committed transition survives delete + rebuild");
     assert_eq!(recovery.entries.len(), 1);
     assert_eq!(recovery.entries[0].consumed_input_id, claim.item_id);
-    assert_eq!(
-        recovery.entries[0].side_record_keys,
-        vec![b"state/run-1".to_vec()]
-    );
+    // fireweed-bf03cbf5: no longer retained in the durable outcome — see
+    // `fireweed_engine::EntryRecovery::side_record_keys`.
+    assert_eq!(recovery.entries[0].side_record_keys, Vec::<Vec<u8>>::new());
     assert_eq!(recovery.entries[0].lifecycle_item_ids, vec![lifecycle_id]);
     assert_eq!(recovery.entries[0].instance, Some((b"wf-1".to_vec(), 1)));
     let (replayed, replay_disp) =

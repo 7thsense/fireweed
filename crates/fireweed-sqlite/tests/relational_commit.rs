@@ -526,7 +526,10 @@ async fn relational_explain_commit_recovers_transition_and_survives_reopen() {
     let e = &recovery.entries[0];
     assert_eq!(e.consumed_input_id, input_id);
     assert_eq!(e.instance, Some((instance_key.clone(), 5)));
-    assert_eq!(e.side_record_keys, vec![b"audit/run-1".to_vec()]);
+    // fireweed-bf03cbf5: no longer retained in the durable outcome — see
+    // `fireweed_engine::EntryRecovery::side_record_keys`. The bytes themselves are still recovered via
+    // `side_record(key)` below.
+    assert_eq!(e.side_record_keys, Vec::<Vec<u8>>::new());
     assert_eq!(e.lifecycle_item_ids, vec![lifecycle_id]);
     assert_eq!(e.status, CommitEntryStatus::Committed);
 
