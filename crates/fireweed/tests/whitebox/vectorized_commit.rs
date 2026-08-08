@@ -783,10 +783,13 @@ async fn explain_commit_reconstructs_the_transition_and_side_records_are_non_wor
         Some((instance_key, 5)),
         "instance key/fence recovered"
     );
+    // fireweed-bf03cbf5: no longer retained in the durable outcome — see
+    // `fireweed_engine::EntryRecovery::side_record_keys`. The bytes themselves are still recovered via
+    // `side_record(key)` below.
     assert_eq!(
         e.side_record_keys,
-        vec![b"audit/run-1".to_vec()],
-        "side-record key recovered"
+        Vec::<Vec<u8>>::new(),
+        "side-record key no longer retained"
     );
     assert_eq!(
         e.lifecycle_item_ids,

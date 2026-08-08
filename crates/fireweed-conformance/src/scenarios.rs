@@ -487,10 +487,10 @@ pub async fn commit_transition_writes_side_records_enqueues_lifecycle_finalizes_
     assert_eq!(recovery.entries.len(), 1);
     assert_eq!(recovery.entries[0].consumed_input_id, input_id);
     assert_eq!(recovery.entries[0].instance, Some((b"wf-1".to_vec(), 1)));
-    assert_eq!(
-        recovery.entries[0].side_record_keys,
-        vec![lifecycle_key.as_bytes().to_vec()]
-    );
+    // fireweed-bf03cbf5: side_record_keys is no longer retained in the durable outcome — it is a pure
+    // function of the caller's own request, so `explain_commit` always returns it empty. The underlying
+    // side record itself is still durably readable, asserted above via `b.side_record(...)`.
+    assert_eq!(recovery.entries[0].side_record_keys, Vec::<Vec<u8>>::new());
     assert_eq!(recovery.entries[0].lifecycle_item_ids, vec![lifecycle_id]);
     assert_eq!(
         b.metrics(&qkey()).await.unwrap().complete,
@@ -747,7 +747,9 @@ pub async fn commit_transition_explain_commit_recovers_transition_and_survives_r
     let entry = &recovery.entries[0];
     assert_eq!(entry.consumed_input_id, input_id);
     assert_eq!(entry.instance, Some((instance_key.clone(), 5)));
-    assert_eq!(entry.side_record_keys, vec![b"audit/run-1".to_vec()]);
+    // fireweed-bf03cbf5: no longer retained — see the assertion in
+    // `commit_transition_writes_side_records_enqueues_lifecycle_finalizes_and_survives_reopen`.
+    assert_eq!(entry.side_record_keys, Vec::<Vec<u8>>::new());
     assert_eq!(entry.lifecycle_item_ids, vec![lifecycle_id]);
     assert_eq!(entry.status, fireweed_engine::CommitEntryStatus::Committed);
     assert_eq!(

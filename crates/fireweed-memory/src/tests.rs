@@ -518,7 +518,9 @@ mod composed_capability_parity {
         };
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].consumed_input_id, input_id);
-        assert_eq!(entries[0].side_record_keys, vec![b"state/run".to_vec()]);
+        // fireweed-bf03cbf5: no longer retained in the durable outcome — see
+        // `fireweed_engine::EntryRecovery::side_record_keys`.
+        assert_eq!(entries[0].side_record_keys, Vec::<Vec<u8>>::new());
         assert_eq!(entries[0].instance, Some((b"wf-1".to_vec(), 1)));
         assert_eq!(entries[0].lifecycle_item_ids, vec![lifecycle_id]);
         assert!(entries[0].rejection.is_none());
@@ -1087,7 +1089,9 @@ async fn commit_path_propagates_request_id_into_every_command_envelope() {
     };
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].consumed_input_id, input_id);
-    assert_eq!(entries[0].side_record_keys, vec![b"state/run".to_vec()]);
+    // fireweed-bf03cbf5: no longer retained in the durable outcome — see
+    // `fireweed_engine::EntryRecovery::side_record_keys`.
+    assert_eq!(entries[0].side_record_keys, Vec::<Vec<u8>>::new());
     assert_eq!(entries[0].instance, Some((b"wf-1".to_vec(), 1)));
     assert_eq!(entries[0].lifecycle_item_ids, vec![lifecycle_id]);
     assert!(entries[0].rejection.is_none());

@@ -847,10 +847,9 @@ fn us009_objectlog_postgres_rich_commit_recovery_promotion() {
         .expect("rich transition survives projection rebuild");
     assert_eq!(recovery.entries[0].consumed_input_id, claim.item_id);
     assert_eq!(recovery.entries[0].lifecycle_item_ids, vec![lifecycle_id]);
-    assert_eq!(
-        recovery.entries[0].side_record_keys,
-        vec![b"state/run-1".to_vec()]
-    );
+    // fireweed-bf03cbf5: no longer retained in the durable outcome — see
+    // `fireweed_engine::EntryRecovery::side_record_keys`.
+    assert_eq!(recovery.entries[0].side_record_keys, Vec::<Vec<u8>>::new());
 
     drop(fireweed);
     drop_schema(&url, &schema);

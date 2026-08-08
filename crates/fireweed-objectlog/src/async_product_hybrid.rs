@@ -2096,10 +2096,9 @@ mod tests {
             .expect("explain_commit");
         assert_eq!(recovery.entries.len(), 1);
         assert_eq!(recovery.entries[0].consumed_input_id, ids[0]);
-        assert_eq!(
-            recovery.entries[0].side_record_keys,
-            vec![b"state/run-1".to_vec()]
-        );
+        // fireweed-bf03cbf5: no longer retained in the durable outcome — see
+        // `fireweed_engine::EntryRecovery::side_record_keys`.
+        assert_eq!(recovery.entries[0].side_record_keys, Vec::<Vec<u8>>::new());
         assert_eq!(recovery.entries[0].lifecycle_item_ids, vec![lifecycle_id]);
         assert_eq!(recovery.entries[0].instance, Some((b"wf-1".to_vec(), 1)));
     }

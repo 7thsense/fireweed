@@ -260,7 +260,11 @@ where
             }
         }
 
-        let side_record_keys: Vec<Vec<u8>> = side_records.iter().map(|r| r.key.clone()).collect();
+        // fireweed-bf03cbf5: not retained. `side_record_keys` is a pure function of the caller's own
+        // `side_records` for this entry — echoing it back in the durable retained outcome cost ~948 B/entry
+        // (500-entry batches: up to 781 KB/row) for data the caller already has. See
+        // `EntryRecovery::side_record_keys` for the consumer-facing contract.
+        let side_record_keys: Vec<Vec<u8>> = Vec::new();
         let instance = instance_fence
             .as_ref()
             .map(|f| (f.instance_key.clone(), f.next));

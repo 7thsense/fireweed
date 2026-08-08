@@ -1253,6 +1253,9 @@ pub struct CommitOutcomeEntry {
     pub additional_consumed_input_ids: Vec<ItemId>,
     #[serde(default, with = "crate::wire_bytes::option_instance")]
     pub instance: Option<(Vec<u8>, u64)>,
+    /// Always empty on write (fireweed-bf03cbf5); `#[serde(default)]` keeps old logs/rows that still carry
+    /// real keys replay-compatible. See [`crate::port::EntryRecovery::side_record_keys`] for why this is no
+    /// longer populated.
     #[serde(default, with = "crate::wire_bytes::vec_vec_u8")]
     pub side_record_keys: Vec<Vec<u8>>,
     #[serde(default)]
@@ -2202,6 +2205,33 @@ mod serde_tests {
         assert_ne!(
             records[0].idempotency_key(),
             other_records[0].idempotency_key()
+        );
+    }
+
+    /// fireweed-bf03cbf5: `side_record_keys` is no longer retained in the durable `CommitTransition`
+    /// outcome. Reproduces the bead's own measurement shape (snorri's 1000-member loadgen at fireweed
+    /// v0.30.0: ~1.2 KB/entry, ~948 B of it base64 side-record keys, up to 781 KB for a 500-entry batch
+    /// ledger row) to pin the resulting reduction as a regression guard.
+    #[test]
+    fn commit_outcome_entry_no_longer_pays_for_side_record_keys() {
+        fn entry_with_keys(n: usize, key_len: usize) -> CommitOutcomeEntry {
+            CommitOutcomeEntry {
+                consumed_input_id: iid("consumed"),
+                additional_consumed_input_ids: Vec::new(),
+                instance: Some((b"workflow-run-batch-0-2-500".to_vec(), 500)),
+                side_record_keys: (0..n).map(|i| vec![i as u8; key_len]).collect(),
+                lifecycle_item_ids: vec![iid("lifecycle")],
+                rejection: None,
+            }
+        }
+        let retained = entry_with_keys(0, 0);
+        let formerly_retained = entry_with_keys(1, 700);
+        let retained_bytes = serde_json::to_vec(&retained).unwrap().len();
+        let formerly_retained_bytes = serde_json::to_vec(&formerly_retained).unwrap().len();
+        // >=5x per entry -> a 500-entry batch ledger row drops from ~577 KB to ~108 KB for this shape.
+        assert!(
+            formerly_retained_bytes >= retained_bytes * 5,
+            "expected >=5x reduction: {formerly_retained_bytes} -> {retained_bytes}"
         );
     }
 }

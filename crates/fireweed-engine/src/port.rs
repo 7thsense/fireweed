@@ -1439,7 +1439,13 @@ pub struct EntryRecovery {
     pub additional_consumed_input_ids: Vec<ItemId>,
     /// The advanced instance/state fence, if the entry carried one: `(instance_key, fence_after_advance)`.
     pub instance: Option<(Vec<u8>, u64)>,
-    /// The opaque non-work side-record keys this entry wrote (empty when it wrote none).
+    /// Always empty (fireweed-bf03cbf5). Formerly the opaque non-work side-record keys this entry wrote;
+    /// no longer retained because the keys are a pure function of the caller's own `side_records` for the
+    /// entry — echoing them back in the durable retained outcome cost ~948 B/entry (up to 781 KB per
+    /// 500-entry batch retention row) for data the caller already has. A caller that needs the keys for a
+    /// `request_id` it just committed already has them in its own request; a caller reconstructing them from
+    /// `explain_commit` after a restart must derive them from its own record of what it sent, not from this
+    /// field.
     pub side_record_keys: Vec<Vec<u8>>,
     /// The server-assigned ids of the entry's dispatchable lifecycle items (empty when it enqueued none).
     pub lifecycle_item_ids: Vec<ItemId>,
