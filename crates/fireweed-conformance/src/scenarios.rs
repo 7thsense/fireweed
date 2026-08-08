@@ -11,6 +11,7 @@ use fireweed_core::{
     LeaseToken, Metadata, MetadataValue, MetricsByQueryRequest, PriorityValue, QueryFilter,
     QueueDefinition, QueueIndex, RequestId, TypedValue,
 };
+// LeaseToken used for distinct claim tokens in multi-delivery scenarios.
 use fireweed_engine::{
     ClaimCommand, ClaimCompatibility, ClaimRef, ClaimRequest, CommandPosition, EngineError,
     EngineResult, FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome, GroupBatching,
@@ -3094,7 +3095,10 @@ pub async fn retry_beyond_max_attempts_goes_terminal<B: ConformanceCore>(make: i
     );
 
     // Delivery 2: claim again → attempt_count = 2 (now AT the bound).
-    b.claim(claim_req(1, 500, 30)).await.unwrap();
+    // Fresh lease token: composed paths reject reusing the same token string across claims.
+    let mut claim2 = claim_req(1, 500, 30);
+    claim2.lease_token = LeaseToken::new("lease-2").unwrap();
+    b.claim(claim2).await.unwrap();
     assert_eq!(
         b.pending(&shard()).await.unwrap()[0].attempt_count,
         2,
