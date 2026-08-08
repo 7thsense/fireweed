@@ -799,11 +799,11 @@ SET lifecycle_state='Leased', lease_token_hash=$5, lease_expires_at=$6, \
 FROM candidates c \
 	WHERE i.tenant_id=$1 AND i.queue_id=$2 AND i.item_id=c.item_id \
 		RETURNING i.item_id, i.client_item_key, i.item_version, i.priority, i.group_key, i.not_before, \
-		          i.lease_expires_at, i.retry_count, i.payload, i.fields, i.metadata, \
+		          i.lease_expires_at, i.retry_count, i.max_attempts, i.payload, i.fields, i.metadata, \
 		          i.priority_sort AS claim_priority_sort, i.created_seq AS claim_created_seq \
 ) \
 SELECT item_id, client_item_key, item_version, priority, group_key, not_before, lease_expires_at, \
-       retry_count, payload, fields, metadata FROM updated \
+       retry_count, max_attempts, payload, fields, metadata FROM updated \
 ORDER BY claim_priority_sort, claim_created_seq";
 
 pub(crate) const ITEM_GATE_KEYS_BATCH_SQL: &str = "\
@@ -4589,8 +4589,8 @@ fn pending_by_ids_sql(
 }
 
 /// Build a [`ClaimedItem`] from a row carrying (client_item_key, item_version, priority, group_key,
-/// not_before, lease_expires_at, retry_count, payload, fields), pairing it with `token`. Shared by the
-/// claim CTE RETURNING and the `claimed_view` read port.
+/// not_before, lease_expires_at, retry_count, max_attempts, payload, fields), pairing it with `token`.
+/// Shared by the claim CTE RETURNING and the `claimed_view` read port.
 #[allow(clippy::too_many_arguments)]
 fn claimed_from_row(
     item_id: ItemId,
@@ -4602,6 +4602,7 @@ fn claimed_from_row(
     not_before: Option<i64>,
     exp: i64,
     retry: i64,
+    max_attempts: i64,
     payload: Option<Vec<u8>>,
     fields: String,
     metadata: String,
@@ -4621,6 +4622,7 @@ fn claimed_from_row(
         lease_token: Some(token),
         lease_expires_at: nanos_ts(exp),
         attempt_count: retry as u32,
+        max_attempts: max_attempts as u32,
         payload: payload.map(Bytes::from),
         fields: fields_from_json(fields)?,
         metadata: metadata_from_json(metadata)?,
@@ -4670,7 +4672,7 @@ fn render_claimed(
     let id_strings: Vec<String> = ids.iter().map(ToString::to_string).collect();
     let rows = st(client.query(
         "SELECT item_id,client_item_key,item_version,priority,group_key,not_before, \
-         lease_expires_at,retry_count,payload,fields,metadata FROM fireweed_items \
+         lease_expires_at,retry_count,max_attempts,payload,fields,metadata FROM fireweed_items \
          WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3::text[]) \
          AND lifecycle_state='Leased'",
         &[&t, &q, &id_strings],
@@ -4706,6 +4708,7 @@ fn render_claimed(
             row.get(8),
             row.get(9),
             row.get(10),
+            row.get(11),
             gate_keys,
         )?);
     }
@@ -7867,6 +7870,7 @@ fn claim_item_level_in_tx(
             row.get(8),
             row.get(9),
             row.get(10),
+            row.get(11),
             gate_keys,
         )?);
         token_ops.push(TokenOp::Set(item_id, req.lease_token.clone()));

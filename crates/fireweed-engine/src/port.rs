@@ -721,8 +721,10 @@ impl ClaimRequest {
 
 /// A claimed item in the API-001 claimed-item shape (lease fields included).
 ///
-/// `metadata`, `group_key`, `not_before`, `gate_keys`, and `attempt_count` are core data-model fields
-/// included so adapters built on this shape don't force a breaking widening later (review I2/I3).
+/// `metadata`, `group_key`, `not_before`, `gate_keys`, `attempt_count`, and `max_attempts` are core
+/// data-model fields included so adapters built on this shape don't force a breaking widening later
+/// (review I2/I3). Per-item `max_attempts` is required for composed finalize sealing: Retry
+/// exhaustion is item-scoped, not queue-default-scoped.
 #[derive(Debug, Clone)]
 pub struct ClaimedItem {
     pub item_id: ItemId,
@@ -735,6 +737,8 @@ pub struct ClaimedItem {
     pub lease_expires_at: UtcTimestamp,
     /// Delivery/reclaim count as of this claim (RESP delivery-count semantics; flavor-diff 7).
     pub attempt_count: u32,
+    /// Item-scoped retry bound used by finalize sealing (`is_retry_exhausted`).
+    pub max_attempts: u32,
     pub payload: Option<Bytes>,
     pub fields: BTreeMap<String, Bytes>,
     pub metadata: Metadata,

@@ -251,6 +251,7 @@ impl ItemRecord {
             lease_token: Some(self.lease_token.clone()?),
             lease_expires_at: self.lease_expires_at?,
             attempt_count: self.attempt_count,
+            max_attempts: self.max_attempts,
             payload: self.payload.clone(),
             fields: self.fields.clone(),
             metadata: self.metadata.clone(),

@@ -661,9 +661,11 @@ impl<S> BlockingControlPlane<S> {
 
 /// Projection-sealed retry inputs for one ordinary leased item.
 ///
-/// The projection must return one member for each requested target in the same order. Relational
-/// projections read both counters from the same validation row; the default implementation uses the
-/// queue-level retry bound supplied by the lifecycle planner.
+/// The projection must return one member for each requested target in the same order. Both counters
+/// are item-scoped: `attempt_count` is deliveries so far, and `max_attempts` is the bound stored on
+/// the item at push (which may be tighter than the queue default). Renderers populate
+/// [`ClaimedItem::max_attempts`]; the default finalize_validate path prefers that value and only
+/// falls back to the queue default when the renderer left it unset (`0`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalizeLeaseMember {
     pub item_id: ItemId,
@@ -962,10 +964,18 @@ pub trait AsyncProjectionStore: Send + Sync {
                     if item.item_id != target.item_id || item.item_version != target.item_version {
                         Err(EngineError::Conflict)
                     } else {
+                        // Prefer the item-scoped bound from the projection image. Fall back to the
+                        // queue default only when a renderer has not yet populated max_attempts
+                        // (legacy / incomplete ClaimedItem construction).
+                        let max_attempts = if item.max_attempts > 0 {
+                            item.max_attempts
+                        } else {
+                            default_max_attempts
+                        };
                         Ok(FinalizeLeaseMember {
                             item_id: item.item_id,
                             attempt_count: item.attempt_count,
-                            max_attempts: default_max_attempts,
+                            max_attempts,
                         })
                     }
                 })
@@ -1351,10 +1361,19 @@ where
             claimed
                 .into_iter()
                 .map(|item| {
+                    // Prefer the item-scoped bound from the projection image (push can pin a
+                    // per-item max_attempts below the queue default). Wrong bound here seals
+                    // applied_state=Pending while SQL apply computes Failed → Conflict on
+                    // composed log-replay paths (retry_beyond_max_attempts_goes_terminal).
+                    let max_attempts = if item.max_attempts > 0 {
+                        item.max_attempts
+                    } else {
+                        default_max_attempts
+                    };
                     Ok(FinalizeLeaseMember {
                         item_id: item.item_id,
                         attempt_count: item.attempt_count,
-                        max_attempts: default_max_attempts,
+                        max_attempts,
                     })
                 })
                 .collect()

@@ -4599,7 +4599,7 @@ impl AsyncProjectionStore for TursoRelational {
                 params.extend(chunk.iter().map(|id| id.to_string().into()));
                 let item_sql = format!(
                     "SELECT item_id,client_item_key,item_version,priority,group_key,not_before,\
-                     lease_expires_at,retry_count,payload,fields,metadata FROM fireweed_items \
+                     lease_expires_at,retry_count,max_attempts,payload,fields,metadata FROM fireweed_items \
                      WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' \
                      AND item_id IN ({placeholders})"
                 );
@@ -4644,9 +4644,10 @@ impl AsyncProjectionStore for TursoRelational {
                     lease_token: Some(token),
                     lease_expires_at: nanos_ts(expires),
                     attempt_count: nonnegative_u32(integer(&values[6])?, "retry_count")?,
-                    payload: optional_blob(&values[7])?.map(Bytes::from),
-                    fields: fields_from_json(text(&values[8])?)?,
-                    metadata: metadata_from_json(text(&values[9])?)?,
+                    max_attempts: nonnegative_u32(integer(&values[7])?, "max_attempts")?,
+                    payload: optional_blob(&values[8])?.map(Bytes::from),
+                    fields: fields_from_json(text(&values[9])?)?,
+                    metadata: metadata_from_json(text(&values[10])?)?,
                     gate_keys: gate_keys.remove(&id).unwrap_or_default(),
                 });
             }

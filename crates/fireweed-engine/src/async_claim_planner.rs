@@ -375,6 +375,7 @@ mod tests {
                     lease_token: Some(LeaseToken::new("lease").unwrap()),
                     lease_expires_at: UtcTimestamp::new(30, 0).unwrap(),
                     attempt_count: 1,
+                    max_attempts: 3,
                     payload: None,
                     fields: BTreeMap::new(),
                     metadata: Metadata::default(),

@@ -1033,6 +1033,7 @@ pub(crate) fn render_claimed(
         Option<i64>,
         Option<i64>,
         i64,
+        i64,
         Option<Vec<u8>>,
         String,
         String,
@@ -1053,7 +1054,7 @@ pub(crate) fn render_claimed(
         let ph = vec!["?"; chunk.len()].join(",");
         let sql = format!(
             "SELECT item_id, client_item_key, item_version, priority, group_key, not_before, \
-             lease_expires_at, retry_count, payload, fields, metadata FROM fireweed_items \
+             lease_expires_at, retry_count, max_attempts, payload, fields, metadata FROM fireweed_items \
              WHERE tenant_id=? AND queue_id=? AND lifecycle_state='Leased' AND item_id IN ({ph})"
         );
         let mut p: Vec<Value> = vec![Value::Text(t.clone()), Value::Text(q.clone())];
@@ -1072,9 +1073,10 @@ pub(crate) fn render_claimed(
                     row.get::<_, Option<i64>>(5)?,
                     row.get::<_, Option<i64>>(6)?,
                     row.get::<_, i64>(7)?,
-                    row.get::<_, Option<Vec<u8>>>(8)?,
-                    row.get::<_, String>(9)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, Option<Vec<u8>>>(9)?,
                     row.get::<_, String>(10)?,
+                    row.get::<_, String>(11)?,
                 ),
             ))
         }))?;
@@ -1095,6 +1097,7 @@ pub(crate) fn render_claimed(
             not_before,
             exp,
             retry,
+            max_attempts,
             payload,
             fields,
             metadata,
@@ -1118,6 +1121,7 @@ pub(crate) fn render_claimed(
             lease_token: Some(token),
             lease_expires_at: nanos_ts(exp),
             attempt_count: retry as u32,
+            max_attempts: max_attempts as u32,
             payload: payload.map(Bytes::from),
             fields: fields_from_json(fields)?,
             metadata: metadata_from_json(metadata)?,

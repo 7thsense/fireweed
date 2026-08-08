@@ -2358,6 +2358,7 @@ mod tests {
             lease_token: Some(request.lease_token.clone()),
             lease_expires_at: request.lease_expires_at,
             attempt_count: 1,
+            max_attempts: 3,
             payload: None,
             fields: BTreeMap::new(),
             metadata: Metadata::default(),
