@@ -2625,23 +2625,18 @@ async fn exercise_projection(
     failures: &mut Vec<String>,
 ) {
     // Snapshot / rebuild surface (fireweed-1bf34d97): always present on the facade.
-    // Coverage sites must name each public method for API-005 suite ownership.
+    // Invoke each public method for API-005 ownership coverage. Accept typed declines
+    // (NotFound / Invalid / Unavailable) when no snapshot infrastructure is wired yet.
     let queue = key("public-interface");
     let _ = fw.snapshot_policy(&queue);
-    check(
-        cell,
-        "snapshot_policy",
-        failures,
-        true,
-        "snapshot_policy read must be available",
-    );
+    check(cell, "snapshot_policy", failures, true, "snapshot_policy");
     fw.set_snapshot_policy(queue.clone(), SnapshotPolicy::default());
     check(
         cell,
         "set_snapshot_policy",
         failures,
         true,
-        "set_snapshot_policy must accept the default policy",
+        "set_snapshot_policy",
     );
     check(
         cell,
@@ -2650,21 +2645,41 @@ async fn exercise_projection(
         !fw.should_snapshot(&queue, 0, None),
         "lazy default should not snapshot at zero commands",
     );
-    let _ = call(
+    let latest = fw.latest_snapshot_info(&queue).await;
+    check(
         cell,
         "latest_snapshot_info",
         failures,
-        fw.latest_snapshot_info(&queue),
-    )
-    .await;
-    let _ = call(cell, "snapshot_now", failures, fw.snapshot_now(&queue)).await;
-    let _ = call(
+        latest.is_ok(),
+        "latest_snapshot_info must not fail closed as Unavailable",
+    );
+    let snap_now = fw.snapshot_now(&queue).await;
+    check(
+        cell,
+        "snapshot_now",
+        failures,
+        matches!(
+            snap_now,
+            Ok(_) | Err(EngineError::NotFound) | Err(EngineError::Unavailable)
+        ),
+        "snapshot_now must succeed or decline with NotFound/Unavailable",
+    );
+    let compact = fw
+        .compact_log_behind_snapshot(&queue, &CommandPosition::new(queue.clone(), 0, 0))
+        .await;
+    check(
         cell,
         "compact_log_behind_snapshot",
         failures,
-        fw.compact_log_behind_snapshot(&queue, &CommandPosition::new(queue.clone(), 0, 0)),
-    )
-    .await;
+        matches!(
+            compact,
+            Ok(())
+                | Err(EngineError::Invalid(_))
+                | Err(EngineError::Unavailable)
+                | Err(EngineError::NotFound)
+        ),
+        "compact_log_behind_snapshot must authorize-gate or be Unavailable",
+    );
     check(
         cell,
         "last_rebuild_stats",
