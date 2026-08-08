@@ -549,6 +549,94 @@ async fn relational_explain_commit_recovers_transition_and_survives_reopen() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Bead fireweed-e47e9287: `side_records_by_prefix` reads back one instance's audit chain in key order,
+/// stays isolated from a sibling instance's records under a different prefix, pages via `next_cursor`, and
+/// survives a reopen (recovery from the durable `fireweed_side_records` table, same as point-get
+/// `side_record`).
+#[tokio::test]
+async fn relational_side_records_by_prefix_pages_ordered_and_survives_reopen() {
+    let path = unique_path("prefix-scan");
+    let _ = std::fs::remove_file(&path);
+    let q = shard();
+
+    {
+        let b = SqliteRelationalBackend::open(&path).unwrap();
+        b.create_queue(qdef()).await.unwrap();
+        let cr = push_and_claim(&b, 0).await;
+        b.commit_transition(
+            &q,
+            CommitTransition {
+                request_id: Some(RequestId::new("prefix-scan-1").unwrap()),
+                entries: vec![CommitTransitionEntry {
+                    claim_ref: cr,
+                    additional_claim_refs: Vec::new(),
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![
+                        side("audit:instance-1:001", "a1"),
+                        side("audit:instance-1:003", "a3"),
+                        side("audit:instance-1:002", "a2"),
+                        side("audit:instance-2:001", "other-instance"),
+                    ],
+                    lifecycle_items: vec![],
+                    instance_fence: None,
+                }],
+            },
+            ts(1),
+            None,
+        )
+        .await
+        .unwrap();
+    } // drop the handle
+
+    // Reopen the same file: the scan reads from durable tables, not an in-process cache.
+    let b = SqliteRelationalBackend::open(&path).unwrap();
+
+    let first_page = b
+        .side_records_by_prefix(&q, b"audit:instance-1:", 2, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        first_page.entries,
+        vec![
+            (b"audit:instance-1:001".to_vec(), Bytes::from_static(b"a1")),
+            (b"audit:instance-1:002".to_vec(), Bytes::from_static(b"a2")),
+        ]
+    );
+    let cursor = first_page
+        .next_cursor
+        .clone()
+        .expect("a third matching entry remains");
+    assert_eq!(cursor, b"audit:instance-1:003".to_vec());
+
+    let second_page = b
+        .side_records_by_prefix(&q, b"audit:instance-1:", 2, Some(cursor))
+        .await
+        .unwrap();
+    assert_eq!(
+        second_page.entries,
+        vec![(b"audit:instance-1:003".to_vec(), Bytes::from_static(b"a3"))]
+    );
+    assert_eq!(
+        second_page.next_cursor, None,
+        "the prefix's key range is exhausted"
+    );
+
+    // A sibling instance's records under a different prefix are excluded entirely.
+    let other = b
+        .side_records_by_prefix(&q, b"audit:instance-2:", 10, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        other.entries,
+        vec![(
+            b"audit:instance-2:001".to_vec(),
+            Bytes::from_static(b"other-instance")
+        )]
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
 #[tokio::test]
 async fn relational_multi_claim_commit_replays_and_survives_reopen() {
     let path = unique_path("multi-claim-reopen");

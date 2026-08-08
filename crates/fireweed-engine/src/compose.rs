@@ -47,8 +47,8 @@ use crate::port::{
     BatchUpdateValue, ClaimRef, ClaimedItem, CommandPage, CommitEntryOutcome, CommitEntryStatus,
     CreateQueueOutcome, EntryRecovery, IndexHit, ItemMutationRequest, ItemMutationResponse,
     ItemView, LeaseView, LiveItemView, MaintenanceSummary, PendingPage, PendingSummary,
-    ProjectionSnapshot, PushSpec, QueueMetrics, SnapshotRef, TerminalEmissionMetrics,
-    validate_api001_reserved_write_fields,
+    ProjectionSnapshot, PushSpec, QueueMetrics, SideRecordPage, SnapshotRef,
+    TerminalEmissionMetrics, validate_api001_reserved_write_fields,
 };
 use crate::types::{CommandPosition, DurabilityClass, QueueKey};
 
@@ -1207,6 +1207,21 @@ pub trait ProjectionStore: Send {
     /// survives input finalization. Default: `Ok(None)`.
     fn side_record(&self, _shard: &QueueKey, _key: &[u8]) -> EngineResult<Option<Bytes>> {
         Ok(None)
+    }
+
+    /// Paged, key-ascending scan of opaque side records whose key starts with `prefix` (bead
+    /// fireweed-e47e9287; see [`crate::port::SideRecordPage`]). Default: `Ok(SideRecordPage::default())` —
+    /// an empty page, mirroring `side_record`'s "nothing written" default rather than `Unavailable`, since a
+    /// projection that materializes the commit-class read model at all has an (initially empty) side-record
+    /// space to scan.
+    fn side_records_by_prefix(
+        &self,
+        _shard: &QueueKey,
+        _prefix: &[u8],
+        _page_size: usize,
+        _cursor: Option<Vec<u8>>,
+    ) -> EngineResult<SideRecordPage> {
+        Ok(SideRecordPage::default())
     }
 
     // -- ProjectionRead surface ---------------------------------------------

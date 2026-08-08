@@ -131,6 +131,13 @@ trait FireweedDataPlane: Send + Sync {
         queue: &'a QueueKey,
         key: &'a [u8],
     ) -> FacadeFuture<'a, Option<Bytes>>;
+    fn side_records_by_prefix<'a>(
+        &'a self,
+        queue: &'a QueueKey,
+        prefix: &'a [u8],
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> FacadeFuture<'a, SideRecordPage>;
     fn peek<'a>(&'a self, queue: &'a QueueKey, limit: usize) -> FacadeFuture<'a, Vec<ItemView>>;
     fn current_position<'a>(&'a self, queue: &'a QueueKey) -> FacadeFuture<'a, CommandPosition>;
     fn snapshot_now<'a>(&'a self, queue: &'a QueueKey) -> FacadeFuture<'a, SnapshotNowResult>;
@@ -754,6 +761,17 @@ impl<B: LibBackend + 'static> FireweedDataPlane for RuntimeCore<B> {
     ) -> FacadeFuture<'a, Option<Bytes>> {
         Box::pin(RuntimeCore::side_record(self, queue, key))
     }
+    fn side_records_by_prefix<'a>(
+        &'a self,
+        queue: &'a QueueKey,
+        prefix: &'a [u8],
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> FacadeFuture<'a, SideRecordPage> {
+        Box::pin(RuntimeCore::side_records_by_prefix(
+            self, queue, prefix, page_size, cursor,
+        ))
+    }
     fn peek<'a>(&'a self, queue: &'a QueueKey, limit: usize) -> FacadeFuture<'a, Vec<ItemView>> {
         Box::pin(RuntimeCore::peek(self, queue, limit))
     }
@@ -1288,6 +1306,24 @@ impl Fireweed {
     }
     pub async fn side_record(&self, queue: &QueueKey, key: &[u8]) -> EngineResult<Option<Bytes>> {
         self.inner.side_record(queue, key).await
+    }
+
+    /// Paged, key-ascending scan of opaque side records whose key starts with `prefix` (bead
+    /// fireweed-e47e9287; see [`SideRecordPage`]). Enables instance-scoped audit hydration for a caller
+    /// that rekeys its side records as `{prefix}{instance_id}{...}` — one prefix scan replaces an
+    /// enumerable-state checkpoint field. A pure read: no epoch/fence check. `cursor` resumes from a
+    /// prior page's `next_cursor` (`None` starts at `prefix` itself). `Unavailable` on a backend that has
+    /// not implemented the scan (point-get-only `side_record`/`side_records` remain available there).
+    pub async fn side_records_by_prefix(
+        &self,
+        queue: &QueueKey,
+        prefix: &[u8],
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> EngineResult<SideRecordPage> {
+        self.inner
+            .side_records_by_prefix(queue, prefix, page_size, cursor)
+            .await
     }
 
     /// Batch point-read of opaque non-work side records (entity-state dispatch hot path;

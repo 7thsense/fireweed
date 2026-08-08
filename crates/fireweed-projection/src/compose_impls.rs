@@ -31,7 +31,8 @@ use fireweed_engine::{
     ExpiredLeaseCursor, ExpiredLeasePage, FinalizeOutcome, InProcessLogStore,
     InProcessProjectionStore, IndexHit, ItemView, LeaseView, LiveItemView, LogStore, PendingPage,
     PendingSummary, ProjectionSnapshot, ProjectionStore, PushItem, QueueCounters, QueueKey,
-    QueueMetrics, RichClaimSelection, SnapshotRef, TerminalEmissionMetrics, UpdateFieldsCommand,
+    QueueMetrics, RichClaimSelection, SideRecordPage, SnapshotRef, TerminalEmissionMetrics,
+    UpdateFieldsCommand,
 };
 
 use crate::{LogData, ProjectionData, ProjectionImage};
@@ -846,6 +847,18 @@ impl ProjectionStore for InMemoryProjection {
 
     fn side_record(&self, shard: &QueueKey, key: &[u8]) -> EngineResult<Option<Bytes>> {
         Ok(self.get(shard)?.side_record(key).cloned())
+    }
+
+    fn side_records_by_prefix(
+        &self,
+        shard: &QueueKey,
+        prefix: &[u8],
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> EngineResult<SideRecordPage> {
+        Ok(self
+            .get(shard)?
+            .side_records_by_prefix(prefix, page_size, cursor))
     }
 
     fn select_eligible(
