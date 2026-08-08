@@ -3533,8 +3533,21 @@ fn profile_row(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn performance_object_log_e3_live_tests() {
-    let governed = std::env::var_os("FIREWEED_PERF_ENV").is_some()
-        || std::env::var_os("FIREWEED_E3_SOURCE_REVISION").is_some();
+    // Explicit producer opt-in: bootstrap pr-gate often sets FIREWEED_S3_TEST_* for
+    // functional S3 composition tests. E3 measurement remains scripts/perf/tp002-e3-s3.sh
+    // (FIREWEED_PERF_ENV / FIREWEED_E3_RUN) so workspace cargo test is not a multi-hour soak.
+    let producer_selected = std::env::var_os("FIREWEED_PERF_ENV").is_some()
+        || std::env::var_os("FIREWEED_E3_SOURCE_REVISION").is_some()
+        || std::env::var_os("FIREWEED_E3_RUN").is_some();
+    let governed = producer_selected;
+    if !producer_selected {
+        eprintln!(
+            "performance_object_log_e3_live_tests: producer not selected \
+             (export FIREWEED_E3_RUN=1 or FIREWEED_PERF_ENV=1 and FIREWEED_S3_TEST_* \
+             via scripts/perf/tp002-e3-s3.sh)"
+        );
+        return;
+    }
     let endpoint = match std::env::var("FIREWEED_S3_TEST_ENDPOINT") {
         Ok(endpoint) => endpoint,
         Err(_) if governed => {
@@ -3543,8 +3556,6 @@ async fn performance_object_log_e3_live_tests() {
             )
         }
         Err(_) => {
-            // Ungoverned default suite: producer not selected (P10ps early-success style).
-            // Governed measurement is scripts/perf/tp002-e3-s3.sh only.
             eprintln!(
                 "performance_object_log_e3_live_tests: producer not selected \
                  (set FIREWEED_S3_TEST_* and invoke via scripts/perf/tp002-e3-s3.sh)"
