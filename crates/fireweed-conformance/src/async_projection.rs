@@ -166,10 +166,7 @@ pub async fn run_full_async_projection_conformance<S: AsyncProjectionStore>(stor
     )
     .await;
     assert!(
-        matches!(
-            empty_push,
-            Ok(()) | Err(EngineError::Unavailable)
-        ),
+        matches!(empty_push, Ok(()) | Err(EngineError::Unavailable)),
         "index_validate_push empty batch: expected Ok or Unavailable, got {empty_push:?}"
     );
     let empty_commit = AsyncProjectionStore::commit_validate(
@@ -180,10 +177,7 @@ pub async fn run_full_async_projection_conformance<S: AsyncProjectionStore>(stor
     )
     .await;
     assert!(
-        matches!(
-            empty_commit,
-            Ok(()) | Err(EngineError::Unavailable)
-        ),
+        matches!(empty_commit, Ok(()) | Err(EngineError::Unavailable)),
         "commit_validate empty batch: expected Ok or Unavailable, got {empty_commit:?}"
     );
 }
