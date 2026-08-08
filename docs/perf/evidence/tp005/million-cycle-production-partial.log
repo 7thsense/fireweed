@@ -1,0 +1,2 @@
+PASS memory--memory: insert=5.0s modify=1.8s read=0.7s reopen=true
+PASS memory--sqlite: insert=19.0s modify=139.0s read=2.3s reopen=true
