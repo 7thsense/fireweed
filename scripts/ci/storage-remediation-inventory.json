@@ -152,9 +152,9 @@
           "P2f"
         ],
         "detail": "comment_or_rehosted_ignore_marker",
-        "id": "bbc67bd8030fb1e7933e",
+        "id": "388eb0376723c77f47ce",
         "identity": "#[ignore]",
-        "line": 3841,
+        "line": 3852,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "discovery_negative"
@@ -166,9 +166,9 @@
           "P2f"
         ],
         "detail": "comment_or_rehosted_ignore_marker",
-        "id": "aeefb25a59c7ff67547f",
+        "id": "eafc393314a1b4003f1b",
         "identity": "#[ignore]",
-        "line": 3844,
+        "line": 3855,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "discovery_negative"
@@ -2786,9 +2786,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "8ea09e8fbd8d6cf933e2",
+        "id": "1c305ed2a664ea63a5e6",
         "identity": "\"FIREWEED_S3_TEST_ENDPOINT required (fail-closed live S3; no LOUD skip of governed E3)\"",
-        "line": 3542,
+        "line": 3555,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "discovery_negative"
@@ -2800,9 +2800,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "b97cc65724ff14efbd4f",
+        "id": "173790a101112b1c68e5",
         "identity": "panic!(\"TEST SKIPPED: FIREWEED_S3_TEST_ENDPOINT is required for live E3 recovery\");",
-        "line": 4247,
+        "line": 4258,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "discovery_negative"
@@ -6945,9 +6945,9 @@
           "P2f"
         ],
         "detail": "intentional_source_binding",
-        "id": "883b346f69d58edcb8f8",
-        "identity": "|| std::env::var_os(\"FIREWEED_E3_SOURCE_REVISION\").is_some();",
-        "line": 3537,
+        "id": "ca37a471f057d12e3926",
+        "identity": "|| std::env::var_os(\"FIREWEED_E3_SOURCE_REVISION\").is_some()",
+        "line": 3540,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "discovery_negative"
@@ -6959,9 +6959,9 @@
           "P2f"
         ],
         "detail": "intentional_source_binding",
-        "id": "1720c8fe93e1778e70b7",
+        "id": "4e0639c43ca139b7b752",
         "identity": "let source_revision = std::env::var(\"FIREWEED_E3_SOURCE_REVISION\")",
-        "line": 3590,
+        "line": 3601,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "discovery_negative"
@@ -6973,9 +6973,9 @@
           "P2f"
         ],
         "detail": "intentional_source_binding",
-        "id": "358998f8553e4b6036fd",
+        "id": "de7e68da9e4aaa30deac",
         "identity": "source_revision.len() == 40",
-        "line": 3593,
+        "line": 3604,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "discovery_negative"
@@ -6987,9 +6987,9 @@
           "P2f"
         ],
         "detail": "intentional_source_binding",
-        "id": "038aeb11c1d9fcbed7cf",
+        "id": "55d93d402e67f49d342f",
         "identity": "&& source_revision.bytes().all(|byte| byte.is_ascii_hexdigit()),",
-        "line": 3594,
+        "line": 3605,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "discovery_negative"
@@ -7001,9 +7001,9 @@
           "P2f"
         ],
         "detail": "intentional_source_binding",
-        "id": "8ee65ee08c39148c0b6f",
+        "id": "d16545fa6b29c1ff57ef",
         "identity": "let fence_revision = source_revision.clone();",
-        "line": 3619,
+        "line": 3630,
         "owner": "P15",
         "path": "crates/fireweed-server/tests/performance_object_log_e3_live_tests.rs",
         "status": "discovery_negative"
@@ -94918,7 +94918,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "25dd1b9c5aa7802a30c475cd32fa60204cad0528196c9c43a60459641ddf4f19",
+  "source_inventory_sha256": "dcfbc7d6983c076d10e79cce7f82cf62be8aa4147d0dd0cfc891623ba54be4c9",
   "workspaces": [
     {
       "listing_error_sha256": "",
