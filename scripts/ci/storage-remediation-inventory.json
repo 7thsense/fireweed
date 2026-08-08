@@ -1680,6 +1680,34 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
+        "id": "28a82b2728e1e8e9068b",
+        "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
+        "line": 218,
+        "owner": "P10pp",
+        "path": "crates/fireweed-postgres/tests/claim_pool_cohort_scale.rs",
+        "status": "discovery_negative"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10pp",
+          "P2f"
+        ],
+        "detail": "fail_closed=true",
+        "id": "292cbc6d9d398f6b8ce1",
+        "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
+        "line": 275,
+        "owner": "P10pp",
+        "path": "crates/fireweed-postgres/tests/claim_pool_cohort_scale.rs",
+        "status": "discovery_negative"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10pp",
+          "P2f"
+        ],
+        "detail": "fail_closed=true",
         "id": "38fa88b93d84b65e6516",
         "identity": "//! Env-gated on `FIREWEED_PG_TEST_URL` (fail-closed: no LOUD skip). Two claim-pool workers race over",
         "line": 3,
@@ -94918,7 +94946,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "6dfde0fe6667da0e420d7c480cf5076371ccbdc8f1db11ab42797c0431f90c48",
+  "source_inventory_sha256": "eb58e7376a485aa8859a952b085a55d0562a3dd347692a0a1b9709b659d5103b",
   "workspaces": [
     {
       "listing_error_sha256": "",

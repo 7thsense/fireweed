@@ -1,0 +1,179 @@
+=== P2f report 2026-08-08T07:11:26Z HEAD=e8f678ff4c80d7e3fe1e950e232884031af2285e ===
+=== pre_s shared ===
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib auth::tests::authorize_operator_requires_operator_prefix -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::auth::tests::authorize_operator_requires_operator_prefix
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::replay_same_request_returns_same_operation -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::replay_same_request_returns_same_operation
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::get_returns_recorded_operation_and_none_for_unknown -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::get_returns_recorded_operation_and_none_for_unknown
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::check_then_record_flow_never_starts_a_second_operation -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::check_then_record_flow_never_starts_a_second_operation
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact
+operator_validation_tests stage=pre_s campaign=shared: 5 leaves, each ran=1
+=== pre_s storage ===
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib auth::tests::authorize_operator_requires_operator_prefix -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::auth::tests::authorize_operator_requires_operator_prefix
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::replay_same_request_returns_same_operation -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::replay_same_request_returns_same_operation
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::get_returns_recorded_operation_and_none_for_unknown -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::get_returns_recorded_operation_and_none_for_unknown
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::check_then_record_flow_never_starts_a_second_operation -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::check_then_record_flow_never_starts_a_second_operation
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact
+operator_validation_tests stage=pre_s campaign=storage: 5 leaves, each ran=1
+=== pre_s product-ready ===
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib auth::tests::authorize_operator_requires_operator_prefix -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::auth::tests::authorize_operator_requires_operator_prefix
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::replay_same_request_returns_same_operation -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::replay_same_request_returns_same_operation
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::get_returns_recorded_operation_and_none_for_unknown -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::get_returns_recorded_operation_and_none_for_unknown
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::check_then_record_flow_never_starts_a_second_operation -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::check_then_record_flow_never_starts_a_second_operation
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact
+operator_validation_tests stage=pre_s campaign=product-ready: 5 leaves, each ran=1
+=== stage=S shared ===
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib auth::tests::authorize_operator_requires_operator_prefix -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::auth::tests::authorize_operator_requires_operator_prefix
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::replay_same_request_returns_same_operation -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::replay_same_request_returns_same_operation
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::get_returns_recorded_operation_and_none_for_unknown -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::get_returns_recorded_operation_and_none_for_unknown
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::check_then_record_flow_never_starts_a_second_operation -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::check_then_record_flow_never_starts_a_second_operation
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::operator_repair_redrive_e2e -- --exact
+ran=1 ok: Cargo.toml::fireweed::fireweed::test::test_product_validation::operator_repair_redrive_e2e
+operator_validation_tests stage=S campaign=shared: 6 leaves, each ran=1
+=== stage=S product-ready ===
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib auth::tests::authorize_operator_requires_operator_prefix -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::auth::tests::authorize_operator_requires_operator_prefix
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::replay_same_request_returns_same_operation -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::replay_same_request_returns_same_operation
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::get_returns_recorded_operation_and_none_for_unknown -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::get_returns_recorded_operation_and_none_for_unknown
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::check_then_record_flow_never_starts_a_second_operation -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::check_then_record_flow_never_starts_a_second_operation
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::operator_repair_redrive_e2e -- --exact
+ran=1 ok: Cargo.toml::fireweed::fireweed::test::test_product_validation::operator_repair_redrive_e2e
+operator_validation_tests stage=S campaign=product-ready: 6 leaves, each ran=1
+=== stage=S storage (out_of_campaign) ===
+operator_validation_tests stage=S campaign=storage: out_of_campaign (6 bound leaves; not invoked)
+=== strict preflight: 20 matrix cells (list-only) ===
++ rustup run 1.92.0 cargo test -p fireweed --features memory,sqlite,objectlog,postgres,turso --test functional_matrix_route_sources -- --list strict_filesystem_memory --exact
+list ok: strict:filesystem--memory
++ rustup run 1.92.0 cargo test -p fireweed --features memory,sqlite,objectlog,postgres,turso --test functional_matrix_route_sources -- --list strict_filesystem_postgres --exact
+list ok: strict:filesystem--postgres
++ rustup run 1.92.0 cargo test -p fireweed --features memory,sqlite,objectlog,postgres,turso --test functional_matrix_route_sources -- --list strict_filesystem_sqlite --exact
+list ok: strict:filesystem--sqlite
++ rustup run 1.92.0 cargo test -p fireweed --features memory,sqlite,objectlog,postgres,turso --test functional_matrix_route_sources -- --list strict_filesystem_turso --exact
+list ok: strict:filesystem--turso
++ rustup run 1.92.0 cargo test -p fireweed --features memory,sqlite,objectlog,postgres,turso --test functional_matrix_route_sources -- --list strict_memory_memory --exact
+list ok: strict:memory--memory
++ rustup run 1.92.0 cargo test -p fireweed --features memory,sqlite,objectlog,postgres,turso --test functional_matrix_route_sources -- --list strict_memory_postgres --exact
+list ok: strict:memory--postgres
++ rustup run 1.92.0 cargo test -p fireweed --features memory,sqlite,objectlog,postgres,turso --test functional_matrix_route_sources -- --list strict_memory_sqlite --exact
+list ok: strict:memory--sqlite
++ rustup run 1.92.0 cargo test -p fireweed --features memory,sqlite,objectlog,postgres,turso --test functional_matrix_route_sources -- --list strict_memory_turso --exact
+list ok: strict:memory--turso
++ rustup run 1.92.0 cargo test -p fireweed --features memory,sqlite,objectlog,postgres,turso --test functional_matrix_route_sources -- --list strict_postgres_memory --exact
+list ok: strict:postgres--memory
++ rustup run 1.92.0 cargo test -p fireweed --features memory,sqlite,objectlog,postgres,turso --test functional_matrix_route_sources -- --list strict_postgres_postgres --exact
+list ok: strict:postgres--postgres
++ rustup run 1.92.0 cargo test -p fireweed --features memory,sqlite,objectlog,postgres,turso --test functional_matrix_route_sources -- --list strict_postgres_sqlite --exact
+list ok: strict:postgres--sqlite
++ rustup run 1.92.0 cargo test -p fireweed --features memory,sqlite,objectlog,postgres,turso --test functional_matrix_route_sources -- --list strict_postgres_turso --exact
+list ok: strict:postgres--turso
++ rustup run 1.92.0 cargo test -p fireweed --features memory,sqlite,objectlog,postgres,turso --test functional_matrix_route_sources -- --list strict_s3_memory --exact
+list ok: strict:s3--memory
++ rustup run 1.92.0 cargo test -p fireweed --features memory,sqlite,objectlog,postgres,turso --test functional_matrix_route_sources -- --list strict_s3_postgres --exact
+list ok: strict:s3--postgres
++ rustup run 1.92.0 cargo test -p fireweed --features memory,sqlite,objectlog,postgres,turso --test functional_matrix_route_sources -- --list strict_s3_sqlite --exact
+list ok: strict:s3--sqlite
++ rustup run 1.92.0 cargo test -p fireweed --features memory,sqlite,objectlog,postgres,turso --test functional_matrix_route_sources -- --list strict_s3_turso --exact
+list ok: strict:s3--turso
++ rustup run 1.92.0 cargo test -p fireweed --features memory,sqlite,objectlog,postgres,turso --test functional_matrix_route_sources -- --list strict_sqlite_memory --exact
+list ok: strict:sqlite--memory
++ rustup run 1.92.0 cargo test -p fireweed --features memory,sqlite,objectlog,postgres,turso --test functional_matrix_route_sources -- --list strict_sqlite_postgres --exact
+list ok: strict:sqlite--postgres
++ rustup run 1.92.0 cargo test -p fireweed --features memory,sqlite,objectlog,postgres,turso --test functional_matrix_route_sources -- --list strict_sqlite_sqlite --exact
+list ok: strict:sqlite--sqlite
++ rustup run 1.92.0 cargo test -p fireweed --features memory,sqlite,objectlog,postgres,turso --test functional_matrix_route_sources -- --list strict_sqlite_turso --exact
+list ok: strict:sqlite--turso
+strict preflight: 20 cells listed ok
+=== pr-gate --mode closure ===
+=== pr-gate [mode=closure] ===
+--- release artifact verifier fixtures ---
+release artifact set verified in /home/erik/.cache/fleet-tmp/fireweed-release-artifacts-test.61nYfy
+missing required release artifact: /home/erik/.cache/fleet-tmp/fireweed-release-artifacts-test.61nYfy/deployment-proof.json
+missing required release artifact: /home/erik/.cache/fleet-tmp/fireweed-release-artifacts-test.61nYfy/deployment-proof.md
+invalid deployment proof: deployment proof status must be passed with exit_status 0; deployment proof chart version must equal 0.0.0-test; deployment proof chart package is missing or mismatched; deployment proof image digest does not match image evidence; deployment proof image tag does not match image evidence; deployment proof image coordinate does not match image evidence; container image evidence commit does not match deployment proof; deployment proof commit does not match expected release commit; deployment proof Markdown omits commit
+invalid deployment proof: deployment proof image coordinate does not match image evidence
+release artifact verifier tests passed
+--- release identity freeze fixtures (P17v) ---
+Cargo.lock: all fireweed* package versions == 0.30.1
+pre-S note ok: docs/releases/v0.30.1.md
+verify-release-identity: ok V=0.30.1 tag=v0.30.1 reserved absent; independent coordinates preserved
+public-release-gates-identity-test: PASS (full='v0.21-source-preview' ci='v0.21-source-preview-ci')
+verify-release-identity-test: ok
+--- source predicate fixtures (P17a) ---
+warning: templates not found in /home/erik/.git-template
+ddx_inventory_root=/home/erik/.cache/fleet-tmp/fireweed-source-predicate.IsEdNC/repo
+verify-source-predicate: ddx_tracked_count=0 ddx_untracked_count=0
+tracked_ignore_ok admin_untracked=0 build_untracked=0
+local_global_exclude_masking_has_no_authority=true
+admin_roots_ok roots=.ddx/ proofs=tracked_rule,contained_path,no_source_authority,no_evidence_authority,no_s_bound_reader
+build_cache_roots_ok roots=target/,scripts/site/node_modules/,__pycache__/,examples/python-resp/.venv/ proofs=tracked_rule,untracked_or_symlink_contained,tracked_lock_and_config_identity,no_credentials,no_governing_input,no_promoted_evidence_authority
+no_s_bound_reader_ok administrative=.ddx/
+verify-source-predicate: ok mode=source source=dbbe992aa4c9ff72d6945ea79d5924768fd141a3 ref=HEAD
+ddx_inventory_root=/home/erik/.cache/fleet-tmp/fireweed-source-predicate.IsEdNC/repo
+verify-source-predicate: ddx_tracked_count=0 ddx_untracked_count=0
+tracked_ignore_ok admin_untracked=0 build_untracked=0
+local_global_exclude_masking_has_no_authority=true
+e-mode promoted allowlist ok count=1
+verify-source-predicate: ok mode=e source=dbbe992aa4c9ff72d6945ea79d5924768fd141a3 ref=HEAD
+verify-source-predicate-test: PASS
+--- governed evidence archive fixtures ---
+Preparing worktree (detached HEAD e8f678ff)
+ddx_inventory_root=/home/erik/.cache/fleet-tmp/fireweed-governed-source.5ay4C6
+verify-source-predicate: ddx_tracked_count=1731 ddx_untracked_count=0
+tracked_ignore_ok admin_untracked=0 build_untracked=0
+local_global_exclude_masking_has_no_authority=true
+admin_roots_ok roots=.ddx/ proofs=tracked_rule,contained_path,no_source_authority,no_evidence_authority,no_s_bound_reader
+build_cache_roots_ok roots=target/,scripts/site/node_modules/,__pycache__/,examples/python-resp/.venv/ proofs=tracked_rule,untracked_or_symlink_contained,tracked_lock_and_config_identity,no_credentials,no_governing_input,no_promoted_evidence_authority
+no_s_bound_reader_ok administrative=.ddx/
+verify-source-predicate: ok mode=source source=e8f678ff4c80d7e3fe1e950e232884031af2285e ref=HEAD
+governed release composite valid for e8f678ff4c80d7e3fe1e950e232884031af2285e
+wrote governed evidence archive: /home/erik/.cache/fleet-tmp/fireweed-governed-archive-test.iIYup5/first/e8f678ff4c80d7e3fe1e950e232884031af2285e.tar.gz
+wrote governed evidence digest: /home/erik/.cache/fleet-tmp/fireweed-governed-archive-test.iIYup5/first/e8f678ff4c80d7e3fe1e950e232884031af2285e.tar.gz.sha256
+staged governed evidence bundle: /home/erik/.cache/fleet-tmp/fireweed-governed-archive-test.iIYup5/first/tp002-release
+e8f678ff4c80d7e3fe1e950e232884031af2285e.tar.gz: OK
+ddx_inventory_root=/home/erik/.cache/fleet-tmp/fireweed-governed-source.5ay4C6
+verify-source-predicate: ddx_tracked_count=1731 ddx_untracked_count=0
+tracked_ignore_ok admin_untracked=0 build_untracked=0
+local_global_exclude_masking_has_no_authority=true
+admin_roots_ok roots=.ddx/ proofs=tracked_rule,contained_path,no_source_authority,no_evidence_authority,no_s_bound_reader
+build_cache_roots_ok roots=target/,scripts/site/node_modules/,__pycache__/,examples/python-resp/.venv/ proofs=tracked_rule,untracked_or_symlink_contained,tracked_lock_and_config_identity,no_credentials,no_governing_input,no_promoted_evidence_authority
+no_s_bound_reader_ok administrative=.ddx/
+verify-source-predicate: ok mode=source source=e8f678ff4c80d7e3fe1e950e232884031af2285e ref=HEAD
+governed release composite valid for e8f678ff4c80d7e3fe1e950e232884031af2285e
+wrote governed evidence archive: /home/erik/.cache/fleet-tmp/fireweed-governed-archive-test.iIYup5/second/e8f678ff4c80d7e3fe1e950e232884031af2285e.tar.gz
+wrote governed evidence digest: /home/erik/.cache/fleet-tmp/fireweed-governed-archive-test.iIYup5/second/e8f678ff4c80d7e3fe1e950e232884031af2285e.tar.gz.sha256
+staged governed evidence bundle: /home/erik/.cache/fleet-tmp/fireweed-governed-archive-test.iIYup5/second/tp002-release
+e8f678ff4c80d7e3fe1e950e232884031af2285e.tar.gz: OK
+build-governed-evidence-bundle-test: PASS
+--- governed evidence promoter fixtures (P17e) ---
+warning: templates not found in /home/erik/.git-template
+Preparing worktree (detached HEAD 03ade8f)
+promote-governed-evidence-test: PASS
+--- storage remediation policy [closure] ---
+storage remediation policy: zero debt; closure enabled
+=== pr-gate [closure] PASSED ===
+=== git diff --check ===
+P2F_ALL_OK report=/tmp/fw-p2f-report-2006779.txt
