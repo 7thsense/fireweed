@@ -3852,11 +3852,11 @@ pub async fn cross_family_core_parity<A: ConformanceCore, B: ConformanceCore>(
     b.claim(claim_req(1, 500, 10)).await.unwrap();
     parity(&a, &b, 100, "after claim b").await;
 
-    // Renew, then complete "2".
+    // Renew, then complete "2". Keep duration within qdef().max_lease_duration_ms (60s).
     a.renew(
         &shard(),
         vec![ItemId::new("2").unwrap()],
-        ts(900),
+        ts(50),
         ts(20),
         None,
     )
@@ -3865,7 +3865,7 @@ pub async fn cross_family_core_parity<A: ConformanceCore, B: ConformanceCore>(
     b.renew(
         &shard(),
         vec![ItemId::new("2").unwrap()],
-        ts(900),
+        ts(50),
         ts(20),
         None,
     )
