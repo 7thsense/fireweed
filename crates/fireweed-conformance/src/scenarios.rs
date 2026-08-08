@@ -11,7 +11,6 @@ use fireweed_core::{
     LeaseToken, Metadata, MetadataValue, MetricsByQueryRequest, PriorityValue, QueryFilter,
     QueueDefinition, QueueIndex, RequestId, TypedValue,
 };
-// LeaseToken used for distinct claim tokens in multi-delivery scenarios.
 use fireweed_engine::{
     ClaimCommand, ClaimCompatibility, ClaimRef, ClaimRequest, CommandPosition, EngineError,
     EngineResult, FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome, GroupBatching,
