@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use fireweed::{
     CohortPolicy, EligibilityPolicy, NewItem, OrderingMode, PriorityDirection, PriorityModel,
-    PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueKey, RecurrencePolicy,
-    RequestId, RetryPolicy, SystemClock,
+    PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueKey, RecurrencePolicy, RequestId,
+    RetryPolicy, SystemClock,
 };
 
 fn bo<F: std::future::Future>(f: F) -> F::Output {

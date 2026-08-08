@@ -44,7 +44,8 @@ fn append_batch(log: &mut SqliteLog, n: usize, offset: usize) {
 }
 
 fn run(mut log: SqliteLog, label: &str) {
-    log.create_or_read_definition(&qdef()).expect("create_queue");
+    log.create_or_read_definition(&qdef())
+        .expect("create_queue");
     log.ensure_shard(&shard()).expect("ensure_shard");
 
     for wave in 0..5 {
@@ -73,9 +74,13 @@ fn run(mut log: SqliteLog, label: &str) {
 fn main() {
     run(SqliteLog::in_memory().expect("mem"), "log in_memory");
 
-    let path = std::env::temp_dir().join(format!("push-floor-probe3-{}.sqlite", std::process::id()));
+    let path =
+        std::env::temp_dir().join(format!("push-floor-probe3-{}.sqlite", std::process::id()));
     let path_str = path.to_str().unwrap().to_owned();
     let _ = std::fs::remove_file(&path);
-    run(SqliteLog::open(&path_str).expect("file"), "log file (synchronous=FULL)");
+    run(
+        SqliteLog::open(&path_str).expect("file"),
+        "log file (synchronous=FULL)",
+    );
     let _ = std::fs::remove_file(&path);
 }

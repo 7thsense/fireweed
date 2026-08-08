@@ -55,11 +55,17 @@ fn run(backend: SqliteRelationalBackend, label: &str) {
 }
 
 fn main() {
-    run(SqliteRelationalBackend::in_memory().expect("mem"), "in_memory");
+    run(
+        SqliteRelationalBackend::in_memory().expect("mem"),
+        "in_memory",
+    );
 
     let path = std::env::temp_dir().join(format!("push-floor-probe-{}.sqlite", std::process::id()));
     let path_str = path.to_str().unwrap().to_owned();
     let _ = std::fs::remove_file(&path);
-    run(SqliteRelationalBackend::open(&path_str).expect("file"), "file");
+    run(
+        SqliteRelationalBackend::open(&path_str).expect("file"),
+        "file",
+    );
     let _ = std::fs::remove_file(&path);
 }
