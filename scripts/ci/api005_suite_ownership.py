@@ -49,8 +49,22 @@ FAMILY_OWNERS: dict[str, str] = {
 
 # Prefix/exact rules map a discovered method to a family. Order matters: first match wins.
 FAMILY_RULES: list[tuple[str, re.Pattern[str]]] = [
-    ("projection_control", re.compile(r"^(projection_control|capabilities|verify|delete|rebuild)$")),
-    ("commit", re.compile(r"^(commit|commit_multi_claim|commit_capabilities|explain_commit|side_record)$")),
+    (
+        "projection_control",
+        re.compile(
+            r"^(projection_control|capabilities|verify|delete|rebuild|"
+            r"snapshot_policy|set_snapshot_policy|should_snapshot|"
+            r"compact_log_behind_snapshot|snapshot_now|latest_snapshot_info|"
+            r"last_rebuild_stats)$"
+        ),
+    ),
+    (
+        "commit",
+        re.compile(
+            r"^(commit|commit_multi_claim|commit_capabilities|explain_commit|"
+            r"side_record|side_records)$"
+        ),
+    ),
     (
         "mutation_and_maintenance",
         re.compile(

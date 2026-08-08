@@ -61,7 +61,9 @@ renew_owned
 retry
 retry_after
 set_gates
+snapshot_policy
 side_record
+side_records
 update
 update_fields
 upsert

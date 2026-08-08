@@ -16,6 +16,7 @@
     "commit",
     "commit_capabilities",
     "commit_multi_claim",
+    "compact_log_behind_snapshot",
     "complete",
     "create_queue",
     "current_position",
@@ -28,6 +29,8 @@
     "fail",
     "grouped_aggregate",
     "hot_projection_capabilities",
+    "last_rebuild_stats",
+    "latest_snapshot_info",
     "live_item",
     "live_items",
     "metrics",
@@ -61,7 +64,12 @@
     "retry",
     "retry_after",
     "set_gates",
+    "set_snapshot_policy",
+    "should_snapshot",
     "side_record",
+    "side_records",
+    "snapshot_now",
+    "snapshot_policy",
     "update",
     "update_fields",
     "upsert"
@@ -353,6 +361,78 @@
       "profile": "public_interface",
       "semantic_owner": "P9",
       "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::memory_memory_public_interface::side_record",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--memory",
+      "kind": "method",
+      "method": "side_records",
+      "profile": "public_interface",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::memory_memory_public_interface::side_records",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--memory",
+      "kind": "method",
+      "method": "snapshot_policy",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::memory_memory_public_interface::snapshot_policy",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--memory",
+      "kind": "method",
+      "method": "set_snapshot_policy",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::memory_memory_public_interface::set_snapshot_policy",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--memory",
+      "kind": "method",
+      "method": "should_snapshot",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::memory_memory_public_interface::should_snapshot",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--memory",
+      "kind": "method",
+      "method": "compact_log_behind_snapshot",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::memory_memory_public_interface::compact_log_behind_snapshot",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--memory",
+      "kind": "method",
+      "method": "snapshot_now",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::memory_memory_public_interface::snapshot_now",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--memory",
+      "kind": "method",
+      "method": "latest_snapshot_info",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::memory_memory_public_interface::latest_snapshot_info",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--memory",
+      "kind": "method",
+      "method": "last_rebuild_stats",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::memory_memory_public_interface::last_rebuild_stats",
       "variant": "default"
     },
     {
@@ -952,6 +1032,78 @@
     {
       "cell_id": "sqlite--memory",
       "kind": "method",
+      "method": "side_records",
+      "profile": "public_interface",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::sqlite_memory_public_interface::side_records",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--memory",
+      "kind": "method",
+      "method": "snapshot_policy",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::sqlite_memory_public_interface::snapshot_policy",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--memory",
+      "kind": "method",
+      "method": "set_snapshot_policy",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::sqlite_memory_public_interface::set_snapshot_policy",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--memory",
+      "kind": "method",
+      "method": "should_snapshot",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::sqlite_memory_public_interface::should_snapshot",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--memory",
+      "kind": "method",
+      "method": "compact_log_behind_snapshot",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::sqlite_memory_public_interface::compact_log_behind_snapshot",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--memory",
+      "kind": "method",
+      "method": "snapshot_now",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::sqlite_memory_public_interface::snapshot_now",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--memory",
+      "kind": "method",
+      "method": "latest_snapshot_info",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::sqlite_memory_public_interface::latest_snapshot_info",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--memory",
+      "kind": "method",
+      "method": "last_rebuild_stats",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::sqlite_memory_public_interface::last_rebuild_stats",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--memory",
+      "kind": "method",
       "method": "peek",
       "profile": "public_interface",
       "semantic_owner": "P6",
@@ -1541,6 +1693,78 @@
       "profile": "public_interface",
       "semantic_owner": "P9",
       "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::sqlite_sqlite_public_interface::side_record",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--sqlite",
+      "kind": "method",
+      "method": "side_records",
+      "profile": "public_interface",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::sqlite_sqlite_public_interface::side_records",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--sqlite",
+      "kind": "method",
+      "method": "snapshot_policy",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::sqlite_sqlite_public_interface::snapshot_policy",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--sqlite",
+      "kind": "method",
+      "method": "set_snapshot_policy",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::sqlite_sqlite_public_interface::set_snapshot_policy",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--sqlite",
+      "kind": "method",
+      "method": "should_snapshot",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::sqlite_sqlite_public_interface::should_snapshot",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--sqlite",
+      "kind": "method",
+      "method": "compact_log_behind_snapshot",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::sqlite_sqlite_public_interface::compact_log_behind_snapshot",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--sqlite",
+      "kind": "method",
+      "method": "snapshot_now",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::sqlite_sqlite_public_interface::snapshot_now",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--sqlite",
+      "kind": "method",
+      "method": "latest_snapshot_info",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::sqlite_sqlite_public_interface::latest_snapshot_info",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--sqlite",
+      "kind": "method",
+      "method": "last_rebuild_stats",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::sqlite_sqlite_public_interface::last_rebuild_stats",
       "variant": "default"
     },
     {
@@ -2140,6 +2364,78 @@
     {
       "cell_id": "filesystem--memory",
       "kind": "method",
+      "method": "side_records",
+      "profile": "public_interface",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_memory_public_interface::side_records",
+      "variant": "default"
+    },
+    {
+      "cell_id": "filesystem--memory",
+      "kind": "method",
+      "method": "snapshot_policy",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_memory_public_interface::snapshot_policy",
+      "variant": "default"
+    },
+    {
+      "cell_id": "filesystem--memory",
+      "kind": "method",
+      "method": "set_snapshot_policy",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_memory_public_interface::set_snapshot_policy",
+      "variant": "default"
+    },
+    {
+      "cell_id": "filesystem--memory",
+      "kind": "method",
+      "method": "should_snapshot",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_memory_public_interface::should_snapshot",
+      "variant": "default"
+    },
+    {
+      "cell_id": "filesystem--memory",
+      "kind": "method",
+      "method": "compact_log_behind_snapshot",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_memory_public_interface::compact_log_behind_snapshot",
+      "variant": "default"
+    },
+    {
+      "cell_id": "filesystem--memory",
+      "kind": "method",
+      "method": "snapshot_now",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_memory_public_interface::snapshot_now",
+      "variant": "default"
+    },
+    {
+      "cell_id": "filesystem--memory",
+      "kind": "method",
+      "method": "latest_snapshot_info",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_memory_public_interface::latest_snapshot_info",
+      "variant": "default"
+    },
+    {
+      "cell_id": "filesystem--memory",
+      "kind": "method",
+      "method": "last_rebuild_stats",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_memory_public_interface::last_rebuild_stats",
+      "variant": "default"
+    },
+    {
+      "cell_id": "filesystem--memory",
+      "kind": "method",
       "method": "peek",
       "profile": "public_interface",
       "semantic_owner": "P6",
@@ -2729,6 +3025,78 @@
       "profile": "public_interface",
       "semantic_owner": "P9",
       "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_sqlite_strict_public_interface::side_record",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "filesystem--sqlite--strict",
+      "kind": "method",
+      "method": "side_records",
+      "profile": "public_interface",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_sqlite_strict_public_interface::side_records",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "filesystem--sqlite--strict",
+      "kind": "method",
+      "method": "snapshot_policy",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_sqlite_strict_public_interface::snapshot_policy",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "filesystem--sqlite--strict",
+      "kind": "method",
+      "method": "set_snapshot_policy",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_sqlite_strict_public_interface::set_snapshot_policy",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "filesystem--sqlite--strict",
+      "kind": "method",
+      "method": "should_snapshot",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_sqlite_strict_public_interface::should_snapshot",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "filesystem--sqlite--strict",
+      "kind": "method",
+      "method": "compact_log_behind_snapshot",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_sqlite_strict_public_interface::compact_log_behind_snapshot",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "filesystem--sqlite--strict",
+      "kind": "method",
+      "method": "snapshot_now",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_sqlite_strict_public_interface::snapshot_now",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "filesystem--sqlite--strict",
+      "kind": "method",
+      "method": "latest_snapshot_info",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_sqlite_strict_public_interface::latest_snapshot_info",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "filesystem--sqlite--strict",
+      "kind": "method",
+      "method": "last_rebuild_stats",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_sqlite_strict_public_interface::last_rebuild_stats",
       "variant": "strict"
     },
     {
@@ -3328,6 +3696,78 @@
     {
       "cell_id": "filesystem--sqlite--async",
       "kind": "method",
+      "method": "side_records",
+      "profile": "public_interface",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_sqlite_async_public_interface::side_records",
+      "variant": "async"
+    },
+    {
+      "cell_id": "filesystem--sqlite--async",
+      "kind": "method",
+      "method": "snapshot_policy",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_sqlite_async_public_interface::snapshot_policy",
+      "variant": "async"
+    },
+    {
+      "cell_id": "filesystem--sqlite--async",
+      "kind": "method",
+      "method": "set_snapshot_policy",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_sqlite_async_public_interface::set_snapshot_policy",
+      "variant": "async"
+    },
+    {
+      "cell_id": "filesystem--sqlite--async",
+      "kind": "method",
+      "method": "should_snapshot",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_sqlite_async_public_interface::should_snapshot",
+      "variant": "async"
+    },
+    {
+      "cell_id": "filesystem--sqlite--async",
+      "kind": "method",
+      "method": "compact_log_behind_snapshot",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_sqlite_async_public_interface::compact_log_behind_snapshot",
+      "variant": "async"
+    },
+    {
+      "cell_id": "filesystem--sqlite--async",
+      "kind": "method",
+      "method": "snapshot_now",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_sqlite_async_public_interface::snapshot_now",
+      "variant": "async"
+    },
+    {
+      "cell_id": "filesystem--sqlite--async",
+      "kind": "method",
+      "method": "latest_snapshot_info",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_sqlite_async_public_interface::latest_snapshot_info",
+      "variant": "async"
+    },
+    {
+      "cell_id": "filesystem--sqlite--async",
+      "kind": "method",
+      "method": "last_rebuild_stats",
+      "profile": "public_interface",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_conformance::test::filesystem_sqlite_async_public_interface::last_rebuild_stats",
+      "variant": "async"
+    },
+    {
+      "cell_id": "filesystem--sqlite--async",
+      "kind": "method",
       "method": "peek",
       "profile": "public_interface",
       "semantic_owner": "P6",
@@ -3917,6 +4357,78 @@
       "profile": "public_interface_external",
       "semantic_owner": "P9",
       "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_convenience_sync_public_interface::side_record",
+      "variant": "convenience-sync"
+    },
+    {
+      "cell_id": "postgres--memory--convenience-sync",
+      "kind": "method",
+      "method": "side_records",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_convenience_sync_public_interface::side_records",
+      "variant": "convenience-sync"
+    },
+    {
+      "cell_id": "postgres--memory--convenience-sync",
+      "kind": "method",
+      "method": "snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_convenience_sync_public_interface::snapshot_policy",
+      "variant": "convenience-sync"
+    },
+    {
+      "cell_id": "postgres--memory--convenience-sync",
+      "kind": "method",
+      "method": "set_snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_convenience_sync_public_interface::set_snapshot_policy",
+      "variant": "convenience-sync"
+    },
+    {
+      "cell_id": "postgres--memory--convenience-sync",
+      "kind": "method",
+      "method": "should_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_convenience_sync_public_interface::should_snapshot",
+      "variant": "convenience-sync"
+    },
+    {
+      "cell_id": "postgres--memory--convenience-sync",
+      "kind": "method",
+      "method": "compact_log_behind_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_convenience_sync_public_interface::compact_log_behind_snapshot",
+      "variant": "convenience-sync"
+    },
+    {
+      "cell_id": "postgres--memory--convenience-sync",
+      "kind": "method",
+      "method": "snapshot_now",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_convenience_sync_public_interface::snapshot_now",
+      "variant": "convenience-sync"
+    },
+    {
+      "cell_id": "postgres--memory--convenience-sync",
+      "kind": "method",
+      "method": "latest_snapshot_info",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_convenience_sync_public_interface::latest_snapshot_info",
+      "variant": "convenience-sync"
+    },
+    {
+      "cell_id": "postgres--memory--convenience-sync",
+      "kind": "method",
+      "method": "last_rebuild_stats",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_convenience_sync_public_interface::last_rebuild_stats",
       "variant": "convenience-sync"
     },
     {
@@ -4516,6 +5028,78 @@
     {
       "cell_id": "postgres--memory--convenience-async",
       "kind": "method",
+      "method": "side_records",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_convenience_async_public_interface::side_records",
+      "variant": "convenience-async"
+    },
+    {
+      "cell_id": "postgres--memory--convenience-async",
+      "kind": "method",
+      "method": "snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_convenience_async_public_interface::snapshot_policy",
+      "variant": "convenience-async"
+    },
+    {
+      "cell_id": "postgres--memory--convenience-async",
+      "kind": "method",
+      "method": "set_snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_convenience_async_public_interface::set_snapshot_policy",
+      "variant": "convenience-async"
+    },
+    {
+      "cell_id": "postgres--memory--convenience-async",
+      "kind": "method",
+      "method": "should_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_convenience_async_public_interface::should_snapshot",
+      "variant": "convenience-async"
+    },
+    {
+      "cell_id": "postgres--memory--convenience-async",
+      "kind": "method",
+      "method": "compact_log_behind_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_convenience_async_public_interface::compact_log_behind_snapshot",
+      "variant": "convenience-async"
+    },
+    {
+      "cell_id": "postgres--memory--convenience-async",
+      "kind": "method",
+      "method": "snapshot_now",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_convenience_async_public_interface::snapshot_now",
+      "variant": "convenience-async"
+    },
+    {
+      "cell_id": "postgres--memory--convenience-async",
+      "kind": "method",
+      "method": "latest_snapshot_info",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_convenience_async_public_interface::latest_snapshot_info",
+      "variant": "convenience-async"
+    },
+    {
+      "cell_id": "postgres--memory--convenience-async",
+      "kind": "method",
+      "method": "last_rebuild_stats",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_convenience_async_public_interface::last_rebuild_stats",
+      "variant": "convenience-async"
+    },
+    {
+      "cell_id": "postgres--memory--convenience-async",
+      "kind": "method",
       "method": "peek",
       "profile": "public_interface_external",
       "semantic_owner": "P6",
@@ -5105,6 +5689,78 @@
       "profile": "public_interface_external",
       "semantic_owner": "P9",
       "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_coordinated_constructor_public_interface::side_record",
+      "variant": "coordinated-constructor"
+    },
+    {
+      "cell_id": "postgres--memory--coordinated-constructor",
+      "kind": "method",
+      "method": "side_records",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_coordinated_constructor_public_interface::side_records",
+      "variant": "coordinated-constructor"
+    },
+    {
+      "cell_id": "postgres--memory--coordinated-constructor",
+      "kind": "method",
+      "method": "snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_coordinated_constructor_public_interface::snapshot_policy",
+      "variant": "coordinated-constructor"
+    },
+    {
+      "cell_id": "postgres--memory--coordinated-constructor",
+      "kind": "method",
+      "method": "set_snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_coordinated_constructor_public_interface::set_snapshot_policy",
+      "variant": "coordinated-constructor"
+    },
+    {
+      "cell_id": "postgres--memory--coordinated-constructor",
+      "kind": "method",
+      "method": "should_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_coordinated_constructor_public_interface::should_snapshot",
+      "variant": "coordinated-constructor"
+    },
+    {
+      "cell_id": "postgres--memory--coordinated-constructor",
+      "kind": "method",
+      "method": "compact_log_behind_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_coordinated_constructor_public_interface::compact_log_behind_snapshot",
+      "variant": "coordinated-constructor"
+    },
+    {
+      "cell_id": "postgres--memory--coordinated-constructor",
+      "kind": "method",
+      "method": "snapshot_now",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_coordinated_constructor_public_interface::snapshot_now",
+      "variant": "coordinated-constructor"
+    },
+    {
+      "cell_id": "postgres--memory--coordinated-constructor",
+      "kind": "method",
+      "method": "latest_snapshot_info",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_coordinated_constructor_public_interface::latest_snapshot_info",
+      "variant": "coordinated-constructor"
+    },
+    {
+      "cell_id": "postgres--memory--coordinated-constructor",
+      "kind": "method",
+      "method": "last_rebuild_stats",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_coordinated_constructor_public_interface::last_rebuild_stats",
       "variant": "coordinated-constructor"
     },
     {
@@ -5704,6 +6360,78 @@
     {
       "cell_id": "postgres--memory--runtime-sync",
       "kind": "method",
+      "method": "side_records",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_runtime_sync_public_interface::side_records",
+      "variant": "runtime-sync"
+    },
+    {
+      "cell_id": "postgres--memory--runtime-sync",
+      "kind": "method",
+      "method": "snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_runtime_sync_public_interface::snapshot_policy",
+      "variant": "runtime-sync"
+    },
+    {
+      "cell_id": "postgres--memory--runtime-sync",
+      "kind": "method",
+      "method": "set_snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_runtime_sync_public_interface::set_snapshot_policy",
+      "variant": "runtime-sync"
+    },
+    {
+      "cell_id": "postgres--memory--runtime-sync",
+      "kind": "method",
+      "method": "should_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_runtime_sync_public_interface::should_snapshot",
+      "variant": "runtime-sync"
+    },
+    {
+      "cell_id": "postgres--memory--runtime-sync",
+      "kind": "method",
+      "method": "compact_log_behind_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_runtime_sync_public_interface::compact_log_behind_snapshot",
+      "variant": "runtime-sync"
+    },
+    {
+      "cell_id": "postgres--memory--runtime-sync",
+      "kind": "method",
+      "method": "snapshot_now",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_runtime_sync_public_interface::snapshot_now",
+      "variant": "runtime-sync"
+    },
+    {
+      "cell_id": "postgres--memory--runtime-sync",
+      "kind": "method",
+      "method": "latest_snapshot_info",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_runtime_sync_public_interface::latest_snapshot_info",
+      "variant": "runtime-sync"
+    },
+    {
+      "cell_id": "postgres--memory--runtime-sync",
+      "kind": "method",
+      "method": "last_rebuild_stats",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_runtime_sync_public_interface::last_rebuild_stats",
+      "variant": "runtime-sync"
+    },
+    {
+      "cell_id": "postgres--memory--runtime-sync",
+      "kind": "method",
       "method": "peek",
       "profile": "public_interface_external",
       "semantic_owner": "P6",
@@ -6293,6 +7021,78 @@
       "profile": "public_interface_external",
       "semantic_owner": "P9",
       "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_relational_coordinated_node_public_interface::side_record",
+      "variant": "relational-coordinated"
+    },
+    {
+      "cell_id": "postgres--postgres--relational-coordinated",
+      "kind": "method",
+      "method": "side_records",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_relational_coordinated_node_public_interface::side_records",
+      "variant": "relational-coordinated"
+    },
+    {
+      "cell_id": "postgres--postgres--relational-coordinated",
+      "kind": "method",
+      "method": "snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_relational_coordinated_node_public_interface::snapshot_policy",
+      "variant": "relational-coordinated"
+    },
+    {
+      "cell_id": "postgres--postgres--relational-coordinated",
+      "kind": "method",
+      "method": "set_snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_relational_coordinated_node_public_interface::set_snapshot_policy",
+      "variant": "relational-coordinated"
+    },
+    {
+      "cell_id": "postgres--postgres--relational-coordinated",
+      "kind": "method",
+      "method": "should_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_relational_coordinated_node_public_interface::should_snapshot",
+      "variant": "relational-coordinated"
+    },
+    {
+      "cell_id": "postgres--postgres--relational-coordinated",
+      "kind": "method",
+      "method": "compact_log_behind_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_relational_coordinated_node_public_interface::compact_log_behind_snapshot",
+      "variant": "relational-coordinated"
+    },
+    {
+      "cell_id": "postgres--postgres--relational-coordinated",
+      "kind": "method",
+      "method": "snapshot_now",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_relational_coordinated_node_public_interface::snapshot_now",
+      "variant": "relational-coordinated"
+    },
+    {
+      "cell_id": "postgres--postgres--relational-coordinated",
+      "kind": "method",
+      "method": "latest_snapshot_info",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_relational_coordinated_node_public_interface::latest_snapshot_info",
+      "variant": "relational-coordinated"
+    },
+    {
+      "cell_id": "postgres--postgres--relational-coordinated",
+      "kind": "method",
+      "method": "last_rebuild_stats",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_relational_coordinated_node_public_interface::last_rebuild_stats",
       "variant": "relational-coordinated"
     },
     {
@@ -6892,6 +7692,78 @@
     {
       "cell_id": "postgres--memory--log-replay",
       "kind": "method",
+      "method": "side_records",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_log_replay_public_interface::side_records",
+      "variant": "log-replay"
+    },
+    {
+      "cell_id": "postgres--memory--log-replay",
+      "kind": "method",
+      "method": "snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_log_replay_public_interface::snapshot_policy",
+      "variant": "log-replay"
+    },
+    {
+      "cell_id": "postgres--memory--log-replay",
+      "kind": "method",
+      "method": "set_snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_log_replay_public_interface::set_snapshot_policy",
+      "variant": "log-replay"
+    },
+    {
+      "cell_id": "postgres--memory--log-replay",
+      "kind": "method",
+      "method": "should_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_log_replay_public_interface::should_snapshot",
+      "variant": "log-replay"
+    },
+    {
+      "cell_id": "postgres--memory--log-replay",
+      "kind": "method",
+      "method": "compact_log_behind_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_log_replay_public_interface::compact_log_behind_snapshot",
+      "variant": "log-replay"
+    },
+    {
+      "cell_id": "postgres--memory--log-replay",
+      "kind": "method",
+      "method": "snapshot_now",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_log_replay_public_interface::snapshot_now",
+      "variant": "log-replay"
+    },
+    {
+      "cell_id": "postgres--memory--log-replay",
+      "kind": "method",
+      "method": "latest_snapshot_info",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_log_replay_public_interface::latest_snapshot_info",
+      "variant": "log-replay"
+    },
+    {
+      "cell_id": "postgres--memory--log-replay",
+      "kind": "method",
+      "method": "last_rebuild_stats",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_log_replay_public_interface::last_rebuild_stats",
+      "variant": "log-replay"
+    },
+    {
+      "cell_id": "postgres--memory--log-replay",
+      "kind": "method",
       "method": "peek",
       "profile": "public_interface_external",
       "semantic_owner": "P6",
@@ -7481,6 +8353,78 @@
       "profile": "public_interface_external",
       "semantic_owner": "P9",
       "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_relational_public_interface::side_record",
+      "variant": "relational"
+    },
+    {
+      "cell_id": "postgres--postgres--relational",
+      "kind": "method",
+      "method": "side_records",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_relational_public_interface::side_records",
+      "variant": "relational"
+    },
+    {
+      "cell_id": "postgres--postgres--relational",
+      "kind": "method",
+      "method": "snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_relational_public_interface::snapshot_policy",
+      "variant": "relational"
+    },
+    {
+      "cell_id": "postgres--postgres--relational",
+      "kind": "method",
+      "method": "set_snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_relational_public_interface::set_snapshot_policy",
+      "variant": "relational"
+    },
+    {
+      "cell_id": "postgres--postgres--relational",
+      "kind": "method",
+      "method": "should_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_relational_public_interface::should_snapshot",
+      "variant": "relational"
+    },
+    {
+      "cell_id": "postgres--postgres--relational",
+      "kind": "method",
+      "method": "compact_log_behind_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_relational_public_interface::compact_log_behind_snapshot",
+      "variant": "relational"
+    },
+    {
+      "cell_id": "postgres--postgres--relational",
+      "kind": "method",
+      "method": "snapshot_now",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_relational_public_interface::snapshot_now",
+      "variant": "relational"
+    },
+    {
+      "cell_id": "postgres--postgres--relational",
+      "kind": "method",
+      "method": "latest_snapshot_info",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_relational_public_interface::latest_snapshot_info",
+      "variant": "relational"
+    },
+    {
+      "cell_id": "postgres--postgres--relational",
+      "kind": "method",
+      "method": "last_rebuild_stats",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_relational_public_interface::last_rebuild_stats",
       "variant": "relational"
     },
     {
@@ -8080,6 +9024,78 @@
     {
       "cell_id": "postgres--memory--coordinated",
       "kind": "method",
+      "method": "side_records",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_coordinated_public_interface::side_records",
+      "variant": "coordinated"
+    },
+    {
+      "cell_id": "postgres--memory--coordinated",
+      "kind": "method",
+      "method": "snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_coordinated_public_interface::snapshot_policy",
+      "variant": "coordinated"
+    },
+    {
+      "cell_id": "postgres--memory--coordinated",
+      "kind": "method",
+      "method": "set_snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_coordinated_public_interface::set_snapshot_policy",
+      "variant": "coordinated"
+    },
+    {
+      "cell_id": "postgres--memory--coordinated",
+      "kind": "method",
+      "method": "should_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_coordinated_public_interface::should_snapshot",
+      "variant": "coordinated"
+    },
+    {
+      "cell_id": "postgres--memory--coordinated",
+      "kind": "method",
+      "method": "compact_log_behind_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_coordinated_public_interface::compact_log_behind_snapshot",
+      "variant": "coordinated"
+    },
+    {
+      "cell_id": "postgres--memory--coordinated",
+      "kind": "method",
+      "method": "snapshot_now",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_coordinated_public_interface::snapshot_now",
+      "variant": "coordinated"
+    },
+    {
+      "cell_id": "postgres--memory--coordinated",
+      "kind": "method",
+      "method": "latest_snapshot_info",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_coordinated_public_interface::latest_snapshot_info",
+      "variant": "coordinated"
+    },
+    {
+      "cell_id": "postgres--memory--coordinated",
+      "kind": "method",
+      "method": "last_rebuild_stats",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_coordinated_public_interface::last_rebuild_stats",
+      "variant": "coordinated"
+    },
+    {
+      "cell_id": "postgres--memory--coordinated",
+      "kind": "method",
       "method": "peek",
       "profile": "public_interface_external",
       "semantic_owner": "P6",
@@ -8384,6 +9400,2004 @@
       "variant": "coordinated"
     },
     {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "projection_control",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::projection_control",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "ownership",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::ownership",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "renew_owned",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::renew_owned",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "create_queue",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::create_queue",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "queue_definition",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::queue_definition",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "ensure_queue",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::ensure_queue",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "push",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::push",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "push_with_request_id",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::push_with_request_id",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "push_batch",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::push_batch",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "push_batch_with_request_id",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::push_batch_with_request_id",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "upsert",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::upsert",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "claim_with",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::claim_with",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "claim",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::claim",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "claim_response_with",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::claim_response_with",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "claim_at",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::claim_at",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "claim_response_at",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::claim_response_at",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "claim_across_queues",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::claim_across_queues",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "claim_by_query",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::claim_by_query",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "claim_by_query_at",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::claim_by_query_at",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "claim_by_item_ids",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::claim_by_item_ids",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "ack",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::ack",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "complete",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::complete",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "nack",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::nack",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "retry",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::retry",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "release",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::release",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "nack_retry_after",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::nack_retry_after",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "retry_after",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::retry_after",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "commit",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::commit",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "commit_multi_claim",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::commit_multi_claim",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "commit_capabilities",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::commit_capabilities",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "explain_commit",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::explain_commit",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "side_record",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::side_record",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "side_records",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::side_records",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::snapshot_policy",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "set_snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::set_snapshot_policy",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "should_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::should_snapshot",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "compact_log_behind_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::compact_log_behind_snapshot",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "snapshot_now",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::snapshot_now",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "latest_snapshot_info",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::latest_snapshot_info",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "last_rebuild_stats",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::last_rebuild_stats",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "peek",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::peek",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "current_position",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::current_position",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "discover_active_scopes",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::discover_active_scopes",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "discover_active_scopes_stamped",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::discover_active_scopes_stamped",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "discover",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::discover",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "live_item",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::live_item",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "live_items",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::live_items",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "query_index_unique",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::query_index_unique",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "query_index",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::query_index",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "query_index_unique_typed",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::query_index_unique_typed",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "query_index_typed",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::query_index_typed",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "fail",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::fail",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "renew",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::renew",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "reassign",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::reassign",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "update_fields",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::update_fields",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "batch_update",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::batch_update",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "mutate_items",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::mutate_items",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "update",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::update",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "set_gates",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::set_gates",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "reclaim_expired",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::reclaim_expired",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "reclaim_expired_at",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::reclaim_expired_at",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "rearm",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::rearm",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "rearm_at",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::rearm_at",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "rearm_after",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::rearm_after",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "purge",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::purge",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "claimed",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::claimed",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "metrics",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::metrics",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "metrics_by_query",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::metrics_by_query",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "hot_projection_capabilities",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::hot_projection_capabilities",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "range_scan",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::range_scan",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "grouped_aggregate",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::grouped_aggregate",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "declared_bucket_segment",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::declared_bucket_segment",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "method",
+      "method": "bounded_mutation",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::bounded_mutation",
+      "variant": "default"
+    },
+    {
+      "cell_id": "memory--postgres",
+      "kind": "reopen",
+      "method": "reopen",
+      "profile": "public_interface_external",
+      "semantic_owner": "P5",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface::reopen",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "projection_control",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::projection_control",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "ownership",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::ownership",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "renew_owned",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::renew_owned",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "create_queue",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::create_queue",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "queue_definition",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::queue_definition",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "ensure_queue",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::ensure_queue",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "push",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::push",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "push_with_request_id",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::push_with_request_id",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "push_batch",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::push_batch",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "push_batch_with_request_id",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::push_batch_with_request_id",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "upsert",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::upsert",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "claim_with",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::claim_with",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "claim",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::claim",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "claim_response_with",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::claim_response_with",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "claim_at",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::claim_at",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "claim_response_at",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::claim_response_at",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "claim_across_queues",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::claim_across_queues",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "claim_by_query",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::claim_by_query",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "claim_by_query_at",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::claim_by_query_at",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "claim_by_item_ids",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::claim_by_item_ids",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "ack",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::ack",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "complete",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::complete",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "nack",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::nack",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "retry",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::retry",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "release",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::release",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "nack_retry_after",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::nack_retry_after",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "retry_after",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::retry_after",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "commit",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::commit",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "commit_multi_claim",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::commit_multi_claim",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "commit_capabilities",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::commit_capabilities",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "explain_commit",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::explain_commit",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "side_record",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::side_record",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "side_records",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::side_records",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::snapshot_policy",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "set_snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::set_snapshot_policy",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "should_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::should_snapshot",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "compact_log_behind_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::compact_log_behind_snapshot",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "snapshot_now",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::snapshot_now",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "latest_snapshot_info",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::latest_snapshot_info",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "last_rebuild_stats",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::last_rebuild_stats",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "peek",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::peek",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "current_position",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::current_position",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "discover_active_scopes",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::discover_active_scopes",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "discover_active_scopes_stamped",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::discover_active_scopes_stamped",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "discover",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::discover",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "live_item",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::live_item",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "live_items",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::live_items",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "query_index_unique",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::query_index_unique",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "query_index",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::query_index",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "query_index_unique_typed",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::query_index_unique_typed",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "query_index_typed",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::query_index_typed",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "fail",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::fail",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "renew",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::renew",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "reassign",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::reassign",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "update_fields",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::update_fields",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "batch_update",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::batch_update",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "mutate_items",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::mutate_items",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "update",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::update",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "set_gates",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::set_gates",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "reclaim_expired",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::reclaim_expired",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "reclaim_expired_at",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::reclaim_expired_at",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "rearm",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::rearm",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "rearm_at",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::rearm_at",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "rearm_after",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::rearm_after",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "purge",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::purge",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "claimed",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::claimed",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "metrics",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::metrics",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "metrics_by_query",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::metrics_by_query",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "hot_projection_capabilities",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::hot_projection_capabilities",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "range_scan",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::range_scan",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "grouped_aggregate",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::grouped_aggregate",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "declared_bucket_segment",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::declared_bucket_segment",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "method",
+      "method": "bounded_mutation",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::bounded_mutation",
+      "variant": "default"
+    },
+    {
+      "cell_id": "sqlite--postgres",
+      "kind": "reopen",
+      "method": "reopen",
+      "profile": "public_interface_external",
+      "semantic_owner": "P5a",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface::reopen",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "projection_control",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::projection_control",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "ownership",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::ownership",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "renew_owned",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::renew_owned",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "create_queue",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::create_queue",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "queue_definition",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::queue_definition",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "ensure_queue",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::ensure_queue",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "push",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::push",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "push_with_request_id",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::push_with_request_id",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "push_batch",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::push_batch",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "push_batch_with_request_id",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::push_batch_with_request_id",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "upsert",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::upsert",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "claim_with",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::claim_with",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "claim",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::claim",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "claim_response_with",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::claim_response_with",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "claim_at",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::claim_at",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "claim_response_at",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::claim_response_at",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "claim_across_queues",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::claim_across_queues",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "claim_by_query",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::claim_by_query",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "claim_by_query_at",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::claim_by_query_at",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "claim_by_item_ids",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::claim_by_item_ids",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "ack",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::ack",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "complete",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::complete",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "nack",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::nack",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "retry",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::retry",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "release",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::release",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "nack_retry_after",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::nack_retry_after",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "retry_after",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::retry_after",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "commit",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::commit",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "commit_multi_claim",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::commit_multi_claim",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "commit_capabilities",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::commit_capabilities",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "explain_commit",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::explain_commit",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "side_record",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::side_record",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "side_records",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::side_records",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::snapshot_policy",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "set_snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::set_snapshot_policy",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "should_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::should_snapshot",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "compact_log_behind_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::compact_log_behind_snapshot",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "snapshot_now",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::snapshot_now",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "latest_snapshot_info",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::latest_snapshot_info",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "last_rebuild_stats",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::last_rebuild_stats",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "peek",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::peek",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "current_position",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::current_position",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "discover_active_scopes",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::discover_active_scopes",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "discover_active_scopes_stamped",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::discover_active_scopes_stamped",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "discover",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::discover",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "live_item",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::live_item",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "live_items",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::live_items",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "query_index_unique",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::query_index_unique",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "query_index",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::query_index",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "query_index_unique_typed",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::query_index_unique_typed",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "query_index_typed",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::query_index_typed",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "fail",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::fail",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "renew",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::renew",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "reassign",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::reassign",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "update_fields",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::update_fields",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "batch_update",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::batch_update",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "mutate_items",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::mutate_items",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "update",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::update",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "set_gates",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::set_gates",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "reclaim_expired",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::reclaim_expired",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "reclaim_expired_at",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::reclaim_expired_at",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "rearm",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::rearm",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "rearm_at",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::rearm_at",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "rearm_after",
+      "profile": "public_interface_external",
+      "semantic_owner": "P7",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::rearm_after",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "purge",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::purge",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "claimed",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::claimed",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "metrics",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::metrics",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "metrics_by_query",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::metrics_by_query",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "hot_projection_capabilities",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::hot_projection_capabilities",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "range_scan",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::range_scan",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "grouped_aggregate",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::grouped_aggregate",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "declared_bucket_segment",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::declared_bucket_segment",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "method",
+      "method": "bounded_mutation",
+      "profile": "public_interface_external",
+      "semantic_owner": "P8",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::bounded_mutation",
+      "variant": "default"
+    },
+    {
+      "cell_id": "postgres--sqlite",
+      "kind": "reopen",
+      "method": "reopen",
+      "profile": "public_interface_external",
+      "semantic_owner": "P5a",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface::reopen",
+      "variant": "default"
+    },
+    {
       "cell_id": "filesystem--postgres--strict",
       "kind": "method",
       "method": "projection_control",
@@ -8669,6 +11683,78 @@
       "profile": "public_interface_external",
       "semantic_owner": "P9",
       "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::filesystem_postgres_strict_public_interface::side_record",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "filesystem--postgres--strict",
+      "kind": "method",
+      "method": "side_records",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::filesystem_postgres_strict_public_interface::side_records",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "filesystem--postgres--strict",
+      "kind": "method",
+      "method": "snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::filesystem_postgres_strict_public_interface::snapshot_policy",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "filesystem--postgres--strict",
+      "kind": "method",
+      "method": "set_snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::filesystem_postgres_strict_public_interface::set_snapshot_policy",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "filesystem--postgres--strict",
+      "kind": "method",
+      "method": "should_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::filesystem_postgres_strict_public_interface::should_snapshot",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "filesystem--postgres--strict",
+      "kind": "method",
+      "method": "compact_log_behind_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::filesystem_postgres_strict_public_interface::compact_log_behind_snapshot",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "filesystem--postgres--strict",
+      "kind": "method",
+      "method": "snapshot_now",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::filesystem_postgres_strict_public_interface::snapshot_now",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "filesystem--postgres--strict",
+      "kind": "method",
+      "method": "latest_snapshot_info",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::filesystem_postgres_strict_public_interface::latest_snapshot_info",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "filesystem--postgres--strict",
+      "kind": "method",
+      "method": "last_rebuild_stats",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::filesystem_postgres_strict_public_interface::last_rebuild_stats",
       "variant": "strict"
     },
     {
@@ -9268,6 +12354,78 @@
     {
       "cell_id": "filesystem--postgres--sync-constructor",
       "kind": "method",
+      "method": "side_records",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::filesystem_postgres_sync_constructor_public_interface::side_records",
+      "variant": "sync-constructor"
+    },
+    {
+      "cell_id": "filesystem--postgres--sync-constructor",
+      "kind": "method",
+      "method": "snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::filesystem_postgres_sync_constructor_public_interface::snapshot_policy",
+      "variant": "sync-constructor"
+    },
+    {
+      "cell_id": "filesystem--postgres--sync-constructor",
+      "kind": "method",
+      "method": "set_snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::filesystem_postgres_sync_constructor_public_interface::set_snapshot_policy",
+      "variant": "sync-constructor"
+    },
+    {
+      "cell_id": "filesystem--postgres--sync-constructor",
+      "kind": "method",
+      "method": "should_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::filesystem_postgres_sync_constructor_public_interface::should_snapshot",
+      "variant": "sync-constructor"
+    },
+    {
+      "cell_id": "filesystem--postgres--sync-constructor",
+      "kind": "method",
+      "method": "compact_log_behind_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::filesystem_postgres_sync_constructor_public_interface::compact_log_behind_snapshot",
+      "variant": "sync-constructor"
+    },
+    {
+      "cell_id": "filesystem--postgres--sync-constructor",
+      "kind": "method",
+      "method": "snapshot_now",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::filesystem_postgres_sync_constructor_public_interface::snapshot_now",
+      "variant": "sync-constructor"
+    },
+    {
+      "cell_id": "filesystem--postgres--sync-constructor",
+      "kind": "method",
+      "method": "latest_snapshot_info",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::filesystem_postgres_sync_constructor_public_interface::latest_snapshot_info",
+      "variant": "sync-constructor"
+    },
+    {
+      "cell_id": "filesystem--postgres--sync-constructor",
+      "kind": "method",
+      "method": "last_rebuild_stats",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::filesystem_postgres_sync_constructor_public_interface::last_rebuild_stats",
+      "variant": "sync-constructor"
+    },
+    {
+      "cell_id": "filesystem--postgres--sync-constructor",
+      "kind": "method",
       "method": "peek",
       "profile": "public_interface_external",
       "semantic_owner": "P6",
@@ -9857,6 +13015,78 @@
       "profile": "public_interface_external",
       "semantic_owner": "P9",
       "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_postgres_strict_public_interface::side_record",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "s3--postgres--strict",
+      "kind": "method",
+      "method": "side_records",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_postgres_strict_public_interface::side_records",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "s3--postgres--strict",
+      "kind": "method",
+      "method": "snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_postgres_strict_public_interface::snapshot_policy",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "s3--postgres--strict",
+      "kind": "method",
+      "method": "set_snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_postgres_strict_public_interface::set_snapshot_policy",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "s3--postgres--strict",
+      "kind": "method",
+      "method": "should_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_postgres_strict_public_interface::should_snapshot",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "s3--postgres--strict",
+      "kind": "method",
+      "method": "compact_log_behind_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_postgres_strict_public_interface::compact_log_behind_snapshot",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "s3--postgres--strict",
+      "kind": "method",
+      "method": "snapshot_now",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_postgres_strict_public_interface::snapshot_now",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "s3--postgres--strict",
+      "kind": "method",
+      "method": "latest_snapshot_info",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_postgres_strict_public_interface::latest_snapshot_info",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "s3--postgres--strict",
+      "kind": "method",
+      "method": "last_rebuild_stats",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_postgres_strict_public_interface::last_rebuild_stats",
       "variant": "strict"
     },
     {
@@ -10456,6 +13686,78 @@
     {
       "cell_id": "s3--sqlite--strict",
       "kind": "method",
+      "method": "side_records",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_sqlite_strict_public_interface::side_records",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "s3--sqlite--strict",
+      "kind": "method",
+      "method": "snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_sqlite_strict_public_interface::snapshot_policy",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "s3--sqlite--strict",
+      "kind": "method",
+      "method": "set_snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_sqlite_strict_public_interface::set_snapshot_policy",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "s3--sqlite--strict",
+      "kind": "method",
+      "method": "should_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_sqlite_strict_public_interface::should_snapshot",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "s3--sqlite--strict",
+      "kind": "method",
+      "method": "compact_log_behind_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_sqlite_strict_public_interface::compact_log_behind_snapshot",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "s3--sqlite--strict",
+      "kind": "method",
+      "method": "snapshot_now",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_sqlite_strict_public_interface::snapshot_now",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "s3--sqlite--strict",
+      "kind": "method",
+      "method": "latest_snapshot_info",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_sqlite_strict_public_interface::latest_snapshot_info",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "s3--sqlite--strict",
+      "kind": "method",
+      "method": "last_rebuild_stats",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_sqlite_strict_public_interface::last_rebuild_stats",
+      "variant": "strict"
+    },
+    {
+      "cell_id": "s3--sqlite--strict",
+      "kind": "method",
       "method": "peek",
       "profile": "public_interface_external",
       "semantic_owner": "P6",
@@ -11050,6 +14352,78 @@
     {
       "cell_id": "s3--sqlite--async",
       "kind": "method",
+      "method": "side_records",
+      "profile": "public_interface_external",
+      "semantic_owner": "P9",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_sqlite_async_public_interface::side_records",
+      "variant": "async"
+    },
+    {
+      "cell_id": "s3--sqlite--async",
+      "kind": "method",
+      "method": "snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_sqlite_async_public_interface::snapshot_policy",
+      "variant": "async"
+    },
+    {
+      "cell_id": "s3--sqlite--async",
+      "kind": "method",
+      "method": "set_snapshot_policy",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_sqlite_async_public_interface::set_snapshot_policy",
+      "variant": "async"
+    },
+    {
+      "cell_id": "s3--sqlite--async",
+      "kind": "method",
+      "method": "should_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_sqlite_async_public_interface::should_snapshot",
+      "variant": "async"
+    },
+    {
+      "cell_id": "s3--sqlite--async",
+      "kind": "method",
+      "method": "compact_log_behind_snapshot",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_sqlite_async_public_interface::compact_log_behind_snapshot",
+      "variant": "async"
+    },
+    {
+      "cell_id": "s3--sqlite--async",
+      "kind": "method",
+      "method": "snapshot_now",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_sqlite_async_public_interface::snapshot_now",
+      "variant": "async"
+    },
+    {
+      "cell_id": "s3--sqlite--async",
+      "kind": "method",
+      "method": "latest_snapshot_info",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_sqlite_async_public_interface::latest_snapshot_info",
+      "variant": "async"
+    },
+    {
+      "cell_id": "s3--sqlite--async",
+      "kind": "method",
+      "method": "last_rebuild_stats",
+      "profile": "public_interface_external",
+      "semantic_owner": "P6",
+      "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::s3_sqlite_async_public_interface::last_rebuild_stats",
+      "variant": "async"
+    },
+    {
+      "cell_id": "s3--sqlite--async",
+      "kind": "method",
       "method": "peek",
       "profile": "public_interface_external",
       "semantic_owner": "P6",
@@ -11356,7 +14730,7 @@
   ],
   "fixed_method_count_forbidden": true,
   "generated_by": "scripts/ci/api005_suite_ownership.py",
-  "method_contract_count": 65,
+  "method_contract_count": 73,
   "method_contracts": [
     {
       "family": "projection_control",
@@ -11517,6 +14891,46 @@
       "family": "commit",
       "method": "side_record",
       "semantic_owner": "P9"
+    },
+    {
+      "family": "commit",
+      "method": "side_records",
+      "semantic_owner": "P9"
+    },
+    {
+      "family": "projection_control",
+      "method": "snapshot_policy",
+      "semantic_owner": "P6"
+    },
+    {
+      "family": "projection_control",
+      "method": "set_snapshot_policy",
+      "semantic_owner": "P6"
+    },
+    {
+      "family": "projection_control",
+      "method": "should_snapshot",
+      "semantic_owner": "P6"
+    },
+    {
+      "family": "projection_control",
+      "method": "compact_log_behind_snapshot",
+      "semantic_owner": "P6"
+    },
+    {
+      "family": "projection_control",
+      "method": "snapshot_now",
+      "semantic_owner": "P6"
+    },
+    {
+      "family": "projection_control",
+      "method": "latest_snapshot_info",
+      "semantic_owner": "P6"
+    },
+    {
+      "family": "projection_control",
+      "method": "last_rebuild_stats",
+      "semantic_owner": "P6"
     },
     {
       "family": "read_and_discovery",
@@ -11760,6 +15174,33 @@
         "test_fn": "postgres_coordinated_public_interface",
         "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_coordinated_public_interface",
         "variant": "coordinated"
+      },
+      {
+        "cell_id": "memory--postgres",
+        "profile": "public_interface_external",
+        "reopen_owner": "P5",
+        "source": "external",
+        "test_fn": "memory_postgres_public_interface",
+        "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::memory_postgres_public_interface",
+        "variant": "default"
+      },
+      {
+        "cell_id": "sqlite--postgres",
+        "profile": "public_interface_external",
+        "reopen_owner": "P5a",
+        "source": "external",
+        "test_fn": "sqlite_postgres_public_interface",
+        "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::sqlite_postgres_public_interface",
+        "variant": "default"
+      },
+      {
+        "cell_id": "postgres--sqlite",
+        "profile": "public_interface_external",
+        "reopen_owner": "P5a",
+        "source": "external",
+        "test_fn": "postgres_sqlite_public_interface",
+        "test_id": "Cargo.toml::fireweed::public_interface_external_conformance::test::postgres_sqlite_public_interface",
+        "variant": "default"
       },
       {
         "cell_id": "filesystem--postgres--strict",

@@ -10,8 +10,8 @@ use fireweed::{
     BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateOutcome, BatchUpdateRequest, BatchUpdateValue,
     BoundedMutationRequest, BucketRule, ClaimAt, ClaimByItemIdsDisposition, ClaimByItemIdsRequest,
     ClaimByQueryAt, ClaimByQueryRequest, ClaimCompatibility, ClaimRef, ClientItemKey,
-    CohortOnIncomplete, CohortPolicy, CommitEntry, CommitEntryStatus, CommitRequest,
-    CompoundIndexDef, CompoundIndexField, CreateQueue, DeclaredBucketSegmentRequest,
+    CohortOnIncomplete, CohortPolicy, CommandPosition, CommitEntry, CommitEntryStatus,
+    CommitRequest, CompoundIndexDef, CompoundIndexField, CreateQueue, DeclaredBucketSegmentRequest,
     DiscoveryGranularity, EligibilityPolicy, EngineError, FinalizeKind, Fireweed, GateKeyPolicy,
     GroupBatching, GroupByField, GroupKey, GroupedAggregateRequest, IndexDeclaration, IndexDef,
     IndexType, ItemMutationOperation, ItemMutationOutcome, ItemMutationRequest,
@@ -21,8 +21,8 @@ use fireweed::{
     PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
     QueryFilter, QueueCreationPolicy, QueueDefinition, QueueId, QueueIndex, QueueKey,
     QueueTemplate, RangeScanRequest, RecurrenceMode, RecurrencePolicy, RequestId, RetryPolicy,
-    ScheduleUpdate, SelectedMutation, SideRecord, SortDirection, TenantId, TypedValue,
-    UtcTimestamp, WorkerId,
+    ScheduleUpdate, SelectedMutation, SideRecord, SnapshotPolicy, SortDirection, TenantId,
+    TypedValue, UtcTimestamp, WorkerId,
 };
 use serde_json::json;
 
@@ -2264,6 +2264,27 @@ async fn exercise_commit(
                 .is_some_and(|value| value.as_deref() == Some(b"value".as_slice())),
             "did not return the committed side-record payload",
         );
+        let batch = call(
+            cell,
+            "side_records",
+            failures,
+            fw.side_records(
+                &queue,
+                &[b"public-side-record".to_vec(), b"missing".to_vec()],
+            ),
+        )
+        .await;
+        check(
+            cell,
+            "side_records",
+            failures,
+            batch.as_ref().is_some_and(|values| {
+                values.len() == 2
+                    && values[0].as_deref() == Some(b"value".as_slice())
+                    && values[1].is_none()
+            }),
+            "batch side-record read did not preserve order and missing keys",
+        );
     } else {
         failures.push(format!("{cell}.commit: no valid claimed item prerequisite"));
     }
@@ -2603,6 +2624,55 @@ async fn exercise_projection(
     expect_projection_control: bool,
     failures: &mut Vec<String>,
 ) {
+    // Snapshot / rebuild surface (fireweed-1bf34d97): always present on the facade.
+    // Coverage sites must name each public method for API-005 suite ownership.
+    let queue = key("public-interface");
+    let _ = fw.snapshot_policy(&queue);
+    check(
+        cell,
+        "snapshot_policy",
+        failures,
+        true,
+        "snapshot_policy read must be available",
+    );
+    fw.set_snapshot_policy(queue.clone(), SnapshotPolicy::default());
+    check(
+        cell,
+        "set_snapshot_policy",
+        failures,
+        true,
+        "set_snapshot_policy must accept the default policy",
+    );
+    check(
+        cell,
+        "should_snapshot",
+        failures,
+        !fw.should_snapshot(&queue, 0, None),
+        "lazy default should not snapshot at zero commands",
+    );
+    let _ = call(
+        cell,
+        "latest_snapshot_info",
+        failures,
+        fw.latest_snapshot_info(&queue),
+    )
+    .await;
+    let _ = call(cell, "snapshot_now", failures, fw.snapshot_now(&queue)).await;
+    let _ = call(
+        cell,
+        "compact_log_behind_snapshot",
+        failures,
+        fw.compact_log_behind_snapshot(&queue, &CommandPosition::new(queue.clone(), 0, 0)),
+    )
+    .await;
+    check(
+        cell,
+        "last_rebuild_stats",
+        failures,
+        fw.last_rebuild_stats().is_none(),
+        "last_rebuild_stats is optional until a rebuild runs",
+    );
+
     let control = fw.projection_control();
     check(
         cell,
