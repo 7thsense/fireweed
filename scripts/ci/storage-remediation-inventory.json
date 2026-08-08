@@ -2590,9 +2590,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "caf8334e9dece8cfa6c3",
+        "id": "389981c299937393aad1",
         "identity": "panic!(\"SQLITE/POSTGRES CONSTRUCT SKIPPED \u2014 set FIREWEED_PG_TEST_URL to a live DB\");",
-        "line": 5846,
+        "line": 5889,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "discovery_negative"
@@ -2604,9 +2604,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "ad271f1fc47da0bd7b9a",
+        "id": "737ef5255b4344bacabd",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 5950,
+        "line": 5993,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "discovery_negative"
@@ -2618,9 +2618,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "d81b07d6abef8c788252",
+        "id": "4f8d0cd7bc2e9fd7e834",
         "identity": "/// otherwise it is skipped with an explicit `eprintln!`.",
-        "line": 6264,
+        "line": 6307,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "discovery_negative"
@@ -2632,9 +2632,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "0e70d492073a1493ee80",
+        "id": "04e8021fa4eb8cf3daa8",
         "identity": "\"FIREWEED_PG_TEST_URL required for class_b postgres T0-T3 (fail-closed; no LOUD skip)\",",
-        "line": 6472,
+        "line": 6515,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "discovery_negative"
@@ -2646,9 +2646,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "25ebd41bab1cdcdf5c0c",
+        "id": "a5b079313b9aa71745b1",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 7001,
+        "line": 7044,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "discovery_negative"
@@ -2660,9 +2660,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "6916fec9d3dd9216e305",
+        "id": "fc1f1dec57667cc66f25",
         "identity": "\"sqlite_log T4 helm template skipped (helm not on PATH); values+gate checked\"",
-        "line": 7476,
+        "line": 7519,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "discovery_negative"
@@ -2674,9 +2674,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "98e50909c5dbae0db2da",
+        "id": "4a83f5ea159c70ecb476",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\")",
-        "line": 7556,
+        "line": 7599,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "discovery_negative"
@@ -2688,9 +2688,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "1a5e181c287fb82ec80f",
+        "id": "fc7bbf4fff5cd3d9d5d1",
         "identity": "\"postgres_log T4 helm template skipped (helm not on PATH); values+gate checked\"",
-        "line": 8251,
+        "line": 8294,
         "owner": "P10ps",
         "path": "crates/fireweed-server/src/lib.rs",
         "status": "discovery_negative"
@@ -94785,14 +94785,14 @@
         "-p",
         "fireweed-server",
         "--doc",
-        "crates/fireweed-server/src/lib.rs - start_with (line 4054)",
+        "crates/fireweed-server/src/lib.rs - start_with (line 4097)",
         "--",
         "--exact"
       ],
       "expected_ran": 1,
-      "harness_id": "crates/fireweed-server/src/lib.rs - start_with (line 4054)",
-      "id": "Cargo.toml::fireweed-server::rustdoc::crates/fireweed-server/src/lib.rs - start_with (line 4054)",
-      "line": 4054,
+      "harness_id": "crates/fireweed-server/src/lib.rs - start_with (line 4097)",
+      "id": "Cargo.toml::fireweed-server::rustdoc::crates/fireweed-server/src/lib.rs - start_with (line 4097)",
+      "line": 4097,
       "normalized_block_sha256": "3706bb8d85d709e77033652b048becbcb581c31c6cb38529509895c04f962e25",
       "observed_ran": 1,
       "owner_item": "start_with",
@@ -94814,14 +94814,14 @@
         "-p",
         "fireweed-server",
         "--doc",
-        "crates/fireweed-server/src/lib.rs - start_with_ownership (line 4106)",
+        "crates/fireweed-server/src/lib.rs - start_with_ownership (line 4149)",
         "--",
         "--exact"
       ],
       "expected_ran": 1,
-      "harness_id": "crates/fireweed-server/src/lib.rs - start_with_ownership (line 4106)",
-      "id": "Cargo.toml::fireweed-server::rustdoc::crates/fireweed-server/src/lib.rs - start_with_ownership (line 4106)",
-      "line": 4106,
+      "harness_id": "crates/fireweed-server/src/lib.rs - start_with_ownership (line 4149)",
+      "id": "Cargo.toml::fireweed-server::rustdoc::crates/fireweed-server/src/lib.rs - start_with_ownership (line 4149)",
+      "line": 4149,
       "normalized_block_sha256": "8afd03a254e7f84516ab7b97769b25bd50b032763433429e9cbefc887e5c043b",
       "observed_ran": 1,
       "owner_item": "start_with_ownership",
@@ -94918,7 +94918,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "dcfbc7d6983c076d10e79cce7f82cf62be8aa4147d0dd0cfc891623ba54be4c9",
+  "source_inventory_sha256": "512512ee715e289a1722cb79d1e2bde25fed6deb91c04866fca9a084a726e06e",
   "workspaces": [
     {
       "listing_error_sha256": "",
