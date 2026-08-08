@@ -30,8 +30,8 @@ use fireweed_engine::{
     CommitRecovery, CommitTransition, CommitTransitionEntry, DurabilityClass, EngineError,
     EngineResult, EntryRecovery, FinalizeCommand, FinalizeOutcome, IdGen, IdempotencyDecision,
     InProcessControlPlane, PushCommand, QueueCommand, QueueCounters, QueueIdempotencyCache,
-    QueueKey, RequestOutcome, WriteSideRecordsCommand, build_push_items, commit_body_hash,
-    compile_entity_schema, outcome_entry_from_recovery, outcomes_from_recovery,
+    QueueKey, RequestOutcome, SideRecordPage, WriteSideRecordsCommand, build_push_items,
+    commit_body_hash, compile_entity_schema, outcome_entry_from_recovery, outcomes_from_recovery,
     recovery_from_outcome_entry, request_expires_at, stage_unique_push_keys,
     validate_distinct_commit_claims, validate_entity, validate_instance_fence,
 };
@@ -530,4 +530,26 @@ where
     P: AsyncProjectionStore,
 {
     AsyncProjectionStore::side_record(projection, shard.clone(), key.to_vec()).await
+}
+
+/// Paged, key-ascending scan of opaque side records whose key starts with `prefix` (bead
+/// fireweed-6072ff52; available whenever the projection materializes side records).
+pub async fn side_records_by_prefix<P>(
+    projection: &P,
+    shard: &QueueKey,
+    prefix: &[u8],
+    page_size: usize,
+    cursor: Option<Vec<u8>>,
+) -> EngineResult<SideRecordPage>
+where
+    P: AsyncProjectionStore,
+{
+    AsyncProjectionStore::side_records_by_prefix(
+        projection,
+        shard.clone(),
+        prefix.to_vec(),
+        page_size,
+        cursor,
+    )
+    .await
 }

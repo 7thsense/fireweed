@@ -29,8 +29,8 @@ use fireweed_engine::{
     ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner,
     ProjectionStore, PurgePort, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey,
     RawCommitOutcome, RawCommitRequest, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RenewLeasePort, SeparateReplayCommit, SeparateReplayCommitter, TickReport, UpsertOutcome,
-    UpsertPort,
+    RenewLeasePort, SeparateReplayCommit, SeparateReplayCommitter, SideRecordPage, TickReport,
+    UpsertOutcome, UpsertPort,
 };
 use fireweed_sqlite::{HybridAsyncThresholds, HybridProjectionStore};
 use object_log::FlushConfig;
@@ -1036,6 +1036,28 @@ impl fireweed_engine::RecoveryReadPort for AsyncObjectLogHybridBackend {
         let shard = shard.clone();
         let key = key.to_vec();
         async move { commit_surface::side_record(projection.as_ref(), &shard, &key).await }
+    }
+
+    fn side_records_by_prefix(
+        &self,
+        shard: &QueueKey,
+        prefix: &[u8],
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> impl std::future::Future<Output = EngineResult<SideRecordPage>> + Send {
+        let projection = Arc::clone(&self.projection);
+        let shard = shard.clone();
+        let prefix = prefix.to_vec();
+        async move {
+            commit_surface::side_records_by_prefix(
+                projection.as_ref(),
+                &shard,
+                &prefix,
+                page_size,
+                cursor,
+            )
+            .await
+        }
     }
 }
 

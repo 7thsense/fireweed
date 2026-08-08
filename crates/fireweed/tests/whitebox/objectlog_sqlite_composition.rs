@@ -494,6 +494,96 @@ fn public_objectlog_sqlite_strict_commit_transition_round_trip() {
     let _ = fs::remove_dir_all(fixture);
 }
 
+/// Bead fireweed-6072ff52: `side_records_by_prefix` reads back one instance's audit chain in key
+/// order, stays isolated from a sibling instance's records under a different prefix, and pages via
+/// `next_cursor` on the objectlog+sqlite composition (the coverage gap the plain composed sqlite
+/// backend already closed under fireweed-e47e9287).
+#[test]
+fn public_objectlog_sqlite_side_records_by_prefix_pages_ordered() {
+    let fixture = std::env::temp_dir().join(format!("fireweed-public-side-prefix-{}", nonce()));
+    let root = fixture.join("objects");
+    let sqlite = fixture.join("projection.sqlite");
+    let config = local_config(&root, &sqlite);
+    let queue_id = "side-prefix-queue";
+    let key = queue(queue_id);
+    let fireweed =
+        fireweed::open_composed_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap();
+    block_on(fireweed.create_queue(definition(queue_id))).unwrap();
+
+    block_on(fireweed.push(&key, item(10))).unwrap();
+    let claimed = block_on(fireweed.claim(&key, 1, 30_000)).unwrap();
+    let claim = &claimed[0];
+    let claim_ref = ClaimRef {
+        item_id: claim.item_id,
+        lease_token: claim
+            .lease_token
+            .clone()
+            .expect("claimed item carries a lease token"),
+        lease_expires_at: claim.lease_expires_at,
+        item_version: claim.item_version,
+    };
+    let side = |key: &str, payload: &str| SideRecord {
+        key: key.as_bytes().to_vec(),
+        payload: Bytes::copy_from_slice(payload.as_bytes()),
+    };
+    let transition = CommitRequest {
+        request_id: Some(RequestId::new(format!("txn-{queue_id}")).unwrap()),
+        entries: vec![CommitEntry {
+            claim_ref,
+            finalize: FinalizeKind::Complete,
+            side_records: vec![
+                side("audit:instance-1:001", "a1"),
+                side("audit:instance-1:003", "a3"),
+                side("audit:instance-1:002", "a2"),
+                side("audit:instance-2:001", "other-instance"),
+            ],
+            lifecycle_items: vec![],
+            instance_fence: None,
+        }],
+    };
+    block_on(fireweed.commit(&key, transition)).unwrap();
+
+    let first_page =
+        block_on(fireweed.side_records_by_prefix(&key, b"audit:instance-1:", 2, None)).unwrap();
+    assert_eq!(
+        first_page.entries,
+        vec![
+            (b"audit:instance-1:001".to_vec(), Bytes::from_static(b"a1")),
+            (b"audit:instance-1:002".to_vec(), Bytes::from_static(b"a2")),
+        ]
+    );
+    let cursor = first_page
+        .next_cursor
+        .clone()
+        .expect("a third matching entry remains");
+    assert_eq!(cursor, b"audit:instance-1:003".to_vec());
+
+    let second_page =
+        block_on(fireweed.side_records_by_prefix(&key, b"audit:instance-1:", 2, Some(cursor)))
+            .unwrap();
+    assert_eq!(
+        second_page.entries,
+        vec![(b"audit:instance-1:003".to_vec(), Bytes::from_static(b"a3"))]
+    );
+    assert_eq!(
+        second_page.next_cursor, None,
+        "the prefix's key range is exhausted"
+    );
+
+    let other =
+        block_on(fireweed.side_records_by_prefix(&key, b"audit:instance-2:", 10, None)).unwrap();
+    assert_eq!(
+        other.entries,
+        vec![(
+            b"audit:instance-2:001".to_vec(),
+            Bytes::from_static(b"other-instance")
+        )]
+    );
+
+    drop(fireweed);
+    let _ = fs::remove_dir_all(fixture);
+}
+
 #[test]
 fn public_objectlog_sqlite_multi_claim_continuation_rebuilds_exactly_once() {
     let fixture = std::env::temp_dir().join(format!("fireweed-public-multi-claim-{}", nonce()));

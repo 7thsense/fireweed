@@ -68,7 +68,7 @@ use crate::{
     CommandPosition, CommitOutcomeEntry, ControlPlane, CreateQueueOutcome, DurabilityClass,
     EngineError, EngineResult, FinalizeTarget, IdempotencyDecision, LogStore, ProjectionSnapshot,
     ProjectionStore, PushFingerprint, PushItem, QueueCommand, QueueIdempotencyCache, QueueKey,
-    RenewTarget, RichClaimSelection, SnapshotRef, request_expires_at,
+    RenewTarget, RichClaimSelection, SideRecordPage, SnapshotRef, request_expires_at,
 };
 
 /// An owned blocking operation over one store instance.
@@ -890,6 +890,18 @@ pub trait AsyncProjectionStore: Send + Sync {
         std::future::ready(Err(EngineError::Unavailable))
     }
 
+    /// Paged, key-ascending scan of opaque side records whose key starts with `prefix` (bead
+    /// fireweed-e47e9287; see [`SideRecordPage`]).
+    fn side_records_by_prefix(
+        &self,
+        _shard: QueueKey,
+        _prefix: Vec<u8>,
+        _page_size: usize,
+        _cursor: Option<Vec<u8>>,
+    ) -> impl std::future::Future<Output = EngineResult<SideRecordPage>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+
     /// Validate that every item remains an active, unfenced lease.
     fn renew_validate(
         &self,
@@ -1306,6 +1318,18 @@ where
         key: Vec<u8>,
     ) -> impl Future<Output = EngineResult<Option<bytes::Bytes>>> + Send {
         self.run_with_store(move |store| store.side_record(&shard, &key))
+    }
+
+    fn side_records_by_prefix(
+        &self,
+        shard: QueueKey,
+        prefix: Vec<u8>,
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> impl Future<Output = EngineResult<SideRecordPage>> + Send {
+        self.run_with_store(move |store| {
+            store.side_records_by_prefix(&shard, &prefix, page_size, cursor)
+        })
     }
 
     fn renew_validate(
@@ -1775,6 +1799,18 @@ where
         key: Vec<u8>,
     ) -> impl Future<Output = EngineResult<Option<bytes::Bytes>>> + Send {
         self.run_sync(move |store: &mut S| store.side_record(&shard, &key))
+    }
+
+    fn side_records_by_prefix(
+        &self,
+        shard: QueueKey,
+        prefix: Vec<u8>,
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> impl Future<Output = EngineResult<SideRecordPage>> + Send {
+        self.run_sync(move |store: &mut S| {
+            store.side_records_by_prefix(&shard, &prefix, page_size, cursor)
+        })
     }
 
     fn apply_live(
