@@ -380,6 +380,7 @@ mod tests {
                     fields: BTreeMap::new(),
                     metadata: Metadata::default(),
                     gate_keys: Vec::new(),
+                    entity: None,
                 })
                 .collect()))
         }

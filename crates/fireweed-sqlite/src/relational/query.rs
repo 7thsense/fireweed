@@ -1038,6 +1038,7 @@ pub(crate) fn render_claimed(
         Option<Vec<u8>>,
         String,
         String,
+        Option<String>,
     );
     let mut requested = Vec::new();
     let mut id_strs = Vec::new();
@@ -1055,7 +1056,8 @@ pub(crate) fn render_claimed(
         let ph = vec!["?"; chunk.len()].join(",");
         let sql = format!(
             "SELECT item_id, client_item_key, item_version, priority, group_key, not_before, \
-             lease_expires_at, retry_count, max_attempts, payload, fields, metadata FROM fireweed_items \
+             lease_expires_at, retry_count, max_attempts, payload, fields, metadata, entity_document \
+             FROM fireweed_items \
              WHERE tenant_id=? AND queue_id=? AND lifecycle_state='Leased' AND item_id IN ({ph})"
         );
         let mut p: Vec<Value> = vec![Value::Text(t.clone()), Value::Text(q.clone())];
@@ -1078,6 +1080,7 @@ pub(crate) fn render_claimed(
                     row.get::<_, Option<Vec<u8>>>(9)?,
                     row.get::<_, String>(10)?,
                     row.get::<_, String>(11)?,
+                    row.get::<_, Option<String>>(12)?,
                 ),
             ))
         }))?;
@@ -1102,6 +1105,7 @@ pub(crate) fn render_claimed(
             payload,
             fields,
             metadata,
+            entity,
         )) = rows.get(&id_str).cloned()
         else {
             continue;
@@ -1126,6 +1130,7 @@ pub(crate) fn render_claimed(
             payload: payload.map(Bytes::from),
             fields: fields_from_json(fields)?,
             metadata: metadata_from_json(metadata)?,
+            entity: entity_from_json(entity)?,
             gate_keys,
         });
     }

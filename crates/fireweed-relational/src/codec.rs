@@ -54,6 +54,11 @@ pub fn metadata_from_json(raw: String) -> EngineResult<Metadata> {
     Ok(Metadata::from_entries(entries))
 }
 
+pub fn entity_from_json(raw: Option<String>) -> EngineResult<Option<JsonValue>> {
+    raw.map(|raw| serde_json::from_str(&raw).map_err(|e| EngineError::Storage(e.to_string())))
+        .transpose()
+}
+
 pub fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year = year - if month <= 2 { 1 } else { 0 };
     let era = if year >= 0 { year } else { year - 399 } / 400;

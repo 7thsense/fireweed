@@ -381,6 +381,7 @@ macro_rules! claimed_item_shape_conformance_tests {
     ($make:expr) => {
         $crate::conformance_suite!(@scenarios $make,
             claimed_item_shape_omits_empty_conditionals,
+            claimed_item_shape_round_trips_entity_document,
         );
         #[tokio::test]
         async fn claimed_item_shape_reflects_update_fields_after_reclaim() {

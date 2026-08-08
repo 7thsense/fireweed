@@ -257,6 +257,7 @@ impl ItemRecord {
             fields: self.fields.clone(),
             metadata: self.metadata.clone(),
             gate_keys: self.gate_keys.clone(),
+            entity: self.entity_document.clone(),
         })
     }
 

@@ -19,9 +19,9 @@ use fireweed_engine::{
     RichClaimSelection, ScheduleUpdate, TerminalEmissionMetrics, UpdateFieldsCommand,
 };
 use fireweed_relational::{
-    async_projection as sql, elig_sort, fields_from_json, fields_to_json, lease_hash,
-    metadata_from_json, metadata_to_json, nanos_ts, parse_priority, parse_state, ts_nanos,
-    ts_nanos_opt,
+    async_projection as sql, elig_sort, entity_from_json, fields_from_json, fields_to_json,
+    lease_hash, metadata_from_json, metadata_to_json, nanos_ts, parse_priority, parse_state,
+    ts_nanos, ts_nanos_opt,
 };
 use tokio::sync::Mutex;
 use turso::{Connection, Value, transaction::TransactionBehavior};
@@ -4599,7 +4599,8 @@ impl AsyncProjectionStore for TursoRelational {
                 params.extend(chunk.iter().map(|id| id.to_string().into()));
                 let item_sql = format!(
                     "SELECT item_id,client_item_key,item_version,priority,group_key,not_before,\
-                     lease_expires_at,retry_count,max_attempts,payload,fields,metadata FROM fireweed_items \
+                     lease_expires_at,retry_count,max_attempts,payload,fields,metadata,entity_document \
+                     FROM fireweed_items \
                      WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' \
                      AND item_id IN ({placeholders})"
                 );
@@ -4648,6 +4649,7 @@ impl AsyncProjectionStore for TursoRelational {
                     payload: optional_blob(&values[8])?.map(Bytes::from),
                     fields: fields_from_json(text(&values[9])?)?,
                     metadata: metadata_from_json(text(&values[10])?)?,
+                    entity: entity_from_json(optional_text(&values[11])?)?,
                     gate_keys: gate_keys.remove(&id).unwrap_or_default(),
                 });
             }

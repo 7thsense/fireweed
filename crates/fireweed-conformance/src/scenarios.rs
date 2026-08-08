@@ -2273,6 +2273,46 @@ pub async fn claimed_item_shape_omits_empty_conditionals<B: ConformanceCore>(mak
     );
 }
 
+/// fireweed-9fd3b49a: the entity document is authoritative on claim, not just at push, so a caller no
+/// longer has to ALSO duplicate entity-resident keys into `fields` just to read them back at claim time.
+/// Pushes an item carrying an entity document and NO `fields`, then proves the entity keys are readable
+/// off the claimed-item shape alone.
+pub async fn claimed_item_shape_round_trips_entity_document<B: ConformanceCore>(
+    make: impl Fn() -> B,
+) {
+    let b = make();
+    b.create_queue(qdef()).await.unwrap();
+    let mut pushed = item("1", "ka", 5);
+    let entity = serde_json::json!({
+        "workflow_id": "wf-42",
+        "workflow_version": 3,
+    });
+    pushed.entity_document = Some(entity.clone());
+    commit(
+        &b,
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![pushed],
+            }),
+            vec![],
+        ),
+    )
+    .await;
+
+    let claimed = b.claim(claim_req(1, 500, 100)).await.unwrap();
+    assert_eq!(claimed.items.len(), 1);
+    let got = &claimed.items[0];
+    assert!(
+        got.fields.is_empty(),
+        "entity keys must be readable without ALSO being duplicated into fields"
+    );
+    assert_eq!(
+        got.entity,
+        Some(entity),
+        "claim must return the pushed entity document verbatim"
+    );
+}
+
 pub async fn claimed_item_shape_whole_cohort_omits_per_item_lease_token<B: ConformanceCore>(
     make: impl Fn() -> B,
 ) {

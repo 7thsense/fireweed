@@ -743,6 +743,20 @@ pub struct ClaimedItem {
     pub fields: BTreeMap<String, Bytes>,
     pub metadata: Metadata,
     pub gate_keys: Vec<String>,
+    /// Typed JSON entity document (ADR-011) — see [`PushSpec::entity`]. Making the entity document
+    /// authoritative on claim (rather than just at push) removes the last forced duplication a caller
+    /// needed: entity-resident keys no longer have to ALSO be copied into `fields` at push time just so
+    /// claim can read them back. `None` for schema-less queues that use the opaque `payload`/`fields`
+    /// carriers.
+    ///
+    /// Cost: every claim path (`claim`, `claim_with`, `claim_by_query`, `claim_by_item_ids`) already
+    /// reads this column/field to evaluate typed-index and predicate matches during selection
+    /// (`entity_document` on the projection's `ItemRecord` / relational `fireweed_items.entity_document`),
+    /// so returning it costs one clone (in-memory) or one extra selected column (relational) — no
+    /// additional storage read. The only new cost is serializing it onto the wire to the caller, which is
+    /// proportional to document size and is paid ONLY when the queue is schema-typed (`None` for
+    /// schema-less queues costs nothing beyond the `Option` discriminant).
+    pub entity: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default)]

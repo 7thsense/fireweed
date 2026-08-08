@@ -800,10 +800,10 @@ FROM candidates c \
 	WHERE i.tenant_id=$1 AND i.queue_id=$2 AND i.item_id=c.item_id \
 		RETURNING i.item_id, i.client_item_key, i.item_version, i.priority, i.group_key, i.not_before, \
 		          i.lease_expires_at, i.retry_count, i.max_attempts, i.payload, i.fields, i.metadata, \
-		          i.priority_sort AS claim_priority_sort, i.created_seq AS claim_created_seq \
+		          i.entity_document, i.priority_sort AS claim_priority_sort, i.created_seq AS claim_created_seq \
 ) \
 SELECT item_id, client_item_key, item_version, priority, group_key, not_before, lease_expires_at, \
-       retry_count, max_attempts, payload, fields, metadata FROM updated \
+       retry_count, max_attempts, payload, fields, metadata, entity_document FROM updated \
 ORDER BY claim_priority_sort, claim_created_seq";
 
 pub(crate) const ITEM_GATE_KEYS_BATCH_SQL: &str = "\
@@ -1513,6 +1513,11 @@ fn metadata_to_json(metadata: &Metadata) -> EngineResult<String> {
 fn metadata_from_json(raw: String) -> EngineResult<Metadata> {
     let entries = serde_json::from_str(&raw).map_err(|e| EngineError::Storage(e.to_string()))?;
     Ok(Metadata::from_entries(entries))
+}
+
+fn entity_from_json(raw: Option<String>) -> EngineResult<Option<serde_json::Value>> {
+    raw.map(|raw| serde_json::from_str(&raw).map_err(|e| EngineError::Storage(e.to_string())))
+        .transpose()
 }
 
 fn parts(shard: &QueueKey) -> (String, String) {
@@ -4589,8 +4594,8 @@ fn pending_by_ids_sql(
 }
 
 /// Build a [`ClaimedItem`] from a row carrying (client_item_key, item_version, priority, group_key,
-/// not_before, lease_expires_at, retry_count, max_attempts, payload, fields), pairing it with `token`.
-/// Shared by the claim CTE RETURNING and the `claimed_view` read port.
+/// not_before, lease_expires_at, retry_count, max_attempts, payload, fields, entity_document), pairing it
+/// with `token`. Shared by the claim CTE RETURNING and the `claimed_view` read port.
 #[allow(clippy::too_many_arguments)]
 fn claimed_from_row(
     item_id: ItemId,
@@ -4606,6 +4611,7 @@ fn claimed_from_row(
     payload: Option<Vec<u8>>,
     fields: String,
     metadata: String,
+    entity: Option<String>,
     gate_keys: Vec<String>,
 ) -> EngineResult<ClaimedItem> {
     Ok(ClaimedItem {
@@ -4625,6 +4631,7 @@ fn claimed_from_row(
         max_attempts: max_attempts as u32,
         payload: payload.map(Bytes::from),
         fields: fields_from_json(fields)?,
+        entity: entity_from_json(entity)?,
         metadata: metadata_from_json(metadata)?,
         gate_keys,
     })
@@ -4672,7 +4679,7 @@ fn render_claimed(
     let id_strings: Vec<String> = ids.iter().map(ToString::to_string).collect();
     let rows = st(client.query(
         "SELECT item_id,client_item_key,item_version,priority,group_key,not_before, \
-         lease_expires_at,retry_count,max_attempts,payload,fields,metadata FROM fireweed_items \
+         lease_expires_at,retry_count,max_attempts,payload,fields,metadata,entity_document FROM fireweed_items \
          WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3::text[]) \
          AND lifecycle_state='Leased'",
         &[&t, &q, &id_strings],
@@ -4709,6 +4716,7 @@ fn render_claimed(
             row.get(9),
             row.get(10),
             row.get(11),
+            row.get(12),
             gate_keys,
         )?);
     }
@@ -7871,6 +7879,7 @@ fn claim_item_level_in_tx(
             row.get(9),
             row.get(10),
             row.get(11),
+            row.get(12),
             gate_keys,
         )?);
         token_ops.push(TokenOp::Set(item_id, req.lease_token.clone()));
