@@ -1,0 +1,23 @@
+{
+  "failures": [],
+  "results": [
+    {
+      "cell": "memory--postgres",
+      "insert_items": 1000000,
+      "insert_ns": 101471969038,
+      "modify_items": 500000,
+      "modify_ns": 853899918774,
+      "read_items": 1000000,
+      "read_verify_ns": 7482643786,
+      "reopen_ok": true
+    }
+  ],
+  "sizes": {
+    "batch": 1000,
+    "insert": 1000000,
+    "modify": 500000,
+    "warmup": 10000
+  },
+  "status": "passed",
+  "tier": "production"
+}

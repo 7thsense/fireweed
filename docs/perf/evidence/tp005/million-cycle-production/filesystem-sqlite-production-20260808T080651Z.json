@@ -1,0 +1,23 @@
+{
+  "failures": [],
+  "results": [
+    {
+      "cell": "filesystem--sqlite",
+      "insert_items": 1000000,
+      "insert_ns": 62385649364,
+      "modify_items": 500000,
+      "modify_ns": 40156818023,
+      "read_items": 1000000,
+      "read_verify_ns": 880761177,
+      "reopen_ok": true
+    }
+  ],
+  "sizes": {
+    "batch": 1000,
+    "insert": 1000000,
+    "modify": 500000,
+    "warmup": 10000
+  },
+  "status": "passed",
+  "tier": "production"
+}

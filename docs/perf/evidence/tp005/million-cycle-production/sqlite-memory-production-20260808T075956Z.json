@@ -1,0 +1,23 @@
+{
+  "failures": [],
+  "results": [
+    {
+      "cell": "sqlite--memory",
+      "insert_items": 1000000,
+      "insert_ns": 30359852396,
+      "modify_items": 500000,
+      "modify_ns": 16716242583,
+      "read_items": 1000000,
+      "read_verify_ns": 726492427,
+      "reopen_ok": true
+    }
+  ],
+  "sizes": {
+    "batch": 1000,
+    "insert": 1000000,
+    "modify": 500000,
+    "warmup": 10000
+  },
+  "status": "passed",
+  "tier": "production"
+}
