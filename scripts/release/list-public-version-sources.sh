@@ -16,7 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "$REPO_ROOT"
 
-target_release="${1:-v0.30.0}"
+target_release="${1:-v0.30.1}"
 if [[ ! "$target_release" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo "usage: $0 [vMAJOR.MINOR.PATCH]" >&2
     exit 2
