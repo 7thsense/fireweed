@@ -1,0 +1,334 @@
+=== storage-matrix-gate: public 20-cell StorageConfig matrix ===
+repo: /home/erik/Projects/fireweed
+REQUIRE_FULL=1
+--- full-matrix fixture check (FIREWEED_STORAGE_MATRIX_REQUIRE_FULL) ---
+  FIREWEED_S3_TEST_ENDPOINT=http://127.0.0.1:33223
+  FIREWEED_PG_TEST_URL is set
+--- functional-matrix route sources (manifest selectors; exact leaves) ---
+functional-matrix route sources self-test passed (100 leaves; strict=20 async=8 invalid=12)
+--- assert-no-legacy-storage-product-names ---
+=== assert-no-legacy-storage-product-names ===
+assert-no-legacy-storage-product-names: OK (no legacy product names on public surfaces)
+--- compile/list functional-matrix route source leaves ---
+compile/list of required source leaves passed
+--- cargo test -p fireweed --test functional_matrix_route_sources (dry-run leaves) ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.57s
+     Running tests/functional_matrix_route_sources.rs (target/debug/deps/functional_matrix_route_sources-1f1e12389f41039d)
+
+running 45 tests
+test route_source_leaf_ids_are_provider_neutral ... ok
+test async_invalid_memory_turso ... ok
+test async_invalid_postgres_memory ... ok
+test async_invalid_postgres_sqlite ... ok
+test async_invalid_memory_sqlite ... ok
+test async_invalid_postgres_postgres ... ok
+test async_invalid_memory_memory ... ok
+test async_invalid_memory_postgres ... ok
+test async_invalid_postgres_turso ... ok
+test async_invalid_sqlite_postgres ... ok
+test async_invalid_sqlite_memory ... ok
+test async_invalid_sqlite_sqlite ... ok
+test async_invalid_sqlite_turso ... ok
+test t0_t2_register_manifest_axes_match_authority ... ok
+test object_log_async_filesystem_memory ... ok
+test object_log_async_filesystem_sqlite ... ok
+test object_log_async_filesystem_postgres ... ok
+test object_log_async_filesystem_turso ... ok
+test object_log_async_s3_sqlite ... ok
+test object_log_async_s3_memory ... ok
+test object_log_async_s3_postgres ... ok
+test object_log_async_s3_turso ... ok
+test strict_filesystem_memory ... ok
+test strict_filesystem_postgres ... ok
+test strict_filesystem_sqlite ... ok
+test strict_filesystem_turso ... ok
+test strict_memory_memory ... ok
+test strict_memory_turso ... ok
+test strict_postgres_memory ... ok
+test strict_postgres_postgres ... ok
+test strict_postgres_sqlite ... ok
+test strict_postgres_turso ... ok
+test strict_memory_sqlite ... ok
+test strict_memory_postgres ... ok
+test strict_s3_memory ... ok
+test strict_s3_postgres ... ok
+test strict_s3_turso ... ok
+test strict_sqlite_sqlite ... ok
+test strict_sqlite_turso ... ok
+test strict_sqlite_postgres ... ok
+test strict_sqlite_memory ... ok
+test strict_s3_sqlite ... ok
+test ac_txn_dry_run_object_log_async_enumerates_all_8_cells ... ok
+test ac_txn_dry_run_async_invalid_enumerates_all_12_non_object_log_cells ... ok
+test ac_txn_dry_run_strict_enumerates_all_20_manifest_cells ... ok
+
+test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+--- exact T0–T2 registration leaf (no live fixture execution claim) ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.58s
+     Running tests/storage_matrix_t0_t2.rs (target/debug/deps/storage_matrix_t0_t2-12b370decd546ac3)
+
+running 1 test
+test storage_matrix_registers_exactly_20_distinct_cells ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+--- exact fireweed-server --lib leaves (compile/list) ---
+list: rustup run 1.92.0 cargo test -p fireweed-server --features postgres --lib -- --list
+  listed class_b_server:class_b_memory_log_tests::class_b_all_four_cells_t0_t3
+  listed class_b_server:class_b_memory_log_tests::class_b_four_cells_never_claim_durable_log_replay
+  listed class_b_server:class_b_memory_log_tests::class_b_memory_memory_t0_t3
+  listed class_b_server:class_b_memory_log_tests::class_b_memory_postgres_t0_t3
+  listed class_b_server:class_b_memory_log_tests::class_b_memory_projection_arms_exist_in_composition_root
+  listed class_b_server:class_b_memory_log_tests::class_b_memory_sqlite_t0_t3
+  listed class_b_server:class_b_memory_log_tests::class_b_memory_turso_t0_t3
+  listed external_kafka:feature_off:change_record_sink_mode
+  listed inline_lib:byte_admission_wiring_tests::filesystem_object_log_postgres_projection_backend_spec_and_composition_root
+  listed inline_lib:byte_admission_wiring_tests::s3_object_log_postgres_projection_backend_spec_and_composition_root
+  listed inline_lib:postgres_log_matrix_tests::postgres_log_composition_root_wires_three_projection_cells
+  listed inline_lib:postgres_log_matrix_tests::postgres_log_t3_evidence_axis_names_file_contract
+  listed inline_lib:postgres_log_matrix_tests::postgres_log_t3_tp003_ac_txn_exact_pairs
+  listed inline_lib:postgres_log_matrix_tests::postgres_log_t4_helm_ci_values_and_gate
+  listed inline_lib:sqlite_log_matrix_tests::sqlite_log_composition_root_wires_three_projection_cells
+  listed inline_lib:sqlite_log_matrix_tests::sqlite_log_memory_lifecycle_and_reopen
+  listed inline_lib:sqlite_log_matrix_tests::sqlite_log_postgres_lifecycle_and_reopen
+  listed inline_lib:sqlite_log_matrix_tests::sqlite_log_sqlite_lifecycle_and_reopen
+  listed inline_lib:sqlite_log_matrix_tests::sqlite_log_t3_evidence_axis_names_file_contract
+  listed inline_lib:sqlite_log_matrix_tests::sqlite_log_t3_tp003_ac_txn_exact_pairs
+  listed inline_lib:sqlite_log_matrix_tests::sqlite_log_t4_helm_ci_values_and_gate
+list: rustup run 1.92.0 cargo test -p fireweed-server --features postgres --test p8c_residual_delivery_cursor -- --list
+  listed external_kafka:feature_off:p8c_class_boundary
+list: rustup run 1.92.0 cargo test -p fireweed-server --features postgres,external-kafka --lib -- --list
+  listed external_kafka:feature_on:change_record_sink_mode
+list: rustup run 1.92.0 cargo test -p fireweed-server --features postgres,external-kafka --test p8cs_s3_delivery_cursor -- --list
+  listed external_kafka:feature_on:p8cs_s3_boundary
+exact server --lib + external-kafka leaves listed
+--- helm-gate (20-cell matrix fixtures + shared variants + turso default) ---
+=== helm static validation gate ===
+chart:               /home/erik/Projects/fireweed/charts/fireweed-queue
+kubeconform version: v0.6.7
+kubernetes schema:   v1.31.0
+storage combinations: memory-memory memory-sqlite memory-turso memory-postgres sqlite-memory sqlite-sqlite sqlite-turso sqlite-postgres postgres-memory postgres-sqlite postgres-turso postgres-postgres filesystem-memory filesystem-sqlite filesystem-turso filesystem-postgres s3-memory s3-sqlite s3-turso s3-postgres shared-s3-postgres-control-plane s3-sqlite-postgres-control-plane lakebase-postgres
+--- kubeconform: using cached v0.6.7 (/home/erik/Projects/fireweed/target/helm-gate/bin/kubeconform) ---
+--- canonical 20-cell T4 fixture mapping ---
+  memory-memory -> memory--memory (charts/fireweed-queue/ci/memory-memory-values.yaml)
+  memory-sqlite -> memory--sqlite (charts/fireweed-queue/ci/memory-sqlite-values.yaml)
+  memory-turso -> memory--turso (charts/fireweed-queue/ci/memory-turso-values.yaml)
+  memory-postgres -> memory--postgres (charts/fireweed-queue/ci/memory-postgres-values.yaml)
+  sqlite-memory -> sqlite--memory (charts/fireweed-queue/ci/sqlite-memory-values.yaml)
+  sqlite-sqlite -> sqlite--sqlite (charts/fireweed-queue/ci/sqlite-sqlite-values.yaml)
+  sqlite-turso -> sqlite--turso (charts/fireweed-queue/ci/sqlite-turso-values.yaml)
+  sqlite-postgres -> sqlite--postgres (charts/fireweed-queue/ci/sqlite-postgres-values.yaml)
+  postgres-memory -> postgres--memory (charts/fireweed-queue/ci/postgres-memory-values.yaml)
+  postgres-sqlite -> postgres--sqlite (charts/fireweed-queue/ci/postgres-sqlite-values.yaml)
+  postgres-turso -> postgres--turso (charts/fireweed-queue/ci/postgres-turso-values.yaml)
+  postgres-postgres -> postgres--postgres (charts/fireweed-queue/ci/postgres-postgres-values.yaml)
+  filesystem-memory -> filesystem--memory (charts/fireweed-queue/ci/filesystem-memory-values.yaml)
+  filesystem-sqlite -> filesystem--sqlite (charts/fireweed-queue/ci/filesystem-sqlite-values.yaml)
+  filesystem-turso -> filesystem--turso (charts/fireweed-queue/ci/filesystem-turso-values.yaml)
+  filesystem-postgres -> filesystem--postgres (charts/fireweed-queue/ci/filesystem-postgres-values.yaml)
+  s3-memory -> s3--memory (charts/fireweed-queue/ci/s3-memory-values.yaml)
+  s3-sqlite -> s3--sqlite (charts/fireweed-queue/ci/s3-sqlite-values.yaml)
+  s3-turso -> s3--turso (charts/fireweed-queue/ci/s3-turso-values.yaml)
+  s3-postgres -> s3--postgres (charts/fireweed-queue/ci/s3-postgres-values.yaml)
+canonical 20-cell T4 mapping: OK
+--- helm_defaults_to_turso_projection ---
+helm_defaults_to_turso_projection: OK
+--- generated bootstrap inventory contract ---
+--- demoted projection/log chart exclusion contract ---
+--- local profile fail-closed contract ---
+--- multi-replica turso durability rule contract ---
+--- helm package ---
+Successfully packaged chart and saved it to: /home/erik/Projects/fireweed/target/helm-gate/release-dist/fireweed-queue-0.6.0.tgz
+--- helm lint [memory-memory] ---
+==> Linting /home/erik/Projects/fireweed/charts/fireweed-queue
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+--- helm template + kubeconform [memory-memory] ---
+--- rendered contract assertions [memory-memory] ---
+Summary: 4 resources found parsing stdin - Valid: 4, Invalid: 0, Errors: 0, Skipped: 0
+--- helm lint [memory-sqlite] ---
+==> Linting /home/erik/Projects/fireweed/charts/fireweed-queue
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+--- helm template + kubeconform [memory-sqlite] ---
+--- rendered contract assertions [memory-sqlite] ---
+Summary: 5 resources found parsing stdin - Valid: 5, Invalid: 0, Errors: 0, Skipped: 0
+--- helm lint [memory-turso] ---
+==> Linting /home/erik/Projects/fireweed/charts/fireweed-queue
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+--- helm template + kubeconform [memory-turso] ---
+--- rendered contract assertions [memory-turso] ---
+Summary: 5 resources found parsing stdin - Valid: 5, Invalid: 0, Errors: 0, Skipped: 0
+--- helm lint [memory-postgres] ---
+==> Linting /home/erik/Projects/fireweed/charts/fireweed-queue
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+--- helm template + kubeconform [memory-postgres] ---
+--- rendered contract assertions [memory-postgres] ---
+Summary: 4 resources found parsing stdin - Valid: 4, Invalid: 0, Errors: 0, Skipped: 0
+--- helm lint [sqlite-memory] ---
+==> Linting /home/erik/Projects/fireweed/charts/fireweed-queue
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+--- helm template + kubeconform [sqlite-memory] ---
+--- rendered contract assertions [sqlite-memory] ---
+Summary: 5 resources found parsing stdin - Valid: 5, Invalid: 0, Errors: 0, Skipped: 0
+--- helm lint [sqlite-sqlite] ---
+==> Linting /home/erik/Projects/fireweed/charts/fireweed-queue
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+--- helm template + kubeconform [sqlite-sqlite] ---
+--- rendered contract assertions [sqlite-sqlite] ---
+Summary: 5 resources found parsing stdin - Valid: 5, Invalid: 0, Errors: 0, Skipped: 0
+--- helm lint [sqlite-turso] ---
+==> Linting /home/erik/Projects/fireweed/charts/fireweed-queue
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+--- helm template + kubeconform [sqlite-turso] ---
+--- rendered contract assertions [sqlite-turso] ---
+Summary: 5 resources found parsing stdin - Valid: 5, Invalid: 0, Errors: 0, Skipped: 0
+--- helm lint [sqlite-postgres] ---
+==> Linting /home/erik/Projects/fireweed/charts/fireweed-queue
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+--- helm template + kubeconform [sqlite-postgres] ---
+--- rendered contract assertions [sqlite-postgres] ---
+Summary: 5 resources found parsing stdin - Valid: 5, Invalid: 0, Errors: 0, Skipped: 0
+--- helm lint [postgres-memory] ---
+==> Linting /home/erik/Projects/fireweed/charts/fireweed-queue
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+--- helm template + kubeconform [postgres-memory] ---
+--- rendered contract assertions [postgres-memory] ---
+Summary: 4 resources found parsing stdin - Valid: 4, Invalid: 0, Errors: 0, Skipped: 0
+--- helm lint [postgres-sqlite] ---
+==> Linting /home/erik/Projects/fireweed/charts/fireweed-queue
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+--- helm template + kubeconform [postgres-sqlite] ---
+--- rendered contract assertions [postgres-sqlite] ---
+Summary: 5 resources found parsing stdin - Valid: 5, Invalid: 0, Errors: 0, Skipped: 0
+--- helm lint [postgres-turso] ---
+==> Linting /home/erik/Projects/fireweed/charts/fireweed-queue
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+--- helm template + kubeconform [postgres-turso] ---
+--- rendered contract assertions [postgres-turso] ---
+Summary: 5 resources found parsing stdin - Valid: 5, Invalid: 0, Errors: 0, Skipped: 0
+--- helm lint [postgres-postgres] ---
+==> Linting /home/erik/Projects/fireweed/charts/fireweed-queue
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+--- helm template + kubeconform [postgres-postgres] ---
+--- rendered contract assertions [postgres-postgres] ---
+Summary: 4 resources found parsing stdin - Valid: 4, Invalid: 0, Errors: 0, Skipped: 0
+--- helm lint [filesystem-memory] ---
+==> Linting /home/erik/Projects/fireweed/charts/fireweed-queue
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+--- helm template + kubeconform [filesystem-memory] ---
+--- rendered contract assertions [filesystem-memory] ---
+Summary: 5 resources found parsing stdin - Valid: 5, Invalid: 0, Errors: 0, Skipped: 0
+--- helm lint [filesystem-sqlite] ---
+==> Linting /home/erik/Projects/fireweed/charts/fireweed-queue
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+--- helm template + kubeconform [filesystem-sqlite] ---
+--- rendered contract assertions [filesystem-sqlite] ---
+Summary: 5 resources found parsing stdin - Valid: 5, Invalid: 0, Errors: 0, Skipped: 0
+--- helm lint [filesystem-turso] ---
+==> Linting /home/erik/Projects/fireweed/charts/fireweed-queue
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+--- helm template + kubeconform [filesystem-turso] ---
+--- rendered contract assertions [filesystem-turso] ---
+Summary: 5 resources found parsing stdin - Valid: 5, Invalid: 0, Errors: 0, Skipped: 0
+--- helm lint [filesystem-postgres] ---
+==> Linting /home/erik/Projects/fireweed/charts/fireweed-queue
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+--- helm template + kubeconform [filesystem-postgres] ---
+--- rendered contract assertions [filesystem-postgres] ---
+Summary: 5 resources found parsing stdin - Valid: 5, Invalid: 0, Errors: 0, Skipped: 0
+--- helm lint [s3-memory] ---
+==> Linting /home/erik/Projects/fireweed/charts/fireweed-queue
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+--- helm template + kubeconform [s3-memory] ---
+--- rendered contract assertions [s3-memory] ---
+Summary: 4 resources found parsing stdin - Valid: 4, Invalid: 0, Errors: 0, Skipped: 0
+--- helm lint [s3-sqlite] ---
+==> Linting /home/erik/Projects/fireweed/charts/fireweed-queue
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+--- helm template + kubeconform [s3-sqlite] ---
+--- rendered contract assertions [s3-sqlite] ---
+Summary: 4 resources found parsing stdin - Valid: 4, Invalid: 0, Errors: 0, Skipped: 0
+--- helm lint [s3-turso] ---
+==> Linting /home/erik/Projects/fireweed/charts/fireweed-queue
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+--- helm template + kubeconform [s3-turso] ---
+--- rendered contract assertions [s3-turso] ---
+Summary: 4 resources found parsing stdin - Valid: 4, Invalid: 0, Errors: 0, Skipped: 0
+--- helm lint [s3-postgres] ---
+==> Linting /home/erik/Projects/fireweed/charts/fireweed-queue
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+--- helm template + kubeconform [s3-postgres] ---
+--- rendered contract assertions [s3-postgres] ---
+Summary: 4 resources found parsing stdin - Valid: 4, Invalid: 0, Errors: 0, Skipped: 0
+--- helm lint [shared-s3-postgres-control-plane] ---
+==> Linting /home/erik/Projects/fireweed/charts/fireweed-queue
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+--- helm template + kubeconform [shared-s3-postgres-control-plane] ---
+--- rendered contract assertions [shared-s3-postgres-control-plane] ---
+Summary: 4 resources found parsing stdin - Valid: 4, Invalid: 0, Errors: 0, Skipped: 0
+--- helm lint [s3-sqlite-postgres-control-plane] ---
+==> Linting /home/erik/Projects/fireweed/charts/fireweed-queue
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+--- helm template + kubeconform [s3-sqlite-postgres-control-plane] ---
+--- rendered contract assertions [s3-sqlite-postgres-control-plane] ---
+Summary: 4 resources found parsing stdin - Valid: 4, Invalid: 0, Errors: 0, Skipped: 0
+--- helm lint [lakebase-postgres] ---
+==> Linting /home/erik/Projects/fireweed/charts/fireweed-queue
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+--- helm template + kubeconform [lakebase-postgres] ---
+--- rendered contract assertions [lakebase-postgres] ---
+Summary: 4 resources found parsing stdin - Valid: 4, Invalid: 0, Errors: 0, Skipped: 0
+=== helm static validation gate PASSED ===
+=== storage-matrix-gate: PASSED ===
+Release storage surface: 20 cells (StorageConfig log × projection).
+AsyncProjection: 8 object-log positives + 12 non-object-log pre-I/O negatives (manifest).
+Route sources: /home/erik/Projects/fireweed/docs/helix/04-build/functional-matrix-route-sources.json
+Full CI claims require FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1 + S3/PG fixtures.
+S3 fixture contract: scripts/ci/s3-matrix-job-requirements.md
+STORAGE_MATRIX_GATE_EXIT=0

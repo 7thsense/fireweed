@@ -1,0 +1,13 @@
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib auth::tests::authorize_operator_requires_operator_prefix -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::auth::tests::authorize_operator_requires_operator_prefix
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::replay_same_request_returns_same_operation -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::replay_same_request_returns_same_operation
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::get_returns_recorded_operation_and_none_for_unknown -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::get_returns_recorded_operation_and_none_for_unknown
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::check_then_record_flow_never_starts_a_second_operation -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::check_then_record_flow_never_starts_a_second_operation
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed-engine --lib operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact -- --exact
+ran=1 ok: Cargo.toml::fireweed-engine::fireweed_engine::test::operator::tests::cancel_stops_non_terminal_and_leaves_terminal_intact
++ rustup run 1.92.0 cargo test --manifest-path Cargo.toml --locked -p fireweed --lib test_product_validation::operator_repair_redrive_e2e -- --exact
+ran=1 ok: Cargo.toml::fireweed::fireweed::test::test_product_validation::operator_repair_redrive_e2e
+operator_validation_tests stage=S campaign=shared: 6 leaves, each ran=1

@@ -1,0 +1,67 @@
+=== pr-gate [mode=closure] ===
+--- release artifact verifier fixtures ---
+release artifact set verified in /home/erik/.cache/fleet-tmp/fireweed-release-artifacts-test.nXIBHg
+missing required release artifact: /home/erik/.cache/fleet-tmp/fireweed-release-artifacts-test.nXIBHg/deployment-proof.json
+missing required release artifact: /home/erik/.cache/fleet-tmp/fireweed-release-artifacts-test.nXIBHg/deployment-proof.md
+invalid deployment proof: deployment proof status must be passed with exit_status 0; deployment proof chart version must equal 0.0.0-test; deployment proof chart package is missing or mismatched; deployment proof image digest does not match image evidence; deployment proof image tag does not match image evidence; deployment proof image coordinate does not match image evidence; container image evidence commit does not match deployment proof; deployment proof commit does not match expected release commit; deployment proof Markdown omits commit
+invalid deployment proof: deployment proof image coordinate does not match image evidence
+release artifact verifier tests passed
+--- release identity freeze fixtures (P17v) ---
+Cargo.lock: all fireweed* package versions == 0.30.1
+pre-S note ok: docs/releases/v0.30.1.md
+verify-release-identity: ok V=0.30.1 tag=v0.30.1 reserved absent; independent coordinates preserved
+public-release-gates-identity-test: PASS (full='v0.21-source-preview' ci='v0.21-source-preview-ci')
+verify-release-identity-test: ok
+--- source predicate fixtures (P17a) ---
+warning: templates not found in /home/erik/.git-template
+ddx_inventory_root=/home/erik/.cache/fleet-tmp/fireweed-source-predicate.SEbc11/repo
+verify-source-predicate: ddx_tracked_count=0 ddx_untracked_count=0
+tracked_ignore_ok admin_untracked=0 build_untracked=0
+local_global_exclude_masking_has_no_authority=true
+admin_roots_ok roots=.ddx/ proofs=tracked_rule,contained_path,no_source_authority,no_evidence_authority,no_s_bound_reader
+build_cache_roots_ok roots=target/,scripts/site/node_modules/,__pycache__/,examples/python-resp/.venv/ proofs=tracked_rule,untracked_or_symlink_contained,tracked_lock_and_config_identity,no_credentials,no_governing_input,no_promoted_evidence_authority
+no_s_bound_reader_ok administrative=.ddx/
+verify-source-predicate: ok mode=source source=5f87bc3b923a55c360b31ad3d14326888f2c9d2e ref=HEAD
+ddx_inventory_root=/home/erik/.cache/fleet-tmp/fireweed-source-predicate.SEbc11/repo
+verify-source-predicate: ddx_tracked_count=0 ddx_untracked_count=0
+tracked_ignore_ok admin_untracked=0 build_untracked=0
+local_global_exclude_masking_has_no_authority=true
+e-mode promoted allowlist ok count=1
+verify-source-predicate: ok mode=e source=5f87bc3b923a55c360b31ad3d14326888f2c9d2e ref=HEAD
+verify-source-predicate-test: PASS
+--- governed evidence archive fixtures ---
+Preparing worktree (detached HEAD 417ebb86)
+ddx_inventory_root=/home/erik/.cache/fleet-tmp/fireweed-governed-source.9q7tIQ
+verify-source-predicate: ddx_tracked_count=1732 ddx_untracked_count=0
+tracked_ignore_ok admin_untracked=0 build_untracked=0
+local_global_exclude_masking_has_no_authority=true
+admin_roots_ok roots=.ddx/ proofs=tracked_rule,contained_path,no_source_authority,no_evidence_authority,no_s_bound_reader
+build_cache_roots_ok roots=target/,scripts/site/node_modules/,__pycache__/,examples/python-resp/.venv/ proofs=tracked_rule,untracked_or_symlink_contained,tracked_lock_and_config_identity,no_credentials,no_governing_input,no_promoted_evidence_authority
+no_s_bound_reader_ok administrative=.ddx/
+verify-source-predicate: ok mode=source source=417ebb861e01c64dca9c3c04bf05e2f3c08f4d35 ref=HEAD
+governed release composite valid for 417ebb861e01c64dca9c3c04bf05e2f3c08f4d35
+wrote governed evidence archive: /home/erik/.cache/fleet-tmp/fireweed-governed-archive-test.pwh04h/first/417ebb861e01c64dca9c3c04bf05e2f3c08f4d35.tar.gz
+wrote governed evidence digest: /home/erik/.cache/fleet-tmp/fireweed-governed-archive-test.pwh04h/first/417ebb861e01c64dca9c3c04bf05e2f3c08f4d35.tar.gz.sha256
+staged governed evidence bundle: /home/erik/.cache/fleet-tmp/fireweed-governed-archive-test.pwh04h/first/tp002-release
+417ebb861e01c64dca9c3c04bf05e2f3c08f4d35.tar.gz: OK
+ddx_inventory_root=/home/erik/.cache/fleet-tmp/fireweed-governed-source.9q7tIQ
+verify-source-predicate: ddx_tracked_count=1732 ddx_untracked_count=0
+tracked_ignore_ok admin_untracked=0 build_untracked=0
+local_global_exclude_masking_has_no_authority=true
+admin_roots_ok roots=.ddx/ proofs=tracked_rule,contained_path,no_source_authority,no_evidence_authority,no_s_bound_reader
+build_cache_roots_ok roots=target/,scripts/site/node_modules/,__pycache__/,examples/python-resp/.venv/ proofs=tracked_rule,untracked_or_symlink_contained,tracked_lock_and_config_identity,no_credentials,no_governing_input,no_promoted_evidence_authority
+no_s_bound_reader_ok administrative=.ddx/
+verify-source-predicate: ok mode=source source=417ebb861e01c64dca9c3c04bf05e2f3c08f4d35 ref=HEAD
+governed release composite valid for 417ebb861e01c64dca9c3c04bf05e2f3c08f4d35
+wrote governed evidence archive: /home/erik/.cache/fleet-tmp/fireweed-governed-archive-test.pwh04h/second/417ebb861e01c64dca9c3c04bf05e2f3c08f4d35.tar.gz
+wrote governed evidence digest: /home/erik/.cache/fleet-tmp/fireweed-governed-archive-test.pwh04h/second/417ebb861e01c64dca9c3c04bf05e2f3c08f4d35.tar.gz.sha256
+staged governed evidence bundle: /home/erik/.cache/fleet-tmp/fireweed-governed-archive-test.pwh04h/second/tp002-release
+417ebb861e01c64dca9c3c04bf05e2f3c08f4d35.tar.gz: OK
+build-governed-evidence-bundle-test: PASS
+--- governed evidence promoter fixtures (P17e) ---
+warning: templates not found in /home/erik/.git-template
+Preparing worktree (detached HEAD 612ea02)
+promote-governed-evidence-test: PASS
+--- storage remediation policy [closure] ---
+storage remediation policy: zero debt; closure enabled
+=== pr-gate [closure] PASSED ===

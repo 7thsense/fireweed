@@ -1,0 +1,1 @@
+operator_validation_tests stage=S campaign=storage: out_of_campaign (6 bound leaves; not invoked)
