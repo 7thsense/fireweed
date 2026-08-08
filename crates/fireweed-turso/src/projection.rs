@@ -4882,11 +4882,14 @@ mod push_batch_lowering_tests {
             .split("/// RESP/server read surface")
             .next()
             .unwrap();
+        // renew_validate is followed by commit_validate (also set-based), then finalize_validate.
+        // Bound each body to the next sibling method so an intervening validation helper is not
+        // attributed to renew.
         let renew = source
             .split("fn renew_validate(")
             .nth(1)
             .unwrap()
-            .split("fn finalize_validate(")
+            .split("fn commit_validate(")
             .next()
             .unwrap();
         let finalize = source
