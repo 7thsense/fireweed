@@ -35,11 +35,11 @@
       "guard": 1,
       "inline_lib": 13,
       "object_log_async": 8,
-      "p4_method_suite": 19,
+      "p4_method_suite": 22,
       "strict": 20,
       "t0_t2": 10
     },
-    "leaves": 97,
+    "leaves": 100,
     "object_log_async": 8,
     "strict": 20
   },
@@ -2386,6 +2386,50 @@
         "--test",
         "public_interface_external_conformance"
       ],
+      "cell_id": "memory--postgres",
+      "exact": true,
+      "feature_tuple": null,
+      "features": [
+        "memory",
+        "sqlite",
+        "objectlog",
+        "postgres",
+        "turso"
+      ],
+      "kind": "p4_method_suite",
+      "leaf_id": "p4:public_interface_external_conformance::memory_postgres_public_interface",
+      "list_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "-p",
+        "fireweed",
+        "--features",
+        "memory,sqlite,objectlog,postgres,turso",
+        "--test",
+        "public_interface_external_conformance",
+        "--",
+        "--list",
+        "memory_postgres_public_interface",
+        "--exact"
+      ],
+      "notes": "P4 API-005 suite ownership exact cell module leaf",
+      "package": "fireweed",
+      "provider_neutral": true,
+      "test_filter": "memory_postgres_public_interface"
+    },
+    {
+      "cargo_args": [
+        "test",
+        "-p",
+        "fireweed",
+        "--features",
+        "memory,sqlite,objectlog,postgres,turso",
+        "--test",
+        "public_interface_external_conformance"
+      ],
       "cell_id": "postgres--memory--convenience-async",
       "exact": true,
       "feature_tuple": null,
@@ -2738,6 +2782,50 @@
         "--test",
         "public_interface_external_conformance"
       ],
+      "cell_id": "postgres--sqlite",
+      "exact": true,
+      "feature_tuple": null,
+      "features": [
+        "memory",
+        "sqlite",
+        "objectlog",
+        "postgres",
+        "turso"
+      ],
+      "kind": "p4_method_suite",
+      "leaf_id": "p4:public_interface_external_conformance::postgres_sqlite_public_interface",
+      "list_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "-p",
+        "fireweed",
+        "--features",
+        "memory,sqlite,objectlog,postgres,turso",
+        "--test",
+        "public_interface_external_conformance",
+        "--",
+        "--list",
+        "postgres_sqlite_public_interface",
+        "--exact"
+      ],
+      "notes": "P4 API-005 suite ownership exact cell module leaf",
+      "package": "fireweed",
+      "provider_neutral": true,
+      "test_filter": "postgres_sqlite_public_interface"
+    },
+    {
+      "cargo_args": [
+        "test",
+        "-p",
+        "fireweed",
+        "--features",
+        "memory,sqlite,objectlog,postgres,turso",
+        "--test",
+        "public_interface_external_conformance"
+      ],
       "cell_id": "s3--postgres--strict",
       "exact": true,
       "feature_tuple": null,
@@ -2859,6 +2947,50 @@
       "package": "fireweed",
       "provider_neutral": true,
       "test_filter": "s3_sqlite_strict_public_interface"
+    },
+    {
+      "cargo_args": [
+        "test",
+        "-p",
+        "fireweed",
+        "--features",
+        "memory,sqlite,objectlog,postgres,turso",
+        "--test",
+        "public_interface_external_conformance"
+      ],
+      "cell_id": "sqlite--postgres",
+      "exact": true,
+      "feature_tuple": null,
+      "features": [
+        "memory",
+        "sqlite",
+        "objectlog",
+        "postgres",
+        "turso"
+      ],
+      "kind": "p4_method_suite",
+      "leaf_id": "p4:public_interface_external_conformance::sqlite_postgres_public_interface",
+      "list_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "-p",
+        "fireweed",
+        "--features",
+        "memory,sqlite,objectlog,postgres,turso",
+        "--test",
+        "public_interface_external_conformance",
+        "--",
+        "--list",
+        "sqlite_postgres_public_interface",
+        "--exact"
+      ],
+      "notes": "P4 API-005 suite ownership exact cell module leaf",
+      "package": "fireweed",
+      "provider_neutral": true,
+      "test_filter": "sqlite_postgres_public_interface"
     },
     {
       "cargo_args": [
