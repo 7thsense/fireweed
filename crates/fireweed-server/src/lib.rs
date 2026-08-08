@@ -3380,12 +3380,25 @@ async fn open_objectlog_s3_memory_backend(
     async_projection: Option<AsyncProjectionSpec>,
 ) -> EngineResult<fireweed_objectlog::AsyncObjectLogMemoryBackend> {
     let flush = objectlog_flush_from_segment(&segment_config);
-    let log = fireweed_objectlog::ObjectLogEngineStore::open_s3(
+    // Isolate each open in a unique S3 key prefix so concurrent/serial product
+    // opens never share recovery state (shared default prefixes caused UNIQUE
+    // constraint failures on sqlite projection recovery).
+    let ns = format!(
+        "fw-s3-mem-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let log = fireweed_objectlog::ObjectLogEngineStore::open_s3_with_prefixes(
         &endpoint,
         &region,
         &bucket,
         &access_key_id,
         &secret_access_key,
+        format!("{ns}/fwlog/"),
+        format!("{ns}/fwmeta/"),
         flush,
     )
     .await?;
@@ -3473,12 +3486,22 @@ async fn open_objectlog_s3_sqlite_backend(
 ) -> EngineResult<fireweed_objectlog::AsyncObjectLogSqliteBackend> {
     let flush = objectlog_flush_from_segment(&segment_config);
     let chunk = deferred_flush_chunk.unwrap_or(fireweed_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK);
-    let log = fireweed_objectlog::ObjectLogEngineStore::open_s3(
+    let ns = format!(
+        "fw-s3-sqlite-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let log = fireweed_objectlog::ObjectLogEngineStore::open_s3_with_prefixes(
         &endpoint,
         &region,
         &bucket,
         &access_key_id,
         &secret_access_key,
+        format!("{ns}/fwlog/"),
+        format!("{ns}/fwmeta/"),
         flush,
     )
     .await?;
@@ -3546,12 +3569,22 @@ async fn open_objectlog_s3_turso_backend(
 ) -> EngineResult<fireweed::turso_compose::DerivedObjectLogTursoBackend> {
     let _ = node_id;
     let flush = objectlog_flush_from_segment(&segment_config);
-    let log = fireweed_objectlog::ObjectLogEngineStore::open_s3(
+    let ns = format!(
+        "fw-s3-turso-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let log = fireweed_objectlog::ObjectLogEngineStore::open_s3_with_prefixes(
         &endpoint,
         &region,
         &bucket,
         &access_key_id,
         &secret_access_key,
+        format!("{ns}/fwlog/"),
+        format!("{ns}/fwmeta/"),
         flush,
     )
     .await?;
@@ -3613,12 +3646,22 @@ async fn open_objectlog_s3_postgres_backend(
     async_projection: Option<AsyncProjectionSpec>,
 ) -> EngineResult<Arc<ObjectLogPostgresBackend>> {
     let flush = objectlog_flush_from_segment(&segment_config);
-    let log = fireweed_objectlog::ObjectLogEngineStore::open_s3(
+    let ns = format!(
+        "fw-s3-pg-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let log = fireweed_objectlog::ObjectLogEngineStore::open_s3_with_prefixes(
         &endpoint,
         &region,
         &bucket,
         &access_key_id,
         &secret_access_key,
+        format!("{ns}/fwlog/"),
+        format!("{ns}/fwmeta/"),
         flush,
     )
     .await?;
