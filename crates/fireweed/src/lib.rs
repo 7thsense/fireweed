@@ -98,7 +98,7 @@ pub use fireweed_engine::{
     OperatorAuditRecord, OperatorItemView, OperatorOpKind, OperatorOpPayload,
     OperatorOperationState, OperatorProgress, PayloadUpdate, PushBatchOutcome, PushDisposition,
     QueueAdminState, QueueKey, QueueMetrics, RepairAction, RetryCountMode, ScheduleUpdate,
-    SelectedMutation, SideRecord, SnapshotStore, TimestampComparison, UpsertOutcome,
+    SelectedMutation, SideRecord, SideRecordPage, SnapshotStore, TimestampComparison, UpsertOutcome,
 };
 pub use operator::OPERATOR_ARCHIVED_METADATA_KEY;
 
@@ -4865,6 +4865,24 @@ impl<B: LibBackend> RuntimeCore<B> {
     /// `Ok(None)` if unwritten.
     pub async fn side_record(&self, queue: &QueueKey, key: &[u8]) -> EngineResult<Option<Bytes>> {
         let r = self.backend.side_record(queue, key).await;
+        self.note(queue, r)
+    }
+
+    /// Paged, key-ascending scan of opaque side records whose key starts with `prefix` (bead
+    /// fireweed-e47e9287; see [`SideRecordPage`]). A pure read: no epoch/fence check. `cursor` resumes
+    /// from a prior page's `next_cursor` (`None` starts at `prefix` itself). `Unavailable` on a backend
+    /// that has not implemented the scan (point-get-only `side_record` remains available there).
+    pub async fn side_records_by_prefix(
+        &self,
+        queue: &QueueKey,
+        prefix: &[u8],
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> EngineResult<SideRecordPage> {
+        let r = self
+            .backend
+            .side_records_by_prefix(queue, prefix, page_size, cursor)
+            .await;
         self.note(queue, r)
     }
 

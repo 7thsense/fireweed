@@ -2060,6 +2060,23 @@ impl RecoveryReadPort for SqliteRelationalBackend {
         })();
         std::future::ready(result)
     }
+
+    /// Paged, key-ascending scan of opaque side records whose key starts with `prefix` (bead
+    /// fireweed-e47e9287). See `side_records_by_prefix_sql` for the index-seek cost characterization.
+    fn side_records_by_prefix(
+        &self,
+        shard: &QueueKey,
+        prefix: &[u8],
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::SideRecordPage>> + Send
+    {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            side_records_by_prefix_sql(&g.conn, shard, prefix, page_size, cursor)
+        })();
+        std::future::ready(result)
+    }
 }
 
 /// SQLite API-004 implementation. Every advertised operation resolves through the durable declared-index

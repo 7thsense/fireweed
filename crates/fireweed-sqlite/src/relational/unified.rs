@@ -814,6 +814,16 @@ impl ProjectionStore for SqliteRelational {
         side_record_sql(&self.lock().conn, shard, key)
     }
 
+    fn side_records_by_prefix(
+        &self,
+        shard: &QueueKey,
+        prefix: &[u8],
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> EngineResult<fireweed_engine::SideRecordPage> {
+        side_records_by_prefix_sql(&self.lock().conn, shard, prefix, page_size, cursor)
+    }
+
     fn select_eligible(
         &self,
         shard: &QueueKey,

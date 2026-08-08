@@ -48,7 +48,8 @@ use fireweed_engine::{
     LeaseView, LifecyclePatch, LiveItemView, MutateItemsCommand, PayloadUpdate, PendingPage,
     PendingSummary, ProjectionSnapshot, PushItem, QueueCommand, QueueCounters, QueueKey,
     QueueMetrics, ResolvedItemMutation, ResolvedItemMutationAction, ResolvedItemValues,
-    ScheduleUpdate, SnapshotRef, TerminalEmissionMetrics, UpdateFieldsCommand, project_scopes,
+    ScheduleUpdate, SideRecordPage, SnapshotRef, TerminalEmissionMetrics, UpdateFieldsCommand,
+    project_scopes,
 };
 use serde_json::Value;
 
@@ -4073,6 +4074,37 @@ impl ProjectionData {
     /// work and is unaffected by item finalization.
     pub fn side_record(&self, key: &[u8]) -> Option<&Bytes> {
         self.side_records.get(key)
+    }
+
+    /// Paged, key-ascending scan of opaque side records whose key starts with `prefix` (bead
+    /// fireweed-e47e9287). `side_records` is a `BTreeMap`, so this is an ordered-map range seek to
+    /// `cursor.unwrap_or(prefix)` bounded by `page_size + 1` entries — O(page_size), not O(map size).
+    pub fn side_records_by_prefix(
+        &self,
+        prefix: &[u8],
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> SideRecordPage {
+        // Mirrors the sqlite-backed composition's page cap (fireweed-sqlite's
+        // `SIDE_RECORD_MAX_PAGE_SIZE`) so a caller sees the same page-size ceiling regardless of backend.
+        let page_size = page_size.min(1_000);
+        let start = cursor.unwrap_or_else(|| prefix.to_vec());
+        let mut entries = Vec::new();
+        let mut next_cursor = None;
+        for (key, payload) in self.side_records.range(start..) {
+            if !key.starts_with(prefix) {
+                break;
+            }
+            if entries.len() == page_size {
+                next_cursor = Some(key.clone());
+                break;
+            }
+            entries.push((key.clone(), payload.clone()));
+        }
+        SideRecordPage {
+            entries,
+            next_cursor,
+        }
     }
 
     /// Read the stored instance/state fence for `key` (Snorri authoritative-commit boundary). `None` if the

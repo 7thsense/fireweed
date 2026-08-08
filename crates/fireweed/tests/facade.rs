@@ -406,3 +406,103 @@ async fn objectlog_sqlite_strict_upsert_claim_commit_transition() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Bead fireweed-e47e9287: `Fireweed::side_records_by_prefix` is reachable through the public
+/// trait-object facade (not just a concrete sqlite backend type), over the `sqlite`-log ×
+/// `in-memory`-projection composition (`open_sqlite`). Proves ordered, prefix-isolated hydration of an
+/// instance's audit chain — the read snorri needs to key audit records as
+/// `audit:{workflow_instance_id}:{transition_request_id}` and enumerate one instance's chain from a single
+/// prefix instead of tracking key lists in the checkpoint head.
+#[tokio::test]
+async fn side_records_by_prefix_reads_through_facade_over_sqlite_log() {
+    use fireweed::open_sqlite;
+    let path = std::env::temp_dir()
+        .join(format!(
+            "fireweed-facade-prefix-scan-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+        .to_str()
+        .unwrap()
+        .to_string();
+    let _ = std::fs::remove_file(&path);
+    let q = qkey();
+
+    let fireweed = open_sqlite(&path, Arc::new(ManualClock::at(0))).unwrap();
+    fireweed.create_queue(qdef()).await.unwrap();
+
+    let key = ClientItemKey::new("work-1").unwrap();
+    let upserted = fireweed.upsert(&q, key, at(10)).await.unwrap();
+    let item_id = match upserted {
+        UpsertOutcome::Inserted { item_id } => item_id,
+        other => panic!("expected insert, got {other:?}"),
+    };
+    let claimed = fireweed.claim(&q, 1, 30_000).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].item_id, item_id);
+    let claim = &claimed[0];
+    let claim_ref = ClaimRef {
+        item_id: claim.item_id,
+        lease_token: claim
+            .lease_token
+            .clone()
+            .expect("claimed item carries a lease token"),
+        lease_expires_at: claim.lease_expires_at,
+        item_version: claim.item_version,
+    };
+
+    fireweed
+        .commit(
+            &q,
+            CommitRequest {
+                request_id: Some(RequestId::new("txn-prefix").unwrap()),
+                entries: vec![CommitEntry {
+                    claim_ref,
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![
+                        SideRecord {
+                            key: b"audit:instance-1:001".to_vec(),
+                            payload: Bytes::from_static(b"one"),
+                        },
+                        SideRecord {
+                            key: b"audit:instance-1:002".to_vec(),
+                            payload: Bytes::from_static(b"two"),
+                        },
+                        SideRecord {
+                            key: b"audit:instance-2:001".to_vec(),
+                            payload: Bytes::from_static(b"other-instance"),
+                        },
+                    ],
+                    lifecycle_items: vec![],
+                    instance_fence: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+    let page = fireweed
+        .side_records_by_prefix(&q, b"audit:instance-1:", 1, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.entries,
+        vec![(b"audit:instance-1:001".to_vec(), Bytes::from_static(b"one"))]
+    );
+    let cursor = page.next_cursor.clone().expect("a second entry remains");
+
+    let page2 = fireweed
+        .side_records_by_prefix(&q, b"audit:instance-1:", 1, Some(cursor))
+        .await
+        .unwrap();
+    assert_eq!(
+        page2.entries,
+        vec![(b"audit:instance-1:002".to_vec(), Bytes::from_static(b"two"))]
+    );
+    assert_eq!(page2.next_cursor, None);
+
+    let _ = std::fs::remove_file(&path);
+}

@@ -490,6 +490,20 @@ impl<B: super::LibBackend + 'static> RecoveryReadPort for BlockingLibBackend<B> 
             move |i| async move { i.side_record(&q, &key).await },
         )
     }
+    fn side_records_by_prefix(
+        &self,
+        shard: &QueueKey,
+        prefix: &[u8],
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> impl Future<Output = EngineResult<SideRecordPage>> + Send {
+        let q = shard.clone();
+        let prefix = prefix.to_vec();
+        self.dispatch(q.clone(), move |i| async move {
+            i.side_records_by_prefix(&q, &prefix, page_size, cursor)
+                .await
+        })
+    }
 }
 impl<B: super::LibBackend + 'static> RenewLeasePort for BlockingLibBackend<B> {
     fn renew(

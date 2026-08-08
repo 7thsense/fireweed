@@ -8,7 +8,8 @@ use fireweed_core::{
 use fireweed_engine::{
     ActiveScope, BatchUpdateItemRef, BatchUpdateSnapshotItem, ClaimCompatibility, ClaimedItem,
     CohortLeaseTarget, DiscoveryGranularity, EngineError, EngineResult, ItemView, LeaseView,
-    LiveItemView, PendingPage, PendingSummary, QueueKey, QueueMetrics, project_scopes,
+    LiveItemView, PendingPage, PendingSummary, QueueKey, QueueMetrics, SideRecordPage,
+    project_scopes,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
@@ -1736,6 +1737,53 @@ pub(crate) fn side_record_sql(
         )
         .optional())?;
     Ok(payload.map(Bytes::from))
+}
+
+/// Server-side cap on `side_records_by_prefix`'s `page_size` (bead fireweed-e47e9287), mirroring the
+/// API-004 range-scan page bound so one call cannot force an unbounded materialization.
+pub(crate) const SIDE_RECORD_MAX_PAGE_SIZE: usize = 1_000;
+
+/// Paged, key-ascending scan of opaque side records whose key starts with `prefix`. Seeks the existing
+/// `fireweed_side_records` primary-key index (`tenant_id, queue_id, key`) to `cursor.unwrap_or(prefix)` and
+/// reads at most `page_size + 1` rows in index order — an index range scan, not a table scan, and its cost
+/// is bounded by the page, not the table. The `+1` row (if fetched and still prefix-matching) becomes
+/// `next_cursor`; a fetched row that no longer starts with `prefix` ends the prefix's key range and is
+/// dropped without needing a computed upper bound.
+pub(crate) fn side_records_by_prefix_sql(
+    conn: &Connection,
+    shard: &QueueKey,
+    prefix: &[u8],
+    page_size: usize,
+    cursor: Option<Vec<u8>>,
+) -> EngineResult<SideRecordPage> {
+    let page_size = page_size.min(SIDE_RECORD_MAX_PAGE_SIZE);
+    let (t, q) = parts(shard);
+    let start = cursor.unwrap_or_else(|| prefix.to_vec());
+    let limit = (page_size as i64).saturating_add(1);
+    let mut stmt = st(conn.prepare(
+        "SELECT key, payload FROM fireweed_side_records \
+         WHERE tenant_id=?1 AND queue_id=?2 AND key>=?3 \
+         ORDER BY key ASC LIMIT ?4",
+    ))?;
+    let mut rows = st(stmt.query(params![t, q, start, limit]))?;
+    let mut entries = Vec::new();
+    let mut next_cursor = None;
+    while let Some(row) = st(rows.next())? {
+        let key: Vec<u8> = st(row.get(0))?;
+        if !key.starts_with(prefix) {
+            break;
+        }
+        if entries.len() == page_size {
+            next_cursor = Some(key);
+            break;
+        }
+        let payload: Vec<u8> = st(row.get(1))?;
+        entries.push((key, Bytes::from(payload)));
+    }
+    Ok(SideRecordPage {
+        entries,
+        next_cursor,
+    })
 }
 
 #[cfg(test)]

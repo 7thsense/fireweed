@@ -1461,6 +1461,16 @@ pub struct CommitRecovery {
     pub entries: Vec<EntryRecovery>,
 }
 
+/// One page of an ordered, key-prefix-scanned side-record read (bead fireweed-e47e9287). `entries` are
+/// `(key, payload)` pairs ordered by key ascending. `next_cursor` is `Some(key)` — the first not-yet-returned
+/// matching key, passed back verbatim to resume — iff more entries under `prefix` remain; `None` means the
+/// page reached the end of the prefix's key range.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SideRecordPage {
+    pub entries: Vec<(Vec<u8>, Bytes)>,
+    pub next_cursor: Option<Vec<u8>>,
+}
+
 /// Recovery/explain reads for the authoritative commit boundary (epic pqueue-2201fd37 acceptance #5). The
 /// default impl returns [`EngineError::Unavailable`](crate::EngineError::Unavailable) so backends without an
 /// authoritative commit boundary expose no (misleading) recovery surface.
@@ -1484,6 +1494,22 @@ pub trait RecoveryReadPort: Send + Sync {
         _shard: &QueueKey,
         _key: &[u8],
     ) -> impl std::future::Future<Output = EngineResult<Option<Bytes>>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+
+    /// Paged, key-ascending-ordered scan of opaque side records whose key starts with `prefix`
+    /// (recovery/audit read, bead fireweed-e47e9287). A pure read: no epoch/fence check, so a concurrent
+    /// writer under the same prefix may or may not be visible in the page. `cursor` resumes from a prior
+    /// page's `next_cursor` (`None` starts at `prefix` itself). Returns at most `page_size` entries;
+    /// `page_size == 0` yields an empty page whose `next_cursor` still reports the first match, if any.
+    /// The default returns [`EngineError::Unavailable`] — a backend must opt in.
+    fn side_records_by_prefix(
+        &self,
+        _shard: &QueueKey,
+        _prefix: &[u8],
+        _page_size: usize,
+        _cursor: Option<Vec<u8>>,
+    ) -> impl std::future::Future<Output = EngineResult<SideRecordPage>> + Send {
         std::future::ready(Err(EngineError::Unavailable))
     }
 }

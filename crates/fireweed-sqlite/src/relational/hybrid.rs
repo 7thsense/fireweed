@@ -1264,6 +1264,18 @@ impl ProjectionStore for HybridProjectionStore {
         self.memory.side_record(shard, key)
     }
 
+    fn side_records_by_prefix(
+        &self,
+        shard: &QueueKey,
+        prefix: &[u8],
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> EngineResult<fireweed_engine::SideRecordPage> {
+        self.require_hydrated(shard)?;
+        self.memory
+            .side_records_by_prefix(shard, prefix, page_size, cursor)
+    }
+
     /// Prefer durable SQLite retained-commit rows when present (Strict/async checkpoint); fall back to
     /// the in-process default (None) only when the durable image has nothing for this request_id.
     fn replay_durable_commit(

@@ -41,8 +41,8 @@ use crate::{
     PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueCounters, QueueIdempotencyCache,
     QueueKey, QueueMetrics, RawCommitFault, RawCommitOutcome, RawCommitRequest,
     ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort,
-    ReplacePendingCommand, RequestIdReplayProbe, RequestOutcome, SnapshotRef, SnapshotStore,
-    TerminalEmissionMetrics, TickReport, UnifiedAtomicCommit, UnifiedAtomicCommitter,
+    ReplacePendingCommand, RequestIdReplayProbe, RequestOutcome, SideRecordPage, SnapshotRef,
+    SnapshotStore, TerminalEmissionMetrics, TickReport, UnifiedAtomicCommit, UnifiedAtomicCommitter,
     UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, WriteSideRecordsCommand,
     batch_update_body_hash, build_push_items, claim_by_item_ids_body_hash,
     claim_by_query_body_hash, commit_body_hash, compile_entity_schema, generate_query_lease_token,
@@ -3043,6 +3043,19 @@ where
             self.projection
                 .with_store(|projection| ProjectionStore::side_record(projection, shard, &key)),
         )
+    }
+
+    fn side_records_by_prefix(
+        &self,
+        shard: &QueueKey,
+        prefix: &[u8],
+        page_size: usize,
+        cursor: Option<Vec<u8>>,
+    ) -> impl std::future::Future<Output = EngineResult<SideRecordPage>> + Send {
+        let prefix = prefix.to_vec();
+        std::future::ready(self.projection.with_store(|projection| {
+            ProjectionStore::side_records_by_prefix(projection, shard, &prefix, page_size, cursor)
+        }))
     }
 }
 
