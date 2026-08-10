@@ -16,24 +16,24 @@ fail() {
 }
 
 # Positive path against the real tree.
-bash "${SCRIPT_DIR}/verify-release-identity.sh" --version 0.30.1
+bash "${SCRIPT_DIR}/verify-release-identity.sh" --version 0.31.2
 
 # Inventory classifies independent coordinates and reports tag reservation.
-inventory="$(bash "${SCRIPT_DIR}/list-public-version-sources.sh" v0.30.1)"
+inventory="$(bash "${SCRIPT_DIR}/list-public-version-sources.sh" v0.31.2)"
 printf '%s\n' "$inventory" | grep -Fq 'crates/fireweed-bench/Cargo.toml: package.version=0.3.1; treatment=independent tool coordinate' ||
     fail "bench independent classification missing"
 printf '%s\n' "$inventory" | grep -Fq 'treatment=independent gate-set identity; owner=P13a' ||
     fail "gate-set independent classification missing"
-printf '%s\n' "$inventory" | grep -Fq 'git tag v0.30.1: state=absent' ||
+printf '%s\n' "$inventory" | grep -Fq 'git tag v0.31.2: state=absent' ||
     fail "tag reservation absent state missing"
-printf '%s\n' "$inventory" | grep -Fq 'Cargo.toml: workspace.package.version=0.30.1; treatment=release-synchronized' ||
+printf '%s\n' "$inventory" | grep -Fq 'Cargo.toml: workspace.package.version=0.31.2; treatment=release-synchronized' ||
     fail "workspace synchronized classification missing"
 
 # Negative: wrong expected version fails.
 if bash "${SCRIPT_DIR}/verify-release-identity.sh" --version 0.30.0 >/dev/null 2>"${CASE_ROOT}/wrong-version.err"; then
     fail "expected version mismatch to fail"
 fi
-grep -Fq 'workspace.package.version=0.30.1 != 0.30.0' "${CASE_ROOT}/wrong-version.err" ||
+grep -Fq 'workspace.package.version=0.31.2 != 0.30.0' "${CASE_ROOT}/wrong-version.err" ||
     fail "wrong-version diagnostic missing"
 
 # Negative: missing usage args fail closed.
