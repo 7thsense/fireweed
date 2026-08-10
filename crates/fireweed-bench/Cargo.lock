@@ -1214,7 +1214,7 @@ checksum = "26b73573e6edcd2af0cdf47bd6cb58f0b3839491263c314eaad1ccf24430e1de"
 
 [[package]]
 name = "fireweed"
-version = "0.31.2"
+version = "0.31.3"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -1252,7 +1252,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-core"
-version = "0.31.2"
+version = "0.31.3"
 dependencies = [
  "axon-esf",
  "serde",
@@ -1261,7 +1261,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-engine"
-version = "0.31.2"
+version = "0.31.3"
 dependencies = [
  "axon-esf",
  "base64",
@@ -1276,7 +1276,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-memory"
-version = "0.31.2"
+version = "0.31.3"
 dependencies = [
  "bytes",
  "fireweed-core",
@@ -1286,7 +1286,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-objectlog"
-version = "0.31.2"
+version = "0.31.3"
 dependencies = [
  "aws-sdk-s3",
  "bytes",
@@ -1302,7 +1302,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-postgres"
-version = "0.31.2"
+version = "0.31.3"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -1319,7 +1319,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-projection"
-version = "0.31.2"
+version = "0.31.3"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -1332,7 +1332,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-relational"
-version = "0.31.2"
+version = "0.31.3"
 dependencies = [
  "bytes",
  "fireweed-core",
@@ -1344,7 +1344,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-release"
-version = "0.31.2"
+version = "0.31.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -1353,7 +1353,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-sqlite"
-version = "0.31.2"
+version = "0.31.3"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -1369,7 +1369,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-turso"
-version = "0.31.2"
+version = "0.31.3"
 dependencies = [
  "bytes",
  "fireweed-core",
