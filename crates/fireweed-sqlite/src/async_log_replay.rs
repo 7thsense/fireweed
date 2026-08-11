@@ -8,7 +8,7 @@
 //! runs on a Tokio reactor thread. That is not process-wide `BlockingLibBackend`.
 
 use fireweed_engine::{
-    AsyncLogReplayBackend, EngineResult, assemble_async_log_replay_with_axis_offload,
+    AsyncLogReplayBackend, EngineResult, assemble_async_log_replay_with_concurrent_projection_reads,
 };
 use fireweed_projection::InMemoryProjection;
 
@@ -31,18 +31,21 @@ pub fn async_composed_sqlite_backend(
 
 /// Assemble from an already-opened [`SqliteLog`] (caller typically runs recover for durable paths).
 ///
-/// Offloads the sqlite log axis only; pairs with an in-memory projection.
+/// Offloads the sqlite log axis only; pairs with an in-memory projection. The projection axis uses
+/// [`InProcessProjectionStore::new_with_concurrent_reads`](fireweed_engine::InProcessProjectionStore::new_with_concurrent_reads)
+/// (fireweed-7b74ceac): `InMemoryProjection` is `Send + Sync` and safe for concurrent shared reads, so
+/// point reads no longer funnel behind an in-flight commit's exclusive lock (fireweed-451a6b23's
+/// mixed-op funnel probe).
 pub fn from_sqlite_log(
     log: SqliteLog,
     node_id: u8,
 ) -> EngineResult<AsyncLogReplayBackend<SqliteLog, InMemoryProjection>> {
     // offload_log=true: rusqlite whole-ops on private bounded executor.
-    // offload_projection=false: InMemoryProjection is CPU-only ready-future safe.
-    assemble_async_log_replay_with_axis_offload(
+    // offload_projection is implicit "false": InMemoryProjection is CPU-only ready-future safe.
+    assemble_async_log_replay_with_concurrent_projection_reads(
         log,
         InMemoryProjection::new(),
         node_id,
         true,
-        false,
     )
 }
