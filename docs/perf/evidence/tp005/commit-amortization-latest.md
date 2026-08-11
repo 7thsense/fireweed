@@ -163,3 +163,15 @@ gate can actually fail rather than silently passing forever.
 
 No absolute ms/entry floor is asserted here (host-dependent); absolute software-floor gates stay
 on the lean `open_sqlite` shapes only (e.g. finalize+side+fence @512 ≤0.25 ms/entry).
+
+## Post-fix tip 00f3bd8b (log-replay single-hop + envelope coalesce)
+
+Local ManualClock snorri-shaped (19 indexes, ~2.3KB), release profile:
+
+| composition | @64 | @500 | @512 |
+|---|---:|---:|---:|
+| open_sqlite | ~0.20–0.38 | ~0.10–0.22 | ~0.09–0.18 |
+| open_sqlite_relational | ~0.55–0.75 | ~0.41–0.51 | ~0.34–0.43 |
+
+Amortization holds (ratio <1.0). Absolute on open_sqlite near ~0.1 ms/entry software target
+at large batches. Relational still higher. Snorri must re-measure w=8 ladder on 00f3bd8b+.
