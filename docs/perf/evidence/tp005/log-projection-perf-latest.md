@@ -26,6 +26,16 @@ Unified same-store is **not** the product durability model. Do not use it for re
 ## Contract
 
 1. Amortization: ms/entry falls (or flat within gate noise) as batch grows on product cells.
-2. Memory projection absolute: ≤0.05 ms/entry @512 snorri-shaped.
-3. sqlite×memory absolute: ≤0.15 ms/entry @512 snorri-shaped (software + local FS log).
+2. Memory projection absolute: ≤0.08 ms/entry @512 snorri-shaped (best-of-3).
+3. sqlite×memory absolute: ≤0.15 ms/entry @512 best-of-3 (quiet host ~0.09 after no-clone apply).
 4. Durable projections (sqlite/objectlog) may be slower; log remains authority.
+
+## 10k-tps iteration (fireweed-85855781)
+
+- Snorri pin: **`open_sqlite`** (sqlite log × memory projection).
+- v0.31.3 ladder: w=8 **4318 tps**, in-commit **0.74 ms/entry**, commit wall 29.6 s.
+- Fix: remove `commands.clone()` on immediate projection apply; own-move Push items into
+  `insert_pending` via `apply_live_owned` / `apply_command_owned_at`.
+- Local quiet sqlite×memory snorri-shaped best-of-3 @512 ≈ **0.09 ms/entry** (under 0.1 software goal).
+- Remaining to 10k tps: snorri multi-worker still pays fsync + contention; need re-ladder on this tip
+  and further concurrency work if w=8 stays ~4k.

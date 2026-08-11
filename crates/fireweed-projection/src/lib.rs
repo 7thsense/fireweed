@@ -702,7 +702,7 @@ fn typed_index_keys(
     specs: &[QueueIndex],
     entity: Option<&Value>,
 ) -> EngineResult<Vec<(String, Vec<u8>)>> {
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(specs.len());
     for spec in specs {
         if let Some(key) = typed_index_key_err(spec, entity)? {
             out.push((spec.name.clone(), key));
@@ -2195,6 +2195,33 @@ impl ProjectionData {
 
     pub fn apply_command(&mut self, cmd: &QueueCommand) -> EngineResult<()> {
         self.apply_command_at(None, None, cmd)
+    }
+
+    /// Owned apply for group-commit: avoids cloning large Push payloads into the projection.
+    pub fn apply_command_owned_at(
+        &mut self,
+        terminal_at: Option<UtcTimestamp>,
+        terminal_position: Option<&CommandPosition>,
+        cmd: QueueCommand,
+    ) -> EngineResult<()> {
+        match cmd {
+            QueueCommand::Push(c) => {
+                self.items.reserve(c.items.len());
+                self.by_key.reserve(
+                    c.items
+                        .iter()
+                        .filter(|item| {
+                            is_explicit_client_item_key(item.item_id, &item.client_item_key)
+                        })
+                        .count(),
+                );
+                for it in c.items {
+                    self.insert_pending(it, terminal_at)?;
+                }
+                Ok(())
+            }
+            other => self.apply_command_at(terminal_at, terminal_position, &other),
+        }
     }
 
     fn apply_command_at(

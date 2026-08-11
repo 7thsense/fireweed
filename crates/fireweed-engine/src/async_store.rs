@@ -1452,14 +1452,36 @@ where
         let executor = self.executor.clone();
         async move {
             let queue = positions.first().map(|p| p.queue.clone());
+            // Capture push-idempotency records BEFORE moving envelopes into apply so
+            // large Push payloads are not cloned (fireweed-85855781 / 10k-tps path).
+            let mut push_idem_records = Vec::new();
+            for env in &commands {
+                let Some(request_id) = env.request_id.clone() else {
+                    continue;
+                };
+                let QueueCommand::Push(push) = &env.command else {
+                    continue;
+                };
+                let fingerprint = match env.request_fingerprint {
+                    Some(fp) => BodyHash(fp),
+                    None => crate::compose::push_item_body_hash(&push.items)?,
+                };
+                let expires_at =
+                    request_expires_at(env.created_at, IN_PROCESS_PUSH_IDEM_RETENTION_MS);
+                let ids = match &env.request_outcome {
+                    Some(crate::RequestOutcome::Push { item_ids }) => item_ids.clone(),
+                    _ => env.item_ids.clone(),
+                };
+                push_idem_records.push((request_id, fingerprint, ids, expires_at));
+            }
             let apply = move || {
                 let mut store = store
                     .lock()
                     .expect("immediate projection store mutex poisoned");
-                store.apply_live_owned(positions, commands.clone())?;
-                Ok(commands)
+                store.apply_live_owned(positions, commands)?;
+                Ok(())
             };
-            let commands = if let Some(executor) = executor {
+            if let Some(executor) = executor {
                 executor.execute(apply).await?
             } else {
                 apply()?
@@ -1468,31 +1490,9 @@ where
                 let mut cache = push_idempotency
                     .lock()
                     .expect("push idempotency mutex poisoned");
-                for env in &commands {
-                    let Some(request_id) = env.request_id.clone() else {
-                        continue;
-                    };
-                    let QueueCommand::Push(push) = &env.command else {
-                        continue;
-                    };
-                    // Prefer durable envelope fingerprint; recompute from Push items when legacy
-                    // logs omit it so recovery conflict/replay still compare body hashes.
-                    let fingerprint = match env.request_fingerprint {
-                        Some(fp) => BodyHash(fp),
-                        None => crate::compose::push_item_body_hash(&push.items)?,
-                    };
-                    let expires_at =
-                        request_expires_at(env.created_at, IN_PROCESS_PUSH_IDEM_RETENTION_MS);
-                    let ids = match &env.request_outcome {
-                        Some(crate::RequestOutcome::Push { item_ids }) => item_ids.clone(),
-                        _ => env.item_ids.clone(),
-                    };
-                    cache.entry(queue.clone()).or_default().record(
-                        request_id,
-                        fingerprint,
-                        ids,
-                        expires_at,
-                    );
+                let entry = cache.entry(queue).or_default();
+                for (request_id, fingerprint, ids, expires_at) in push_idem_records {
+                    entry.record(request_id, fingerprint, ids, expires_at);
                 }
             }
             Ok(())

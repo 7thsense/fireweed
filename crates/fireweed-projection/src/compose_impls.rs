@@ -494,6 +494,25 @@ impl ProjectionStore for InMemoryProjection {
         self.apply_borrowed(positions, commands)
     }
 
+    fn apply_live_owned(
+        &mut self,
+        positions: Vec<CommandPosition>,
+        commands: Vec<CommandEnvelope>,
+    ) -> EngineResult<()> {
+        if positions.len() != commands.len() {
+            return Err(EngineError::Storage(
+                "apply_live_owned: positions/commands length mismatch".into(),
+            ));
+        }
+        for (pos, cmd) in positions.iter().zip(commands) {
+            self.projections
+                .get_mut(&pos.queue)
+                .ok_or(EngineError::NotFound)?
+                .apply_command_owned_at(Some(cmd.created_at), Some(pos), cmd.command)?;
+        }
+        Ok(())
+    }
+
     fn install_recovery_shard(
         &mut self,
         definition: &QueueDefinition,
