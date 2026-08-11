@@ -9,10 +9,12 @@
 //! - a bad lease token -> Rejected(StaleLease); a bad item_version -> Rejected(Conflict); both write nothing;
 //! - a request-id replay returns the prior outcomes with NO double-write.
 
+use axon_esf::IndexDef;
 use bytes::Bytes;
 use fireweed_conformance::{qdef, shard};
 use fireweed_core::{
-    EntitySchemaDocument, LeaseToken, PriorityValue, RequestId, UtcTimestamp, WorkerId,
+    EntitySchemaDocument, IndexDeclaration, IndexType, ItemId, LeaseToken, PriorityValue,
+    QueueIndex, RequestId, UtcTimestamp, WorkerId,
 };
 use fireweed_engine::{
     Backend, ClaimCompatibility, ClaimPort, ClaimRef, ClaimRequest, CommitEntryOutcome,
@@ -326,6 +328,19 @@ fn read_instance_fence(path: &str, q: &QueueKey, key: &[u8]) -> Option<i64> {
         |row| row.get::<_, i64>(0),
     )
     .ok()
+}
+
+/// Durable command sequence high-water mark (`relational_cursor.next_seq`) — one tick per
+/// `apply_command_sql` call inside `commit_transition`. Reading the delta across a single commit
+/// counts how many command groups that commit applied, independent of wall-clock timing.
+fn read_next_seq(path: &str, q: &QueueKey) -> i64 {
+    let conn = Connection::open(path).unwrap();
+    conn.query_row(
+        "SELECT next_seq FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+        rusqlite::params![q.tenant_id.as_str(), q.queue_id.as_str()],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap()
 }
 
 /// C6 (durable): an entry advancing `expected -> next` succeeds and the durable fence is `next`; a stale
@@ -827,5 +842,253 @@ async fn schema_validation_rejects_before_append_and_idempotency_on_sqlite_relat
     let _ = std::fs::remove_file(&path);
     let backend = SqliteRelationalBackend::open(&path).unwrap();
     schema_validation_backend(&backend).await;
+    let _ = std::fs::remove_file(&path);
+}
+
+/// fireweed-4ba1dfd7 (lineage: fireweed-6bfe48ca revert c6c411ff, decision record
+/// docs/perf/evidence/tp005/relational-commit-transition-per-entry-apply-decision.md): pin the
+/// restored per-entry apply shape on `commit_transition` behaviorally (no timing dependency), so a
+/// future re-landing of all-entries bulk-apply coalescing on side records / fences / lifecycle
+/// pushes fails this test even though the perf amortization gates only run under `--release`.
+///
+/// Each entry's side record, instance fence, and lifecycle push are independently attributable
+/// (entry i's own key/value/fence, never merged with entry j's), and the durable command-sequence
+/// high-water mark (`relational_cursor.next_seq`) advances by exactly `3*N + 1` for N entries that
+/// each carry a side record + fence + lifecycle item: 3 per-entry command groups (side records,
+/// fence, lifecycle Push stay entry-scoped) plus ONE coalesced `Finalize` envelope for the whole
+/// body (the accepted, evidenced-safe optimization from 00f3bd8b). Bulk-coalescing side/fence/push
+/// back across entries collapses this count toward O(1) instead of O(N); the assertion catches
+/// that regardless of wall-clock noise.
+#[tokio::test]
+async fn relational_commit_transition_applies_each_entry_independently() {
+    const N: usize = 6;
+    let path = unique_path("per-entry-independent");
+    let _ = std::fs::remove_file(&path);
+    let q = shard();
+    let b = SqliteRelationalBackend::open(&path).unwrap();
+    b.create_queue(qdef()).await.unwrap();
+
+    let mut claim_refs = Vec::with_capacity(N);
+    for _ in 0..N {
+        claim_refs.push(push_and_claim(&b, 0).await);
+    }
+
+    let entries: Vec<CommitTransitionEntry> = claim_refs
+        .into_iter()
+        .enumerate()
+        .map(|(i, claim_ref)| CommitTransitionEntry {
+            claim_ref,
+            additional_claim_refs: Vec::new(),
+            finalize: FinalizeKind::Complete,
+            side_records: vec![side(&format!("state/entry-{i}"), &format!("payload-{i}"))],
+            lifecycle_items: vec![item(20 + i as i64)],
+            instance_fence: Some(InstanceFence {
+                instance_key: format!("instance/entry-{i}").into_bytes(),
+                expected: 0,
+                next: 1,
+            }),
+        })
+        .collect();
+
+    let before_seq = read_next_seq(&path, &q);
+    let outcomes = b
+        .commit_transition(
+            &q,
+            CommitTransition {
+                request_id: None,
+                entries,
+            },
+            ts(1),
+            None,
+        )
+        .await
+        .unwrap();
+    let after_seq = read_next_seq(&path, &q);
+
+    assert_eq!(
+        outcomes.len(),
+        N,
+        "outcome cardinality must equal the entry count"
+    );
+    for (i, outcome) in outcomes.iter().enumerate() {
+        match outcome {
+            CommitEntryOutcome::Committed { lifecycle_item_ids } => {
+                assert_eq!(
+                    lifecycle_item_ids.len(),
+                    1,
+                    "entry {i} must produce exactly its own lifecycle item"
+                );
+            }
+            other => panic!("entry {i} expected Committed, got {other:?}"),
+        }
+    }
+
+    // Independent attributability: entry i's own side record and fence, never another entry's.
+    for i in 0..N {
+        assert_eq!(
+            read_side_record(&path, &q, &format!("state/entry-{i}")),
+            Some(format!("payload-{i}").into_bytes()),
+            "entry {i} side record must be independently attributable"
+        );
+        assert_eq!(
+            read_instance_fence(&path, &q, format!("instance/entry-{i}").as_bytes()),
+            Some(1),
+            "entry {i} fence must be independently advanced"
+        );
+    }
+    assert_eq!(
+        count_side_records(&path),
+        N as i64,
+        "no side records were merged or dropped across entries"
+    );
+
+    // Behavioral (non-timing) pin on the applied-command shape: see doc comment above.
+    let applied_commands = after_seq - before_seq;
+    assert_eq!(
+        applied_commands,
+        3 * N as i64 + 1,
+        "expected 3 per-entry command groups (side records, fence, lifecycle push) per entry \
+         plus one coalesced Finalize for the whole body; got {applied_commands} command groups \
+         for {N} entries -- cross-entry coalescing (or de-coalescing) of side records, fences, \
+         lifecycle pushes, or finalizes changed the applied-command shape restored by c6c411ff"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Snorri-shaped queue definition (19 typed indexes, one unique) matching the regressing shape in
+/// docs/perf/evidence/tp005/commit-amortization-latest.md (HOLD fireweed-6bfe48ca): 19 typed
+/// indexes, entity documents, ~2.3 KB payloads, 500-entry commit batches.
+fn snorri_shape_qdef(n_indexes: usize) -> fireweed_core::QueueDefinition {
+    let mut def = qdef();
+    def.max_push_batch_size = 10_000;
+    def.max_claim_batch_size = 10_000;
+    def.typed_indexes = (0..n_indexes)
+        .map(|i| QueueIndex {
+            name: format!("by_f{i}"),
+            declaration: IndexDeclaration::Single(IndexDef {
+                field: format!("f{i}"),
+                index_type: IndexType::String,
+                unique: i == 0,
+            }),
+        })
+        .collect();
+    def
+}
+
+/// fireweed-4ba1dfd7: at the exact batch size that regressed snorri (500 entries/commit, 19 typed
+/// indexes, entity documents, ~2.3 KB payloads), `CommitEntryOutcome` order and per-entry content
+/// must match input entry order -- proving the restored per-entry path preserves per-entry identity
+/// at the regressing shape, not just at small N (see the 6-entry cardinality/attribution test
+/// above). Ground truth: each entry's lifecycle item carries a distinct ascending priority equal to
+/// its entry index, so re-claiming under `OrderingMode::Strict` returns the newly-pushed items in
+/// exactly entry order; if outcomes were reordered or cross-entry-coalesced this element-wise
+/// comparison would fail even though the outcome COUNT still matched N.
+#[tokio::test]
+async fn relational_commit_transition_per_entry_outcomes_are_order_stable() {
+    const N: usize = 500;
+    const N_INDEXES: usize = 19;
+    const PAYLOAD_BYTES: usize = 2300;
+
+    let path = unique_path("order-stable-snorri");
+    let _ = std::fs::remove_file(&path);
+    let def = snorri_shape_qdef(N_INDEXES);
+    let q = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+    let b = SqliteRelationalBackend::open(&path).unwrap();
+    b.create_queue(def).await.unwrap();
+
+    let payload = Bytes::from(vec![b'x'; PAYLOAD_BYTES]);
+    let inputs: Vec<PushSpec> = (0..N)
+        .map(|_| PushSpec {
+            payload: Some(payload.clone()),
+            ..Default::default()
+        })
+        .collect();
+    b.push(&q, inputs, ts(0), None).await.unwrap();
+
+    let claimed = b.claim(claim_req(N, 600, 0)).await.unwrap();
+    assert_eq!(claimed.items.len(), N, "claim batch size");
+
+    let entries: Vec<CommitTransitionEntry> = claimed
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, claimed_item)| {
+            let mut entity = serde_json::Map::new();
+            entity.insert("f0".into(), json!(format!("k-{i}")));
+            for f in 1..N_INDEXES {
+                entity.insert(format!("f{f}"), json!(format!("v{f}-{i}")));
+            }
+            CommitTransitionEntry {
+                claim_ref: ClaimRef {
+                    item_id: claimed_item.item_id,
+                    lease_token: claimed_item
+                        .lease_token
+                        .clone()
+                        .expect("claimed item carries a token"),
+                    lease_expires_at: claimed_item.lease_expires_at,
+                    item_version: claimed_item.item_version,
+                },
+                additional_claim_refs: Vec::new(),
+                finalize: FinalizeKind::Complete,
+                side_records: vec![],
+                lifecycle_items: vec![PushSpec {
+                    priority: Some(PriorityValue::Int64(i as i64)),
+                    entity: Some(serde_json::Value::Object(entity)),
+                    payload: Some(payload.clone()),
+                    ..Default::default()
+                }],
+                instance_fence: None,
+            }
+        })
+        .collect();
+
+    let outcomes = b
+        .commit_transition(
+            &q,
+            CommitTransition {
+                request_id: None,
+                entries,
+            },
+            ts(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcomes.len(),
+        N,
+        "outcome cardinality must equal entry count at the regressing batch size"
+    );
+    let outcome_ids: Vec<ItemId> = outcomes
+        .iter()
+        .enumerate()
+        .map(|(i, o)| match o {
+            CommitEntryOutcome::Committed { lifecycle_item_ids } => {
+                assert_eq!(
+                    lifecycle_item_ids.len(),
+                    1,
+                    "entry {i} must produce exactly its own lifecycle item"
+                );
+                lifecycle_item_ids[0]
+            }
+            other => panic!("entry {i} expected Committed, got {other:?}"),
+        })
+        .collect();
+
+    let reclaimed = b.claim(claim_req(N, 605, 5)).await.unwrap();
+    assert_eq!(
+        reclaimed.items.len(),
+        N,
+        "all 500 lifecycle items claimable"
+    );
+    let reclaimed_ids: Vec<ItemId> = reclaimed.items.iter().map(|it| it.item_id).collect();
+    assert_eq!(
+        outcome_ids, reclaimed_ids,
+        "CommitEntryOutcome order must match input entry order at 500 entries/commit \
+         (snorri-shaped: 19 typed indexes, entity documents, ~2.3 KB payloads)"
+    );
+
     let _ = std::fs::remove_file(&path);
 }
