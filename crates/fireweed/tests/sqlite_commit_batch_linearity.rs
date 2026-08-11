@@ -10,7 +10,9 @@
 //! This regression gate:
 //! 1. Reproduces the measurement shape (fixed total work, vary entries/commit).
 //! 2. Asserts amortization (ratio ms_large/ms_small ≤ 1.05 in the amortizing range).
-//! 3. Covers plain, unique typed-index, finalize+side+fence, and multi-index shapes.
+//! 3. Covers plain, unique typed-index, finalize+side+fence, multi-index, and the full
+//!    snorri shape (19 typed indexes, ~2.3 KB payload, entity docs, 500-entry batches) on
+//!    both `open_sqlite` and `open_sqlite_relational` (fireweed-d8ceee81).
 //! 4. Prints a ladder table for evidence (`docs/perf/evidence/tp005/commit-amortization-latest.md`).
 
 #![cfg(feature = "sqlite")]
@@ -704,10 +706,58 @@ async fn sqlite_commit_amortizes_with_multi_typed_indexes() {
     );
 }
 
-/// fireweed-6bfe48ca: snorri-shaped probe — 19 typed indexes, ~2.3 KB payload, entity docs.
+/// fireweed-d8ceee81: assert per-entry amortization for the snorri-shaped probe.
 ///
-/// Prints ms/entry for 64/500/512 on both open_sqlite and open_sqlite_relational.
-/// Does not assert absolute floors (host-dependent); records ladder for evidence.
+/// Ratio-only (host-independent), never an absolute floor: ms/entry at 500 and at 512
+/// entries/commit must each be <=1.05x ms/entry at 64. This is the assertion that failed to
+/// exist when relational bulk-apply coalescing regressed snorri's real w=8 ladder while the
+/// unasserted probe kept printing worse numbers and exiting 0 (docs/perf/evidence/tp005/
+/// commit-amortization-latest.md, HOLD fireweed-6bfe48ca).
+fn assert_snorri_amortizes(kind_label: &str, ms_64: f64, ms_500: f64, ms_512: f64) {
+    const MAX_RATIO: f64 = 1.05;
+    let ratio_500 = ms_500 / ms_64.max(1e-9);
+    let ratio_512 = ms_512 / ms_64.max(1e-9);
+    assert!(
+        ratio_500 <= MAX_RATIO,
+        "snorri-shaped commit must amortize 64->500 entries/commit ({kind_label}): \
+         64={ms_64:.3} ms/entry, 500={ms_500:.3} ms/entry, 512={ms_512:.3} ms/entry, \
+         ratio(500/64)={ratio_500:.2} (max {MAX_RATIO}). Rising per-entry cost at 500-entry \
+         batches is the durable_queue_commit inflation signature (fireweed-6bfe48ca)."
+    );
+    assert!(
+        ratio_512 <= MAX_RATIO,
+        "snorri-shaped commit must amortize 64->512 entries/commit ({kind_label}): \
+         64={ms_64:.3} ms/entry, 500={ms_500:.3} ms/entry, 512={ms_512:.3} ms/entry, \
+         ratio(512/64)={ratio_512:.2} (max {MAX_RATIO})."
+    );
+}
+
+/// Proves `assert_snorri_amortizes` can actually fail: feeds it a synthetic ladder shaped like
+/// the reverted relational bulk-apply-coalescing regression (500/512-entry batches costing MORE
+/// per entry than 64-entry batches — durable_queue_commit inflation, HOLD fireweed-6bfe48ca) and
+/// asserts it panics. Without this, the gate above could silently stop asserting (e.g. a future
+/// edit turns the `assert!` back into an `eprintln!`) and no test would catch it.
+#[test]
+fn sqlite_commit_snorri_shape_rejects_batch_inversion() {
+    let result = std::panic::catch_unwind(|| {
+        // Synthetic, not measured: mirrors the observed v0.31.2->landing regression where
+        // 500-entry batches got slower per entry than 64-entry batches on the relational path.
+        assert_snorri_amortizes("open_sqlite_relational (synthetic-inverted)", 0.30, 0.48, 0.46);
+    });
+    assert!(
+        result.is_err(),
+        "assert_snorri_amortizes must reject an inverted batch-size ladder (500/512-entry \
+         batches costing more per entry than 64-entry batches); it did not panic on synthetic \
+         inverted data, so the regression gate cannot actually fail."
+    );
+}
+
+/// fireweed-6bfe48ca / fireweed-d8ceee81: snorri-shaped regression gate — 19 typed indexes,
+/// ~2.3 KB payload, entity docs.
+///
+/// Asserts per-entry amortization (ratio <=1.05x cost-at-64) for both open_sqlite and
+/// open_sqlite_relational at 500 and 512 entries/commit; still prints the full ladder for
+/// evidence.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sqlite_commit_snorri_shaped_ladder_probe() {
     const N_INDEXES: usize = 19;
@@ -800,6 +850,7 @@ async fn sqlite_commit_snorri_shaped_ladder_probe() {
             OpenKind::Relational => "open_sqlite_relational",
         };
         eprintln!("--- {label} ---");
+        let (mut ms_64, mut ms_500, mut ms_512) = (0.0f64, 0.0f64, 0.0f64);
         for (batch, total) in [(64usize, 1024), (500, 1000), (512, 1024)] {
             let ms = measure(
                 kind,
@@ -811,6 +862,13 @@ async fn sqlite_commit_snorri_shaped_ladder_probe() {
             )
             .await;
             eprintln!("entries/commit={batch}\tms/entry={ms:.4}\ttotal={total}");
+            match batch {
+                64 => ms_64 = ms,
+                500 => ms_500 = ms,
+                512 => ms_512 = ms,
+                _ => unreachable!(),
+            }
         }
+        assert_snorri_amortizes(label, ms_64, ms_500, ms_512);
     }
 }

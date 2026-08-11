@@ -140,3 +140,26 @@ ratio 512/64 = **0.20** (amortizing). Absolute @500 ≈0.27 ms (software target 
 ratio 512/64 = **0.76**. Absolute closer to snorri's historical 0.93 ms/entry.
 
 **Do not tag v0.31.3** until snorri w=8 ladder ≥ v0.31.2 baseline (3,692 tps) on a post-revert tip.
+
+## Snorri-shaped regression gate (fireweed-d8ceee81)
+
+`sqlite_commit_snorri_shaped_ladder_probe` was a print-only ladder (no assertions), so a
+re-landing of relational bulk-apply coalescing on `commit_transition` would reproduce the HOLD
+regression above (`durable_queue_commit` inflation at 500-entry batches, w=8 tps 3,692 → 1,540)
+and still exit 0 — the same evidence gap that let fireweed-346a8d9b close on lean-shape data that
+did not transfer to this shape. The probe now asserts, host-independently, over the shape above:
+
+| open kind | ratio 500/64 must be ≤ | ratio 512/64 must be ≤ | measured band (post-revert) |
+|---|---:|---:|---|
+| `open_sqlite` | 1.05 | 1.05 | 0.272/1.006 ≈ 0.27, 0.202/1.006 = **0.20** |
+| `open_sqlite_relational` | 1.05 | 1.05 | 0.783/1.006 ≈ 0.78, 0.762/1.006 = **0.76** |
+
+Mechanism defended against: per-entry cost *rising* with batch size on the relational path
+(bulk-apply coalescing turning `commit_transition` into fewer, larger, more expensive command
+groups instead of amortizing) — the exact inversion signature snorri's real w=1/4/8 ladder caught
+and this synthetic probe originally missed. `sqlite_commit_snorri_shape_rejects_batch_inversion`
+feeds `assert_snorri_amortizes` a synthetic inverted ladder and asserts it panics, proving the
+gate can actually fail rather than silently passing forever.
+
+No absolute ms/entry floor is asserted here (host-dependent); absolute software-floor gates stay
+on the lean `open_sqlite` shapes only (e.g. finalize+side+fence @512 ≤0.25 ms/entry).
