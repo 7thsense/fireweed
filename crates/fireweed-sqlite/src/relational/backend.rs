@@ -1922,6 +1922,17 @@ impl fireweed_engine::CommitTransitionPort for SqliteRelationalBackend {
             let mut finalize_outcomes: Vec<FinalizeOutcome> = Vec::new();
             let mut staged_fences: HashMap<Vec<u8>, u64> = HashMap::new();
 
+            // LOAD-BEARING SHAPE, not incidental: side records / instance fence / lifecycle Push apply
+            // per entry, one apply_cmd! each — this loop is the per-entry apply path restored by c6c411ff
+            // (fireweed-6bfe48ca) after all-entries bulk-apply coalescing inverted commit_transition's
+            // amortization at snorri's shape (19 typed indexes, entity documents, ~2.3 KB payloads,
+            // 500-entry batches; w=8 tps 3,692 -> 1,540, durable_queue_commit 37.2s -> 124.2s). Do not
+            // re-coalesce these three across entries without first satisfying the shape predicate and
+            // two-part re-landing precondition in
+            // docs/perf/evidence/tp005/relational-commit-transition-per-entry-apply-decision.md, and the
+            // behavioral invariant tests in crates/fireweed-sqlite/tests/relational_commit.rs
+            // (relational_commit_transition_applies_each_entry_independently,
+            // relational_commit_transition_per_entry_outcomes_are_order_stable — fireweed-4ba1dfd7).
             for entry in entries {
                 let consumed_input_id = entry.claim_ref.item_id;
                 let additional_consumed_input_ids = entry
