@@ -57,7 +57,7 @@ use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
@@ -438,27 +438,115 @@ impl<S: LogStore> InProcessLogStore<S> {
 /// Default retention when recording push request-ids from apply envelopes without a queue definition.
 const IN_PROCESS_PUSH_IDEM_RETENTION_MS: u64 = 86_400_000;
 
+/// Type-erased lock strategy behind [`InProcessProjectionStore`] (fireweed-7b74ceac). Hidden behind
+/// a trait object so the store's field type — and therefore `InProcessProjectionStore<S>` itself —
+/// stays identical regardless of which variant backs it; callers (e.g.
+/// `AsyncLogReplayBackend<L, P>`) never need a second generic parameter to pick a lock strategy.
+///
+/// [`Mutex`] implements this exclusively (works for any `S: Send`, including connection-backed axes
+/// that are not `Sync`-safe). [`RwLock`] implements it concurrently (`S: Send + Sync` required by the
+/// `impl`, matching `RwLock<S>`'s own `Sync` bound) so [`Self::lock_read`] callers run in parallel
+/// with each other and only serialize against [`Self::lock_write`].
+trait StoreLockOps<S>: Send + Sync {
+    fn lock_read<'a>(&'a self) -> Box<dyn std::ops::Deref<Target = S> + 'a>;
+    fn lock_write<'a>(&'a self) -> Box<dyn std::ops::DerefMut<Target = S> + 'a>;
+}
+
+struct ExclusiveReadGuard<'a, S>(std::sync::MutexGuard<'a, S>);
+
+impl<S> std::ops::Deref for ExclusiveReadGuard<'_, S> {
+    type Target = S;
+    fn deref(&self) -> &S {
+        &self.0
+    }
+}
+
+struct ExclusiveWriteGuard<'a, S>(std::sync::MutexGuard<'a, S>);
+
+impl<S> std::ops::Deref for ExclusiveWriteGuard<'_, S> {
+    type Target = S;
+    fn deref(&self) -> &S {
+        &self.0
+    }
+}
+
+impl<S> std::ops::DerefMut for ExclusiveWriteGuard<'_, S> {
+    fn deref_mut(&mut self) -> &mut S {
+        &mut self.0
+    }
+}
+
+impl<S: Send + 'static> StoreLockOps<S> for Mutex<S> {
+    fn lock_read<'a>(&'a self) -> Box<dyn std::ops::Deref<Target = S> + 'a> {
+        Box::new(ExclusiveReadGuard(
+            self.lock().expect("immediate projection store mutex poisoned"),
+        ))
+    }
+
+    fn lock_write<'a>(&'a self) -> Box<dyn std::ops::DerefMut<Target = S> + 'a> {
+        Box::new(ExclusiveWriteGuard(
+            self.lock().expect("immediate projection store mutex poisoned"),
+        ))
+    }
+}
+
+struct SharedReadGuard<'a, S>(std::sync::RwLockReadGuard<'a, S>);
+
+impl<S> std::ops::Deref for SharedReadGuard<'_, S> {
+    type Target = S;
+    fn deref(&self) -> &S {
+        &self.0
+    }
+}
+
+struct SharedWriteGuard<'a, S>(std::sync::RwLockWriteGuard<'a, S>);
+
+impl<S> std::ops::Deref for SharedWriteGuard<'_, S> {
+    type Target = S;
+    fn deref(&self) -> &S {
+        &self.0
+    }
+}
+
+impl<S> std::ops::DerefMut for SharedWriteGuard<'_, S> {
+    fn deref_mut(&mut self) -> &mut S {
+        &mut self.0
+    }
+}
+
+impl<S: Send + Sync + 'static> StoreLockOps<S> for RwLock<S> {
+    fn lock_read<'a>(&'a self) -> Box<dyn std::ops::Deref<Target = S> + 'a> {
+        Box::new(SharedReadGuard(
+            self.read().expect("immediate projection store lock poisoned"),
+        ))
+    }
+
+    fn lock_write<'a>(&'a self) -> Box<dyn std::ops::DerefMut<Target = S> + 'a> {
+        Box::new(SharedWriteGuard(
+            self.write().expect("immediate projection store lock poisoned"),
+        ))
+    }
+}
+
 /// Shared adapter for a synchronous projection store.
 ///
-/// Default construction keeps operations on the polling thread (memory axes).
-/// [`Self::new_with_blocking_offload`] routes whole operations through a private
-/// [`BoundedBlockingExecutor`] for durable blocking projections (sqlite).
+/// Default construction ([`Self::new`] / [`Self::new_with_blocking_offload`]) keeps the historical
+/// **funnel** behavior (fireweed-451a6b23): every axis op — reads and writes alike — funnels through
+/// one exclusive `Mutex<S>`, so [`Self::run_with_store`] (shared borrow) and
+/// [`Self::run_with_store_mut`] (exclusive borrow) both serialize against each other. A point read
+/// (`query_index*`, `live_item*`, `item_state`, …) queues behind another worker's concurrent commit
+/// (`apply_live`, `admit_mutation`, …) and vice versa. A pure-commit workload never sees this
+/// (fireweed-77ae7a87's commit-section probe measured this mutex flat at ~0.14 ms/entry, w=1..8),
+/// but interleaving point reads with commits — the realistic shape snorri's ladder drives — inflates
+/// commit-span latency well beyond that (mixed-op funnel probe, `sqlite_mixed_op_funnel_probe.rs`).
 ///
-/// **Funnel caveat (fireweed-451a6b23):** every axis op — reads and writes alike — funnels through
-/// the same `store` mutex: [`Self::run_with_store`] (shared borrow) and [`Self::run_with_store_mut`]
-/// (exclusive borrow) both take it, so a point read (`query_index*`, `live_item*`, `item_state`, …)
-/// queues behind another worker's concurrent commit (`apply_live`, `admit_mutation`, …) and vice
-/// versa. A pure-commit workload never sees this (fireweed-77ae7a87's commit-section probe measured
-/// this mutex flat at ~0.14 ms/entry, w=1..8), but interleaving point reads with commits — the
-/// realistic shape snorri's ladder drives — inflates commit-span latency well beyond that (mixed-op
-/// funnel probe, `sqlite_mixed_op_funnel_probe.rs`: commit ms/entry rose sharply once reads shared
-/// the mutex, capping snorri's w=8 caller-visible worker concurrency well under 8/8). Until a
-/// segregated read lane lands, callers driving high-volume point-read traffic against the same queue
-/// a commit-heavy workload writes to should batch reads (`live_items`/`query_index_typed` accept
-/// multiple keys per call) rather than issuing one `run_with_store` acquisition per key, and should
-/// not assume point reads are free of commit-path contention.
+/// [`Self::new_with_concurrent_reads`] (fireweed-7b74ceac) opts into a `RwLock<S>` instead: reads run
+/// concurrently with each other and only serialize against an in-flight write. Gated on `S: Sync` —
+/// use only for backing stores that are genuinely safe for concurrent shared access (e.g.
+/// `InMemoryProjection`); connection-backed axes (`SqliteRelational`, `PostgresRelational`, …) are not
+/// `Sync`-safe and must keep using the exclusive constructors.
 pub struct InProcessProjectionStore<S> {
-    store: Arc<Mutex<S>>,
+    store: Arc<dyn StoreLockOps<S>>,
     executor: Option<BoundedBlockingExecutor>,
     supports_gates: bool,
     /// Per-shard push request-id cache (parity with `AsyncLogReplayBackend` / sync composition).
@@ -467,10 +555,33 @@ pub struct InProcessProjectionStore<S> {
 }
 
 impl<S: ProjectionStore> InProcessProjectionStore<S> {
-    pub fn new(store: S) -> Self {
+    pub fn new(store: S) -> Self
+    where
+        S: Send + 'static,
+    {
         let supports_gates = store.supports_gates();
+        let store: Arc<dyn StoreLockOps<S>> = Arc::new(Mutex::new(store));
         Self {
-            store: Arc::new(Mutex::new(store)),
+            store,
+            executor: None,
+            supports_gates,
+            push_idempotency: Arc::new(Mutex::new(HashMap::new())),
+            lock_phase: Arc::new(LockPhaseCounters::default()),
+        }
+    }
+
+    /// Same as [`Self::new`] but backed by a [`RwLock`] instead of a [`Mutex`]: concurrent
+    /// [`Self::run_with_store`] / [`Self::with_store`] reads no longer serialize behind each other or
+    /// behind another caller's in-flight [`Self::run_with_store_mut`] wait — only writers exclude
+    /// readers and each other, exactly as `std::sync::RwLock` guarantees. Requires `S: Sync`.
+    pub fn new_with_concurrent_reads(store: S) -> Self
+    where
+        S: Send + Sync + 'static,
+    {
+        let supports_gates = store.supports_gates();
+        let store: Arc<dyn StoreLockOps<S>> = Arc::new(RwLock::new(store));
+        Self {
+            store,
             executor: None,
             supports_gates,
             push_idempotency: Arc::new(Mutex::new(HashMap::new())),
@@ -479,10 +590,14 @@ impl<S: ProjectionStore> InProcessProjectionStore<S> {
     }
 
     /// Durable / blocking projection axis: adapter-local whole-op offload.
-    pub fn new_with_blocking_offload(store: S, max_in_flight: usize) -> EngineResult<Self> {
+    pub fn new_with_blocking_offload(store: S, max_in_flight: usize) -> EngineResult<Self>
+    where
+        S: Send + 'static,
+    {
         let supports_gates = store.supports_gates();
+        let store: Arc<dyn StoreLockOps<S>> = Arc::new(Mutex::new(store));
         Ok(Self {
-            store: Arc::new(Mutex::new(store)),
+            store,
             executor: Some(BoundedBlockingExecutor::new(max_in_flight)?),
             supports_gates,
             push_idempotency: Arc::new(Mutex::new(HashMap::new())),
@@ -502,11 +617,8 @@ impl<S: ProjectionStore> InProcessProjectionStore<S> {
 
     /// Synchronous read (open/recover/tests). Blocks the caller.
     pub fn with_store<R>(&self, f: impl FnOnce(&S) -> R) -> R {
-        let store = self
-            .store
-            .lock()
-            .expect("immediate projection store mutex poisoned");
-        f(&*store)
+        let guard = self.store.lock_read();
+        f(&**guard)
     }
 
     /// Rebuild process-local push request-id maps from durable log envelopes.
@@ -552,14 +664,13 @@ impl<S: ProjectionStore> InProcessProjectionStore<S> {
 
     /// Synchronous mutation. Blocks the caller.
     pub fn with_store_mut<R>(&self, f: impl FnOnce(&mut S) -> R) -> R {
-        let mut store = self
-            .store
-            .lock()
-            .expect("immediate projection store mutex poisoned");
-        f(&mut *store)
+        let mut guard = self.store.lock_write();
+        f(&mut **guard)
     }
 
-    /// Async read; offloads when constructed with blocking offload.
+    /// Async read; offloads when constructed with blocking offload. Runs concurrently with other
+    /// readers when constructed via [`Self::new_with_concurrent_reads`]; otherwise serializes against
+    /// every other op class exactly like [`Self::run_with_store_mut`] (fireweed-451a6b23 funnel).
     pub fn run_with_store<T, F>(
         &self,
         operation: F,
@@ -572,36 +683,26 @@ impl<S: ProjectionStore> InProcessProjectionStore<S> {
         let store = Arc::clone(&self.store);
         let executor = self.executor.clone();
         let lock_phase = Arc::clone(&self.lock_phase);
+        let run = move || {
+            let wait_start = Instant::now();
+            let guard = store.lock_read();
+            let wait = wait_start.elapsed();
+            let hold_start = Instant::now();
+            let result = operation(&**guard);
+            lock_phase.record(wait, hold_start.elapsed());
+            result
+        };
         async move {
             if let Some(executor) = executor {
-                executor
-                    .execute(move || {
-                        let wait_start = Instant::now();
-                        let store = store
-                            .lock()
-                            .expect("immediate projection store mutex poisoned");
-                        let wait = wait_start.elapsed();
-                        let hold_start = Instant::now();
-                        let result = operation(&*store);
-                        lock_phase.record(wait, hold_start.elapsed());
-                        result
-                    })
-                    .await
+                executor.execute(run).await
             } else {
-                let wait_start = Instant::now();
-                let store = store
-                    .lock()
-                    .expect("immediate projection store mutex poisoned");
-                let wait = wait_start.elapsed();
-                let hold_start = Instant::now();
-                let result = operation(&*store);
-                lock_phase.record(wait, hold_start.elapsed());
-                result
+                run()
             }
         }
     }
 
-    /// Async mutation; offloads when constructed with blocking offload.
+    /// Async mutation; offloads when constructed with blocking offload. Always exclusive: excludes
+    /// every concurrent reader and writer alike, regardless of lock strategy.
     pub fn run_with_store_mut<T, F>(
         &self,
         operation: F,
@@ -614,31 +715,20 @@ impl<S: ProjectionStore> InProcessProjectionStore<S> {
         let store = Arc::clone(&self.store);
         let executor = self.executor.clone();
         let lock_phase = Arc::clone(&self.lock_phase);
+        let run = move || {
+            let wait_start = Instant::now();
+            let mut guard = store.lock_write();
+            let wait = wait_start.elapsed();
+            let hold_start = Instant::now();
+            let result = operation(&mut **guard);
+            lock_phase.record(wait, hold_start.elapsed());
+            result
+        };
         async move {
             if let Some(executor) = executor {
-                executor
-                    .execute(move || {
-                        let wait_start = Instant::now();
-                        let mut store = store
-                            .lock()
-                            .expect("immediate projection store mutex poisoned");
-                        let wait = wait_start.elapsed();
-                        let hold_start = Instant::now();
-                        let result = operation(&mut *store);
-                        lock_phase.record(wait, hold_start.elapsed());
-                        result
-                    })
-                    .await
+                executor.execute(run).await
             } else {
-                let wait_start = Instant::now();
-                let mut store = store
-                    .lock()
-                    .expect("immediate projection store mutex poisoned");
-                let wait = wait_start.elapsed();
-                let hold_start = Instant::now();
-                let result = operation(&mut *store);
-                lock_phase.record(wait, hold_start.elapsed());
-                result
+                run()
             }
         }
     }
@@ -1607,9 +1697,7 @@ where
                 push_idem_records.push((request_id, fingerprint, ids, expires_at));
             }
             let apply = move || {
-                let mut store = store
-                    .lock()
-                    .expect("immediate projection store mutex poisoned");
+                let mut store = store.lock_write();
                 store.apply_live_owned(positions, commands)?;
                 Ok(())
             };
@@ -1644,9 +1732,7 @@ where
         async move {
             let queue = positions.first().map(|p| p.queue.clone());
             let apply = move || {
-                let mut store = store
-                    .lock()
-                    .expect("immediate projection store mutex poisoned");
+                let mut store = store.lock_write();
                 store.apply_recovery(&positions, &commands)?;
                 Ok(commands)
             };
@@ -2565,5 +2651,75 @@ mod tests {
         drop(future);
         std::thread::sleep(Duration::from_millis(10));
         assert!(!ran.load(AtomicOrdering::SeqCst));
+    }
+
+    /// fireweed-7b74ceac: the reader/writer split's whole point is that
+    /// [`InProcessProjectionStore::new_with_concurrent_reads`]'s `RwLock`-backed
+    /// [`StoreLockOps::lock_read`] lets readers overlap, while the default `Mutex`-backed path keeps
+    /// funneling every read through one exclusive lock. Exercise the primitive directly (not through
+    /// a full `ProjectionStore` fake) so this stays a fast, deterministic unit test.
+    #[test]
+    fn concurrent_reads_lock_lets_readers_overlap_while_exclusive_lock_serializes() {
+        fn measure(lock: Arc<dyn StoreLockOps<u32>>) -> Duration {
+            let start = Instant::now();
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    let lock = Arc::clone(&lock);
+                    std::thread::spawn(move || {
+                        let _guard = lock.lock_read();
+                        std::thread::sleep(Duration::from_millis(80));
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().expect("reader thread panicked");
+            }
+            start.elapsed()
+        }
+
+        let concurrent: Arc<dyn StoreLockOps<u32>> = Arc::new(RwLock::new(0u32));
+        let exclusive: Arc<dyn StoreLockOps<u32>> = Arc::new(Mutex::new(0u32));
+
+        let concurrent_elapsed = measure(concurrent);
+        let exclusive_elapsed = measure(exclusive);
+
+        assert!(
+            concurrent_elapsed < Duration::from_millis(150),
+            "two RwLock-backed readers should overlap, took {concurrent_elapsed:?}"
+        );
+        assert!(
+            exclusive_elapsed >= Duration::from_millis(150),
+            "two Mutex-backed readers must serialize, took {exclusive_elapsed:?}"
+        );
+    }
+
+    /// A writer must still exclude every concurrent reader on the `RwLock`-backed path — the split
+    /// only lets *readers* overlap with each other, never with a write.
+    #[test]
+    fn concurrent_reads_lock_write_excludes_readers() {
+        let lock: Arc<dyn StoreLockOps<u32>> = Arc::new(RwLock::new(0u32));
+        let start = Instant::now();
+
+        let writer_lock = Arc::clone(&lock);
+        let writer = std::thread::spawn(move || {
+            let mut guard = writer_lock.lock_write();
+            std::thread::sleep(Duration::from_millis(80));
+            **guard = 1;
+        });
+        // Give the writer a head start so the reader below reliably queues behind it.
+        std::thread::sleep(Duration::from_millis(20));
+        let reader_lock = Arc::clone(&lock);
+        let reader = std::thread::spawn(move || {
+            let guard = reader_lock.lock_read();
+            (start.elapsed(), **guard)
+        });
+
+        writer.join().expect("writer thread panicked");
+        let (reader_wait, value) = reader.join().expect("reader thread panicked");
+        assert_eq!(value, 1, "reader must observe the write, not a torn state");
+        assert!(
+            reader_wait >= Duration::from_millis(75),
+            "reader must block until the writer releases, waited {reader_wait:?}"
+        );
     }
 }

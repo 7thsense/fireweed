@@ -536,6 +536,52 @@ where
     } else {
         InProcessProjectionStore::new(projection)
     });
+    assemble_async_log_replay_from_axes(log, projection, node_id)
+}
+
+/// Same as [`assemble_async_log_replay_with_axis_offload`], but the projection axis is constructed
+/// with [`InProcessProjectionStore::new_with_concurrent_reads`] (fireweed-7b74ceac) instead of the
+/// exclusive default: point reads (`query_index_*`/`live_item`/`side_record`/…) proceed concurrently
+/// with each other and only serialize against an in-flight commit, rather than funneling every op
+/// class through one mutex (fireweed-451a6b23's mixed-op funnel probe).
+///
+/// Requires `P: Sync` — safe only for backing stores without a live connection/transaction handle
+/// (e.g. `InMemoryProjection`). Connection-backed axes (`SqliteRelational`, `PostgresRelational`, …)
+/// are not `Sync`-safe for concurrent use and must keep using
+/// [`assemble_async_log_replay_with_axis_offload`].
+pub fn assemble_async_log_replay_with_concurrent_projection_reads<L, P>(
+    log: L,
+    projection: P,
+    node_id: u8,
+    offload_log: bool,
+) -> EngineResult<AsyncLogReplayBackend<L, P>>
+where
+    L: LogStore + Send + 'static,
+    P: ProjectionStore + Send + Sync + 'static,
+{
+    use crate::{DEFAULT_BLOCKING_AXIS_IN_FLIGHT, InProcessLogStore, InProcessProjectionStore};
+
+    let log = Arc::new(if offload_log {
+        InProcessLogStore::new_with_blocking_offload(log, DEFAULT_BLOCKING_AXIS_IN_FLIGHT)?
+    } else {
+        InProcessLogStore::new(log)
+    });
+    let projection = Arc::new(InProcessProjectionStore::new_with_concurrent_reads(
+        projection,
+    ));
+    assemble_async_log_replay_from_axes(log, projection, node_id)
+}
+
+/// Shared tail of axis assembly: fresh idempotency caches, control plane, id/counter state.
+fn assemble_async_log_replay_from_axes<L, P>(
+    log: Arc<InProcessLogStore<L>>,
+    projection: Arc<InProcessProjectionStore<P>>,
+    node_id: u8,
+) -> EngineResult<AsyncLogReplayBackend<L, P>>
+where
+    L: LogStore + Send + 'static,
+    P: ProjectionStore + Send + 'static,
+{
     let push_idempotency = Arc::new(Mutex::new(HashMap::new()));
     let claim_by_query_idempotency = Arc::new(Mutex::new(HashMap::new()));
     let claim_by_item_ids_idempotency = Arc::new(Mutex::new(HashMap::new()));
