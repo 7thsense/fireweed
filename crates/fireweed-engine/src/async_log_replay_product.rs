@@ -3484,13 +3484,24 @@ where
             self.engine
                 .submit_operation(shard.clone(), move || {
                     Box::pin(async move {
-                        let mut recovery: Vec<EntryRecovery> = Vec::with_capacity(entries.len());
-                        let mut committed_envelopes: Vec<CommandEnvelope> = Vec::new();
-                        let mut finalized_in_commit: HashSet<ItemId> = HashSet::new();
-                        let mut staged_fences: HashMap<Vec<u8>, u64> = HashMap::new();
-                        let mut staged_unique_keys: HashMap<(String, Vec<u8>), ItemId> =
-                            HashMap::new();
+                        // fireweed-6bfe48ca: collapse per-entry projection hops into ONE store
+                        // session. Previously each entry paid 1–3 run_with_store awaits
+                        // (commit_validate / fence / index_validate_push) — O(entries) async
+                        // round-trips. Validation still per-entry for reject semantics.
+                        struct Prepared {
+                            consumed_input_id: ItemId,
+                            additional_consumed_input_ids: Vec<ItemId>,
+                            claim_refs: Vec<crate::ClaimRef>,
+                            finalize: FinalizeKind,
+                            side_records: Vec<crate::SideRecord>,
+                            instance_fence: Option<crate::InstanceFence>,
+                            push_items: Option<(Vec<PushItem>, Vec<ItemId>)>,
+                            early_reject: Option<EngineError>,
+                        }
 
+                        let mut prepared: Vec<Prepared> = Vec::with_capacity(entries.len());
+                        // Within-commit double-finalize guard (not durable; store may still reject).
+                        let mut reserved_claims: HashSet<ItemId> = HashSet::new();
                         for entry in entries {
                             let CommitTransitionEntry {
                                 claim_ref,
@@ -3509,181 +3520,272 @@ where
                                 Vec::with_capacity(1 + additional_claim_refs.len());
                             claim_refs.push(claim_ref);
                             claim_refs.extend(additional_claim_refs);
-                            let reject = |e: EngineError| EntryRecovery {
+
+                            if let Err(error) =
+                                validate_distinct_commit_claims(&claim_refs[0], &claim_refs[1..])
+                            {
+                                prepared.push(Prepared {
+                                    consumed_input_id,
+                                    additional_consumed_input_ids,
+                                    claim_refs,
+                                    finalize,
+                                    side_records,
+                                    instance_fence,
+                                    push_items: None,
+                                    early_reject: Some(error),
+                                });
+                                continue;
+                            }
+                            if claim_refs
+                                .iter()
+                                .any(|c| reserved_claims.contains(&c.item_id))
+                            {
+                                prepared.push(Prepared {
+                                    consumed_input_id,
+                                    additional_consumed_input_ids,
+                                    claim_refs,
+                                    finalize,
+                                    side_records,
+                                    instance_fence,
+                                    push_items: None,
+                                    early_reject: Some(EngineError::Terminal),
+                                });
+                                continue;
+                            }
+                            // Reserve only for entries that will attempt store validation.
+                            reserved_claims.extend(claim_refs.iter().map(|c| c.item_id));
+
+                            let mut early_reject = None;
+                            let mut push_items = None;
+                            if !lifecycle_items.is_empty() {
+                                if let Some(e) = lifecycle_items.iter().find_map(|item| {
+                                    validate_entity(schema.as_ref(), item.entity.as_ref()).err()
+                                }) {
+                                    early_reject = Some(e);
+                                } else {
+                                    let counter_base = counters.reserve(
+                                        &shard,
+                                        epoch,
+                                        lifecycle_items.len() as u32,
+                                    );
+                                    let built = build_push_items(
+                                        lifecycle_items,
+                                        epoch,
+                                        node_id,
+                                        counter_base,
+                                        max_attempts,
+                                    );
+                                    push_items = Some(built);
+                                }
+                            }
+                            prepared.push(Prepared {
                                 consumed_input_id,
-                                additional_consumed_input_ids: additional_consumed_input_ids
+                                additional_consumed_input_ids,
+                                claim_refs,
+                                finalize,
+                                side_records,
+                                instance_fence,
+                                push_items,
+                                early_reject,
+                            });
+                        }
+
+                        // Snapshot validate inputs so `prepared` stays owned for envelope build.
+                        #[derive(Clone)]
+                        struct ValidateIn {
+                            skip: bool,
+                            claim_refs: Vec<crate::ClaimRef>,
+                            fence: Option<crate::InstanceFence>,
+                            push_items: Option<Vec<PushItem>>,
+                        }
+                        let validate_in: Vec<ValidateIn> = prepared
+                            .iter()
+                            .map(|prep| ValidateIn {
+                                skip: prep.early_reject.is_some(),
+                                claim_refs: prep.claim_refs.clone(),
+                                fence: prep.instance_fence.clone(),
+                                push_items: prep
+                                    .push_items
+                                    .as_ref()
+                                    .map(|(items, _)| items.clone()),
+                            })
+                            .collect();
+
+                        // One projection hop for every durable validate (claims, fences, indexes).
+                        let store_results: Vec<Option<EngineError>> = projection
+                            .run_with_store({
+                                let shard = shard.clone();
+                                let definition_for_unique = definition_for_unique.clone();
+                                move |p| {
+                                    let mut staged_fences: HashMap<Vec<u8>, u64> = HashMap::new();
+                                    let mut staged_unique_keys: HashMap<(String, Vec<u8>), ItemId> =
+                                        HashMap::new();
+                                    let mut results = Vec::with_capacity(validate_in.len());
+                                    for prep in &validate_in {
+                                        if prep.skip {
+                                            results.push(None);
+                                            continue;
+                                        }
+                                        if let Err(e) = ProjectionStore::commit_validate(
+                                            p,
+                                            &shard,
+                                            &prep.claim_refs,
+                                            now,
+                                        ) {
+                                            results.push(Some(e));
+                                            continue;
+                                        }
+                                        if let Some(fence) = &prep.fence {
+                                            let stored =
+                                                match staged_fences.get(&fence.instance_key) {
+                                                    Some(v) => *v,
+                                                    None => ProjectionStore::instance_fence(
+                                                        p,
+                                                        &shard,
+                                                        &fence.instance_key,
+                                                    )?
+                                                    .unwrap_or(0),
+                                                };
+                                            if let Err(e) = validate_instance_fence(stored, fence)
+                                            {
+                                                results.push(Some(e));
+                                                continue;
+                                            }
+                                            staged_fences
+                                                .insert(fence.instance_key.clone(), fence.next);
+                                        }
+                                        if let Some(push_items) = &prep.push_items {
+                                            if let Err(e) = ProjectionStore::index_validate_push(
+                                                p,
+                                                &shard,
+                                                push_items,
+                                            ) {
+                                                results.push(Some(e));
+                                                continue;
+                                            }
+                                            if requires_cross_entry_push_validation
+                                                && let Err(e) = stage_unique_push_keys(
+                                                    &definition_for_unique,
+                                                    push_items,
+                                                    &mut staged_unique_keys,
+                                                )
+                                            {
+                                                results.push(Some(e));
+                                                continue;
+                                            }
+                                        }
+                                        results.push(None);
+                                    }
+                                    Ok(results)
+                                }
+                            })
+                            .await?;
+
+                        let mut recovery: Vec<EntryRecovery> =
+                            Vec::with_capacity(prepared.len());
+                        let mut committed_envelopes: Vec<CommandEnvelope> = Vec::new();
+                        let mk_env =
+                            |command: QueueCommand, item_ids: Vec<ItemId>| CommandEnvelope {
+                                command_id: ids.next_command_id(),
+                                request_id: request_id.clone(),
+                                request_fingerprint: Some(commit_fingerprint),
+                                request_outcome: None,
+                                item_ids,
+                                command,
+                                checksum: CommandChecksum(0),
+                                created_at: now,
+                            };
+
+                        // Coalesce accepted work into O(1) envelopes per command kind (not per entry).
+                        // Cuts log append + projection apply from ~3N commands to ~4 for N entries.
+                        let mut all_sides: Vec<crate::SideRecord> = Vec::new();
+                        let mut all_fences: Vec<crate::InstanceFence> = Vec::new();
+                        let mut all_push: Vec<PushItem> = Vec::new();
+                        let mut all_push_ids: Vec<ItemId> = Vec::new();
+                        let mut all_finalize: Vec<FinalizeOutcome> = Vec::new();
+                        let mut all_finalize_ids: Vec<ItemId> = Vec::new();
+
+                        for (prep, store_err) in prepared.into_iter().zip(store_results) {
+                            let reject = |e: EngineError| EntryRecovery {
+                                consumed_input_id: prep.consumed_input_id,
+                                additional_consumed_input_ids: prep
+                                    .additional_consumed_input_ids
                                     .clone(),
                                 instance: None,
                                 side_record_keys: Vec::new(),
                                 lifecycle_item_ids: Vec::new(),
                                 status: CommitEntryStatus::Rejected(e),
                             };
-
-                            if let Err(error) =
-                                validate_distinct_commit_claims(&claim_refs[0], &claim_refs[1..])
-                            {
-                                recovery.push(reject(error));
-                                continue;
-                            }
-                            if claim_refs
-                                .iter()
-                                .any(|c| finalized_in_commit.contains(&c.item_id))
-                            {
-                                recovery.push(reject(EngineError::Terminal));
-                                continue;
-                            }
-                            if let Err(e) = projection
-                                .run_with_store({
-                                    let shard = shard.clone();
-                                    let claim_refs = claim_refs.clone();
-                                    move |p| {
-                                        ProjectionStore::commit_validate(
-                                            p,
-                                            &shard,
-                                            &claim_refs,
-                                            now,
-                                        )
-                                    }
-                                })
-                                .await
-                            {
+                            if let Some(e) = prep.early_reject {
                                 recovery.push(reject(e));
                                 continue;
                             }
-                            if let Some(fence) = &instance_fence {
-                                let stored = match staged_fences.get(&fence.instance_key) {
-                                    Some(v) => *v,
-                                    None => projection
-                                        .run_with_store({
-                                            let shard = shard.clone();
-                                            let key = fence.instance_key.clone();
-                                            move |p| {
-                                                ProjectionStore::instance_fence(p, &shard, &key)
-                                            }
-                                        })
-                                        .await?
-                                        .unwrap_or(0),
-                                };
-                                if let Err(e) = validate_instance_fence(stored, fence) {
-                                    recovery.push(reject(e));
-                                    continue;
-                                }
+                            if let Some(e) = store_err {
+                                recovery.push(reject(e));
+                                continue;
                             }
 
-                            // fireweed-bf03cbf5: not retained — see `EntryRecovery::side_record_keys`.
-                            let side_record_keys: Vec<Vec<u8>> = Vec::new();
-                            let instance = instance_fence
+                            let instance = prep
+                                .instance_fence
                                 .as_ref()
                                 .map(|f| (f.instance_key.clone(), f.next));
-                            let mut envelopes: Vec<CommandEnvelope> = Vec::new();
-                            let mk_env =
-                                |command: QueueCommand, item_ids: Vec<ItemId>| CommandEnvelope {
-                                    command_id: ids.next_command_id(),
-                                    request_id: request_id.clone(),
-                                    request_fingerprint: Some(commit_fingerprint),
-                                    request_outcome: None,
-                                    item_ids,
-                                    command,
-                                    checksum: CommandChecksum(0),
-                                    created_at: now,
-                                };
-
-                            if !side_records.is_empty() {
-                                envelopes.push(mk_env(
-                                    QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
-                                        records: side_records,
-                                    }),
-                                    Vec::new(),
-                                ));
+                            all_sides.extend(prep.side_records);
+                            if let Some(fence) = prep.instance_fence {
+                                all_fences.push(fence);
                             }
-                            if let Some(fence) = instance_fence {
-                                envelopes.push(mk_env(
-                                    QueueCommand::AdvanceInstanceFence(
-                                        AdvanceInstanceFenceCommand {
-                                            instance_key: fence.instance_key,
-                                            expected: fence.expected,
-                                            next: fence.next,
-                                        },
-                                    ),
-                                    Vec::new(),
-                                ));
-                            }
-
                             let mut lifecycle_item_ids = Vec::new();
-                            if !lifecycle_items.is_empty() {
-                                if let Some(e) = lifecycle_items.iter().find_map(|item| {
-                                    validate_entity(schema.as_ref(), item.entity.as_ref()).err()
-                                }) {
-                                    recovery.push(reject(e));
-                                    continue;
-                                }
-                                let counter_base =
-                                    counters.reserve(&shard, epoch, lifecycle_items.len() as u32);
-                                let (push_items, push_ids) = build_push_items(
-                                    lifecycle_items,
-                                    epoch,
-                                    node_id,
-                                    counter_base,
-                                    max_attempts,
-                                );
-                                // fireweed-a355d82b / fireweed-60ca4bfd: validate only this entry's
-                                // push delta against durable projection (plus within-delta uniqueness).
-                                // Cross-entry uniqueness for unique-index queues uses staged_unique_keys.
-                                if let Err(e) = projection
-                                    .run_with_store({
-                                        let shard = shard.clone();
-                                        let candidate = push_items.clone();
-                                        move |p| {
-                                            ProjectionStore::index_validate_push(
-                                                p, &shard, &candidate,
-                                            )
-                                        }
-                                    })
-                                    .await
-                                {
-                                    recovery.push(reject(e));
-                                    continue;
-                                }
-                                if requires_cross_entry_push_validation
-                                    && let Err(e) = stage_unique_push_keys(
-                                        &definition_for_unique,
-                                        &push_items,
-                                        &mut staged_unique_keys,
-                                    )
-                                {
-                                    recovery.push(reject(e));
-                                    continue;
-                                }
+                            if let Some((push_items, push_ids)) = prep.push_items {
                                 lifecycle_item_ids = push_ids.clone();
-                                envelopes.push(mk_env(
-                                    QueueCommand::Push(PushCommand { items: push_items }),
-                                    push_ids,
-                                ));
+                                all_push.extend(push_items);
+                                all_push_ids.extend(push_ids);
                             }
-
-                            envelopes.push(mk_env(
-                                QueueCommand::Finalize(FinalizeCommand {
-                                    outcomes: claim_refs
-                                        .iter()
-                                        .map(|c| FinalizeOutcome::new(c.item_id, finalize))
-                                        .collect(),
-                                }),
-                                claim_refs.iter().map(|c| c.item_id).collect(),
-                            ));
-
-                            finalized_in_commit.extend(claim_refs.iter().map(|c| c.item_id));
-                            if let Some((key, next)) = &instance {
-                                staged_fences.insert(key.clone(), *next);
+                            for c in &prep.claim_refs {
+                                all_finalize
+                                    .push(FinalizeOutcome::new(c.item_id, prep.finalize));
+                                all_finalize_ids.push(c.item_id);
                             }
-                            committed_envelopes.append(&mut envelopes);
                             recovery.push(EntryRecovery {
-                                consumed_input_id,
-                                additional_consumed_input_ids,
+                                consumed_input_id: prep.consumed_input_id,
+                                additional_consumed_input_ids: prep.additional_consumed_input_ids,
                                 instance,
-                                side_record_keys,
+                                // fireweed-bf03cbf5: not retained — see EntryRecovery::side_record_keys.
+                                side_record_keys: Vec::new(),
                                 lifecycle_item_ids,
                                 status: CommitEntryStatus::Committed,
                             });
+                        }
+
+                        if !all_sides.is_empty() {
+                            committed_envelopes.push(mk_env(
+                                QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                                    records: all_sides,
+                                }),
+                                Vec::new(),
+                            ));
+                        }
+                        for fence in all_fences {
+                            committed_envelopes.push(mk_env(
+                                QueueCommand::AdvanceInstanceFence(AdvanceInstanceFenceCommand {
+                                    instance_key: fence.instance_key,
+                                    expected: fence.expected,
+                                    next: fence.next,
+                                }),
+                                Vec::new(),
+                            ));
+                        }
+                        if !all_push.is_empty() {
+                            committed_envelopes.push(mk_env(
+                                QueueCommand::Push(PushCommand { items: all_push }),
+                                all_push_ids,
+                            ));
+                        }
+                        if !all_finalize.is_empty() {
+                            committed_envelopes.push(mk_env(
+                                QueueCommand::Finalize(FinalizeCommand {
+                                    outcomes: all_finalize,
+                                }),
+                                all_finalize_ids,
+                            ));
                         }
 
                         let mut batch = committed_envelopes;

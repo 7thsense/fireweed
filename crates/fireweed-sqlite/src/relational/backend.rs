@@ -1838,27 +1838,27 @@ impl fireweed_engine::CommitTransitionPort for SqliteRelationalBackend {
                 return Ok(recovery_to_outcomes(&stored));
             }
 
-            // (2) Per entry: validate the lease-token + version-fenced claim_ref, then apply the entry's
-            //     side-records + lifecycle push + input finalize in this same transaction. A rejected entry
-            //     applies nothing (its outcome is captured; later entries still proceed). The caller's
-            //     `request_id` is recorded with the whole-body outcome (no `request_id: None` on this path).
+            // (2) Validate every entry, then apply with coalesced finalizes (and chunked lifecycle
+            //     pushes). fireweed-6bfe48ca: full all-entries bulk-apply regressed snorri; this keeps
+            //     per-entry lifecycle Push (unique/index apply stays entry-scoped) but collapses
+            //     Finalize into one statement group and batches claim-row reads.
             let mut token_ops = Vec::new();
             let mut seq = seq0 as u64;
             let mut positions: Vec<CommandPosition> = Vec::new();
-            let mut apply =
-                |command: &QueueCommand, token_ops: &mut Vec<TokenOp>| -> EngineResult<()> {
+            macro_rules! apply_cmd {
+                ($command:expr) => {{
                     apply_command_sql(
                         &tx,
                         queues,
                         grouped_shards,
                         claim_scan_hints,
                         claim_scan_default_fifo,
-                        token_ops,
+                        &mut token_ops,
                         shard,
                         &CommandPosition::new(shard.clone(), cursor_epoch as u64, seq),
                         seq,
                         now,
-                        command,
+                        $command,
                     )?;
                     positions.push(CommandPosition::new(
                         shard.clone(),
@@ -1866,10 +1866,62 @@ impl fireweed_engine::CommitTransitionPort for SqliteRelationalBackend {
                         seq,
                     ));
                     seq += 1;
-                    Ok(())
-                };
+                }};
+            }
+
+            // Prefetch claim rows (fixed chunk size, plain prepare — no prepare_cached).
+            let all_claim_ids: Vec<_> = entries
+                .iter()
+                .flat_map(|e| {
+                    std::iter::once(e.claim_ref.item_id)
+                        .chain(e.additional_claim_refs.iter().map(|c| c.item_id))
+                })
+                .collect();
+            let claim_rows = {
+                let mut found: HashMap<String, (String, i64, i64, Option<Vec<u8>>, Option<i64>, i64)> =
+                    HashMap::with_capacity(all_claim_ids.len());
+                const CH: usize = 64;
+                for chunk in all_claim_ids.chunks(CH) {
+                    if chunk.is_empty() {
+                        continue;
+                    }
+                    let ph = vec!["?"; chunk.len()].join(",");
+                    let sql = format!(
+                        "SELECT item_id, lifecycle_state, fenced, superseded, lease_token_hash, \
+                         lease_expires_at, item_version FROM fireweed_items \
+                         WHERE tenant_id=? AND queue_id=? AND item_id IN ({ph})"
+                    );
+                    let mut pv: Vec<rusqlite::types::Value> =
+                        Vec::with_capacity(2 + chunk.len());
+                    pv.push(rusqlite::types::Value::Text(t.clone()));
+                    pv.push(rusqlite::types::Value::Text(q.clone()));
+                    for id in chunk {
+                        pv.push(rusqlite::types::Value::Text(id.to_string()));
+                    }
+                    let mut stmt = st(tx.prepare(&sql))?;
+                    let rows = st(stmt.query_map(params_from_iter(pv.iter()), |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, Option<Vec<u8>>>(4)?,
+                            row.get::<_, Option<i64>>(5)?,
+                            row.get::<_, i64>(6)?,
+                        ))
+                    }))?;
+                    for r in rows {
+                        let (id, stt, f, s, h, e, v) = st(r)?;
+                        found.insert(id, (stt, f, s, h, e, v));
+                    }
+                }
+                found
+            };
 
             let mut recovery: Vec<EntryRecovery> = Vec::with_capacity(entries.len());
+            let mut finalize_outcomes: Vec<FinalizeOutcome> = Vec::new();
+            let mut staged_fences: HashMap<Vec<u8>, u64> = HashMap::new();
+
             for entry in entries {
                 let consumed_input_id = entry.claim_ref.item_id;
                 let additional_consumed_input_ids = entry
@@ -1894,28 +1946,64 @@ impl fireweed_engine::CommitTransitionPort for SqliteRelationalBackend {
                 }
                 if let Some(e) = std::iter::once(&entry.claim_ref)
                     .chain(&entry.additional_claim_refs)
-                    .find_map(|claim| commit_validate_sql(&tx, shard, claim, now).err())
+                    .find_map(|claim| {
+                        let id = claim.item_id.to_string();
+                        let Some((state, fenced, superseded, hash, exp, ver)) = claim_rows.get(&id)
+                        else {
+                            return Some(EngineError::NotFound);
+                        };
+                        // Inline validate against prefetched row (same rules as commit_validate_sql).
+                        let state = match parse_state(state) {
+                            Ok(s) => s,
+                            Err(err) => return Some(err),
+                        };
+                        if *fenced != 0 {
+                            return Some(EngineError::StaleLease);
+                        }
+                        if state.is_terminal() {
+                            return Some(EngineError::Terminal);
+                        }
+                        if *superseded != 0 {
+                            return Some(EngineError::Superseded);
+                        }
+                        if state != ItemState::Leased {
+                            return Some(EngineError::Invalid("item is not leased"));
+                        }
+                        if hash.as_deref() != Some(lease_hash(&claim.lease_token).as_slice()) {
+                            return Some(EngineError::StaleLease);
+                        }
+                        if exp.is_some_and(|exp| exp < ts_nanos(now)) {
+                            return Some(EngineError::StaleLease);
+                        }
+                        if *ver as u64 != claim.item_version {
+                            return Some(EngineError::Conflict);
+                        }
+                        None
+                    })
                 {
                     recovery.push(reject(e));
                     continue;
                 }
-                // C6: validate the caller-supplied instance fence against the durable fence (absent == 0).
-                // A stale `expected` -> Conflict, a non-monotonic `next` -> Invalid; NOTHING is applied.
                 if let Some(fence) = &entry.instance_fence {
                     let (it, iq) = parts(shard);
-                    let stored: i64 = st(tx
-                        .query_row(
-                            "SELECT fence FROM fireweed_instance_fences \
-                             WHERE tenant_id=?1 AND queue_id=?2 AND instance_key=?3",
-                            params![it, iq, fence.instance_key],
-                            |row| row.get(0),
-                        )
-                        .optional())?
-                    .unwrap_or(0);
-                    if let Err(e) = validate_instance_fence(stored as u64, fence) {
+                    let stored = if let Some(v) = staged_fences.get(&fence.instance_key) {
+                        *v
+                    } else {
+                        st(tx
+                            .query_row(
+                                "SELECT fence FROM fireweed_instance_fences \
+                                 WHERE tenant_id=?1 AND queue_id=?2 AND instance_key=?3",
+                                params![it, iq, fence.instance_key],
+                                |row| row.get::<_, i64>(0),
+                            )
+                            .optional())?
+                        .unwrap_or(0) as u64
+                    };
+                    if let Err(e) = validate_instance_fence(stored, fence) {
                         recovery.push(reject(e));
                         continue;
                     }
+                    staged_fences.insert(fence.instance_key.clone(), fence.next);
                 }
                 if !entry.lifecycle_items.is_empty()
                     && let Some(e) = entry.lifecycle_items.iter().find_map(|item| {
@@ -1925,30 +2013,22 @@ impl fireweed_engine::CommitTransitionPort for SqliteRelationalBackend {
                     recovery.push(reject(e));
                     continue;
                 }
-                // fireweed-bf03cbf5: not retained — see `EntryRecovery::side_record_keys`.
-                let side_record_keys: Vec<Vec<u8>> = Vec::new();
                 let instance = entry
                     .instance_fence
                     .as_ref()
                     .map(|f| (f.instance_key.clone(), f.next));
 
                 if !entry.side_records.is_empty() {
-                    apply(
-                        &QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
-                            records: entry.side_records,
-                        }),
-                        &mut token_ops,
-                    )?;
+                    apply_cmd!(&QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                        records: entry.side_records,
+                    }));
                 }
                 if let Some(fence) = entry.instance_fence {
-                    apply(
-                        &QueueCommand::AdvanceInstanceFence(AdvanceInstanceFenceCommand {
-                            instance_key: fence.instance_key,
-                            expected: fence.expected,
-                            next: fence.next,
-                        }),
-                        &mut token_ops,
-                    )?;
+                    apply_cmd!(&QueueCommand::AdvanceInstanceFence(AdvanceInstanceFenceCommand {
+                        instance_key: fence.instance_key,
+                        expected: fence.expected,
+                        next: fence.next,
+                    }));
                 }
                 let mut lifecycle_item_ids = Vec::new();
                 if !entry.lifecycle_items.is_empty() {
@@ -1963,28 +2043,25 @@ impl fireweed_engine::CommitTransitionPort for SqliteRelationalBackend {
                         max_attempts,
                     );
                     lifecycle_item_ids = ids;
-                    apply(
-                        &QueueCommand::Push(PushCommand { items: push_items }),
-                        &mut token_ops,
-                    )?;
+                    apply_cmd!(&QueueCommand::Push(PushCommand { items: push_items }));
                 }
-                apply(
-                    &QueueCommand::Finalize(FinalizeCommand {
-                        outcomes: std::iter::once(&entry.claim_ref)
-                            .chain(&entry.additional_claim_refs)
-                            .map(|claim| FinalizeOutcome::new(claim.item_id, entry.finalize))
-                            .collect(),
-                    }),
-                    &mut token_ops,
-                )?;
+                for claim in std::iter::once(&entry.claim_ref).chain(&entry.additional_claim_refs) {
+                    finalize_outcomes
+                        .push(FinalizeOutcome::new(claim.item_id, entry.finalize));
+                }
                 recovery.push(EntryRecovery {
                     consumed_input_id,
                     additional_consumed_input_ids,
                     instance,
-                    side_record_keys,
+                    side_record_keys: Vec::new(),
                     lifecycle_item_ids,
                     status: CommitEntryStatus::Committed,
                 });
+            }
+            if !finalize_outcomes.is_empty() {
+                apply_cmd!(&QueueCommand::Finalize(FinalizeCommand {
+                    outcomes: finalize_outcomes,
+                }));
             }
             let outcomes = recovery_to_outcomes(&recovery);
 
