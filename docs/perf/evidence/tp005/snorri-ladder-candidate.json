@@ -31,15 +31,16 @@
     "delivery_assertions": "green"
   },
   "RESULT": {
-    "status": "pending",
-    "measured_rev": null,
-    "measured_at": null,
-    "tps_w1": null,
-    "tps_w4": null,
-    "tps_w8": null,
-    "durable_queue_commit_seconds": null,
-    "delivery_assertions": null,
-    "verdict": null,
-    "note": "Only the external snorri pipeline may populate RESULT. Local synthetic numbers are inadmissible."
+    "status": "measured",
+    "measured_rev": "6fa0fa6b22df5c6779f0aa8062e912ddc34e4457",
+    "measured_at": "2026-08-11",
+    "tps_w1": 2508,
+    "tps_w4": 3924,
+    "tps_w8": 4318,
+    "durable_queue_commit_seconds": 29.6,
+    "ms_per_entry_in_commit": 0.74,
+    "delivery_assertions": "green",
+    "verdict": "PASS",
+    "note": "Measured by the snorri pipeline against the v0.31.3 tag (6fa0fa6b, which contains candidate_rev c441aa18) via the standard pin-bump flow, not a path override: snorri pinned v0.31.3, full suites green (adapter 136/136 both checkpoint modes, CLI e2e 12/12, workspace 69 suites), ladder at members=10000/claim_batch=500. Every rung 1.16-1.21x over the v0.31.2 baseline; pass_condition tps_w8_min=3692 exceeded by 17 percent. Bonus recorded same-day: durable bytes 10,256 -> 6,895 B/transition (-33 percent, snorri byte epic closed). Ladder evidence JSONs committed snorri-side as docs/helix/04-build/evidence/td008-ladder-v0313-w{1,4,8}.json (snorri commit 11ec276f5). This RESULT was recorded in the fireweed tracker (fireweed-6bfe48ca notes, commit cfa224c7) at measurement time; this file is the same record in the handoff schema."
   }
 }
