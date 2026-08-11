@@ -443,6 +443,20 @@ const IN_PROCESS_PUSH_IDEM_RETENTION_MS: u64 = 86_400_000;
 /// Default construction keeps operations on the polling thread (memory axes).
 /// [`Self::new_with_blocking_offload`] routes whole operations through a private
 /// [`BoundedBlockingExecutor`] for durable blocking projections (sqlite).
+///
+/// **Funnel caveat (fireweed-451a6b23):** every axis op — reads and writes alike — funnels through
+/// the same `store` mutex: [`Self::run_with_store`] (shared borrow) and [`Self::run_with_store_mut`]
+/// (exclusive borrow) both take it, so a point read (`query_index*`, `live_item*`, `item_state`, …)
+/// queues behind another worker's concurrent commit (`apply_live`, `admit_mutation`, …) and vice
+/// versa. A pure-commit workload never sees this (fireweed-77ae7a87's commit-section probe measured
+/// this mutex flat at ~0.14 ms/entry, w=1..8), but interleaving point reads with commits — the
+/// realistic shape snorri's ladder drives — inflates commit-span latency well beyond that (mixed-op
+/// funnel probe, `sqlite_mixed_op_funnel_probe.rs`: commit ms/entry rose sharply once reads shared
+/// the mutex, capping snorri's w=8 caller-visible worker concurrency well under 8/8). Until a
+/// segregated read lane lands, callers driving high-volume point-read traffic against the same queue
+/// a commit-heavy workload writes to should batch reads (`live_items`/`query_index_typed` accept
+/// multiple keys per call) rather than issuing one `run_with_store` acquisition per key, and should
+/// not assume point reads are free of commit-path contention.
 pub struct InProcessProjectionStore<S> {
     store: Arc<Mutex<S>>,
     executor: Option<BoundedBlockingExecutor>,
