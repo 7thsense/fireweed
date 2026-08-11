@@ -6528,13 +6528,17 @@ pub fn open_sqlite_postgres_projection(
     wrap_postgres_runtime_safe(backend, clock)
 }
 
-/// Open a **sole-owner**, relational SQLite Fireweed handle at `path`. Unlike [`open_sqlite`], this constructor keeps
-/// its authoritative projection in relational tables and supports [`Fireweed::discover_active_scopes`],
-/// including per-group discovery. Queue creation is atomic across independently opened handles and returns
-/// the definition decoded from the durable `queues` catalog. Requires the `sqlite` feature (default).
+/// Open a **sole-owner**, **unified** SQLite Fireweed handle at `path`.
 ///
-/// Note: this is the **unified** sqlite relational backend (same store on both axes), not the orthogonal
-/// [`open_sqlite_sqlite_projection`] matrix cell.
+/// **Not the product durability model.** ADR-012 product cells are orthogonal
+/// `LogStore × ProjectionStore` (log for durability, projection for performance).
+/// This constructor keeps a **single** sqlite file as a unified store (same path on both
+/// axes) for sole-owner discovery/`discover_active_scopes` convenience. Prefer
+/// [`open_sqlite`] / [`open_sqlite_sqlite_projection`] / [`open_memory`] for performance
+/// work and Class A log-replay semantics.
+///
+/// Queue creation is atomic across independently opened handles and returns the definition
+/// decoded from the durable `queues` catalog. Requires the `sqlite` feature (default).
 #[cfg(feature = "sqlite")]
 pub fn open_sqlite_relational(path: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
     // Unified relational SQLite already implements async product ports; do not install

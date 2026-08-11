@@ -1922,6 +1922,11 @@ impl fireweed_engine::CommitTransitionPort for SqliteRelationalBackend {
             let mut finalize_outcomes: Vec<FinalizeOutcome> = Vec::new();
             let mut staged_fences: HashMap<Vec<u8>, u64> = HashMap::new();
 
+            // Per-entry validate + lifecycle apply (fireweed-6bfe48ca / c6c411ff).
+            // Do not re-land full-batch lifecycle coalescing without clearing
+            // docs/perf/adr-notes/commit-coalescing-shape-predicate.md (snorri-shaped gate
+            // + external ladder ≥ 3692 tps @ w=8). Finalize may be coalesced; lifecycle Push stays
+            // per-entry on this unified path.
             for entry in entries {
                 let consumed_input_id = entry.claim_ref.item_id;
                 let additional_consumed_input_ids = entry

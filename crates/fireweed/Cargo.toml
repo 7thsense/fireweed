@@ -107,7 +107,7 @@ path = "tests/sqlite_create_or_read.rs"
 [[test]]
 name = "sqlite_commit_batch_linearity"
 path = "tests/sqlite_commit_batch_linearity.rs"
-required-features = ["sqlite"]
+required-features = ["sqlite", "memory", "objectlog"]
 
 [[test]]
 name = "durable_tps_proof"

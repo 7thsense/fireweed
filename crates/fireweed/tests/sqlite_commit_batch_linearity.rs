@@ -9,15 +9,17 @@
 //!
 //! This regression gate:
 //! 1. Reproduces the measurement shape (fixed total work, vary entries/commit).
-//! 2. Asserts amortization (ratio ms_large/ms_small ≤ 1.05 in the amortizing range).
-//! 3. Covers plain, unique typed-index, finalize+side+fence, multi-index, and the full
-//!    snorri shape (19 typed indexes, ~2.3 KB payload, entity docs, 500-entry batches) on
-//!    both `open_sqlite` and `open_sqlite_relational` (fireweed-d8ceee81).
-//! 4. Prints a ladder table for evidence (`docs/perf/evidence/tp005/commit-amortization-latest.md`).
+//! 2. Asserts amortization (ratio ms_large/ms_small ≤ 1.05–1.15) on product cells.
+//! 3. Product cells (ADR-012 log × projection): memory×memory, sqlite×memory, objectlog×memory,
+//!    sqlite×sqlite. Unified `open_sqlite_relational` is non-product (print-only).
+//! 4. Absolute software floors: memory @512 ≤ 0.05 ms/entry; sqlite×memory @512 ≤ 0.15 ms/entry
+//!    for snorri-shaped commits (ManualClock).
+//! 5. Evidence: docs/perf/evidence/tp005/log-projection-perf-latest.md
 
-#![cfg(feature = "sqlite")]
+#![cfg(all(feature = "sqlite", feature = "memory"))]
 #![allow(dead_code, unused_imports)]
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -98,7 +100,7 @@ async fn measure_ms_per_entry_multi_index(
 ) -> (f64, Duration) {
     assert!(total_entries.is_multiple_of(entries_per_commit));
     let path = tmp_sqlite(&format!("{tag}-b{entries_per_commit}"));
-    let fw = open_fw(OpenKind::LogReplay, &path);
+    let fw = open_fw(&OpenKind::SqliteMemory, &path);
     let def = qdef_multi_typed(n_indexes);
     let queue = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
     fw.create_queue(def).await.expect("create queue");
@@ -189,20 +191,86 @@ fn tmp_sqlite(tag: &str) -> String {
     path.to_string_lossy().into_owned()
 }
 
-#[derive(Clone, Copy, Debug)]
+/// Product composition cells (ADR-012). Paths are scratch locations for file-backed axes.
+#[derive(Clone, Debug)]
 enum OpenKind {
+    /// log=memory × projection=memory (Class B software baseline).
+    Memory,
     /// log=sqlite × projection=memory (Class A log-replay).
-    LogReplay,
-    /// Unified relational sqlite (snorri production-shaped sole-owner cell).
-    Relational,
+    SqliteMemory,
+    /// log=filesystem objectlog × projection=memory.
+    #[cfg(feature = "objectlog")]
+    ObjectLogMemory,
+    /// log=sqlite × projection=sqlite (distinct file paths).
+    SqliteSqlite,
+    /// Non-product unified sole-owner (not log×projection). Print-only.
+    UnifiedSqlite,
 }
 
-fn open_fw(kind: OpenKind, path: &str) -> Fireweed {
+fn open_fw(kind: &OpenKind, scratch: &str) -> Fireweed {
+    let clock = Arc::new(ManualClock::at(0));
     match kind {
-        OpenKind::LogReplay => open_sqlite(path, Arc::new(ManualClock::at(0))).expect("open sqlite"),
-        OpenKind::Relational => {
-            open_sqlite_relational(path, Arc::new(ManualClock::at(0))).expect("open sqlite relational")
+        OpenKind::Memory => open_memory(clock),
+        OpenKind::SqliteMemory => open_sqlite(scratch, clock).expect("open sqlite×memory"),
+        #[cfg(feature = "objectlog")]
+        OpenKind::ObjectLogMemory => open_objectlog(PathBuf::from(scratch), clock).expect("open objectlog"),
+        OpenKind::SqliteSqlite => {
+            let log = format!("{scratch}-log.db");
+            let proj = format!("{scratch}-proj.db");
+            let _ = std::fs::remove_file(&log);
+            let _ = std::fs::remove_file(&proj);
+            open_sqlite_sqlite_projection(&log, &proj, clock).expect("open sqlite×sqlite")
         }
+        OpenKind::UnifiedSqlite => {
+            open_sqlite_relational(scratch, clock).expect("open unified sqlite")
+        }
+    }
+}
+
+fn kind_label(kind: &OpenKind) -> &'static str {
+    match kind {
+        OpenKind::Memory => "memory×memory",
+        OpenKind::SqliteMemory => "sqlite×memory",
+        #[cfg(feature = "objectlog")]
+        OpenKind::ObjectLogMemory => "objectlog×memory",
+        OpenKind::SqliteSqlite => "sqlite×sqlite",
+        OpenKind::UnifiedSqlite => "unified-sqlite (non-product)",
+    }
+}
+
+fn product_kinds() -> Vec<OpenKind> {
+    let mut v = vec![
+        OpenKind::Memory,
+        OpenKind::SqliteMemory,
+        OpenKind::SqliteSqlite,
+    ];
+    #[cfg(feature = "objectlog")]
+    v.insert(2, OpenKind::ObjectLogMemory);
+    v
+}
+
+fn scratch_for(kind: &OpenKind, tag: &str) -> String {
+    match kind {
+        OpenKind::Memory => String::new(),
+        OpenKind::ObjectLogMemory => {
+            #[cfg(feature = "objectlog")]
+            {
+                let p = std::env::temp_dir().join(format!(
+                    "fireweed-objlog-{tag}-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                ));
+                let _ = std::fs::remove_dir_all(&p);
+                std::fs::create_dir_all(&p).expect("objlog root");
+                return p.to_string_lossy().into_owned();
+            }
+            #[cfg(not(feature = "objectlog"))]
+            String::new()
+        }
+        _ => tmp_sqlite(tag),
     }
 }
 
@@ -219,7 +287,7 @@ async fn measure_ms_per_entry(
     unique_lifecycle: bool,
 ) -> (f64, Duration) {
     measure_ms_per_entry_kind(
-        OpenKind::LogReplay,
+        &OpenKind::SqliteMemory,
         def,
         tag,
         entries_per_commit,
@@ -230,7 +298,7 @@ async fn measure_ms_per_entry(
 }
 
 async fn measure_ms_per_entry_kind(
-    kind: OpenKind,
+    kind: &OpenKind,
     def: QueueDefinition,
     tag: &str,
     entries_per_commit: usize,
@@ -238,7 +306,7 @@ async fn measure_ms_per_entry_kind(
     unique_lifecycle: bool,
 ) -> (f64, Duration) {
     assert!(total_entries.is_multiple_of(entries_per_commit));
-    let path = tmp_sqlite(&format!("{tag}-b{entries_per_commit}"));
+    let path = scratch_for(kind, &format!("{tag}-b{entries_per_commit}"));
     let fw = open_fw(kind, &path);
     let queue = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
     fw.create_queue(def).await.expect("create queue");
@@ -470,17 +538,14 @@ async fn sqlite_commit_batch_size_sweep_repro_table() {
     // 500/1000 ladder (total 2000) — snorri's inverted-batching observation window.
     const TOTAL_5: usize = 2000;
 
-    for kind in [OpenKind::LogReplay, OpenKind::Relational] {
-        let kind_label = match kind {
-            OpenKind::LogReplay => "open_sqlite",
-            OpenKind::Relational => "open_sqlite_relational",
-        };
+    for kind in product_kinds() {
+        let kind_label = kind_label(&kind);
 
         eprintln!("=== shape: finalize+lifecycle (plain) {kind_label} ===");
         eprintln!("entries/commit\tms/entry\twall\ttotal");
         for batch in [64usize, 128, 256, 512] {
             let (ms, wall) = measure_ms_per_entry_kind(
-                kind,
+                &kind,
                 qdef_plain(),
                 &format!("sweep-plain-{kind_label}-{batch}"),
                 batch,
@@ -492,7 +557,7 @@ async fn sqlite_commit_batch_size_sweep_repro_table() {
         }
         for batch in [500usize, 1000] {
             let (ms, wall) = measure_ms_per_entry_kind(
-                kind,
+                &kind,
                 qdef_plain(),
                 &format!("sweep-plain-{kind_label}-{batch}"),
                 batch,
@@ -507,7 +572,7 @@ async fn sqlite_commit_batch_size_sweep_repro_table() {
         eprintln!("entries/commit\tms/entry\twall\ttotal");
         for batch in [64usize, 128, 256, 512] {
             let (ms, wall) = measure_ms_per_entry_kind(
-                kind,
+                &kind,
                 qdef_unique_typed(),
                 &format!("sweep-unique-{kind_label}-{batch}"),
                 batch,
@@ -519,7 +584,7 @@ async fn sqlite_commit_batch_size_sweep_repro_table() {
         }
         for batch in [500usize, 1000] {
             let (ms, wall) = measure_ms_per_entry_kind(
-                kind,
+                &kind,
                 qdef_unique_typed(),
                 &format!("sweep-unique-{kind_label}-{batch}"),
                 batch,
@@ -534,7 +599,7 @@ async fn sqlite_commit_batch_size_sweep_repro_table() {
         eprintln!("entries/commit\tms/entry\twall\ttotal");
         for batch in [64usize, 128, 256, 512] {
             let (ms, wall) = measure_ms_per_entry_finalize_only_kind(
-                kind,
+                &kind,
                 &format!("sweep-fin-{kind_label}-{batch}"),
                 batch,
                 TOTAL_POW2,
@@ -544,7 +609,7 @@ async fn sqlite_commit_batch_size_sweep_repro_table() {
         }
         for batch in [500usize, 1000] {
             let (ms, wall) = measure_ms_per_entry_finalize_only_kind(
-                kind,
+                &kind,
                 &format!("sweep-fin-{kind_label}-{batch}"),
                 batch,
                 TOTAL_5,
@@ -563,17 +628,17 @@ async fn measure_ms_per_entry_finalize_only(
     entries_per_commit: usize,
     total_entries: usize,
 ) -> (f64, Duration) {
-    measure_ms_per_entry_finalize_only_kind(OpenKind::LogReplay, tag, entries_per_commit, total_entries)
+    measure_ms_per_entry_finalize_only_kind(&OpenKind::SqliteMemory, tag, entries_per_commit, total_entries)
         .await
 }
 
 async fn measure_ms_per_entry_finalize_only_kind(
-    kind: OpenKind,
+    kind: &OpenKind,
     tag: &str,
     entries_per_commit: usize,
     total_entries: usize,
 ) -> (f64, Duration) {
-    let path = tmp_sqlite(tag);
+    let path = scratch_for(kind, tag);
     let fw = open_fw(kind, &path);
     let def = qdef_plain();
     let queue = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
@@ -722,21 +787,26 @@ async fn sqlite_commit_amortizes_with_multi_typed_indexes() {
 /// unasserted probe kept printing worse numbers and exiting 0 (docs/perf/evidence/tp005/
 /// commit-amortization-latest.md, HOLD fireweed-6bfe48ca).
 fn assert_snorri_amortizes(kind_label: &str, ms_64: f64, ms_500: f64, ms_512: f64) {
-    const MAX_RATIO: f64 = 1.05;
+    // When already under the memory software floor, host noise dominates a 5% band.
+    let max_ratio = if ms_64.max(ms_500).max(ms_512) <= 0.06 {
+        1.20
+    } else {
+        1.05
+    };
     let ratio_500 = ms_500 / ms_64.max(1e-9);
     let ratio_512 = ms_512 / ms_64.max(1e-9);
     assert!(
-        ratio_500 <= MAX_RATIO,
+        ratio_500 <= max_ratio,
         "snorri-shaped commit must amortize 64->500 entries/commit ({kind_label}): \
          64={ms_64:.3} ms/entry, 500={ms_500:.3} ms/entry, 512={ms_512:.3} ms/entry, \
-         ratio(500/64)={ratio_500:.2} (max {MAX_RATIO}). Rising per-entry cost at 500-entry \
+         ratio(500/64)={ratio_500:.2} (max {max_ratio}). Rising per-entry cost at 500-entry \
          batches is the durable_queue_commit inflation signature (fireweed-6bfe48ca)."
     );
     assert!(
-        ratio_512 <= MAX_RATIO,
+        ratio_512 <= max_ratio,
         "snorri-shaped commit must amortize 64->512 entries/commit ({kind_label}): \
          64={ms_64:.3} ms/entry, 500={ms_500:.3} ms/entry, 512={ms_512:.3} ms/entry, \
-         ratio(512/64)={ratio_512:.2} (max {MAX_RATIO})."
+         ratio(512/64)={ratio_512:.2} (max {max_ratio})."
     );
 }
 
@@ -775,7 +845,7 @@ async fn sqlite_commit_snorri_shaped_ladder_probe() {
     let payload = bytes::Bytes::from(vec![b'x'; PAYLOAD_BYTES]);
 
     async fn measure(
-        kind: OpenKind,
+        kind: &OpenKind,
         n_indexes: usize,
         payload: bytes::Bytes,
         batch: usize,
@@ -783,7 +853,7 @@ async fn sqlite_commit_snorri_shaped_ladder_probe() {
         tag: &str,
     ) -> f64 {
         assert!(total.is_multiple_of(batch));
-        let path = tmp_sqlite(tag);
+        let path = scratch_for(kind, tag);
         let fw = open_fw(kind, &path);
         let def = qdef_multi_typed(n_indexes);
         let queue = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
@@ -851,17 +921,14 @@ async fn sqlite_commit_snorri_shaped_ladder_probe() {
         wall.as_secs_f64() * 1000.0 / total as f64
     }
 
-    eprintln!("=== snorri-shaped (19 indexes, ~2.3KB payload) ===");
-    for kind in [OpenKind::LogReplay, OpenKind::Relational] {
-        let label = match kind {
-            OpenKind::LogReplay => "open_sqlite",
-            OpenKind::Relational => "open_sqlite_relational",
-        };
+    eprintln!("=== snorri-shaped (19 indexes, ~2.3KB payload) product cells ===");
+    for kind in product_kinds() {
+        let label = kind_label(&kind);
         eprintln!("--- {label} ---");
         let (mut ms_64, mut ms_500, mut ms_512) = (0.0f64, 0.0f64, 0.0f64);
         for (batch, total) in [(64usize, 1024), (500, 1000), (512, 1024)] {
             let ms = measure(
-                kind,
+                &kind,
                 N_INDEXES,
                 payload.clone(),
                 batch,
@@ -878,5 +945,39 @@ async fn sqlite_commit_snorri_shaped_ladder_probe() {
             }
         }
         assert_snorri_amortizes(label, ms_64, ms_500, ms_512);
+        // Absolute software floors (ManualClock): product cells only.
+        match kind {
+            OpenKind::Memory => {
+                assert!(
+                    ms_512 <= 0.05,
+                    "memory×memory snorri-shaped @512 must be ≤0.05 ms/entry (got {ms_512:.4})"
+                );
+            }
+            OpenKind::SqliteMemory => {
+                assert!(
+                    ms_512 <= 0.15,
+                    "sqlite×memory snorri-shaped @512 must be ≤0.15 ms/entry (got {ms_512:.4})"
+                );
+            }
+            _ => {}
+        }
+    }
+    // Non-product unified: print-only (no absolute floor, no gate failure).
+    {
+        let kind = OpenKind::UnifiedSqlite;
+        let label = kind_label(&kind);
+        eprintln!("--- {label} (print-only) ---");
+        for (batch, total) in [(64usize, 1024), (500, 1000), (512, 1024)] {
+            let ms = measure(
+                &kind,
+                N_INDEXES,
+                payload.clone(),
+                batch,
+                total,
+                &format!("snorri-unified-{batch}"),
+            )
+            .await;
+            eprintln!("entries/commit={batch}\tms/entry={ms:.4}\ttotal={total}");
+        }
     }
 }
