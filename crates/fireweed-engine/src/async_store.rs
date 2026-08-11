@@ -56,8 +56,10 @@
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
+use std::time::{Duration, Instant};
 
 use fireweed_core::{
     BodyHash, ItemId, ItemState, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
@@ -247,10 +249,55 @@ pub struct InProcessLogStore<S> {
     executor: Option<BoundedBlockingExecutor>,
     durability_class: DurabilityClass,
     durable_log: bool,
+    lock_phase: Arc<LockPhaseCounters>,
 }
 
 /// Default in-flight bound for adapter-local durable log offload (serialized by the store mutex).
 pub const DEFAULT_BLOCKING_AXIS_IN_FLIGHT: usize = 32;
+
+/// Cumulative wait/hold timing for one store-mutex axis (fireweed-77ae7a87 commit-section
+/// contention decomposition). `wait` is time a caller spent blocked acquiring the store `Mutex`
+/// before its operation could start; `hold` is time spent executing the operation while holding
+/// it. Neither includes off-lock work a caller does before/after invoking the axis (queue
+/// definition lookup, command validation, response assembly) — that is the residual between a
+/// probe's end-to-end wall time and `wait + hold`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LockPhaseSnapshot {
+    pub calls: u64,
+    pub wait: Duration,
+    pub hold: Duration,
+}
+
+#[derive(Default)]
+struct LockPhaseCounters {
+    calls: AtomicU64,
+    wait_nanos: AtomicU64,
+    hold_nanos: AtomicU64,
+}
+
+impl LockPhaseCounters {
+    fn record(&self, wait: Duration, hold: Duration) {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.wait_nanos
+            .fetch_add(wait.as_nanos() as u64, Ordering::Relaxed);
+        self.hold_nanos
+            .fetch_add(hold.as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> LockPhaseSnapshot {
+        LockPhaseSnapshot {
+            calls: self.calls.load(Ordering::Relaxed),
+            wait: Duration::from_nanos(self.wait_nanos.load(Ordering::Relaxed)),
+            hold: Duration::from_nanos(self.hold_nanos.load(Ordering::Relaxed)),
+        }
+    }
+
+    fn reset(&self) {
+        self.calls.store(0, Ordering::Relaxed);
+        self.wait_nanos.store(0, Ordering::Relaxed);
+        self.hold_nanos.store(0, Ordering::Relaxed);
+    }
+}
 
 impl<S: LogStore> InProcessLogStore<S> {
     pub fn new(store: S) -> Self {
@@ -261,6 +308,7 @@ impl<S: LogStore> InProcessLogStore<S> {
             executor: None,
             durability_class,
             durable_log,
+            lock_phase: Arc::new(LockPhaseCounters::default()),
         }
     }
 
@@ -275,7 +323,20 @@ impl<S: LogStore> InProcessLogStore<S> {
             executor: Some(BoundedBlockingExecutor::new(max_in_flight)?),
             durability_class,
             durable_log,
+            lock_phase: Arc::new(LockPhaseCounters::default()),
         })
+    }
+
+    /// Cumulative time callers spent waiting for / holding this axis's store mutex across every
+    /// [`Self::run_with_store`] / [`Self::run_with_store_mut`] call since construction or the last
+    /// [`Self::reset_lock_phase_stats`] (fireweed-77ae7a87 commit-section contention probe).
+    pub fn lock_phase_stats(&self) -> LockPhaseSnapshot {
+        self.lock_phase.snapshot()
+    }
+
+    /// Zero the cumulative lock-phase counters so a probe can bracket one measurement window.
+    pub fn reset_lock_phase_stats(&self) {
+        self.lock_phase.reset();
     }
 
     /// Run a synchronous read against the underlying log (open/recover/tests). Blocks the caller;
@@ -309,17 +370,28 @@ impl<S: LogStore> InProcessLogStore<S> {
     {
         let store = Arc::clone(&self.store);
         let executor = self.executor.clone();
+        let lock_phase = Arc::clone(&self.lock_phase);
         async move {
             if let Some(executor) = executor {
                 executor
                     .execute(move || {
+                        let wait_start = Instant::now();
                         let store = store.lock().expect("immediate log store mutex poisoned");
-                        operation(&*store)
+                        let wait = wait_start.elapsed();
+                        let hold_start = Instant::now();
+                        let result = operation(&*store);
+                        lock_phase.record(wait, hold_start.elapsed());
+                        result
                     })
                     .await
             } else {
+                let wait_start = Instant::now();
                 let store = store.lock().expect("immediate log store mutex poisoned");
-                operation(&*store)
+                let wait = wait_start.elapsed();
+                let hold_start = Instant::now();
+                let result = operation(&*store);
+                lock_phase.record(wait, hold_start.elapsed());
+                result
             }
         }
     }
@@ -336,17 +408,28 @@ impl<S: LogStore> InProcessLogStore<S> {
     {
         let store = Arc::clone(&self.store);
         let executor = self.executor.clone();
+        let lock_phase = Arc::clone(&self.lock_phase);
         async move {
             if let Some(executor) = executor {
                 executor
                     .execute(move || {
+                        let wait_start = Instant::now();
                         let mut store = store.lock().expect("immediate log store mutex poisoned");
-                        operation(&mut *store)
+                        let wait = wait_start.elapsed();
+                        let hold_start = Instant::now();
+                        let result = operation(&mut *store);
+                        lock_phase.record(wait, hold_start.elapsed());
+                        result
                     })
                     .await
             } else {
+                let wait_start = Instant::now();
                 let mut store = store.lock().expect("immediate log store mutex poisoned");
-                operation(&mut *store)
+                let wait = wait_start.elapsed();
+                let hold_start = Instant::now();
+                let result = operation(&mut *store);
+                lock_phase.record(wait, hold_start.elapsed());
+                result
             }
         }
     }
@@ -366,6 +449,7 @@ pub struct InProcessProjectionStore<S> {
     supports_gates: bool,
     /// Per-shard push request-id cache (parity with `AsyncLogReplayBackend` / sync composition).
     push_idempotency: Arc<Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>>>,
+    lock_phase: Arc<LockPhaseCounters>,
 }
 
 impl<S: ProjectionStore> InProcessProjectionStore<S> {
@@ -376,6 +460,7 @@ impl<S: ProjectionStore> InProcessProjectionStore<S> {
             executor: None,
             supports_gates,
             push_idempotency: Arc::new(Mutex::new(HashMap::new())),
+            lock_phase: Arc::new(LockPhaseCounters::default()),
         }
     }
 
@@ -387,7 +472,18 @@ impl<S: ProjectionStore> InProcessProjectionStore<S> {
             executor: Some(BoundedBlockingExecutor::new(max_in_flight)?),
             supports_gates,
             push_idempotency: Arc::new(Mutex::new(HashMap::new())),
+            lock_phase: Arc::new(LockPhaseCounters::default()),
         })
+    }
+
+    /// Cumulative time callers spent waiting for / holding this axis's store mutex (fireweed-77ae7a87).
+    pub fn lock_phase_stats(&self) -> LockPhaseSnapshot {
+        self.lock_phase.snapshot()
+    }
+
+    /// Zero the cumulative lock-phase counters so a probe can bracket one measurement window.
+    pub fn reset_lock_phase_stats(&self) {
+        self.lock_phase.reset();
     }
 
     /// Synchronous read (open/recover/tests). Blocks the caller.
@@ -461,21 +557,32 @@ impl<S: ProjectionStore> InProcessProjectionStore<S> {
     {
         let store = Arc::clone(&self.store);
         let executor = self.executor.clone();
+        let lock_phase = Arc::clone(&self.lock_phase);
         async move {
             if let Some(executor) = executor {
                 executor
                     .execute(move || {
+                        let wait_start = Instant::now();
                         let store = store
                             .lock()
                             .expect("immediate projection store mutex poisoned");
-                        operation(&*store)
+                        let wait = wait_start.elapsed();
+                        let hold_start = Instant::now();
+                        let result = operation(&*store);
+                        lock_phase.record(wait, hold_start.elapsed());
+                        result
                     })
                     .await
             } else {
+                let wait_start = Instant::now();
                 let store = store
                     .lock()
                     .expect("immediate projection store mutex poisoned");
-                operation(&*store)
+                let wait = wait_start.elapsed();
+                let hold_start = Instant::now();
+                let result = operation(&*store);
+                lock_phase.record(wait, hold_start.elapsed());
+                result
             }
         }
     }
@@ -492,21 +599,32 @@ impl<S: ProjectionStore> InProcessProjectionStore<S> {
     {
         let store = Arc::clone(&self.store);
         let executor = self.executor.clone();
+        let lock_phase = Arc::clone(&self.lock_phase);
         async move {
             if let Some(executor) = executor {
                 executor
                     .execute(move || {
+                        let wait_start = Instant::now();
                         let mut store = store
                             .lock()
                             .expect("immediate projection store mutex poisoned");
-                        operation(&mut *store)
+                        let wait = wait_start.elapsed();
+                        let hold_start = Instant::now();
+                        let result = operation(&mut *store);
+                        lock_phase.record(wait, hold_start.elapsed());
+                        result
                     })
                     .await
             } else {
+                let wait_start = Instant::now();
                 let mut store = store
                     .lock()
                     .expect("immediate projection store mutex poisoned");
-                operation(&mut *store)
+                let wait = wait_start.elapsed();
+                let hold_start = Instant::now();
+                let result = operation(&mut *store);
+                lock_phase.record(wait, hold_start.elapsed());
+                result
             }
         }
     }

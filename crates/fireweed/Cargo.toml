@@ -110,6 +110,11 @@ path = "tests/sqlite_commit_batch_linearity.rs"
 required-features = ["sqlite", "memory", "objectlog"]
 
 [[test]]
+name = "sqlite_commit_section_contention_probe"
+path = "tests/sqlite_commit_section_contention_probe.rs"
+required-features = ["sqlite"]
+
+[[test]]
 name = "durable_tps_proof"
 path = "tests/durable_tps_proof.rs"
 required-features = ["sqlite"]

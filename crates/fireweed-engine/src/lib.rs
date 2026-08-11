@@ -80,7 +80,7 @@ pub use async_store::{
     AsyncControlPlane, AsyncLogStore, AsyncProjectionStore, BlockingControlPlane, BlockingLogStore,
     BlockingProjectionStore, BlockingStoreOperation, BoundedBlockingExecutor,
     DEFAULT_BLOCKING_AXIS_IN_FLIGHT, FinalizeLeaseMember, InProcessLogStore,
-    InProcessProjectionStore,
+    InProcessProjectionStore, LockPhaseSnapshot,
 };
 pub use auth::{AuthContext, RedactedLeaseToken, hash_lease_token};
 pub use byte_admission::{

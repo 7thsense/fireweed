@@ -6482,6 +6482,24 @@ pub fn open_sqlite(path: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> 
     Ok(Fireweed::from_runtime(RuntimeCore::new(backend, clock)))
 }
 
+/// Same as [`open_sqlite`] but also returns the underlying composed backend handle so a caller can
+/// read its commit-section lock-phase counters (wait vs hold time on the log/projection store
+/// mutexes) alongside driving load through the ordinary public API. Diagnostic-only, not part of
+/// the stable product surface (fireweed-77ae7a87 commit-section contention probe).
+#[doc(hidden)]
+#[cfg(feature = "sqlite")]
+pub fn open_sqlite_with_lock_stats_handle(
+    path: &str,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<(
+    Fireweed,
+    Arc<fireweed_engine::AsyncLogReplayBackend<fireweed_sqlite::SqliteLog, fireweed_sqlite::InMemoryProjection>>,
+)> {
+    let backend = Arc::new(fireweed_sqlite::composed_sqlite_backend(path)?);
+    let fw = Fireweed::from_runtime(RuntimeCore::new(Arc::clone(&backend), clock));
+    Ok((fw, backend))
+}
+
 /// Open a **sole-owner** Fireweed handle with a durable sqlite command log at `log_path` and a
 /// derived sqlite projection at `projection_path` (Class A; distinct store paths required).
 ///

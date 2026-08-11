@@ -730,6 +730,24 @@ where
         self.projection.with_store(f)
     }
 
+    /// Cumulative wait/hold timing for the log axis's store mutex — the "log append" half of the
+    /// commit-section exclusive hold (fireweed-77ae7a87 commit-section contention probe).
+    pub fn log_lock_phase_stats(&self) -> crate::LockPhaseSnapshot {
+        self.log.lock_phase_stats()
+    }
+
+    /// Cumulative wait/hold timing for the projection axis's store mutex — the "index publish"
+    /// half of the commit-section exclusive hold (fireweed-77ae7a87).
+    pub fn projection_lock_phase_stats(&self) -> crate::LockPhaseSnapshot {
+        self.projection.lock_phase_stats()
+    }
+
+    /// Zero both axes' cumulative lock-phase counters so a probe can bracket one measurement window.
+    pub fn reset_lock_phase_stats(&self) {
+        self.log.reset_lock_phase_stats();
+        self.projection.reset_lock_phase_stats();
+    }
+
     /// Emit durable change-record tail from the log emission cursor (parity with sync composition).
     pub fn emit_change_record_tail<S: crate::ChangeRecordSink + ?Sized>(
         &self,
