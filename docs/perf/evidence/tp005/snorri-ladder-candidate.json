@@ -1,7 +1,7 @@
 {
   "schema": "fireweed-snorri-ladder-handoff/v1",
-  "candidate_rev": "PENDING_PIN_AT_RELEASE",
-  "product_composition": "sqlite log × memory projection (open_sqlite) preferred; confirm snorri pin",
+  "candidate_rev": "c441aa1885992f60349f060eae7be0d6bf2bf8b8",
+  "product_composition": "sqlite log \u00d7 memory projection (open_sqlite) preferred; confirm snorri pin",
   "baseline_v0_31_2": {
     "tps_w1": 2069,
     "tps_w4": 3395,
@@ -18,7 +18,11 @@
   "run_config": {
     "members": 10000,
     "claim_batch": 500,
-    "workers": [1, 4, 8],
+    "workers": [
+      1,
+      4,
+      8
+    ],
     "path_override": true,
     "delivery_assertions": "expected_green"
   },
