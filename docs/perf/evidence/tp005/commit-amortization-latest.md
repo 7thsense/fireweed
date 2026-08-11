@@ -112,3 +112,31 @@ Snorri same-day ladder at main `ed311dff` (post bulk-apply): **regression** vs v
 `durable_queue_commit` wall: 124.2 s (was 37.2 s). Shape: 19 typed indexes, entity docs, ~2.3 KB payloads, 500-entry batches.
 
 **Action:** reverse bulk-apply coalescing on relational `commit_transition` (reinstated per-entry apply). Keep amortization gates on `open_sqlite` (lean shapes still green). Do not tag v0.31.3 until snorri ladder ≥ v0.31.2 baseline at w=8.
+
+## Snorri-shaped probe (post-revert, fireweed-6bfe48ca)
+
+Host: local workstation, release profile, ManualClock.
+Shape: 19 typed indexes (1 unique), ~2.3 KB payload on input + lifecycle entity docs.
+Command: `sqlite_commit_snorri_shaped_ladder_probe`.
+
+### open_sqlite
+
+| entries/commit | ms/entry |
+|---:|---:|
+| 64 | 1.006 |
+| 500 | 0.272 |
+| 512 | 0.202 |
+
+ratio 512/64 = **0.20** (amortizing). Absolute @500 ≈0.27 ms (software target ~0.1 still open).
+
+### open_sqlite_relational
+
+| entries/commit | ms/entry |
+|---:|---:|
+| 64 | 1.006 |
+| 500 | 0.783 |
+| 512 | 0.762 |
+
+ratio 512/64 = **0.76**. Absolute closer to snorri's historical 0.93 ms/entry.
+
+**Do not tag v0.31.3** until snorri w=8 ladder ≥ v0.31.2 baseline (3,692 tps) on a post-revert tip.

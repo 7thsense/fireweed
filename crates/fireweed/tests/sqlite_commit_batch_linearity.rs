@@ -703,3 +703,114 @@ async fn sqlite_commit_amortizes_with_multi_typed_indexes() {
         "multi-index commit must amortize 64→512: 64={ms_64:.3}, 512={ms_512:.3}, ratio={ratio:.2}"
     );
 }
+
+/// fireweed-6bfe48ca: snorri-shaped probe — 19 typed indexes, ~2.3 KB payload, entity docs.
+///
+/// Prints ms/entry for 64/500/512 on both open_sqlite and open_sqlite_relational.
+/// Does not assert absolute floors (host-dependent); records ladder for evidence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_commit_snorri_shaped_ladder_probe() {
+    const N_INDEXES: usize = 19;
+    const PAYLOAD_BYTES: usize = 2300;
+    const TOTAL: usize = 1000; // divisible by 64? 1000/64 no — use 1024 and 1000 separately
+
+    let payload = bytes::Bytes::from(vec![b'x'; PAYLOAD_BYTES]);
+
+    async fn measure(
+        kind: OpenKind,
+        n_indexes: usize,
+        payload: bytes::Bytes,
+        batch: usize,
+        total: usize,
+        tag: &str,
+    ) -> f64 {
+        assert!(total.is_multiple_of(batch));
+        let path = tmp_sqlite(tag);
+        let fw = open_fw(kind, &path);
+        let def = qdef_multi_typed(n_indexes);
+        let queue = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        fw.create_queue(def).await.expect("create");
+        let inputs: Vec<NewItem> = (0..total)
+            .map(|_| NewItem {
+                payload: Some(payload.clone()),
+                ..Default::default()
+            })
+            .collect();
+        for chunk in inputs.chunks(500) {
+            fw.push_batch(&queue, chunk.to_vec()).await.expect("push");
+        }
+        let mut wall = Duration::ZERO;
+        let mut next = 0u64;
+        for _ in 0..(total / batch) {
+            let claimed = fw.claim(&queue, batch, 30_000).await.expect("claim");
+            let entries: Vec<CommitEntry> = claimed
+                .into_iter()
+                .map(|item| {
+                    let k = next;
+                    next += 1;
+                    let mut entity = serde_json::Map::new();
+                    entity.insert("f0".into(), json!(format!("k-{k}")));
+                    for i in 1..n_indexes {
+                        entity.insert(format!("f{i}"), json!(format!("v{i}-{k}")));
+                    }
+                    CommitEntry {
+                        claim_ref: ClaimRef {
+                            item_id: item.item_id,
+                            lease_token: item.lease_token.expect("lease"),
+                            lease_expires_at: item.lease_expires_at,
+                            item_version: item.item_version,
+                        },
+                        finalize: FinalizeKind::Complete,
+                        side_records: vec![],
+                        lifecycle_items: vec![NewItem {
+                            entity: Some(JsonValue::Object(entity)),
+                            payload: Some(payload.clone()),
+                            ..Default::default()
+                        }],
+                        instance_fence: None,
+                    }
+                })
+                .collect();
+            let t0 = Instant::now();
+            let outcomes = fw
+                .commit(
+                    &queue,
+                    CommitRequest {
+                        request_id: None,
+                        entries,
+                    },
+                )
+                .await
+                .expect("commit");
+            wall += t0.elapsed();
+            for o in outcomes {
+                if let EntryOutcome::Rejected(e) = o {
+                    panic!("rejected: {e}");
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+        wall.as_secs_f64() * 1000.0 / total as f64
+    }
+
+    eprintln!("=== snorri-shaped (19 indexes, ~2.3KB payload) ===");
+    for kind in [OpenKind::LogReplay, OpenKind::Relational] {
+        let label = match kind {
+            OpenKind::LogReplay => "open_sqlite",
+            OpenKind::Relational => "open_sqlite_relational",
+        };
+        eprintln!("--- {label} ---");
+        for (batch, total) in [(64usize, 1024), (500, 1000), (512, 1024)] {
+            let ms = measure(
+                kind,
+                N_INDEXES,
+                payload.clone(),
+                batch,
+                total,
+                &format!("snorri-{label}-{batch}"),
+            )
+            .await;
+            eprintln!("entries/commit={batch}\tms/entry={ms:.4}\ttotal={total}");
+        }
+    }
+}
