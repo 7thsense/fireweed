@@ -2057,15 +2057,85 @@ pub fn plan_batch_update(
     PlannedBatchUpdate { outcomes, commands }
 }
 
-/// Stable body fingerprint for the vectorized commit path: a non-cryptographic hash over the serialized
-/// commit entries (the request_id is the cache KEY, not part of the body). A different body under the same
-/// request id is a `RequestIdConflict`; an equal body replays the prior per-entry outcomes.
 /// Stable body fingerprint for the vectorized commit path (shared with async compositions).
+///
+/// Hashes structural fields + raw payload/entity bytes with a streaming hasher — does **not**
+/// allocate a full JSON document for multi-KB lifecycle payloads (fireweed-85855781 / 10k-tps).
+/// The request_id is the cache KEY, not part of the body. A different body under the same request
+/// id is a `RequestIdConflict`; an equal body replays the prior per-entry outcomes.
+///
+/// Algorithm version is distinct from the pre-2026-08 JSON-bytes hash; in-flight request-id
+/// records from older builds may conflict once and then settle on the new fingerprint.
 pub fn commit_body_hash(entries: &[crate::port::CommitTransitionEntry]) -> EngineResult<BodyHash> {
     use std::hash::{Hash, Hasher};
-    let bytes = serde_json::to_vec(entries).map_err(|e| EngineError::Storage(e.to_string()))?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut h);
+    // Domain separator so this never collides with the legacy JSON-document hash by accident.
+    0xC0_u64.hash(&mut h);
+    entries.len().hash(&mut h);
+    for entry in entries {
+        entry.claim_ref.item_id.hash(&mut h);
+        entry.claim_ref.item_version.hash(&mut h);
+        entry.claim_ref.lease_token.as_str().hash(&mut h);
+        for c in &entry.additional_claim_refs {
+            c.item_id.hash(&mut h);
+            c.item_version.hash(&mut h);
+            c.lease_token.as_str().hash(&mut h);
+        }
+        std::mem::discriminant(&entry.finalize).hash(&mut h);
+        entry.side_records.len().hash(&mut h);
+        for rec in &entry.side_records {
+            rec.key.hash(&mut h);
+            rec.payload.as_ref().hash(&mut h);
+        }
+        entry.lifecycle_items.len().hash(&mut h);
+        for item in &entry.lifecycle_items {
+            item.client_item_key
+                .as_ref()
+                .map(|k| k.as_str())
+                .hash(&mut h);
+            if let Some(p) = &item.priority {
+                // PriorityValue is not Hash; stable JSON is small.
+                let bytes =
+                    serde_json::to_vec(p).map_err(|e| EngineError::Storage(e.to_string()))?;
+                bytes.hash(&mut h);
+            } else {
+                3u8.hash(&mut h);
+            }
+            if let Some(nb) = item.not_before {
+                nb.seconds.hash(&mut h);
+                nb.nanoseconds.hash(&mut h);
+            } else {
+                4u8.hash(&mut h);
+            }
+            item.group_key.as_ref().map(|g| g.as_str()).hash(&mut h);
+            item.cohort_size.hash(&mut h);
+            item.gate_keys.hash(&mut h);
+            if let Some(payload) = &item.payload {
+                payload.as_ref().hash(&mut h);
+            } else {
+                0u8.hash(&mut h);
+            }
+            // Entity: hash canonical JSON once per item only when present (needed for uniqueness).
+            if let Some(entity) = &item.entity {
+                let bytes = serde_json::to_vec(entity)
+                    .map_err(|e| EngineError::Storage(e.to_string()))?;
+                bytes.hash(&mut h);
+            } else {
+                1u8.hash(&mut h);
+            }
+            for (k, v) in &item.fields {
+                k.hash(&mut h);
+                v.as_ref().hash(&mut h);
+            }
+        }
+        if let Some(fence) = &entry.instance_fence {
+            fence.instance_key.hash(&mut h);
+            fence.expected.hash(&mut h);
+            fence.next.hash(&mut h);
+        } else {
+            2u8.hash(&mut h);
+        }
+    }
     Ok(BodyHash(h.finish()))
 }
 

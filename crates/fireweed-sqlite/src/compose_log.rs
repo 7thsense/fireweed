@@ -250,7 +250,9 @@ impl LogStore for SqliteLog {
         expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>> {
         let (t, q) = parts(shard);
-        let envelopes = commands
+        // Encode once per envelope; keep as String so we can bind without a second full clone
+        // of multi-MB push batches (fireweed-85855781).
+        let envelopes: Vec<String> = commands
             .iter()
             .map(to_json)
             .collect::<EngineResult<Vec<_>>>()?;
@@ -287,32 +289,29 @@ impl LogStore for SqliteLog {
             |row| row.get(0),
         ))?;
 
-        for (chunk_index, envelope_chunk) in envelopes.chunks(APPEND_INSERT_CHUNK_SIZE).enumerate()
-        {
-            let chunk_offset = chunk_index
-                .checked_mul(APPEND_INSERT_CHUNK_SIZE)
-                .ok_or(EngineError::Invalid("append batch is too large"))?;
-            let chunk_first = first_seq
-                .checked_add(
-                    i64::try_from(chunk_offset)
-                        .map_err(|_| EngineError::Invalid("append batch is too large"))?,
-                )
+        // Drain owned JSON strings so multi-MB push envelopes are not cloned into Value::Text.
+        let mut first_seq_cursor = first_seq;
+        let mut remaining = envelopes;
+        while !remaining.is_empty() {
+            let take = remaining.len().min(APPEND_INSERT_CHUNK_SIZE);
+            let chunk: Vec<String> = remaining.drain(..take).collect();
+            let chunk_first = first_seq_cursor;
+            first_seq_cursor = first_seq_cursor
+                .checked_add(chunk.len() as i64)
                 .ok_or(EngineError::Invalid("log sequence exhausted"))?;
-            let mut values = Vec::with_capacity(envelope_chunk.len() * 5);
-            for (offset, envelope) in envelope_chunk.iter().enumerate() {
+            let mut values = Vec::with_capacity(chunk.len() * 5);
+            for (offset, envelope) in chunk.into_iter().enumerate() {
                 let seq = chunk_first
                     .checked_add(offset as i64)
                     .ok_or(EngineError::Invalid("log sequence exhausted"))?;
-                values.extend([
-                    Value::Text(t.clone()),
-                    Value::Text(q.clone()),
-                    Value::Integer(epoch),
-                    Value::Integer(seq),
-                    Value::Text(envelope.clone()),
-                ]);
+                values.push(Value::Text(t.clone()));
+                values.push(Value::Text(q.clone()));
+                values.push(Value::Integer(epoch));
+                values.push(Value::Integer(seq));
+                values.push(Value::Text(envelope));
             }
             st(tx.execute(
-                &insert_batch_sql(envelope_chunk.len()),
+                &insert_batch_sql(take),
                 params_from_iter(values.iter()),
             ))?;
         }
