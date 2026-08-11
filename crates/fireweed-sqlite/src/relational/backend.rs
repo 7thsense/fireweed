@@ -14,7 +14,7 @@ use fireweed_core::{
 use fireweed_engine::ClaimUnit;
 use fireweed_engine::TerminalEmissionMetrics;
 use fireweed_engine::{
-    ActiveScope, AdvanceInstanceFenceCommand, Backend, ClaimCommand, ClaimCompatibility, ClaimPort,
+    ActiveScope, Backend, ClaimCommand, ClaimCompatibility, ClaimPort,
     ClaimRequest, Claimed, ClaimedItem, CohortClaimCommand, CohortExpiredCommand,
     CohortFinalizeCommand, CohortFinalizePort, CohortLeaseTarget, CohortRenewLeaseCommand,
     CohortRenewLeasePort, CommandEnvelope, CommandPosition, CommitCapabilities, CommitEntryOutcome,
@@ -1838,27 +1838,30 @@ impl fireweed_engine::CommitTransitionPort for SqliteRelationalBackend {
                 return Ok(recovery_to_outcomes(&stored));
             }
 
-            // (2) Per entry: validate the lease-token + version-fenced claim_ref, then apply the entry's
-            //     side-records + lifecycle push + input finalize in this same transaction. A rejected entry
-            //     applies nothing (its outcome is captured; later entries still proceed). The caller's
-            //     `request_id` is recorded with the whole-body outcome (no `request_id: None` on this path).
+            // (2) Validate every entry, then bulk-apply accepted work in O(1) command groups
+            //     (side records / fences / lifecycle push / finalize) instead of 3–4 apply_command_sql
+            //     calls per entry. fireweed-6e651ac5: per-entry apply was ~flat-to-inverted ms/entry
+            //     on open_sqlite_relational; coalescing restores amortization toward the software floor.
+            //     A rejected entry applies nothing; later entries still proceed. request_id is recorded
+            //     with the whole-body outcome (no request_id: None on this path).
             let mut token_ops = Vec::new();
             let mut seq = seq0 as u64;
             let mut positions: Vec<CommandPosition> = Vec::new();
-            let mut apply =
-                |command: &QueueCommand, token_ops: &mut Vec<TokenOp>| -> EngineResult<()> {
+            // Local helper (not a long-lived closure) so fence bulk-SQL can also advance `seq`.
+            macro_rules! apply_cmd {
+                ($command:expr) => {{
                     apply_command_sql(
                         &tx,
                         queues,
                         grouped_shards,
                         claim_scan_hints,
                         claim_scan_default_fifo,
-                        token_ops,
+                        &mut token_ops,
                         shard,
                         &CommandPosition::new(shard.clone(), cursor_epoch as u64, seq),
                         seq,
                         now,
-                        command,
+                        $command,
                     )?;
                     positions.push(CommandPosition::new(
                         shard.clone(),
@@ -1866,10 +1869,23 @@ impl fireweed_engine::CommitTransitionPort for SqliteRelationalBackend {
                         seq,
                     ));
                     seq += 1;
-                    Ok(())
-                };
+                }};
+            }
 
+            // Staged accepted work (order of `entries` preserved for recovery outcomes).
+            struct Accepted {
+                recovery_index: usize,
+                side_records: Vec<fireweed_engine::SideRecord>,
+                fence: Option<fireweed_engine::InstanceFence>,
+                lifecycle_items: Vec<PushSpec>,
+                finalize: FinalizeKind,
+                claim_refs: Vec<fireweed_engine::ClaimRef>,
+            }
             let mut recovery: Vec<EntryRecovery> = Vec::with_capacity(entries.len());
+            let mut accepted: Vec<Accepted> = Vec::with_capacity(entries.len());
+            // Within-commit fence staging (later entry may advance the same key after an earlier accept).
+            let mut staged_fences: HashMap<Vec<u8>, u64> = HashMap::new();
+
             for entry in entries {
                 let consumed_input_id = entry.claim_ref.item_id;
                 let additional_consumed_input_ids = entry
@@ -1899,20 +1915,24 @@ impl fireweed_engine::CommitTransitionPort for SqliteRelationalBackend {
                     recovery.push(reject(e));
                     continue;
                 }
-                // C6: validate the caller-supplied instance fence against the durable fence (absent == 0).
+                // C6: validate the caller-supplied instance fence against durable + earlier staged.
                 // A stale `expected` -> Conflict, a non-monotonic `next` -> Invalid; NOTHING is applied.
                 if let Some(fence) = &entry.instance_fence {
                     let (it, iq) = parts(shard);
-                    let stored: i64 = st(tx
-                        .query_row(
-                            "SELECT fence FROM fireweed_instance_fences \
-                             WHERE tenant_id=?1 AND queue_id=?2 AND instance_key=?3",
-                            params![it, iq, fence.instance_key],
-                            |row| row.get(0),
-                        )
-                        .optional())?
-                    .unwrap_or(0);
-                    if let Err(e) = validate_instance_fence(stored as u64, fence) {
+                    let stored = if let Some(v) = staged_fences.get(&fence.instance_key) {
+                        *v
+                    } else {
+                        st(tx
+                            .query_row(
+                                "SELECT fence FROM fireweed_instance_fences \
+                                 WHERE tenant_id=?1 AND queue_id=?2 AND instance_key=?3",
+                                params![it, iq, fence.instance_key],
+                                |row| row.get::<_, i64>(0),
+                            )
+                            .optional())?
+                        .unwrap_or(0) as u64
+                    };
+                    if let Err(e) = validate_instance_fence(stored, fence) {
                         recovery.push(reject(e));
                         continue;
                     }
@@ -1925,66 +1945,124 @@ impl fireweed_engine::CommitTransitionPort for SqliteRelationalBackend {
                     recovery.push(reject(e));
                     continue;
                 }
-                // fireweed-bf03cbf5: not retained — see `EntryRecovery::side_record_keys`.
-                let side_record_keys: Vec<Vec<u8>> = Vec::new();
+
                 let instance = entry
                     .instance_fence
                     .as_ref()
                     .map(|f| (f.instance_key.clone(), f.next));
-
-                if !entry.side_records.is_empty() {
-                    apply(
-                        &QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
-                            records: entry.side_records,
-                        }),
-                        &mut token_ops,
-                    )?;
+                if let Some((ref key, next)) = instance {
+                    staged_fences.insert(key.clone(), next);
                 }
-                if let Some(fence) = entry.instance_fence {
-                    apply(
-                        &QueueCommand::AdvanceInstanceFence(AdvanceInstanceFenceCommand {
-                            instance_key: fence.instance_key,
-                            expected: fence.expected,
-                            next: fence.next,
-                        }),
-                        &mut token_ops,
-                    )?;
-                }
-                let mut lifecycle_item_ids = Vec::new();
-                if !entry.lifecycle_items.is_empty() {
-                    let counter_base =
-                        self.counters
-                            .reserve(shard, epoch, entry.lifecycle_items.len() as u32);
-                    let (push_items, ids) = build_push_items(
-                        entry.lifecycle_items,
-                        epoch,
-                        self.node_id,
-                        counter_base,
-                        max_attempts,
-                    );
-                    lifecycle_item_ids = ids;
-                    apply(
-                        &QueueCommand::Push(PushCommand { items: push_items }),
-                        &mut token_ops,
-                    )?;
-                }
-                apply(
-                    &QueueCommand::Finalize(FinalizeCommand {
-                        outcomes: std::iter::once(&entry.claim_ref)
-                            .chain(&entry.additional_claim_refs)
-                            .map(|claim| FinalizeOutcome::new(claim.item_id, entry.finalize))
-                            .collect(),
-                    }),
-                    &mut token_ops,
-                )?;
+                let recovery_index = recovery.len();
                 recovery.push(EntryRecovery {
                     consumed_input_id,
                     additional_consumed_input_ids,
                     instance,
-                    side_record_keys,
-                    lifecycle_item_ids,
+                    // fireweed-bf03cbf5: not retained — see `EntryRecovery::side_record_keys`.
+                    side_record_keys: Vec::new(),
+                    lifecycle_item_ids: Vec::new(),
                     status: CommitEntryStatus::Committed,
                 });
+                let mut claim_refs = Vec::with_capacity(1 + entry.additional_claim_refs.len());
+                claim_refs.push(entry.claim_ref);
+                claim_refs.extend(entry.additional_claim_refs);
+                accepted.push(Accepted {
+                    recovery_index,
+                    side_records: entry.side_records,
+                    fence: entry.instance_fence,
+                    lifecycle_items: entry.lifecycle_items,
+                    finalize: entry.finalize,
+                    claim_refs,
+                });
+            }
+
+            // Bulk apply accepted entries (order: all sides → all fences → all lifecycle → all finalizes).
+            // Cross-entry unique lifecycle collisions are still enforced inside Push apply / unique batch.
+            if !accepted.is_empty() {
+                let mut all_sides: Vec<fireweed_engine::SideRecord> = Vec::new();
+                for a in &mut accepted {
+                    all_sides.append(&mut a.side_records);
+                }
+                if !all_sides.is_empty() {
+                    apply_cmd!(&QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                        records: all_sides,
+                    }));
+                }
+                // Multi-row fence upsert: one statement per chunk (was 1 execute/entry).
+                {
+                    let (it, iq) = parts(shard);
+                    let fences: Vec<_> = accepted
+                        .iter()
+                        .filter_map(|a| a.fence.as_ref())
+                        .collect();
+                    const FENCE_BATCH: usize = 64;
+                    for chunk in fences.chunks(FENCE_BATCH) {
+                        let values = vec!["(?,?,?,?)"; chunk.len()].join(",");
+                        let mut params_v: Vec<rusqlite::types::Value> =
+                            Vec::with_capacity(chunk.len() * 4);
+                        for f in chunk {
+                            params_v.push(rusqlite::types::Value::Text(it.clone()));
+                            params_v.push(rusqlite::types::Value::Text(iq.clone()));
+                            params_v.push(rusqlite::types::Value::Blob(f.instance_key.clone()));
+                            params_v.push(rusqlite::types::Value::Integer(f.next as i64));
+                        }
+                        st(tx.execute(
+                            &format!(
+                                "INSERT INTO fireweed_instance_fences (tenant_id,queue_id,instance_key,fence) \
+                                 VALUES {values} \
+                                 ON CONFLICT(tenant_id,queue_id,instance_key) DO UPDATE SET fence=excluded.fence"
+                            ),
+                            params_from_iter(params_v.iter()),
+                        ))?;
+                        // Count as one applied command position for high-water bookkeeping.
+                        positions.push(CommandPosition::new(
+                            shard.clone(),
+                            cursor_epoch as u64,
+                            seq,
+                        ));
+                        seq += 1;
+                    }
+                }
+                // One Push for all lifecycle items; stamp per-entry lifecycle_item_ids into recovery.
+                {
+                    let total_lifecycle: usize =
+                        accepted.iter().map(|a| a.lifecycle_items.len()).sum();
+                    if total_lifecycle > 0 {
+                        let counter_base =
+                            self.counters
+                                .reserve(shard, epoch, total_lifecycle as u32);
+                        let mut counter = counter_base;
+                        let mut all_push: Vec<PushItem> = Vec::with_capacity(total_lifecycle);
+                        for a in &mut accepted {
+                            if a.lifecycle_items.is_empty() {
+                                continue;
+                            }
+                            let n = a.lifecycle_items.len() as u32;
+                            let (push_items, ids) = build_push_items(
+                                std::mem::take(&mut a.lifecycle_items),
+                                epoch,
+                                self.node_id,
+                                counter,
+                                max_attempts,
+                            );
+                            counter = counter.saturating_add(n);
+                            recovery[a.recovery_index].lifecycle_item_ids = ids;
+                            all_push.extend(push_items);
+                        }
+                        apply_cmd!(&QueueCommand::Push(PushCommand { items: all_push }));
+                    }
+                }
+                {
+                    let mut outcomes: Vec<FinalizeOutcome> = Vec::new();
+                    for a in &accepted {
+                        for claim in &a.claim_refs {
+                            outcomes.push(FinalizeOutcome::new(claim.item_id, a.finalize));
+                        }
+                    }
+                    if !outcomes.is_empty() {
+                        apply_cmd!(&QueueCommand::Finalize(FinalizeCommand { outcomes }));
+                    }
+                }
             }
             let outcomes = recovery_to_outcomes(&recovery);
 

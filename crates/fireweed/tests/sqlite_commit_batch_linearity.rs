@@ -1,17 +1,17 @@
-//! fireweed-a355d82b / fireweed-60ca4bfd: SQLite `queue.commit` per-entry cost must be flat
-//! across batch size — including queues that declare unique secondary/typed indexes.
+//! fireweed-a355d82b / fireweed-60ca4bfd / fireweed-110c25bc: SQLite `queue.commit` per-entry
+//! cost must amortize with batch size — including unique secondary/typed indexes and
+//! finalize+side+fence shapes (snorri).
 //!
-//! Snorri observed superlinear cost: 64 entries/commit ≈ 3.6 ms/entry, 512 ≈ 22.9 ms/entry
-//! (~6.3× worse per entry for 8× larger batches). Cause: commit_transition re-cloned and
-//! re-validated the entire staged lifecycle-push set on every entry. a355d82b fixed queues
-//! without unique indexes; 60ca4bfd extends the same linearity to unique-index queues via
-//! incremental staged-key tracking.
+//! Snorri observed superlinear cost historically (64 ≈ 3.6 ms/entry, 512 ≈ 22.9 ms/entry) and
+//! residual inverted batching at v0.31.2 (0.93 ms/entry@500 → 1.44 ms/entry@1000). Prior
+//! O(N²) staged validation fixes required only ratio ≤2.5×; product bar is amortization:
+//! ms/entry must be monotone non-increasing as entries/commit grows until IO geometry saturates.
 //!
 //! This regression gate:
 //! 1. Reproduces the measurement shape (fixed total work, vary entries/commit).
-//! 2. Asserts per-entry cost at 512 is within a stated tolerance of cost at 64.
-//! 3. Covers both plain queues and unique typed-index queues (the a355d82b gap).
-//! 4. Documents the defect as sqlite log-replay specific (postgres is not superlinear).
+//! 2. Asserts amortization (ratio ms_large/ms_small ≤ 1.05 in the amortizing range).
+//! 3. Covers plain, unique typed-index, finalize+side+fence, and multi-index shapes.
+//! 4. Prints a ladder table for evidence (`docs/perf/evidence/tp005/commit-amortization-latest.md`).
 
 #![cfg(feature = "sqlite")]
 #![allow(dead_code, unused_imports)]
@@ -23,7 +23,7 @@ use axon_esf::IndexDef;
 use fireweed::*;
 use fireweed_core::{IndexDeclaration, IndexType, QueueIndex};
 use fireweed_memory::ManualClock;
-use serde_json::json;
+use serde_json::{json, Value as JsonValue};
 
 fn qdef_plain() -> QueueDefinition {
     QueueDefinition {
@@ -70,6 +70,110 @@ fn qdef_unique_typed() -> QueueDefinition {
     def
 }
 
+/// fireweed-346a8d9b: snorri-like multi typed-index queue (≥8 single-field indexes).
+fn qdef_multi_typed(n: usize) -> QueueDefinition {
+    let mut def = qdef_plain();
+    def.queue_id = QueueId::new("q-commit-linear-multi").unwrap();
+    def.typed_indexes = (0..n)
+        .map(|i| QueueIndex {
+            name: format!("by_f{i}"),
+            declaration: IndexDeclaration::Single(IndexDef {
+                field: format!("f{i}"),
+                index_type: IndexType::String,
+                unique: i == 0, // one unique index among many
+            }),
+        })
+        .collect();
+    def
+}
+
+/// Measure finalize+lifecycle with multi-field entity documents for multi-index queues.
+async fn measure_ms_per_entry_multi_index(
+    n_indexes: usize,
+    tag: &str,
+    entries_per_commit: usize,
+    total_entries: usize,
+) -> (f64, Duration) {
+    assert!(total_entries.is_multiple_of(entries_per_commit));
+    let path = tmp_sqlite(&format!("{tag}-b{entries_per_commit}"));
+    let fw = open_fw(OpenKind::LogReplay, &path);
+    let def = qdef_multi_typed(n_indexes);
+    let queue = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+    fw.create_queue(def).await.expect("create queue");
+
+    let mut inputs = Vec::with_capacity(total_entries);
+    for _ in 0..total_entries {
+        inputs.push(NewItem::default());
+    }
+    for chunk in inputs.chunks(500) {
+        fw.push_batch(&queue, chunk.to_vec())
+            .await
+            .expect("push inputs");
+    }
+
+    let commits = total_entries / entries_per_commit;
+    let mut commit_wall = Duration::ZERO;
+    let mut committed_entries = 0usize;
+    let mut next_key = 0u64;
+
+    for _ in 0..commits {
+        let claimed = fw
+            .claim(&queue, entries_per_commit, 30_000)
+            .await
+            .expect("claim");
+        assert_eq!(claimed.len(), entries_per_commit, "claim batch size");
+        let entries: Vec<CommitEntry> = claimed
+            .into_iter()
+            .map(|item| {
+                let k = next_key;
+                next_key += 1;
+                let mut entity = serde_json::Map::new();
+                entity.insert("f0".into(), json!(format!("k-{k}")));
+                for i in 1..n_indexes {
+                    entity.insert(format!("f{i}"), json!(format!("v{i}-{k}")));
+                }
+                CommitEntry {
+                    claim_ref: ClaimRef {
+                        item_id: item.item_id,
+                        lease_token: item.lease_token.expect("lease token"),
+                        lease_expires_at: item.lease_expires_at,
+                        item_version: item.item_version,
+                    },
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![],
+                    lifecycle_items: vec![NewItem {
+                        entity: Some(JsonValue::Object(entity)),
+                        ..Default::default()
+                    }],
+                    instance_fence: None,
+                }
+            })
+            .collect();
+        let t0 = Instant::now();
+        let outcomes = fw
+            .commit(
+                &queue,
+                CommitRequest {
+                    request_id: None,
+                    entries,
+                },
+            )
+            .await
+            .expect("commit");
+        commit_wall += t0.elapsed();
+        for outcome in outcomes {
+            match outcome {
+                EntryOutcome::Committed { .. } => committed_entries += 1,
+                EntryOutcome::Rejected(e) => panic!("entry rejected: {e}"),
+            }
+        }
+    }
+    assert_eq!(committed_entries, total_entries);
+    let _ = std::fs::remove_file(&path);
+    let ms_per_entry = commit_wall.as_secs_f64() * 1000.0 / total_entries as f64;
+    (ms_per_entry, commit_wall)
+}
+
 fn tmp_sqlite(tag: &str) -> String {
     let path = std::env::temp_dir().join(format!(
         "fireweed-commit-linear-{tag}-{}-{}.db",
@@ -81,6 +185,23 @@ fn tmp_sqlite(tag: &str) -> String {
     ));
     let _ = std::fs::remove_file(&path);
     path.to_string_lossy().into_owned()
+}
+
+#[derive(Clone, Copy, Debug)]
+enum OpenKind {
+    /// log=sqlite × projection=memory (Class A log-replay).
+    LogReplay,
+    /// Unified relational sqlite (snorri production-shaped sole-owner cell).
+    Relational,
+}
+
+fn open_fw(kind: OpenKind, path: &str) -> Fireweed {
+    match kind {
+        OpenKind::LogReplay => open_sqlite(path, Arc::new(ManualClock::at(0))).expect("open sqlite"),
+        OpenKind::Relational => {
+            open_sqlite_relational(path, Arc::new(ManualClock::at(0))).expect("open sqlite relational")
+        }
+    }
 }
 
 /// Measure mean wall-clock per entry for `Fireweed::commit` at a given entries-per-call size.
@@ -95,9 +216,28 @@ async fn measure_ms_per_entry(
     total_entries: usize,
     unique_lifecycle: bool,
 ) -> (f64, Duration) {
+    measure_ms_per_entry_kind(
+        OpenKind::LogReplay,
+        def,
+        tag,
+        entries_per_commit,
+        total_entries,
+        unique_lifecycle,
+    )
+    .await
+}
+
+async fn measure_ms_per_entry_kind(
+    kind: OpenKind,
+    def: QueueDefinition,
+    tag: &str,
+    entries_per_commit: usize,
+    total_entries: usize,
+    unique_lifecycle: bool,
+) -> (f64, Duration) {
     assert!(total_entries.is_multiple_of(entries_per_commit));
     let path = tmp_sqlite(&format!("{tag}-b{entries_per_commit}"));
-    let fw = open_sqlite(&path, Arc::new(ManualClock::at(0))).expect("open sqlite");
+    let fw = open_fw(kind, &path);
     let queue = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
     fw.create_queue(def).await.expect("create queue");
 
@@ -194,8 +334,14 @@ async fn assert_linearity(label: &str, def: QueueDefinition, tag: &str, unique_l
         unique_lifecycle,
     )
     .await;
-    let (ms_512, wall_512) =
-        measure_ms_per_entry(def, &format!("{tag}-512"), 512, TOTAL, unique_lifecycle).await;
+    let (ms_512, wall_512) = measure_ms_per_entry(
+        def.clone(),
+        &format!("{tag}-512"),
+        512,
+        TOTAL,
+        unique_lifecycle,
+    )
+    .await;
 
     let ratio = ms_512 / ms_64.max(1e-9);
     eprintln!(
@@ -203,20 +349,39 @@ async fn assert_linearity(label: &str, def: QueueDefinition, tag: &str, unique_l
          512 → {ms_512:.3} ms/entry (wall {wall_512:?}); ratio={ratio:.2}"
     );
 
-    const MAX_RATIO: f64 = 2.5;
+    // fireweed-110c25bc: amortization (ratio ≤1.0) with 5% host noise.
+    const MAX_RATIO: f64 = 1.05;
     assert!(
         ratio <= MAX_RATIO,
-        "per-entry commit cost must be flat from 64 to 512 entries/call ({label}): \
+        "per-entry commit cost must amortize from 64 to 512 entries/call ({label}): \
          64={ms_64:.3} ms/entry, 512={ms_512:.3} ms/entry, ratio={ratio:.2} (max {MAX_RATIO}). \
-         Superlinearity indicates staged push validation regressed \
-         (fireweed-a355d82b / fireweed-60ca4bfd)."
+         Rising or flat-linear cost is a product defect (fireweed-110c25bc)."
+    );
+
+    // 500→1000 ladder (snorri inverted-batching window).
+    const TOTAL_5: usize = 2000;
+    let (ms_500, _) = measure_ms_per_entry(
+        def.clone(),
+        &format!("{tag}-500"),
+        500,
+        TOTAL_5,
+        unique_lifecycle,
+    )
+    .await;
+    let (ms_1000, _) =
+        measure_ms_per_entry(def, &format!("{tag}-1000"), 1000, TOTAL_5, unique_lifecycle).await;
+    let ratio_5 = ms_1000 / ms_500.max(1e-9);
+    eprintln!(
+        "sqlite commit 500→1000 ({label}): {ms_500:.3} → {ms_1000:.3} ms/entry; ratio={ratio_5:.2}"
+    );
+    assert!(
+        ratio_5 <= MAX_RATIO,
+        "per-entry commit must amortize 500→1000 ({label}): \
+         500={ms_500:.3}, 1000={ms_1000:.3}, ratio={ratio_5:.2}"
     );
 }
 
-/// Per-entry cost at 512 entries/commit must stay within 2.5× of cost at 64 entries/commit.
-///
-/// Pre-fix superlinearity was ~6.3×. Tolerance is loose enough for noisy CI hosts but tight
-/// enough to catch a return of the O(n) staged-set revalidation.
+/// Per-entry cost at 512 entries/commit must not exceed cost at 64 (amortization; ≤1.05 noise).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sqlite_commit_per_entry_cost_is_flat_from_64_to_512() {
     assert_linearity("plain", qdef_plain(), "plain", false).await;
@@ -286,19 +451,100 @@ async fn sqlite_commit_rejects_in_commit_duplicate_unique_typed_key() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// Named repro harness: print the measurement table shape snorri reported.
+/// fireweed-ca9c45a0: print amortization ladder for snorri-shaped entries.
+///
+/// Fixed total work per ladder segment; prints ms/entry for batches in the snorri set.
+/// Interpretation (amortizing / inverted / flat) is recorded in
+/// `docs/perf/evidence/tp005/commit-amortization-latest.md`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sqlite_commit_batch_size_sweep_repro_table() {
-    const TOTAL: usize = 512;
-    eprintln!("entries/commit\tms/entry\twall");
-    for batch in [16usize, 32, 64, 128, 256, 512] {
-        if !TOTAL.is_multiple_of(batch) {
-            continue;
+    // Power-of-two ladder (total 1024).
+    const TOTAL_POW2: usize = 1024;
+    // 500/1000 ladder (total 2000) — snorri's inverted-batching observation window.
+    const TOTAL_5: usize = 2000;
+
+    for kind in [OpenKind::LogReplay, OpenKind::Relational] {
+        let kind_label = match kind {
+            OpenKind::LogReplay => "open_sqlite",
+            OpenKind::Relational => "open_sqlite_relational",
+        };
+
+        eprintln!("=== shape: finalize+lifecycle (plain) {kind_label} ===");
+        eprintln!("entries/commit\tms/entry\twall\ttotal");
+        for batch in [64usize, 128, 256, 512] {
+            let (ms, wall) = measure_ms_per_entry_kind(
+                kind,
+                qdef_plain(),
+                &format!("sweep-plain-{kind_label}-{batch}"),
+                batch,
+                TOTAL_POW2,
+                false,
+            )
+            .await;
+            eprintln!("{batch}\t{ms:.4}\t{wall:?}\t{TOTAL_POW2}");
         }
-        let (ms, wall) =
-            measure_ms_per_entry(qdef_plain(), &format!("sweep-{batch}"), batch, TOTAL, false)
-                .await;
-        eprintln!("{batch}\t{ms:.3}\t{wall:?}");
+        for batch in [500usize, 1000] {
+            let (ms, wall) = measure_ms_per_entry_kind(
+                kind,
+                qdef_plain(),
+                &format!("sweep-plain-{kind_label}-{batch}"),
+                batch,
+                TOTAL_5,
+                false,
+            )
+            .await;
+            eprintln!("{batch}\t{ms:.4}\t{wall:?}\t{TOTAL_5}");
+        }
+
+        eprintln!("=== shape: finalize+lifecycle (unique typed index) {kind_label} ===");
+        eprintln!("entries/commit\tms/entry\twall\ttotal");
+        for batch in [64usize, 128, 256, 512] {
+            let (ms, wall) = measure_ms_per_entry_kind(
+                kind,
+                qdef_unique_typed(),
+                &format!("sweep-unique-{kind_label}-{batch}"),
+                batch,
+                TOTAL_POW2,
+                true,
+            )
+            .await;
+            eprintln!("{batch}\t{ms:.4}\t{wall:?}\t{TOTAL_POW2}");
+        }
+        for batch in [500usize, 1000] {
+            let (ms, wall) = measure_ms_per_entry_kind(
+                kind,
+                qdef_unique_typed(),
+                &format!("sweep-unique-{kind_label}-{batch}"),
+                batch,
+                TOTAL_5,
+                true,
+            )
+            .await;
+            eprintln!("{batch}\t{ms:.4}\t{wall:?}\t{TOTAL_5}");
+        }
+
+        eprintln!("=== shape: finalize+side+fence {kind_label} ===");
+        eprintln!("entries/commit\tms/entry\twall\ttotal");
+        for batch in [64usize, 128, 256, 512] {
+            let (ms, wall) = measure_ms_per_entry_finalize_only_kind(
+                kind,
+                &format!("sweep-fin-{kind_label}-{batch}"),
+                batch,
+                TOTAL_POW2,
+            )
+            .await;
+            eprintln!("{batch}\t{ms:.4}\t{wall:?}\t{TOTAL_POW2}");
+        }
+        for batch in [500usize, 1000] {
+            let (ms, wall) = measure_ms_per_entry_finalize_only_kind(
+                kind,
+                &format!("sweep-fin-{kind_label}-{batch}"),
+                batch,
+                TOTAL_5,
+            )
+            .await;
+            eprintln!("{batch}\t{ms:.4}\t{wall:?}\t{TOTAL_5}");
+        }
     }
 }
 
@@ -310,8 +556,18 @@ async fn measure_ms_per_entry_finalize_only(
     entries_per_commit: usize,
     total_entries: usize,
 ) -> (f64, Duration) {
+    measure_ms_per_entry_finalize_only_kind(OpenKind::LogReplay, tag, entries_per_commit, total_entries)
+        .await
+}
+
+async fn measure_ms_per_entry_finalize_only_kind(
+    kind: OpenKind,
+    tag: &str,
+    entries_per_commit: usize,
+    total_entries: usize,
+) -> (f64, Duration) {
     let path = tmp_sqlite(tag);
-    let fw = open_sqlite(&path, Arc::new(ManualClock::at(0))).expect("open sqlite");
+    let fw = open_fw(kind, &path);
     let def = qdef_plain();
     let queue = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
     fw.create_queue(def).await.expect("create queue");
@@ -399,11 +655,51 @@ async fn sqlite_finalize_side_record_fence_commit_per_entry_cost_is_flat() {
         "sqlite finalize+side+fence linearity: 64 → {ms_64:.3} ms/entry (wall {wall_64:?}); \
          512 → {ms_512:.3} ms/entry (wall {wall_512:?}); ratio={ratio:.2}"
     );
-    const MAX_RATIO: f64 = 2.5;
+    const MAX_RATIO: f64 = 1.05;
     assert!(
         ratio <= MAX_RATIO,
-        "per-entry finalize+side+fence commit cost must be flat 64→512: \
+        "per-entry finalize+side+fence commit cost must amortize 64→512: \
          64={ms_64:.3}, 512={ms_512:.3}, ratio={ratio:.2} (max {MAX_RATIO}). \
-         Superlinearity is fireweed-2045eac0 (snorri dispatch path)."
+         fireweed-110c25bc / fireweed-6e651ac5."
+    );
+    // Absolute software floor on open_sqlite + ManualClock (B2 AC #3).
+    assert!(
+        ms_512 <= 0.25,
+        "finalize+side+fence @512 must be ≤0.25 ms/entry on open_sqlite (got {ms_512:.3})"
+    );
+
+    // 500→1000 ladder (snorri inverted-batching window).
+    const TOTAL_5: usize = 2000;
+    let (ms_500, _) = measure_ms_per_entry_finalize_only("fin-500", 500, TOTAL_5).await;
+    let (ms_1000, _) = measure_ms_per_entry_finalize_only("fin-1000", 1000, TOTAL_5).await;
+    let ratio_5 = ms_1000 / ms_500.max(1e-9);
+    eprintln!(
+        "sqlite finalize+side+fence 500→1000: {ms_500:.3} → {ms_1000:.3} ms/entry; ratio={ratio_5:.2}"
+    );
+    assert!(
+        ratio_5 <= MAX_RATIO,
+        "finalize+side+fence must amortize 500→1000: 500={ms_500:.3}, 1000={ms_1000:.3}, ratio={ratio_5:.2}"
+    );
+}
+
+/// fireweed-346a8d9b: amortization holds with ≥8 typed indexes (snorri-like index count).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_commit_amortizes_with_multi_typed_indexes() {
+    const N_INDEXES: usize = 8;
+    const TOTAL: usize = 1024;
+    let _ = measure_ms_per_entry_multi_index(N_INDEXES, "multi-warm", 64, TOTAL).await;
+    let (ms_64, wall_64) =
+        measure_ms_per_entry_multi_index(N_INDEXES, "multi-64", 64, TOTAL).await;
+    let (ms_512, wall_512) =
+        measure_ms_per_entry_multi_index(N_INDEXES, "multi-512", 512, TOTAL).await;
+    let ratio = ms_512 / ms_64.max(1e-9);
+    eprintln!(
+        "sqlite multi-index ({N_INDEXES}) commit: 64 → {ms_64:.3} ms/entry (wall {wall_64:?}); \
+         512 → {ms_512:.3} ms/entry (wall {wall_512:?}); ratio={ratio:.2}"
+    );
+    const MAX_RATIO: f64 = 1.05;
+    assert!(
+        ratio <= MAX_RATIO,
+        "multi-index commit must amortize 64→512: 64={ms_64:.3}, 512={ms_512:.3}, ratio={ratio:.2}"
     );
 }
