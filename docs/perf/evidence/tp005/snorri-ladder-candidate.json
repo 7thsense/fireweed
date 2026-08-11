@@ -1,0 +1,41 @@
+{
+  "schema": "fireweed-snorri-ladder-handoff/v1",
+  "candidate_rev": "PENDING_PIN_AT_RELEASE",
+  "product_composition": "sqlite log × memory projection (open_sqlite) preferred; confirm snorri pin",
+  "baseline_v0_31_2": {
+    "tps_w1": 2069,
+    "tps_w4": 3395,
+    "tps_w8": 3692,
+    "ms_per_entry_in_commit": 0.93,
+    "durable_queue_commit_seconds": 37.2
+  },
+  "regressed_ed311dff": {
+    "tps_w1": 988,
+    "tps_w4": 2247,
+    "tps_w8": 1540,
+    "durable_queue_commit_seconds": 124.2
+  },
+  "run_config": {
+    "members": 10000,
+    "claim_batch": 500,
+    "workers": [1, 4, 8],
+    "path_override": true,
+    "delivery_assertions": "expected_green"
+  },
+  "pass_condition": {
+    "tps_w8_min": 3692,
+    "delivery_assertions": "green"
+  },
+  "RESULT": {
+    "status": "pending",
+    "measured_rev": null,
+    "measured_at": null,
+    "tps_w1": null,
+    "tps_w4": null,
+    "tps_w8": null,
+    "durable_queue_commit_seconds": null,
+    "delivery_assertions": null,
+    "verdict": null,
+    "note": "Only the external snorri pipeline may populate RESULT. Local synthetic numbers are inadmissible."
+  }
+}
