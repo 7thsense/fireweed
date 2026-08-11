@@ -98,3 +98,17 @@ groups per commit (was 3–4 applies/entry). Absolute cost remains higher than l
 - `open_sqlite` log: `PRAGMA synchronous=FULL` — one fsync per commit batch (amortizes).
 - Probe uses ManualClock (no timer sleep). Host filesystem noise appears in wall times;
   ratios are stable across runs.
+
+## HOLD (fireweed-6bfe48ca) — 2026-08-11
+
+Snorri same-day ladder at main `ed311dff` (post bulk-apply): **regression** vs v0.31.2:
+
+| workers | tps (landing) | tps (v0.31.2) | ratio |
+|---:|---:|---:|---:|
+| 1 | 988 | 2,069 | 0.48× |
+| 4 | 2,247 | 3,395 | 0.66× |
+| 8 | 1,540 | 3,692 | 0.42× |
+
+`durable_queue_commit` wall: 124.2 s (was 37.2 s). Shape: 19 typed indexes, entity docs, ~2.3 KB payloads, 500-entry batches.
+
+**Action:** reverse bulk-apply coalescing on relational `commit_transition` (reinstated per-entry apply). Keep amortization gates on `open_sqlite` (lean shapes still green). Do not tag v0.31.3 until snorri ladder ≥ v0.31.2 baseline at w=8.

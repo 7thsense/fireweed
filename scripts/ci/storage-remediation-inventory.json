@@ -18083,6 +18083,25 @@
         "baseline": false,
         "boundary_kind": "public_external",
         "boundary_owners": [
+          "P6",
+          "P9"
+        ],
+        "final_id": "Cargo.toml::fireweed::sqlite_commit_batch_linearity::test::sqlite_commit_amortizes_with_multi_typed_indexes",
+        "key": "sqlite_commit_batch_linearity.rs::sqlite_commit_amortizes_with_multi_typed_indexes",
+        "observed_count": 1,
+        "observed_ids": [
+          "Cargo.toml::fireweed::sqlite_commit_batch_linearity::test::sqlite_commit_amortizes_with_multi_typed_indexes"
+        ],
+        "old_id": "Cargo.toml::fireweed::sqlite_commit_batch_linearity::test::sqlite_commit_amortizes_with_multi_typed_indexes",
+        "private_refs": [],
+        "source": "sqlite_commit_batch_linearity.rs",
+        "temporary_id": "Cargo.toml::fireweed::sqlite_commit_batch_linearity::test::sqlite_commit_amortizes_with_multi_typed_indexes",
+        "test_id": "sqlite_commit_amortizes_with_multi_typed_indexes"
+      },
+      {
+        "baseline": false,
+        "boundary_kind": "public_external",
+        "boundary_owners": [
           "P9"
         ],
         "final_id": "Cargo.toml::fireweed::sqlite_commit_batch_linearity::test::sqlite_commit_batch_size_sweep_repro_table",
@@ -18570,7 +18589,7 @@
     "cargo_status": "listed",
     "errors": [],
     "generated_by": "scripts/ci/fireweed_test_placement.py",
-    "input_sha256": "d440b2869dbf1f234b568c2217d4bb91d0dcc538af83eb6d51109698210fc003",
+    "input_sha256": "5ae5b9b8bea45d6709ad9abe7fd1f06a54eb42236f90dbb68ba591b3687dd062",
     "private_surface": [
       {
         "declaration_kind": "fn",
@@ -27057,6 +27076,27 @@
           "--all-features",
           "--test",
           "sqlite_commit_batch_linearity",
+          "sqlite_commit_amortizes_with_multi_typed_indexes",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::sqlite_commit_batch_linearity::test::sqlite_commit_amortizes_with_multi_typed_indexes",
+        "target": "sqlite_commit_batch_linearity",
+        "test_id": "sqlite_commit_amortizes_with_multi_typed_indexes"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.92.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--test",
+          "sqlite_commit_batch_linearity",
           "sqlite_commit_batch_size_sweep_repro_table",
           "--",
           "--exact"
@@ -28184,8 +28224,9 @@
       },
       {
         "exists": true,
-        "listed_test_count": 5,
+        "listed_test_count": 6,
         "listed_test_ids": [
+          "Cargo.toml::fireweed::sqlite_commit_batch_linearity::test::sqlite_commit_amortizes_with_multi_typed_indexes",
           "Cargo.toml::fireweed::sqlite_commit_batch_linearity::test::sqlite_commit_batch_size_sweep_repro_table",
           "Cargo.toml::fireweed::sqlite_commit_batch_linearity::test::sqlite_commit_per_entry_cost_is_flat_from_64_to_512",
           "Cargo.toml::fireweed::sqlite_commit_batch_linearity::test::sqlite_commit_per_entry_cost_is_flat_with_unique_typed_index",
@@ -93655,6 +93696,35 @@
         "fireweed",
         "--test",
         "sqlite_commit_batch_linearity",
+        "sqlite_commit_amortizes_with_multi_typed_indexes",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "sqlite_commit_amortizes_with_multi_typed_indexes",
+      "id": "Cargo.toml::fireweed::sqlite_commit_batch_linearity::test::sqlite_commit_amortizes_with_multi_typed_indexes",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "sqlite_commit_batch_linearity",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--test",
+        "sqlite_commit_batch_linearity",
         "sqlite_commit_batch_size_sweep_repro_table",
         "--",
         "--exact"
@@ -95383,7 +95453,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "8e7553f5ee5189415e31186dfe48b43503cdd101918488447958f6ae6d363d91",
+  "source_inventory_sha256": "c94e5ff7fd864a145f30d6dfcb532b0f9ca4795ad1eefc8bdd9f8bfc391e45ea",
   "workspaces": [
     {
       "listing_error_sha256": "",
