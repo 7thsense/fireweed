@@ -339,6 +339,18 @@ pub trait LogStore: Send {
         expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>>;
 
+    /// True when [`Self::append_serialized`] durably retains the pre-encoded bytes and therefore does
+    /// not need `commands` at all.
+    ///
+    /// fireweed-ecf5ee96: a caller that encodes off-lock may hand such a store bytes only (with an
+    /// empty `commands` slice). Every other axis falls through to the default `append_serialized`,
+    /// which drops the bytes and appends `commands` — so handing IT an empty slice silently appends
+    /// nothing and desynchronizes the returned positions from the caller's envelopes. Callers must
+    /// consult this before choosing the bytes-only form.
+    fn retains_serialized_appends(&self) -> bool {
+        false
+    }
+
     /// Append using canonical bytes prepared by the composition's pre-ownership admission boundary. Logs
     /// that retain encoded records override this to consume them; other axes preserve existing behavior.
     fn append_serialized(

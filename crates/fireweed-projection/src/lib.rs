@@ -4269,20 +4269,28 @@ impl ProjectionData {
 
     /// Pre-commit unique-index validation for a PUSH batch: each item is checked against the existing
     /// index AND against earlier items in the same batch (a violating batch appends nothing).
+    ///
+    /// fireweed-9d2281f0: the index keys of an item are computed **once** and reused for both the
+    /// durable check and the within-batch dedup. The previous two-pass form recomputed every typed
+    /// index key per item, which on snorri-shaped commits (19 typed indexes, one unique) doubled the
+    /// key-encoding work of the commit validate hop. Rejection semantics are unchanged: any durable
+    /// or within-batch collision on a unique index is `Conflict`, and every declared index key is
+    /// still computed (so a malformed typed value rejects before the log append).
     pub fn index_validate_push(&self, items: &[PushItem]) -> EngineResult<()> {
         let mut batch: BTreeMap<(String, Vec<u8>), ItemId> = BTreeMap::new();
         for item in items {
-            self.index_validate_with_entity(
-                &item.item_id,
-                &item.fields,
-                item.entity_document.as_ref(),
-                None,
-            )?;
             for (name, key) in
                 self.record_index_keys(&item.fields, item.entity_document.as_ref())?
             {
-                if matches!(self.indexes.get(&name), Some(SecondaryIndex::Unique(_)))
-                    && let Some(prev) = batch.insert((name, key), item.item_id)
+                let Some(SecondaryIndex::Unique(map)) = self.indexes.get(&name) else {
+                    continue;
+                };
+                if let Some(holder) = map.get(&key)
+                    && *holder != item.item_id
+                {
+                    return Err(EngineError::Conflict);
+                }
+                if let Some(prev) = batch.insert((name, key), item.item_id)
                     && prev != item.item_id
                 {
                     return Err(EngineError::Conflict);

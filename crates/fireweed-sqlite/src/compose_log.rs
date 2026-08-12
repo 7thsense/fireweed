@@ -339,6 +339,11 @@ impl LogStore for SqliteLog {
         self.append_json_envelopes(shard, envelopes, expected_epoch)
     }
 
+    /// The sqlite log stores the encoded JSON row itself, so a caller may append bytes only.
+    fn retains_serialized_appends(&self) -> bool {
+        true
+    }
+
     /// Durable append from pre-encoded JSON envelopes (composition admission boundary /
     /// async bridges encode **off** the exclusive SQLite writer lock so concurrent workers
     /// serialize only on WAL insert + FULL fsync — fireweed-9d2281f0 / 10k campaign).

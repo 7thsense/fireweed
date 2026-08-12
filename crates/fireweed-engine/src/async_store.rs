@@ -253,8 +253,13 @@ pub struct InProcessLogStore<S> {
     executor: Option<BoundedBlockingExecutor>,
     durability_class: DurabilityClass,
     durable_log: bool,
+    /// The store keeps the pre-encoded bytes handed to `append_serialized` (see
+    /// [`LogStore::retains_serialized_appends`]). Only such a store may be appended bytes-only.
+    retains_serialized: bool,
     lock_phase: Arc<LockPhaseCounters>,
-    /// Present only when `durable_log && executor` — batches concurrent appends.
+    /// Present only when `durable_log && retains_serialized && executor` — batches concurrent
+    /// appends. The seal loop carries encoded bytes only, so an axis that cannot consume them
+    /// must not group-commit (fireweed-ecf5ee96).
     group_commit: Option<Arc<Mutex<GroupCommitState>>>,
 }
 
@@ -352,11 +357,13 @@ impl<S: LogStore> InProcessLogStore<S> {
     pub fn new(store: S) -> Self {
         let durability_class = store.durability_class();
         let durable_log = store.is_durable_log();
+        let retains_serialized = store.retains_serialized_appends();
         Self {
             store: Arc::new(Mutex::new(store)),
             executor: None,
             durability_class,
             durable_log,
+            retains_serialized,
             lock_phase: Arc::new(LockPhaseCounters::default()),
             group_commit: None,
         }
@@ -370,13 +377,15 @@ impl<S: LogStore> InProcessLogStore<S> {
     pub fn new_with_blocking_offload(store: S, max_in_flight: usize) -> EngineResult<Self> {
         let durability_class = store.durability_class();
         let durable_log = store.is_durable_log();
+        let retains_serialized = store.retains_serialized_appends();
         Ok(Self {
             store: Arc::new(Mutex::new(store)),
             executor: Some(BoundedBlockingExecutor::new(max_in_flight)?),
             durability_class,
             durable_log,
+            retains_serialized,
             lock_phase: Arc::new(LockPhaseCounters::default()),
-            group_commit: durable_log.then(|| {
+            group_commit: (durable_log && retains_serialized).then(|| {
                 Arc::new(Mutex::new(GroupCommitState {
                     pending: Vec::new(),
                     sealer_active: false,
@@ -417,8 +426,58 @@ impl<S: LogStore> InProcessLogStore<S> {
         }
     }
 
+    /// Whether this axis may be appended pre-encoded bytes **without** the envelopes
+    /// ([`LogStore::retains_serialized_appends`]). Callers that encode off-lock must branch on this:
+    /// `true` → [`Self::append_encoded`], `false` → [`Self::append_owned`].
+    pub fn retains_serialized_appends(&self) -> bool {
+        self.retains_serialized
+    }
+
+    /// Append envelopes plus their pre-encoded bytes, handing the envelopes back so the caller can
+    /// apply them by move.
+    ///
+    /// This is the correct form for axes that do NOT retain the encoded bytes (in-memory log,
+    /// object log): they append from `commands`, so the envelopes must travel with the bytes. The
+    /// move round-trip keeps the commit path clone-free (fireweed-ecf5ee96 / fireweed-9d2281f0).
+    pub fn append_owned(
+        &self,
+        shard: QueueKey,
+        commands: Vec<CommandEnvelope>,
+        serialized: Vec<Vec<u8>>,
+        expected_epoch: u64,
+    ) -> impl Future<Output = EngineResult<(Vec<CommandPosition>, Vec<CommandEnvelope>)>> + Send + 'static
+    where
+        S: Send + 'static,
+    {
+        let this_store = Arc::clone(&self.store);
+        let executor = self.executor.clone();
+        let lock_phase = Arc::clone(&self.lock_phase);
+        async move {
+            let run = move || {
+                let wait_start = Instant::now();
+                let mut guard = this_store
+                    .lock()
+                    .expect("immediate log store mutex poisoned");
+                let wait = wait_start.elapsed();
+                let hold_start = Instant::now();
+                let result =
+                    guard.append_serialized(&shard, &commands, serialized, expected_epoch);
+                lock_phase.record(wait, hold_start.elapsed());
+                result.map(|positions| (positions, commands))
+            };
+            if let Some(executor) = executor {
+                executor.execute(run).await
+            } else {
+                run()
+            }
+        }
+    }
+
     /// Append pre-encoded JSON envelopes without consuming CommandEnvelopes so apply can
     /// take ownership of the same batch (kills double clone on atomic commit / 10k path).
+    ///
+    /// Only valid for axes where [`Self::retains_serialized_appends`] is true — the envelopes are
+    /// never handed to the store, so any other axis would append nothing.
     pub fn append_encoded(
         &self,
         shard: QueueKey,
@@ -432,7 +491,17 @@ impl<S: LogStore> InProcessLogStore<S> {
         let this_store = Arc::clone(&self.store);
         let executor = self.executor.clone();
         let lock_phase = Arc::clone(&self.lock_phase);
+        let retains_serialized = self.retains_serialized;
         async move {
+            if !retains_serialized {
+                // Fail loudly instead of appending nothing: this axis derives its append from the
+                // envelopes, which the bytes-only form does not carry (fireweed-ecf5ee96).
+                return Err(EngineError::Storage(
+                    "append_encoded requires a log that retains serialized appends; \
+                     use append_owned"
+                        .to_string(),
+                ));
+            }
             if let Some(gc) = group_commit {
                 let executor = executor.expect("group-commit requires offload executor");
                 let slot = Arc::new(Mutex::new(GroupCommitSlot {

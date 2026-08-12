@@ -184,16 +184,24 @@ where
                 .lock()
                 .expect("compose fault hook poisoned")
                 .clone();
-            // Encode once; apply owns commands (no double clone).
+            // Encode once, off the store lock; apply owns commands (no double clone). An axis that
+            // does not retain the encoded bytes must still receive the envelopes, so they travel
+            // with the bytes and come back by move (fireweed-ecf5ee96).
             let serialized = commands
                 .iter()
                 .map(|c| {
                     serde_json::to_vec(c).map_err(|e| EngineError::Storage(e.to_string()))
                 })
                 .collect::<EngineResult<Vec<_>>>()?;
-            let positions = log
-                .append_encoded(shard.clone(), serialized, expected_epoch)
-                .await?;
+            let (positions, commands) = if log.retains_serialized_appends() {
+                let positions = log
+                    .append_encoded(shard.clone(), serialized, expected_epoch)
+                    .await?;
+                (positions, commands)
+            } else {
+                log.append_owned(shard.clone(), commands, serialized, expected_epoch)
+                    .await?
+            };
             if matches!(fault, RawCommitFault::AfterAppendBeforeApply) {
                 return Ok(RawCommitOutcome::appended(positions));
             }
@@ -3627,7 +3635,13 @@ where
                 request_id,
                 entries,
             } = transition;
-            let fingerprint = commit_body_hash(&entries)?;
+            // fireweed-9d2281f0: the body fingerprint exists only to detect a request-id replayed
+            // with a different body. Without a request id nothing can ever read it back, so hashing
+            // every multi-KB payload of the batch is pure hot-path cost on the snorri shape.
+            let fingerprint = match &request_id {
+                Some(_) => commit_body_hash(&entries)?,
+                None => BodyHash(0),
+            };
             let definition =
                 AsyncControlPlane::queue_definition(self.control.as_ref(), shard.clone()).await?;
             let max_attempts = definition.retry_policy.max_attempts;
@@ -3696,7 +3710,9 @@ where
             // fireweed-3469cf97: pure CPU prep (entity validate, claim-ref shape, push item build)
             // runs **outside** the admit permit so concurrent workers overlap that work; only durable
             // validate + log seal + projection apply hold the permit.
-            let commit_fingerprint = fingerprint.0;
+            // Only meaningful next to a request id (see the fingerprint computation above); a
+            // request-id-free commit records `None` so replay metadata stays self-consistent.
+            let commit_fingerprint = request_id.as_ref().map(|_| fingerprint.0);
             let epoch = self.resolve_epoch(&shard, expected_epoch).await?;
             let strategy = self.engine.commit_strategy();
             let projection = Arc::clone(&self.projection);
@@ -3909,7 +3925,7 @@ where
                             |command: QueueCommand, item_ids: Vec<ItemId>| CommandEnvelope {
                                 command_id: ids.next_command_id(),
                                 request_id: request_id.clone(),
-                                request_fingerprint: Some(commit_fingerprint),
+                                request_fingerprint: commit_fingerprint,
                                 request_outcome: None,
                                 item_ids,
                                 command,
@@ -4020,7 +4036,7 @@ where
                             batch.push(CommandEnvelope {
                                 command_id: ids.next_command_id(),
                                 request_id: Some(rid.clone()),
-                                request_fingerprint: Some(commit_fingerprint),
+                                request_fingerprint: Some(fingerprint.0),
                                 request_outcome: Some(RequestOutcome::CommitTransition {
                                     entries: outcome_entries,
                                 }),
