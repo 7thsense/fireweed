@@ -50,7 +50,13 @@ Best single-run observations on this host (noisy; range across 4 runs):
 | 4 | **~8,200** | multi-worker does not beat single-stream much |
 | 8 | **~7,700** | still ~permit-serialized |
 
-**Scoreboard:** product claim+commit **~70–82% of 10k** (host-noise band). **Group-commit** works for direct concurrent appends (64→2 seals) but product multi-worker still serializes claim/commit on the admit permit for the durable section — prep overlap alone does not free concurrent seals. Residual: software on exclusive path (~0.12–0.15 ms/entry claim+commit) and/or batching multiple commits under one exclusive seal.
+**Scoreboard:** product claim+commit **~70–86% of 10k** (host-noise band; best quiet ~8.6k w=8). **Group-commit** works for direct concurrent appends (64→2 seals) but product multi-worker still serializes claim/commit on the admit permit for the durable section. Residual: exclusive software (~0.12 ms/entry claim+commit) and/or **single-fsync claim+commit cycle** (today two FULL seals per worker step).
+
+### f4225198 hot-path opts
+
+- No double `commands.clone()` on atomic commit (`append_encoded` + owned apply).
+- Skip definition fetch when no gates / push request-id.
+- One-pass dual index insert; SqliteLog cache/mmap under FULL.
 
 ### Group-commit proof (direct concurrent appends)
 
