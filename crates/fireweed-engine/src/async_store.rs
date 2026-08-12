@@ -541,13 +541,22 @@ fn seal_group_commit_loop<S: LogStore>(
         }
 
         for key in order {
-            let waiters = groups.remove(&key).expect("group present");
+            let mut waiters = groups.remove(&key).expect("group present");
             let (shard, expected_epoch) = key;
+            let waiter_count = waiters.len() as u64;
             let counts: Vec<usize> = waiters.iter().map(|w| w.serialized.len()).collect();
-            let mut combined: Vec<Vec<u8>> = Vec::with_capacity(counts.iter().sum());
-            for w in &waiters {
-                combined.extend(w.serialized.iter().cloned());
-            }
+
+            // Move envelopes (avoid clone); single-waiter path is the common open_sqlite case
+            // under the queue-local admit permit (only one commit in flight per queue).
+            let combined: Vec<Vec<u8>> = if waiters.len() == 1 {
+                std::mem::take(&mut waiters[0].serialized)
+            } else {
+                let mut combined = Vec::with_capacity(counts.iter().sum());
+                for w in &mut waiters {
+                    combined.extend(std::mem::take(&mut w.serialized));
+                }
+                combined
+            };
 
             let wait_start = Instant::now();
             let mut guard = store.lock().expect("immediate log store mutex poisoned");
@@ -561,9 +570,7 @@ fn seal_group_commit_loop<S: LogStore>(
             {
                 let mut state = gc.lock().expect("group-commit mutex poisoned");
                 state.seals_completed = state.seals_completed.saturating_add(1);
-                state.appends_completed = state
-                    .appends_completed
-                    .saturating_add(waiters.len() as u64);
+                state.appends_completed = state.appends_completed.saturating_add(waiter_count);
             }
 
             match outcome {

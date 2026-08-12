@@ -805,6 +805,12 @@ where
         self.log.reset_group_commit_stats();
     }
 
+    /// Shared log axis handle (diagnostic / stress tests). Prefer product ports for normal work.
+    #[doc(hidden)]
+    pub fn log_store(&self) -> Arc<InProcessLogStore<L>> {
+        Arc::clone(&self.log)
+    }
+
     /// Emit durable change-record tail from the log emission cursor (parity with sync composition).
     pub fn emit_change_record_tail<S: crate::ChangeRecordSink + ?Sized>(
         &self,

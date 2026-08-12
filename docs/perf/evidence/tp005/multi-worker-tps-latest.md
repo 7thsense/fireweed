@@ -29,7 +29,28 @@ cargo test -p fireweed --test sqlite_multi_worker_tps_probe --release --features
 | 4 | 8000 | 1.050 | 0.131 | **7,618** |
 | 8 | 8000 | 1.067 | 0.133 | **7,496** |
 
-**Scoreboard:** w=8 **~75% of 10k goal** (was ~60%). Off-lock encode recovered ~1.5k tps by letting workers serde in parallel; seal is still one FULL fsync stream.
+### After group-commit + single-waiter fast path (same host, quiet-ish)
+
+| workers | durable_tps | % of 10k |
+|--------:|------------:|---------:|
+| 1 | **7,675** | 77% |
+| 4 | **7,978** | 80% |
+| 8 | **7,283** | 73% |
+
+**Scoreboard:** product claim+commit ~**73–80% of 10k**. **Group-commit seals concurrent appends** (stress: 64 appends → 2 seals) but **does not fully unlock single-queue multi-worker** because claim and commit both take the **queue-local admit permit** (`submit_operation`) — only one mutation in flight per queue, so appends almost never wait together. Residual gap is software (claim+commit ~0.13 ms/entry) + that serialization.
+
+### Group-commit proof (direct concurrent appends)
+
+```
+cargo test -p fireweed --test sqlite_log_group_commit_stress --release --features sqlite -- --nocapture
+# group-commit stress: seals=2 appends=64
+```
+
+### Implications
+
+1. **Group-commit is real** for concurrent `AsyncLogStore::append` (multi-queue or future shorter hold).
+2. **10k on one queue** still needs either: (a) single-stream claim+commit ≤0.1 ms (~10k), or (b) **shorten admit permit** so prep overlaps and appends group-commit, or (c) multi-queue sharding.
+3. Do **not** treat recovery floors as done.
 
 ## Vs external snorri
 
