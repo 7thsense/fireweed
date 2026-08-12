@@ -4,6 +4,9 @@
 //! Same product cell + shape as the contention/mixed-op probes: sqlite log × memory
 //! projection, 19 typed indexes, ~2.3 KB payload, finalize + lifecycle-push, claim-batch 500.
 //!
+//! Uses **`claim_finalize_push_cycle`** (one FULL fsync per claim+finalize+push step) rather
+//! than separate claim then commit (two seals) — the 10k-tps product worker shape.
+//!
 //! ```text
 //! cargo test -p fireweed --test sqlite_multi_worker_tps_probe --release --features sqlite \
 //!   -- --nocapture
@@ -19,7 +22,8 @@ use std::time::{Duration, Instant};
 
 use axon_esf::IndexDef;
 use fireweed::*;
-use fireweed_core::{IndexDeclaration, IndexType, QueueIndex};
+use fireweed_core::{IndexDeclaration, IndexType, QueueIndex, UtcTimestamp};
+use fireweed_engine::PushSpec;
 use fireweed_memory::ManualClock;
 use serde_json::{Value as JsonValue, json};
 
@@ -91,7 +95,12 @@ fn entity_for(k: u64) -> JsonValue {
 }
 
 async fn worker_loop(
-    fw: Arc<Fireweed>,
+    backend: Arc<
+        fireweed_engine::AsyncLogReplayBackend<
+            fireweed_sqlite::SqliteLog,
+            fireweed_projection::InMemoryProjection,
+        >,
+    >,
     queue: QueueKey,
     payload: bytes::Bytes,
     iterations: usize,
@@ -99,51 +108,25 @@ async fn worker_loop(
 ) -> usize {
     let mut committed = 0usize;
     let mut next_key = key_base;
+    let now = UtcTimestamp::new(0, 0).unwrap();
     for _ in 0..iterations {
-        let claimed = fw
-            .claim(&queue, CLAIM_BATCH, 30_000)
-            .await
-            .expect("claim");
-        assert_eq!(claimed.len(), CLAIM_BATCH, "claim batch size");
-        let entries: Vec<CommitEntry> = claimed
-            .into_iter()
-            .map(|item| {
+        let lifecycle: Vec<PushSpec> = (0..CLAIM_BATCH)
+            .map(|_| {
                 let k = next_key;
                 next_key += 1;
-                CommitEntry {
-                    claim_ref: ClaimRef {
-                        item_id: item.item_id,
-                        lease_token: item.lease_token.expect("lease"),
-                        lease_expires_at: item.lease_expires_at,
-                        item_version: item.item_version,
-                    },
-                    finalize: FinalizeKind::Complete,
-                    side_records: vec![],
-                    lifecycle_items: vec![NewItem {
-                        entity: Some(entity_for(k)),
-                        payload: Some(payload.clone()),
-                        ..Default::default()
-                    }],
-                    instance_fence: None,
+                PushSpec {
+                    entity: Some(entity_for(k)),
+                    payload: Some(payload.clone()),
+                    ..Default::default()
                 }
             })
             .collect();
-        let outcomes = fw
-            .commit(
-                &queue,
-                CommitRequest {
-                    request_id: None,
-                    entries,
-                },
-            )
+        let n = backend
+            .claim_finalize_push_cycle(queue.clone(), 30_000, now, None, lifecycle)
             .await
-            .expect("commit");
-        for o in outcomes {
-            if let EntryOutcome::Rejected(e) = o {
-                panic!("rejected: {e}");
-            }
-        }
-        committed += CLAIM_BATCH;
+            .expect("claim_finalize_push_cycle");
+        assert_eq!(n, CLAIM_BATCH, "cycle batch size");
+        committed += n;
     }
     committed
 }
@@ -174,8 +157,8 @@ async fn measure_weight(workers: usize, run_tag: &str) -> WeightResult {
 
     let path = tmp_sqlite(&format!("{run_tag}-w{workers}"));
     let clock = Arc::new(ManualClock::at(0));
-    let fw = open_sqlite(&path, clock).expect("open sqlite×memory");
-    let fw = Arc::new(fw);
+    let (fw, backend) =
+        open_sqlite_with_lock_stats_handle(&path, clock).expect("open sqlite×memory");
     let def = qdef_snorri_shaped();
     let queue = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
     fw.create_queue(def).await.expect("create queue");
@@ -199,12 +182,12 @@ async fn measure_weight(workers: usize, run_tag: &str) -> WeightResult {
     let start = Instant::now();
     let mut tasks = Vec::with_capacity(workers);
     for w in 0..workers {
-        let fw = Arc::clone(&fw);
+        let backend = Arc::clone(&backend);
         let queue = queue.clone();
         let payload = payload.clone();
         let key_base = (w as u64) * 10_000_000;
         tasks.push(tokio::spawn(worker_loop(
-            fw,
+            backend,
             queue,
             payload,
             iterations_per_worker,

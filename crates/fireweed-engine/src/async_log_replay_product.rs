@@ -1555,6 +1555,125 @@ where
     }
 }
 
+impl<L, P> AsyncLogReplayBackend<L, P>
+where
+    L: LogStore + Send + 'static,
+    P: ProjectionStore + Send + 'static,
+{
+    /// Claim up to `lifecycle.len()` pending items, finalize them `Complete`, and push
+    /// `lifecycle` as replacements in **one** durable seal (one FULL fsync).
+    ///
+    /// Worker loops that would otherwise `claim` then `commit_transition` pay two seals; this
+    /// packs Claim + Finalize + Push into a single `strategy.commit` under one admit permit
+    /// (10k-tps campaign). Returns the number of items cycled (0 if the queue was empty).
+    pub async fn claim_finalize_push_cycle(
+        &self,
+        shard: QueueKey,
+        lease_duration_ms: u64,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+        lifecycle: Vec<PushSpec>,
+    ) -> EngineResult<usize> {
+        if lifecycle.is_empty() {
+            return Ok(0);
+        }
+        let max_items = lifecycle.len();
+        let definition =
+            AsyncControlPlane::queue_definition(self.control.as_ref(), shard.clone()).await?;
+        if max_items > definition.max_claim_batch_size as usize {
+            return Err(EngineError::Invalid("claim_finalize_push_cycle batch too large"));
+        }
+        if lease_duration_ms == 0 || lease_duration_ms > definition.max_lease_duration_ms {
+            return Err(EngineError::Invalid("invalid lease_duration_ms"));
+        }
+        let max_attempts = definition.retry_policy.max_attempts;
+        let epoch = self.resolve_epoch(&shard, expected_epoch).await?;
+        let strategy = self.engine.commit_strategy();
+        let projection = Arc::clone(&self.projection);
+        let ids = Arc::clone(&self.ids);
+        let counters = Arc::clone(&self.counters);
+        let node_id = self.node_id;
+        // ManualClock / probe-friendly: lease end is now + duration (ms), no clock dependency.
+        let lease_expires_at = UtcTimestamp::new(
+            now.seconds.saturating_add((lease_duration_ms / 1000) as i64),
+            now.nanoseconds
+                .saturating_add(((lease_duration_ms % 1000) as u32).saturating_mul(1_000_000))
+                % 1_000_000_000,
+        )
+        .unwrap_or(now);
+
+        self.engine
+            .submit_operation(shard.clone(), move || {
+                Box::pin(async move {
+                    let item_ids = projection
+                        .eligible_candidates(shard.clone(), now, max_items)
+                        .await?;
+                    if item_ids.is_empty() {
+                        return Ok(0usize);
+                    }
+                    let n = item_ids.len();
+                    let lifecycle: Vec<PushSpec> = lifecycle.into_iter().take(n).collect();
+                    if lifecycle.len() != n {
+                        return Err(EngineError::Invalid(
+                            "claim_finalize_push_cycle: lifecycle shorter than claimed",
+                        ));
+                    }
+                    let lease_token = generate_query_lease_token()?;
+                    let counter_base = counters.reserve(&shard, epoch, n as u32);
+                    let (push_items, push_ids) =
+                        build_push_items(lifecycle, epoch, node_id, counter_base, max_attempts);
+
+                    let mut envelopes = Vec::with_capacity(3);
+                    envelopes.push(CommandEnvelope {
+                        command_id: ids.next_command_id(),
+                        request_id: None,
+                        request_fingerprint: None,
+                        request_outcome: None,
+                        item_ids: item_ids.clone(),
+                        command: QueueCommand::Claim(ClaimCommand {
+                            item_ids: item_ids.clone(),
+                            lease_token,
+                            lease_expires_at,
+                            worker_id: None,
+                        }),
+                        checksum: CommandChecksum(0),
+                        created_at: now,
+                    });
+                    let outcomes: Vec<FinalizeOutcome> = item_ids
+                        .iter()
+                        .map(|id| FinalizeOutcome::new(*id, FinalizeKind::Complete))
+                        .collect();
+                    envelopes.push(CommandEnvelope {
+                        command_id: ids.next_command_id(),
+                        request_id: None,
+                        request_fingerprint: None,
+                        request_outcome: None,
+                        item_ids: item_ids.clone(),
+                        command: QueueCommand::Finalize(FinalizeCommand { outcomes }),
+                        checksum: CommandChecksum(0),
+                        created_at: now,
+                    });
+                    envelopes.push(CommandEnvelope {
+                        command_id: ids.next_command_id(),
+                        request_id: None,
+                        request_fingerprint: None,
+                        request_outcome: None,
+                        item_ids: push_ids,
+                        command: QueueCommand::Push(PushCommand { items: push_items }),
+                        checksum: CommandChecksum(0),
+                        created_at: now,
+                    });
+                    strategy
+                        .commit(RawCommitRequest::new(shard, envelopes, epoch))
+                        .await?;
+                    Ok(n)
+                })
+            })
+            .await
+            .map_err(|e| EngineError::Storage(format!("claim_finalize_push_cycle failed: {e:?}")))?
+    }
+}
+
 impl<L, P> FinalizePort for AsyncLogReplayBackend<L, P>
 where
     L: LogStore + Send + 'static,
