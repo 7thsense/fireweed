@@ -339,6 +339,9 @@ impl LogStore for SqliteLog {
     /// Durable append from pre-encoded JSON envelopes (composition admission boundary /
     /// async bridges encode **off** the exclusive SQLite writer lock so concurrent workers
     /// serialize only on WAL insert + FULL fsync — fireweed-9d2281f0 / 10k campaign).
+    ///
+    /// `commands` may be empty when `serialized` is non-empty (group-commit coalesces many
+    /// waiters and only needs the JSON rows). If both are non-empty, lengths must match.
     fn append_serialized(
         &mut self,
         shard: &QueueKey,
@@ -346,13 +349,13 @@ impl LogStore for SqliteLog {
         serialized: Vec<Vec<u8>>,
         expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>> {
-        if !serialized.is_empty() && serialized.len() != commands.len() {
+        if serialized.is_empty() {
+            return self.append(shard, commands, expected_epoch);
+        }
+        if !commands.is_empty() && commands.len() != serialized.len() {
             return Err(EngineError::Invalid(
                 "append_serialized: commands/serialized length mismatch",
             ));
-        }
-        if serialized.is_empty() {
-            return self.append(shard, commands, expected_epoch);
         }
         let envelopes: Vec<String> = serialized
             .into_iter()

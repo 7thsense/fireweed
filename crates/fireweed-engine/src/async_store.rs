@@ -244,12 +244,61 @@ impl<T: Send + 'static> Future for BlockingTaskFuture<T> {
 /// with [`Self::new_with_blocking_offload`], each whole store operation runs on a private
 /// [`BoundedBlockingExecutor`] so rusqlite/disk work never stalls a Tokio worker (adapter-local
 /// offload — not process-wide `BlockingLibBackend`).
+///
+/// Durable offload axes also enable **group-commit** on [`AsyncLogStore::append`]: concurrent
+/// appends that share `(shard, epoch)` coalesce into one `append_serialized` / FULL fsync
+/// (fireweed-2a564ff7 / 10k campaign). Memory / non-durable axes leave group-commit off.
 pub struct InProcessLogStore<S> {
     store: Arc<Mutex<S>>,
     executor: Option<BoundedBlockingExecutor>,
     durability_class: DurabilityClass,
     durable_log: bool,
     lock_phase: Arc<LockPhaseCounters>,
+    /// Present only when `durable_log && executor` — batches concurrent appends.
+    group_commit: Option<Arc<Mutex<GroupCommitState>>>,
+}
+
+/// Waiter + seal accounting for durable log group-commit (fireweed-2a564ff7).
+struct GroupCommitState {
+    pending: Vec<GroupCommitWaiter>,
+    /// A seal loop is scheduled or running on the blocking executor.
+    sealer_active: bool,
+    /// Completed seal transactions (each is one Immediate + FULL fsync for one shard/epoch group).
+    seals_completed: u64,
+    /// Individual logical appends that joined a seal (waiters completed).
+    appends_completed: u64,
+}
+
+struct GroupCommitWaiter {
+    shard: QueueKey,
+    serialized: Vec<Vec<u8>>,
+    expected_epoch: u64,
+    result: Arc<Mutex<GroupCommitSlot>>,
+}
+
+struct GroupCommitSlot {
+    done: Option<EngineResult<Vec<CommandPosition>>>,
+    waker: Option<Waker>,
+}
+
+struct GroupCommitFuture {
+    result: Arc<Mutex<GroupCommitSlot>>,
+}
+
+impl Future for GroupCommitFuture {
+    type Output = EngineResult<Vec<CommandPosition>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut slot = self
+            .result
+            .lock()
+            .expect("group-commit result mutex poisoned");
+        if let Some(done) = slot.done.take() {
+            return Poll::Ready(done);
+        }
+        slot.waker = Some(cx.waker().clone());
+        Poll::Pending
+    }
 }
 
 /// Default in-flight bound for adapter-local durable log offload (serialized by the store mutex).
@@ -309,12 +358,15 @@ impl<S: LogStore> InProcessLogStore<S> {
             durability_class,
             durable_log,
             lock_phase: Arc::new(LockPhaseCounters::default()),
+            group_commit: None,
         }
     }
 
     /// Same as [`Self::new`] but every async axis op and [`Self::run_with_store`] offloads through a
     /// private bounded blocking executor (spawned OS threads). Use for durable blocking stores
     /// (sqlite) so product ports are non-blocking-under-poll without process-wide BLB.
+    ///
+    /// When the store is a durable log, enables group-commit on append (fireweed-2a564ff7).
     pub fn new_with_blocking_offload(store: S, max_in_flight: usize) -> EngineResult<Self> {
         let durability_class = store.durability_class();
         let durable_log = store.is_durable_log();
@@ -324,6 +376,14 @@ impl<S: LogStore> InProcessLogStore<S> {
             durability_class,
             durable_log,
             lock_phase: Arc::new(LockPhaseCounters::default()),
+            group_commit: durable_log.then(|| {
+                Arc::new(Mutex::new(GroupCommitState {
+                    pending: Vec::new(),
+                    sealer_active: false,
+                    seals_completed: 0,
+                    appends_completed: 0,
+                }))
+            }),
         })
     }
 
@@ -337,6 +397,24 @@ impl<S: LogStore> InProcessLogStore<S> {
     /// Zero the cumulative lock-phase counters so a probe can bracket one measurement window.
     pub fn reset_lock_phase_stats(&self) {
         self.lock_phase.reset();
+    }
+
+    /// Group-commit seal / append counters when group-commit is enabled (`None` otherwise).
+    /// `(seals_completed, appends_completed)` — under load `seals < appends` proves coalescing.
+    pub fn group_commit_stats(&self) -> Option<(u64, u64)> {
+        self.group_commit.as_ref().map(|gc| {
+            let g = gc.lock().expect("group-commit mutex poisoned");
+            (g.seals_completed, g.appends_completed)
+        })
+    }
+
+    /// Zero group-commit counters (tests / probes).
+    pub fn reset_group_commit_stats(&self) {
+        if let Some(gc) = &self.group_commit {
+            let mut g = gc.lock().expect("group-commit mutex poisoned");
+            g.seals_completed = 0;
+            g.appends_completed = 0;
+        }
     }
 
     /// Run a synchronous read against the underlying log (open/recover/tests). Blocks the caller;
@@ -432,6 +510,99 @@ impl<S: LogStore> InProcessLogStore<S> {
                 result
             }
         }
+    }
+}
+
+/// Drain pending group-commit waiters until empty. One Immediate+fsync per (shard, epoch) group.
+fn seal_group_commit_loop<S: LogStore>(
+    gc: Arc<Mutex<GroupCommitState>>,
+    store: Arc<Mutex<S>>,
+    lock_phase: Arc<LockPhaseCounters>,
+) {
+    loop {
+        let batch = {
+            let mut state = gc.lock().expect("group-commit mutex poisoned");
+            if state.pending.is_empty() {
+                state.sealer_active = false;
+                return;
+            }
+            std::mem::take(&mut state.pending)
+        };
+
+        // Group waiters by (shard, epoch) preserving first-seen order of keys.
+        let mut groups: HashMap<(QueueKey, u64), Vec<GroupCommitWaiter>> = HashMap::new();
+        let mut order: Vec<(QueueKey, u64)> = Vec::new();
+        for w in batch {
+            let key = (w.shard.clone(), w.expected_epoch);
+            if !groups.contains_key(&key) {
+                order.push(key.clone());
+            }
+            groups.entry(key).or_default().push(w);
+        }
+
+        for key in order {
+            let waiters = groups.remove(&key).expect("group present");
+            let (shard, expected_epoch) = key;
+            let counts: Vec<usize> = waiters.iter().map(|w| w.serialized.len()).collect();
+            let mut combined: Vec<Vec<u8>> = Vec::with_capacity(counts.iter().sum());
+            for w in &waiters {
+                combined.extend(w.serialized.iter().cloned());
+            }
+
+            let wait_start = Instant::now();
+            let mut guard = store.lock().expect("immediate log store mutex poisoned");
+            let wait = wait_start.elapsed();
+            let hold_start = Instant::now();
+            // commands empty: SqliteLog append_serialized uses serialized only.
+            let outcome = guard.append_serialized(&shard, &[], combined, expected_epoch);
+            lock_phase.record(wait, hold_start.elapsed());
+            drop(guard);
+
+            {
+                let mut state = gc.lock().expect("group-commit mutex poisoned");
+                state.seals_completed = state.seals_completed.saturating_add(1);
+                state.appends_completed = state
+                    .appends_completed
+                    .saturating_add(waiters.len() as u64);
+            }
+
+            match outcome {
+                Ok(positions) => {
+                    let mut offset = 0usize;
+                    for (w, n) in waiters.into_iter().zip(counts) {
+                        let slice = positions
+                            .get(offset..offset + n)
+                            .map(|s| s.to_vec())
+                            .unwrap_or_default();
+                        offset += n;
+                        complete_group_commit_waiter(w.result, Ok(slice));
+                    }
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    for w in waiters {
+                        complete_group_commit_waiter(
+                            w.result,
+                            Err(EngineError::Storage(msg.clone())),
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn complete_group_commit_waiter(
+    slot: Arc<Mutex<GroupCommitSlot>>,
+    result: EngineResult<Vec<CommandPosition>>,
+) {
+    let waker = {
+        let mut s = slot.lock().expect("group-commit result mutex poisoned");
+        s.done = Some(result);
+        s.waker.take()
+    };
+    if let Some(w) = waker {
+        w.wake();
     }
 }
 
@@ -1377,9 +1548,92 @@ where
         commands: Vec<CommandEnvelope>,
         expected_epoch: u64,
     ) -> impl Future<Output = EngineResult<Vec<CommandPosition>>> + Send {
-        // In-process (memory) axes do not JSON-encode for durability; keep encode inside append.
-        // Durable offload paths use BlockingLogStore::append which pre-encodes off-lock.
-        self.run_with_store_mut(move |store| store.append(&shard, &commands, expected_epoch))
+        // Durable offload (`open_sqlite`): pre-encode JSON off the exclusive writer lock, then
+        // join group-commit so concurrent workers coalesce FULL fsyncs (fireweed-2a564ff7).
+        // Memory / non-offload: encode stays inside the store mutex via plain `append`.
+        let group_commit = self.group_commit.clone();
+        let this_store = Arc::clone(&self.store);
+        let executor = self.executor.clone();
+        let lock_phase = Arc::clone(&self.lock_phase);
+        // Rebuild a thin handle for group-commit / direct paths without cloning the whole self.
+        let gc_enabled = group_commit.is_some();
+        async move {
+            if gc_enabled {
+                let serialized = commands
+                    .iter()
+                    .map(|c| {
+                        serde_json::to_vec(c).map_err(|e| EngineError::Storage(e.to_string()))
+                    })
+                    .collect::<EngineResult<Vec<_>>>()?;
+                // Inline the group-commit path (same as append_via_group_commit) using captured fields.
+                let gc = group_commit.expect("gc_enabled");
+                let executor = executor.expect("group-commit requires offload executor");
+                let slot = Arc::new(Mutex::new(GroupCommitSlot {
+                    done: None,
+                    waker: None,
+                }));
+                let waiter = GroupCommitWaiter {
+                    shard,
+                    serialized,
+                    expected_epoch,
+                    result: Arc::clone(&slot),
+                };
+                let is_leader = {
+                    let mut state = gc.lock().expect("group-commit mutex poisoned");
+                    state.pending.push(waiter);
+                    if !state.sealer_active {
+                        state.sealer_active = true;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if is_leader {
+                    let gc_seal = Arc::clone(&gc);
+                    let store_seal = Arc::clone(&this_store);
+                    let lock_phase_seal = Arc::clone(&lock_phase);
+                    executor
+                        .execute(move || {
+                            seal_group_commit_loop::<S>(gc_seal, store_seal, lock_phase_seal);
+                            Ok(())
+                        })
+                        .await?;
+                }
+                GroupCommitFuture { result: slot }.await
+            } else {
+                // Non-durable / no offload: mutate under store mutex (possibly via executor).
+                let store = Arc::clone(&this_store);
+                let executor = executor;
+                let lock_phase = Arc::clone(&lock_phase);
+                async move {
+                    if let Some(executor) = executor {
+                        executor
+                            .execute(move || {
+                                let wait_start = Instant::now();
+                                let mut guard =
+                                    store.lock().expect("immediate log store mutex poisoned");
+                                let wait = wait_start.elapsed();
+                                let hold_start = Instant::now();
+                                let result =
+                                    guard.append(&shard, &commands, expected_epoch);
+                                lock_phase.record(wait, hold_start.elapsed());
+                                result
+                            })
+                            .await
+                    } else {
+                        let wait_start = Instant::now();
+                        let mut guard =
+                            store.lock().expect("immediate log store mutex poisoned");
+                        let wait = wait_start.elapsed();
+                        let hold_start = Instant::now();
+                        let result = guard.append(&shard, &commands, expected_epoch);
+                        lock_phase.record(wait, hold_start.elapsed());
+                        result
+                    }
+                }
+                .await
+            }
+        }
     }
 
     fn read_from(

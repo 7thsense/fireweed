@@ -794,6 +794,17 @@ where
         self.projection.reset_lock_phase_stats();
     }
 
+    /// Durable log group-commit stats: `(seals, logical_appends)`. `None` when group-commit is off.
+    /// Under concurrent load `seals < appends` proves coalescing (fireweed-2a564ff7).
+    pub fn log_group_commit_stats(&self) -> Option<(u64, u64)> {
+        self.log.group_commit_stats()
+    }
+
+    /// Zero group-commit counters for a measurement window.
+    pub fn reset_log_group_commit_stats(&self) {
+        self.log.reset_group_commit_stats();
+    }
+
     /// Emit durable change-record tail from the log emission cursor (parity with sync composition).
     pub fn emit_change_record_tail<S: crate::ChangeRecordSink + ?Sized>(
         &self,
