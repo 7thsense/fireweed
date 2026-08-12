@@ -144,6 +144,84 @@ impl SqliteLog {
         Self::from_conn(st(Connection::open_in_memory())?)
     }
 
+    /// Insert pre-encoded JSON envelope strings under one Immediate + FULL fsync transaction.
+    fn append_json_envelopes(
+        &mut self,
+        shard: &QueueKey,
+        envelopes: Vec<String>,
+        expected_epoch: u64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        let (t, q) = parts(shard);
+        // Acquire the SQLite writer slot before the epoch read. A deferred read transaction can lose an
+        // upgrade race and fail an otherwise valid concurrent append with SQLITE_BUSY.
+        let tx = st(self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate))?;
+        // TD-003 fence: reject a non-current epoch (a stale owner) before writing anything.
+        let epoch: i64 = st(tx
+            .query_row(
+                "SELECT assignment_epoch FROM log_epochs WHERE tenant=?1 AND queue=?2",
+                params![t, q],
+                |row| row.get(0),
+            )
+            .optional())?
+        .ok_or(EngineError::NotFound)?;
+        if expected_epoch != epoch as u64 {
+            return Err(EngineError::EpochFenced);
+        }
+
+        if envelopes.is_empty() {
+            st(tx.commit())?;
+            return Ok(Vec::new());
+        }
+
+        let batch_len = i64::try_from(envelopes.len())
+            .map_err(|_| EngineError::Invalid("append batch is too large"))?;
+        // Allocate a single contiguous sequence range. The transaction serializes this counter update
+        // with every insert chunk and the one final high-water advance.
+        let first_seq: i64 = st(tx.query_row(
+            ALLOCATE_SEQUENCE_RANGE_SQL,
+            params![t, q, batch_len],
+            |row| row.get(0),
+        ))?;
+
+        // Drain owned JSON strings so multi-MB push envelopes are not cloned into Value::Text.
+        let mut first_seq_cursor = first_seq;
+        let mut remaining = envelopes;
+        while !remaining.is_empty() {
+            let take = remaining.len().min(APPEND_INSERT_CHUNK_SIZE);
+            let chunk: Vec<String> = remaining.drain(..take).collect();
+            let chunk_first = first_seq_cursor;
+            first_seq_cursor = first_seq_cursor
+                .checked_add(chunk.len() as i64)
+                .ok_or(EngineError::Invalid("log sequence exhausted"))?;
+            let mut values = Vec::with_capacity(chunk.len() * 5);
+            for (offset, envelope) in chunk.into_iter().enumerate() {
+                let seq = chunk_first
+                    .checked_add(offset as i64)
+                    .ok_or(EngineError::Invalid("log sequence exhausted"))?;
+                values.push(Value::Text(t.clone()));
+                values.push(Value::Text(q.clone()));
+                values.push(Value::Integer(epoch));
+                values.push(Value::Integer(seq));
+                values.push(Value::Text(envelope));
+            }
+            st(tx.execute(
+                &insert_batch_sql(take),
+                params_from_iter(values.iter()),
+            ))?;
+        }
+
+        let last_seq = first_seq
+            .checked_add(batch_len - 1)
+            .ok_or(EngineError::Invalid("log sequence exhausted"))?;
+        st(tx.execute(ADVANCE_HIGH_WATER_SQL, params![t, q, epoch, last_seq]))?;
+        st(tx.commit())?;
+        Ok((first_seq..=last_seq)
+            .map(|seq| CommandPosition::new(shard.clone(), epoch as u64, seq as u64))
+            .collect())
+    }
+
     fn from_conn(conn: Connection) -> EngineResult<Self> {
         // WAL + synchronous=FULL: this connection is the authoritative command log
         // (TD-005). FULL fsyncs the WAL on every commit so a returned append survives
@@ -249,81 +327,42 @@ impl LogStore for SqliteLog {
         commands: &[CommandEnvelope],
         expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>> {
-        let (t, q) = parts(shard);
         // Encode once per envelope; keep as String so we can bind without a second full clone
         // of multi-MB push batches (fireweed-85855781).
         let envelopes: Vec<String> = commands
             .iter()
             .map(to_json)
             .collect::<EngineResult<Vec<_>>>()?;
-        // Acquire the SQLite writer slot before the epoch read. A deferred read transaction can lose an
-        // upgrade race and fail an otherwise valid concurrent append with SQLITE_BUSY.
-        let tx = st(self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate))?;
-        // TD-003 fence: reject a non-current epoch (a stale owner) before writing anything.
-        let epoch: i64 = st(tx
-            .query_row(
-                "SELECT assignment_epoch FROM log_epochs WHERE tenant=?1 AND queue=?2",
-                params![t, q],
-                |row| row.get(0),
-            )
-            .optional())?
-        .ok_or(EngineError::NotFound)?;
-        if expected_epoch != epoch as u64 {
-            return Err(EngineError::EpochFenced);
+        self.append_json_envelopes(shard, envelopes, expected_epoch)
+    }
+
+    /// Durable append from pre-encoded JSON envelopes (composition admission boundary /
+    /// async bridges encode **off** the exclusive SQLite writer lock so concurrent workers
+    /// serialize only on WAL insert + FULL fsync — fireweed-9d2281f0 / 10k campaign).
+    fn append_serialized(
+        &mut self,
+        shard: &QueueKey,
+        commands: &[CommandEnvelope],
+        serialized: Vec<Vec<u8>>,
+        expected_epoch: u64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        if !serialized.is_empty() && serialized.len() != commands.len() {
+            return Err(EngineError::Invalid(
+                "append_serialized: commands/serialized length mismatch",
+            ));
         }
-
-        if envelopes.is_empty() {
-            st(tx.commit())?;
-            return Ok(Vec::new());
+        if serialized.is_empty() {
+            return self.append(shard, commands, expected_epoch);
         }
-
-        let batch_len = i64::try_from(envelopes.len())
-            .map_err(|_| EngineError::Invalid("append batch is too large"))?;
-        // Allocate a single contiguous sequence range. The transaction serializes this counter update
-        // with every insert chunk and the one final high-water advance.
-        let first_seq: i64 = st(tx.query_row(
-            ALLOCATE_SEQUENCE_RANGE_SQL,
-            params![t, q, batch_len],
-            |row| row.get(0),
-        ))?;
-
-        // Drain owned JSON strings so multi-MB push envelopes are not cloned into Value::Text.
-        let mut first_seq_cursor = first_seq;
-        let mut remaining = envelopes;
-        while !remaining.is_empty() {
-            let take = remaining.len().min(APPEND_INSERT_CHUNK_SIZE);
-            let chunk: Vec<String> = remaining.drain(..take).collect();
-            let chunk_first = first_seq_cursor;
-            first_seq_cursor = first_seq_cursor
-                .checked_add(chunk.len() as i64)
-                .ok_or(EngineError::Invalid("log sequence exhausted"))?;
-            let mut values = Vec::with_capacity(chunk.len() * 5);
-            for (offset, envelope) in chunk.into_iter().enumerate() {
-                let seq = chunk_first
-                    .checked_add(offset as i64)
-                    .ok_or(EngineError::Invalid("log sequence exhausted"))?;
-                values.push(Value::Text(t.clone()));
-                values.push(Value::Text(q.clone()));
-                values.push(Value::Integer(epoch));
-                values.push(Value::Integer(seq));
-                values.push(Value::Text(envelope));
-            }
-            st(tx.execute(
-                &insert_batch_sql(take),
-                params_from_iter(values.iter()),
-            ))?;
-        }
-
-        let last_seq = first_seq
-            .checked_add(batch_len - 1)
-            .ok_or(EngineError::Invalid("log sequence exhausted"))?;
-        st(tx.execute(ADVANCE_HIGH_WATER_SQL, params![t, q, epoch, last_seq]))?;
-        st(tx.commit())?;
-        Ok((first_seq..=last_seq)
-            .map(|seq| CommandPosition::new(shard.clone(), epoch as u64, seq as u64))
-            .collect())
+        let envelopes: Vec<String> = serialized
+            .into_iter()
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|e| {
+                    EngineError::Storage(format!("append_serialized envelope is not utf-8: {e}"))
+                })
+            })
+            .collect::<EngineResult<Vec<_>>>()?;
+        self.append_json_envelopes(shard, envelopes, expected_epoch)
     }
 
     fn read_from(

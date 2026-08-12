@@ -1377,6 +1377,8 @@ where
         commands: Vec<CommandEnvelope>,
         expected_epoch: u64,
     ) -> impl Future<Output = EngineResult<Vec<CommandPosition>>> + Send {
+        // In-process (memory) axes do not JSON-encode for durability; keep encode inside append.
+        // Durable offload paths use BlockingLogStore::append which pre-encodes off-lock.
         self.run_with_store_mut(move |store| store.append(&shard, &commands, expected_epoch))
     }
 
@@ -1874,7 +1876,22 @@ where
         commands: Vec<CommandEnvelope>,
         expected_epoch: u64,
     ) -> impl Future<Output = EngineResult<Vec<CommandPosition>>> + Send {
-        self.run_sync(move |store: &mut S| store.append(&shard, &commands, expected_epoch))
+        // Encode JSON **before** the exclusive offload/store lock so concurrent workers pay
+        // serde cost in parallel and only serialize on the durable seal (fireweed-9d2281f0).
+        // Axes that do not consume `serialized` drop it and re-derive from `commands`.
+        async move {
+            let serialized = commands
+                .iter()
+                .map(|c| {
+                    serde_json::to_vec(c)
+                        .map_err(|e| EngineError::Storage(e.to_string()))
+                })
+                .collect::<EngineResult<Vec<_>>>()?;
+            self.run_sync(move |store: &mut S| {
+                store.append_serialized(&shard, &commands, serialized, expected_epoch)
+            })
+            .await
+        }
     }
 
     fn read_from(

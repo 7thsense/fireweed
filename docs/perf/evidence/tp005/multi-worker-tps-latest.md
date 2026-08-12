@@ -13,13 +13,23 @@ cargo test -p fireweed --test sqlite_multi_worker_tps_probe --release --features
 
 ## Results (this host, 2026-08-12)
 
+### Baseline (probe land, pre off-lock encode)
+
 | workers | committed | wall_s | ms/entry | **durable_tps** |
 |--------:|----------:|-------:|---------:|----------------:|
 | 1 | 8000 | 1.377 | 0.172 | **5,809** |
 | 4 | 8000 | 1.288 | 0.161 | **6,210** |
 | 8 | 8000 | 1.342 | 0.168 | **5,961** |
 
-**Scoreboard:** w=8 **~60% of 10k goal**. Multi-worker barely beats single stream → one durable write stream is the limiter (FULL fsync + exclusive commit section), not CPU starvation of idle cores.
+### After off-lock JSON encode (`append_serialized` on SqliteLog + BlockingLogStore)
+
+| workers | committed | wall_s | ms/entry | **durable_tps** |
+|--------:|----------:|-------:|---------:|----------------:|
+| 1 | 8000 | 1.181 | 0.148 | **6,772** |
+| 4 | 8000 | 1.050 | 0.131 | **7,618** |
+| 8 | 8000 | 1.067 | 0.133 | **7,496** |
+
+**Scoreboard:** w=8 **~75% of 10k goal** (was ~60%). Off-lock encode recovered ~1.5k tps by letting workers serde in parallel; seal is still one FULL fsync stream.
 
 ## Vs external snorri
 
