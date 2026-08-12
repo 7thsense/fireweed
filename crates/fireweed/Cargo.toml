@@ -120,6 +120,11 @@ path = "tests/sqlite_mixed_op_funnel_probe.rs"
 required-features = ["sqlite"]
 
 [[test]]
+name = "sqlite_multi_worker_tps_probe"
+path = "tests/sqlite_multi_worker_tps_probe.rs"
+required-features = ["sqlite"]
+
+[[test]]
 name = "durable_tps_proof"
 path = "tests/durable_tps_proof.rs"
 required-features = ["sqlite"]
