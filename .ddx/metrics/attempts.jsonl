@@ -542,3 +542,4 @@
 {"schema_version":1,"attempt_id":"20260811T211502-b14c5ba8","bead_id":"fireweed-451a6b23","session_id":"eb-01547fe3","ts_end":"2026-08-11T21:53:44Z","outcome":"success","exit_code":0,"duration_ms":0}
 {"schema_version":1,"attempt_id":"20260811T225359-d8c4115a","bead_id":"fireweed-7b74ceac","session_id":"eb-8f4648b5","ts_end":"2026-08-11T23:41:02Z","outcome":"success","exit_code":0,"duration_ms":0}
 {"schema_version":1,"attempt_id":"20260812T011554-cb05a4e5","bead_id":"fireweed-3469cf97","session_id":"eb-657ea7c8","ts_start":"2026-08-12T01:23:19Z","ts_end":"2026-08-12T01:40:33Z","model":"sonnet","harness":"claude","outcome":"repair-cycle-exhausted","exit_code":0,"cost_usd":4.95906095,"duration_ms":1033382,"review_verdict":"BLOCK"}
+{"schema_version":1,"attempt_id":"20260812T015533-f63a2690","bead_id":"fireweed-3469cf97","session_id":"eb-b703dab3","ts_end":"2026-08-12T03:38:40Z","outcome":"success","exit_code":0,"duration_ms":0}
