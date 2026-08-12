@@ -50,18 +50,7 @@ Best single-run observations on this host (noisy; range across 4 runs):
 | 4 | **~8,200** | multi-worker does not beat single-stream much |
 | 8 | **~7,700** | still ~permit-serialized |
 
-### After claim off-permit definition + compat checks
-
-| workers | durable_tps | % of 10k |
-|--------:|------------:|---------:|
-| 1 | 7,661 | 77% |
-| 4 | 7,570 | 76% |
-| 8 | **8,489** | **85%** |
-
-Pure commit software floor (snorri-shaped @512, best-of-3): **0.079 ms/entry** (under 0.1 software goal).  
-Claim+commit multi-worker residual is exclusive select+fsync+apply (~0.12 ms) + permit serialization.
-
-**Scoreboard:** **~85% of 10k** at w=8 best. Residual: exclusive-path software and/or product-level multi-commit seal batching.
+**Scoreboard:** product claim+commit **~70–82% of 10k** (host-noise band). **Group-commit** works for direct concurrent appends (64→2 seals) but product multi-worker still serializes claim/commit on the admit permit for the durable section — prep overlap alone does not free concurrent seals. Residual: software on exclusive path (~0.12–0.15 ms/entry claim+commit) and/or batching multiple commits under one exclusive seal.
 
 ### Group-commit proof (direct concurrent appends)
 

@@ -1759,43 +1759,36 @@ where
     D: OwnedTaskDispatcher,
     P: AsyncClaimPlanner,
 {
-    /// Plan, durably commit, and render one typed claim.
-    ///
-    /// Definition lookup + compatibility checks run **outside** the queue admit permit
-    /// (fireweed-9d2281f0 / 3469cf97): pure reads that concurrent workers can overlap.
-    /// Select-eligible + durable Claim append + render stay under the permit so two workers
-    /// cannot both observe the same Pending ids (fireweed-9cec8b02).
+    /// Plan, durably commit, and render one typed claim under a single queue-local permit.
     pub async fn claim(&self, request: ClaimRequest) -> Result<Claimed, AsyncClaimError> {
         let queue = request.shard.clone();
         let strategy = Arc::clone(&self.strategy);
         let planner = Arc::clone(&self.claim_planner);
-
-        // --- off-permit prep ---
-        let definition = planner
-            .queue_definition(queue.clone())
-            .await
-            .map_err(|e| AsyncClaimError::from(ClaimExecutionError::BeforeCommit(e)))?;
-        if definition.tenant_id != queue.tenant_id || definition.queue_id != queue.queue_id {
-            return Err(AsyncClaimError::from(ClaimExecutionError::BeforeCommit(
-                EngineError::Storage(
-                    "async claim planner returned the wrong queue definition".to_string(),
-                ),
-            )));
-        }
-        if request.max_items == 0 || request.max_items > definition.max_claim_batch_size as usize {
-            return Err(AsyncClaimError::from(ClaimExecutionError::BeforeCommit(
-                EngineError::Invalid("claim batch is outside queue limits"),
-            )));
-        }
-        let unit = validate_claim_compatibility(
-            &request.compatibility,
-            request.max_items as u64,
-            &definition,
-        )
-        .map_err(|e| AsyncClaimError::from(ClaimExecutionError::BeforeCommit(e)))?;
-
         self.submit_operation(queue.clone(), move || {
             Box::pin(async move {
+                let definition = planner
+                    .queue_definition(queue.clone())
+                    .await
+                    .map_err(ClaimExecutionError::BeforeCommit)?;
+                if definition.tenant_id != queue.tenant_id || definition.queue_id != queue.queue_id
+                {
+                    return Err(ClaimExecutionError::BeforeCommit(EngineError::Storage(
+                        "async claim planner returned the wrong queue definition".to_string(),
+                    )));
+                }
+                if request.max_items == 0
+                    || request.max_items > definition.max_claim_batch_size as usize
+                {
+                    return Err(ClaimExecutionError::BeforeCommit(EngineError::Invalid(
+                        "claim batch is outside queue limits",
+                    )));
+                }
+                let unit = validate_claim_compatibility(
+                    &request.compatibility,
+                    request.max_items as u64,
+                    &definition,
+                )
+                .map_err(ClaimExecutionError::BeforeCommit)?;
                 let plan = planner
                     .plan_claim(request.clone(), unit)
                     .await
