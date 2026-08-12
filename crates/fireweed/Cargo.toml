@@ -130,6 +130,11 @@ path = "tests/sqlite_log_group_commit_stress.rs"
 required-features = ["sqlite"]
 
 [[test]]
+name = "sqlite_product_claim_commit_group_commit_probe"
+path = "tests/sqlite_product_claim_commit_group_commit_probe.rs"
+required-features = ["sqlite"]
+
+[[test]]
 name = "durable_tps_proof"
 path = "tests/durable_tps_proof.rs"
 required-features = ["sqlite"]
