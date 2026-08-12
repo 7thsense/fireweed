@@ -3548,6 +3548,9 @@ where
 
             // fireweed-5497780d: fence validation + append/apply under one queue-local permit so
             // concurrent fenced side-record commits cannot last-writer-wins overwrite each other.
+            // fireweed-3469cf97: pure CPU prep (entity validate, claim-ref shape, push item build)
+            // runs **outside** the admit permit so concurrent workers overlap that work; only durable
+            // validate + log seal + projection apply hold the permit.
             let commit_fingerprint = fingerprint.0;
             let epoch = self.resolve_epoch(&shard, expected_epoch).await?;
             let strategy = self.engine.commit_strategy();
@@ -3562,122 +3565,117 @@ where
             let requires_cross_entry_push_validation =
                 definition.requires_cross_entry_push_validation();
             let definition_for_unique = definition.clone();
+
+            struct Prepared {
+                consumed_input_id: ItemId,
+                additional_consumed_input_ids: Vec<ItemId>,
+                claim_refs: Vec<crate::ClaimRef>,
+                finalize: FinalizeKind,
+                side_records: Vec<crate::SideRecord>,
+                instance_fence: Option<crate::InstanceFence>,
+                /// Arc so durable validate can share the payload without cloning multi-KB items.
+                push_items: Option<(Arc<Vec<PushItem>>, Vec<ItemId>)>,
+                early_reject: Option<EngineError>,
+            }
+
+            // --- off-permit pure prep (safe to overlap across workers) ---
+            let mut prepared: Vec<Prepared> = Vec::with_capacity(entries.len());
+            let mut reserved_claims: HashSet<ItemId> = HashSet::new();
+            for entry in entries {
+                let CommitTransitionEntry {
+                    claim_ref,
+                    additional_claim_refs,
+                    finalize,
+                    side_records,
+                    lifecycle_items,
+                    instance_fence,
+                } = entry;
+                let consumed_input_id = claim_ref.item_id;
+                let additional_consumed_input_ids = additional_claim_refs
+                    .iter()
+                    .map(|c| c.item_id)
+                    .collect::<Vec<_>>();
+                let mut claim_refs = Vec::with_capacity(1 + additional_claim_refs.len());
+                claim_refs.push(claim_ref);
+                claim_refs.extend(additional_claim_refs);
+
+                if let Err(error) =
+                    validate_distinct_commit_claims(&claim_refs[0], &claim_refs[1..])
+                {
+                    prepared.push(Prepared {
+                        consumed_input_id,
+                        additional_consumed_input_ids,
+                        claim_refs,
+                        finalize,
+                        side_records,
+                        instance_fence,
+                        push_items: None,
+                        early_reject: Some(error),
+                    });
+                    continue;
+                }
+                if claim_refs
+                    .iter()
+                    .any(|c| reserved_claims.contains(&c.item_id))
+                {
+                    prepared.push(Prepared {
+                        consumed_input_id,
+                        additional_consumed_input_ids,
+                        claim_refs,
+                        finalize,
+                        side_records,
+                        instance_fence,
+                        push_items: None,
+                        early_reject: Some(EngineError::Terminal),
+                    });
+                    continue;
+                }
+                reserved_claims.extend(claim_refs.iter().map(|c| c.item_id));
+
+                let mut early_reject = None;
+                let mut push_items = None;
+                if !lifecycle_items.is_empty() {
+                    if let Some(e) = lifecycle_items.iter().find_map(|item| {
+                        validate_entity(schema.as_ref(), item.entity.as_ref()).err()
+                    }) {
+                        early_reject = Some(e);
+                    } else {
+                        let counter_base =
+                            counters.reserve(&shard, epoch, lifecycle_items.len() as u32);
+                        let (built_items, built_ids) = build_push_items(
+                            lifecycle_items,
+                            epoch,
+                            node_id,
+                            counter_base,
+                            max_attempts,
+                        );
+                        push_items = Some((Arc::new(built_items), built_ids));
+                    }
+                }
+                prepared.push(Prepared {
+                    consumed_input_id,
+                    additional_consumed_input_ids,
+                    claim_refs,
+                    finalize,
+                    side_records,
+                    instance_fence,
+                    push_items,
+                    early_reject,
+                });
+            }
+
             self.engine
                 .submit_operation(shard.clone(), move || {
                     Box::pin(async move {
                         // fireweed-6bfe48ca: collapse per-entry projection hops into ONE store
-                        // session. Previously each entry paid 1–3 run_with_store awaits
-                        // (commit_validate / fence / index_validate_push) — O(entries) async
-                        // round-trips. Validation still per-entry for reject semantics.
-                        struct Prepared {
-                            consumed_input_id: ItemId,
-                            additional_consumed_input_ids: Vec<ItemId>,
-                            claim_refs: Vec<crate::ClaimRef>,
-                            finalize: FinalizeKind,
-                            side_records: Vec<crate::SideRecord>,
-                            instance_fence: Option<crate::InstanceFence>,
-                            push_items: Option<(Vec<PushItem>, Vec<ItemId>)>,
-                            early_reject: Option<EngineError>,
-                        }
-
-                        let mut prepared: Vec<Prepared> = Vec::with_capacity(entries.len());
-                        // Within-commit double-finalize guard (not durable; store may still reject).
-                        let mut reserved_claims: HashSet<ItemId> = HashSet::new();
-                        for entry in entries {
-                            let CommitTransitionEntry {
-                                claim_ref,
-                                additional_claim_refs,
-                                finalize,
-                                side_records,
-                                lifecycle_items,
-                                instance_fence,
-                            } = entry;
-                            let consumed_input_id = claim_ref.item_id;
-                            let additional_consumed_input_ids = additional_claim_refs
-                                .iter()
-                                .map(|c| c.item_id)
-                                .collect::<Vec<_>>();
-                            let mut claim_refs =
-                                Vec::with_capacity(1 + additional_claim_refs.len());
-                            claim_refs.push(claim_ref);
-                            claim_refs.extend(additional_claim_refs);
-
-                            if let Err(error) =
-                                validate_distinct_commit_claims(&claim_refs[0], &claim_refs[1..])
-                            {
-                                prepared.push(Prepared {
-                                    consumed_input_id,
-                                    additional_consumed_input_ids,
-                                    claim_refs,
-                                    finalize,
-                                    side_records,
-                                    instance_fence,
-                                    push_items: None,
-                                    early_reject: Some(error),
-                                });
-                                continue;
-                            }
-                            if claim_refs
-                                .iter()
-                                .any(|c| reserved_claims.contains(&c.item_id))
-                            {
-                                prepared.push(Prepared {
-                                    consumed_input_id,
-                                    additional_consumed_input_ids,
-                                    claim_refs,
-                                    finalize,
-                                    side_records,
-                                    instance_fence,
-                                    push_items: None,
-                                    early_reject: Some(EngineError::Terminal),
-                                });
-                                continue;
-                            }
-                            // Reserve only for entries that will attempt store validation.
-                            reserved_claims.extend(claim_refs.iter().map(|c| c.item_id));
-
-                            let mut early_reject = None;
-                            let mut push_items = None;
-                            if !lifecycle_items.is_empty() {
-                                if let Some(e) = lifecycle_items.iter().find_map(|item| {
-                                    validate_entity(schema.as_ref(), item.entity.as_ref()).err()
-                                }) {
-                                    early_reject = Some(e);
-                                } else {
-                                    let counter_base = counters.reserve(
-                                        &shard,
-                                        epoch,
-                                        lifecycle_items.len() as u32,
-                                    );
-                                    let built = build_push_items(
-                                        lifecycle_items,
-                                        epoch,
-                                        node_id,
-                                        counter_base,
-                                        max_attempts,
-                                    );
-                                    push_items = Some(built);
-                                }
-                            }
-                            prepared.push(Prepared {
-                                consumed_input_id,
-                                additional_consumed_input_ids,
-                                claim_refs,
-                                finalize,
-                                side_records,
-                                instance_fence,
-                                push_items,
-                                early_reject,
-                            });
-                        }
-
-                        // Snapshot validate inputs so `prepared` stays owned for envelope build.
+                        // session. Durable validate still per-entry for reject semantics.
+                        // Validate borrows prepared via Arc push_items — no multi-KB clone.
                         #[derive(Clone)]
                         struct ValidateIn {
                             skip: bool,
                             claim_refs: Vec<crate::ClaimRef>,
                             fence: Option<crate::InstanceFence>,
-                            push_items: Option<Vec<PushItem>>,
+                            push_items: Option<Arc<Vec<PushItem>>>,
                         }
                         let validate_in: Vec<ValidateIn> = prepared
                             .iter()
@@ -3685,10 +3683,7 @@ where
                                 skip: prep.early_reject.is_some(),
                                 claim_refs: prep.claim_refs.clone(),
                                 fence: prep.instance_fence.clone(),
-                                push_items: prep
-                                    .push_items
-                                    .as_ref()
-                                    .map(|(items, _)| items.clone()),
+                                push_items: prep.push_items.as_ref().map(|(items, _)| Arc::clone(items)),
                             })
                             .collect();
 
@@ -3739,7 +3734,7 @@ where
                                             if let Err(e) = ProjectionStore::index_validate_push(
                                                 p,
                                                 &shard,
-                                                push_items,
+                                                push_items.as_slice(),
                                             ) {
                                                 results.push(Some(e));
                                                 continue;
@@ -3747,7 +3742,7 @@ where
                                             if requires_cross_entry_push_validation
                                                 && let Err(e) = stage_unique_push_keys(
                                                     &definition_for_unique,
-                                                    push_items,
+                                                    push_items.as_slice(),
                                                     &mut staged_unique_keys,
                                                 )
                                             {
@@ -3817,7 +3812,11 @@ where
                             let mut lifecycle_item_ids = Vec::new();
                             if let Some((push_items, push_ids)) = prep.push_items {
                                 lifecycle_item_ids = push_ids.clone();
-                                all_push.extend(push_items);
+                                // Prefer move-out when Arc is unique (common: one validate hop).
+                                match Arc::try_unwrap(push_items) {
+                                    Ok(owned) => all_push.extend(owned),
+                                    Err(shared) => all_push.extend(shared.iter().cloned()),
+                                }
                                 all_push_ids.extend(push_ids);
                             }
                             for c in &prep.claim_refs {

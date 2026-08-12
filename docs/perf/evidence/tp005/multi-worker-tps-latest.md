@@ -37,7 +37,20 @@ cargo test -p fireweed --test sqlite_multi_worker_tps_probe --release --features
 | 4 | **7,978** | 80% |
 | 8 | **7,283** | 73% |
 
-**Scoreboard:** product claim+commit ~**73–80% of 10k**. **Group-commit seals concurrent appends** (stress: 64 appends → 2 seals) but **does not fully unlock single-queue multi-worker** because claim and commit both take the **queue-local admit permit** (`submit_operation`) — only one mutation in flight per queue, so appends almost never wait together. Residual gap is software (claim+commit ~0.13 ms/entry) + that serialization.
+### After off-permit pure prep (fireweed-3469cf97 partial)
+
+Pure CPU prep (entity validate, push-item build, claim-ref shape) moved **outside** `submit_operation`.
+Durable validate + append + apply stay exclusive (fence/unique correctness).
+
+Best single-run observations on this host (noisy; range across 4 runs):
+
+| workers | best durable_tps seen | notes |
+|--------:|----------------------:|-------|
+| 1 | **~8,200** | exclusive section still dominates |
+| 4 | **~8,200** | multi-worker does not beat single-stream much |
+| 8 | **~7,700** | still ~permit-serialized |
+
+**Scoreboard:** product claim+commit **~70–82% of 10k** (host-noise band). **Group-commit** works for direct concurrent appends (64→2 seals) but product multi-worker still serializes claim/commit on the admit permit for the durable section — prep overlap alone does not free concurrent seals. Residual: software on exclusive path (~0.12–0.15 ms/entry claim+commit) and/or batching multiple commits under one exclusive seal.
 
 ### Group-commit proof (direct concurrent appends)
 
