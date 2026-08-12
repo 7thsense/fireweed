@@ -1593,7 +1593,6 @@ where
         let ids = Arc::clone(&self.ids);
         let counters = Arc::clone(&self.counters);
         let node_id = self.node_id;
-        // ManualClock / probe-friendly: lease end is now + duration (ms), no clock dependency.
         let lease_expires_at = UtcTimestamp::new(
             now.seconds.saturating_add((lease_duration_ms / 1000) as i64),
             now.nanoseconds
@@ -1601,6 +1600,16 @@ where
                 % 1_000_000_000,
         )
         .unwrap_or(now);
+
+        // --- off-permit: id mint + push-item materialization (CPU-heavy for snorri entities) ---
+        let counter_base = counters.reserve(&shard, epoch, max_items as u32);
+        let (mut push_items, mut push_ids) =
+            build_push_items(lifecycle, epoch, node_id, counter_base, max_attempts);
+        let lease_token = generate_query_lease_token()?;
+        // Pre-mint command ids so exclusive section only selects + seals.
+        let claim_cid = ids.next_command_id();
+        let fin_cid = ids.next_command_id();
+        let push_cid = ids.next_command_id();
 
         self.engine
             .submit_operation(shard.clone(), move || {
@@ -1612,20 +1621,17 @@ where
                         return Ok(0usize);
                     }
                     let n = item_ids.len();
-                    let lifecycle: Vec<PushSpec> = lifecycle.into_iter().take(n).collect();
-                    if lifecycle.len() != n {
+                    if n > push_items.len() {
                         return Err(EngineError::Invalid(
-                            "claim_finalize_push_cycle: lifecycle shorter than claimed",
+                            "claim_finalize_push_cycle: claimed more than prepared lifecycle",
                         ));
                     }
-                    let lease_token = generate_query_lease_token()?;
-                    let counter_base = counters.reserve(&shard, epoch, n as u32);
-                    let (push_items, push_ids) =
-                        build_push_items(lifecycle, epoch, node_id, counter_base, max_attempts);
+                    push_items.truncate(n);
+                    push_ids.truncate(n);
 
                     let mut envelopes = Vec::with_capacity(3);
                     envelopes.push(CommandEnvelope {
-                        command_id: ids.next_command_id(),
+                        command_id: claim_cid,
                         request_id: None,
                         request_fingerprint: None,
                         request_outcome: None,
@@ -1644,7 +1650,7 @@ where
                         .map(|id| FinalizeOutcome::new(*id, FinalizeKind::Complete))
                         .collect();
                     envelopes.push(CommandEnvelope {
-                        command_id: ids.next_command_id(),
+                        command_id: fin_cid,
                         request_id: None,
                         request_fingerprint: None,
                         request_outcome: None,
@@ -1654,7 +1660,7 @@ where
                         created_at: now,
                     });
                     envelopes.push(CommandEnvelope {
-                        command_id: ids.next_command_id(),
+                        command_id: push_cid,
                         request_id: None,
                         request_fingerprint: None,
                         request_outcome: None,
