@@ -156,60 +156,81 @@ where
                 }
                 RawCommitFault::None | RawCommitFault::AfterAppendBeforeApply => {}
             }
-            let definition =
-                AsyncControlPlane::queue_definition(control.as_ref(), shard.clone()).await?;
-            for env in &commands {
-                crate::validate_gate_command_definition(&definition, &env.command)?;
+            // Hot path: skip definition fetch when no gates / push request-id (10k-tps).
+            let needs_definition = commands.iter().any(|env| {
+                let has_rid = env.request_id.is_some();
+                match &env.command {
+                    QueueCommand::SetGates(_) => true,
+                    QueueCommand::Push(p) => {
+                        has_rid || p.items.iter().any(|i| !i.gate_keys.is_empty())
+                    }
+                    QueueCommand::ReplacePending(r) => !r.replacement.gate_keys.is_empty(),
+                    _ => false,
+                }
+            });
+            let definition = if needs_definition {
+                Some(
+                    AsyncControlPlane::queue_definition(control.as_ref(), shard.clone()).await?,
+                )
+            } else {
+                None
+            };
+            if let Some(def) = definition.as_ref() {
+                for env in &commands {
+                    crate::validate_gate_command_definition(def, &env.command)?;
+                }
             }
             let fault_hook = fault_hook
                 .lock()
                 .expect("compose fault hook poisoned")
                 .clone();
-            let positions = AsyncLogStore::append(
-                log.as_ref(),
-                shard.clone(),
-                commands.clone(),
-                expected_epoch,
-            )
-            .await?;
+            // Encode once; apply owns commands (no double clone).
+            let serialized = commands
+                .iter()
+                .map(|c| {
+                    serde_json::to_vec(c).map_err(|e| EngineError::Storage(e.to_string()))
+                })
+                .collect::<EngineResult<Vec<_>>>()?;
+            let positions = log
+                .append_encoded(shard.clone(), serialized, expected_epoch)
+                .await?;
             if matches!(fault, RawCommitFault::AfterAppendBeforeApply) {
                 return Ok(RawCommitOutcome::appended(positions));
             }
+            let mut push_records = Vec::new();
+            if let Some(def) = definition.as_ref() {
+                let retention_ms = def.request_id_retention_ms;
+                for env in &commands {
+                    let Some(request_id) = env.request_id.clone() else {
+                        continue;
+                    };
+                    let QueueCommand::Push(_) = &env.command else {
+                        continue;
+                    };
+                    let fingerprint = push_envelope_body_hash(env)?;
+                    let expires_at = crate::request_expires_at(env.created_at, retention_ms);
+                    let ids = match &env.request_outcome {
+                        Some(crate::RequestOutcome::Push { item_ids }) => item_ids.clone(),
+                        _ => env.item_ids.clone(),
+                    };
+                    push_records.push((request_id, fingerprint, ids, expires_at));
+                }
+            }
+            let positions_out = positions.clone();
             apply_with_compose_fault_hook(fault_hook.as_ref(), || {
-                AsyncProjectionStore::apply_live(
-                    projection.as_ref(),
-                    positions.clone(),
-                    commands.clone(),
-                )
+                AsyncProjectionStore::apply_live(projection.as_ref(), positions, commands)
             })
             .await?;
-            // Record push request-id outcomes after a successful atomic apply (sync composition parity).
-            // Expiry must honor the queue's request_id_retention_ms (not a hardcoded window).
-            let retention_ms = definition.request_id_retention_ms;
-            let mut cache = push_idempotency
-                .lock()
-                .expect("push idempotency mutex poisoned");
-            for env in &commands {
-                let Some(request_id) = env.request_id.clone() else {
-                    continue;
-                };
-                let QueueCommand::Push(_) = &env.command else {
-                    continue;
-                };
-                let fingerprint = push_envelope_body_hash(env)?;
-                let expires_at = crate::request_expires_at(env.created_at, retention_ms);
-                let ids = match &env.request_outcome {
-                    Some(crate::RequestOutcome::Push { item_ids }) => item_ids.clone(),
-                    _ => env.item_ids.clone(),
-                };
-                cache.entry(shard.clone()).or_default().record(
-                    request_id,
-                    fingerprint,
-                    ids,
-                    expires_at,
-                );
+            if !push_records.is_empty() {
+                let mut cache = push_idempotency
+                    .lock()
+                    .expect("push idempotency mutex poisoned");
+                let entry = cache.entry(shard).or_default();
+                for (request_id, fingerprint, ids, expires_at) in push_records {
+                    entry.record(request_id, fingerprint, ids, expires_at);
+                }
             }
-            Ok(RawCommitOutcome::applied(positions))
+            Ok(RawCommitOutcome::applied(positions_out))
         })
     }
 }

@@ -417,6 +417,78 @@ impl<S: LogStore> InProcessLogStore<S> {
         }
     }
 
+    /// Append pre-encoded JSON envelopes without consuming CommandEnvelopes so apply can
+    /// take ownership of the same batch (kills double clone on atomic commit / 10k path).
+    pub fn append_encoded(
+        &self,
+        shard: QueueKey,
+        serialized: Vec<Vec<u8>>,
+        expected_epoch: u64,
+    ) -> impl Future<Output = EngineResult<Vec<CommandPosition>>> + Send + 'static
+    where
+        S: Send + 'static,
+    {
+        let group_commit = self.group_commit.clone();
+        let this_store = Arc::clone(&self.store);
+        let executor = self.executor.clone();
+        let lock_phase = Arc::clone(&self.lock_phase);
+        async move {
+            if let Some(gc) = group_commit {
+                let executor = executor.expect("group-commit requires offload executor");
+                let slot = Arc::new(Mutex::new(GroupCommitSlot {
+                    done: None,
+                    waker: None,
+                }));
+                let waiter = GroupCommitWaiter {
+                    shard,
+                    serialized,
+                    expected_epoch,
+                    result: Arc::clone(&slot),
+                };
+                let is_leader = {
+                    let mut state = gc.lock().expect("group-commit mutex poisoned");
+                    state.pending.push(waiter);
+                    if !state.sealer_active {
+                        state.sealer_active = true;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if is_leader {
+                    let gc_seal = Arc::clone(&gc);
+                    let store_seal = Arc::clone(&this_store);
+                    let lock_phase_seal = Arc::clone(&lock_phase);
+                    executor
+                        .execute(move || {
+                            seal_group_commit_loop::<S>(gc_seal, store_seal, lock_phase_seal);
+                            Ok(())
+                        })
+                        .await?;
+                }
+                GroupCommitFuture { result: slot }.await
+            } else {
+                let run = move || {
+                    let wait_start = Instant::now();
+                    let mut guard = this_store
+                        .lock()
+                        .expect("immediate log store mutex poisoned");
+                    let wait = wait_start.elapsed();
+                    let hold_start = Instant::now();
+                    let result =
+                        guard.append_serialized(&shard, &[], serialized, expected_epoch);
+                    lock_phase.record(wait, hold_start.elapsed());
+                    result
+                };
+                if let Some(executor) = executor {
+                    executor.execute(run).await
+                } else {
+                    run()
+                }
+            }
+        }
+    }
+
     /// Run a synchronous read against the underlying log (open/recover/tests). Blocks the caller;
     /// prefer [`Self::run_with_store`] on async product paths when offload is configured.
     pub fn with_store<R>(&self, f: impl FnOnce(&S) -> R) -> R {

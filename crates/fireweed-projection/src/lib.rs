@@ -1866,20 +1866,36 @@ impl ProjectionData {
         Self::insert_keys_into(&mut self.claim_indexes, item_id, keys);
     }
 
+    fn insert_one_key(index: &mut SecondaryIndex, item_id: ItemId, key: &[u8]) {
+        match index {
+            SecondaryIndex::Unique(map) => {
+                map.insert(key.to_vec(), item_id);
+            }
+            SecondaryIndex::NonUnique(map) => {
+                map.entry(key.to_vec()).or_default().insert(item_id);
+            }
+        }
+    }
+
+    fn insert_keys_into_both(&mut self, item_id: ItemId, keys: &[(String, Vec<u8>)]) {
+        for (name, key) in keys {
+            if let Some(idx) = self.indexes.get_mut(name) {
+                Self::insert_one_key(idx, item_id, key);
+            }
+            if let Some(idx) = self.claim_indexes.get_mut(name) {
+                Self::insert_one_key(idx, item_id, key);
+            }
+        }
+    }
+
     fn insert_keys_into(
         indexes: &mut BTreeMap<String, SecondaryIndex>,
         item_id: ItemId,
         keys: &[(String, Vec<u8>)],
     ) {
         for (name, key) in keys {
-            match indexes.get_mut(name) {
-                Some(SecondaryIndex::Unique(map)) => {
-                    map.insert(key.clone(), item_id);
-                }
-                Some(SecondaryIndex::NonUnique(map)) => {
-                    map.entry(key.clone()).or_default().insert(item_id);
-                }
-                None => {}
+            if let Some(idx) = indexes.get_mut(name) {
+                Self::insert_one_key(idx, item_id, key);
             }
         }
     }
@@ -2015,8 +2031,7 @@ impl ProjectionData {
                 .insert(rec.item_id);
         }
         let keys = self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
-        self.index_insert_keys(rec.item_id, &keys);
-        self.claim_index_insert_keys(rec.item_id, &keys);
+        self.insert_keys_into_both(rec.item_id, &keys);
         self.items.insert(rec.item_id, rec);
         self.metrics.pending += 1;
         Ok(())

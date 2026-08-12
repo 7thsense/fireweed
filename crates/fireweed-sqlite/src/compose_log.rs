@@ -233,7 +233,10 @@ impl SqliteLog {
         st(conn.execute_batch(
             "PRAGMA journal_mode=WAL;\
              PRAGMA synchronous=FULL;\
-             PRAGMA busy_timeout=5000;",
+             PRAGMA busy_timeout=5000;\
+             PRAGMA cache_size=-65536;\
+             PRAGMA temp_store=MEMORY;\
+             PRAGMA mmap_size=268435456;",
         ))?;
         st(conn.execute_batch(SCHEMA))?;
         Ok(Self { conn })
