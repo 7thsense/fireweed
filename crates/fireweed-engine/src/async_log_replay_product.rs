@@ -1601,12 +1601,11 @@ where
         )
         .unwrap_or(now);
 
-        // --- off-permit: id mint + push-item materialization (CPU-heavy for snorri entities) ---
+        // --- off-permit: id mint + push-item materialization (CPU-heavy snorri entities) ---
         let counter_base = counters.reserve(&shard, epoch, max_items as u32);
         let (mut push_items, mut push_ids) =
             build_push_items(lifecycle, epoch, node_id, counter_base, max_attempts);
         let lease_token = generate_query_lease_token()?;
-        // Pre-mint command ids so exclusive section only selects + seals.
         let claim_cid = ids.next_command_id();
         let fin_cid = ids.next_command_id();
         let push_cid = ids.next_command_id();
