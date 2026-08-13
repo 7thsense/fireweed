@@ -39,7 +39,7 @@ configuration used below is disposable and development-only.
 ### Prerequisites
 
 - Git;
-- [rustup](https://rustup.rs/) (the repository selects Rust 1.92.0 from
+- [rustup](https://rustup.rs/) (the repository selects Rust 1.97.1 from
   `rust-toolchain.toml`);
 - a C toolchain and CMake for native crypto dependencies; and
 - `redis-cli` for this RESP example.

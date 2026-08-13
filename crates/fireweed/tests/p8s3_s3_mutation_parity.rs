@@ -14,7 +14,7 @@
 //! export FIREWEED_PG_TEST_URL='postgres://fireweed:fireweed@127.0.0.1:55432/fireweed'
 //! export CARGO_TARGET_DIR=/home/erik/Projects/fireweed-shared-target
 //! set -a; source /tmp/fireweed-s3-secrets/credentials.env; set +a
-//! rustup run 1.92.0 cargo test -p fireweed --features objectlog,sqlite,postgres \
+//! rustup run 1.97.1 cargo test -p fireweed --features objectlog,sqlite,postgres \
 //!   --test p8s3_s3_query_parity -- --nocapture
 //! ```
 

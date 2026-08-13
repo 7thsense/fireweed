@@ -86,7 +86,7 @@
                 "exact_invocation": [
                   "rustup",
                   "run",
-                  "1.92.0",
+                  "1.97.1",
                   "cargo",
                   "test",
                   "--manifest-path",
@@ -108,7 +108,7 @@
                 "exact_invocation": [
                   "rustup",
                   "run",
-                  "1.92.0",
+                  "1.97.1",
                   "cargo",
                   "test",
                   "--manifest-path",
@@ -130,7 +130,7 @@
                 "exact_invocation": [
                   "rustup",
                   "run",
-                  "1.92.0",
+                  "1.97.1",
                   "cargo",
                   "test",
                   "--manifest-path",
@@ -152,7 +152,7 @@
                 "exact_invocation": [
                   "rustup",
                   "run",
-                  "1.92.0",
+                  "1.97.1",
                   "cargo",
                   "test",
                   "--manifest-path",
@@ -174,7 +174,7 @@
                 "exact_invocation": [
                   "rustup",
                   "run",
-                  "1.92.0",
+                  "1.97.1",
                   "cargo",
                   "test",
                   "--manifest-path",
@@ -196,7 +196,7 @@
                 "exact_invocation": [
                   "rustup",
                   "run",
-                  "1.92.0",
+                  "1.97.1",
                   "cargo",
                   "test",
                   "--manifest-path",
@@ -224,7 +224,7 @@
                 "exact_invocation": [
                   "rustup",
                   "run",
-                  "1.92.0",
+                  "1.97.1",
                   "cargo",
                   "test",
                   "--manifest-path",
@@ -246,7 +246,7 @@
                 "exact_invocation": [
                   "rustup",
                   "run",
-                  "1.92.0",
+                  "1.97.1",
                   "cargo",
                   "test",
                   "--manifest-path",
@@ -268,7 +268,7 @@
                 "exact_invocation": [
                   "rustup",
                   "run",
-                  "1.92.0",
+                  "1.97.1",
                   "cargo",
                   "test",
                   "--manifest-path",
@@ -290,7 +290,7 @@
                 "exact_invocation": [
                   "rustup",
                   "run",
-                  "1.92.0",
+                  "1.97.1",
                   "cargo",
                   "test",
                   "--manifest-path",
@@ -312,7 +312,7 @@
                 "exact_invocation": [
                   "rustup",
                   "run",
-                  "1.92.0",
+                  "1.97.1",
                   "cargo",
                   "test",
                   "--manifest-path",
@@ -334,7 +334,7 @@
                 "exact_invocation": [
                   "rustup",
                   "run",
-                  "1.92.0",
+                  "1.97.1",
                   "cargo",
                   "test",
                   "--manifest-path",
@@ -361,7 +361,7 @@
                 "exact_invocation": [
                   "rustup",
                   "run",
-                  "1.92.0",
+                  "1.97.1",
                   "cargo",
                   "test",
                   "--manifest-path",
@@ -383,7 +383,7 @@
                 "exact_invocation": [
                   "rustup",
                   "run",
-                  "1.92.0",
+                  "1.97.1",
                   "cargo",
                   "test",
                   "--manifest-path",
@@ -405,7 +405,7 @@
                 "exact_invocation": [
                   "rustup",
                   "run",
-                  "1.92.0",
+                  "1.97.1",
                   "cargo",
                   "test",
                   "--manifest-path",
@@ -427,7 +427,7 @@
                 "exact_invocation": [
                   "rustup",
                   "run",
-                  "1.92.0",
+                  "1.97.1",
                   "cargo",
                   "test",
                   "--manifest-path",
@@ -449,7 +449,7 @@
                 "exact_invocation": [
                   "rustup",
                   "run",
-                  "1.92.0",
+                  "1.97.1",
                   "cargo",
                   "test",
                   "--manifest-path",
@@ -471,7 +471,7 @@
                 "exact_invocation": [
                   "rustup",
                   "run",
-                  "1.92.0",
+                  "1.97.1",
                   "cargo",
                   "test",
                   "--manifest-path",
@@ -506,7 +506,7 @@
             "exact_invocation": [
               "rustup",
               "run",
-              "1.92.0",
+              "1.97.1",
               "cargo",
               "test",
               "--manifest-path",
@@ -528,7 +528,7 @@
             "exact_invocation": [
               "rustup",
               "run",
-              "1.92.0",
+              "1.97.1",
               "cargo",
               "test",
               "--manifest-path",
@@ -550,7 +550,7 @@
             "exact_invocation": [
               "rustup",
               "run",
-              "1.92.0",
+              "1.97.1",
               "cargo",
               "test",
               "--manifest-path",
@@ -572,7 +572,7 @@
             "exact_invocation": [
               "rustup",
               "run",
-              "1.92.0",
+              "1.97.1",
               "cargo",
               "test",
               "--manifest-path",
@@ -594,7 +594,7 @@
             "exact_invocation": [
               "rustup",
               "run",
-              "1.92.0",
+              "1.97.1",
               "cargo",
               "test",
               "--manifest-path",
@@ -634,7 +634,7 @@
           "exact_invocation": [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "--manifest-path",
@@ -655,7 +655,7 @@
           "exact_invocation": [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "--manifest-path",
@@ -676,7 +676,7 @@
           "exact_invocation": [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "--manifest-path",
@@ -697,7 +697,7 @@
           "exact_invocation": [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "--manifest-path",
@@ -718,7 +718,7 @@
           "exact_invocation": [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "--manifest-path",
@@ -739,7 +739,7 @@
           "exact_invocation": [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "--manifest-path",
@@ -760,7 +760,7 @@
           "exact_invocation": [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "--manifest-path",
@@ -781,7 +781,7 @@
           "exact_invocation": [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "--manifest-path",
@@ -815,7 +815,7 @@
           "exact_invocation": [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "--manifest-path",
@@ -849,7 +849,7 @@
           "exact_invocation": [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "--manifest-path",
@@ -883,7 +883,7 @@
           "exact_invocation": [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "--manifest-path",
@@ -917,7 +917,7 @@
           "exact_invocation": [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "--manifest-path",
@@ -951,7 +951,7 @@
           "exact_invocation": [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "--manifest-path",
@@ -985,7 +985,7 @@
           "exact_invocation": [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "--manifest-path",
@@ -1019,7 +1019,7 @@
           "exact_invocation": [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "--manifest-path",
@@ -1053,7 +1053,7 @@
           "exact_invocation": [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "--manifest-path",
@@ -1087,7 +1087,7 @@
           "exact_invocation": [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "--manifest-path",
@@ -1149,7 +1149,7 @@
           "list_invocation": [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "-p",

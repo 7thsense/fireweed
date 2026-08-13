@@ -13,4 +13,4 @@
 
 [[suites]]
 name = "core_domain_tests"
-command = ["cargo", "+1.92.0", "test", "-p", "fireweed-core", "core_domain_tests"]
+command = ["cargo", "+1.97.1", "test", "-p", "fireweed-core", "core_domain_tests"]

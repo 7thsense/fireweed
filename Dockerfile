@@ -3,11 +3,11 @@
 # Reproducible container image for the Fireweed API-001 service. The image runs the
 # production service binary directly and does not rely on local source mounts.
 #
-# Toolchain is pinned to the ADR-003 / workspace `rust-version` (1.92). See
+# Toolchain is pinned to the ADR-003 / workspace `rust-version` (1.97). See
 # docs/deployment/container-runtime-contract.md for the runtime config contract.
 
 # ---- builder ----
-FROM rust:1.92-bookworm AS builder
+FROM rust:1.97.1-bookworm AS builder
 
 WORKDIR /build
 

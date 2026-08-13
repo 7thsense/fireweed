@@ -398,7 +398,7 @@ if [[ "$EVIDENCE_MODE" == d5-diagnostic ]]; then
   printf 'DIAGNOSTIC_OUT=%s\n' "$LEDGER_OUT"
   exit 0
 fi
-rustup run 1.92.0 cargo run --locked --quiet -p fireweed-loadgen -- density-emit-row \
+rustup run 1.97.1 cargo run --locked --quiet -p fireweed-loadgen -- density-emit-row \
   --result "$RESULT_FILE" \
   --observed-threads "$OBSERVED_THREADS" --thread-limit "$THREAD_LIMIT" \
   --observed-connections "$OBSERVED_CONNECTIONS" --connection-limit "$CONNECTION_LIMIT" \
@@ -413,6 +413,6 @@ rustup run 1.92.0 cargo run --locked --quiet -p fireweed-loadgen -- density-emit
   --revision "$REVISION" --image-digest "$IMAGE_DIGEST" \
   --topology "$TOPOLOGY" --hardware "$HARDWARE" --out "$LEDGER_OUT"
 assert_source_unchanged
-rustup run 1.92.0 cargo run --locked --quiet -p fireweed-release --bin fireweed-verify-density-evidence -- "$LEDGER_OUT"
+rustup run 1.97.1 cargo run --locked --quiet -p fireweed-release --bin fireweed-verify-density-evidence -- "$LEDGER_OUT"
 assert_source_unchanged
 printf 'LEDGER_OUT=%s\n' "$LEDGER_OUT"

@@ -16,7 +16,7 @@
 #   SNORRI_CHECKOUT            path to sibling snorri clone (optional)
 #   P6S_SKIP_SNORRI            set to 1 to skip external snorri execution
 #   CARGO_TARGET_DIR           optional shared target dir
-#   RUSTUP_TOOLCHAIN           default 1.92.0
+#   RUSTUP_TOOLCHAIN           default 1.97.1
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,7 +28,7 @@ ATTESTATION_FILE="${SECRET_DIR}/s3-native-cas-capability-attestation.json"
 EVIDENCE_DIR="${REPO_ROOT}/docs/evidence/snorri"
 OUT_JSON="${EVIDENCE_DIR}/p6s-s3-durability-attestation.json"
 LEDGER_FIXTURE="${REPO_ROOT}/scripts/ci/fixtures/snorri/p6s-s3-durability.json"
-TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.92.0}"
+TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.97.1}"
 DEFAULT_PG_URL="postgres://fireweed:fireweed@127.0.0.1:55432/fireweed_snorri_p6p"
 export FIREWEED_PG_TEST_URL="${FIREWEED_PG_TEST_URL:-${SNORRI_FIREWEED_POSTGRES_URL:-$DEFAULT_PG_URL}}"
 export SNORRI_FIREWEED_POSTGRES_URL="${SNORRI_FIREWEED_POSTGRES_URL:-$FIREWEED_PG_TEST_URL}"
@@ -180,7 +180,7 @@ native_update = bool(
 commands = json.loads(os.environ.get("P6S_COMMANDS_JSON") or "[]")
 snorri_sha = os.environ.get("P6S_SNORRI_SHA") or None
 snorri_checkout = os.environ.get("P6S_SNORRI_CHECKOUT") or None
-toolchain = os.environ.get("P6S_TOOLCHAIN", "1.92.0")
+toolchain = os.environ.get("P6S_TOOLCHAIN", "1.97.1")
 
 doc = {
     "schema_version": 1,

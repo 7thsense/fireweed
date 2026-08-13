@@ -97,7 +97,7 @@ LIFECYCLE_COMMANDS: dict[str, list[list[str]]] = {
         [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "-p",
@@ -110,7 +110,7 @@ LIFECYCLE_COMMANDS: dict[str, list[list[str]]] = {
         [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "-p",
@@ -125,7 +125,7 @@ LIFECYCLE_COMMANDS: dict[str, list[list[str]]] = {
         [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "-p",
@@ -139,7 +139,7 @@ LIFECYCLE_COMMANDS: dict[str, list[list[str]]] = {
         [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "-p",
@@ -156,7 +156,7 @@ LIFECYCLE_COMMANDS: dict[str, list[list[str]]] = {
         [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "-p",
@@ -172,7 +172,7 @@ LIFECYCLE_COMMANDS: dict[str, list[list[str]]] = {
         [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "-p",
@@ -191,7 +191,7 @@ S3_DURABILITY_COMMANDS: dict[str, list[list[str]]] = {
         [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "-p",
@@ -209,7 +209,7 @@ S3_DURABILITY_COMMANDS: dict[str, list[list[str]]] = {
         [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "-p",
@@ -227,7 +227,7 @@ S3_DURABILITY_COMMANDS: dict[str, list[list[str]]] = {
         [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "-p",

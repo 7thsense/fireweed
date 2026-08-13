@@ -397,9 +397,9 @@ the transport contract's existing dependents.
 
 1. B-012 owns the optional-feature integration example and README pointer; this slice only verifies the
    repository state that actually landed.
-2. `cargo +1.92.0 fmt --all --check`,
-   `cargo +1.92.0 clippy --workspace --all-targets -- -D warnings`, and
-   `cargo +1.92.0 test --workspace` pass.
+2. `cargo +1.97.1 fmt --all --check`,
+   `cargo +1.97.1 clippy --workspace --all-targets -- -D warnings`, and
+   `cargo +1.97.1 test --workspace` pass.
 3. `ddx doc validate`, `ddx doc audit`, and `git diff --check` pass.
 
 ## Validation Plan

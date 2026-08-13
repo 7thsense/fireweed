@@ -267,7 +267,7 @@ jobs:
             --version "${{ steps.identity.outputs.version }}" \
             --revision "${{ steps.identity.outputs.measured_source }}"
 
-      - run: rustup toolchain install 1.92.0 --profile minimal --component clippy --component rustfmt --component llvm-tools-preview
+      - run: rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt --component llvm-tools-preview
         working-directory: fireweed-source
       - run: rustup toolchain install nightly --profile minimal --component llvm-tools-preview
         working-directory: fireweed-source
@@ -301,7 +301,7 @@ jobs:
         working-directory: fireweed-source
         run: |
           set -euo pipefail
-          cargo +1.92.0 run -q -p fireweed-release \
+          cargo +1.97.1 run -q -p fireweed-release \
             --bin fireweed-verify-evidence-attestation -- \
             --manifest "${{ steps.run.outputs.promoted_evidence }}/attestation.json" \
             --repo-root . \

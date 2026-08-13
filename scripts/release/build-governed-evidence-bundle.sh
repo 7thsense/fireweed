@@ -82,7 +82,7 @@ if find "$e3_dir" -type l -print -quit | grep -q .; then echo "E3 source contain
 mkdir -p "$out/e3"
 for name in e0.jsonl e1.jsonl e2-scale.jsonl e2-density.jsonl e2-failover.json; do install -m 0644 "$source_dir/$name" "$out/$name"; done
 for name in e3.jsonl tp003.jsonl fencing.json; do install -m 0644 "$e3_dir/$name" "$out/e3/$name"; done
-rustup run 1.92.0 cargo run -q -p fireweed-release --bin fireweed-build-e3-contract -- \
+rustup run 1.97.1 cargo run -q -p fireweed-release --bin fireweed-build-e3-contract -- \
   --out "$out/e3/e3-contract.json" --source-revision "$revision" \
   --e3-ledger "$out/e3/e3.jsonl" --transaction-evidence "$out/e3/tp003.jsonl" \
   --fencing-evidence "$out/e3/fencing.json"
@@ -100,10 +100,10 @@ PY
 bash "$REPO_ROOT/scripts/ci/verify-governed-release-composite.sh" \
   --contract "$out/composite-contract.json" --expected-revision "$revision"
 if [[ -n "$tag$produced_at$reviewed_at" ]]; then
-  rustup run 1.92.0 cargo run -q -p fireweed-release --bin fireweed-build-evidence-attestation -- \
+  rustup run 1.97.1 cargo run -q -p fireweed-release --bin fireweed-build-evidence-attestation -- \
     --repo-root "$source_root" --bundle-root "$out" --tag "$tag" --commit "$revision" \
     --produced-at "$produced_at" --reviewed-at "$reviewed_at" --out "$out/attestation.json"
-  rustup run 1.92.0 cargo run -q -p fireweed-release --bin fireweed-verify-evidence-attestation -- \
+  rustup run 1.97.1 cargo run -q -p fireweed-release --bin fireweed-verify-evidence-attestation -- \
     --manifest "$out/attestation.json" --repo-root "$source_root" --evidence-root "$out" \
     --tag "$tag" --commit "$revision"
 

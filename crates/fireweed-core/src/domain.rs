@@ -373,7 +373,7 @@ impl From<&MetadataValue> for MetadataValueWire {
             MetadataValue::Null => Self::Null,
             MetadataValue::Bool(b) => Self::Bool(*b),
             MetadataValue::Integer(i) => Self::Integer(*i),
-            MetadataValue::Number(n) => Self::Number(n.clone()),
+            MetadataValue::Number(n) => Self::Number(*n),
             MetadataValue::String(s) => Self::String(s.clone()),
             MetadataValue::Array(a) => Self::Array(a.iter().map(Self::from).collect()),
             MetadataValue::Object(o) => Self::Object(

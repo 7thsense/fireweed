@@ -36,7 +36,7 @@ OWNERSHIP = ROOT / "docs/helix/04-build/api005-suite-ownership-map.json"
 REGISTRY = ROOT / "docs/helix/04-build/functional-matrix-route-sources.json"
 S3_REQUIREMENTS = ROOT / "scripts/ci/s3-matrix-job-requirements.md"
 ROUTE_SOURCE_RS = ROOT / "crates/fireweed/tests/functional_matrix_route_sources.rs"
-CARGO = ["rustup", "run", "1.92.0", "cargo"]
+CARGO = ["rustup", "run", "1.97.1", "cargo"]
 
 SCHEMA_VERSION = 1
 PLAN_KEY = "P10r"

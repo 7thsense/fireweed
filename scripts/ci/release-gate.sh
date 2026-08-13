@@ -28,7 +28,7 @@
 # never scans docs/perf/evidence and cannot accept an unlisted replacement row.
 set -euo pipefail
 
-CARGO="rustup run 1.92.0 cargo"
+CARGO="rustup run 1.97.1 cargo"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TP002_RELEASE_DIR="${FIREWEED_TP002_RELEASE_DIR:-${REPO_ROOT}/target/tp002-release}"

@@ -44,7 +44,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
-CARGO="${CARGO:-rustup run 1.92.0 cargo}"
+CARGO="${CARGO:-rustup run 1.97.1 cargo}"
 REQUIRE_FULL="${FIREWEED_STORAGE_MATRIX_REQUIRE_FULL:-0}"
 SKIP_HELM=0
 SKIP_CARGO=0
@@ -146,7 +146,7 @@ from pathlib import Path
 
 root = Path(os.environ["REPO_ROOT"])
 registry = json.loads((root / "docs/helix/04-build/functional-matrix-route-sources.json").read_text())
-cargo = os.environ.get("CARGO", "rustup run 1.92.0 cargo").split()
+cargo = os.environ.get("CARGO", "rustup run 1.97.1 cargo").split()
 kinds = {"class_b_server", "inline_lib", "external_kafka"}
 groups: dict[tuple[str, ...], list[tuple[str, str]]] = {}
 for leaf in registry["leaves"]:

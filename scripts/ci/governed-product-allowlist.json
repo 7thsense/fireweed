@@ -18,7 +18,7 @@
       "command": [
         "rustup",
         "run",
-        "1.92.0",
+        "1.97.1",
         "cargo",
         "test",
         "-p",
@@ -39,7 +39,7 @@
       "command": [
         "rustup",
         "run",
-        "1.92.0",
+        "1.97.1",
         "cargo",
         "test",
         "-p",
@@ -66,7 +66,7 @@
       "command": [
         "rustup",
         "run",
-        "1.92.0",
+        "1.97.1",
         "cargo",
         "test",
         "-p",
@@ -109,7 +109,7 @@
       "command": [
         "rustup",
         "run",
-        "1.92.0",
+        "1.97.1",
         "cargo",
         "test",
         "-p",
@@ -134,7 +134,7 @@
       "command": [
         "rustup",
         "run",
-        "1.92.0",
+        "1.97.1",
         "cargo",
         "test",
         "-p",
@@ -156,7 +156,7 @@
       "command": [
         "rustup",
         "run",
-        "1.92.0",
+        "1.97.1",
         "cargo",
         "test",
         "-p",
@@ -179,7 +179,7 @@
       "command": [
         "rustup",
         "run",
-        "1.92.0",
+        "1.97.1",
         "cargo",
         "test",
         "-p",
@@ -201,7 +201,7 @@
       "command": [
         "rustup",
         "run",
-        "1.92.0",
+        "1.97.1",
         "cargo",
         "test",
         "-p",

@@ -21,7 +21,7 @@
 //! export LD_LIBRARY_PATH="/home/linuxbrew/.linuxbrew/opt/openssl@3/lib:${LD_LIBRARY_PATH:-}"
 //! export FIREWEED_PG_TEST_URL='postgres://fireweed:fireweed@127.0.0.1:55432/fireweed_snorri_p6p'
 //! set -a; source /tmp/fireweed-s3-secrets/credentials.env; set +a
-//! rustup run 1.92.0 cargo test -p fireweed --features objectlog,sqlite,postgres \
+//! rustup run 1.97.1 cargo test -p fireweed --features objectlog,sqlite,postgres \
 //!   --test p6s_s3_durability_acceptance -- --nocapture
 //! ```
 //!

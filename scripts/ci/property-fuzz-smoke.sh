@@ -15,7 +15,7 @@ echo "=== property + fuzz smoke ==="
 FOUND_PROPERTY=0
 FOUND_FUZZ=0
 
-if rustup run 1.92.0 cargo test --workspace --list 2>/dev/null \
+if rustup run 1.97.1 cargo test --workspace --list 2>/dev/null \
         | grep -qE 'proptest|_property_tests'; then
     FOUND_PROPERTY=1
 fi
@@ -33,7 +33,7 @@ fi
 
 if [[ $FOUND_PROPERTY -eq 1 ]]; then
     echo "--- property tests ---"
-    rustup run 1.92.0 cargo test --workspace -- --include-ignored
+    rustup run 1.97.1 cargo test --workspace -- --include-ignored
 fi
 
 if [[ $FOUND_FUZZ -eq 1 ]]; then

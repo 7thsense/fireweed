@@ -460,8 +460,7 @@ impl<S: LogStore> InProcessLogStore<S> {
                     .expect("immediate log store mutex poisoned");
                 let wait = wait_start.elapsed();
                 let hold_start = Instant::now();
-                let result =
-                    guard.append_serialized(&shard, &commands, serialized, expected_epoch);
+                let result = guard.append_serialized(&shard, &commands, serialized, expected_epoch);
                 lock_phase.record(wait, hold_start.elapsed());
                 result.map(|positions| (positions, commands))
             };
@@ -544,8 +543,7 @@ impl<S: LogStore> InProcessLogStore<S> {
                         .expect("immediate log store mutex poisoned");
                     let wait = wait_start.elapsed();
                     let hold_start = Instant::now();
-                    let result =
-                        guard.append_serialized(&shard, &[], serialized, expected_epoch);
+                    let result = guard.append_serialized(&shard, &[], serialized, expected_epoch);
                     lock_phase.record(wait, hold_start.elapsed());
                     result
                 };
@@ -798,13 +796,15 @@ impl<S> std::ops::DerefMut for ExclusiveWriteGuard<'_, S> {
 impl<S: Send + 'static> StoreLockOps<S> for Mutex<S> {
     fn lock_read<'a>(&'a self) -> Box<dyn std::ops::Deref<Target = S> + 'a> {
         Box::new(ExclusiveReadGuard(
-            self.lock().expect("immediate projection store mutex poisoned"),
+            self.lock()
+                .expect("immediate projection store mutex poisoned"),
         ))
     }
 
     fn lock_write<'a>(&'a self) -> Box<dyn std::ops::DerefMut<Target = S> + 'a> {
         Box::new(ExclusiveWriteGuard(
-            self.lock().expect("immediate projection store mutex poisoned"),
+            self.lock()
+                .expect("immediate projection store mutex poisoned"),
         ))
     }
 }
@@ -836,13 +836,15 @@ impl<S> std::ops::DerefMut for SharedWriteGuard<'_, S> {
 impl<S: Send + Sync + 'static> StoreLockOps<S> for RwLock<S> {
     fn lock_read<'a>(&'a self) -> Box<dyn std::ops::Deref<Target = S> + 'a> {
         Box::new(SharedReadGuard(
-            self.read().expect("immediate projection store lock poisoned"),
+            self.read()
+                .expect("immediate projection store lock poisoned"),
         ))
     }
 
     fn lock_write<'a>(&'a self) -> Box<dyn std::ops::DerefMut<Target = S> + 'a> {
         Box::new(SharedWriteGuard(
-            self.write().expect("immediate projection store lock poisoned"),
+            self.write()
+                .expect("immediate projection store lock poisoned"),
         ))
     }
 }
@@ -1760,16 +1762,14 @@ where
                                     store.lock().expect("immediate log store mutex poisoned");
                                 let wait = wait_start.elapsed();
                                 let hold_start = Instant::now();
-                                let result =
-                                    guard.append(&shard, &commands, expected_epoch);
+                                let result = guard.append(&shard, &commands, expected_epoch);
                                 lock_phase.record(wait, hold_start.elapsed());
                                 result
                             })
                             .await
                     } else {
                         let wait_start = Instant::now();
-                        let mut guard =
-                            store.lock().expect("immediate log store mutex poisoned");
+                        let mut guard = store.lock().expect("immediate log store mutex poisoned");
                         let wait = wait_start.elapsed();
                         let hold_start = Instant::now();
                         let result = guard.append(&shard, &commands, expected_epoch);
@@ -2270,25 +2270,23 @@ where
         self.run_sync(move |store: &mut S| store.acquire_epoch(&shard))
     }
 
-    fn append(
+    async fn append(
         &self,
         shard: QueueKey,
         commands: Vec<CommandEnvelope>,
         expected_epoch: u64,
-    ) -> impl Future<Output = EngineResult<Vec<CommandPosition>>> + Send {
+    ) -> EngineResult<Vec<CommandPosition>> {
         // Encode native FWC1 **before** the exclusive offload/store lock so concurrent workers
         // pay codec cost in parallel and only serialize on the durable seal (fireweed-9d2281f0).
         // Axes that do not consume `serialized` drop it and re-derive from `commands`.
-        async move {
-            let serialized = commands
-                .iter()
-                .map(crate::command_codec::encode_command_envelope)
-                .collect::<EngineResult<Vec<_>>>()?;
-            self.run_sync(move |store: &mut S| {
-                store.append_serialized(&shard, &commands, serialized, expected_epoch)
-            })
-            .await
-        }
+        let serialized = commands
+            .iter()
+            .map(crate::command_codec::encode_command_envelope)
+            .collect::<EngineResult<Vec<_>>>()?;
+        self.run_sync(move |store: &mut S| {
+            store.append_serialized(&shard, &commands, serialized, expected_epoch)
+        })
+        .await
     }
 
     fn read_from(

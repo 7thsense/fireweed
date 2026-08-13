@@ -28,7 +28,7 @@ P8K_FIXTURE = ROOT / "crates/fireweed-server/tests/support/external_kafka_fixtur
 
 SCHEMA_VERSION = 1
 PLAN_KEY = "P13"
-CARGO = ["rustup", "run", "1.92.0", "cargo"]
+CARGO = ["rustup", "run", "1.97.1", "cargo"]
 
 FORBIDDEN_IN_LANE = [
     "scripts/perf/",

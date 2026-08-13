@@ -14,7 +14,7 @@
 #   fireweed-engine : >= 80% line
 #
 # NOTE: Branch coverage (--branch / -Z coverage-options=branch) requires
-# a nightly toolchain and is not available on stable 1.92.0.
+# a nightly toolchain and is not available on stable 1.97.1.
 set -euo pipefail
 
 echo "=== coverage (bootstrap; thresholds not enforced) ==="
@@ -23,16 +23,16 @@ echo "    Branch coverage deferred here: requires nightly toolchain (--branch/-Z
 
 # Clean instrumentation so artifacts from deleted crates can't contaminate the
 # reported numbers.
-rustup run 1.92.0 cargo llvm-cov clean --workspace
+rustup run 1.97.1 cargo llvm-cov clean --workspace
 
 echo "--- fireweed-core (line) ---"
-rustup run 1.92.0 cargo llvm-cov \
+rustup run 1.97.1 cargo llvm-cov \
     --package fireweed-core \
     --summary-only \
     --fail-under-lines 0
 
 echo "--- fireweed-engine (line) ---"
-rustup run 1.92.0 cargo llvm-cov \
+rustup run 1.97.1 cargo llvm-cov \
     --package fireweed-engine \
     --summary-only \
     --fail-under-lines 0

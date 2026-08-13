@@ -65,7 +65,7 @@ if [[ ! -f "${turso}" ]]; then
 fi
 grep -Fq 'pull_request:' "${turso}"
 grep -Fq 'paths:' "${turso}"
-grep -Fq '1.92.0' "${turso}"
+grep -Fq '1.97.1' "${turso}"
 grep -Fq 'turso_projection_is_the_public_env_default' "${turso}"
 grep -Fq 'objectlog_turso_profile_rebuilds_deleted_projection_from_authoritative_log' "${turso}"
 grep -Fq 'storage_matrix_t0_t2_all_twenty_cells' "${turso}"

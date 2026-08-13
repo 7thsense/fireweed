@@ -465,7 +465,7 @@ def page_concepts(meta: dict) -> str:
 def page_get_started(meta: dict) -> str:
     embed = """git clone https://github.com/7thsense/fireweed.git
 cd fireweed
-# Requires rustup; toolchain from rust-toolchain.toml (Rust 1.92.0)
+# Requires rustup; toolchain from rust-toolchain.toml (Rust 1.97.1)
 cargo test -p fireweed --test concrete_fireweed
 cargo run -p fireweed --example scheduler_boundary"""
     resp = """# From repository root after building fireweed-service

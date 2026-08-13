@@ -669,16 +669,15 @@ where
         });
         replies.push((waiter.reply, n));
     }
-    if !envelopes.is_empty() {
-        if let Err(e) = strategy
+    if !envelopes.is_empty()
+        && let Err(e) = strategy
             .commit(RawCommitRequest::new(shard.clone(), envelopes, epoch))
             .await
-        {
-            for (reply, _) in replies {
-                let _ = reply.send(Err(e.clone()));
-            }
-            return Err(e);
+    {
+        for (reply, _) in replies {
+            let _ = reply.send(Err(e.clone()));
         }
+        return Err(e);
     }
     for (reply, n) in replies {
         let _ = reply.send(Ok(n));

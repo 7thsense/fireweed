@@ -271,7 +271,7 @@ def cargo_routes(
             [
                 "rustup",
                 "run",
-                "1.92.0",
+                "1.97.1",
                 "cargo",
                 "metadata",
                 "--manifest-path",
@@ -291,7 +291,7 @@ def cargo_routes(
             [
                 "rustup",
                 "run",
-                "1.92.0",
+                "1.97.1",
                 "cargo",
                 "test",
                 "--manifest-path",
@@ -334,7 +334,7 @@ def cargo_routes(
             invocation = [
                 "rustup",
                 "run",
-                "1.92.0",
+                "1.97.1",
                 "cargo",
                 "test",
                 "--manifest-path",
@@ -371,7 +371,7 @@ def cargo_routes(
         command = [
             "rustup",
             "run",
-            "1.92.0",
+            "1.97.1",
             "cargo",
             "test",
             "--manifest-path",
@@ -423,12 +423,12 @@ def cargo_routes(
                     elif "```no_run" in window:
                         behavior = "compile_only_debt"
             # Recorded invocation keeps the historical --exact shape for policy validators.
-            # Execution uses a package-level --doc suite below: rustc 1.92 merged doctests often
+            # Execution uses a package-level --doc suite below: rustc merged doctests often
             # ignore per-id --exact for compile-only (`no_run`/`ignore`) examples.
             invocation = [
                 "rustup",
                 "run",
-                "1.92.0",
+                "1.97.1",
                 "cargo",
                 "test",
                 "--manifest-path",
@@ -463,7 +463,7 @@ def cargo_routes(
             suite_invocation = [
                 "rustup",
                 "run",
-                "1.92.0",
+                "1.97.1",
                 "cargo",
                 "test",
                 "--manifest-path",

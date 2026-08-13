@@ -65,10 +65,10 @@ fi
 
 if [[ "$MODE" == "enforcing" ]]; then
     echo "--- fmt ---"
-    rustup run 1.92.0 cargo fmt --all --check
+    rustup run 1.97.1 cargo fmt --all --check
 
     echo "--- ledger validator tests ---"
-    rustup run 1.92.0 cargo test -p fireweed-release -- --nocapture
+    rustup run 1.97.1 cargo test -p fireweed-release -- --nocapture
 
     echo "--- coverage threshold parser fixtures ---"
     bash "${SCRIPT_DIR}/check-lcov-coverage.py" --fixture "${SCRIPT_DIR}/fixtures/lcov/core-pass.info" --crate fireweed-core --min-lines 90 --min-branches 85
@@ -88,13 +88,13 @@ if [[ "$MODE" == "enforcing" ]]; then
 fi
 
 echo "--- fmt ---"
-rustup run 1.92.0 cargo fmt --all --check
+rustup run 1.97.1 cargo fmt --all --check
 
 echo "--- clippy ---"
-rustup run 1.92.0 cargo clippy --workspace --all-targets -- -D warnings
+rustup run 1.97.1 cargo clippy --workspace --all-targets -- -D warnings
 
 echo "--- test ---"
-rustup run 1.92.0 cargo test --workspace
+rustup run 1.97.1 cargo test --workspace
 
 echo "--- cargo deny ---"
 cargo deny check

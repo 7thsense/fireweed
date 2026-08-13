@@ -257,7 +257,11 @@ pub(crate) fn insert_item_specs(
         insert_default_empty_item_specs(tx, &t, &q, specs, base_seq)?;
         return Ok(());
     }
-    if homogeneous_now && items_only.iter().all(|item| is_payload_index_push_item(item)) {
+    if homogeneous_now
+        && items_only
+            .iter()
+            .all(|item| is_payload_index_push_item(item))
+    {
         insert_payload_index_item_specs(tx, &t, &q, specs, base_seq)?;
         maintain_typed_indexes_on_insert(tx, &t, &q, typed_indexes, &items_only)?;
         return Ok(());
@@ -406,9 +410,7 @@ pub(crate) fn insert_payload_index_item_specs(
             params.push(Value::Text(item_id.clone()));
             params.push(Value::Text(item_id));
             params.push(Value::Integer(now_n));
-            params.push(opt_blob(
-                spec.item.payload.as_ref().map(|b| b.to_vec()),
-            ));
+            params.push(opt_blob(spec.item.payload.as_ref().map(|b| b.to_vec())));
             params.push(opt_blob(
                 fireweed_engine::index_fields::encode_index_fields_blob(&spec.item.index_fields)?,
             ));
@@ -996,6 +998,10 @@ pub(crate) fn finalize_completes_claim(
 ///
 /// Used when Claim + Finalize(Complete) share an apply batch so we never write Leased /
 /// lease-index rows that would be deleted in the next statement.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "fused claim+complete needs both scan maps, the shard cursor, and the claim body"
+)]
 pub(crate) fn apply_fused_claim_complete_sql(
     tx: &Transaction<'_>,
     claim_scan_hints: &mut HashMap<QueueKey, i64>,

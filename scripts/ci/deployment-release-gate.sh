@@ -454,8 +454,8 @@ free_kind_build_space() {
 prepare_kind_image_context() {
     echo "=== deployment release gate: prepare kind image context ==="
     free_kind_build_space
-    run_cmd rustup run 1.92.0 cargo build --release --bin fireweed-verify-ledger
-    run_cmd rustup run 1.92.0 cargo build --release --bin fireweed-service
+    run_cmd rustup run 1.97.1 cargo build --release --bin fireweed-verify-ledger
+    run_cmd rustup run 1.97.1 cargo build --release --bin fireweed-service
 
     rm -rf "${KIND_IMAGE_CONTEXT}"
     mkdir -p "${KIND_IMAGE_CONTEXT}"

@@ -40,7 +40,7 @@ for k in keys:
 PY
 )
 [[ ${#fields[@]} -eq 6 ]] || exit 1
-CARGO=(rustup run 1.92.0 cargo)
+CARGO=(rustup run 1.97.1 cargo)
 "${CARGO[@]}" run -q -p fireweed-release --bin fireweed-verify-e0-e1-evidence -- --e0 "${fields[0]}" --e1 "${fields[1]}" --expected-revision "$revision"
 "${CARGO[@]}" run -q -p fireweed-release --bin fireweed-verify-e2-scale-evidence -- "${fields[2]}" --expected-revision "$revision"
 "${CARGO[@]}" run -q -p fireweed-release --bin fireweed-verify-density-evidence -- "${fields[3]}"

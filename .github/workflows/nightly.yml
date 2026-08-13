@@ -16,8 +16,8 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v5
-      - run: rustup toolchain install 1.92.0 --profile minimal --component rustfmt
+      - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: bash scripts/ci/verify-github-actions-policy.sh
       - name: Extended workspace library tests
-        run: cargo +1.92.0 test --workspace --lib --locked
+        run: cargo +1.97.1 test --workspace --lib --locked

@@ -41,7 +41,7 @@
         "s3--postgres"
       ],
       "status": "passed",
-      "command": "rustup run 1.92.0 cargo test -p fireweed --features objectlog,sqlite,postgres --test p6s_s3_durability_acceptance snorri_reopen_ -- --nocapture"
+      "command": "rustup run 1.97.1 cargo test -p fireweed --features objectlog,sqlite,postgres --test p6s_s3_durability_acceptance snorri_reopen_ -- --nocapture"
     },
     "SNORRI-PROJECTION-REBUILD": {
       "cells": [
@@ -50,7 +50,7 @@
       ],
       "unsupported_negative": "s3--memory projection_control=None",
       "status": "passed",
-      "command": "rustup run 1.92.0 cargo test -p fireweed --features objectlog,sqlite,postgres --test p6s_s3_durability_acceptance snorri_projection_rebuild_ -- --nocapture"
+      "command": "rustup run 1.97.1 cargo test -p fireweed --features objectlog,sqlite,postgres --test p6s_s3_durability_acceptance snorri_projection_rebuild_ -- --nocapture"
     },
     "SNORRI-RETRY-ONCE": {
       "cells": [
@@ -59,12 +59,12 @@
         "s3--postgres"
       ],
       "status": "passed",
-      "command": "rustup run 1.92.0 cargo test -p fireweed --features objectlog,sqlite,postgres --test p6s_s3_durability_acceptance snorri_retry_once_ -- --nocapture"
+      "command": "rustup run 1.97.1 cargo test -p fireweed --features objectlog,sqlite,postgres --test p6s_s3_durability_acceptance snorri_retry_once_ -- --nocapture"
     }
   },
   "commands": [
     "bash scripts/ci/snorri-runner-preflight.sh",
-    "rustup run 1.92.0 cargo test -p fireweed --features objectlog,sqlite,postgres --test p6s_s3_durability_acceptance -- --nocapture",
+    "rustup run 1.97.1 cargo test -p fireweed --features objectlog,sqlite,postgres --test p6s_s3_durability_acceptance -- --nocapture",
     "python3 scripts/ci/snorri-semantic-verifier.py --ledger scripts/ci/fixtures/snorri/p6s-s3-durability.json --cells s3 --ids SNORRI-REOPEN,SNORRI-PROJECTION-REBUILD,SNORRI-RETRY-ONCE",
     "bash scripts/test-s3-live-mutations.sh  # snorri@eef2864301357889aed984a5e371192aa36d7b55"
   ],

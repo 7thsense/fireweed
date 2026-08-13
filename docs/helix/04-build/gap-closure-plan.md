@@ -3,7 +3,7 @@
 Restores a green, buildable, honestly-tested baseline, finishes the ADR-012 composed-backend
 architecture, then closes every outstanding vision, evidence, CI, and doc gap. Sequenced by
 dependency: Phase 0 unblocks all later phases. Each work item becomes one DDx bead with mechanical,
-Rust-native acceptance criteria (gates are `rustup run 1.92.0 cargo build/test/clippy -p <crate>` +
+Rust-native acceptance criteria (gates are `rustup run 1.97.1 cargo build/test/clippy -p <crate>` +
 named snake_case `#[test]` fns; NO `go test`, NO `lefthook`).
 
 ## Verified current state (evidence-anchored)
@@ -27,7 +27,7 @@ named snake_case `#[test]` fns; NO `go test`, NO `lefthook`).
     (`change_record_sink.rs:675`), so a port collision yields the wrong error + leaks the broker task.
 - Bead queue stalled: 6 open epic-parents (execution-eligible:false), 4 proposed leaves circuit-broken
   against the red tree + unconfigured `lefthook` AC.
-- Toolchain: pinned 1.92.0 IS installed; invoke via `rustup run 1.92.0 cargo …` (brew 1.96 shadows PATH).
+- Toolchain: pinned 1.97.1 IS installed; invoke via `rustup run 1.97.1 cargo …` (Homebrew rustc on PATH must not shadow the pin).
 
 ## Decisions (owner, 2026-07-08)
 1. **rdkafka/librdkafka is deleted.** Embedded change-log produces IN-PROCESS to the fjord broker's
@@ -48,7 +48,7 @@ named snake_case `#[test]` fns; NO `go test`, NO `lefthook`).
 - Remove `rdkafka` from `fireweed-server/Cargo.toml`; delete `Cargo.lock` entries; `rg rdkafka crates/`
   returns zero. Replace the `FutureProducer` field/usage in `FjordChangeRecordSink`
   (`change_record_sink.rs:344,378,402`) with an in-process log handle (`Arc<dyn LogBackend>`).
-- AC: `rustup run 1.92.0 cargo build -p fireweed-server` succeeds on a box with NO libcurl-dev/cmake;
+- AC: `rustup run 1.97.1 cargo build -p fireweed-server` succeeds on a box with NO libcurl-dev/cmake;
   `rg -n rdkafka` finds nothing under `crates/` or `Cargo.lock`.
 
 **B0.1b — Share the embedded broker's log handle with the sink.**
@@ -76,7 +76,7 @@ named snake_case `#[test]` fns; NO `go test`, NO `lefthook`).
 - `tests/fjord_surface.rs:557` asserts partition 0, monotonic offsets, stable idempotency keys, JSON
   payload, headers via an rdkafka consumer. Rewrite those assertions using a pure-Rust consumer
   (`rskafka`) OR the broker's in-process read API — preserving every contract assertion.
-- AC: `rustup run 1.92.0 cargo test -p fireweed-server` fjord-surface tests pass with zero rdkafka.
+- AC: `rustup run 1.97.1 cargo test -p fireweed-server` fjord-surface tests pass with zero rdkafka.
 
 **B0.1e — External-Kafka mode + config-mode split + ADR-014 thread.**
 - `ChangeRecordSinkConfig` requires an endpoint when enabled (`change_record_sink.rs:20,455,680`).
@@ -139,7 +139,7 @@ named snake_case `#[test]` fns; NO `go test`, NO `lefthook`).
 - AC: all six pass, or a follow-up fix bead is filed with the diagnosis.
 
 **B0.8 — Phase-0 green gate.**
-- AC: `rustup run 1.92.0 cargo test --workspace` (non-env-gated) green; `rustup run 1.92.0 cargo clippy
+- AC: `rustup run 1.97.1 cargo test --workspace` (non-env-gated) green; `rustup run 1.97.1 cargo clippy
   --workspace --all-targets -- -D warnings` clean.
 
 ## Phase 1 — CI integrity & hygiene
@@ -152,7 +152,7 @@ named snake_case `#[test]` fns; NO `go test`, NO `lefthook`).
   `go_root_test.go`+`go.mod` (wire into CI as an artifact-assertion job + fix the non-existent
   `fireweed-kafka` reference, OR delete). No bead AC references `go test`/`lefthook` after this.
 - **B1.5** Snake_case the ~53 `fn Test[A-Z]` Rust fns (or `#[allow]`), so `-D warnings` stays clean.
-- **B1.6** Document reproducible dev build (toolchain 1.92.0; post-B0.1 no system libs; fjord/heimq/
+- **B1.6** Document reproducible dev build (toolchain 1.97.1; post-B0.1 no system libs; fjord/heimq/
   object-log dep provenance).
 
 ## Phase 2 — Finish open Fjord/ADR-014 + TD-008 (subsumes the stuck beads)
@@ -194,5 +194,5 @@ named snake_case `#[test]` fns; NO `go test`, NO `lefthook`).
 Phase 0 first, B0.1a→e before B0.7 (fireweed-server must build to verify). B0.2/B0.3/B0.4 are real engine
 work — each gets a fresh-eyes/codex review before commit. Within a phase beads are largely independent
 (parallel sub-agents). Postgres/S3 ACs run against docker-compose (`postgres:16`) + a MinIO container.
-Gate every commit on `rustup run 1.92.0 cargo test`/`clippy` for the touched crate(s), full-workspace
+Gate every commit on `rustup run 1.97.1 cargo test`/`clippy` for the touched crate(s), full-workspace
 green before closing a phase.

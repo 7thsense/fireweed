@@ -38,7 +38,7 @@ unsafe usage, and verification gates.
 ## Decision
 
 fireweed will be implemented as a Rust Cargo workspace using the latest stable
-Rust toolchain at project creation time, pinned in `rust-toolchain.toml`.
+Rust toolchain, pinned in `rust-toolchain.toml`.
 
 The workspace crates (as amended by ADR-007's hexagonal cutover, ADR-009's
 encapsulated surface, and ADR-012's composition; the original table named
@@ -72,7 +72,7 @@ fireweed-core     -> no fireweed crate dependencies
 
 - Rust edition: 2024 unless initial tooling proves a blocker; otherwise edition
   2021 with a recorded follow-up.
-- MSRV: latest stable Rust at initial workspace creation. Any published crate
+- MSRV: latest stable Rust, pinned in `rust-toolchain.toml` and recorded as MSRV. Any published crate
   release must record its MSRV in package metadata and release notes.
 - Formatting: `cargo fmt --all --check`.
 - Lints: `cargo clippy --workspace --all-targets -- -D warnings`.

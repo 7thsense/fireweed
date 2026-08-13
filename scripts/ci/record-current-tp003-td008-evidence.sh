@@ -14,7 +14,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-cargo_cmd=(rustup run 1.92.0 cargo)
+cargo_cmd=(rustup run 1.97.1 cargo)
 
 : "${FIREWEED_PG_TEST_URL:?set FIREWEED_PG_TEST_URL for Class A T3 cells that need Postgres}"
 : "${FIREWEED_P11_EVIDENCE_DIR:?set FIREWEED_P11_EVIDENCE_DIR to a newly created external directory}"

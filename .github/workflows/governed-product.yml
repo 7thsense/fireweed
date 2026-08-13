@@ -40,8 +40,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install Rust 1.92.0
-        run: rustup toolchain install 1.92.0 --profile minimal --component rustfmt --component clippy
+      - name: Install Rust 1.97.1
+        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
 
       - name: Reuse Cargo build state
         uses: Swatinem/rust-cache@v2

@@ -41,7 +41,7 @@ fn turso_workflow_qualifies_the_public_default_projection() {
     );
 
     // Rust pin + policy verifier.
-    assert!(wf.contains("1.92.0"), "turso.yml must pin Rust 1.92.0");
+    assert!(wf.contains("1.97.1"), "turso.yml must pin Rust 1.97.1");
     assert!(
         wf.contains("verify-github-actions-policy.sh"),
         "turso.yml must run the repository Actions policy verifier"

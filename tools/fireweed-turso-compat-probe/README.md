@@ -7,7 +7,7 @@ default tests, production features, or adapter selection.
 Run the pinned probe from the repository root:
 
 ```bash
-rustup run 1.92.0 cargo run \
+rustup run 1.97.1 cargo run \
   --locked \
   --manifest-path tools/fireweed-turso-compat-probe/Cargo.toml
 ```

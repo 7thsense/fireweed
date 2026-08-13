@@ -336,7 +336,7 @@ def discover_private_refs(root: Path, sources: list[dict[str, object]], items: s
 
 def cargo_fireweed_routes(root: Path) -> tuple[list[dict[str, object]], dict[str, object] | None]:
     command = [
-        "rustup", "run", "1.92.0", "cargo", "test", "--manifest-path", "Cargo.toml",
+        "rustup", "run", "1.97.1", "cargo", "test", "--manifest-path", "Cargo.toml",
         "--locked", "-p", "fireweed", "--all-features", "--no-run", "--message-format=json",
     ]
     completed = run(command, cwd=root)
@@ -385,7 +385,7 @@ def cargo_fireweed_routes(root: Path) -> tuple[list[dict[str, object]], dict[str
                     "target": target_name,
                     "test_id": test_id,
                     "exact_invocation": [
-                        "rustup", "run", "1.92.0", "cargo", "test", "--locked",
+                        "rustup", "run", "1.97.1", "cargo", "test", "--locked",
                         "-p", "fireweed", "--all-features",
                         *( ["--test", target_name] if "test" in target.get("kind", []) else ["--lib"] ),
                         test_id, "--", "--exact",
@@ -426,7 +426,7 @@ def verify_private_visibility(root: Path, rows: list[dict[str, object]]) -> None
             (fixture_root / "src/main.rs").write_text("\n".join(source_lines) + "\n")
             completed = run(
                 [
-                    "rustup", "run", "1.92.0", "cargo", "check", "--offline",
+                    "rustup", "run", "1.97.1", "cargo", "check", "--offline",
                     "--manifest-path", str(fixture_root / "Cargo.toml"),
                     "--target-dir", str(root / "target/public-crate-boundary/p2a"),
                     "--message-format=json",

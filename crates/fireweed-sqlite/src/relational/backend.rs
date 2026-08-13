@@ -1879,7 +1879,8 @@ impl fireweed_engine::CommitTransitionPort for SqliteRelationalBackend {
                 })
                 .collect();
             let claim_rows = {
-                let mut found: HashMap<String, (String, i64, i64, Option<Vec<u8>>, Option<i64>, i64)> =
+                type ClaimRow = (String, i64, i64, Option<Vec<u8>>, Option<i64>, i64);
+                let mut found: HashMap<String, ClaimRow> =
                     HashMap::with_capacity(all_claim_ids.len());
                 const CH: usize = 64;
                 for chunk in all_claim_ids.chunks(CH) {
@@ -1892,8 +1893,7 @@ impl fireweed_engine::CommitTransitionPort for SqliteRelationalBackend {
                          lease_expires_at, item_version FROM fireweed_items \
                          WHERE tenant_id=? AND queue_id=? AND item_id IN ({ph})"
                     );
-                    let mut pv: Vec<rusqlite::types::Value> =
-                        Vec::with_capacity(2 + chunk.len());
+                    let mut pv: Vec<rusqlite::types::Value> = Vec::with_capacity(2 + chunk.len());
                     pv.push(rusqlite::types::Value::Text(t.clone()));
                     pv.push(rusqlite::types::Value::Text(q.clone()));
                     for id in chunk {
@@ -2030,11 +2030,13 @@ impl fireweed_engine::CommitTransitionPort for SqliteRelationalBackend {
                     }));
                 }
                 if let Some(fence) = entry.instance_fence {
-                    apply_cmd!(&QueueCommand::AdvanceInstanceFence(AdvanceInstanceFenceCommand {
-                        instance_key: fence.instance_key,
-                        expected: fence.expected,
-                        next: fence.next,
-                    }));
+                    apply_cmd!(&QueueCommand::AdvanceInstanceFence(
+                        AdvanceInstanceFenceCommand {
+                            instance_key: fence.instance_key,
+                            expected: fence.expected,
+                            next: fence.next,
+                        }
+                    ));
                 }
                 let mut lifecycle_item_ids = Vec::new();
                 if !entry.lifecycle_items.is_empty() {
@@ -2052,8 +2054,7 @@ impl fireweed_engine::CommitTransitionPort for SqliteRelationalBackend {
                     apply_cmd!(&QueueCommand::Push(PushCommand { items: push_items }));
                 }
                 for claim in std::iter::once(&entry.claim_ref).chain(&entry.additional_claim_refs) {
-                    finalize_outcomes
-                        .push(FinalizeOutcome::new(claim.item_id, entry.finalize));
+                    finalize_outcomes.push(FinalizeOutcome::new(claim.item_id, entry.finalize));
                 }
                 recovery.push(EntryRecovery {
                     consumed_input_id,
@@ -2154,10 +2155,10 @@ impl RecoveryReadPort for SqliteRelationalBackend {
         cursor: Option<Vec<u8>>,
     ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::SideRecordPage>> + Send
     {
-        let result = (|| {
+        let result = {
             let g = self.inner.lock().expect("poisoned");
             side_records_by_prefix_sql(&g.conn, shard, prefix, page_size, cursor)
-        })();
+        };
         std::future::ready(result)
     }
 }

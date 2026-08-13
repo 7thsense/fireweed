@@ -30,8 +30,8 @@ if [[ -n "$FIREWEED_FEATURES" ]]; then
     SERVICE_FEATURE_ARGS=(-p fireweed-server --features "$FIREWEED_FEATURES")
 fi
 
-rustup run 1.92.0 cargo build --release --bin fireweed-verify-ledger
-rustup run 1.92.0 cargo build --release --bin fireweed-service "${SERVICE_FEATURE_ARGS[@]}"
+rustup run 1.97.1 cargo build --release --bin fireweed-verify-ledger
+rustup run 1.97.1 cargo build --release --bin fireweed-service "${SERVICE_FEATURE_ARGS[@]}"
 
 cp "target/release/fireweed-service" "$STAGE_DIR/"
 cp "target/release/fireweed-verify-ledger" "$STAGE_DIR/"
@@ -44,7 +44,7 @@ Binaries:
 - fireweed-verify-ledger: validates Fireweed verification ledger JSONL files.
 
 Build command:
-rustup run 1.92.0 cargo build --release --bin fireweed-service --bin fireweed-verify-ledger
+rustup run 1.97.1 cargo build --release --bin fireweed-service --bin fireweed-verify-ledger
   (set FIREWEED_FEATURES=tls for the Lakebase / cloud-postgres native-tls service build)
 EOF
 

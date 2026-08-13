@@ -889,13 +889,13 @@ offset→location index is provided by object-log's own `ManifestSequencer`
 freestanding `object-log` crate and no longer on fjord's internal coordinator.
 The validation boundary is:
 
-- `cargo +1.92.0 test -p fireweed-service local_object_log_deployment_smoke_tests -- --ignored --nocapture`
+- `cargo +1.97.1 test -p fireweed-service local_object_log_deployment_smoke_tests -- --ignored --nocapture`
   passes the local object-log deployment profile.
 - The historical `object_log_commit_recovery_tests` aggregate route is no longer
   present. Its group-commit, replay, epoch-fencing, and native-authority rejection
   obligations map to TD004-ACK-1, TD004-REC-1, TD004-FENCE-1, and TD004-AUTH-1
   below; the governing test manifest must assign current concrete routes.
-- `FIREWEED_BACKEND_PROFILE=object_log_sqlite_projection FIREWEED_E2E_SCALE=smoke FIREWEED_E2E_SEED=1801 cargo +1.92.0 test -p fireweed-service --test product_workflows -- --ignored --nocapture`
+- `FIREWEED_BACKEND_PROFILE=object_log_sqlite_projection FIREWEED_E2E_SCALE=smoke FIREWEED_E2E_SEED=1801 cargo +1.97.1 test -p fireweed-service --test product_workflows -- --ignored --nocapture`
   passes all nine product workflows and emits verification-ledger rows validated
   by `fireweed-verify-ledger --strict`.
 - `bash scripts/ci/release-gate.sh --require-tp002-evidence E0,E1,E2,E3 --tp002-e0e1-source pqueue-7e2b3132 --tp002-e2-source pqueue-9afd88cc,pqueue-76d92a33 --tp002-e3-source pqueue-b1abd895,pqueue-472a09d4`
