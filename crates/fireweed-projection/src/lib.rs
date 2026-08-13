@@ -190,8 +190,8 @@ impl From<ProjectionImageItem> for ItemRecord {
             fields: item.fields,
             metadata: item.metadata,
             gate_keys: item.gate_keys,
+            entity_document: rehydrate_entity_document(item.entity_document, &item.index_fields),
             index_fields: item.index_fields,
-            entity_document: item.entity_document,
             state: item.state,
             item_version: item.item_version,
             attempt_count: item.attempt_count,
@@ -701,6 +701,24 @@ fn legacy_index_keys(
         }
     }
     Ok(out)
+}
+
+/// Rehydrate a dropped entity document from native index fields.
+///
+/// Admission drops the durable entity only when it is byte-equivalent to this synthesis
+/// (`entity_fully_indexed`), so reconstruction at projection-apply is lossless: claim
+/// echo, filter evaluation, and merge bases behave exactly as if the doc had traveled.
+fn rehydrate_entity_document(
+    entity: Option<Value>,
+    index_fields: &BTreeMap<String, TypedValue>,
+) -> Option<Value> {
+    entity.or_else(|| {
+        if index_fields.is_empty() {
+            None
+        } else {
+            fireweed_engine::index_fields::index_fields_as_entity(index_fields).ok()
+        }
+    })
 }
 
 fn typed_index_keys(
@@ -2006,8 +2024,8 @@ impl ProjectionData {
             fields: item.fields,
             metadata: item.metadata,
             gate_keys: item.gate_keys,
+            entity_document: rehydrate_entity_document(item.entity_document, &item.index_fields),
             index_fields: item.index_fields,
-            entity_document: item.entity_document,
             state: ItemState::Pending,
             item_version: 1,
             attempt_count: 0,

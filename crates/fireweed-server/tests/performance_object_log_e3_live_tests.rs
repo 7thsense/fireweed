@@ -358,6 +358,7 @@ fn keyed_spec(payload: &str, client_item_key: Option<ClientItemKey>) -> PushSpec
         cohort_size: None,
         gate_keys: Vec::new(),
         entity: None,
+        index_fields: BTreeMap::new(),
     }
 }
 
