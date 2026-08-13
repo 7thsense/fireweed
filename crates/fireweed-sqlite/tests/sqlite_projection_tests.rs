@@ -99,6 +99,7 @@ fn rich_item(id: &str, key: &str) -> PushItem {
         metadata,
         cohort_size: None,
         gate_keys: vec!["gate-a".to_string()],
+        index_fields: Default::default(),
         entity_document: Some(serde_json::json!({"kind":"job","rank":7})),
     }
 }

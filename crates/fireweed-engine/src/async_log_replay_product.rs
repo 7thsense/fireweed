@@ -189,9 +189,7 @@ where
             // with the bytes and come back by move (fireweed-ecf5ee96).
             let serialized = commands
                 .iter()
-                .map(|c| {
-                    serde_json::to_vec(c).map_err(|e| EngineError::Storage(e.to_string()))
-                })
+                .map(crate::command_codec::encode_command_envelope)
                 .collect::<EngineResult<Vec<_>>>()?;
             let (positions, commands) = if log.retains_serialized_appends() {
                 let positions = log
@@ -1609,10 +1607,11 @@ where
         )
         .unwrap_or(now);
 
-        // --- off-permit: id mint + push-item materialization (CPU-heavy snorri entities) ---
+        // --- off-permit: id mint + native index_fields materialization ---
         let counter_base = counters.reserve(&shard, epoch, max_items as u32);
         let (mut push_items, mut push_ids) =
             build_push_items(lifecycle, epoch, node_id, counter_base, max_attempts);
+        crate::admit_push_items_indexes(&definition, &mut push_items)?;
         let lease_token = generate_query_lease_token()?;
         let claim_cid = ids.next_command_id();
         let fin_cid = ids.next_command_id();
@@ -1875,6 +1874,7 @@ where
                 metadata,
                 cohort_size: None,
                 gate_keys: Vec::new(),
+                index_fields: Default::default(),
                 entity_document: entity,
             };
 
@@ -2393,8 +2393,9 @@ where
             })?,
         };
         let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
-        let (push_items, ids) =
+        let (mut push_items, ids) =
             build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
+        crate::admit_push_items_indexes(&def, &mut push_items)?;
         self.projection
             .with_store(|p| p.index_validate_push(shard, &push_items))?;
         let env = CommandEnvelope {

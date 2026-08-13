@@ -23,6 +23,7 @@ fn envelope(i: usize, offset: usize) -> CommandEnvelope {
         metadata: Default::default(),
         cohort_size: None,
         gate_keys: vec![],
+        index_fields: Default::default(),
         entity_document: None,
     };
     CommandEnvelope {

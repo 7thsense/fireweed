@@ -5266,6 +5266,7 @@ mod item_mutation_tests {
                 fields,
                 metadata: pushed.metadata.clone(),
                 gate_keys: vec!["item-block".to_string()],
+                index_fields: Default::default(),
                 entity_document: pushed.entity_document.clone(),
                 invalidate_lease: false,
             })),

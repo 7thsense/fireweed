@@ -288,6 +288,7 @@ async fn turso_projection_image(store: &TursoRelational, shard: &QueueKey) -> Pr
                 fields: fields_from_json(text(&values[9])).unwrap(),
                 metadata: metadata_from_json(text(&values[10])).unwrap(),
                 gate_keys: gates.remove(&item_id_text).unwrap_or_default(),
+                index_fields: Default::default(),
                 entity_document: optional_text(&values[11])
                     .map(|value| serde_json::from_str(&value).unwrap()),
                 attempt_count: integer(&values[12]) as u32,

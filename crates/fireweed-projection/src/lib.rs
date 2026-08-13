@@ -74,9 +74,10 @@ struct ItemRecord {
     fields: BTreeMap<String, Bytes>,
     metadata: Metadata,
     gate_keys: Vec<String>,
-    /// Typed JSON entity document (ADR-011). Carries the canonical typed representation through the
-    /// projection so schema validation and axon_esf index-key computation can address it.
-    /// `None` for schema-less queues that use the opaque `payload` bytes carrier.
+    /// Native client-declared typed index field values (ADR-011). Source of truth for index keys.
+    index_fields: BTreeMap<String, TypedValue>,
+    /// Optional entity document for claim round-trip / schema. Not required for index keying when
+    /// `index_fields` is populated.
     entity_document: Option<serde_json::Value>,
     state: ItemState,
     item_version: u64,
@@ -113,6 +114,8 @@ pub struct ProjectionImageItem {
     pub fields: BTreeMap<String, Bytes>,
     pub metadata: Metadata,
     pub gate_keys: Vec<String>,
+    #[serde(default)]
+    pub index_fields: BTreeMap<String, TypedValue>,
     pub entity_document: Option<serde_json::Value>,
     pub state: ItemState,
     pub item_version: u64,
@@ -147,6 +150,7 @@ impl From<&ItemRecord> for ProjectionImageItem {
             fields: rec.fields.clone(),
             metadata: rec.metadata.clone(),
             gate_keys: rec.gate_keys.clone(),
+            index_fields: rec.index_fields.clone(),
             entity_document: rec.entity_document.clone(),
             state: rec.state,
             item_version: rec.item_version,
@@ -186,6 +190,7 @@ impl From<ProjectionImageItem> for ItemRecord {
             fields: item.fields,
             metadata: item.metadata,
             gate_keys: item.gate_keys,
+            index_fields: item.index_fields,
             entity_document: item.entity_document,
             state: item.state,
             item_version: item.item_version,
@@ -1363,6 +1368,7 @@ pub fn query_projection_from_index_keys(
             fields: BTreeMap::new(),
             metadata: Metadata::default(),
             gate_keys: Vec::new(),
+            index_fields: Default::default(),
             entity_document: Some(entity),
             state: ItemState::Pending,
             item_version: 1,
@@ -1809,7 +1815,7 @@ impl ProjectionData {
                     projection.by_key.insert(key, rec.item_id);
                 }
                 let keys =
-                    projection.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
+                    projection.record_index_keys(&rec.fields, &rec.index_fields, rec.entity_document.as_ref())?;
                 projection.index_insert_keys(rec.item_id, &keys);
                 if rec.state == ItemState::Pending {
                     projection.claim_index_insert_keys(rec.item_id, &keys);
@@ -1955,10 +1961,19 @@ impl ProjectionData {
     fn record_index_keys(
         &self,
         fields: &BTreeMap<String, Bytes>,
+        index_fields: &BTreeMap<String, TypedValue>,
         entity: Option<&Value>,
     ) -> EngineResult<Vec<(String, Vec<u8>)>> {
         let mut keys = legacy_index_keys(&self.index_specs, fields)?;
-        keys.extend(typed_index_keys(&self.typed_index_specs, entity)?);
+        // Prefer native index_fields; entity is only a fall-back for pre-native durable rows.
+        let synthetic;
+        let entity_ref = if !index_fields.is_empty() {
+            synthetic = fireweed_engine::index_fields::index_fields_as_entity(index_fields)?;
+            Some(&synthetic)
+        } else {
+            entity
+        };
+        keys.extend(typed_index_keys(&self.typed_index_specs, entity_ref)?);
         Ok(keys)
     }
 
@@ -1991,6 +2006,7 @@ impl ProjectionData {
             fields: item.fields,
             metadata: item.metadata,
             gate_keys: item.gate_keys,
+            index_fields: item.index_fields,
             entity_document: item.entity_document,
             state: ItemState::Pending,
             item_version: 1,
@@ -2030,7 +2046,7 @@ impl ProjectionData {
                 .or_default()
                 .insert(rec.item_id);
         }
-        let keys = self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
+        let keys = self.record_index_keys(&rec.fields, &rec.index_fields, rec.entity_document.as_ref())?;
         self.insert_keys_into_both(rec.item_id, &keys);
         self.items.insert(rec.item_id, rec);
         self.metrics.pending += 1;
@@ -2149,13 +2165,13 @@ impl ProjectionData {
         if old_state == ItemState::Pending && new_state != ItemState::Pending {
             let keys = {
                 let rec = self.items.get(id).ok_or(EngineError::NotFound)?;
-                self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?
+                self.record_index_keys(&rec.fields, &rec.index_fields, rec.entity_document.as_ref())?
             };
             self.claim_index_remove_keys(*id, &keys);
         } else if old_state != ItemState::Pending && new_state == ItemState::Pending {
             let keys = {
                 let rec = self.items.get(id).ok_or(EngineError::NotFound)?;
-                self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?
+                self.record_index_keys(&rec.fields, &rec.index_fields, rec.entity_document.as_ref())?
             };
             self.claim_index_insert_keys(*id, &keys);
         }
@@ -2387,7 +2403,7 @@ impl ProjectionData {
                         "UpdateFields applied to a non-updatable item; update_fields_validate was bypassed"
                     );
                     let old_keys =
-                        self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
+                        self.record_index_keys(&rec.fields, &rec.index_fields, rec.entity_document.as_ref())?;
                     let repricing = matches!(c.set_priority, ScheduleUpdate::Set(_))
                         || matches!(c.set_not_before, ScheduleUpdate::Set(_));
                     let eligibility_changed = repricing || c.set_gate_keys.is_some();
@@ -2413,7 +2429,7 @@ impl ProjectionData {
                         .set_entity_document
                         .as_ref()
                         .or(rec.entity_document.as_ref());
-                    let new_keys = self.record_index_keys(&next_fields, next_entity)?;
+                    let new_keys = self.record_index_keys(&next_fields, &rec.index_fields, next_entity)?;
 
                     let mut next_rec = rec.clone();
                     next_rec.fields = next_fields;
@@ -2535,7 +2551,7 @@ impl ProjectionData {
                                 .cloned()
                                 .ok_or(EngineError::NotFound)?;
                             let old_index_keys =
-                                self.record_index_keys(&old.fields, old.entity_document.as_ref())?;
+                                self.record_index_keys(&old.fields, &old.index_fields, old.entity_document.as_ref())?;
                             if old.state == ItemState::Pending
                                 && !old.superseded
                                 && !gate_keys_blocked(&self.blocked_gates, &old.gate_keys)
@@ -2564,6 +2580,7 @@ impl ProjectionData {
 
                             let new_index_keys = self.record_index_keys(
                                 &values.fields,
+                                &values.index_fields,
                                 values.entity_document.as_ref(),
                             )?;
                             let record = self
@@ -2579,6 +2596,7 @@ impl ProjectionData {
                             record.fields = values.fields.clone();
                             record.metadata = values.metadata.clone();
                             record.gate_keys = values.gate_keys.clone();
+                            record.index_fields = values.index_fields.clone();
                             record.entity_document = values.entity_document.clone();
                             if lease_ends {
                                 record.lease_token = None;
@@ -2747,7 +2765,7 @@ impl ProjectionData {
                 let superseded_keys = self
                     .items
                     .get(&c.superseded_item_id)
-                    .map(|rec| self.record_index_keys(&rec.fields, rec.entity_document.as_ref()))
+                    .map(|rec| self.record_index_keys(&rec.fields, &rec.index_fields, rec.entity_document.as_ref()))
                     .transpose()?;
                 let superseded_gate_keys = self
                     .items
@@ -3257,7 +3275,7 @@ impl ProjectionData {
                 continue;
             };
             for (name, key) in
-                self.record_index_keys(&values.fields, values.entity_document.as_ref())?
+                self.record_index_keys(&values.fields, &values.index_fields, values.entity_document.as_ref())?
             {
                 if matches!(self.indexes.get(&name), Some(SecondaryIndex::Unique(_)))
                     && let Some(other) = batch_unique.insert((name, key), command.item_id)
@@ -3476,6 +3494,16 @@ impl ProjectionData {
                 state,
             }
         };
+        // Keep native index fields in step with entity edits when present.
+        let index_fields = if let Some(doc) = entity.as_ref() {
+            fireweed_engine::index_fields::extract_index_fields_from_entity(
+                &self.typed_index_specs,
+                doc,
+            )
+            .unwrap_or_else(|_| record.index_fields.clone())
+        } else {
+            record.index_fields.clone()
+        };
         Ok((
             outcome,
             (!dry_run).then_some(ResolvedItemMutation {
@@ -3490,6 +3518,7 @@ impl ProjectionData {
                     fields,
                     metadata,
                     gate_keys,
+                    index_fields,
                     entity_document: entity,
                     invalidate_lease,
                 })),
@@ -3796,7 +3825,7 @@ impl ProjectionData {
                 }
             }
         }
-        let keys = self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
+        let keys = self.record_index_keys(&rec.fields, &rec.index_fields, rec.entity_document.as_ref())?;
         self.index_remove_keys(rec.item_id, &keys);
         self.claim_index_remove_keys(rec.item_id, &keys);
         Ok(())
@@ -4023,7 +4052,9 @@ impl ProjectionData {
                 }
                 Err(error) => return Err(error),
             }
-            for (name, key) in self.record_index_keys(&fields, entity)? {
+            // Batch update path still keys from entity merge; empty native map until native edits land.
+            let empty_index = BTreeMap::<String, TypedValue>::new();
+            for (name, key) in self.record_index_keys(&fields, &empty_index, entity)? {
                 if !matches!(self.indexes.get(&name), Some(SecondaryIndex::Unique(_))) {
                     continue;
                 }
@@ -4255,7 +4286,8 @@ impl ProjectionData {
         entity: Option<&Value>,
         exclude: Option<&ItemId>,
     ) -> EngineResult<()> {
-        for (name, key) in self.record_index_keys(fields, entity)? {
+        let empty_index = BTreeMap::<String, TypedValue>::new();
+        for (name, key) in self.record_index_keys(fields, &empty_index, entity)? {
             if let Some(SecondaryIndex::Unique(map)) = self.indexes.get(&name)
                 && let Some(holder) = map.get(&key)
                 && holder != item_id
@@ -4280,7 +4312,7 @@ impl ProjectionData {
         let mut batch: BTreeMap<(String, Vec<u8>), ItemId> = BTreeMap::new();
         for item in items {
             for (name, key) in
-                self.record_index_keys(&item.fields, item.entity_document.as_ref())?
+                self.record_index_keys(&item.fields, &item.index_fields, item.entity_document.as_ref())?
             {
                 let Some(SecondaryIndex::Unique(map)) = self.indexes.get(&name) else {
                     continue;
@@ -4950,7 +4982,9 @@ impl ProjectionData {
                         Some(&new_entity),
                         None,
                     )?;
-                    let new_keys = self.record_index_keys(&new_fields, Some(&new_entity))?;
+                    let empty_index = BTreeMap::<String, TypedValue>::new();
+                    let new_keys =
+                        self.record_index_keys(&new_fields, &empty_index, Some(&new_entity))?;
                     let reservation_conflict = new_keys.iter().any(|(name, key)| {
                         matches!(self.indexes.get(name), Some(SecondaryIndex::Unique(_)))
                             && reservations
@@ -5398,6 +5432,7 @@ mod tests {
             metadata: Metadata::default(),
             cohort_size: None,
             gate_keys: Vec::new(),
+            index_fields: Default::default(),
             entity_document: None,
         }
     }
@@ -5414,6 +5449,7 @@ mod tests {
             fields,
             metadata,
             gate_keys: vec!["gate-a".to_string()],
+            index_fields: Default::default(),
             entity_document: Some(serde_json::json!({"kind":"job","rank":7})),
             ..push_item(id, key, priority)
         }
@@ -5519,6 +5555,7 @@ mod tests {
             fields: BTreeMap::new(),
             metadata: Metadata::default(),
             gate_keys: Vec::new(),
+            index_fields: Default::default(),
             entity_document: None,
             state: ItemState::Complete,
             item_version: 2,
@@ -5563,6 +5600,7 @@ mod tests {
                     metadata: Metadata::default(),
                     cohort_size: None,
                     gate_keys: Vec::new(),
+                    index_fields: Default::default(),
                     entity_document: None,
                 }],
             }))
@@ -5625,6 +5663,7 @@ mod tests {
                     metadata: Metadata::default(),
                     cohort_size: None,
                     gate_keys: Vec::new(),
+                    index_fields: Default::default(),
                     entity_document: None,
                 }],
             }))
@@ -5697,6 +5736,7 @@ mod tests {
             fields: BTreeMap::new(),
             metadata: Metadata::default(),
             gate_keys: Vec::new(),
+            index_fields: Default::default(),
             entity_document: None,
             state: ItemState::Pending,
             item_version: 1,
@@ -6708,6 +6748,7 @@ mod tests {
                     fields: BTreeMap::new(),
                     metadata: Metadata::default(),
                     gate_keys: Vec::new(),
+                    index_fields: Default::default(),
                     entity_document: None,
                     state: ItemState::Pending,
                     item_version: 1,
@@ -6735,6 +6776,7 @@ mod tests {
                     fields: BTreeMap::new(),
                     metadata: Metadata::default(),
                     gate_keys: Vec::new(),
+                    index_fields: Default::default(),
                     entity_document: None,
                     state: ItemState::Pending,
                     item_version: 1,

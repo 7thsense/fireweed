@@ -1696,8 +1696,8 @@ where
         commands: Vec<CommandEnvelope>,
         expected_epoch: u64,
     ) -> impl Future<Output = EngineResult<Vec<CommandPosition>>> + Send {
-        // Durable offload (`open_sqlite`): pre-encode JSON off the exclusive writer lock, then
-        // join group-commit so concurrent workers coalesce FULL fsyncs (fireweed-2a564ff7).
+        // Durable offload (`open_sqlite`): pre-encode native FWC1 off the exclusive writer lock,
+        // then join group-commit so concurrent workers coalesce FULL fsyncs (fireweed-2a564ff7).
         // Memory / non-offload: encode stays inside the store mutex via plain `append`.
         let group_commit = self.group_commit.clone();
         let this_store = Arc::clone(&self.store);
@@ -1709,9 +1709,7 @@ where
             if gc_enabled {
                 let serialized = commands
                     .iter()
-                    .map(|c| {
-                        serde_json::to_vec(c).map_err(|e| EngineError::Storage(e.to_string()))
-                    })
+                    .map(crate::command_codec::encode_command_envelope)
                     .collect::<EngineResult<Vec<_>>>()?;
                 // Inline the group-commit path (same as append_via_group_commit) using captured fields.
                 let gc = group_commit.expect("gc_enabled");
@@ -2278,16 +2276,13 @@ where
         commands: Vec<CommandEnvelope>,
         expected_epoch: u64,
     ) -> impl Future<Output = EngineResult<Vec<CommandPosition>>> + Send {
-        // Encode JSON **before** the exclusive offload/store lock so concurrent workers pay
-        // serde cost in parallel and only serialize on the durable seal (fireweed-9d2281f0).
+        // Encode native FWC1 **before** the exclusive offload/store lock so concurrent workers
+        // pay codec cost in parallel and only serialize on the durable seal (fireweed-9d2281f0).
         // Axes that do not consume `serialized` drop it and re-derive from `commands`.
         async move {
             let serialized = commands
                 .iter()
-                .map(|c| {
-                    serde_json::to_vec(c)
-                        .map_err(|e| EngineError::Storage(e.to_string()))
-                })
+                .map(crate::command_codec::encode_command_envelope)
                 .collect::<EngineResult<Vec<_>>>()?;
             self.run_sync(move |store: &mut S| {
                 store.append_serialized(&shard, &commands, serialized, expected_epoch)

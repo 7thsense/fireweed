@@ -556,6 +556,7 @@ async fn cohort_expired_fails_group_members() {
         metadata: Default::default(),
         cohort_size: None,
         gate_keys: Vec::new(),
+        index_fields: Default::default(),
         entity_document: None,
     };
     commit(

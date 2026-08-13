@@ -1692,6 +1692,7 @@ fn plan_item_mutation_sql<C: GenericClient>(
                 .get(&item_id.to_string())
                 .cloned()
                 .unwrap_or_default(),
+            index_fields: Default::default(),
             entity_document,
             state,
             item_version: u64::try_from(row.get::<_, i64>(12))
@@ -7940,6 +7941,7 @@ impl UpsertPort for PostgresRelationalBackend {
                 metadata,
                 cohort_size: None,
                 gate_keys: Vec::new(),
+                index_fields: Default::default(),
                 entity_document: entity,
             };
             match existing {
@@ -12271,6 +12273,7 @@ mod gated_group_summary_tests {
                 metadata: Metadata::default(),
                 cohort_size: None,
                 gate_keys: Vec::new(),
+                index_fields: Default::default(),
                 entity_document: None,
             })
             .collect();

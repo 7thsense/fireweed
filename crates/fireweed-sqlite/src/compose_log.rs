@@ -13,6 +13,7 @@ use fireweed_core::QueueDefinition;
 use fireweed_engine::{
     CommandEnvelope, CommandPage, CommandPosition, CreateQueueOutcome, DefinitionCursor,
     DefinitionPage, EngineError, EngineResult, LogStore, ProjectionSnapshot, QueueKey, SnapshotRef,
+    command_codec::{decode_command_envelope, encode_command_envelope},
     definition_page_from_storage_rows,
 };
 use std::fmt::Write as _;
@@ -29,7 +30,8 @@ CREATE TABLE IF NOT EXISTS log_epochs (
 );
 CREATE TABLE IF NOT EXISTS log_entries (
     tenant TEXT NOT NULL, queue TEXT NOT NULL, epoch INTEGER NOT NULL, seq INTEGER NOT NULL,
-    envelope TEXT NOT NULL,
+    -- FWC1 native binary frame only (BLOB).
+    envelope BLOB NOT NULL,
     PRIMARY KEY (tenant, queue, epoch, seq)
 );
 -- Queue-global sequence ordering crosses ownership epochs, so the primary key cannot serve `read_from`
@@ -114,6 +116,20 @@ fn to_json<T: serde::Serialize>(value: &T) -> EngineResult<String> {
     serde_json::to_string(value).map_err(|e| EngineError::Storage(e.to_string()))
 }
 
+/// Read a log envelope column that may be native BLOB (FWC1) or legacy TEXT (JSON).
+fn envelope_blob_from_row(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<Vec<u8>> {
+    use rusqlite::types::ValueRef;
+    match row.get_ref(idx)? {
+        ValueRef::Blob(b) => Ok(b.to_vec()),
+        ValueRef::Text(t) => Ok(t.to_vec()),
+        other => Err(rusqlite::Error::InvalidColumnType(
+            idx,
+            "envelope".into(),
+            other.data_type(),
+        )),
+    }
+}
+
 fn parts(shard: &QueueKey) -> (String, String) {
     (
         shard.tenant_id.as_str().to_string(),
@@ -144,11 +160,11 @@ impl SqliteLog {
         Self::from_conn(st(Connection::open_in_memory())?)
     }
 
-    /// Insert pre-encoded JSON envelope strings under one Immediate + FULL fsync transaction.
-    fn append_json_envelopes(
+    /// Insert pre-encoded envelope blobs (FWC1 native or legacy JSON) under one Immediate + FULL fsync.
+    fn append_envelope_blobs(
         &mut self,
         shard: &QueueKey,
-        envelopes: Vec<String>,
+        envelopes: Vec<Vec<u8>>,
         expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>> {
         let (t, q) = parts(shard);
@@ -185,12 +201,12 @@ impl SqliteLog {
             |row| row.get(0),
         ))?;
 
-        // Drain owned JSON strings so multi-MB push envelopes are not cloned into Value::Text.
+        // Drain owned blobs so multi-MB push envelopes are not cloned into Value::Blob.
         let mut first_seq_cursor = first_seq;
         let mut remaining = envelopes;
         while !remaining.is_empty() {
             let take = remaining.len().min(APPEND_INSERT_CHUNK_SIZE);
-            let chunk: Vec<String> = remaining.drain(..take).collect();
+            let chunk: Vec<Vec<u8>> = remaining.drain(..take).collect();
             let chunk_first = first_seq_cursor;
             first_seq_cursor = first_seq_cursor
                 .checked_add(chunk.len() as i64)
@@ -204,7 +220,7 @@ impl SqliteLog {
                 values.push(Value::Text(q.clone()));
                 values.push(Value::Integer(epoch));
                 values.push(Value::Integer(seq));
-                values.push(Value::Text(envelope));
+                values.push(Value::Blob(envelope));
             }
             st(tx.execute(
                 &insert_batch_sql(take),
@@ -330,26 +346,27 @@ impl LogStore for SqliteLog {
         commands: &[CommandEnvelope],
         expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>> {
-        // Encode once per envelope; keep as String so we can bind without a second full clone
+        // Native FWC1 encode once per envelope; bind as BLOB without a second full clone
         // of multi-MB push batches (fireweed-85855781).
-        let envelopes: Vec<String> = commands
+        let envelopes: Vec<Vec<u8>> = commands
             .iter()
-            .map(to_json)
+            .map(encode_command_envelope)
             .collect::<EngineResult<Vec<_>>>()?;
-        self.append_json_envelopes(shard, envelopes, expected_epoch)
+        self.append_envelope_blobs(shard, envelopes, expected_epoch)
     }
 
-    /// The sqlite log stores the encoded JSON row itself, so a caller may append bytes only.
+    /// The sqlite log stores the encoded row itself, so a caller may append bytes only.
     fn retains_serialized_appends(&self) -> bool {
         true
     }
 
-    /// Durable append from pre-encoded JSON envelopes (composition admission boundary /
+    /// Durable append from pre-encoded envelopes (composition admission boundary /
     /// async bridges encode **off** the exclusive SQLite writer lock so concurrent workers
     /// serialize only on WAL insert + FULL fsync — fireweed-9d2281f0 / 10k campaign).
     ///
-    /// `commands` may be empty when `serialized` is non-empty (group-commit coalesces many
-    /// waiters and only needs the JSON rows). If both are non-empty, lengths must match.
+    /// Bytes are the FWC1 native frame (or legacy JSON for dual-read writers). `commands` may be
+    /// empty when `serialized` is non-empty (group-commit coalesces many waiters and only needs
+    /// the rows). If both are non-empty, lengths must match.
     fn append_serialized(
         &mut self,
         shard: &QueueKey,
@@ -365,15 +382,7 @@ impl LogStore for SqliteLog {
                 "append_serialized: commands/serialized length mismatch",
             ));
         }
-        let envelopes: Vec<String> = serialized
-            .into_iter()
-            .map(|bytes| {
-                String::from_utf8(bytes).map_err(|e| {
-                    EngineError::Storage(format!("append_serialized envelope is not utf-8: {e}"))
-                })
-            })
-            .collect::<EngineResult<Vec<_>>>()?;
-        self.append_json_envelopes(shard, envelopes, expected_epoch)
+        self.append_envelope_blobs(shard, serialized, expected_epoch)
     }
 
     fn read_from(
@@ -406,14 +415,13 @@ impl LogStore for SqliteLog {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
+                envelope_blob_from_row(row, 2)?,
             ))
         }))?;
         let mut entries = Vec::new();
         for r in mapped {
-            let (seq, epoch, json) = st(r)?;
-            let env: CommandEnvelope =
-                serde_json::from_str(&json).map_err(|e| EngineError::Storage(e.to_string()))?;
+            let (seq, epoch, blob) = st(r)?;
+            let env = decode_command_envelope(&blob)?;
             entries.push((
                 CommandPosition::new(shard.clone(), epoch as u64, seq as u64),
                 env,
@@ -867,6 +875,39 @@ mod batching_tests {
                 .collect::<Vec<_>>(),
             vec![42, 43]
         );
+    }
+
+    /// FWC1-only: legacy JSON TEXT rows are rejected on read.
+    #[test]
+    fn legacy_json_envelope_is_rejected() {
+        use fireweed_engine::command_codec::is_native_envelope;
+        let (log, shard, epoch) = ready_log();
+        let (tenant, queue) = parts(&shard);
+        let legacy = commands(0, 1);
+        let legacy_json = to_json(&legacy[0]).unwrap();
+        assert!(!is_native_envelope(legacy_json.as_bytes()));
+        log.conn
+            .execute(
+                "INSERT INTO log_entries(tenant,queue,epoch,seq,envelope) VALUES(?1,?2,?3,0,?4)",
+                params![tenant, queue, epoch as i64, legacy_json],
+            )
+            .unwrap();
+        log.conn
+            .execute(
+                "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES(?1,?2,?3,0)",
+                params![tenant, queue, epoch as i64],
+            )
+            .unwrap();
+        let err = log.read_from(&shard, None, 10).unwrap_err();
+        assert!(
+            matches!(err, EngineError::Storage(_)),
+            "expected storage error rejecting legacy JSON, got {err:?}"
+        );
+        // Fresh native append still works on a clean log.
+        let (mut log2, shard2, epoch2) = ready_log();
+        let pos = log2.append(&shard2, &commands(0, 1), epoch2).unwrap();
+        assert_eq!(pos[0].sequence, 0);
+        assert_eq!(log2.read_from(&shard2, None, 10).unwrap().entries.len(), 1);
     }
 
     #[test]

@@ -92,13 +92,14 @@ where
             })
             .await?;
             let base = counters.reserve(&request.shard, epoch, request.items.len() as u32);
-            let (items, item_ids) = build_push_items(
+            let (mut items, item_ids) = build_push_items(
                 request.items,
                 epoch,
                 node_id,
                 base,
                 definition.retry_policy.max_attempts,
             );
+            crate::admit_push_items_indexes(&definition, &mut items)?;
             projection
                 .validate_push(request.shard.clone(), items.clone(), request.now)
                 .await?;

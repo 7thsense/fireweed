@@ -7,7 +7,8 @@ use std::sync::Mutex;
 use bytes::Bytes;
 use fireweed_core::{
     ClientItemKey, CohortId, GroupKey, IndexDeclaration, ItemId, ItemState, LeaseToken, Metadata,
-    OwnerId, PriorityValue, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp, WorkerId,
+    OwnerId, PriorityValue, QueueDefinition, QueueId, RequestId, TenantId, TypedValue, UtcTimestamp,
+    WorkerId,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -127,6 +128,9 @@ pub struct ResolvedItemValues {
     pub fields: BTreeMap<String, Bytes>,
     pub metadata: Metadata,
     pub gate_keys: Vec<String>,
+    #[serde(default)]
+    pub index_fields: BTreeMap<String, TypedValue>,
+    #[serde(default, with = "crate::entity_wire::option_entity")]
     pub entity_document: Option<serde_json::Value>,
     pub invalidate_lease: bool,
 }
@@ -165,10 +169,47 @@ pub fn build_push_items(
             metadata: s.metadata,
             cohort_size: s.cohort_size,
             gate_keys: s.gate_keys,
+            index_fields: s.index_fields,
+            // Entity is admission-only for indexing: durable keying uses `index_fields`.
+            // Callers that still need document round-trip may set entity; indexes do not depend on it.
             entity_document: s.entity,
         });
     }
     (items, ids)
+}
+
+/// Fill [`PushItem::index_fields`] from admission inputs using the queue definition.
+///
+/// Prefer explicit native values; else project declared fields out of an entity document once.
+/// When typed indexes are present and materialization succeeds, clear `entity_document` so the
+/// durable log does not carry a JSON entity just for indexing.
+pub fn admit_push_item_indexes(
+    definition: &QueueDefinition,
+    item: &mut PushItem,
+) -> EngineResult<()> {
+    let explicit = std::mem::take(&mut item.index_fields);
+    let entity = item.entity_document.as_ref();
+    item.index_fields =
+        crate::index_fields::materialize_index_fields(definition, explicit, entity)?;
+    if !definition.typed_indexes.is_empty() && !item.index_fields.is_empty() {
+        // Indexes are native on the log; drop the entity document unless schema validation
+        // required keeping it (schema path re-attaches before validate if needed).
+        if definition.entity_schema.is_none() {
+            item.entity_document = None;
+        }
+    }
+    Ok(())
+}
+
+/// Admit indexes for a whole push batch (shared by push planners / log-replay ports).
+pub fn admit_push_items_indexes(
+    definition: &QueueDefinition,
+    items: &mut [PushItem],
+) -> EngineResult<()> {
+    for item in items {
+        admit_push_item_indexes(definition, item)?;
+    }
+    Ok(())
 }
 
 /// Length-prefix composite key for ADR-010 secondary indexes (matches projection encoding).
@@ -207,22 +248,32 @@ pub fn unique_index_keys_for_push_item(
             out.push((spec.name.clone(), legacy_secondary_index_key(&field_bytes)));
         }
     }
-    if let Some(entity) = item.entity_document.as_ref() {
-        for qi in &definition.typed_indexes {
-            let unique = match &qi.declaration {
-                IndexDeclaration::Single(def) => def.unique,
-                IndexDeclaration::Compound(def) => def.unique,
-            };
-            if !unique {
-                continue;
-            }
-            let key = match &qi.declaration {
-                IndexDeclaration::Single(def) => def.index_key(entity),
-                IndexDeclaration::Compound(def) => def.index_key(entity),
-            }
-            .map_err(|e| EngineError::Storage(e.to_string()))?;
-            if let Some(k) = key {
-                out.push((qi.name.clone(), k));
+    if !item.index_fields.is_empty() || item.entity_document.is_some() {
+        // Prefer native index_fields; fall back to entity only for pre-native durable rows.
+        let entity;
+        let entity_ref = if !item.index_fields.is_empty() {
+            entity = crate::index_fields::index_fields_as_entity(&item.index_fields)?;
+            Some(&entity)
+        } else {
+            item.entity_document.as_ref()
+        };
+        if let Some(entity) = entity_ref {
+            for qi in &definition.typed_indexes {
+                let unique = match &qi.declaration {
+                    IndexDeclaration::Single(def) => def.unique,
+                    IndexDeclaration::Compound(def) => def.unique,
+                };
+                if !unique {
+                    continue;
+                }
+                let key = match &qi.declaration {
+                    IndexDeclaration::Single(def) => def.index_key(entity),
+                    IndexDeclaration::Compound(def) => def.index_key(entity),
+                }
+                .map_err(|e| EngineError::Storage(e.to_string()))?;
+                if let Some(k) = key {
+                    out.push((qi.name.clone(), k));
+                }
             }
         }
     }
@@ -360,11 +411,19 @@ pub struct PushItem {
     /// the BQ-14d fresh-eyes review.
     #[serde(default)]
     pub gate_keys: Vec<String>,
-    /// Typed JSON entity document (ADR-011). The canonical typed representation for schema-validated typed
-    /// queues — used by schema validation and axon_esf index-key computation at push time.
-    /// `#[serde(default)]` preserves replay compatibility for log entries written before this field existed.
-    /// `None` for schema-less queues (which use the opaque `payload` bytes carrier).
+    /// Native values for client-declared typed index fields (ADR-011).
+    ///
+    /// Keys are field paths from `create_queue.typed_indexes`; values are [`TypedValue`]
+    /// (`String` / `Integer` / `Float` / `Bool` / `DateTime`). This is the durable middle
+    /// ground for client-controllable indices — **not** a JSON entity document.
+    /// Materialized at admission ([`crate::index_fields::materialize_index_fields`]);
+    /// projection encodes axon keys from these values at apply.
     #[serde(default)]
+    pub index_fields: BTreeMap<String, TypedValue>,
+    /// Optional full entity document for schema validation / claim round-trip.
+    /// **Not** used for index keying when [`Self::index_fields`] is populated.
+    /// Prefer leaving this `None` on new writes once indexes are native.
+    #[serde(default, with = "crate::entity_wire::option_entity")]
     pub entity_document: Option<serde_json::Value>,
 }
 
@@ -496,7 +555,8 @@ pub struct UpdateFieldsCommand {
     /// Replace the item's entity document (ADR-011). `None` leaves it unchanged; `Some(doc)` replaces
     /// it and triggers schema validation if the queue has a compiled schema. `#[serde(default)]` keeps
     /// log-replay compatible with pre-ADR-011 commands (absent field → `None`).
-    #[serde(default)]
+    /// Native FWC1: opaque JSON blob (same as [`PushItem::entity_document`]).
+    #[serde(default, with = "crate::entity_wire::option_entity")]
     pub set_entity_document: Option<serde_json::Value>,
     /// API-001 `BatchUpdate` uses full replacement for the hot field map. `None` preserves the legacy
     /// FAC-1 delta behavior; `Some` replaces the complete map before any (normally empty) `field_ops`.
@@ -605,13 +665,18 @@ impl Serialize for PauseQueueCommand {
     where
         S: Serializer,
     {
-        if !self.drain_intake {
-            return serializer.serialize_unit();
+        if serializer.is_human_readable() {
+            if !self.drain_intake {
+                return serializer.serialize_unit();
+            }
+            use serde::ser::SerializeMap;
+            let mut map = serializer.serialize_map(Some(1))?;
+            map.serialize_entry("drain_intake", &self.drain_intake)?;
+            map.end()
+        } else {
+            // Native binary: always a bool (postcard has no deserialize_any).
+            serializer.serialize_bool(self.drain_intake)
         }
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(Some(1))?;
-        map.serialize_entry("drain_intake", &self.drain_intake)?;
-        map.end()
     }
 }
 
@@ -626,7 +691,7 @@ impl<'de> Deserialize<'de> for PauseQueueCommand {
             type Value = PauseQueueCommand;
 
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("null or an object with drain_intake")
+                f.write_str("null, bool, or an object with drain_intake")
             }
 
             fn visit_unit<E>(self) -> Result<Self::Value, E> {
@@ -658,7 +723,13 @@ impl<'de> Deserialize<'de> for PauseQueueCommand {
             }
         }
 
-        deserializer.deserialize_any(PauseQueueCommandVisitor)
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_any(PauseQueueCommandVisitor)
+        } else {
+            Ok(PauseQueueCommand {
+                drain_intake: bool::deserialize(deserializer)?,
+            })
+        }
     }
 }
 
@@ -1311,6 +1382,7 @@ mod serde_tests {
             metadata: Metadata::default(),
             cohort_size: Some(4),
             gate_keys: Vec::new(),
+            index_fields: Default::default(),
             entity_document: None,
         }
     }
@@ -2244,7 +2316,7 @@ mod unique_stage_tests {
         IndexDeclaration, IndexDef, IndexSpec, IndexType, PriorityDirection, PriorityModel,
         PriorityModelKind, PriorityTieBreaker, QueueId, QueueIndex, TenantId,
     };
-    use serde_json::json;
+
 
     fn def_with_unique_email() -> QueueDefinition {
         QueueDefinition {
@@ -2304,7 +2376,15 @@ mod unique_stage_tests {
             metadata: Metadata::default(),
             cohort_size: None,
             gate_keys: Vec::new(),
-            entity_document: email.map(|e| json!({ "email": e })),
+            index_fields: email
+                .map(|e| {
+                    BTreeMap::from([(
+                        "email".to_string(),
+                        TypedValue::String(e.to_string()),
+                    )])
+                })
+                .unwrap_or_default(),
+            entity_document: None,
         }
     }
 

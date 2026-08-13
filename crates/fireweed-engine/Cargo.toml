@@ -23,6 +23,8 @@ serde = { version = "1", features = ["derive"] }
 # Deterministic body fingerprint for the composed backend's request-id idempotency (ADR-012). Pure
 # serialization, no I/O — mirrors the monolithic memory/sqlite backends.
 serde_json = "1"
+# Native durable command-envelope codec (product log path): 0 Base64, ItemId as u64, payload as blob.
+postcard = { version = "1", default-features = false, features = ["alloc", "use-std"] }
 # Owned-task inline dispatcher (tests + in-process async composition) drives factories to completion.
 futures = "0.3"
 

@@ -100,6 +100,7 @@ async fn concurrent_appends_coalesce_group_commit_seals() {
                         metadata: Default::default(),
                         cohort_size: None,
                         gate_keys: vec![],
+                        index_fields: Default::default(),
                         entity_document: None,
                     }],
                 }),

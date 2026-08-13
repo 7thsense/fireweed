@@ -19,6 +19,7 @@ use std::fmt;
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use bytes::Bytes;
 use serde::Deserialize;
+use serde::Serialize;
 use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::{SerializeMap, Serializer};
 
@@ -33,6 +34,9 @@ fn serialize_raw_bytes<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::
 }
 
 /// Decode Base64 string **or** legacy JSON integer array into raw bytes.
+///
+/// Binary codecs (postcard) call `deserialize_bytes` — never `deserialize_any`
+/// (postcard rejects `deserialize_any`).
 fn deserialize_raw_bytes<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
     struct BytesVisitor;
 
@@ -40,7 +44,7 @@ fn deserialize_raw_bytes<'de, D: Deserializer<'de>>(deserializer: D) -> Result<V
         type Value = Vec<u8>;
 
         fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("base64 string or integer byte array")
+            f.write_str("raw bytes, base64 string, or integer byte array")
         }
 
         fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
@@ -69,7 +73,11 @@ fn deserialize_raw_bytes<'de, D: Deserializer<'de>>(deserializer: D) -> Result<V
         }
     }
 
-    deserializer.deserialize_any(BytesVisitor)
+    if deserializer.is_human_readable() {
+        deserializer.deserialize_any(BytesVisitor)
+    } else {
+        deserializer.deserialize_byte_buf(BytesVisitor)
+    }
 }
 
 /// `Vec<u8>` field encoding.
@@ -98,6 +106,14 @@ pub mod bytes_val {
     }
 }
 
+/// Wrapper so binary `serialize_some` emits raw bytes (postcard Option discriminant).
+struct BytesSer<'a>(&'a [u8]);
+impl Serialize for BytesSer<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serialize_raw_bytes(self.0, serializer)
+    }
+}
+
 /// `Option<Bytes>` field encoding (`None` → JSON null / absent via Option).
 pub mod option_bytes {
     use super::*;
@@ -108,7 +124,14 @@ pub mod option_bytes {
     ) -> Result<S::Ok, S::Error> {
         match value {
             None => serializer.serialize_none(),
-            Some(b) => serialize_raw_bytes(b.as_ref(), serializer),
+            Some(b) => {
+                if serializer.is_human_readable() {
+                    // JSON: field is null or a base64 string (no nested Option tag).
+                    serialize_raw_bytes(b.as_ref(), serializer)
+                } else {
+                    serializer.serialize_some(&BytesSer(b.as_ref()))
+                }
+            }
         }
     }
 
@@ -121,7 +144,7 @@ pub mod option_bytes {
             type Value = Option<Bytes>;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("null, base64 string, or integer byte array")
+                f.write_str("null, raw bytes, base64 string, or integer byte array")
             }
 
             fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
@@ -145,6 +168,14 @@ pub mod option_bytes {
                 self.visit_str(&v)
             }
 
+            fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
+                Ok(Some(Bytes::copy_from_slice(v)))
+            }
+
+            fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<Self::Value, E> {
+                Ok(Some(Bytes::from(v)))
+            }
+
             fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
                 // Legacy: Option was encoded as the array itself when Some.
                 deserialize_raw_bytes(de::value::SeqAccessDeserializer::new(seq))
@@ -152,7 +183,11 @@ pub mod option_bytes {
             }
         }
 
-        deserializer.deserialize_any(OptVisitor)
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_any(OptVisitor)
+        } else {
+            deserializer.deserialize_option(OptVisitor)
+        }
     }
 }
 
@@ -271,7 +306,20 @@ pub mod option_btreemap_bytes {
     ) -> Result<S::Ok, S::Error> {
         match value {
             None => serializer.serialize_none(),
-            Some(map) => btreemap_bytes::serialize(map, serializer),
+            Some(map) => {
+                if serializer.is_human_readable() {
+                    btreemap_bytes::serialize(map, serializer)
+                } else {
+                    // postcard needs the Option discriminant before the map body.
+                    struct MapSer<'a>(&'a BTreeMap<String, Bytes>);
+                    impl Serialize for MapSer<'_> {
+                        fn serialize<S2: Serializer>(&self, s: S2) -> Result<S2::Ok, S2::Error> {
+                            btreemap_bytes::serialize(self.0, s)
+                        }
+                    }
+                    serializer.serialize_some(&MapSer(map))
+                }
+            }
         }
     }
 
@@ -305,7 +353,11 @@ pub mod option_btreemap_bytes {
             }
         }
 
-        deserializer.deserialize_any(OptVisitor)
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_any(OptVisitor)
+        } else {
+            deserializer.deserialize_option(OptVisitor)
+        }
     }
 }
 
@@ -376,13 +428,30 @@ pub mod option_instance {
         match value {
             None => serializer.serialize_none(),
             Some((key, fence)) => {
-                // Preserve historical tuple shape `[key, fence]` for structure,
-                // with key as base64 string.
-                use serde::ser::SerializeTuple;
-                let mut t = serializer.serialize_tuple(2)?;
-                t.serialize_element(&B64.encode(key))?;
-                t.serialize_element(fence)?;
-                t.end()
+                if serializer.is_human_readable() {
+                    // Preserve historical tuple shape `[key, fence]` for structure,
+                    // with key as base64 string.
+                    use serde::ser::SerializeTuple;
+                    let mut t = serializer.serialize_tuple(2)?;
+                    t.serialize_element(&B64.encode(key))?;
+                    t.serialize_element(fence)?;
+                    t.end()
+                } else {
+                    struct PairSer<'a>(&'a [u8], u64);
+                    impl Serialize for PairSer<'_> {
+                        fn serialize<S2: Serializer>(
+                            &self,
+                            s: S2,
+                        ) -> Result<S2::Ok, S2::Error> {
+                            use serde::ser::SerializeTuple;
+                            let mut t = s.serialize_tuple(2)?;
+                            t.serialize_element(&BytesSer(self.0))?;
+                            t.serialize_element(&self.1)?;
+                            t.end()
+                        }
+                    }
+                    serializer.serialize_some(&PairSer(key.as_slice(), *fence))
+                }
             }
         }
     }
@@ -446,7 +515,11 @@ pub mod option_instance {
             }
         }
 
-        deserializer.deserialize_any(V)
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_any(V)
+        } else {
+            deserializer.deserialize_option(V)
+        }
     }
 }
 

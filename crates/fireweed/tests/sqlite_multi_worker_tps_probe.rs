@@ -22,10 +22,10 @@ use std::time::{Duration, Instant};
 
 use axon_esf::IndexDef;
 use fireweed::*;
-use fireweed_core::{IndexDeclaration, IndexType, QueueIndex, UtcTimestamp};
+use fireweed_core::{IndexDeclaration, IndexType, QueueIndex, TypedValue, UtcTimestamp};
 use fireweed_engine::PushSpec;
 use fireweed_memory::ManualClock;
-use serde_json::{Value as JsonValue, json};
+use std::collections::BTreeMap;
 
 const N_INDEXES: usize = 19;
 const PAYLOAD_BYTES: usize = 2300;
@@ -85,13 +85,17 @@ fn tmp_sqlite(tag: &str) -> String {
     path.to_string_lossy().into_owned()
 }
 
-fn entity_for(k: u64) -> JsonValue {
-    let mut entity = serde_json::Map::new();
-    entity.insert("f0".into(), json!(format!("k-{k}")));
+/// Native client-controllable index field values (no JSON entity on the log).
+fn index_fields_for(k: u64) -> BTreeMap<String, TypedValue> {
+    let mut fields = BTreeMap::new();
+    fields.insert("f0".into(), TypedValue::String(format!("k-{k}")));
     for i in 1..N_INDEXES {
-        entity.insert(format!("f{i}"), json!(format!("v{i}-{k}")));
+        fields.insert(
+            format!("f{i}"),
+            TypedValue::String(format!("v{i}-{k}")),
+        );
     }
-    JsonValue::Object(entity)
+    fields
 }
 
 async fn worker_loop(
@@ -115,7 +119,7 @@ async fn worker_loop(
                 let k = next_key;
                 next_key += 1;
                 PushSpec {
-                    entity: Some(entity_for(k)),
+                    index_fields: index_fields_for(k),
                     payload: Some(payload.clone()),
                     ..Default::default()
                 }
@@ -168,7 +172,7 @@ async fn measure_weight(workers: usize, run_tag: &str) -> WeightResult {
     let seed_total = CLAIM_BATCH * workers;
     let seed: Vec<NewItem> = (0..seed_total)
         .map(|i| NewItem {
-            entity: Some(entity_for(u64::MAX - i as u64)),
+            index_fields: index_fields_for(u64::MAX - i as u64),
             payload: Some(payload.clone()),
             ..Default::default()
         })

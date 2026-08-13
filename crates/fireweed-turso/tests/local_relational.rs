@@ -32,6 +32,7 @@ fn indexed_item(item_id: ItemId, key: &str, email: &str) -> PushItem {
         metadata: Metadata::default(),
         cohort_size: None,
         gate_keys: Vec::new(),
+        index_fields: Default::default(),
         entity_document: Some(serde_json::json!({ "email": email })),
     }
 }
@@ -406,6 +407,7 @@ fn cohort_item(item_id: ItemId, key: &str, group: &GroupKey, email: &str) -> Pus
         metadata: Metadata::default(),
         cohort_size: Some(2),
         gate_keys: vec!["capacity".to_string()],
+        index_fields: Default::default(),
         entity_document: Some(serde_json::json!({ "email": email })),
     }
 }
@@ -1685,6 +1687,7 @@ async fn filtered_item_selection_matches_sqlite_and_applies_limit_after_filters(
             metadata: west,
             cohort_size: None,
             gate_keys: Vec::new(),
+            index_fields: Default::default(),
             entity_document: None,
         },
         PushItem {
@@ -1699,6 +1702,7 @@ async fn filtered_item_selection_matches_sqlite_and_applies_limit_after_filters(
             metadata: east.clone(),
             cohort_size: None,
             gate_keys: Vec::new(),
+            index_fields: Default::default(),
             entity_document: None,
         },
         PushItem {
@@ -1713,6 +1717,7 @@ async fn filtered_item_selection_matches_sqlite_and_applies_limit_after_filters(
             metadata: east,
             cohort_size: None,
             gate_keys: Vec::new(),
+            index_fields: Default::default(),
             entity_document: None,
         },
     ];
@@ -1794,6 +1799,7 @@ async fn filtered_item_selection_crosses_page_boundary_and_matches_nested_values
             metadata,
             cohort_size: None,
             gate_keys: Vec::new(),
+            index_fields: Default::default(),
             entity_document: None,
         });
     }
@@ -1813,6 +1819,7 @@ async fn filtered_item_selection_crosses_page_boundary_and_matches_nested_values
         metadata,
         cohort_size: None,
         gate_keys: Vec::new(),
+        index_fields: Default::default(),
         entity_document: None,
     });
     apply_both_rich(
@@ -1857,6 +1864,7 @@ fn push_item(item_id: ItemId, key: &str, max_attempts: u32) -> PushItem {
         metadata: Metadata::default(),
         cohort_size: None,
         gate_keys: Vec::new(),
+        index_fields: Default::default(),
         entity_document: None,
     }
 }
@@ -1993,6 +2001,7 @@ async fn async_projection_matches_sqlite_for_push_claim_reads_and_frontier() {
             metadata: Metadata::default(),
             cohort_size: None,
             gate_keys: Vec::new(),
+            index_fields: Default::default(),
             entity_document: None,
         },
         PushItem {
@@ -2007,6 +2016,7 @@ async fn async_projection_matches_sqlite_for_push_claim_reads_and_frontier() {
             metadata: Metadata::default(),
             cohort_size: None,
             gate_keys: Vec::new(),
+            index_fields: Default::default(),
             entity_document: None,
         },
     ];

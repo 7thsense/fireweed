@@ -235,6 +235,7 @@ pub fn item_max(id: &str, key: &str, priority: i64, max_attempts: u32) -> PushIt
         metadata: Metadata::default(),
         cohort_size: None,
         gate_keys: Vec::new(),
+        index_fields: Default::default(),
         entity_document: None,
     }
 }

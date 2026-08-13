@@ -981,8 +981,13 @@ pub struct PushSpec {
     pub cohort_size: Option<u64>,
     /// Gate keys this item carries (BQ-14d) — see [`crate::PushItem::gate_keys`]. Empty for un-gated items.
     pub gate_keys: Vec<String>,
-    /// Typed JSON entity document (ADR-011). The canonical typed representation for schema-validated
-    /// typed queues. `None` for schema-less queues that use the opaque `payload` bytes carrier.
+    /// Native values for client-declared typed index fields (ADR-011).
+    /// Keys are field paths from `create_queue.typed_indexes`; values are [`fireweed_core::TypedValue`].
+    /// Prefer this over [`Self::entity`] for indexing — it is what the durable log stores.
+    pub index_fields: std::collections::BTreeMap<String, fireweed_core::TypedValue>,
+    /// Optional JSON entity (admission ergonomics / schema validation). Projected into
+    /// [`Self::index_fields`] at the admission boundary when indexes are declared; not required
+    /// for index keying on the durable path.
     pub entity: Option<serde_json::Value>,
 }
 

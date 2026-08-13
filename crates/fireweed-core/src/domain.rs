@@ -181,15 +181,27 @@ impl std::str::FromStr for ItemId {
 
 impl serde::Serialize for ItemId {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // String on the wire/log — avoids the JSON >2^53 number-precision footgun.
-        serializer.serialize_str(&self.0.to_string())
+        // JSON/human-readable: decimal string (avoids >2^53 number-precision footgun).
+        // Native binary codecs (postcard): packed u64 — zero encode tax on the hot path.
+        if serializer.is_human_readable() {
+            serializer.serialize_str(&self.0.to_string())
+        } else {
+            serializer.serialize_u64(self.0)
+        }
     }
 }
 
 impl<'de> serde::Deserialize<'de> for ItemId {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let s = <String as serde::Deserialize>::deserialize(deserializer)?;
-        s.parse().map_err(serde::de::Error::custom)
+        // Mirror serialize: human-readable → decimal string; binary → u64.
+        // `deserialize_any` is not available on non-self-describing formats (postcard).
+        if deserializer.is_human_readable() {
+            let s = <String as serde::Deserialize>::deserialize(deserializer)?;
+            s.parse().map_err(serde::de::Error::custom)
+        } else {
+            let raw = <u64 as serde::Deserialize>::deserialize(deserializer)?;
+            Ok(Self(raw))
+        }
     }
 }
 
@@ -331,30 +343,91 @@ impl serde::Serialize for Metadata {
 
 impl<'de> serde::Deserialize<'de> for Metadata {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        // Accept natural `{"k":…}` and legacy `{"entries":{…}}` (from older Object tags).
-        let value = serde_json::Value::deserialize(deserializer)?;
-        metadata_from_json_value(value).map_err(serde::de::Error::custom)
+        if deserializer.is_human_readable() {
+            // Accept natural `{"k":…}` and legacy `{"entries":{…}}` (from older Object tags).
+            let value = serde_json::Value::deserialize(deserializer)?;
+            metadata_from_json_value(value).map_err(serde::de::Error::custom)
+        } else {
+            // Native binary: map of tagged MetadataValue variants (no deserialize_any).
+            let entries = BTreeMap::<String, MetadataValue>::deserialize(deserializer)?;
+            Ok(Metadata::from_entries(entries))
+        }
+    }
+}
+
+/// Tagged wire form for native binary codecs (postcard rejects untagged/any).
+#[derive(serde::Serialize, serde::Deserialize)]
+enum MetadataValueWire {
+    Null,
+    Bool(bool),
+    Integer(i64),
+    Number(DecimalValue),
+    String(String),
+    Array(Vec<MetadataValueWire>),
+    Object(BTreeMap<String, MetadataValueWire>),
+}
+
+impl From<&MetadataValue> for MetadataValueWire {
+    fn from(v: &MetadataValue) -> Self {
+        match v {
+            MetadataValue::Null => Self::Null,
+            MetadataValue::Bool(b) => Self::Bool(*b),
+            MetadataValue::Integer(i) => Self::Integer(*i),
+            MetadataValue::Number(n) => Self::Number(n.clone()),
+            MetadataValue::String(s) => Self::String(s.clone()),
+            MetadataValue::Array(a) => Self::Array(a.iter().map(Self::from).collect()),
+            MetadataValue::Object(o) => Self::Object(
+                o.entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Self::from(v)))
+                    .collect(),
+            ),
+        }
+    }
+}
+
+impl From<MetadataValueWire> for MetadataValue {
+    fn from(v: MetadataValueWire) -> Self {
+        match v {
+            MetadataValueWire::Null => Self::Null,
+            MetadataValueWire::Bool(b) => Self::Bool(b),
+            MetadataValueWire::Integer(i) => Self::Integer(i),
+            MetadataValueWire::Number(n) => Self::Number(n),
+            MetadataValueWire::String(s) => Self::String(s),
+            MetadataValueWire::Array(a) => Self::Array(a.into_iter().map(Self::from).collect()),
+            MetadataValueWire::Object(o) => Self::Object(Metadata::from_entries(
+                o.into_iter().map(|(k, v)| (k, Self::from(v))).collect(),
+            )),
+        }
     }
 }
 
 impl serde::Serialize for MetadataValue {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            MetadataValue::Null => serializer.serialize_none(),
-            MetadataValue::Bool(v) => serializer.serialize_bool(*v),
-            MetadataValue::Integer(v) => serializer.serialize_i64(*v),
-            MetadataValue::Number(v) => v.serialize(serializer),
-            MetadataValue::String(v) => serializer.serialize_str(v),
-            MetadataValue::Array(v) => v.serialize(serializer),
-            MetadataValue::Object(v) => v.serialize(serializer),
+        if serializer.is_human_readable() {
+            match self {
+                MetadataValue::Null => serializer.serialize_none(),
+                MetadataValue::Bool(v) => serializer.serialize_bool(*v),
+                MetadataValue::Integer(v) => serializer.serialize_i64(*v),
+                MetadataValue::Number(v) => v.serialize(serializer),
+                MetadataValue::String(v) => serializer.serialize_str(v),
+                MetadataValue::Array(v) => v.serialize(serializer),
+                MetadataValue::Object(v) => v.serialize(serializer),
+            }
+        } else {
+            MetadataValueWire::from(self).serialize(serializer)
         }
     }
 }
 
 impl<'de> serde::Deserialize<'de> for MetadataValue {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        metadata_value_from_json(value).map_err(serde::de::Error::custom)
+        if deserializer.is_human_readable() {
+            let value = serde_json::Value::deserialize(deserializer)?;
+            metadata_value_from_json(value).map_err(serde::de::Error::custom)
+        } else {
+            Ok(MetadataValueWire::deserialize(deserializer)?.into())
+        }
     }
 }
 

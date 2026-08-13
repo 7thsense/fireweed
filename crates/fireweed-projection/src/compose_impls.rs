@@ -1190,6 +1190,7 @@ mod async_axis_tests {
                 metadata: east.clone(),
                 cohort_size: None,
                 gate_keys: Vec::new(),
+                index_fields: Default::default(),
                 entity_document: None,
             },
             PushItem {
@@ -1204,6 +1205,7 @@ mod async_axis_tests {
                 metadata: east,
                 cohort_size: None,
                 gate_keys: Vec::new(),
+                index_fields: Default::default(),
                 entity_document: None,
             },
             PushItem {
@@ -1218,6 +1220,7 @@ mod async_axis_tests {
                 metadata: west_md,
                 cohort_size: None,
                 gate_keys: Vec::new(),
+                index_fields: Default::default(),
                 entity_document: None,
             },
         ];

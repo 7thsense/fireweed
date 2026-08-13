@@ -750,6 +750,7 @@ pub(crate) fn export_projection_image_sql(
             fields: fields_from_json(fields)?,
             metadata: metadata_from_json(metadata)?,
             gate_keys: gate_keys_by_item.remove(&item_id).unwrap_or_default(),
+            index_fields: Default::default(),
             entity_document,
             state: parse_state(&lifecycle_state)?,
             item_version: item_version as u64,
