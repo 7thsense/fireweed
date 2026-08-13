@@ -125,6 +125,11 @@ path = "tests/sqlite_multi_worker_tps_probe.rs"
 required-features = ["sqlite"]
 
 [[test]]
+name = "sqlite_sqlite_projection_tps_probe"
+path = "tests/sqlite_sqlite_projection_tps_probe.rs"
+required-features = ["sqlite"]
+
+[[test]]
 name = "sqlite_log_group_commit_stress"
 path = "tests/sqlite_log_group_commit_stress.rs"
 required-features = ["sqlite"]

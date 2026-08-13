@@ -224,3 +224,40 @@ async fn composed_sqlite_relational_rejects_in_commit_duplicate_unique_key_and_r
 
     let _ = std::fs::remove_file(&path);
 }
+
+/// Native `index_fields` (no entity JSON) must populate `fireweed_item_index`.
+#[tokio::test]
+async fn native_index_fields_write_typed_index_rows() {
+    use fireweed_core::TypedValue;
+    use std::collections::BTreeMap;
+
+    let (log_path, proj_path) = unique_paths("native-idx");
+    let _ = std::fs::remove_file(&log_path);
+    let _ = std::fs::remove_file(&proj_path);
+    let backend =
+        fireweed_sqlite::composed_sqlite_log_sqlite_projection(&log_path, &proj_path).unwrap();
+    backend.create_queue(qdef_unique_email()).await.unwrap();
+    let ids = backend
+        .push(
+            &shard(),
+            vec![PushSpec {
+                index_fields: BTreeMap::from([(
+                    "email".into(),
+                    TypedValue::String("n@x".into()),
+                )]),
+                ..Default::default()
+            }],
+            ts(0),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(
+        count_index_rows(&proj_path),
+        1,
+        "native index_fields must land in fireweed_item_index"
+    );
+    let _ = std::fs::remove_file(&log_path);
+    let _ = std::fs::remove_file(&proj_path);
+}

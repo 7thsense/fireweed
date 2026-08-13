@@ -29,6 +29,9 @@ pub fn claim_by_query_replay_item_ids(raw: &str) -> EngineResult<Vec<ItemId>> {
 }
 
 pub fn fields_to_json(fields: &BTreeMap<String, Bytes>) -> EngineResult<String> {
+    if fields.is_empty() {
+        return Ok("{}".to_string());
+    }
     let raw: BTreeMap<&str, Vec<u8>> = fields
         .iter()
         .map(|(k, v)| (k.as_str(), v.to_vec()))
@@ -46,6 +49,9 @@ pub fn fields_from_json(raw: String) -> EngineResult<BTreeMap<String, Bytes>> {
 }
 
 pub fn metadata_to_json(metadata: &Metadata) -> EngineResult<String> {
+    if metadata.is_empty() {
+        return Ok("{}".to_string());
+    }
     to_json(&metadata.clone().into_inner())
 }
 

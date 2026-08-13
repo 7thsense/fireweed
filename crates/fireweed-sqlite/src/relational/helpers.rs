@@ -737,6 +737,18 @@ pub(crate) fn ensure_item_metadata_column(conn: &Connection) -> EngineResult<()>
     ensure_item_text_column(conn, "metadata", "{}")
 }
 
+pub(crate) fn ensure_item_index_fields_column(conn: &Connection) -> EngineResult<()> {
+    match conn.execute("ALTER TABLE fireweed_items ADD COLUMN index_fields BLOB", []) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
+            if msg.contains("duplicate column name") =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(EngineError::Storage(e.to_string())),
+    }
+}
+
 pub(crate) fn ensure_item_entity_document_column(conn: &Connection) -> EngineResult<()> {
     match conn.execute(
         "ALTER TABLE fireweed_items ADD COLUMN entity_document TEXT",
@@ -928,6 +940,33 @@ pub(crate) fn typed_index_keys_for_entity(
     Ok(out)
 }
 
+/// Prefer native [`PushItem::index_fields`]; fall back to entity JSON for pre-native rows.
+pub(crate) fn typed_index_keys_for_native(
+    typed_indexes: &[QueueIndex],
+    index_fields: &std::collections::BTreeMap<String, fireweed_core::TypedValue>,
+    entity: Option<&JsonValue>,
+) -> EngineResult<Vec<(String, Vec<u8>)>> {
+    if typed_indexes.is_empty() {
+        return Ok(vec![]);
+    }
+    if !index_fields.is_empty() {
+        let entity = fireweed_engine::index_fields::index_fields_as_entity(index_fields)?;
+        return typed_index_keys_for_entity(typed_indexes, Some(&entity));
+    }
+    typed_index_keys_for_entity(typed_indexes, entity)
+}
+
+pub(crate) fn typed_index_keys_for_push_item(
+    typed_indexes: &[QueueIndex],
+    item: &PushItem,
+) -> EngineResult<Vec<(String, Vec<u8>)>> {
+    typed_index_keys_for_native(
+        typed_indexes,
+        &item.index_fields,
+        item.entity_document.as_ref(),
+    )
+}
+
 pub(crate) fn index_is_unique(qi: &QueueIndex) -> bool {
     match &qi.declaration {
         IndexDeclaration::Single(def) => def.unique,
@@ -993,8 +1032,9 @@ pub(crate) fn insert_typed_index_rows(
     insert_typed_index_rows_batch(tx, t, q, &[(item_id.to_string(), keys.to_vec())])
 }
 
-const TYPED_INDEX_CHECK_CHUNK: usize = 299;
-const TYPED_INDEX_INSERT_CHUNK: usize = 190;
+// Item inserts already bind 10×1500 variables, so this SQLite is not the historical 999 cap.
+const TYPED_INDEX_CHECK_CHUNK: usize = 1_000;
+const TYPED_INDEX_INSERT_CHUNK: usize = 1_500;
 type TypedIndexKey = (String, Vec<u8>);
 type TypedIndexBatchItem = (String, Vec<TypedIndexKey>);
 
@@ -1056,17 +1096,21 @@ fn insert_typed_index_rows_batch(
     q: &str,
     items: &[TypedIndexBatchItem],
 ) -> EngineResult<()> {
-    let rows: Vec<_> = items
+    let mut rows: Vec<_> = items
         .iter()
         .flat_map(|(item_id, keys)| keys.iter().map(move |(name, key)| (item_id, name, key)))
         .collect();
+    // Insert in index/key order so B-tree leaf splits stay sequential.
+    rows.sort_unstable_by(|a, b| a.1.cmp(b.1).then_with(|| a.2.cmp(b.2)));
     for chunk in rows.chunks(TYPED_INDEX_INSERT_CHUNK) {
         let values = vec!["(?,?,?,?,?)"; chunk.len()].join(",");
         let mut parameters = Vec::with_capacity(chunk.len() * 5);
+        let tenant = Value::Text(t.to_string());
+        let queue = Value::Text(q.to_string());
         for (item_id, name, key) in chunk {
+            parameters.push(tenant.clone());
+            parameters.push(queue.clone());
             parameters.extend([
-                Value::Text(t.to_string()),
-                Value::Text(q.to_string()),
                 Value::Text((*name).clone()),
                 Value::Blob((*key).clone()),
                 Value::Text((*item_id).clone()),
@@ -1075,9 +1119,7 @@ fn insert_typed_index_rows_batch(
         st(tx.execute(
             &format!(
                 "INSERT INTO fireweed_item_index \
-                 (tenant_id,queue_id,index_name,index_key,item_id) VALUES {values} \
-                 ON CONFLICT(tenant_id,queue_id,index_name,item_id) DO UPDATE SET \
-                 index_key=excluded.index_key"
+                 (tenant_id,queue_id,index_name,index_key,item_id) VALUES {values}"
             ),
             params_from_iter(parameters.iter()),
         ))?;
@@ -1119,32 +1161,41 @@ pub(crate) fn maintain_typed_indexes_on_insert(
     if typed_indexes.is_empty() {
         return Ok(());
     }
+    // Durable SQL rows are paid per index. Unique indexes must be in SQLite for conflict
+    // checks; non-unique keys are derived from native index_fields and are not written
+    // on the apply hot path (snorri-shaped 19-index batches are otherwise 19× row inserts).
+    let unique_names: std::collections::HashSet<&str> = typed_indexes
+        .iter()
+        .filter(|index| index_is_unique(index))
+        .map(|index| index.name.as_str())
+        .collect();
     // Collect (item_id, keys) and enforce within-batch uniqueness in a single pass.
     let mut batch_unique: std::collections::HashMap<(String, Vec<u8>), String> =
         std::collections::HashMap::new();
     let mut item_keys: TypedIndexRows = Vec::with_capacity(items.len());
     for item in items {
-        let keys = typed_index_keys_for_entity(typed_indexes, item.entity_document.as_ref())?;
+        let keys = typed_index_keys_for_push_item(typed_indexes, item)?;
+        let id_str = item.item_id.to_string();
         // Within-batch: detect two items in the same push sharing a unique key.
         for (name, key) in &keys {
-            if typed_indexes
-                .iter()
-                .find(|qi| &qi.name == name)
-                .map(index_is_unique)
-                .unwrap_or(false)
-            {
+            if unique_names.contains(name.as_str()) {
                 let bk = (name.clone(), key.clone());
-                let id_str = item.item_id.to_string();
                 if let Some(prev) = batch_unique.get(&bk) {
                     if prev != &id_str {
                         return Err(EngineError::Conflict);
                     }
                 } else {
-                    batch_unique.insert(bk, id_str);
+                    batch_unique.insert(bk, id_str.clone());
                 }
             }
         }
-        item_keys.push((item.item_id.to_string(), keys));
+        let durable: Vec<_> = keys
+            .into_iter()
+            .filter(|(name, _)| unique_names.contains(name.as_str()))
+            .collect();
+        if !durable.is_empty() {
+            item_keys.push((id_str, durable));
+        }
     }
     check_typed_unique_conflicts_batch(tx, t, q, typed_indexes, &item_keys)?;
     insert_typed_index_rows_batch(tx, t, q, &item_keys)?;
@@ -1176,7 +1227,8 @@ pub(crate) fn validate_typed_unique_push(
         std::collections::HashMap::new();
     let mut item_keys: TypedIndexRows = Vec::with_capacity(items.len());
     for item in items {
-        let keys = typed_index_keys_for_entity(typed_indexes, item.entity_document.as_ref())?;
+        let keys = typed_index_keys_for_push_item(typed_indexes, item)?;
+        let id_str = item.item_id.to_string();
         // (a) Within-batch: two items in the SAME candidate batch (possibly from different commit entries)
         // sharing a unique key collide — this is the cross-entry duplicate apply enforces only at insert time.
         for (name, key) in &keys {
@@ -1187,17 +1239,16 @@ pub(crate) fn validate_typed_unique_push(
                 .unwrap_or(false)
             {
                 let bk = (name.clone(), key.clone());
-                let id_str = item.item_id.to_string();
                 if let Some(prev) = batch_unique.get(&bk) {
                     if prev != &id_str {
                         return Err(EngineError::Conflict);
                     }
                 } else {
-                    batch_unique.insert(bk, id_str);
+                    batch_unique.insert(bk, id_str.clone());
                 }
             }
         }
-        item_keys.push((item.item_id.to_string(), keys));
+        item_keys.push((id_str, keys));
     }
     check_typed_unique_conflicts_batch(&tx, &t, &q, typed_indexes, &item_keys)?;
     Ok(())

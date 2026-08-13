@@ -527,12 +527,14 @@ pub(crate) fn open_inner(conn: Connection) -> EngineResult<Inner> {
     // live_items / peek pages off the disk for recovery verification and hot claim paths; the projection
     // remains rebuildable from the durable log so a larger cache is not a durability claim.
     st(conn.execute_batch(
-        "PRAGMA journal_mode=WAL;\
+        "PRAGMA page_size=16384;\
+         PRAGMA journal_mode=WAL;\
          PRAGMA synchronous=NORMAL;\
          PRAGMA busy_timeout=5000;\
          PRAGMA cache_size=-262144;\
          PRAGMA temp_store=MEMORY;\
-         PRAGMA mmap_size=268435456;",
+         PRAGMA mmap_size=268435456;\
+         PRAGMA cache_spill=OFF;",
     ))?;
     st(conn.execute_batch(RELATIONAL_SCHEMA))?;
     backfill_id_high_water_once(&conn)?;
@@ -540,6 +542,7 @@ pub(crate) fn open_inner(conn: Connection) -> EngineResult<Inner> {
     ensure_item_fields_column(&conn)?;
     ensure_item_metadata_column(&conn)?;
     ensure_item_entity_document_column(&conn)?;
+    ensure_item_index_fields_column(&conn)?;
     ensure_item_terminal_command_epoch_column(&conn)?;
     ensure_cohort_lifecycle_columns(&conn)?;
     let mut inner = Inner {
@@ -669,7 +672,7 @@ pub(crate) fn export_projection_image_sql(
     let mut gate_keys_by_item = item_gate_key_map(conn, shard)?;
     let mut stmt = st(conn.prepare(
         "SELECT item_id,client_item_key,lifecycle_state,priority,not_before,eligible_since,group_key,cohort_size,payload,\
-         fields,metadata,entity_document,retry_count,item_version,lease_expires_at,worker_id,fenced,\
+         fields,metadata,entity_document,index_fields,retry_count,item_version,lease_expires_at,worker_id,fenced,\
          superseded,max_attempts,created_seq,terminal_at,terminal_command_epoch,last_command_sequence \
          FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 ORDER BY created_seq,item_id",
     ))?;
@@ -687,17 +690,18 @@ pub(crate) fn export_projection_image_sql(
             row.get::<_, String>(9)?,
             row.get::<_, String>(10)?,
             row.get::<_, Option<String>>(11)?,
-            row.get::<_, i64>(12)?,
+            row.get::<_, Option<Vec<u8>>>(12)?,
             row.get::<_, i64>(13)?,
-            row.get::<_, Option<i64>>(14)?,
-            row.get::<_, Option<String>>(15)?,
-            row.get::<_, i64>(16)?,
+            row.get::<_, i64>(14)?,
+            row.get::<_, Option<i64>>(15)?,
+            row.get::<_, Option<String>>(16)?,
             row.get::<_, i64>(17)?,
             row.get::<_, i64>(18)?,
             row.get::<_, i64>(19)?,
-            row.get::<_, Option<i64>>(20)?,
+            row.get::<_, i64>(20)?,
             row.get::<_, Option<i64>>(21)?,
-            row.get::<_, i64>(22)?,
+            row.get::<_, Option<i64>>(22)?,
+            row.get::<_, i64>(23)?,
         ))
     }))?;
     let mut items = Vec::new();
@@ -715,6 +719,7 @@ pub(crate) fn export_projection_image_sql(
             fields,
             metadata,
             entity_document,
+            index_fields_blob,
             retry_count,
             item_version,
             lease_expires_at,
@@ -731,6 +736,9 @@ pub(crate) fn export_projection_image_sql(
         let entity_document = entity_document
             .map(|raw| serde_json::from_str(&raw).map_err(|e| EngineError::Storage(e.to_string())))
             .transpose()?;
+        let index_fields = fireweed_engine::index_fields::decode_index_fields_blob(
+            index_fields_blob.as_deref(),
+        )?;
         let cohort_size = cohort_size.map(u64::try_from).transpose().map_err(|_| {
             EngineError::Storage("negative cohort_size in sqlite projection".into())
         })?;
@@ -750,7 +758,7 @@ pub(crate) fn export_projection_image_sql(
             fields: fields_from_json(fields)?,
             metadata: metadata_from_json(metadata)?,
             gate_keys: gate_keys_by_item.remove(&item_id).unwrap_or_default(),
-            index_fields: Default::default(),
+            index_fields,
             entity_document,
             state: parse_state(&lifecycle_state)?,
             item_version: item_version as u64,
@@ -983,6 +991,47 @@ pub(crate) fn apply_committed_batch_sql(
                 pos.queue.tenant_id.as_str(),
                 pos.queue.queue_id.as_str()
             )));
+        }
+
+        // Fuse Claim + Finalize(Complete) [+ following Push] in one UPDATE so we never
+        // materialize Leased / lease-index rows that the next command would delete.
+        if let QueueCommand::Claim(claim) = &env.command
+            && i + 1 < positions.len()
+            && positions[i + 1].queue == pos.queue
+            && positions[i + 1].sequence == pos.sequence.saturating_add(1)
+            && let QueueCommand::Finalize(fin) = &envelopes[i + 1].command
+            && finalize_completes_claim(claim, fin)
+        {
+            apply_fused_claim_complete_sql(
+                &tx,
+                claim_scan_hints,
+                claim_scan_default_fifo,
+                &mut token_ops,
+                &pos.queue,
+                &positions[i + 1],
+                envelopes[i + 1].created_at,
+                claim,
+            )?;
+            persist_request_outcome_sql(&tx, queues, &pos.queue, env, pos)?;
+            persist_request_outcome_sql(
+                &tx,
+                queues,
+                &positions[i + 1].queue,
+                &envelopes[i + 1],
+                &positions[i + 1],
+            )?;
+            let fin_seq = positions[i + 1].sequence as i64;
+            let new_next = fin_seq
+                .checked_add(1)
+                .ok_or_else(|| EngineError::Storage("command sequence overflow".into()))?;
+            next_seq.insert(pos.queue.clone(), new_next);
+            let e = positions[i + 1].backend_epoch as i64;
+            let slot = max_epoch.entry(pos.queue.clone()).or_insert(e);
+            if e > *slot {
+                *slot = e;
+            }
+            i += 2;
+            continue;
         }
 
         // Coalesce consecutive Push commands on this queue with contiguous sequences into one multi-row

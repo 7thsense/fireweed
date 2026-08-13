@@ -174,6 +174,28 @@ pub fn index_fields_as_entity(fields: &BTreeMap<String, TypedValue>) -> EngineRe
     Ok(Value::Object(map))
 }
 
+/// Compact durable blob for a native index-field map (sqlite projection item row).
+pub fn encode_index_fields_blob(
+    fields: &BTreeMap<String, TypedValue>,
+) -> EngineResult<Option<Vec<u8>>> {
+    if fields.is_empty() {
+        return Ok(None);
+    }
+    postcard::to_allocvec(fields)
+        .map(Some)
+        .map_err(|e| EngineError::Storage(format!("index_fields encode: {e}")))
+}
+
+pub fn decode_index_fields_blob(
+    blob: Option<&[u8]>,
+) -> EngineResult<BTreeMap<String, TypedValue>> {
+    match blob {
+        None | Some([]) => Ok(BTreeMap::new()),
+        Some(bytes) => postcard::from_bytes(bytes)
+            .map_err(|e| EngineError::Storage(format!("index_fields decode: {e}"))),
+    }
+}
+
 pub fn typed_value_to_json(value: &TypedValue) -> EngineResult<Value> {
     Ok(match value {
         TypedValue::String(v) => Value::String(v.clone()),

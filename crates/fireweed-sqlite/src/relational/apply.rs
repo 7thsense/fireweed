@@ -257,6 +257,11 @@ pub(crate) fn insert_item_specs(
         insert_default_empty_item_specs(tx, &t, &q, specs, base_seq)?;
         return Ok(());
     }
+    if homogeneous_now && items_only.iter().all(|item| is_payload_index_push_item(item)) {
+        insert_payload_index_item_specs(tx, &t, &q, specs, base_seq)?;
+        maintain_typed_indexes_on_insert(tx, &t, &q, typed_indexes, &items_only)?;
+        return Ok(());
+    }
     let mut rows: Vec<Vec<Value>> = Vec::with_capacity(specs.len());
     for (i, spec) in specs.iter().enumerate() {
         let item = spec.item;
@@ -277,6 +282,9 @@ pub(crate) fn insert_item_specs(
             Value::Text(fields_to_json(&item.fields)?),
             Value::Text(metadata_to_json(&item.metadata)?),
             opt_text(item.entity_document.as_ref().map(to_json).transpose()?),
+            opt_blob(fireweed_engine::index_fields::encode_index_fields_blob(
+                &item.index_fields,
+            )?),
             Value::Integer(spec.command_seq as i64),
             Value::Integer(now_n),
             Value::Integer(now_n),
@@ -285,13 +293,13 @@ pub(crate) fn insert_item_specs(
         ]);
     }
     const ROW_PH: &str =
-        "(?,?,?,?,'Pending',?,?,?,?,?,?,?,?,?,?,0,1,NULL,NULL,NULL,?,?,?,NULL,NULL,0,0,?,?)";
+        "(?,?,?,?,'Pending',?,?,?,?,?,?,?,?,?,?,?,0,1,NULL,NULL,NULL,?,?,?,NULL,NULL,0,0,?,?)";
     for chunk in rows.chunks(SQLITE_BATCH) {
         let values = vec![ROW_PH; chunk.len()].join(",");
         let sql = format!(
             "INSERT INTO fireweed_items \
              (tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
-              not_before,eligible_since,group_key,cohort_size,payload,fields,metadata,entity_document,retry_count,\
+              not_before,eligible_since,group_key,cohort_size,payload,fields,metadata,entity_document,index_fields,retry_count,\
               item_version,lease_token_hash,lease_expires_at,worker_id,last_command_sequence,created_at,\
               updated_at,terminal_at,terminal_command_epoch,fenced,superseded,max_attempts,created_seq) VALUES {values}"
         );
@@ -315,12 +323,16 @@ pub(crate) fn insert_item_specs(
 }
 
 pub(crate) fn is_default_empty_push_item(item: &PushItem) -> bool {
+    is_payload_index_push_item(item) && item.payload.is_none() && item.index_fields.is_empty()
+}
+
+/// Snorri / cycle shape: opaque payload + native index_fields, no entity/fields/metadata/gates.
+pub(crate) fn is_payload_index_push_item(item: &PushItem) -> bool {
     item.client_item_key.as_str() == item.item_id.to_string()
         && item.priority.is_none()
         && item.not_before.is_none()
         && item.group_key.is_none()
         && item.cohort_size.is_none()
-        && item.payload.is_none()
         && item.fields.is_empty()
         && item.metadata == Metadata::default()
         && item.gate_keys.is_empty()
@@ -354,6 +366,52 @@ pub(crate) fn insert_default_empty_item_specs(
             params.push(Value::Text(item_id.clone()));
             params.push(Value::Text(item_id));
             params.push(Value::Integer(now_n));
+            params.push(Value::Integer(spec.command_seq as i64));
+            params.push(Value::Integer(now_n));
+            params.push(Value::Integer(now_n));
+            params.push(Value::Integer(spec.item.max_attempts as i64));
+            params.push(Value::Integer(base_seq + offset as i64 + i as i64));
+        }
+        let mut stmt = st(tx.prepare_cached(&sql))?;
+        st(stmt.execute(params_from_iter(params.iter())))?;
+    }
+    Ok(())
+}
+
+/// Fast insert for payload + native index_fields items (no per-row JSON encode).
+pub(crate) fn insert_payload_index_item_specs(
+    tx: &Transaction<'_>,
+    t: &str,
+    q: &str,
+    specs: &[InsertItemSpec<'_>],
+    base_seq: i64,
+) -> EngineResult<()> {
+    const ROW_PH: &str = "(?,?,?,?,'Pending',NULL,X'01',NULL,?,NULL,NULL,?, '{}','{}',NULL,?,0,1,NULL,NULL,NULL,?,?,?,NULL,NULL,0,0,?,?)";
+    for (chunk_idx, chunk) in specs.chunks(SQLITE_BATCH).enumerate() {
+        let values = vec![ROW_PH; chunk.len()].join(",");
+        let sql = format!(
+            "INSERT INTO fireweed_items \
+             (tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
+              not_before,eligible_since,group_key,cohort_size,payload,fields,metadata,entity_document,index_fields,retry_count,\
+             item_version,lease_token_hash,lease_expires_at,worker_id,last_command_sequence,created_at,\
+              updated_at,terminal_at,terminal_command_epoch,fenced,superseded,max_attempts,created_seq) VALUES {values}"
+        );
+        let mut params = Vec::with_capacity(chunk.len() * 12);
+        let offset = chunk_idx * SQLITE_BATCH;
+        for (i, spec) in chunk.iter().enumerate() {
+            let now_n = ts_nanos(spec.now);
+            params.push(Value::Text(t.to_string()));
+            params.push(Value::Text(q.to_string()));
+            let item_id = spec.item.item_id.to_string();
+            params.push(Value::Text(item_id.clone()));
+            params.push(Value::Text(item_id));
+            params.push(Value::Integer(now_n));
+            params.push(opt_blob(
+                spec.item.payload.as_ref().map(|b| b.to_vec()),
+            ));
+            params.push(opt_blob(
+                fireweed_engine::index_fields::encode_index_fields_blob(&spec.item.index_fields)?,
+            ));
             params.push(Value::Integer(spec.command_seq as i64));
             params.push(Value::Integer(now_n));
             params.push(Value::Integer(now_n));
@@ -907,6 +965,106 @@ pub(crate) fn refresh_group_summaries(
           at_risk_count=excluded.at_risk_count, updated_at=excluded.updated_at",
         params![t, q, targets, now_n],
     ))?;
+    Ok(())
+}
+
+/// True when `finalize` is Complete for exactly `claim.item_ids` (same order not required).
+pub(crate) fn finalize_completes_claim(
+    claim: &fireweed_engine::ClaimCommand,
+    finalize: &FinalizeCommand,
+) -> bool {
+    if claim.item_ids.len() != finalize.outcomes.len() {
+        return false;
+    }
+    if !finalize
+        .outcomes
+        .iter()
+        .all(|o| matches!(o.kind, FinalizeKind::Complete))
+    {
+        return false;
+    }
+    let mut claimed: BTreeSet<ItemId> = claim.item_ids.iter().copied().collect();
+    for o in &finalize.outcomes {
+        if !claimed.remove(&o.item_id) {
+            return false;
+        }
+    }
+    claimed.is_empty()
+}
+
+/// One UPDATE: Pending → Complete with claim+finalize version accounting (retry+1, version+2).
+///
+/// Used when Claim + Finalize(Complete) share an apply batch so we never write Leased /
+/// lease-index rows that would be deleted in the next statement.
+pub(crate) fn apply_fused_claim_complete_sql(
+    tx: &Transaction<'_>,
+    claim_scan_hints: &mut HashMap<QueueKey, i64>,
+    claim_scan_default_fifo: &mut HashMap<QueueKey, bool>,
+    token_ops: &mut Vec<TokenOp>,
+    shard: &QueueKey,
+    finalize_position: &CommandPosition,
+    now: UtcTimestamp,
+    claim: &fireweed_engine::ClaimCommand,
+) -> EngineResult<()> {
+    let (t, q) = parts(shard);
+    let now_n = ts_nanos(now);
+    let ids: Vec<String> = claim.item_ids.iter().map(|i| i.to_string()).collect();
+    let seq = finalize_position.sequence as i64;
+    let epoch = finalize_position.backend_epoch as i64;
+    if claim_scan_default_fifo.get(shard).copied().unwrap_or(false)
+        && let Some((min_rowid, max_rowid)) =
+            fifo_rowid_range_for_id_strings(tx, shard, &ids, Some("Pending"))?
+    {
+        let changed = st(tx.execute(
+            "UPDATE fireweed_items SET lifecycle_state='Complete', lease_token_hash=NULL, \
+             lease_expires_at=NULL, worker_id=NULL, fenced=0, \
+             retry_count=retry_count+1, item_version=item_version+2, \
+             terminal_at=?1, terminal_command_epoch=?2, updated_at=?3, last_command_sequence=?4 \
+             WHERE tenant_id=?5 AND queue_id=?6 AND rowid BETWEEN ?7 AND ?8 \
+               AND lifecycle_state='Pending' AND superseded=0",
+            params![now_n, epoch, now_n, seq, t, q, min_rowid, max_rowid],
+        ))?;
+        if changed != ids.len() {
+            return Err(EngineError::Storage(
+                "fused claim+complete range update changed an unexpected row count".into(),
+            ));
+        }
+        let next = max_rowid
+            .checked_add(1)
+            .ok_or_else(|| EngineError::Storage("claim scan hint overflow".into()))?;
+        let slot = claim_scan_hints.entry(shard.clone()).or_insert(0);
+        if next > *slot {
+            *slot = next;
+        }
+    } else {
+        exec_items_in(
+            tx,
+            "UPDATE fireweed_items SET lifecycle_state='Complete', lease_token_hash=NULL, \
+             lease_expires_at=NULL, worker_id=NULL, fenced=0, \
+             retry_count=retry_count+1, item_version=item_version+2, \
+             terminal_at=?, terminal_command_epoch=?, updated_at=?, last_command_sequence=? \
+             WHERE tenant_id=? AND queue_id=? AND lifecycle_state='Pending' AND superseded=0 AND item_id IN",
+            &[
+                Value::Integer(now_n),
+                Value::Integer(epoch),
+                Value::Integer(now_n),
+                Value::Integer(seq),
+            ],
+            &t,
+            &q,
+            &ids,
+        )?;
+        advance_claim_scan_hint_for_ids(
+            tx,
+            claim_scan_hints,
+            claim_scan_default_fifo,
+            shard,
+            &claim.item_ids,
+        )?;
+    }
+    for id in &claim.item_ids {
+        token_ops.push(TokenOp::Clear(shard.clone(), *id));
+    }
     Ok(())
 }
 
@@ -1971,8 +2129,9 @@ pub(crate) fn apply_command_sql(
                         }
                         if !typed_indexes.is_empty() {
                             delete_typed_index_rows(tx, &t, &q, std::slice::from_ref(&item_id))?;
-                            let keys = typed_index_keys_for_entity(
+                            let keys = typed_index_keys_for_native(
                                 typed_indexes,
+                                &values.index_fields,
                                 values.entity_document.as_ref(),
                             )?;
                             check_typed_unique_conflicts(tx, &t, &q, typed_indexes, &keys, None)?;

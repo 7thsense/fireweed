@@ -6528,6 +6528,35 @@ pub fn open_sqlite_sqlite_projection(
     Ok(Fireweed::from_runtime(RuntimeCore::new(backend, clock)))
 }
 
+/// Same as [`open_sqlite_sqlite_projection`] plus the composed backend handle (cycle-API probes).
+#[doc(hidden)]
+#[cfg(feature = "sqlite")]
+pub fn open_sqlite_sqlite_projection_with_handle(
+    log_path: &str,
+    projection_path: &str,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<(
+    Fireweed,
+    Arc<
+        fireweed_engine::AsyncLogReplayBackend<
+            fireweed_sqlite::SqliteLog,
+            fireweed_sqlite::SqliteProjectionStore,
+        >,
+    >,
+)> {
+    if log_path == projection_path {
+        return Err(EngineError::Invalid(
+            "sqlite×sqlite requires distinct log_path and projection_path",
+        ));
+    }
+    let backend = Arc::new(fireweed_sqlite::composed_sqlite_log_sqlite_projection(
+        log_path,
+        projection_path,
+    )?);
+    let fw = Fireweed::from_runtime(RuntimeCore::new(Arc::clone(&backend), clock));
+    Ok((fw, backend))
+}
+
 /// Open a **sole-owner** Fireweed handle with a durable sqlite command log at `log_path` and a
 /// derived postgres relational projection at `projection_url` (Class A; distinct stores).
 ///

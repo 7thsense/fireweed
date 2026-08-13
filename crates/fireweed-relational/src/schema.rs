@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS fireweed_items (
     fields TEXT NOT NULL DEFAULT '{}',
     metadata TEXT NOT NULL DEFAULT '{}',
     entity_document TEXT,
+    -- Native typed index field map (postcard). Query indexes rebuild from this; unique
+    -- keys are also stored in fireweed_item_index for conflict checks.
+    index_fields BLOB,
     retry_count INTEGER NOT NULL DEFAULT 0,
     item_version INTEGER NOT NULL,
     lease_token_hash BLOB,
@@ -228,8 +231,9 @@ CREATE TABLE IF NOT EXISTS fireweed_item_index (
     item_id TEXT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, index_name, item_id)
 );
-CREATE INDEX IF NOT EXISTS fireweed_item_index_key_idx
-    ON fireweed_item_index (tenant_id, queue_id, index_name, index_key);
+-- Prefix lookups on (tenant, queue, index_name, index_key) use the ASC keyset
+-- index below. A separate key-only index doubled insert cost (19×batch rows).
+DROP INDEX IF EXISTS fireweed_item_index_key_idx;
 -- API-004 hot scans use `(index_key,item_id)` as their stable keyset.  Keep both
 -- physical directions because reversing an ASC index also reverses `item_id`, while
 -- the public cursor contract always uses item id ascending as its final tiebreaker.
