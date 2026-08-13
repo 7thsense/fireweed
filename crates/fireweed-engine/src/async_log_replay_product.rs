@@ -42,9 +42,9 @@ use crate::{
     QueueKey, QueueMetrics, RawCommitFault, RawCommitOutcome, RawCommitRequest,
     ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort,
     ReplacePendingCommand, RequestIdReplayProbe, RequestOutcome, SideRecordPage, SnapshotRef,
-    SnapshotStore, TerminalEmissionMetrics, TickReport, UnifiedAtomicCommit, UnifiedAtomicCommitter,
-    UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, WriteSideRecordsCommand,
-    batch_update_body_hash, build_push_items, claim_by_item_ids_body_hash,
+    SnapshotStore, TerminalEmissionMetrics, TickReport, UnifiedAtomicCommit,
+    UnifiedAtomicCommitter, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    WriteSideRecordsCommand, batch_update_body_hash, build_push_items, claim_by_item_ids_body_hash,
     claim_by_query_body_hash, commit_body_hash, compile_entity_schema, generate_query_lease_token,
     outcome_entry_from_recovery, plan_batch_update, stage_unique_push_keys,
     validate_api001_reserved_write_fields, validate_entity, validate_gate_push,
@@ -169,9 +169,7 @@ where
                 }
             });
             let definition = if needs_definition {
-                Some(
-                    AsyncControlPlane::queue_definition(control.as_ref(), shard.clone()).await?,
-                )
+                Some(AsyncControlPlane::queue_definition(control.as_ref(), shard.clone()).await?)
             } else {
                 None
             };
@@ -494,6 +492,200 @@ type ClaimByItemIdsIdempotency = Mutex<
 /// BatchUpdate request-id cache (API-001 ordered outcomes).
 type BatchUpdateIdempotency = Mutex<HashMap<QueueKey, QueueIdempotencyCache<BatchUpdateResponse>>>;
 
+/// Group-commit for [`AsyncLogReplayBackend::claim_finalize_push_cycle`].
+///
+/// Concurrent callers on one shard enqueue; one leader holds admit, selects once for the
+/// combined batch, and issues a single append+apply. One waiter (the w1 path) is one seal —
+/// no extra dispatcher hop. `seals < cycles` under load proves coalescing.
+struct CycleSealer {
+    inner: Mutex<CycleSealerState>,
+    seals: AtomicU64,
+    cycles: AtomicU64,
+}
+
+#[derive(Default)]
+struct CycleSealerState {
+    waiters: HashMap<QueueKey, Vec<CycleWaiter>>,
+    sealing: HashSet<QueueKey>,
+}
+
+struct CycleWaiter {
+    max_items: usize,
+    now: UtcTimestamp,
+    lease_expires_at: UtcTimestamp,
+    lease_token: LeaseToken,
+    claim_cid: CommandId,
+    fin_cid: CommandId,
+    push_cid: CommandId,
+    push_items: Vec<PushItem>,
+    push_ids: Vec<ItemId>,
+    reply: futures::channel::oneshot::Sender<EngineResult<usize>>,
+}
+
+impl CycleSealer {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(CycleSealerState::default()),
+            seals: AtomicU64::new(0),
+            cycles: AtomicU64::new(0),
+        }
+    }
+
+    /// Push `waiter` and return whether this caller should lead the next seal.
+    fn enqueue(&self, shard: QueueKey, waiter: CycleWaiter) -> bool {
+        let mut g = self.inner.lock().expect("cycle sealer poisoned");
+        g.waiters.entry(shard.clone()).or_default().push(waiter);
+        g.sealing.insert(shard)
+    }
+
+    /// Take every waiter for `shard`, or release the sealing bit when none remain.
+    fn take_batch_or_release(&self, shard: &QueueKey) -> Option<Vec<CycleWaiter>> {
+        let mut g = self.inner.lock().expect("cycle sealer poisoned");
+        match g.waiters.remove(shard) {
+            Some(batch) if !batch.is_empty() => Some(batch),
+            _ => {
+                g.sealing.remove(shard);
+                None
+            }
+        }
+    }
+
+    fn abort_shard(&self, shard: &QueueKey, err: EngineError) {
+        let waiters = {
+            let mut g = self.inner.lock().expect("cycle sealer poisoned");
+            g.sealing.remove(shard);
+            g.waiters.remove(shard).unwrap_or_default()
+        };
+        for waiter in waiters {
+            let _ = waiter.reply.send(Err(err.clone()));
+        }
+    }
+
+    fn record_seal(&self, cycles: u64) {
+        self.seals.fetch_add(1, Ordering::Relaxed);
+        self.cycles.fetch_add(cycles, Ordering::Relaxed);
+    }
+
+    fn stats(&self) -> (u64, u64) {
+        (
+            self.seals.load(Ordering::Relaxed),
+            self.cycles.load(Ordering::Relaxed),
+        )
+    }
+}
+
+async fn seal_cycle_waiters<S, P>(
+    projection: &InProcessProjectionStore<P>,
+    strategy: &S,
+    shard: &QueueKey,
+    epoch: u64,
+    batch: Vec<CycleWaiter>,
+) -> EngineResult<()>
+where
+    S: AsyncCommitStrategy<Request = RawCommitRequest, Output = EngineResult<RawCommitOutcome>>,
+    P: ProjectionStore + Send + 'static,
+{
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let total: usize = batch.iter().map(|w| w.max_items).sum();
+    let now = batch[0].now;
+    let all_ids = match projection
+        .eligible_candidates(shard.clone(), now, total)
+        .await
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            for waiter in batch {
+                let _ = waiter.reply.send(Err(e.clone()));
+            }
+            return Err(e);
+        }
+    };
+    let mut offset = 0usize;
+    let mut envelopes = Vec::with_capacity(batch.len().saturating_mul(3));
+    let mut replies = Vec::with_capacity(batch.len());
+    for mut waiter in batch {
+        let take = waiter.max_items.min(all_ids.len().saturating_sub(offset));
+        let item_ids = all_ids[offset..offset + take].to_vec();
+        offset += take;
+        if item_ids.is_empty() {
+            replies.push((waiter.reply, 0usize));
+            continue;
+        }
+        let n = item_ids.len();
+        if n > waiter.push_items.len() {
+            let err = EngineError::Invalid(
+                "claim_finalize_push_cycle: claimed more than prepared lifecycle",
+            );
+            let _ = waiter.reply.send(Err(err.clone()));
+            for (reply, _) in replies {
+                let _ = reply.send(Err(err.clone()));
+            }
+            return Err(err);
+        }
+        waiter.push_items.truncate(n);
+        waiter.push_ids.truncate(n);
+        envelopes.push(CommandEnvelope {
+            command_id: waiter.claim_cid,
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: item_ids.clone(),
+            command: QueueCommand::Claim(ClaimCommand {
+                item_ids: item_ids.clone(),
+                lease_token: waiter.lease_token,
+                lease_expires_at: waiter.lease_expires_at,
+                worker_id: None,
+            }),
+            checksum: CommandChecksum(0),
+            created_at: waiter.now,
+        });
+        let outcomes: Vec<FinalizeOutcome> = item_ids
+            .iter()
+            .map(|id| FinalizeOutcome::new(*id, FinalizeKind::Complete))
+            .collect();
+        envelopes.push(CommandEnvelope {
+            command_id: waiter.fin_cid,
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: item_ids.clone(),
+            command: QueueCommand::Finalize(FinalizeCommand { outcomes }),
+            checksum: CommandChecksum(0),
+            created_at: waiter.now,
+        });
+        envelopes.push(CommandEnvelope {
+            command_id: waiter.push_cid,
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: waiter.push_ids,
+            command: QueueCommand::Push(PushCommand {
+                items: waiter.push_items,
+            }),
+            checksum: CommandChecksum(0),
+            created_at: waiter.now,
+        });
+        replies.push((waiter.reply, n));
+    }
+    if !envelopes.is_empty() {
+        if let Err(e) = strategy
+            .commit(RawCommitRequest::new(shard.clone(), envelopes, epoch))
+            .await
+        {
+            for (reply, _) in replies {
+                let _ = reply.send(Err(e.clone()));
+            }
+            return Err(e);
+        }
+    }
+    for (reply, n) in replies {
+        let _ = reply.send(Ok(n));
+    }
+    Ok(())
+}
+
 /// Atomic async log-replay product: full product ports over any log × projection axes.
 pub struct AsyncLogReplayBackend<L, P>
 where
@@ -514,6 +706,7 @@ where
     commit_idempotency:
         Arc<Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<crate::EntryRecovery>>>>>,
     fault_hook: ComposeFaultHookSlot,
+    cycle_sealer: Arc<CycleSealer>,
 }
 
 /// Assemble a fresh async log-replay product over the given axes (no recovery).
@@ -758,6 +951,7 @@ where
         batch_update_idempotency,
         commit_idempotency,
         fault_hook,
+        cycle_sealer: Arc::new(CycleSealer::new()),
     })
 }
 
@@ -825,6 +1019,12 @@ where
     /// Under concurrent load `seals < appends` proves coalescing (fireweed-2a564ff7).
     pub fn log_group_commit_stats(&self) -> Option<(u64, u64)> {
         self.log.group_commit_stats()
+    }
+
+    /// Cycle group-commit stats: `(seals, cycles)`. `seals < cycles` means concurrent
+    /// `claim_finalize_push_cycle` callers coalesced into fewer append+apply operations.
+    pub fn cycle_group_commit_stats(&self) -> (u64, u64) {
+        self.cycle_sealer.stats()
     }
 
     /// Zero group-commit counters for a measurement window.
@@ -1569,9 +1769,10 @@ where
     /// Claim up to `lifecycle.len()` pending items, finalize them `Complete`, and push
     /// `lifecycle` as replacements in **one** durable seal (one FULL fsync).
     ///
-    /// Worker loops that would otherwise `claim` then `commit_transition` pay two seals; this
-    /// packs Claim + Finalize + Push into a single `strategy.commit` under one admit permit
-    /// (10k-tps campaign). Returns the number of items cycled (0 if the queue was empty).
+    /// Concurrent callers on the same shard coalesce into one select + one `strategy.commit`
+    /// so multi-worker loops share a seal instead of serializing admit-through-apply.
+    /// A single waiter is still one commit (no extra dispatcher hop). Returns the number
+    /// of items cycled (0 if the queue was empty).
     pub async fn claim_finalize_push_cycle(
         &self,
         shard: QueueKey,
@@ -1587,20 +1788,18 @@ where
         let definition =
             AsyncControlPlane::queue_definition(self.control.as_ref(), shard.clone()).await?;
         if max_items > definition.max_claim_batch_size as usize {
-            return Err(EngineError::Invalid("claim_finalize_push_cycle batch too large"));
+            return Err(EngineError::Invalid(
+                "claim_finalize_push_cycle batch too large",
+            ));
         }
         if lease_duration_ms == 0 || lease_duration_ms > definition.max_lease_duration_ms {
             return Err(EngineError::Invalid("invalid lease_duration_ms"));
         }
         let max_attempts = definition.retry_policy.max_attempts;
         let epoch = self.resolve_epoch(&shard, expected_epoch).await?;
-        let strategy = self.engine.commit_strategy();
-        let projection = Arc::clone(&self.projection);
-        let ids = Arc::clone(&self.ids);
-        let counters = Arc::clone(&self.counters);
-        let node_id = self.node_id;
         let lease_expires_at = UtcTimestamp::new(
-            now.seconds.saturating_add((lease_duration_ms / 1000) as i64),
+            now.seconds
+                .saturating_add((lease_duration_ms / 1000) as i64),
             now.nanoseconds
                 .saturating_add(((lease_duration_ms % 1000) as u32).saturating_mul(1_000_000))
                 % 1_000_000_000,
@@ -1608,81 +1807,76 @@ where
         .unwrap_or(now);
 
         // --- off-permit: id mint + native index_fields materialization ---
-        let counter_base = counters.reserve(&shard, epoch, max_items as u32);
-        let (mut push_items, mut push_ids) =
-            build_push_items(lifecycle, epoch, node_id, counter_base, max_attempts);
+        let counter_base = self.counters.reserve(&shard, epoch, max_items as u32);
+        let (mut push_items, push_ids) =
+            build_push_items(lifecycle, epoch, self.node_id, counter_base, max_attempts);
         crate::admit_push_items_indexes(&definition, &mut push_items)?;
         let lease_token = generate_query_lease_token()?;
-        let claim_cid = ids.next_command_id();
-        let fin_cid = ids.next_command_id();
-        let push_cid = ids.next_command_id();
+        let claim_cid = self.ids.next_command_id();
+        let fin_cid = self.ids.next_command_id();
+        let push_cid = self.ids.next_command_id();
 
-        self.engine
-            .submit_operation(shard.clone(), move || {
-                Box::pin(async move {
-                    let item_ids = projection
-                        .eligible_candidates(shard.clone(), now, max_items)
-                        .await?;
-                    if item_ids.is_empty() {
-                        return Ok(0usize);
-                    }
-                    let n = item_ids.len();
-                    if n > push_items.len() {
-                        return Err(EngineError::Invalid(
-                            "claim_finalize_push_cycle: claimed more than prepared lifecycle",
-                        ));
-                    }
-                    push_items.truncate(n);
-                    push_ids.truncate(n);
-
-                    let mut envelopes = Vec::with_capacity(3);
-                    envelopes.push(CommandEnvelope {
-                        command_id: claim_cid,
-                        request_id: None,
-                        request_fingerprint: None,
-                        request_outcome: None,
-                        item_ids: item_ids.clone(),
-                        command: QueueCommand::Claim(ClaimCommand {
-                            item_ids: item_ids.clone(),
-                            lease_token,
-                            lease_expires_at,
-                            worker_id: None,
-                        }),
-                        checksum: CommandChecksum(0),
-                        created_at: now,
-                    });
-                    let outcomes: Vec<FinalizeOutcome> = item_ids
-                        .iter()
-                        .map(|id| FinalizeOutcome::new(*id, FinalizeKind::Complete))
-                        .collect();
-                    envelopes.push(CommandEnvelope {
-                        command_id: fin_cid,
-                        request_id: None,
-                        request_fingerprint: None,
-                        request_outcome: None,
-                        item_ids: item_ids.clone(),
-                        command: QueueCommand::Finalize(FinalizeCommand { outcomes }),
-                        checksum: CommandChecksum(0),
-                        created_at: now,
-                    });
-                    envelopes.push(CommandEnvelope {
-                        command_id: push_cid,
-                        request_id: None,
-                        request_fingerprint: None,
-                        request_outcome: None,
-                        item_ids: push_ids,
-                        command: QueueCommand::Push(PushCommand { items: push_items }),
-                        checksum: CommandChecksum(0),
-                        created_at: now,
-                    });
-                    strategy
-                        .commit(RawCommitRequest::new(shard, envelopes, epoch))
-                        .await?;
-                    Ok(n)
+        let (tx, rx) = futures::channel::oneshot::channel();
+        let lead = self.cycle_sealer.enqueue(
+            shard.clone(),
+            CycleWaiter {
+                max_items,
+                now,
+                lease_expires_at,
+                lease_token,
+                claim_cid,
+                fin_cid,
+                push_cid,
+                push_items,
+                push_ids,
+                reply: tx,
+            },
+        );
+        if lead {
+            let sealer = Arc::clone(&self.cycle_sealer);
+            let strategy = self.engine.commit_strategy();
+            let projection = Arc::clone(&self.projection);
+            let shard_lead = shard.clone();
+            let submit = self
+                .engine
+                .submit_operation(shard.clone(), move || {
+                    Box::pin(async move {
+                        loop {
+                            let Some(batch) = sealer.take_batch_or_release(&shard_lead) else {
+                                return Ok(());
+                            };
+                            let n = batch.len() as u64;
+                            match seal_cycle_waiters(
+                                projection.as_ref(),
+                                strategy.as_ref(),
+                                &shard_lead,
+                                epoch,
+                                batch,
+                            )
+                            .await
+                            {
+                                Ok(()) => sealer.record_seal(n),
+                                Err(e) => {
+                                    sealer.abort_shard(&shard_lead, e.clone());
+                                    return Err(e);
+                                }
+                            }
+                        }
+                    })
                 })
-            })
-            .await
-            .map_err(|e| EngineError::Storage(format!("claim_finalize_push_cycle failed: {e:?}")))?
+                .await;
+            if let Err(e) = submit {
+                self.cycle_sealer.abort_shard(
+                    &shard,
+                    EngineError::Storage(format!("claim_finalize_push_cycle failed: {e:?}")),
+                );
+            }
+        }
+        rx.await.unwrap_or_else(|_| {
+            Err(EngineError::Storage(
+                "claim_finalize_push_cycle: sealer dropped".into(),
+            ))
+        })
     }
 }
 
@@ -3845,7 +4039,10 @@ where
                                 skip: prep.early_reject.is_some(),
                                 claim_refs: prep.claim_refs.clone(),
                                 fence: prep.instance_fence.clone(),
-                                push_items: prep.push_items.as_ref().map(|(items, _)| Arc::clone(items)),
+                                push_items: prep
+                                    .push_items
+                                    .as_ref()
+                                    .map(|(items, _)| Arc::clone(items)),
                             })
                             .collect();
 
@@ -3884,8 +4081,7 @@ where
                                                     )?
                                                     .unwrap_or(0),
                                                 };
-                                            if let Err(e) = validate_instance_fence(stored, fence)
-                                            {
+                                            if let Err(e) = validate_instance_fence(stored, fence) {
                                                 results.push(Some(e));
                                                 continue;
                                             }
@@ -3919,8 +4115,7 @@ where
                             })
                             .await?;
 
-                        let mut recovery: Vec<EntryRecovery> =
-                            Vec::with_capacity(prepared.len());
+                        let mut recovery: Vec<EntryRecovery> = Vec::with_capacity(prepared.len());
                         let mut committed_envelopes: Vec<CommandEnvelope> = Vec::new();
                         let mk_env =
                             |command: QueueCommand, item_ids: Vec<ItemId>| CommandEnvelope {
@@ -3982,8 +4177,7 @@ where
                                 all_push_ids.extend(push_ids);
                             }
                             for c in &prep.claim_refs {
-                                all_finalize
-                                    .push(FinalizeOutcome::new(c.item_id, prep.finalize));
+                                all_finalize.push(FinalizeOutcome::new(c.item_id, prep.finalize));
                                 all_finalize_ids.push(c.item_id);
                             }
                             recovery.push(EntryRecovery {

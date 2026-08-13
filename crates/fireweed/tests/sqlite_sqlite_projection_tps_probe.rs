@@ -5,6 +5,7 @@
 //! [`SqliteProjectionStore`] instead of `InMemoryProjection`.
 //!
 //! **Goal:** ~13k durable tps (same as sqlite × memory on this shape).
+//! **Concurrency goal:** w8 ≈ w1 (~12k) — workers share a cycle seal, not 8× serial apply.
 //!
 //! ```text
 //! cargo test -p fireweed --test sqlite_sqlite_projection_tps_probe --release --features sqlite \
@@ -137,6 +138,8 @@ struct WeightResult {
     workers: usize,
     wall: Duration,
     committed: usize,
+    seals: u64,
+    cycles: u64,
 }
 
 impl WeightResult {
@@ -201,6 +204,7 @@ async fn measure_weight(workers: usize, run_tag: &str) -> WeightResult {
     }
     let wall = start.elapsed();
     assert_eq!(total_committed, TOTAL_ENTRIES);
+    let (seals, cycles) = backend.cycle_group_commit_stats();
 
     let _ = std::fs::remove_file(&log);
     let _ = std::fs::remove_file(&proj);
@@ -208,6 +212,8 @@ async fn measure_weight(workers: usize, run_tag: &str) -> WeightResult {
         workers,
         wall,
         committed: total_committed,
+        seals,
+        cycles,
     }
 }
 
@@ -216,7 +222,7 @@ async fn sqlite_sqlite_projection_durable_tps_ladder() {
     eprintln!(
         "=== multi-worker durable tps (open_sqlite_sqlite_projection, snorri-shaped, 19 idx, ~2.3KB) ==="
     );
-    eprintln!("workers\tcommitted\twall_s\tms/entry\tdurable_tps");
+    eprintln!("workers\tcommitted\twall_s\tms/entry\tdurable_tps\tseals\tcycles");
     let mut results = Vec::new();
     for workers in [1usize, 4, 8] {
         let mut best: Option<WeightResult> = None;
@@ -230,22 +236,32 @@ async fn sqlite_sqlite_projection_durable_tps_ladder() {
         }
         let r = best.expect("measured");
         eprintln!(
-            "{}\t{}\t{:.3}\t{:.4}\t{:.0}",
+            "{}\t{}\t{:.3}\t{:.4}\t{:.0}\t{}\t{}",
             r.workers,
             r.committed,
             r.wall.as_secs_f64(),
             r.ms_per_entry(),
             r.durable_tps(),
+            r.seals,
+            r.cycles,
         );
         results.push(r);
     }
     let w1 = &results[0];
+    let w8 = &results[2];
     eprintln!(
-        "SCOREBOARD sqlite×sqlite w1_tps={:.0} w4_tps={:.0} w8_tps={:.0}",
+        "SCOREBOARD sqlite×sqlite w1_tps={:.0} w4_tps={:.0} w8_tps={:.0} w8/w1={:.2}  goal=w8≈w1",
         w1.durable_tps(),
         results[1].durable_tps(),
-        results[2].durable_tps(),
+        w8.durable_tps(),
+        w8.durable_tps() / w1.durable_tps().max(1.0),
     );
     assert!(w1.durable_tps() > 50.0, "w=1 should clear 50 tps");
-    assert!(results[2].committed == TOTAL_ENTRIES);
+    assert!(w8.committed == TOTAL_ENTRIES);
+    assert!(
+        w8.durable_tps() >= w1.durable_tps() * 0.85,
+        "concurrency collapse: w8 {:.0} < 85% of w1 {:.0}",
+        w8.durable_tps(),
+        w1.durable_tps()
+    );
 }
