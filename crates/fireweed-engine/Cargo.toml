@@ -25,6 +25,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Native durable command-envelope codec (product log path): 0 Base64, ItemId as u64, payload as blob.
 postcard = { version = "1", default-features = false, features = ["alloc", "use-std"] }
+serde_path_to_error = "0.1"
 # Owned-task inline dispatcher (tests + in-process async composition) drives factories to completion.
 futures = "0.3"
 

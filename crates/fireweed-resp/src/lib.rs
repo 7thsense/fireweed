@@ -1029,6 +1029,7 @@ fn parse_xadd(args: &[Vec<u8>]) -> Result<ParsedXadd, Resp> {
             cohort_size: None,
             gate_keys: Vec::new(),
             entity: None,
+            index_fields: Default::default(),
         },
     })
 }

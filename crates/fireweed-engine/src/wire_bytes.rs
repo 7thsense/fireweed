@@ -459,7 +459,9 @@ pub mod option_instance {
     pub fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Option<(Vec<u8>, u64)>, D::Error> {
-        struct V;
+        struct V {
+            human: bool,
+        }
 
         impl<'de> Visitor<'de> for V {
             type Value = Option<(Vec<u8>, u64)>;
@@ -477,6 +479,17 @@ pub mod option_instance {
             }
 
             fn visit_some<D2: Deserializer<'de>>(self, d: D2) -> Result<Self::Value, D2::Error> {
+                #[derive(Deserialize)]
+                struct WireTuple(
+                    #[serde(deserialize_with = "deserialize_raw_bytes")] Vec<u8>,
+                    u64,
+                );
+                if !self.human {
+                    // Native binary is always the tuple layout; untagged fallback would
+                    // buffer through `deserialize_any`, which postcard rejects.
+                    let WireTuple(k, f) = WireTuple::deserialize(d)?;
+                    return Ok(Some((k, f)));
+                }
                 // Prefer tuple; fall back to object.
                 #[derive(Deserialize)]
                 #[serde(untagged)]
@@ -484,11 +497,6 @@ pub mod option_instance {
                     Tuple(WireTuple),
                     Object(WireOwned),
                 }
-                #[derive(Deserialize)]
-                struct WireTuple(
-                    #[serde(deserialize_with = "deserialize_raw_bytes")] Vec<u8>,
-                    u64,
-                );
                 match Forms::deserialize(d)? {
                     Forms::Tuple(WireTuple(k, f)) => Ok(Some((k, f))),
                     Forms::Object(WireOwned { key, fence }) => Ok(Some((key, fence))),
@@ -516,9 +524,9 @@ pub mod option_instance {
         }
 
         if deserializer.is_human_readable() {
-            deserializer.deserialize_any(V)
+            deserializer.deserialize_any(V { human: true })
         } else {
-            deserializer.deserialize_option(V)
+            deserializer.deserialize_option(V { human: false })
         }
     }
 }

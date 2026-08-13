@@ -91,8 +91,17 @@ pub fn json_to_typed_value(value: &Value, index_type: &IndexType) -> EngineResul
                         })?,
                     ));
                 }
-                Err(EngineError::Invalid(
-                    "typed index datetime string must be epoch seconds",
+                let nanos = axon_esf::coerce_datetime_nanos(value).map_err(|_| {
+                    EngineError::Invalid(
+                        "typed index datetime string must be RFC 3339 or epoch seconds",
+                    )
+                })?;
+                Ok(TypedValue::DateTime(
+                    UtcTimestamp::new(
+                        nanos.div_euclid(1_000_000_000),
+                        u32::try_from(nanos.rem_euclid(1_000_000_000)).expect("rem < 1e9"),
+                    )
+                    .map_err(|_| EngineError::Invalid("typed index datetime out of range"))?,
                 ))
             }
             Value::Number(n) => {
@@ -196,6 +205,32 @@ pub fn decode_index_fields_blob(
     }
 }
 
+/// True when an admitted item's entity document is fully represented by its materialized
+/// index fields, i.e. dropping it from the durable row loses nothing.
+///
+/// The claim path echoes the entity document to consumers (contract since v0.31.0), and
+/// consumers may treat it as the authoritative item representation — so admission must
+/// only drop it when the synthesized index-field document is byte-equivalent.
+pub fn entity_fully_indexed(
+    definition: &fireweed_core::QueueDefinition,
+    index_fields: &BTreeMap<String, TypedValue>,
+    entity: Option<&Value>,
+) -> bool {
+    if definition.typed_indexes.is_empty()
+        || index_fields.is_empty()
+        || definition.entity_schema.is_some()
+    {
+        return false;
+    }
+    let Some(doc) = entity else {
+        return false;
+    };
+    match index_fields_as_entity(index_fields) {
+        Ok(synth) => *doc == synth,
+        Err(_) => false,
+    }
+}
+
 pub fn typed_value_to_json(value: &TypedValue) -> EngineResult<Value> {
     Ok(match value {
         TypedValue::String(v) => Value::String(v.clone()),
@@ -204,7 +239,16 @@ pub fn typed_value_to_json(value: &TypedValue) -> EngineResult<Value> {
             EngineError::Invalid("typed index float is not finite"),
         )?),
         TypedValue::Bool(v) => Value::Bool(*v),
-        TypedValue::DateTime(v) => Value::Number(v.seconds.into()),
+        // Axon's canonical numeric-datetime unit is epoch NANOS (`coerce_datetime_nanos`);
+        // emitting seconds here would shift every datetime key by 1e9.
+        TypedValue::DateTime(v) => {
+            let nanos = v
+                .seconds
+                .checked_mul(1_000_000_000)
+                .and_then(|n| n.checked_add(i64::from(v.nanoseconds)))
+                .ok_or(EngineError::Invalid("typed index datetime out of range"))?;
+            Value::Number(nanos.into())
+        }
     })
 }
 

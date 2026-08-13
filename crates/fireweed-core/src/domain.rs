@@ -816,7 +816,52 @@ pub struct QueueIndex {
     /// Unique index name within the queue (the query handle).
     pub name: String,
     /// The ESF typed index declaration — single-field or compound.
+    #[serde(with = "index_declaration_wire")]
     pub declaration: IndexDeclaration,
+}
+
+/// Tagged wire form of [`IndexDeclaration`] for native binary codecs.
+///
+/// Axon's own serde is JSON-shaped: untagged on serialize, `deserialize_any` on deserialize.
+/// Postcard (FWC1) rejects both, so native paths carry this explicit tag and human-readable
+/// paths keep axon's natural JSON form unchanged.
+#[derive(serde::Serialize, serde::Deserialize)]
+enum IndexDeclarationWire {
+    Single(IndexDef),
+    Compound(CompoundIndexDef),
+}
+
+mod index_declaration_wire {
+    use super::{IndexDeclaration, IndexDeclarationWire};
+    use serde::{Deserialize, Serialize};
+
+    pub fn serialize<S: serde::Serializer>(
+        value: &IndexDeclaration,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            value.serialize(serializer)
+        } else {
+            match value {
+                IndexDeclaration::Single(def) => IndexDeclarationWire::Single(def.clone()),
+                IndexDeclaration::Compound(def) => IndexDeclarationWire::Compound(def.clone()),
+            }
+            .serialize(serializer)
+        }
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<IndexDeclaration, D::Error> {
+        if deserializer.is_human_readable() {
+            IndexDeclaration::deserialize(deserializer)
+        } else {
+            Ok(match IndexDeclarationWire::deserialize(deserializer)? {
+                IndexDeclarationWire::Single(def) => IndexDeclaration::Single(def),
+                IndexDeclarationWire::Compound(def) => IndexDeclaration::Compound(def),
+            })
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

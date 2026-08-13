@@ -1067,12 +1067,7 @@ fn validate_push_plan(
             .zip(&requested.items)
             .zip(item_ids)
             .any(|((planned, spec), item_id)| {
-                !push_item_matches(
-                    planned,
-                    spec,
-                    *item_id,
-                    definition.retry_policy.max_attempts,
-                )
+                !push_item_matches(planned, spec, *item_id, definition)
             })
     {
         return Err(EngineError::Invalid("invalid async push plan"));
@@ -1084,24 +1079,45 @@ fn push_item_matches(
     planned: &PushItem,
     spec: &PushSpec,
     item_id: ItemId,
-    max_attempts: u32,
+    definition: &QueueDefinition,
 ) -> bool {
     let key_matches = spec.client_item_key.as_ref().map_or_else(
         || planned.client_item_key.as_str() == item_id.to_string(),
         |key| &planned.client_item_key == key,
     );
+    // Admission (`admit_push_item_indexes`) materializes typed indexes from the spec and
+    // may drop a fully-indexed entity document from the durable item; validate against the
+    // admitted form, not the raw spec.
+    let Ok(expected_index_fields) = crate::index_fields::materialize_index_fields(
+        definition,
+        spec.index_fields.clone(),
+        spec.entity.as_ref(),
+    ) else {
+        return false;
+    };
+    let entity_dropped = crate::index_fields::entity_fully_indexed(
+        definition,
+        &expected_index_fields,
+        spec.entity.as_ref(),
+    );
+    let expected_entity = if entity_dropped {
+        None
+    } else {
+        spec.entity.clone()
+    };
     planned.item_id == item_id
         && key_matches
         && planned.priority == spec.priority
         && planned.not_before == spec.not_before
         && planned.group_key == spec.group_key
-        && planned.max_attempts == max_attempts
+        && planned.max_attempts == definition.retry_policy.max_attempts
         && planned.payload == spec.payload
         && planned.fields == spec.fields
         && planned.metadata == spec.metadata
         && planned.cohort_size == spec.cohort_size
         && planned.gate_keys == spec.gate_keys
-        && planned.entity_document == spec.entity
+        && planned.index_fields == expected_index_fields
+        && planned.entity_document == expected_entity
 }
 
 fn validate_push_commit_outcome(

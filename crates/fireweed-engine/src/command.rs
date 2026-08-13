@@ -191,12 +191,15 @@ pub fn admit_push_item_indexes(
     let entity = item.entity_document.as_ref();
     item.index_fields =
         crate::index_fields::materialize_index_fields(definition, explicit, entity)?;
-    if !definition.typed_indexes.is_empty() && !item.index_fields.is_empty() {
-        // Indexes are native on the log; drop the entity document unless schema validation
-        // required keeping it (schema path re-attaches before validate if needed).
-        if definition.entity_schema.is_none() {
-            item.entity_document = None;
-        }
+    // Indexes are native on the log; drop the entity document ONLY when it carries nothing
+    // beyond the declared index fields. Claims echo the entity to consumers (contract since
+    // v0.31.0), so a document with extra fields must survive admission intact.
+    if crate::index_fields::entity_fully_indexed(
+        definition,
+        &item.index_fields,
+        item.entity_document.as_ref(),
+    ) {
+        item.entity_document = None;
     }
     Ok(())
 }

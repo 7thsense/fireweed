@@ -54,8 +54,13 @@ pub fn decode_command_envelope(bytes: &[u8]) -> EngineResult<CommandEnvelope> {
         ));
     }
     let body = &bytes[NATIVE_ENVELOPE_MAGIC.len()..];
-    postcard::from_bytes(body).map_err(|e| {
-        EngineError::Storage(format!("native command decode failed: {e}"))
+    let mut de = postcard::Deserializer::from_bytes(body);
+    serde_path_to_error::deserialize(&mut de).map_err(|e| {
+        EngineError::Storage(format!(
+            "native command decode failed at `{}`: {}",
+            e.path(),
+            e.inner()
+        ))
     })
 }
 
