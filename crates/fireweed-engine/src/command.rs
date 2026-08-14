@@ -7,8 +7,8 @@ use std::sync::Mutex;
 use bytes::Bytes;
 use fireweed_core::{
     ClientItemKey, CohortId, GroupKey, IndexDeclaration, ItemId, ItemState, LeaseToken, Metadata,
-    OwnerId, PriorityValue, QueueDefinition, QueueId, RequestId, TenantId, TypedValue, UtcTimestamp,
-    WorkerId,
+    OwnerId, PriorityValue, QueueDefinition, QueueId, RequestId, TenantId, TypedValue,
+    UtcTimestamp, WorkerId,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -251,35 +251,20 @@ pub fn unique_index_keys_for_push_item(
             out.push((spec.name.clone(), legacy_secondary_index_key(&field_bytes)));
         }
     }
-    if !item.index_fields.is_empty() || item.entity_document.is_some() {
-        // Prefer native index_fields; fall back to entity only for pre-native durable rows.
-        let entity;
-        let entity_ref = if !item.index_fields.is_empty() {
-            entity = crate::index_fields::index_fields_as_entity(&item.index_fields)?;
-            Some(&entity)
-        } else {
-            item.entity_document.as_ref()
-        };
-        if let Some(entity) = entity_ref {
-            for qi in &definition.typed_indexes {
-                let unique = match &qi.declaration {
-                    IndexDeclaration::Single(def) => def.unique,
-                    IndexDeclaration::Compound(def) => def.unique,
-                };
-                if !unique {
-                    continue;
-                }
-                let key = match &qi.declaration {
-                    IndexDeclaration::Single(def) => def.index_key(entity),
-                    IndexDeclaration::Compound(def) => def.index_key(entity),
-                }
-                .map_err(|e| EngineError::Storage(e.to_string()))?;
-                if let Some(k) = key {
-                    out.push((qi.name.clone(), k));
-                }
-            }
-        }
-    }
+    let unique_typed: Vec<_> = definition
+        .typed_indexes
+        .iter()
+        .filter(|qi| match &qi.declaration {
+            IndexDeclaration::Single(def) => def.unique,
+            IndexDeclaration::Compound(def) => def.unique,
+        })
+        .cloned()
+        .collect();
+    out.extend(crate::index_fields::typed_index_keys_for_item(
+        &unique_typed,
+        &item.index_fields,
+        item.entity_document.as_ref(),
+    )?);
     Ok(out)
 }
 
@@ -2320,7 +2305,6 @@ mod unique_stage_tests {
         PriorityModelKind, PriorityTieBreaker, QueueId, QueueIndex, TenantId,
     };
 
-
     fn def_with_unique_email() -> QueueDefinition {
         QueueDefinition {
             tenant_id: TenantId::new("t").unwrap(),
@@ -2380,12 +2364,7 @@ mod unique_stage_tests {
             cohort_size: None,
             gate_keys: Vec::new(),
             index_fields: email
-                .map(|e| {
-                    BTreeMap::from([(
-                        "email".to_string(),
-                        TypedValue::String(e.to_string()),
-                    )])
-                })
+                .map(|e| BTreeMap::from([("email".to_string(), TypedValue::String(e.to_string()))]))
                 .unwrap_or_default(),
             entity_document: None,
         }

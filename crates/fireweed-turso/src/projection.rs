@@ -312,11 +312,11 @@ async fn insert_push_items_batched(
 ) -> EngineResult<()> {
     const COLUMNS: &str = "tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,\
         priority_sort,not_before,eligible_since,group_key,cohort_size,recurrence_until,payload,\
-        fields,metadata,entity_document,retry_count,item_version,lease_token_hash,lease_expires_at,\
+        fields,metadata,entity_document,index_fields,retry_count,item_version,lease_token_hash,lease_expires_at,\
         worker_id,last_command_sequence,created_at,updated_at,terminal_at,terminal_command_epoch,\
         fenced,superseded,max_attempts,created_seq";
     const ROW: &str =
-        "(?,?,?,?,'Pending',?,?,?,?,?,?,NULL,?,?,?,?,0,1,NULL,NULL,NULL,?,?,?,NULL,NULL,0,0,?,?)";
+        "(?,?,?,?,'Pending',?,?,?,?,?,?,NULL,?,?,?,?,?,0,1,NULL,NULL,NULL,?,?,?,NULL,NULL,0,0,?,?)";
 
     for (chunk_index, chunk) in insert.items.chunks(PUSH_ITEM_CHUNK).enumerate() {
         let mut parameters: Vec<Value> = Vec::with_capacity(chunk.len() * 19);
@@ -366,6 +366,8 @@ async fn insert_push_items_batched(
                 Value::Text(fields_to_json(&item.fields)?),
                 Value::Text(metadata_to_json(&item.metadata)?),
                 entity.map_or(Value::Null, Value::Text),
+                fireweed_engine::index_fields::encode_index_fields_blob(&item.index_fields)?
+                    .map_or(Value::Null, Value::Blob),
                 Value::Integer(insert.incoming),
                 Value::Integer(insert.now),
                 Value::Integer(insert.now),
@@ -428,25 +430,10 @@ async fn insert_push_gates_batched(
 
 fn typed_index_keys(
     indexes: &[QueueIndex],
+    index_fields: &std::collections::BTreeMap<String, fireweed_core::TypedValue>,
     entity: Option<&serde_json::Value>,
 ) -> EngineResult<Vec<(String, Vec<u8>)>> {
-    let Some(entity) = entity else {
-        return Ok(Vec::new());
-    };
-    indexes
-        .iter()
-        .filter_map(|index| {
-            let key = match &index.declaration {
-                IndexDeclaration::Single(definition) => definition.index_key(entity),
-                IndexDeclaration::Compound(definition) => definition.index_key(entity),
-            };
-            match key {
-                Ok(Some(key)) => Some(Ok((index.name.clone(), key))),
-                Ok(None) => None,
-                Err(error) => Some(Err(storage(error))),
-            }
-        })
-        .collect()
+    fireweed_engine::index_fields::typed_index_keys_for_item(indexes, index_fields, entity)
 }
 
 async fn check_typed_unique_conflicts(
@@ -552,11 +539,14 @@ async fn replace_typed_indexes_for_entity(
     indexes: &[QueueIndex],
     item_id: ItemId,
     entity: &serde_json::Value,
-) -> EngineResult<()> {
-    let keys = typed_index_keys(indexes, Some(entity))?;
+) -> EngineResult<std::collections::BTreeMap<String, fireweed_core::TypedValue>> {
+    let extracted =
+        fireweed_engine::index_fields::extract_index_fields_from_entity(indexes, entity)?;
+    let keys = typed_index_keys(indexes, &extracted, None)?;
     delete_typed_index_rows(transaction, tenant, queue, std::slice::from_ref(&item_id)).await?;
     check_typed_unique_conflicts(transaction, tenant, queue, indexes, &keys).await?;
-    insert_typed_index_rows(transaction, tenant, queue, &item_id.to_string(), &keys).await
+    insert_typed_index_rows(transaction, tenant, queue, &item_id.to_string(), &keys).await?;
+    Ok(extracted)
 }
 
 async fn maintain_typed_indexes_on_insert(
@@ -571,7 +561,7 @@ async fn maintain_typed_indexes_on_insert(
     let mut unique_rows = Vec::new();
     for item in items {
         let item_id = item.item_id.to_string();
-        let keys = typed_index_keys(indexes, item.entity_document.as_ref())?;
+        let keys = typed_index_keys(indexes, &item.index_fields, item.entity_document.as_ref())?;
         for (name, key) in &keys {
             let unique = indexes
                 .iter()
@@ -2533,7 +2523,7 @@ async fn apply_owned(
                         }
                     }
                     if let Some(document) = &update.set_entity_document {
-                        replace_typed_indexes_for_entity(
+                        let extracted = replace_typed_indexes_for_entity(
                             &transaction,
                             &tenant,
                             &queue,
@@ -2542,6 +2532,8 @@ async fn apply_owned(
                             document,
                         )
                         .await?;
+                        let index_blob =
+                            fireweed_engine::index_fields::encode_index_fields_blob(&extracted)?;
                         transaction
                             .execute(
                                 sql::UPDATE_ENTITY_DOCUMENT,
@@ -2550,6 +2542,7 @@ async fn apply_owned(
                                     Value::Text(queue.clone()),
                                     Value::Text(update.item_id.to_string()),
                                     Value::Text(serde_json::to_string(document).map_err(storage)?),
+                                    index_blob.map_or(Value::Null, Value::Blob),
                                 ],
                             )
                             .await
@@ -3042,6 +3035,7 @@ async fn apply_owned(
                                 .execute(
                                     "UPDATE fireweed_items SET lifecycle_state=?,priority=?,priority_sort=?,\
                                      not_before=?,eligible_since=?,payload=?,fields=?,metadata=?,entity_document=?,\
+                                     index_fields=?,\
                                      lease_token_hash=CASE WHEN ?!=0 THEN NULL ELSE lease_token_hash END,\
                                      lease_expires_at=CASE WHEN ?!=0 THEN NULL ELSE lease_expires_at END,\
                                      worker_id=CASE WHEN ?!=0 THEN NULL ELSE worker_id END,\
@@ -3064,6 +3058,10 @@ async fn apply_owned(
                                         Value::Text(fields_to_json(&values.fields)?),
                                         Value::Text(metadata_to_json(&values.metadata)?),
                                         entity.map_or(Value::Null, Value::Text),
+                                        fireweed_engine::index_fields::encode_index_fields_blob(
+                                            &values.index_fields,
+                                        )?
+                                        .map_or(Value::Null, Value::Blob),
                                         Value::Integer(i64::from(values.invalidate_lease)),
                                         Value::Integer(i64::from(values.invalidate_lease)),
                                         Value::Integer(i64::from(values.invalidate_lease)),
@@ -3122,6 +3120,7 @@ async fn apply_owned(
                             .await?;
                             let keys = typed_index_keys(
                                 &definition.typed_indexes,
+                                &values.index_fields,
                                 values.entity_document.as_ref(),
                             )?;
                             check_typed_unique_conflicts(
@@ -4599,7 +4598,7 @@ impl AsyncProjectionStore for TursoRelational {
                 params.extend(chunk.iter().map(|id| id.to_string().into()));
                 let item_sql = format!(
                     "SELECT item_id,client_item_key,item_version,priority,group_key,not_before,\
-                     lease_expires_at,retry_count,max_attempts,payload,fields,metadata,entity_document \
+                     lease_expires_at,retry_count,max_attempts,payload,fields,metadata,entity_document,index_fields \
                      FROM fireweed_items \
                      WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' \
                      AND item_id IN ({placeholders})"
@@ -4649,7 +4648,12 @@ impl AsyncProjectionStore for TursoRelational {
                     payload: optional_blob(&values[8])?.map(Bytes::from),
                     fields: fields_from_json(text(&values[9])?)?,
                     metadata: metadata_from_json(text(&values[10])?)?,
-                    entity: entity_from_json(optional_text(&values[11])?)?,
+                    entity: fireweed_engine::index_fields::echo_entity_document(
+                        entity_from_json(optional_text(&values[11])?)?,
+                        &fireweed_engine::index_fields::decode_index_fields_blob(
+                            optional_blob(&values[12])?.as_deref(),
+                        )?,
+                    )?,
                     gate_keys: gate_keys.remove(&id).unwrap_or_default(),
                 });
             }
@@ -4778,7 +4782,10 @@ mod push_batch_lowering_tests {
         let gate_rows = items.iter().map(|item| item.gate_keys.len()).sum::<usize>();
         let keys = items
             .iter()
-            .flat_map(|item| typed_index_keys(indexes, item.entity_document.as_ref()).unwrap())
+            .flat_map(|item| {
+                typed_index_keys(indexes, &item.index_fields, item.entity_document.as_ref())
+                    .unwrap()
+            })
             .collect::<Vec<_>>();
         let unique_rows = keys
             .iter()

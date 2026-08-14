@@ -45,7 +45,6 @@ mod operator;
 #[cfg(feature = "turso")]
 pub mod turso_compose;
 
-use axon_esf::encode_index_value;
 // Internal-only types (not named in the public API surface).
 pub use facade::{
     Fireweed, ProjectionControl, ProjectionControlCapabilities, ProjectionRebuild,
@@ -98,7 +97,8 @@ pub use fireweed_engine::{
     OperatorAuditRecord, OperatorItemView, OperatorOpKind, OperatorOpPayload,
     OperatorOperationState, OperatorProgress, PayloadUpdate, PushBatchOutcome, PushDisposition,
     QueueAdminState, QueueKey, QueueMetrics, RepairAction, RetryCountMode, ScheduleUpdate,
-    SelectedMutation, SideRecord, SideRecordPage, SnapshotStore, TimestampComparison, UpsertOutcome,
+    SelectedMutation, SideRecord, SideRecordPage, SnapshotStore, TimestampComparison,
+    UpsertOutcome,
 };
 pub use operator::OPERATOR_ARCHIVED_METADATA_KEY;
 
@@ -3389,8 +3389,8 @@ impl<T> LibBackend for T where
 {
 }
 
-/// Serialize a [`serde_json::Value`] to the axon_esf-compatible raw byte format expected by the
-/// typed-index lookup path in the projection (`decode_typed_lookup_value`):
+/// Serialize a [`serde_json::Value`] to the raw lookup-byte format consumed by
+/// [`fireweed_engine::index_fields::typed_lookup_key`]:
 /// - `String`: raw UTF-8 bytes (no JSON quoting) — matches String and Datetime index types.
 /// - `Number` / `Bool` / other: JSON-encoded bytes — matches Integer, Float, and Boolean index types.
 fn json_value_to_index_key_bytes(value: &serde_json::Value) -> Vec<u8> {
@@ -3415,16 +3415,18 @@ fn typed_index_query_key_bytes(
     let mut raw = Vec::with_capacity(key_values.len());
     match &spec.declaration {
         IndexDeclaration::Single(def) => {
-            encode_index_value(&key_values[0], &def.index_type).map_err(|_| {
-                EngineError::Invalid("typed index value is not valid for declared type")
-            })?;
+            fireweed_engine::index_fields::json_to_typed_value(&key_values[0], &def.index_type)
+                .map_err(|_| {
+                    EngineError::Invalid("typed index value is not valid for declared type")
+                })?;
             raw.push(json_value_to_index_key_bytes(&key_values[0]));
         }
         IndexDeclaration::Compound(def) => {
             for (value, field) in key_values.iter().zip(def.fields.iter()) {
-                encode_index_value(value, &field.index_type).map_err(|_| {
-                    EngineError::Invalid("typed index value is not valid for declared type")
-                })?;
+                fireweed_engine::index_fields::json_to_typed_value(value, &field.index_type)
+                    .map_err(|_| {
+                        EngineError::Invalid("typed index value is not valid for declared type")
+                    })?;
                 raw.push(json_value_to_index_key_bytes(value));
             }
         }
@@ -6496,7 +6498,12 @@ pub fn open_sqlite_with_lock_stats_handle(
     clock: Arc<dyn Clock>,
 ) -> EngineResult<(
     Fireweed,
-    Arc<fireweed_engine::AsyncLogReplayBackend<fireweed_sqlite::SqliteLog, fireweed_sqlite::InMemoryProjection>>,
+    Arc<
+        fireweed_engine::AsyncLogReplayBackend<
+            fireweed_sqlite::SqliteLog,
+            fireweed_sqlite::InMemoryProjection,
+        >,
+    >,
 )> {
     let backend = Arc::new(fireweed_sqlite::composed_sqlite_backend(path)?);
     let fw = Fireweed::from_runtime(RuntimeCore::new(Arc::clone(&backend), clock));

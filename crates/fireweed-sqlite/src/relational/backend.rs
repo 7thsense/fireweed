@@ -58,18 +58,6 @@ struct HotQueryShape {
     equality_fields: usize,
 }
 
-fn typed_value_json(value: &TypedValue) -> JsonValue {
-    match value {
-        TypedValue::String(value) => JsonValue::String(value.clone()),
-        TypedValue::Integer(value) => JsonValue::Number((*value).into()),
-        TypedValue::Float(value) => serde_json::Number::from_f64(*value)
-            .map(JsonValue::Number)
-            .unwrap_or(JsonValue::Null),
-        TypedValue::Bool(value) => JsonValue::Bool(*value),
-        TypedValue::DateTime(value) => JsonValue::Number(ts_nanos(*value).into()),
-    }
-}
-
 fn index_fields(spec: &fireweed_core::QueueIndex) -> Vec<(&str, &IndexType)> {
     match &spec.declaration {
         IndexDeclaration::Single(def) => vec![(def.field.as_str(), &def.index_type)],
@@ -144,16 +132,10 @@ fn hot_query_shape(
             return Err(EngineError::Invalid("duplicate index predicate"));
         }
         let filter = matches[0];
-        let json = typed_value_json(&filter.value);
-        let Some(component) =
-            axon_esf::encode_compound_index_key(&[(&json, index_type)]).map_err(|_| {
-                EngineError::Invalid("typed index value is not valid for declared type")
-            })?
-        else {
-            return Err(EngineError::Invalid(
-                "typed index value is not valid for declared type",
-            ));
-        };
+        let component =
+            fireweed_engine::index_fields::framed_typed_value(&filter.value, index_type).map_err(
+                |_| EngineError::Invalid("typed index value is not valid for declared type"),
+            )?;
         encoded.extend(component);
         equality_fields += 1;
     }
@@ -185,16 +167,10 @@ fn hot_query_shape(
                 "range field has no order-preserving SQL key encoding",
             ));
         }
-        let json = typed_value_json(&filter.value);
-        let Some(component) =
-            axon_esf::encode_compound_index_key(&[(&json, index_type)]).map_err(|_| {
-                EngineError::Invalid("typed index value is not valid for declared type")
-            })?
-        else {
-            return Err(EngineError::Invalid(
-                "typed index value is not valid for declared type",
-            ));
-        };
+        let component =
+            fireweed_engine::index_fields::framed_typed_value(&filter.value, index_type).map_err(
+                |_| EngineError::Invalid("typed index value is not valid for declared type"),
+            )?;
         let mut bound = encoded.clone();
         bound.extend(component);
         match filter.op {
@@ -2872,6 +2848,7 @@ impl fireweed_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                 candidate: HotQueryCandidate,
                 entity: JsonValue,
                 fields: String,
+                index_fields: Option<Vec<u8>>,
                 keys: Vec<(String, Vec<u8>)>,
             }
             let mut planned = Vec::new();
@@ -2899,8 +2876,18 @@ impl fireweed_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                         ),
                     );
                 }
+                let extracted = fireweed_engine::index_fields::extract_index_fields_from_entity(
+                    &definition.typed_indexes,
+                    &entity,
+                )?;
                 planned.push(PlannedMutation {
-                    keys: typed_index_keys_for_entity(&definition.typed_indexes, Some(&entity))?,
+                    keys: fireweed_engine::index_fields::typed_index_keys(
+                        &definition.typed_indexes,
+                        &extracted,
+                    )?,
+                    index_fields: fireweed_engine::index_fields::encode_index_fields_blob(
+                        &extracted,
+                    )?,
                     fields: fields_to_json(&fields)?,
                     candidate,
                     entity,
@@ -2976,16 +2963,16 @@ impl fireweed_engine::HotProjectionQueryPort for SqliteRelationalBackend {
             let mut updated = HashSet::new();
             if !planned.is_empty() {
                 st(tx.execute_batch(
-                    "CREATE TEMP TABLE IF NOT EXISTS fireweed_hot_mutation_stage(ordinal INTEGER PRIMARY KEY,item_id TEXT NOT NULL UNIQUE,item_version INTEGER NOT NULL,fields TEXT NOT NULL,entity TEXT NOT NULL); \
-                     DELETE FROM fireweed_hot_mutation_stage;",
+                    "DROP TABLE IF EXISTS fireweed_hot_mutation_stage; \
+                     CREATE TEMP TABLE fireweed_hot_mutation_stage(ordinal INTEGER PRIMARY KEY,item_id TEXT NOT NULL UNIQUE,item_version INTEGER NOT NULL,fields TEXT NOT NULL,entity TEXT NOT NULL,index_fields BLOB);",
                 ))?;
             }
             for planned_chunk in planned.chunks(1_000) {
                 st(tx.execute("DELETE FROM fireweed_hot_mutation_stage", []))?;
-                let values_clause = std::iter::repeat_n("(?,?,?,?,?)", planned_chunk.len())
+                let values_clause = std::iter::repeat_n("(?,?,?,?,?,?)", planned_chunk.len())
                     .collect::<Vec<_>>()
                     .join(",");
-                let mut values = Vec::with_capacity(planned_chunk.len() * 5);
+                let mut values = Vec::with_capacity(planned_chunk.len() * 6);
                 for (ordinal, mutation) in planned_chunk.iter().enumerate() {
                     values.push(SqlValue::Integer(ordinal as i64));
                     values.push(SqlValue::Text(mutation.candidate.item_id.to_string()));
@@ -2995,13 +2982,17 @@ impl fireweed_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                         serde_json::to_string(&mutation.entity)
                             .map_err(|e| EngineError::Storage(e.to_string()))?,
                     ));
+                    values.push(match &mutation.index_fields {
+                        Some(blob) => SqlValue::Blob(blob.clone()),
+                        None => SqlValue::Null,
+                    });
                 }
                 st(tx.execute(
-                    &format!("INSERT INTO fireweed_hot_mutation_stage(ordinal,item_id,item_version,fields,entity) VALUES {values_clause}"),
+                    &format!("INSERT INTO fireweed_hot_mutation_stage(ordinal,item_id,item_version,fields,entity,index_fields) VALUES {values_clause}"),
                     params_from_iter(values),
                 ))?;
                 let mut statement = st(tx.prepare(
-                    "UPDATE fireweed_items AS i SET fields=m.fields,entity_document=m.entity, \
+                    "UPDATE fireweed_items AS i SET fields=m.fields,entity_document=m.entity,index_fields=m.index_fields, \
                      item_version=i.item_version+1,updated_at=?1,last_command_sequence=?2 \
                      FROM fireweed_hot_mutation_stage AS m WHERE i.tenant_id=?3 AND i.queue_id=?4 \
                      AND i.item_id=m.item_id AND i.item_version=m.item_version \

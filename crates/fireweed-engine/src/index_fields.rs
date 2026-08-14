@@ -212,6 +212,14 @@ fn frame_value(encoded: &[u8], out: &mut Vec<u8>) {
     out.extend_from_slice(encoded);
 }
 
+/// Framed axon-compatible bytes for one [`TypedValue`] (`u32` BE length + [`encode_typed_value`]).
+pub fn framed_typed_value(value: &TypedValue, expected: &IndexType) -> EngineResult<Vec<u8>> {
+    let encoded = encode_typed_value(value, expected)?;
+    let mut out = Vec::with_capacity(4 + encoded.len());
+    frame_value(&encoded, &mut out);
+    Ok(out)
+}
+
 /// Framed axon-compatible key for one declared index from a native field map.
 ///
 /// `None` when any required field is missing (sparse). Bytes match
@@ -226,10 +234,7 @@ pub fn typed_index_key(
             let Some(value) = fields.get(&def.field) else {
                 return Ok(None);
             };
-            let encoded = encode_typed_value(value, &def.index_type)?;
-            let mut out = Vec::with_capacity(4 + encoded.len());
-            frame_value(&encoded, &mut out);
-            Ok(Some(out))
+            Ok(Some(framed_typed_value(value, &def.index_type)?))
         }
         IndexDeclaration::Compound(def) => {
             let mut out = Vec::new();
@@ -237,8 +242,7 @@ pub fn typed_index_key(
                 let Some(value) = fields.get(&field.field) else {
                     return Ok(None);
                 };
-                let encoded = encode_typed_value(value, &field.index_type)?;
-                frame_value(&encoded, &mut out);
+                out.extend(framed_typed_value(value, &field.index_type)?);
             }
             Ok(Some(out))
         }
@@ -259,6 +263,93 @@ pub fn typed_index_keys(
     Ok(out)
 }
 
+/// Apply/insert keys: native `index_fields` first, else extract from an admission entity
+/// and encode natively. Never calls axon `index_key` on a JSON record.
+pub fn typed_index_keys_for_item(
+    indexes: &[QueueIndex],
+    index_fields: &BTreeMap<String, TypedValue>,
+    entity: Option<&Value>,
+) -> EngineResult<Vec<(String, Vec<u8>)>> {
+    if indexes.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !index_fields.is_empty() {
+        return typed_index_keys(indexes, index_fields);
+    }
+    let Some(doc) = entity else {
+        return Ok(Vec::new());
+    };
+    let extracted = extract_index_fields_from_entity(indexes, doc)?;
+    typed_index_keys(indexes, &extracted)
+}
+
+/// Decode a claim-by-query lookup slice (UTF-8 string / JSON number / JSON bool)
+/// into a native [`TypedValue`].
+pub fn lookup_bytes_to_typed(index_type: &IndexType, bytes: &[u8]) -> EngineResult<TypedValue> {
+    match index_type {
+        IndexType::String => {
+            let s = std::str::from_utf8(bytes)
+                .map_err(|_| EngineError::Invalid("lookup key is not valid UTF-8"))?;
+            Ok(TypedValue::String(s.to_owned()))
+        }
+        IndexType::Integer => {
+            let n: serde_json::Value = serde_json::from_slice(bytes)
+                .map_err(|_| EngineError::Invalid("lookup key is not a valid JSON number"))?;
+            json_to_typed_value(&n, index_type)
+        }
+        IndexType::Float => {
+            let n: serde_json::Value = serde_json::from_slice(bytes)
+                .map_err(|_| EngineError::Invalid("lookup key is not a valid JSON number"))?;
+            json_to_typed_value(&n, index_type)
+        }
+        IndexType::Boolean => {
+            let n: serde_json::Value = serde_json::from_slice(bytes)
+                .map_err(|_| EngineError::Invalid("lookup key is not a valid JSON boolean"))?;
+            json_to_typed_value(&n, index_type)
+        }
+        IndexType::Datetime => {
+            if let Ok(Value::Number(num)) = serde_json::from_slice::<Value>(bytes) {
+                let nanos = num.as_i64().ok_or(EngineError::Invalid(
+                    "lookup datetime number is not an i64 epoch-nanos",
+                ))?;
+                return Ok(TypedValue::DateTime(
+                    UtcTimestamp::new(
+                        nanos.div_euclid(1_000_000_000),
+                        u32::try_from(nanos.rem_euclid(1_000_000_000)).expect("rem < 1e9"),
+                    )
+                    .map_err(|_| EngineError::Invalid("typed index datetime out of range"))?,
+                ));
+            }
+            let s = std::str::from_utf8(bytes)
+                .map_err(|_| EngineError::Invalid("lookup key is not valid UTF-8"))?;
+            json_to_typed_value(&Value::String(s.to_owned()), index_type)
+        }
+    }
+}
+
+/// Framed lookup key from caller-supplied raw value slices (API-004 / claim-by-query).
+pub fn typed_lookup_key(
+    declaration: &IndexDeclaration,
+    key_values: &[Vec<u8>],
+) -> EngineResult<Vec<u8>> {
+    let mut fields = BTreeMap::new();
+    match declaration {
+        IndexDeclaration::Single(def) => {
+            let value = lookup_bytes_to_typed(&def.index_type, &key_values[0])?;
+            fields.insert(def.field.clone(), value);
+        }
+        IndexDeclaration::Compound(def) => {
+            for (field, bytes) in def.fields.iter().zip(key_values.iter()) {
+                fields.insert(
+                    field.field.clone(),
+                    lookup_bytes_to_typed(&field.index_type, bytes)?,
+                );
+            }
+        }
+    }
+    typed_index_key(declaration, &fields)?.ok_or(EngineError::Storage("missing lookup key".into()))
+}
+
 /// Serving-time entity echo: stored document, else synthesize from native index fields.
 ///
 /// Compact-log admission may omit `entity_document` when `index_fields` already carry the
@@ -276,10 +367,10 @@ pub fn echo_entity_document(
     index_fields_as_entity(index_fields).map(Some)
 }
 
-/// Build a synthetic JSON object from native index fields (for axon_esf `index_key` / encode).
+/// Build a synthetic JSON object from native index fields (claim/query entity echo).
 ///
-/// This is a **projection-time** adapter: storage remains native `TypedValue`. axon_esf's public
-/// encoder currently takes `serde_json::Value`; we convert only the small declared field set.
+/// Index **keys** are encoded from [`TypedValue`] directly ([`typed_index_key`]); this adapter is
+/// only for the serving-time document shape, not for keying.
 pub fn index_fields_as_entity(fields: &BTreeMap<String, TypedValue>) -> EngineResult<Value> {
     let mut map = serde_json::Map::new();
     for (path, value) in fields {
@@ -503,5 +594,16 @@ mod tests {
                 .unwrap()
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn framed_typed_value_matches_axon_compound_component() {
+        let value = TypedValue::Integer(-3);
+        let native = framed_typed_value(&value, &IndexType::Integer).unwrap();
+        let json = typed_value_to_json(&value).unwrap();
+        let axon = axon_esf::encode_compound_index_key(&[(&json, &IndexType::Integer)])
+            .unwrap()
+            .unwrap();
+        assert_eq!(native, axon);
     }
 }

@@ -3,8 +3,8 @@ use super::*;
 use std::collections::HashMap;
 
 use fireweed_core::{
-    ClaimByQueryRequest, IndexDeclaration, IndexType, ItemId, ItemState, LeaseToken,
-    QueueDefinition, QueueIndex, RequestId, UtcTimestamp,
+    ClaimByQueryRequest, IndexDeclaration, ItemId, ItemState, LeaseToken, QueueDefinition,
+    QueueIndex, RequestId, UtcTimestamp,
 };
 use fireweed_engine::{
     ClaimRef, CommandPosition, CommitEntryOutcome, CommitEntryStatus, CommitTransitionEntry,
@@ -864,83 +864,12 @@ pub(crate) fn parts(shard: &QueueKey) -> (String, String) {
 // ADR-011 typed secondary index helpers
 // ---------------------------------------------------------------------------
 
-/// Decode a caller-supplied raw lookup byte slice into a `serde_json::Value` for re-encoding via
-/// `IndexDef::index_key` / `CompoundIndexDef::index_key`. Mirrors `decode_typed_lookup_value` in
-/// `fireweed_projection` — the two must stay identical so lookup keys byte-match stored keys.
-pub(crate) fn decode_typed_lookup_value_rel(
-    index_type: &IndexType,
-    bytes: &[u8],
-) -> EngineResult<JsonValue> {
-    match index_type {
-        IndexType::String => {
-            let s = std::str::from_utf8(bytes)
-                .map_err(|_| EngineError::Invalid("lookup key is not valid UTF-8"))?;
-            Ok(JsonValue::String(s.to_owned()))
-        }
-        IndexType::Datetime => {
-            if let Ok(value @ JsonValue::Number(_)) = serde_json::from_slice::<JsonValue>(bytes) {
-                return Ok(value);
-            }
-            let s = std::str::from_utf8(bytes)
-                .map_err(|_| EngineError::Invalid("lookup key is not valid UTF-8"))?;
-            Ok(JsonValue::String(s.to_owned()))
-        }
-        IndexType::Integer | IndexType::Float => serde_json::from_slice::<JsonValue>(bytes)
-            .map_err(|_| EngineError::Invalid("lookup key is not a valid JSON number")),
-        IndexType::Boolean => serde_json::from_slice::<JsonValue>(bytes)
-            .map_err(|_| EngineError::Invalid("lookup key is not a valid JSON boolean")),
-    }
-}
-
-/// Compute the canonical `index_key` bytes for a lookup against a named index. Roundtrips the
-/// caller's raw byte slices through their declared types so the result is byte-identical to stored
-/// keys regardless of how the caller encoded the lookup value.
+/// Compute the canonical `index_key` bytes for a lookup against a named index.
 pub(crate) fn typed_lookup_canonical_key(
     qi: &QueueIndex,
     key_values: &[Vec<u8>],
 ) -> EngineResult<Vec<u8>> {
-    match &qi.declaration {
-        IndexDeclaration::Single(def) => {
-            let val = decode_typed_lookup_value_rel(&def.index_type, &key_values[0])?;
-            let mut record = serde_json::Map::new();
-            record.insert(def.field.clone(), val);
-            def.index_key(&JsonValue::Object(record))
-                .map_err(|e| EngineError::Storage(e.to_string()))?
-                .ok_or_else(|| EngineError::Storage("missing lookup key".to_string()))
-        }
-        IndexDeclaration::Compound(def) => {
-            let mut record = serde_json::Map::new();
-            for (field, bytes) in def.fields.iter().zip(key_values.iter()) {
-                let val = decode_typed_lookup_value_rel(&field.index_type, bytes)?;
-                record.insert(field.field.clone(), val);
-            }
-            def.index_key(&JsonValue::Object(record))
-                .map_err(|e| EngineError::Storage(e.to_string()))?
-                .ok_or_else(|| EngineError::Storage("missing lookup key".to_string()))
-        }
-    }
-}
-
-/// Compute `(index_name, canonical_key_bytes)` pairs for an item's `entity_document`.
-/// Returns empty when `typed_indexes` is empty or `entity` is `None` (schema-less queues).
-pub(crate) fn typed_index_keys_for_entity(
-    typed_indexes: &[QueueIndex],
-    entity: Option<&JsonValue>,
-) -> EngineResult<Vec<(String, Vec<u8>)>> {
-    let Some(entity) = entity else {
-        return Ok(vec![]);
-    };
-    let mut out = Vec::with_capacity(typed_indexes.len());
-    for qi in typed_indexes {
-        let key = match &qi.declaration {
-            IndexDeclaration::Single(def) => def.index_key(entity),
-            IndexDeclaration::Compound(def) => def.index_key(entity),
-        };
-        if let Some(k) = key.map_err(|e| EngineError::Storage(e.to_string()))? {
-            out.push((qi.name.clone(), k));
-        }
-    }
-    Ok(out)
+    fireweed_engine::index_fields::typed_lookup_key(&qi.declaration, key_values)
 }
 
 /// Prefer native [`PushItem::index_fields`]; fall back to entity JSON for pre-native rows.
@@ -952,10 +881,7 @@ pub(crate) fn typed_index_keys_for_native(
     if typed_indexes.is_empty() {
         return Ok(vec![]);
     }
-    if !index_fields.is_empty() {
-        return fireweed_engine::index_fields::typed_index_keys(typed_indexes, index_fields);
-    }
-    typed_index_keys_for_entity(typed_indexes, entity)
+    fireweed_engine::index_fields::typed_index_keys_for_item(typed_indexes, index_fields, entity)
 }
 
 pub(crate) fn typed_index_keys_for_push_item(

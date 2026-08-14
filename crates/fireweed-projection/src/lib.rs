@@ -592,26 +592,9 @@ impl<'a> IndexLookupSpec<'a> {
                 let slices: Vec<&[u8]> = key_values.iter().map(|v| v.as_slice()).collect();
                 Ok(legacy_raw_key(&slices))
             }
-            Self::Typed(spec) => match &spec.declaration {
-                IndexDeclaration::Single(def) => {
-                    let value = decode_typed_lookup_value(&def.index_type, &key_values[0])?;
-                    let mut record = serde_json::Map::new();
-                    record.insert(def.field.clone(), value);
-                    let key: Result<Option<Vec<u8>>, _> = def.index_key(&Value::Object(record));
-                    key.map_err(|err| EngineError::Storage(err.to_string()))?
-                        .ok_or_else(|| EngineError::Storage("missing lookup key".to_string()))
-                }
-                IndexDeclaration::Compound(def) => {
-                    let mut record = serde_json::Map::new();
-                    for (field, value_bytes) in def.fields.iter().zip(key_values.iter()) {
-                        let value = decode_typed_lookup_value(&field.index_type, value_bytes)?;
-                        record.insert(field.field.clone(), value);
-                    }
-                    let key: Result<Option<Vec<u8>>, _> = def.index_key(&Value::Object(record));
-                    key.map_err(|err| EngineError::Storage(err.to_string()))?
-                        .ok_or_else(|| EngineError::Storage("missing lookup key".to_string()))
-                }
-            },
+            Self::Typed(spec) => {
+                fireweed_engine::index_fields::typed_lookup_key(&spec.declaration, key_values)
+            }
         }
     }
 }
@@ -642,46 +625,15 @@ fn legacy_index_key(
     Ok(Some(legacy_raw_key(&field_bytes)))
 }
 
-/// Decode a raw lookup byte slice into a JSON `Value` appropriate for `index_type`. String fields
-/// are treated as strict UTF-8 (not JSON-parsed), so `b"123"` stays `"123"` rather than the number
-/// 123. Datetime fields accept either RFC 3339 UTF-8 or JSON numeric epoch-nanos because axon-esf
-/// treats both as valid representations of the same instant.
-fn decode_typed_lookup_value(index_type: &IndexType, bytes: &[u8]) -> EngineResult<Value> {
-    match index_type {
-        IndexType::String => {
-            let s = std::str::from_utf8(bytes)
-                .map_err(|_| EngineError::Invalid("lookup key is not valid UTF-8"))?;
-            Ok(Value::String(s.to_owned()))
-        }
-        IndexType::Datetime => {
-            if let Ok(value @ Value::Number(_)) = serde_json::from_slice::<Value>(bytes) {
-                return Ok(value);
-            }
-            let s = std::str::from_utf8(bytes)
-                .map_err(|_| EngineError::Invalid("lookup key is not valid UTF-8"))?;
-            Ok(Value::String(s.to_owned()))
-        }
-        IndexType::Integer | IndexType::Float => serde_json::from_slice::<Value>(bytes)
-            .map_err(|_| EngineError::Invalid("lookup key is not a valid JSON number")),
-        IndexType::Boolean => serde_json::from_slice::<Value>(bytes)
-            .map_err(|_| EngineError::Invalid("lookup key is not a valid JSON boolean")),
-    }
-}
-
 fn typed_index_key(spec: &QueueIndex, entity: Option<&Value>) -> EngineResult<Option<Vec<u8>>> {
     let Some(entity) = entity else {
         return Ok(None);
     };
-    match &spec.declaration {
-        IndexDeclaration::Single(def) => {
-            let key: Result<Option<Vec<u8>>, _> = def.index_key(entity);
-            key.map_err(|err| EngineError::Storage(err.to_string()))
-        }
-        IndexDeclaration::Compound(def) => {
-            let key: Result<Option<Vec<u8>>, _> = def.index_key(entity);
-            key.map_err(|err| EngineError::Storage(err.to_string()))
-        }
-    }
+    let fields = fireweed_engine::index_fields::extract_index_fields_from_entity(
+        std::slice::from_ref(spec),
+        entity,
+    )?;
+    fireweed_engine::index_fields::typed_index_key(&spec.declaration, &fields)
 }
 
 fn typed_index_key_err(spec: &QueueIndex, entity: Option<&Value>) -> EngineResult<Option<Vec<u8>>> {
@@ -1195,10 +1147,10 @@ pub fn filtered_lifecycle_metrics_by_index_key<'a>(
             return Err(EngineError::Invalid("unindexed-field"));
         };
         typed_value_from_filter_value(&filter.value, index_type)?;
-        let value = typed_value_to_json(&filter.value)?;
-        let encoded = axon_esf::encode_index_value(&value, index_type).map_err(|_| {
-            EngineError::Invalid("typed index value is not valid for declared type")
-        })?;
+        let encoded = fireweed_engine::index_fields::encode_typed_value(&filter.value, index_type)
+            .map_err(|_| {
+                EngineError::Invalid("typed index value is not valid for declared type")
+            })?;
         encoded_filters.push((position, filter.op, encoded));
     }
 
@@ -2412,7 +2364,15 @@ impl ProjectionData {
             }
             QueueCommand::UpdateFields(c) => {
                 let model = self.priority_model;
-                let (old_keys, old_elig, new_keys, new_elig, old_gate_keys, new_gate_keys) = {
+                let (
+                    old_keys,
+                    old_elig,
+                    new_keys,
+                    new_elig,
+                    old_gate_keys,
+                    new_gate_keys,
+                    next_index_fields,
+                ) = {
                     let rec = self.items.get(&c.item_id).ok_or(EngineError::NotFound)?;
                     // A field/payload merge and/or a priority/not_before reschedule (no lifecycle change),
                     // so it relies on `update_fields_validate` having run pre-commit.
@@ -2446,15 +2406,24 @@ impl ProjectionData {
                             }
                         }
                     }
+                    let next_index_fields = if let Some(doc) = c.set_entity_document.as_ref() {
+                        fireweed_engine::index_fields::extract_index_fields_from_entity(
+                            &self.typed_index_specs,
+                            doc,
+                        )?
+                    } else {
+                        rec.index_fields.clone()
+                    };
                     let next_entity = c
                         .set_entity_document
                         .as_ref()
                         .or(rec.entity_document.as_ref());
                     let new_keys =
-                        self.record_index_keys(&next_fields, &rec.index_fields, next_entity)?;
+                        self.record_index_keys(&next_fields, &next_index_fields, next_entity)?;
 
                     let mut next_rec = rec.clone();
                     next_rec.fields = next_fields;
+                    next_rec.index_fields = next_index_fields.clone();
                     if c.set_entity_document.is_some() {
                         next_rec.entity_document = c.set_entity_document.clone();
                     }
@@ -2482,6 +2451,7 @@ impl ProjectionData {
                         new_elig,
                         rec.gate_keys.clone(),
                         next_rec.gate_keys,
+                        next_index_fields,
                     )
                 };
                 let rec = self
@@ -2511,6 +2481,7 @@ impl ProjectionData {
                 if let Some(gate_keys) = &c.set_gate_keys {
                     rec.gate_keys = gate_keys.clone();
                 }
+                rec.index_fields = next_index_fields;
                 if c.set_entity_document.is_some() {
                     rec.entity_document = c.set_entity_document.clone();
                 }

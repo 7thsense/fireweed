@@ -1382,23 +1382,33 @@ pub(crate) fn apply_command_sql(
                     }
                 }
                 if let Some(ref doc) = c.set_entity_document {
-                    st(tx.execute(
-                        "UPDATE fireweed_items SET entity_document=?4 \
-                         WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
-                        params![t, q, c.item_id.to_string(), to_json(doc)?],
-                    ))?;
-                }
-                // ADR-011: if a new entity document was supplied, re-index this item. Delete the
-                // old rows first so the unique slot is freed before the conflict check fires.
-                if let Some(ref doc) = c.set_entity_document {
                     let typed_indexes = queues
                         .get(shard)
                         .map(|d| d.typed_indexes.as_slice())
                         .unwrap_or(&[]);
+                    let extracted =
+                        fireweed_engine::index_fields::extract_index_fields_from_entity(
+                            typed_indexes,
+                            doc,
+                        )?;
+                    st(tx.execute(
+                        "UPDATE fireweed_items SET entity_document=?4,index_fields=?5 \
+                         WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                        params![
+                            t,
+                            q,
+                            c.item_id.to_string(),
+                            to_json(doc)?,
+                            fireweed_engine::index_fields::encode_index_fields_blob(&extracted)?
+                        ],
+                    ))?;
                     if !typed_indexes.is_empty() {
                         let item_id_str = c.item_id.to_string();
                         delete_typed_index_rows(tx, &t, &q, std::slice::from_ref(&item_id_str))?;
-                        let new_keys = typed_index_keys_for_entity(typed_indexes, Some(doc))?;
+                        let new_keys = fireweed_engine::index_fields::typed_index_keys(
+                            typed_indexes,
+                            &extracted,
+                        )?;
                         check_typed_unique_conflicts(tx, &t, &q, typed_indexes, &new_keys, None)?;
                         insert_typed_index_rows(tx, &t, &q, &item_id_str, &new_keys)?;
                     }
@@ -2103,16 +2113,19 @@ pub(crate) fn apply_command_sql(
                         };
                         let changed = st(tx.execute(
                             "UPDATE fireweed_items SET lifecycle_state=?4,priority=?5,priority_sort=?6,not_before=?7,\
-                             eligible_since=?8,payload=?9,fields=?10,metadata=?11,entity_document=?12,\
-                             lease_token_hash=?13,lease_expires_at=?14,worker_id=?15,fenced=?16,item_version=?17,\
-                             terminal_at=?18,terminal_command_epoch=?19,updated_at=?20,last_command_sequence=?21 \
-                             WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 AND item_version=?22",
+                             eligible_since=?8,payload=?9,fields=?10,metadata=?11,entity_document=?12,index_fields=?13,\
+                             lease_token_hash=?14,lease_expires_at=?15,worker_id=?16,fenced=?17,item_version=?18,\
+                             terminal_at=?19,terminal_command_epoch=?20,updated_at=?21,last_command_sequence=?22 \
+                             WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 AND item_version=?23",
                             params![
                                 t, q, item_id, state_str(values.state), priority_json, priority_sort,
                                 values.not_before.map(ts_nanos), ts_nanos(values.eligible_since),
                                 values.payload.as_ref().map(|payload| payload.to_vec()),
                                 fields_to_json(&values.fields)?, metadata_to_json(&values.metadata)?,
                                 values.entity_document.as_ref().map(to_json).transpose()?,
+                                fireweed_engine::index_fields::encode_index_fields_blob(
+                                    &values.index_fields,
+                                )?,
                                 lease_hash_sql, lease_expiry_sql, worker_sql, fenced_sql,
                                 values.item_version as i64,
                                 terminal.then_some(now_n),

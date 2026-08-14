@@ -199,6 +199,7 @@ CREATE TABLE IF NOT EXISTS fireweed_items (
     fields TEXT NOT NULL DEFAULT '{}',
     metadata TEXT NOT NULL DEFAULT '{}',
     entity_document TEXT,
+    index_fields BYTEA,
     retry_count BIGINT NOT NULL DEFAULT 0,
     item_version BIGINT NOT NULL,
     lease_token_hash BYTEA,
@@ -800,10 +801,10 @@ FROM candidates c \
 	WHERE i.tenant_id=$1 AND i.queue_id=$2 AND i.item_id=c.item_id \
 		RETURNING i.item_id, i.client_item_key, i.item_version, i.priority, i.group_key, i.not_before, \
 		          i.lease_expires_at, i.retry_count, i.max_attempts, i.payload, i.fields, i.metadata, \
-		          i.entity_document, i.priority_sort AS claim_priority_sort, i.created_seq AS claim_created_seq \
+		          i.entity_document, i.index_fields, i.priority_sort AS claim_priority_sort, i.created_seq AS claim_created_seq \
 ) \
 SELECT item_id, client_item_key, item_version, priority, group_key, not_before, lease_expires_at, \
-       retry_count, max_attempts, payload, fields, metadata, entity_document FROM updated \
+       retry_count, max_attempts, payload, fields, metadata, entity_document, index_fields FROM updated \
 ORDER BY claim_priority_sort, claim_created_seq";
 
 pub(crate) const ITEM_GATE_KEYS_BATCH_SQL: &str = "\
@@ -1746,80 +1747,16 @@ fn plan_item_mutation_sql<C: GenericClient>(
 // ADR-011 typed secondary index helpers (port of the sqlite relational helpers)
 // ---------------------------------------------------------------------------
 
-/// Decode a caller-supplied raw lookup byte slice into a `serde_json::Value` for re-encoding via
-/// `IndexDef::index_key` / `CompoundIndexDef::index_key`. Mirrors `decode_typed_lookup_value_rel`
-/// in `fireweed_sqlite::relational` — the two must stay identical so lookup keys byte-match stored keys.
-fn decode_typed_lookup_value_rel(
-    index_type: &IndexType,
-    bytes: &[u8],
-) -> EngineResult<serde_json::Value> {
-    match index_type {
-        IndexType::String => {
-            let s = std::str::from_utf8(bytes)
-                .map_err(|_| EngineError::Invalid("lookup key is not valid UTF-8"))?;
-            Ok(serde_json::Value::String(s.to_owned()))
-        }
-        IndexType::Datetime => {
-            if let Ok(value @ serde_json::Value::Number(_)) =
-                serde_json::from_slice::<serde_json::Value>(bytes)
-            {
-                return Ok(value);
-            }
-            let s = std::str::from_utf8(bytes)
-                .map_err(|_| EngineError::Invalid("lookup key is not valid UTF-8"))?;
-            Ok(serde_json::Value::String(s.to_owned()))
-        }
-        IndexType::Integer | IndexType::Float => serde_json::from_slice::<serde_json::Value>(bytes)
-            .map_err(|_| EngineError::Invalid("lookup key is not a valid JSON number")),
-        IndexType::Boolean => serde_json::from_slice::<serde_json::Value>(bytes)
-            .map_err(|_| EngineError::Invalid("lookup key is not a valid JSON boolean")),
-    }
-}
-
-/// Compute the canonical `index_key` bytes for a lookup against a named index.
 fn typed_lookup_canonical_key(qi: &QueueIndex, key_values: &[Vec<u8>]) -> EngineResult<Vec<u8>> {
-    match &qi.declaration {
-        IndexDeclaration::Single(def) => {
-            let val = decode_typed_lookup_value_rel(&def.index_type, &key_values[0])?;
-            let mut record = serde_json::Map::new();
-            record.insert(def.field.clone(), val);
-            def.index_key(&serde_json::Value::Object(record))
-                .map_err(|e| EngineError::Storage(e.to_string()))?
-                .ok_or_else(|| EngineError::Storage("missing lookup key".to_string()))
-        }
-        IndexDeclaration::Compound(def) => {
-            let mut record = serde_json::Map::new();
-            for (field, bytes) in def.fields.iter().zip(key_values.iter()) {
-                let val = decode_typed_lookup_value_rel(&field.index_type, bytes)?;
-                record.insert(field.field.clone(), val);
-            }
-            def.index_key(&serde_json::Value::Object(record))
-                .map_err(|e| EngineError::Storage(e.to_string()))?
-                .ok_or_else(|| EngineError::Storage("missing lookup key".to_string()))
-        }
-    }
+    fireweed_engine::index_fields::typed_lookup_key(&qi.declaration, key_values)
 }
 
-/// Compute `(index_name, canonical_key_bytes)` pairs for an item's `entity_document`.
-/// Returns empty when `typed_indexes` is empty or `entity` is `None` (schema-less queues).
-fn typed_index_keys_for_entity(
+fn typed_index_keys_for_item(
     typed_indexes: &[QueueIndex],
+    index_fields: &std::collections::BTreeMap<String, fireweed_core::TypedValue>,
     entity: Option<&serde_json::Value>,
 ) -> EngineResult<Vec<(String, Vec<u8>)>> {
-    let Some(entity) = entity else {
-        return Ok(vec![]);
-    };
-    let mut out = Vec::with_capacity(typed_indexes.len());
-    for qi in typed_indexes {
-        let key = match &qi.declaration {
-            IndexDeclaration::Single(def) => def.index_key(entity),
-            IndexDeclaration::Compound(def) => def.index_key(entity),
-        };
-        if let Some(k) = key.map_err(|e| EngineError::Storage(e.to_string()))? {
-            out.push((qi.name.clone(), k));
-        }
-    }
-    Ok(out)
+    fireweed_engine::index_fields::typed_index_keys_for_item(typed_indexes, index_fields, entity)
 }
 
 type TypedIndexRows = Vec<(String, Vec<(String, Vec<u8>)>)>;
@@ -1942,7 +1879,11 @@ fn maintain_typed_indexes_on_insert(
         std::collections::HashMap::new();
     let mut item_keys: TypedIndexRows = Vec::with_capacity(items.len());
     for item in items {
-        let keys = typed_index_keys_for_entity(typed_indexes, item.entity_document.as_ref())?;
+        let keys = fireweed_engine::index_fields::typed_index_keys_for_item(
+            typed_indexes,
+            &item.index_fields,
+            item.entity_document.as_ref(),
+        )?;
         check_typed_unique_conflicts(tx, t, q, typed_indexes, &keys, None)?;
         for (name, key) in &keys {
             if typed_indexes
@@ -2706,6 +2647,7 @@ struct ItemRow {
     fields: String,
     metadata: String,
     entity_document: Option<String>,
+    index_fields: Option<Vec<u8>>,
     max_attempts: i64,
     created_seq: i64,
 }
@@ -2752,6 +2694,9 @@ fn insert_items(
             fields: fields_to_json(&item.fields)?,
             metadata: metadata_to_json(&item.metadata)?,
             entity_document: item.entity_document.as_ref().map(to_json).transpose()?,
+            index_fields: fireweed_engine::index_fields::encode_index_fields_blob(
+                &item.index_fields,
+            )?,
             max_attempts: item.max_attempts as i64,
             created_seq: base_seq + i as i64,
         });
@@ -2760,18 +2705,18 @@ fn insert_items(
         let mut sql = String::from(
             "INSERT INTO fireweed_items \
              (tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
-              not_before,eligible_since,group_key,cohort_size,payload,fields,metadata,entity_document,retry_count,\
+              not_before,eligible_since,group_key,cohort_size,payload,fields,metadata,entity_document,index_fields,retry_count,\
               item_version,lease_token_hash,lease_expires_at,worker_id,last_command_sequence,created_at,\
               updated_at,terminal_at,fenced,superseded,max_attempts,created_seq) VALUES ",
         );
         let mut params: Vec<&(dyn ToSql + Sync)> = vec![&t, &q, &seqi, &now_n];
         for (r, row) in chunk.iter().enumerate() {
-            let b = 5 + r * 14;
+            let b = 5 + r * 15;
             if r > 0 {
                 sql.push(',');
             }
             sql.push_str(&format!(
-                "($1,$2,${},${},'Pending',${},${},${},${},${},${},${},${},${},${},\
+                "($1,$2,${},${},'Pending',${},${},${},${},${},${},${},${},${},${},${},\
                  0,1,NULL,NULL,NULL,$3,$4,$4,NULL,false,false,${},${})",
                 b,
                 b + 1,
@@ -2787,6 +2732,7 @@ fn insert_items(
                 b + 11,
                 b + 12,
                 b + 13,
+                b + 14,
             ));
             params.push(&row.item_id);
             params.push(&row.key);
@@ -2800,6 +2746,7 @@ fn insert_items(
             params.push(&row.fields);
             params.push(&row.metadata);
             params.push(&row.entity_document);
+            params.push(&row.index_fields);
             params.push(&row.max_attempts);
             params.push(&row.created_seq);
         }
@@ -3148,15 +3095,18 @@ fn apply_mutate_items_sql(
         let entity_document = values.entity_document.as_ref().map(to_json).transpose()?;
         let terminal_at = values.state.is_terminal().then_some(now_n);
         let lease_ends = values.invalidate_lease || values.state != ItemState::Leased;
+        let index_fields =
+            fireweed_engine::index_fields::encode_index_fields_blob(&values.index_fields)?;
         let affected = st(tx.execute(
             "UPDATE fireweed_items SET lifecycle_state=$4,item_version=$5,priority=$6,priority_sort=$7, \
                not_before=$8,eligible_since=$9,payload=$10,fields=$11,metadata=$12,entity_document=$13, \
-               lease_token_hash=CASE WHEN $14 THEN NULL ELSE lease_token_hash END, \
-               lease_expires_at=CASE WHEN $14 THEN NULL ELSE lease_expires_at END, \
-               worker_id=CASE WHEN $14 THEN NULL ELSE worker_id END, \
-               fenced=CASE WHEN $14 THEN false ELSE fenced END,terminal_at=$15,updated_at=$16, \
-               last_command_sequence=$17 \
-             WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 AND item_version=$18",
+               index_fields=$14, \
+               lease_token_hash=CASE WHEN $15 THEN NULL ELSE lease_token_hash END, \
+               lease_expires_at=CASE WHEN $15 THEN NULL ELSE lease_expires_at END, \
+               worker_id=CASE WHEN $15 THEN NULL ELSE worker_id END, \
+               fenced=CASE WHEN $15 THEN false ELSE fenced END,terminal_at=$16,updated_at=$17, \
+               last_command_sequence=$18 \
+             WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 AND item_version=$19",
             &[
                 &tenant,
                 &queue,
@@ -3171,6 +3121,7 @@ fn apply_mutate_items_sql(
                 &fields,
                 &metadata,
                 &entity_document,
+                &index_fields,
                 &lease_ends,
                 &terminal_at,
                 &now_n,
@@ -3194,7 +3145,11 @@ fn apply_mutate_items_sql(
                 &[&tenant, &queue, &item_ids, &values.gate_keys],
             ))?;
         }
-        let new_keys = typed_index_keys_for_entity(typed_indexes, values.entity_document.as_ref())?;
+        let new_keys = typed_index_keys_for_item(
+            typed_indexes,
+            &values.index_fields,
+            values.entity_document.as_ref(),
+        )?;
         check_typed_unique_conflicts(
             tx,
             &tenant,
@@ -3458,18 +3413,24 @@ fn apply_command_sql(
             // old rows first so the unique slot is freed before the conflict check fires.
             if let Some(ref doc) = c.set_entity_document {
                 let entity_document = to_json(doc)?;
-                st(tx.execute(
-                    "UPDATE fireweed_items SET entity_document=$4 \
-                     WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
-                    &[&t, &q, &item_id, &entity_document],
-                ))?;
                 let typed_indexes = queues
                     .get(shard)
                     .map(|d| d.typed_indexes.as_slice())
                     .unwrap_or(&[]);
+                let extracted = fireweed_engine::index_fields::extract_index_fields_from_entity(
+                    typed_indexes,
+                    doc,
+                )?;
+                let index_fields =
+                    fireweed_engine::index_fields::encode_index_fields_blob(&extracted)?;
+                st(tx.execute(
+                    "UPDATE fireweed_items SET entity_document=$4,index_fields=$5 \
+                     WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
+                    &[&t, &q, &item_id, &entity_document, &index_fields],
+                ))?;
                 if !typed_indexes.is_empty() {
                     delete_typed_index_rows(tx, &t, &q, std::slice::from_ref(&item_id))?;
-                    let new_keys = typed_index_keys_for_entity(typed_indexes, Some(doc))?;
+                    let new_keys = typed_index_keys_for_item(typed_indexes, &extracted, None)?;
                     check_typed_unique_conflicts(tx, &t, &q, typed_indexes, &new_keys, None)?;
                     insert_typed_index_rows(tx, &t, &q, typed_indexes, &item_id, &new_keys)?;
                 }
@@ -4613,8 +4574,11 @@ fn claimed_from_row(
     fields: String,
     metadata: String,
     entity: Option<String>,
+    index_fields: Option<Vec<u8>>,
     gate_keys: Vec<String>,
 ) -> EngineResult<ClaimedItem> {
+    let index_fields =
+        fireweed_engine::index_fields::decode_index_fields_blob(index_fields.as_deref())?;
     Ok(ClaimedItem {
         item_id,
         client_item_key: ClientItemKey::new(key)
@@ -4632,7 +4596,10 @@ fn claimed_from_row(
         max_attempts: max_attempts as u32,
         payload: payload.map(Bytes::from),
         fields: fields_from_json(fields)?,
-        entity: entity_from_json(entity)?,
+        entity: fireweed_engine::index_fields::echo_entity_document(
+            entity_from_json(entity)?,
+            &index_fields,
+        )?,
         metadata: metadata_from_json(metadata)?,
         gate_keys,
     })
@@ -4680,7 +4647,7 @@ fn render_claimed(
     let id_strings: Vec<String> = ids.iter().map(ToString::to_string).collect();
     let rows = st(client.query(
         "SELECT item_id,client_item_key,item_version,priority,group_key,not_before, \
-         lease_expires_at,retry_count,max_attempts,payload,fields,metadata,entity_document FROM fireweed_items \
+         lease_expires_at,retry_count,max_attempts,payload,fields,metadata,entity_document,index_fields FROM fireweed_items \
          WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3::text[]) \
          AND lifecycle_state='Leased'",
         &[&t, &q, &id_strings],
@@ -4718,6 +4685,7 @@ fn render_claimed(
             row.get(10),
             row.get(11),
             row.get(12),
+            row.get(13),
             gate_keys,
         )?);
     }
@@ -4848,27 +4816,10 @@ fn metrics_by_query_sql(
         else {
             return Err(EngineError::Invalid("unindexed-field"));
         };
-        let value = match (&filter.value, *index_type) {
-            (TypedValue::String(value), IndexType::String) => {
-                serde_json::Value::String(value.clone())
-            }
-            (TypedValue::Integer(value), IndexType::Integer) => (*value).into(),
-            (TypedValue::Float(value), IndexType::Float) => serde_json::Number::from_f64(*value)
-                .map(serde_json::Value::Number)
-                .ok_or(EngineError::Invalid(
-                    "typed index value is not valid for declared type",
-                ))?,
-            (TypedValue::Bool(value), IndexType::Boolean) => (*value).into(),
-            (TypedValue::DateTime(value), IndexType::Datetime) => value.seconds.into(),
-            _ => {
-                return Err(EngineError::Invalid(
-                    "typed index value is not valid for declared type",
-                ));
-            }
-        };
-        let encoded = axon_esf::encode_index_value(&value, index_type).map_err(|_| {
-            EngineError::Invalid("typed index value is not valid for declared type")
-        })?;
+        let encoded = fireweed_engine::index_fields::encode_typed_value(&filter.value, index_type)
+            .map_err(|_| {
+                EngineError::Invalid("typed index value is not valid for declared type")
+            })?;
         positioned.push((position, filter, encoded));
     }
     positioned.sort_by_key(|(position, _, _)| *position);
@@ -5717,6 +5668,7 @@ impl PostgresRelationalBackend {
                  ALTER TABLE queues ADD COLUMN IF NOT EXISTS pause_drain_intake BOOLEAN NOT NULL DEFAULT false;\
                  ALTER TABLE fireweed_items ADD COLUMN IF NOT EXISTS metadata TEXT NOT NULL DEFAULT '{}';\
                  ALTER TABLE fireweed_items ADD COLUMN IF NOT EXISTS entity_document TEXT;\
+                 ALTER TABLE fireweed_items ADD COLUMN IF NOT EXISTS index_fields BYTEA;\
                  ALTER TABLE fireweed_cohorts ADD COLUMN IF NOT EXISTS cohort_id TEXT;\
              ALTER TABLE fireweed_cohorts ADD COLUMN IF NOT EXISTS member_count BIGINT NOT NULL DEFAULT 0;\
              ALTER TABLE fireweed_cohorts ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'forming';\
@@ -7881,6 +7833,7 @@ fn claim_item_level_in_tx(
             row.get(10),
             row.get(11),
             row.get(12),
+            row.get(13),
             gate_keys,
         )?);
         token_ops.push(TokenOp::Set(item_id, req.lease_token.clone()));

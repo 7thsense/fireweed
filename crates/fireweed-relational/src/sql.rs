@@ -86,7 +86,7 @@ pub mod async_projection {
         item_version=item_version+1,updated_at=?6,last_command_sequence=?7 WHERE tenant_id=?1 \
         AND queue_id=?2 AND item_id=?3 AND lifecycle_state IN ('Pending','Leased') \
         AND superseded=0 AND fenced=0";
-    pub const UPDATE_ENTITY_DOCUMENT: &str = "UPDATE fireweed_items SET entity_document=?4 \
+    pub const UPDATE_ENTITY_DOCUMENT: &str = "UPDATE fireweed_items SET entity_document=?4,index_fields=?5 \
         WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3";
     pub const SUPERSEDE_ITEM: &str = "UPDATE fireweed_items SET superseded=1,updated_at=?4,\
         last_command_sequence=?5 WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3";
