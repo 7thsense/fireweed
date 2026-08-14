@@ -1373,6 +1373,7 @@ mod tests {
             cohort_size: None,
             gate_keys: Vec::new(),
             entity: None,
+            index_fields: Default::default(),
         }
     }
     #[test]

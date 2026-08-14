@@ -42,6 +42,7 @@ fn push_spec(key: &str, priority: i64) -> PushSpec {
         cohort_size: None,
         gate_keys: Vec::new(),
         entity: None,
+        index_fields: BTreeMap::new(),
     }
 }
 

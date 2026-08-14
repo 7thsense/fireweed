@@ -199,9 +199,17 @@ pub mod btreemap_bytes {
         value: &BTreeMap<String, Bytes>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
+        let human = serializer.is_human_readable();
         let mut map = serializer.serialize_map(Some(value.len()))?;
         for (k, v) in value {
-            map.serialize_entry(k, &B64.encode(v.as_ref()))?;
+            if human {
+                map.serialize_entry(k, &B64.encode(v.as_ref()))?;
+            } else {
+                // Native binary: raw bytes. Base64 here would round-trip as the
+                // encoded TEXT (postcard str/bytes framing is identical), silently
+                // corrupting every field value.
+                map.serialize_entry(k, &BytesSer(v.as_ref()))?;
+            }
         }
         map.end()
     }
@@ -250,11 +258,15 @@ pub mod btreemap_option_bytes {
         value: &BTreeMap<String, Option<Bytes>>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
+        let human = serializer.is_human_readable();
         let mut map = serializer.serialize_map(Some(value.len()))?;
         for (k, v) in value {
-            match v {
-                None => map.serialize_entry(k, &serde_json::Value::Null)?,
-                Some(b) => map.serialize_entry(k, &B64.encode(b.as_ref()))?,
+            match (human, v) {
+                (true, None) => map.serialize_entry(k, &serde_json::Value::Null)?,
+                (true, Some(b)) => map.serialize_entry(k, &B64.encode(b.as_ref()))?,
+                // Native binary: real Option + raw bytes (see btreemap_bytes).
+                (false, None) => map.serialize_entry(k, &None::<BytesSer>)?,
+                (false, Some(b)) => map.serialize_entry(k, &Some(BytesSer(b.as_ref())))?,
             }
         }
         map.end()
@@ -367,9 +379,15 @@ pub mod vec_vec_u8 {
 
     pub fn serialize<S: Serializer>(value: &[Vec<u8>], serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeSeq;
+        let human = serializer.is_human_readable();
         let mut seq = serializer.serialize_seq(Some(value.len()))?;
         for v in value {
-            seq.serialize_element(&B64.encode(v))?;
+            if human {
+                seq.serialize_element(&B64.encode(v))?;
+            } else {
+                // Native binary: raw bytes (see btreemap_bytes).
+                seq.serialize_element(&BytesSer(v))?;
+            }
         }
         seq.end()
     }
