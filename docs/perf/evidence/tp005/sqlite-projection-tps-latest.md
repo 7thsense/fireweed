@@ -11,19 +11,21 @@ concurrent `claim_finalize_push_cycle` callers into one ordered append+apply.
 cargo test -p fireweed --test sqlite_sqlite_projection_tps_probe --release --features sqlite -- --nocapture
 ```
 
-## Measure (cycle group-commit sealer)
-
-Concurrent `claim_finalize_push_cycle` callers on one shard enqueue; one leader
-selects the combined eligible set and issues a single append+apply. w1 is one
-waiter → one seal (no extra dispatcher hop). `seals < cycles` proves coalescing.
+## Quiet-host measure (v0.31.7 tip)
 
 | workers | durable_tps | seals | cycles |
 |--------:|------------:|------:|-------:|
-| 1 | **9,061** | 16 | 16 |
-| 4 | **10,333** | 11 | 16 |
-| 8 | **10,697** | 5 | 16 |
+| 1 | **13,141** | 16 | 16 |
+| 4 | **13,422** | 11 | 16 |
+| 8 | **14,092** | 5 | 16 |
 
-**Concurrency goal met:** w8 / w1 = **1.18** (w8 no longer collapses).  
-Host is slower than the v0.31.6 cut machine (that cut was w1 **12,221** / w4 **11,975** / w8 **7,214**). Same-host sqlite×memory w1 was ~8.3k.
+**Concurrency:** w8 / w1 = **1.07** (no collapse).  
+**13k cell:** met. **+10% vs v0.31.6 w1 (12,221 → 13,443):** not yet (13,141 = +7.5%).
+
+Next performance cut waits for sqlite×sqlite w1 ≥ **13,443**, then ratchets +10% from that new w1.
+
+Earlier noisy-host best-of-2 was w1 9,061 / w4 10,333 / w8 10,697 (same sealer).
+
+v0.31.6 on the previous cut machine: w1 **12,221** / w4 **11,975** / w8 **7,214**.
 
 Apply writes: item row + **unique** `fireweed_item_index` rows only. All index field values persist as a postcard blob on the item so query indexes rebuild from native fields (not 19 B-tree inserts per item).

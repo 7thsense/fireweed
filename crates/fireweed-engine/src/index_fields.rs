@@ -85,11 +85,9 @@ pub fn json_to_typed_value(value: &Value, index_type: &IndexType) -> EngineResul
             Value::String(s) => {
                 // ISO-ish or decimal seconds — keep admission permissive; axon encode is strict.
                 if let Ok(secs) = s.parse::<i64>() {
-                    return Ok(TypedValue::DateTime(
-                        UtcTimestamp::new(secs, 0).map_err(|_| {
-                            EngineError::Invalid("typed index datetime out of range")
-                        })?,
-                    ));
+                    return Ok(TypedValue::DateTime(UtcTimestamp::new(secs, 0).map_err(
+                        |_| EngineError::Invalid("typed index datetime out of range"),
+                    )?));
                 }
                 let nanos = axon_esf::coerce_datetime_nanos(value).map_err(|_| {
                     EngineError::Invalid(
@@ -171,6 +169,23 @@ pub fn materialize_index_fields(
     }
 }
 
+/// Serving-time entity echo: stored document, else synthesize from native index fields.
+///
+/// Compact-log admission may omit `entity_document` when `index_fields` already carry the
+/// declared typed keys. Claim/query must still return the same JSON object on every cell.
+pub fn echo_entity_document(
+    entity: Option<Value>,
+    index_fields: &BTreeMap<String, TypedValue>,
+) -> EngineResult<Option<Value>> {
+    if entity.is_some() {
+        return Ok(entity);
+    }
+    if index_fields.is_empty() {
+        return Ok(None);
+    }
+    index_fields_as_entity(index_fields).map(Some)
+}
+
 /// Build a synthetic JSON object from native index fields (for axon_esf `index_key` / encode).
 ///
 /// This is a **projection-time** adapter: storage remains native `TypedValue`. axon_esf's public
@@ -195,9 +210,7 @@ pub fn encode_index_fields_blob(
         .map_err(|e| EngineError::Storage(format!("index_fields encode: {e}")))
 }
 
-pub fn decode_index_fields_blob(
-    blob: Option<&[u8]>,
-) -> EngineResult<BTreeMap<String, TypedValue>> {
+pub fn decode_index_fields_blob(blob: Option<&[u8]>) -> EngineResult<BTreeMap<String, TypedValue>> {
     match blob {
         None | Some([]) => Ok(BTreeMap::new()),
         Some(bytes) => postcard::from_bytes(bytes)
@@ -235,9 +248,10 @@ pub fn typed_value_to_json(value: &TypedValue) -> EngineResult<Value> {
     Ok(match value {
         TypedValue::String(v) => Value::String(v.clone()),
         TypedValue::Integer(v) => Value::Number((*v).into()),
-        TypedValue::Float(v) => Value::Number(serde_json::Number::from_f64(*v).ok_or(
-            EngineError::Invalid("typed index float is not finite"),
-        )?),
+        TypedValue::Float(v) => Value::Number(
+            serde_json::Number::from_f64(*v)
+                .ok_or(EngineError::Invalid("typed index float is not finite"))?,
+        ),
         TypedValue::Bool(v) => Value::Bool(*v),
         // Axon's canonical numeric-datetime unit is epoch NANOS (`coerce_datetime_nanos`);
         // emitting seconds here would shift every datetime key by 1e9.
@@ -360,5 +374,13 @@ mod tests {
         let entity = index_fields_as_entity(&fields).unwrap();
         assert_eq!(entity["f0"], json!("k-1"));
         assert_eq!(entity["rank"], json!(3));
+        assert_eq!(
+            echo_entity_document(None, &fields).unwrap(),
+            Some(entity.clone())
+        );
+        assert_eq!(
+            echo_entity_document(Some(json!({"kept": true})), &fields).unwrap(),
+            Some(json!({"kept": true}))
+        );
     }
 }
