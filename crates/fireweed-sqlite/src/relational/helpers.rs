@@ -738,7 +738,10 @@ pub(crate) fn ensure_item_metadata_column(conn: &Connection) -> EngineResult<()>
 }
 
 pub(crate) fn ensure_item_index_fields_column(conn: &Connection) -> EngineResult<()> {
-    match conn.execute("ALTER TABLE fireweed_items ADD COLUMN index_fields BLOB", []) {
+    match conn.execute(
+        "ALTER TABLE fireweed_items ADD COLUMN index_fields BLOB",
+        [],
+    ) {
         Ok(_) => Ok(()),
         Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
             if msg.contains("duplicate column name") =>
@@ -950,8 +953,7 @@ pub(crate) fn typed_index_keys_for_native(
         return Ok(vec![]);
     }
     if !index_fields.is_empty() {
-        let entity = fireweed_engine::index_fields::index_fields_as_entity(index_fields)?;
-        return typed_index_keys_for_entity(typed_indexes, Some(&entity));
+        return fireweed_engine::index_fields::typed_index_keys(typed_indexes, index_fields);
     }
     typed_index_keys_for_entity(typed_indexes, entity)
 }

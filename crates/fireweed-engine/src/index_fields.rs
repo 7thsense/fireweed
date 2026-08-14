@@ -9,9 +9,9 @@
 //! | `push.payload` | client | opaque byte blob |
 //!
 //! The durable log stores `index_fields` as postcard-native `TypedValue`s
-//! (`String` / `Integer` / `Float` / `Bool` / `DateTime`). Projection encodes
-//! axon_esf order-preserving keys from those values at apply — never by
-//! re-parsing an entity JSON document from the log.
+//! (`String` / `Integer` / `Float` / `Bool` / `DateTime`). Unique SQL keys are
+//! framed from those values directly ([`typed_index_key`]) — never by building
+//! a JSON entity and asking axon to re-parse it.
 //!
 //! Admission may still accept a JSON entity for ergonomics; call
 //! [`materialize_index_fields`] **once** at the admission boundary, then only
@@ -167,6 +167,96 @@ pub fn materialize_index_fields(
         Some(doc) => extract_index_fields_from_entity(&definition.typed_indexes, doc),
         None => Ok(BTreeMap::new()),
     }
+}
+
+/// Order-preserving bytes for one native [`TypedValue`], matching axon_esf's unframed
+/// `encode_index_value` (sign-flipped i64, total-order f64, UTF-8, bool 0/1, datetime nanos).
+pub fn encode_typed_value(value: &TypedValue, expected: &IndexType) -> EngineResult<Vec<u8>> {
+    match (expected, value) {
+        (IndexType::String, TypedValue::String(s)) => Ok(s.as_bytes().to_vec()),
+        (IndexType::Integer, TypedValue::Integer(v)) => Ok(encode_i64(*v)),
+        (IndexType::Float, TypedValue::Float(v)) => Ok(encode_f64(*v)),
+        (IndexType::Boolean, TypedValue::Bool(b)) => Ok(vec![u8::from(*b)]),
+        (IndexType::Datetime, TypedValue::DateTime(ts)) => {
+            let nanos = ts
+                .seconds
+                .checked_mul(1_000_000_000)
+                .and_then(|n| n.checked_add(i64::from(ts.nanoseconds)))
+                .ok_or(EngineError::Invalid("typed index datetime out of range"))?;
+            Ok(encode_i64(nanos))
+        }
+        _ => Err(EngineError::Invalid(
+            "typed index field value does not match declared IndexType",
+        )),
+    }
+}
+
+fn encode_i64(v: i64) -> Vec<u8> {
+    let ordered = (v as u64) ^ (1u64 << 63);
+    ordered.to_be_bytes().to_vec()
+}
+
+fn encode_f64(v: f64) -> Vec<u8> {
+    let bits = v.to_bits();
+    let ordered = if bits & (1u64 << 63) == 0 {
+        bits | (1u64 << 63)
+    } else {
+        !bits
+    };
+    ordered.to_be_bytes().to_vec()
+}
+
+fn frame_value(encoded: &[u8], out: &mut Vec<u8>) {
+    let len = u32::try_from(encoded.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(encoded);
+}
+
+/// Framed axon-compatible key for one declared index from a native field map.
+///
+/// `None` when any required field is missing (sparse). Bytes match
+/// `IndexDef::index_key` / `CompoundIndexDef::index_key` on the equivalent JSON
+/// record so existing unique SQL rows stay valid.
+pub fn typed_index_key(
+    declaration: &IndexDeclaration,
+    fields: &BTreeMap<String, TypedValue>,
+) -> EngineResult<Option<Vec<u8>>> {
+    match declaration {
+        IndexDeclaration::Single(def) => {
+            let Some(value) = fields.get(&def.field) else {
+                return Ok(None);
+            };
+            let encoded = encode_typed_value(value, &def.index_type)?;
+            let mut out = Vec::with_capacity(4 + encoded.len());
+            frame_value(&encoded, &mut out);
+            Ok(Some(out))
+        }
+        IndexDeclaration::Compound(def) => {
+            let mut out = Vec::new();
+            for field in &def.fields {
+                let Some(value) = fields.get(&field.field) else {
+                    return Ok(None);
+                };
+                let encoded = encode_typed_value(value, &field.index_type)?;
+                frame_value(&encoded, &mut out);
+            }
+            Ok(Some(out))
+        }
+    }
+}
+
+/// `(index_name, framed_key)` for every declared index that is fully present in `fields`.
+pub fn typed_index_keys(
+    indexes: &[QueueIndex],
+    fields: &BTreeMap<String, TypedValue>,
+) -> EngineResult<Vec<(String, Vec<u8>)>> {
+    let mut out = Vec::with_capacity(indexes.len());
+    for qi in indexes {
+        if let Some(key) = typed_index_key(&qi.declaration, fields)? {
+            out.push((qi.name.clone(), key));
+        }
+    }
+    Ok(out)
 }
 
 /// Serving-time entity echo: stored document, else synthesize from native index fields.
@@ -381,6 +471,37 @@ mod tests {
         assert_eq!(
             echo_entity_document(Some(json!({"kept": true})), &fields).unwrap(),
             Some(json!({"kept": true}))
+        );
+    }
+
+    #[test]
+    fn native_typed_key_matches_axon_framed_entity_key() {
+        let def = IndexDef {
+            field: "f0".into(),
+            index_type: IndexType::String,
+            unique: true,
+        };
+        let fields = BTreeMap::from([("f0".into(), TypedValue::String("k-1".into()))]);
+        let native = typed_index_key(&IndexDeclaration::Single(def.clone()), &fields)
+            .unwrap()
+            .unwrap();
+        let entity = index_fields_as_entity(&fields).unwrap();
+        let axon = def.index_key(&entity).unwrap().unwrap();
+        assert_eq!(native, axon);
+
+        let idef = IndexDef {
+            field: "n".into(),
+            index_type: IndexType::Integer,
+            unique: false,
+        };
+        let ints = BTreeMap::from([("n".into(), TypedValue::Integer(-3))]);
+        assert_eq!(
+            typed_index_key(&IndexDeclaration::Single(idef.clone()), &ints)
+                .unwrap()
+                .unwrap(),
+            idef.index_key(&index_fields_as_entity(&ints).unwrap())
+                .unwrap()
+                .unwrap()
         );
     }
 }

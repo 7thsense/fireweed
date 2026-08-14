@@ -1821,8 +1821,11 @@ impl ProjectionData {
                 if let Some(key) = rec.explicit_client_item_key.clone() {
                     projection.by_key.insert(key, rec.item_id);
                 }
-                let keys =
-                    projection.record_index_keys(&rec.fields, &rec.index_fields, rec.entity_document.as_ref())?;
+                let keys = projection.record_index_keys(
+                    &rec.fields,
+                    &rec.index_fields,
+                    rec.entity_document.as_ref(),
+                )?;
                 projection.index_insert_keys(rec.item_id, &keys);
                 if rec.state == ItemState::Pending {
                     projection.claim_index_insert_keys(rec.item_id, &keys);
@@ -1972,15 +1975,14 @@ impl ProjectionData {
         entity: Option<&Value>,
     ) -> EngineResult<Vec<(String, Vec<u8>)>> {
         let mut keys = legacy_index_keys(&self.index_specs, fields)?;
-        // Prefer native index_fields; entity is only a fall-back for pre-native durable rows.
-        let synthetic;
-        let entity_ref = if !index_fields.is_empty() {
-            synthetic = fireweed_engine::index_fields::index_fields_as_entity(index_fields)?;
-            Some(&synthetic)
+        if !index_fields.is_empty() {
+            keys.extend(fireweed_engine::index_fields::typed_index_keys(
+                &self.typed_index_specs,
+                index_fields,
+            )?);
         } else {
-            entity
-        };
-        keys.extend(typed_index_keys(&self.typed_index_specs, entity_ref)?);
+            keys.extend(typed_index_keys(&self.typed_index_specs, entity)?);
+        }
         Ok(keys)
     }
 
@@ -2053,7 +2055,8 @@ impl ProjectionData {
                 .or_default()
                 .insert(rec.item_id);
         }
-        let keys = self.record_index_keys(&rec.fields, &rec.index_fields, rec.entity_document.as_ref())?;
+        let keys =
+            self.record_index_keys(&rec.fields, &rec.index_fields, rec.entity_document.as_ref())?;
         self.insert_keys_into_both(rec.item_id, &keys);
         self.items.insert(rec.item_id, rec);
         self.metrics.pending += 1;
@@ -2172,13 +2175,21 @@ impl ProjectionData {
         if old_state == ItemState::Pending && new_state != ItemState::Pending {
             let keys = {
                 let rec = self.items.get(id).ok_or(EngineError::NotFound)?;
-                self.record_index_keys(&rec.fields, &rec.index_fields, rec.entity_document.as_ref())?
+                self.record_index_keys(
+                    &rec.fields,
+                    &rec.index_fields,
+                    rec.entity_document.as_ref(),
+                )?
             };
             self.claim_index_remove_keys(*id, &keys);
         } else if old_state != ItemState::Pending && new_state == ItemState::Pending {
             let keys = {
                 let rec = self.items.get(id).ok_or(EngineError::NotFound)?;
-                self.record_index_keys(&rec.fields, &rec.index_fields, rec.entity_document.as_ref())?
+                self.record_index_keys(
+                    &rec.fields,
+                    &rec.index_fields,
+                    rec.entity_document.as_ref(),
+                )?
             };
             self.claim_index_insert_keys(*id, &keys);
         }
@@ -2409,8 +2420,11 @@ impl ProjectionData {
                         !rec.state.is_terminal() && !rec.superseded && !rec.fenced,
                         "UpdateFields applied to a non-updatable item; update_fields_validate was bypassed"
                     );
-                    let old_keys =
-                        self.record_index_keys(&rec.fields, &rec.index_fields, rec.entity_document.as_ref())?;
+                    let old_keys = self.record_index_keys(
+                        &rec.fields,
+                        &rec.index_fields,
+                        rec.entity_document.as_ref(),
+                    )?;
                     let repricing = matches!(c.set_priority, ScheduleUpdate::Set(_))
                         || matches!(c.set_not_before, ScheduleUpdate::Set(_));
                     let eligibility_changed = repricing || c.set_gate_keys.is_some();
@@ -2436,7 +2450,8 @@ impl ProjectionData {
                         .set_entity_document
                         .as_ref()
                         .or(rec.entity_document.as_ref());
-                    let new_keys = self.record_index_keys(&next_fields, &rec.index_fields, next_entity)?;
+                    let new_keys =
+                        self.record_index_keys(&next_fields, &rec.index_fields, next_entity)?;
 
                     let mut next_rec = rec.clone();
                     next_rec.fields = next_fields;
@@ -2557,8 +2572,11 @@ impl ProjectionData {
                                 .get(&mutation.item_id)
                                 .cloned()
                                 .ok_or(EngineError::NotFound)?;
-                            let old_index_keys =
-                                self.record_index_keys(&old.fields, &old.index_fields, old.entity_document.as_ref())?;
+                            let old_index_keys = self.record_index_keys(
+                                &old.fields,
+                                &old.index_fields,
+                                old.entity_document.as_ref(),
+                            )?;
                             if old.state == ItemState::Pending
                                 && !old.superseded
                                 && !gate_keys_blocked(&self.blocked_gates, &old.gate_keys)
@@ -2772,7 +2790,13 @@ impl ProjectionData {
                 let superseded_keys = self
                     .items
                     .get(&c.superseded_item_id)
-                    .map(|rec| self.record_index_keys(&rec.fields, &rec.index_fields, rec.entity_document.as_ref()))
+                    .map(|rec| {
+                        self.record_index_keys(
+                            &rec.fields,
+                            &rec.index_fields,
+                            rec.entity_document.as_ref(),
+                        )
+                    })
                     .transpose()?;
                 let superseded_gate_keys = self
                     .items
@@ -3281,9 +3305,11 @@ impl ProjectionData {
             let ResolvedItemMutationAction::Replace(values) = &command.action else {
                 continue;
             };
-            for (name, key) in
-                self.record_index_keys(&values.fields, &values.index_fields, values.entity_document.as_ref())?
-            {
+            for (name, key) in self.record_index_keys(
+                &values.fields,
+                &values.index_fields,
+                values.entity_document.as_ref(),
+            )? {
                 if matches!(self.indexes.get(&name), Some(SecondaryIndex::Unique(_)))
                     && let Some(other) = batch_unique.insert((name, key), command.item_id)
                     && other != command.item_id
@@ -3832,7 +3858,8 @@ impl ProjectionData {
                 }
             }
         }
-        let keys = self.record_index_keys(&rec.fields, &rec.index_fields, rec.entity_document.as_ref())?;
+        let keys =
+            self.record_index_keys(&rec.fields, &rec.index_fields, rec.entity_document.as_ref())?;
         self.index_remove_keys(rec.item_id, &keys);
         self.claim_index_remove_keys(rec.item_id, &keys);
         Ok(())
@@ -4318,9 +4345,11 @@ impl ProjectionData {
     pub fn index_validate_push(&self, items: &[PushItem]) -> EngineResult<()> {
         let mut batch: BTreeMap<(String, Vec<u8>), ItemId> = BTreeMap::new();
         for item in items {
-            for (name, key) in
-                self.record_index_keys(&item.fields, &item.index_fields, item.entity_document.as_ref())?
-            {
+            for (name, key) in self.record_index_keys(
+                &item.fields,
+                &item.index_fields,
+                item.entity_document.as_ref(),
+            )? {
                 let Some(SecondaryIndex::Unique(map)) = self.indexes.get(&name) else {
                     continue;
                 };
