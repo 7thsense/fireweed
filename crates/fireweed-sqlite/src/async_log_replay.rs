@@ -12,7 +12,7 @@ use fireweed_engine::{
 };
 use fireweed_projection::InMemoryProjection;
 
-use crate::SqliteLog;
+use crate::{SqliteLog, SqliteLogSync};
 
 /// Assemble an ephemeral `:memory:` async sqlite log-replay backend.
 ///
@@ -26,7 +26,15 @@ pub fn async_composed_sqlite_backend_in_memory()
 pub fn async_composed_sqlite_backend(
     path: &str,
 ) -> EngineResult<AsyncLogReplayBackend<SqliteLog, InMemoryProjection>> {
-    from_sqlite_log(SqliteLog::open(path)?, 0)?.recover()
+    async_composed_sqlite_backend_with_sync(path, SqliteLogSync::Full)
+}
+
+/// Assemble and recover a durable sqlite log-replay backend with an explicit WAL sync mode.
+pub fn async_composed_sqlite_backend_with_sync(
+    path: &str,
+    sync: SqliteLogSync,
+) -> EngineResult<AsyncLogReplayBackend<SqliteLog, InMemoryProjection>> {
+    from_sqlite_log(SqliteLog::open_with_sync(path, sync)?, 0)?.recover()
 }
 
 /// Assemble from an already-opened [`SqliteLog`] (caller typically runs recover for durable paths).

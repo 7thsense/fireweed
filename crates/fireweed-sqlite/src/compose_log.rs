@@ -144,20 +144,49 @@ fn next_page_cursor(
     has_more.then(|| last_returned.cloned()).flatten()
 }
 
+/// WAL commit durability for [`SqliteLog`].
+///
+/// [`Self::Full`] is the Class A default (ack survives process crash and power loss).
+/// [`Self::Normal`] and [`Self::Off`] trade that ack for throughput: a process crash is
+/// usually still safe in WAL mode, but an OS crash or power loss may lose the tail.
+/// The serving projection is rebuildable either way; these knobs only change the log file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SqliteLogSync {
+    #[default]
+    Full,
+    Normal,
+    Off,
+}
+
+impl SqliteLogSync {
+    fn pragma(self) -> &'static str {
+        match self {
+            Self::Full => "FULL",
+            Self::Normal => "NORMAL",
+            Self::Off => "OFF",
+        }
+    }
+}
+
 /// The durable sqlite command-log axis.
 pub struct SqliteLog {
     conn: Connection,
 }
 
 impl SqliteLog {
-    /// Open (or create) a durable sqlite log at `path`.
+    /// Open (or create) a durable sqlite log at `path` with Class A `synchronous=FULL`.
     pub fn open(path: &str) -> EngineResult<Self> {
-        Self::from_conn(st(Connection::open(path))?)
+        Self::open_with_sync(path, SqliteLogSync::Full)
+    }
+
+    /// Open a sqlite log with an explicit WAL sync mode.
+    pub fn open_with_sync(path: &str, sync: SqliteLogSync) -> EngineResult<Self> {
+        Self::from_conn(st(Connection::open(path))?, sync)
     }
 
     /// An ephemeral `:memory:` durable log (a real command log within the process).
     pub fn in_memory() -> EngineResult<Self> {
-        Self::from_conn(st(Connection::open_in_memory())?)
+        Self::from_conn(st(Connection::open_in_memory())?, SqliteLogSync::Full)
     }
 
     /// Insert pre-encoded envelope blobs (FWC1 native or legacy JSON) under one Immediate + FULL fsync.
@@ -238,22 +267,35 @@ impl SqliteLog {
             .collect())
     }
 
-    fn from_conn(conn: Connection) -> EngineResult<Self> {
-        // WAL + synchronous=FULL: this connection is the authoritative command log
-        // (TD-005). FULL fsyncs the WAL on every commit so a returned append survives
-        // process crash and power loss. Do NOT copy the projection open path
-        // (relational/recovery.rs), which uses NORMAL because that SQLite is
-        // rebuildable from an object-log authority. busy_timeout avoids spurious
-        // SQLITE_BUSY under concurrent readers/checkpoints. PRAGMAs no-op safely on
-        // :memory: (journal_mode stays memory).
-        st(conn.execute_batch(
+    fn from_conn(conn: Connection, sync: SqliteLogSync) -> EngineResult<Self> {
+        // WAL + configurable synchronous. FULL is the Class A default (TD-005): every
+        // commit fsyncs the WAL so an ack survives process crash and power loss.
+        // NORMAL/OFF are explicit throughput knobs: the projection is rebuildable from
+        // the log tail that actually made it to stable storage. Exclusive locking is
+        // only taken for those relaxed modes (sole-owner hot path); FULL keeps shared
+        // locks so readers/tools can attach.
+        //
+        // cache_spill=OFF + a larger cache keep the hot log in RAM; wal_autocheckpoint
+        // is raised so a 1M-item run is not punctuated by implicit checkpoints.
+        let exclusive = !matches!(sync, SqliteLogSync::Full);
+        // Relaxed modes disable automatic WAL checkpoints so a 1M-item ingest is not
+        // punctuated by multi-100ms TRUNCATE/PASSIVE stalls. Callers checkpoint on close.
+        let wal_auto = if exclusive { 0 } else { 10_000 };
+        let mut pragmas = format!(
             "PRAGMA journal_mode=WAL;\
-             PRAGMA synchronous=FULL;\
+             PRAGMA synchronous={};\
              PRAGMA busy_timeout=5000;\
-             PRAGMA cache_size=-65536;\
+             PRAGMA cache_size=-262144;\
              PRAGMA temp_store=MEMORY;\
-             PRAGMA mmap_size=268435456;",
-        ))?;
+             PRAGMA mmap_size=1073741824;\
+             PRAGMA cache_spill=OFF;\
+             PRAGMA wal_autocheckpoint={wal_auto};",
+            sync.pragma()
+        );
+        if exclusive {
+            pragmas.push_str("PRAGMA locking_mode=EXCLUSIVE;");
+        }
+        st(conn.execute_batch(&pragmas))?;
         st(conn.execute_batch(SCHEMA))?;
         Ok(Self { conn })
     }
@@ -984,6 +1026,33 @@ mod batching_tests {
             "authoritative log must keep synchronous=FULL"
         );
         assert_eq!(busy_timeout, 5000);
+        drop(log);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{path_str}-wal"));
+        let _ = std::fs::remove_file(format!("{path_str}-shm"));
+    }
+
+    #[test]
+    fn relaxed_open_sets_requested_synchronous() {
+        let path = std::env::temp_dir().join(format!(
+            "fireweed-sqlite-log-sync-normal-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let path_str = path.to_str().unwrap();
+        let log = SqliteLog::open_with_sync(path_str, SqliteLogSync::Normal).unwrap();
+        let synchronous: i64 = log
+            .conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(synchronous, 1, "NORMAL");
+        drop(log);
+        let log = SqliteLog::open_with_sync(path_str, SqliteLogSync::Off).unwrap();
+        let synchronous: i64 = log
+            .conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(synchronous, 0, "OFF");
         drop(log);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{path_str}-wal"));

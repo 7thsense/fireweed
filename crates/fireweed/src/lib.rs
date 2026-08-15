@@ -50,6 +50,8 @@ pub use facade::{
     Fireweed, ProjectionControl, ProjectionControlCapabilities, ProjectionRebuild,
     ProjectionVerification,
 };
+#[cfg(feature = "sqlite")]
+pub use fireweed_sqlite::SqliteLogSync;
 use fireweed_engine::{
     Backend, BatchUpdatePort, ClaimPort, ClaimRequest, CommitEntryOutcome, CommitTransition,
     CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore, DiscoveryPort, FinalizeOutcome,
@@ -6483,7 +6485,23 @@ pub fn open_memory(clock: Arc<dyn Clock>) -> Fireweed {
 /// (`assemble_async_log_replay_with_axis_offload`, fireweed-db4405b6 / API-005).
 #[cfg(feature = "sqlite")]
 pub fn open_sqlite(path: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
-    let backend = Arc::new(fireweed_sqlite::composed_sqlite_backend(path)?);
+    open_sqlite_with_sync(path, clock, fireweed_sqlite::SqliteLogSync::Full)
+}
+
+/// Same as [`open_sqlite`] with an explicit WAL sync mode.
+///
+/// [`fireweed_sqlite::SqliteLogSync::Full`] is Class A (power-loss durable ack).
+/// `Normal` / `Off` trade that ack for throughput; the memory projection is
+/// rebuildable from whatever the log actually flushed.
+#[cfg(feature = "sqlite")]
+pub fn open_sqlite_with_sync(
+    path: &str,
+    clock: Arc<dyn Clock>,
+    sync: fireweed_sqlite::SqliteLogSync,
+) -> EngineResult<Fireweed> {
+    let backend = Arc::new(fireweed_sqlite::composed_sqlite_backend_with_sync(
+        path, sync,
+    )?);
     Ok(Fireweed::from_runtime(RuntimeCore::new(backend, clock)))
 }
 

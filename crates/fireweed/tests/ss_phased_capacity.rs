@@ -145,7 +145,17 @@ async fn ss_phased_capacity_smoke() {
 
     let log = tmp_log();
     let clock = Arc::new(SystemClock);
-    let fw = open_sqlite(log.to_str().unwrap(), clock).expect("open_sqlite");
+    let sync = match std::env::var("SS_SQLITE_SYNC")
+        .unwrap_or_else(|_| "full".into())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "normal" => SqliteLogSync::Normal,
+        "off" => SqliteLogSync::Off,
+        _ => SqliteLogSync::Full,
+    };
+    eprintln!("sqlite_sync={sync:?} log={}", log.display());
+    let fw = open_sqlite_with_sync(log.to_str().unwrap(), clock, sync).expect("open_sqlite");
 
     let warmup_def = qdef("t-ss-phased", "q-warmup", push_batch, claim_batch);
     fw.create_queue(warmup_def).await.expect("warmup queue");

@@ -13,10 +13,11 @@ mod async_projection;
 mod compose_log;
 mod relational;
 pub use async_log_replay::{
-    async_composed_sqlite_backend, async_composed_sqlite_backend_in_memory, from_sqlite_log,
+    async_composed_sqlite_backend, async_composed_sqlite_backend_in_memory,
+    async_composed_sqlite_backend_with_sync, from_sqlite_log,
 };
 pub use async_projection::{AsyncSqliteProjectionStore, DEFAULT_ASYNC_PROJECTION_MAILBOX_CAPACITY};
-pub use compose_log::SqliteLog;
+pub use compose_log::{SqliteLog, SqliteLogSync};
 pub use fireweed_projection::InMemoryProjection;
 pub use relational::{
     BackpressureLevel, CheckpointLineage, CheckpointProgress, DEFAULT_DEFERRED_FLUSH_CHUNK,
@@ -54,7 +55,15 @@ pub fn composed_sqlite_backend_in_memory()
 pub fn composed_sqlite_backend(
     path: &str,
 ) -> EngineResult<AsyncLogReplayBackend<SqliteLog, InMemoryProjection>> {
-    async_composed_sqlite_backend(path)
+    composed_sqlite_backend_with_sync(path, SqliteLogSync::Full)
+}
+
+/// Same as [`composed_sqlite_backend`] with an explicit WAL sync mode.
+pub fn composed_sqlite_backend_with_sync(
+    path: &str,
+    sync: SqliteLogSync,
+) -> EngineResult<AsyncLogReplayBackend<SqliteLog, InMemoryProjection>> {
+    async_composed_sqlite_backend_with_sync(path, sync)
 }
 
 /// Assemble and recover exactly one fixed-pool worker partition.
