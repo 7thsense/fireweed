@@ -405,7 +405,9 @@ async fn ss_phased_capacity_smoke() {
 
 fn write_evidence(phases: &[PhaseRow], n: usize, push_batch: usize, claim_batch: usize) {
     let utc = chrono_like_utc();
-    let dir = PathBuf::from(format!("docs/perf/evidence/ss-phased/{utc}"));
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/perf/evidence/ss-phased")
+        .join(&utc);
     let _ = std::fs::create_dir_all(&dir);
     let mut json = String::from("{\n  \"schema\": \"ss-phased-summary/v1\",\n");
     json.push_str(&format!("  \"utc\": \"{utc}\",\n"));
