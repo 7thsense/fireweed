@@ -1089,19 +1089,13 @@ pub(crate) fn maintain_typed_indexes_on_insert(
     if typed_indexes.is_empty() {
         return Ok(());
     }
-    // Durable SQL rows are paid per unique index only. Non-unique keys live in the
-    // native index_fields blob; encoding 19 axon keys per item just to keep one
-    // unique row is the apply-path tax that kept w1 under the +10% ratchet.
-    let unique_indexes: Vec<QueueIndex> = typed_indexes
+    // Every declared typed index is a query handle (ADR-011): `fireweed_item_index` is the
+    // only durable row hot queries (bounded_mutation, range scans, aggregates) seek against,
+    // so non-unique indexes need rows here too, not just the ones with a uniqueness
+    // constraint to enforce.
+    let unique_names: std::collections::HashSet<&str> = typed_indexes
         .iter()
         .filter(|index| index_is_unique(index))
-        .cloned()
-        .collect();
-    if unique_indexes.is_empty() {
-        return Ok(());
-    }
-    let unique_names: std::collections::HashSet<&str> = unique_indexes
-        .iter()
         .map(|index| index.name.as_str())
         .collect();
     // Collect (item_id, keys) and enforce within-batch uniqueness in a single pass.
@@ -1109,7 +1103,7 @@ pub(crate) fn maintain_typed_indexes_on_insert(
         std::collections::HashMap::new();
     let mut item_keys: TypedIndexRows = Vec::with_capacity(items.len());
     for item in items {
-        let keys = typed_index_keys_for_push_item(&unique_indexes, item)?;
+        let keys = typed_index_keys_for_push_item(typed_indexes, item)?;
         let id_str = item.item_id.to_string();
         for (name, key) in &keys {
             if unique_names.contains(name.as_str()) {
