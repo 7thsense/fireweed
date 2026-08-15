@@ -50,8 +50,8 @@ pub use facade::{
     Fireweed, ProjectionControl, ProjectionControlCapabilities, ProjectionRebuild,
     ProjectionVerification,
 };
-#[cfg(feature = "sqlite")]
-pub use fireweed_sqlite::SqliteLogSync;
+#[cfg(test)]
+use fireweed_engine::validate_api001_reserved_write_fields;
 use fireweed_engine::{
     Backend, BatchUpdatePort, ClaimPort, ClaimRequest, CommitEntryOutcome, CommitTransition,
     CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore, DiscoveryPort, FinalizeOutcome,
@@ -61,8 +61,8 @@ use fireweed_engine::{
     RenewLeasePort, ReschedulePort, SetGatesCommand, SetGatesPort, UpdateFieldsPort, UpsertPort,
     acquire_and_fence, validate_claim_compatibility,
 };
-#[cfg(test)]
-use fireweed_engine::validate_api001_reserved_write_fields;
+#[cfg(feature = "sqlite")]
+pub use fireweed_sqlite::SqliteLogSync;
 
 // ---------------------------------------------------------------------------
 // PUBLIC DEPENDENCY SURFACE (ADR-009): a consumer depends on `fireweed` alone and can name every type its

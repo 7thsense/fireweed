@@ -218,6 +218,14 @@ trait FireweedDataPlane: Send + Sync {
         ids: Vec<ItemId>,
         lease_ms: u64,
     ) -> FacadeFuture<'a, ()>;
+    fn update<'a>(
+        &'a self,
+        queue: &'a QueueKey,
+        item_id: ItemId,
+        priority: ScheduleUpdate<PriorityValue>,
+        not_before: ScheduleUpdate<UtcTimestamp>,
+        expected_item_version: Option<u64>,
+    ) -> FacadeFuture<'a, u64>;
     fn set_gates<'a>(
         &'a self,
         queue: &'a QueueKey,
@@ -877,6 +885,23 @@ impl<B: LibBackend + 'static> FireweedDataPlane for RuntimeCore<B> {
     ) -> FacadeFuture<'a, ()> {
         Box::pin(RuntimeCore::reassign(self, queue, ids, lease_ms))
     }
+    fn update<'a>(
+        &'a self,
+        queue: &'a QueueKey,
+        item_id: ItemId,
+        priority: ScheduleUpdate<PriorityValue>,
+        not_before: ScheduleUpdate<UtcTimestamp>,
+        expected_item_version: Option<u64>,
+    ) -> FacadeFuture<'a, u64> {
+        Box::pin(RuntimeCore::update(
+            self,
+            queue,
+            item_id,
+            priority,
+            not_before,
+            expected_item_version,
+        ))
+    }
     fn set_gates<'a>(
         &'a self,
         queue: &'a QueueKey,
@@ -995,6 +1020,25 @@ impl fmt::Debug for Fireweed {
 }
 
 impl Fireweed {
+    /// Reschedule a live item's `priority`/`not_before` after push — the
+    /// operator/owner-runtime "change when this item is delivered" seam
+    /// (`ReschedulePort`), legal while the item is Pending OR Leased and
+    /// lease-preserving. Restored after f94819c2 removed the scalar `update`:
+    /// API-001 `batch_update` rejects leased items by design, so consumers
+    /// lost the only lease-preserving reschedule path.
+    pub async fn reschedule(
+        &self,
+        queue: &QueueKey,
+        item_id: ItemId,
+        priority: ScheduleUpdate<PriorityValue>,
+        not_before: ScheduleUpdate<UtcTimestamp>,
+        expected_item_version: Option<u64>,
+    ) -> EngineResult<u64> {
+        self.inner
+            .update(queue, item_id, priority, not_before, expected_item_version)
+            .await
+    }
+
     pub(crate) fn from_runtime<B: LibBackend + BatchUpdatePort + ItemMutationPort + 'static>(
         queue: RuntimeCore<B>,
     ) -> Self {
