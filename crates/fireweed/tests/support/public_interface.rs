@@ -1635,35 +1635,30 @@ async fn exercise_mutation(cell: &str, fw: &Fireweed, failures: &mut Vec<String>
     else {
         return;
     };
-    let version = call(
-        cell,
-        "batch_update[schedule]",
-        failures,
-        async {
-            let resp = fw
-                .batch_update(
-                    &queue,
-                    BatchUpdateRequest {
-                        request_id: RequestId::new("pi-update-schedule").unwrap(),
-                        updates: vec![BatchUpdateEntry {
-                            item_ref: BatchUpdateItemRef::ItemId(id),
-                            expected_item_version: Some(1),
-                            priority: BatchUpdateValue::Replace(PriorityValue::Int64(2)),
-                            not_before: BatchUpdateValue::Keep,
-                            payload: BatchUpdateValue::Keep,
-                            metadata: BatchUpdateValue::Keep,
-                            gate_keys: BatchUpdateValue::Keep,
-                            fields: BatchUpdateValue::Keep,
-                        }],
-                    },
-                )
-                .await?;
-            match resp.results.as_slice() {
-                [BatchUpdateOutcome::Updated { item_version, .. }] => Ok(*item_version),
-                _ => Err(EngineError::Invalid("unexpected batch_update outcome")),
-            }
-        },
-    )
+    let version = call(cell, "batch_update[schedule]", failures, async {
+        let resp = fw
+            .batch_update(
+                &queue,
+                BatchUpdateRequest {
+                    request_id: RequestId::new("pi-update-schedule").unwrap(),
+                    updates: vec![BatchUpdateEntry {
+                        item_ref: BatchUpdateItemRef::ItemId(id),
+                        expected_item_version: Some(1),
+                        priority: BatchUpdateValue::Replace(PriorityValue::Int64(2)),
+                        not_before: BatchUpdateValue::Keep,
+                        payload: BatchUpdateValue::Keep,
+                        metadata: BatchUpdateValue::Keep,
+                        gate_keys: BatchUpdateValue::Keep,
+                        fields: BatchUpdateValue::Keep,
+                    }],
+                },
+            )
+            .await?;
+        match resp.results.as_slice() {
+            [BatchUpdateOutcome::Updated { item_version, .. }] => Ok(*item_version),
+            _ => Err(EngineError::Invalid("unexpected batch_update outcome")),
+        }
+    })
     .await;
     check(
         cell,
@@ -1672,38 +1667,33 @@ async fn exercise_mutation(cell: &str, fw: &Fireweed, failures: &mut Vec<String>
         version.is_some_and(|value| value > 1),
         "did not advance item_version",
     );
-    let field_version = call(
-        cell,
-        "batch_update[fields]",
-        failures,
-        async {
-            let resp = fw
-                .batch_update(
-                    &queue,
-                    BatchUpdateRequest {
-                        request_id: RequestId::new("pi-update-fields").unwrap(),
-                        updates: vec![BatchUpdateEntry {
-                            item_ref: BatchUpdateItemRef::ItemId(id),
-                            expected_item_version: version,
-                            priority: BatchUpdateValue::Keep,
-                            not_before: BatchUpdateValue::Keep,
-                            payload: BatchUpdateValue::Keep,
-                            metadata: BatchUpdateValue::Keep,
-                            gate_keys: BatchUpdateValue::Keep,
-                            fields: BatchUpdateValue::Replace(BTreeMap::from([(
-                                "updated".into(),
-                                b"yes".to_vec().into(),
-                            )])),
-                        }],
-                    },
-                )
-                .await?;
-            match resp.results.as_slice() {
-                [BatchUpdateOutcome::Updated { item_version, .. }] => Ok(*item_version),
-                _ => Err(EngineError::Invalid("unexpected batch_update outcome")),
-            }
-        },
-    )
+    let field_version = call(cell, "batch_update[fields]", failures, async {
+        let resp = fw
+            .batch_update(
+                &queue,
+                BatchUpdateRequest {
+                    request_id: RequestId::new("pi-update-fields").unwrap(),
+                    updates: vec![BatchUpdateEntry {
+                        item_ref: BatchUpdateItemRef::ItemId(id),
+                        expected_item_version: version,
+                        priority: BatchUpdateValue::Keep,
+                        not_before: BatchUpdateValue::Keep,
+                        payload: BatchUpdateValue::Keep,
+                        metadata: BatchUpdateValue::Keep,
+                        gate_keys: BatchUpdateValue::Keep,
+                        fields: BatchUpdateValue::Replace(BTreeMap::from([(
+                            "updated".into(),
+                            b"yes".to_vec().into(),
+                        )])),
+                    }],
+                },
+            )
+            .await?;
+        match resp.results.as_slice() {
+            [BatchUpdateOutcome::Updated { item_version, .. }] => Ok(*item_version),
+            _ => Err(EngineError::Invalid("unexpected batch_update outcome")),
+        }
+    })
     .await;
     check(
         cell,

@@ -157,7 +157,10 @@ async fn product_claim_commit_group_commit_stats_on_one_queue() {
     for t in tasks {
         total_committed += t.await.expect("worker task panicked");
     }
-    assert_eq!(total_committed, CLAIM_BATCH * WORKERS * ITERATIONS_PER_WORKER);
+    assert_eq!(
+        total_committed,
+        CLAIM_BATCH * WORKERS * ITERATIONS_PER_WORKER
+    );
 
     let (seals, appends) = backend
         .log_group_commit_stats()

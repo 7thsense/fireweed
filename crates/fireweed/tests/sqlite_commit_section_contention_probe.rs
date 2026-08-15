@@ -102,10 +102,7 @@ async fn worker_loop(
     let mut committed = 0usize;
     let mut next_key = key_base;
     for _ in 0..iterations {
-        let claimed = fw
-            .claim(&queue, CLAIM_BATCH, 30_000)
-            .await
-            .expect("claim");
+        let claimed = fw.claim(&queue, CLAIM_BATCH, 30_000).await.expect("claim");
         assert_eq!(claimed.len(), CLAIM_BATCH, "claim batch size");
         let entries: Vec<CommitEntry> = claimed
             .into_iter()

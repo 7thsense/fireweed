@@ -16,8 +16,7 @@ use std::sync::Arc;
 use fireweed::*;
 use fireweed_core::{ClientItemKey, ItemId, UtcTimestamp};
 use fireweed_engine::{
-    AsyncLogStore, CommandChecksum, CommandEnvelope, CommandId, PushCommand, PushItem,
-    QueueCommand,
+    AsyncLogStore, CommandChecksum, CommandEnvelope, CommandId, PushCommand, PushItem, QueueCommand,
 };
 use fireweed_memory::ManualClock;
 

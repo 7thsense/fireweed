@@ -27,7 +27,7 @@ use axon_esf::IndexDef;
 use fireweed::*;
 use fireweed_core::{IndexDeclaration, IndexType, QueueIndex};
 use fireweed_memory::ManualClock;
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 
 fn qdef_plain() -> QueueDefinition {
     QueueDefinition {
@@ -213,7 +213,9 @@ fn open_fw(kind: &OpenKind, scratch: &str) -> Fireweed {
         OpenKind::Memory => open_memory(clock),
         OpenKind::SqliteMemory => open_sqlite(scratch, clock).expect("open sqlite×memory"),
         #[cfg(feature = "objectlog")]
-        OpenKind::ObjectLogMemory => open_objectlog(PathBuf::from(scratch), clock).expect("open objectlog"),
+        OpenKind::ObjectLogMemory => {
+            open_objectlog(PathBuf::from(scratch), clock).expect("open objectlog")
+        }
         OpenKind::SqliteSqlite => {
             let log = format!("{scratch}-log.db");
             let proj = format!("{scratch}-proj.db");
@@ -628,8 +630,13 @@ async fn measure_ms_per_entry_finalize_only(
     entries_per_commit: usize,
     total_entries: usize,
 ) -> (f64, Duration) {
-    measure_ms_per_entry_finalize_only_kind(&OpenKind::SqliteMemory, tag, entries_per_commit, total_entries)
-        .await
+    measure_ms_per_entry_finalize_only_kind(
+        &OpenKind::SqliteMemory,
+        tag,
+        entries_per_commit,
+        total_entries,
+    )
+    .await
 }
 
 async fn measure_ms_per_entry_finalize_only_kind(
@@ -763,8 +770,7 @@ async fn sqlite_commit_amortizes_with_multi_typed_indexes() {
     const N_INDEXES: usize = 8;
     const TOTAL: usize = 1024;
     let _ = measure_ms_per_entry_multi_index(N_INDEXES, "multi-warm", 64, TOTAL).await;
-    let (ms_64, wall_64) =
-        measure_ms_per_entry_multi_index(N_INDEXES, "multi-64", 64, TOTAL).await;
+    let (ms_64, wall_64) = measure_ms_per_entry_multi_index(N_INDEXES, "multi-64", 64, TOTAL).await;
     let (ms_512, wall_512) =
         measure_ms_per_entry_multi_index(N_INDEXES, "multi-512", 512, TOTAL).await;
     let ratio = ms_512 / ms_64.max(1e-9);
@@ -821,7 +827,12 @@ fn sqlite_commit_snorri_shape_rejects_batch_inversion() {
     let result = std::panic::catch_unwind(|| {
         // Synthetic, not measured: mirrors the observed v0.31.2->landing regression where
         // 500-entry batches got slower per entry than 64-entry batches on the relational path.
-        assert_snorri_amortizes("open_sqlite_relational (synthetic-inverted)", 0.30, 0.48, 0.46);
+        assert_snorri_amortizes(
+            "open_sqlite_relational (synthetic-inverted)",
+            0.30,
+            0.48,
+            0.46,
+        );
     });
     assert!(
         result.is_err(),
@@ -1041,7 +1052,11 @@ async fn relational_commit_transition_per_entry_outcomes_are_order_stable() {
         )
         .await
         .expect("commit");
-    assert_eq!(outcomes.len(), N, "outcome cardinality must equal entry count");
+    assert_eq!(
+        outcomes.len(),
+        N,
+        "outcome cardinality must equal entry count"
+    );
     for (i, o) in outcomes.iter().enumerate() {
         match o {
             EntryOutcome::Committed { lifecycle_item_ids } => {

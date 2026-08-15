@@ -62,9 +62,10 @@ fn count_tree(root: &std::path::Path) -> (u64, u64) {
 }
 
 fn parent_dir() -> PathBuf {
-    PathBuf::from(std::env::var("SS_LOG_DIR").unwrap_or_else(|_| {
-        std::env::temp_dir().to_string_lossy().into_owned()
-    }))
+    PathBuf::from(
+        std::env::var("SS_LOG_DIR")
+            .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned()),
+    )
 }
 
 fn unique_suffix() -> String {
@@ -84,10 +85,7 @@ enum Cell {
     ObjectLogFilesystemMemory { root: PathBuf },
     /// SQLite command log × memory projection. Not production.
     #[cfg(feature = "sqlite")]
-    SqliteCommandLogMemory {
-        path: PathBuf,
-        sync: SqliteLogSync,
-    },
+    SqliteCommandLogMemory { path: PathBuf, sync: SqliteLogSync },
 }
 
 impl Cell {
@@ -119,8 +117,8 @@ impl Cell {
                         "off" => SqliteLogSync::Off,
                         _ => SqliteLogSync::Full,
                     };
-                    let path = parent_dir()
-                        .join(format!("fireweed-ss-phased-sl-{}.db", unique_suffix()));
+                    let path =
+                        parent_dir().join(format!("fireweed-ss-phased-sl-{}.db", unique_suffix()));
                     let _ = std::fs::remove_file(&path);
                     let _ = std::fs::remove_file(format!("{}-wal", path.display()));
                     let _ = std::fs::remove_file(format!("{}-shm", path.display()));
@@ -161,8 +159,7 @@ impl Cell {
             }
             #[cfg(feature = "sqlite")]
             Self::SqliteCommandLogMemory { path, sync } => {
-                open_sqlite_with_sync(path.to_str().unwrap(), clock, *sync)
-                    .expect("open_sqlite")
+                open_sqlite_with_sync(path.to_str().unwrap(), clock, *sync).expect("open_sqlite")
             }
         }
     }
@@ -293,7 +290,10 @@ async fn ss_phased_capacity_smoke() {
     let n = env_usize("SS_N", DEFAULT_N);
     let push_batch = env_usize("SS_PUSH_BATCH", 100);
     let claim_batch = env_usize("SS_CLAIM_BATCH", 100);
-    assert!(n > 0 && n.is_multiple_of(claim_batch), "SS_N must be >0 and divisible by SS_CLAIM_BATCH");
+    assert!(
+        n > 0 && n.is_multiple_of(claim_batch),
+        "SS_N must be >0 and divisible by SS_CLAIM_BATCH"
+    );
 
     let cell = Cell::parse();
     let clock = Arc::new(SystemClock);
@@ -538,7 +538,10 @@ async fn ss_phased_capacity_smoke() {
     let t0 = Instant::now();
     let mut completed = 0usize;
     let c0 = Instant::now();
-    let mut prev = fw.claim(&queue, claim_batch, 30_000).await.expect("P4 claim");
+    let mut prev = fw
+        .claim(&queue, claim_batch, 30_000)
+        .await
+        .expect("P4 claim");
     p4_claim.record(c0.elapsed());
     loop {
         if prev.is_empty() {
@@ -553,10 +556,7 @@ async fn ss_phased_capacity_smoke() {
         let (fin_elapsed, (claim_elapsed, next)) = tokio::join!(
             async move {
                 let c1 = Instant::now();
-                fw_fin
-                    .complete(&queue_fin, ids)
-                    .await
-                    .expect("P4 complete");
+                fw_fin.complete(&queue_fin, ids).await.expect("P4 complete");
                 c1.elapsed()
             },
             async move {
@@ -594,7 +594,11 @@ async fn ss_phased_capacity_smoke() {
         eprintln!(
             "object_log_tree objects={objects} bytes={bytes} ({:.1} MiB) bytes/object={:.0}",
             bytes as f64 / (1024.0 * 1024.0),
-            if objects == 0 { 0.0 } else { bytes as f64 / objects as f64 }
+            if objects == 0 {
+                0.0
+            } else {
+                bytes as f64 / objects as f64
+            }
         );
     }
     eprintln!(

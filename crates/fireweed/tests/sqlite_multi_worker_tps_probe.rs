@@ -90,10 +90,7 @@ fn index_fields_for(k: u64) -> BTreeMap<String, TypedValue> {
     let mut fields = BTreeMap::new();
     fields.insert("f0".into(), TypedValue::String(format!("k-{k}")));
     for i in 1..N_INDEXES {
-        fields.insert(
-            format!("f{i}"),
-            TypedValue::String(format!("v{i}-{k}")),
-        );
+        fields.insert(format!("f{i}"), TypedValue::String(format!("v{i}-{k}")));
     }
     fields
 }
