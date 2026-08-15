@@ -2028,6 +2028,11 @@ fn command_item_ids(command: &QueueCommand) -> Vec<ItemId> {
         QueueCommand::UnfenceLease(command) => command.item_ids.clone(),
         QueueCommand::ReplacePending(command) => vec![command.replacement.item_id],
         QueueCommand::UpdateFields(command) => vec![command.item_id],
+        QueueCommand::UpdateFieldsBatch(command) => command
+            .updates
+            .iter()
+            .map(|update| update.item_id)
+            .collect(),
         QueueCommand::MutateItems(command) => {
             command.items.iter().map(|item| item.item_id).collect()
         }
@@ -3437,6 +3442,20 @@ fn apply_command_sql(
             }
             if pending && repricing {
                 increment_group_summaries_for_items(tx, shard, &singleton, now)?;
+            }
+            Ok(())
+        }
+        QueueCommand::UpdateFieldsBatch(c) => {
+            for update in &c.updates {
+                apply_command_sql(
+                    tx,
+                    queues,
+                    token_ops,
+                    shard,
+                    seq,
+                    now,
+                    &QueueCommand::UpdateFields(update.clone()),
+                )?;
             }
             Ok(())
         }

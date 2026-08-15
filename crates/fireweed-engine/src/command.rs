@@ -53,6 +53,10 @@ pub enum QueueCommand {
     /// change (FAC-1, ADR-009). The write side of the `LiveItemView` map; bumps `item_version`. Atomic
     /// class only. Lets an owner-runtime keep compound per-item work state in fireweed instead of a shadow.
     UpdateFields(UpdateFieldsCommand),
+    /// One durable envelope for API-001 BatchUpdate: N [`UpdateFieldsCommand`]s under a single log
+    /// row and apply dispatch. A log that still contains one [`Self::UpdateFields`] per item remains
+    /// valid on replay.
+    UpdateFieldsBatch(UpdateFieldsBatchCommand),
     /// One resolved, durable backend-erased mutation. Selector predicates are evaluated before append;
     /// this command contains only exact item ids and complete post-mutation values.
     MutateItems(MutateItemsCommand),
@@ -562,6 +566,13 @@ pub struct UpdateFieldsCommand {
     pub api001_batch: bool,
 }
 
+/// Batched in-place field/payload/schedule merge. Same per-item semantics as
+/// [`UpdateFieldsCommand`]; one command so BatchUpdate pays O(1) envelope cost.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UpdateFieldsBatchCommand {
+    pub updates: Vec<UpdateFieldsCommand>,
+}
+
 /// A field-reschedule disposition under [`UpdateFieldsCommand`] (BQ pqueue-7a96f929): leave the value as-is,
 /// or set it (`Set(None)` clears an optional value). Distinct from a bare field/payload merge.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -1069,6 +1080,24 @@ pub fn command_envelope_change_records(
             source_owner_id,
             source_epoch,
         )],
+        QueueCommand::UpdateFieldsBatch(c) => c
+            .updates
+            .iter()
+            .map(|update| {
+                item_change_record(
+                    shard,
+                    update.item_id,
+                    position,
+                    ChangeRecordKind::UpdateFields,
+                    None,
+                    None,
+                    None,
+                    emitted_at,
+                    source_owner_id.clone(),
+                    source_epoch,
+                )
+            })
+            .collect(),
         QueueCommand::LeaseExpired(c) => c
             .item_ids
             .iter()
@@ -1441,6 +1470,20 @@ mod serde_tests {
                 set_metadata: None,
                 set_gate_keys: None,
                 api001_batch: false,
+            }),
+            QueueCommand::UpdateFieldsBatch(UpdateFieldsBatchCommand {
+                updates: vec![UpdateFieldsCommand {
+                    item_id: iid("a"),
+                    field_ops: BTreeMap::new(),
+                    payload: PayloadUpdate::Keep,
+                    set_priority: ScheduleUpdate::Keep,
+                    set_not_before: ScheduleUpdate::Keep,
+                    set_entity_document: None,
+                    set_fields: None,
+                    set_metadata: None,
+                    set_gate_keys: None,
+                    api001_batch: true,
+                }],
             }),
             QueueCommand::LeaseExpired(LeaseExpiredCommand {
                 item_ids: vec![iid("a")],
@@ -1882,6 +1925,54 @@ mod serde_tests {
                     item_version: None,
                     terminal_at: None,
                 }],
+            ),
+            (
+                "update-fields-batch",
+                vec![iid("a"), iid("b")],
+                QueueCommand::UpdateFieldsBatch(UpdateFieldsBatchCommand {
+                    updates: vec![
+                        UpdateFieldsCommand {
+                            item_id: iid("a"),
+                            field_ops: BTreeMap::new(),
+                            payload: PayloadUpdate::Keep,
+                            set_priority: ScheduleUpdate::Keep,
+                            set_not_before: ScheduleUpdate::Keep,
+                            set_entity_document: None,
+                            set_fields: None,
+                            set_metadata: None,
+                            set_gate_keys: None,
+                            api001_batch: true,
+                        },
+                        UpdateFieldsCommand {
+                            item_id: iid("b"),
+                            field_ops: BTreeMap::new(),
+                            payload: PayloadUpdate::Keep,
+                            set_priority: ScheduleUpdate::Keep,
+                            set_not_before: ScheduleUpdate::Keep,
+                            set_entity_document: None,
+                            set_fields: None,
+                            set_metadata: None,
+                            set_gate_keys: None,
+                            api001_batch: true,
+                        },
+                    ],
+                }),
+                vec![
+                    ExpectedRecord {
+                        item_id: Some(iid("a")),
+                        kind: ChangeRecordKind::UpdateFields,
+                        new_state: None,
+                        item_version: None,
+                        terminal_at: None,
+                    },
+                    ExpectedRecord {
+                        item_id: Some(iid("b")),
+                        kind: ChangeRecordKind::UpdateFields,
+                        new_state: None,
+                        item_version: None,
+                        terminal_at: None,
+                    },
+                ],
             ),
             (
                 "lease-expired",

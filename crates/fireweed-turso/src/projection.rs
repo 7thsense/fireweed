@@ -181,6 +181,7 @@ fn validate_minimal_command(envelope: &CommandEnvelope) -> EngineResult<()> {
         | QueueCommand::UnfenceLease(_)
         | QueueCommand::ReplacePending(_)
         | QueueCommand::UpdateFields(_)
+        | QueueCommand::UpdateFieldsBatch(_)
         | QueueCommand::PauseQueue(_)
         | QueueCommand::ResumeQueue
         | QueueCommand::PurgeItems(_)
@@ -2392,16 +2393,27 @@ async fn apply_owned(
                 )
                 .await?;
             }
-            QueueCommand::UpdateFields(_) if api001_updates.is_some() => {}
-            QueueCommand::UpdateFields(update) => {
-                let old_groups = groups_for_items(
-                    &transaction,
-                    &tenant,
-                    &queue,
-                    std::slice::from_ref(&update.item_id),
-                )
-                .await?;
-                let current = one_row(
+            QueueCommand::UpdateFields(_) | QueueCommand::UpdateFieldsBatch(_)
+                if api001_updates.is_some() => {}
+            QueueCommand::UpdateFields(_) | QueueCommand::UpdateFieldsBatch(_) => {
+                let single;
+                let updates: &[UpdateFieldsCommand] = match &envelope.command {
+                    QueueCommand::UpdateFields(update) => {
+                        single = vec![update.clone()];
+                        single.as_slice()
+                    }
+                    QueueCommand::UpdateFieldsBatch(batch) => batch.updates.as_slice(),
+                    _ => unreachable!("update-fields arm"),
+                };
+                for update in updates {
+                    let old_groups = groups_for_items(
+                        &transaction,
+                        &tenant,
+                        &queue,
+                        std::slice::from_ref(&update.item_id),
+                    )
+                    .await?;
+                    let current = one_row(
                     &transaction,
                     "SELECT fields,lifecycle_state,priority,not_before,eligible_since,payload,metadata \
                      FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 \
@@ -2413,57 +2425,57 @@ async fn apply_owned(
                     ],
                 )
                 .await?;
-                if let Some(row) = current {
-                    let definition =
-                        definition_in_transaction(&transaction, &position.queue).await?;
-                    let mut fields = update
-                        .set_fields
-                        .clone()
-                        .unwrap_or(fields_from_json(text(&row[0])?)?);
-                    for (key, value) in &update.field_ops {
-                        match value {
-                            Some(value) => {
-                                fields.insert(key.clone(), value.clone());
-                            }
-                            None => {
-                                fields.remove(key);
+                    if let Some(row) = current {
+                        let definition =
+                            definition_in_transaction(&transaction, &position.queue).await?;
+                        let mut fields = update
+                            .set_fields
+                            .clone()
+                            .unwrap_or(fields_from_json(text(&row[0])?)?);
+                        for (key, value) in &update.field_ops {
+                            match value {
+                                Some(value) => {
+                                    fields.insert(key.clone(), value.clone());
+                                }
+                                None => {
+                                    fields.remove(key);
+                                }
                             }
                         }
-                    }
-                    let payload = match &update.payload {
-                        PayloadUpdate::Keep => optional_blob(&row[5])?,
-                        PayloadUpdate::Set(payload) => {
-                            payload.as_ref().map(|payload| payload.to_vec())
-                        }
-                    };
-                    let metadata = update
-                        .set_metadata
-                        .as_ref()
-                        .map(metadata_to_json)
-                        .transpose()?
-                        .unwrap_or(text(&row[6])?);
-                    let priority = match &update.set_priority {
-                        ScheduleUpdate::Keep => optional_text(&row[2])?,
-                        ScheduleUpdate::Set(priority) => priority
+                        let payload = match &update.payload {
+                            PayloadUpdate::Keep => optional_blob(&row[5])?,
+                            PayloadUpdate::Set(payload) => {
+                                payload.as_ref().map(|payload| payload.to_vec())
+                            }
+                        };
+                        let metadata = update
+                            .set_metadata
                             .as_ref()
-                            .map(serde_json::to_string)
-                            .transpose()
-                            .map_err(storage)?,
-                    };
-                    let mut eligible_since = optional_integer(&row[4])?;
-                    let not_before = match &update.set_not_before {
-                        ScheduleUpdate::Keep => optional_integer(&row[3])?,
-                        ScheduleUpdate::Set(not_before) => {
-                            let now = ts_nanos(envelope.created_at);
-                            let not_before = not_before.map(ts_nanos);
-                            if !update.api001_batch {
-                                eligible_since = Some(not_before.unwrap_or(now).max(now));
+                            .map(metadata_to_json)
+                            .transpose()?
+                            .unwrap_or(text(&row[6])?);
+                        let priority = match &update.set_priority {
+                            ScheduleUpdate::Keep => optional_text(&row[2])?,
+                            ScheduleUpdate::Set(priority) => priority
+                                .as_ref()
+                                .map(serde_json::to_string)
+                                .transpose()
+                                .map_err(storage)?,
+                        };
+                        let mut eligible_since = optional_integer(&row[4])?;
+                        let not_before = match &update.set_not_before {
+                            ScheduleUpdate::Keep => optional_integer(&row[3])?,
+                            ScheduleUpdate::Set(not_before) => {
+                                let now = ts_nanos(envelope.created_at);
+                                let not_before = not_before.map(ts_nanos);
+                                if !update.api001_batch {
+                                    eligible_since = Some(not_before.unwrap_or(now).max(now));
+                                }
+                                not_before
                             }
-                            not_before
-                        }
-                    };
-                    let parsed_priority = parse_priority(priority.clone())?;
-                    let changed = transaction
+                        };
+                        let parsed_priority = parse_priority(priority.clone())?;
+                        let changed = transaction
                         .execute(
                             "UPDATE fireweed_items SET fields=?4,payload=?5,metadata=?6,priority=?7,\
                              priority_sort=?8,not_before=?9,eligible_since=?10,\
@@ -2487,28 +2499,28 @@ async fn apply_owned(
                         )
                         .await
                         .map_err(storage)?;
-                    if changed != 1 {
-                        return Err(EngineError::Conflict);
-                    }
-                    if let Some(gate_keys) = &update.set_gate_keys {
-                        execute_for_items(
-                            &transaction,
-                            sql::delete_item_gates,
-                            vec![Value::Text(tenant.clone()), Value::Text(queue.clone())],
-                            std::slice::from_ref(&update.item_id),
-                        )
-                        .await?;
-                        for chunk in gate_keys.chunks(PUSH_GATE_CHUNK) {
-                            let mut params = Vec::with_capacity(chunk.len() * 4);
-                            for gate in chunk {
-                                params.extend([
-                                    Value::Text(tenant.clone()),
-                                    Value::Text(queue.clone()),
-                                    Value::Text(update.item_id.to_string()),
-                                    Value::Text(gate.clone()),
-                                ]);
-                            }
-                            transaction
+                        if changed != 1 {
+                            return Err(EngineError::Conflict);
+                        }
+                        if let Some(gate_keys) = &update.set_gate_keys {
+                            execute_for_items(
+                                &transaction,
+                                sql::delete_item_gates,
+                                vec![Value::Text(tenant.clone()), Value::Text(queue.clone())],
+                                std::slice::from_ref(&update.item_id),
+                            )
+                            .await?;
+                            for chunk in gate_keys.chunks(PUSH_GATE_CHUNK) {
+                                let mut params = Vec::with_capacity(chunk.len() * 4);
+                                for gate in chunk {
+                                    params.extend([
+                                        Value::Text(tenant.clone()),
+                                        Value::Text(queue.clone()),
+                                        Value::Text(update.item_id.to_string()),
+                                        Value::Text(gate.clone()),
+                                    ]);
+                                }
+                                transaction
                                 .execute(
                                     format!(
                                         "INSERT INTO fireweed_item_gates \
@@ -2520,42 +2532,47 @@ async fn apply_owned(
                                 )
                                 .await
                                 .map_err(storage)?;
+                            }
                         }
-                    }
-                    if let Some(document) = &update.set_entity_document {
-                        let extracted = replace_typed_indexes_for_entity(
+                        if let Some(document) = &update.set_entity_document {
+                            let extracted = replace_typed_indexes_for_entity(
+                                &transaction,
+                                &tenant,
+                                &queue,
+                                &definition.typed_indexes,
+                                update.item_id,
+                                document,
+                            )
+                            .await?;
+                            let index_blob =
+                                fireweed_engine::index_fields::encode_index_fields_blob(
+                                    &extracted,
+                                )?;
+                            transaction
+                                .execute(
+                                    sql::UPDATE_ENTITY_DOCUMENT,
+                                    vec![
+                                        Value::Text(tenant.clone()),
+                                        Value::Text(queue.clone()),
+                                        Value::Text(update.item_id.to_string()),
+                                        Value::Text(
+                                            serde_json::to_string(document).map_err(storage)?,
+                                        ),
+                                        index_blob.map_or(Value::Null, Value::Blob),
+                                    ],
+                                )
+                                .await
+                                .map_err(storage)?;
+                        }
+                        refresh_group_summaries(
                             &transaction,
                             &tenant,
                             &queue,
-                            &definition.typed_indexes,
-                            update.item_id,
-                            document,
+                            &old_groups,
+                            ts_nanos(envelope.created_at),
                         )
                         .await?;
-                        let index_blob =
-                            fireweed_engine::index_fields::encode_index_fields_blob(&extracted)?;
-                        transaction
-                            .execute(
-                                sql::UPDATE_ENTITY_DOCUMENT,
-                                vec![
-                                    Value::Text(tenant.clone()),
-                                    Value::Text(queue.clone()),
-                                    Value::Text(update.item_id.to_string()),
-                                    Value::Text(serde_json::to_string(document).map_err(storage)?),
-                                    index_blob.map_or(Value::Null, Value::Blob),
-                                ],
-                            )
-                            .await
-                            .map_err(storage)?;
                     }
-                    refresh_group_summaries(
-                        &transaction,
-                        &tenant,
-                        &queue,
-                        &old_groups,
-                        ts_nanos(envelope.created_at),
-                    )
-                    .await?;
                 }
             }
             QueueCommand::ReplacePending(replace) => {

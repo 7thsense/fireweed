@@ -23,10 +23,10 @@ use fireweed_engine::{
     ClaimedItem, CommandChecksum, CommandEnvelope, EngineError, EngineResult, IdGen,
     IdempotencyDecision, InProcessControlPlane, InProcessProjectionStore, IndexHit, PayloadUpdate,
     ProjectionStore, PushCommand, PushItem, QueueCommand, QueueCounters, QueueIdempotencyCache,
-    QueueKey, QueueMetrics, ReplacePendingCommand, RequestOutcome, UpdateFieldsCommand,
-    UpsertOutcome, batch_update_body_hash, claim_by_item_ids_body_hash, claim_by_query_body_hash,
-    compile_entity_schema, generate_query_lease_token, plan_batch_update, request_expires_at,
-    validate_entity,
+    QueueKey, QueueMetrics, ReplacePendingCommand, RequestOutcome, UpdateFieldsBatchCommand,
+    UpdateFieldsCommand, UpsertOutcome, batch_update_body_hash, claim_by_item_ids_body_hash,
+    claim_by_query_body_hash, compile_entity_schema, generate_query_lease_token, plan_batch_update,
+    request_expires_at, validate_entity,
 };
 
 use crate::async_product::SeqIdGen;
@@ -364,22 +364,27 @@ where
     };
     let response_payload = serde_json::to_string(&response)
         .map_err(|error| EngineError::Storage(error.to_string()))?;
-    let mut envelopes = plan
+    let updates = plan
         .commands
         .into_iter()
-        .map(|(_, command)| {
-            let item_id = command.item_id;
-            make_envelope(ids, QueueCommand::UpdateFields(command), vec![item_id], now)
-        })
+        .map(|(_, command)| command)
         .collect::<Vec<_>>();
-    if envelopes.is_empty() {
-        envelopes.push(make_envelope(
+    let mut envelopes = if updates.is_empty() {
+        vec![make_envelope(
             ids,
             QueueCommand::WriteSideRecords(fireweed_engine::WriteSideRecordsCommand::default()),
             Vec::new(),
             now,
-        ));
-    }
+        )]
+    } else {
+        let item_ids = updates.iter().map(|command| command.item_id).collect();
+        vec![make_envelope(
+            ids,
+            QueueCommand::UpdateFieldsBatch(UpdateFieldsBatchCommand { updates }),
+            item_ids,
+            now,
+        )]
+    };
     let marker = envelopes
         .first_mut()
         .expect("batch update always emits a command or marker");

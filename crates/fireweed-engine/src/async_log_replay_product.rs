@@ -43,11 +43,12 @@ use crate::{
     ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort,
     ReplacePendingCommand, RequestIdReplayProbe, RequestOutcome, SideRecordPage, SnapshotRef,
     SnapshotStore, TerminalEmissionMetrics, TickReport, UnifiedAtomicCommit,
-    UnifiedAtomicCommitter, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
-    WriteSideRecordsCommand, batch_update_body_hash, build_push_items, claim_by_item_ids_body_hash,
-    claim_by_query_body_hash, commit_body_hash, compile_entity_schema, generate_query_lease_token,
-    outcome_entry_from_recovery, plan_batch_update, stage_unique_push_keys,
-    validate_api001_reserved_write_fields, validate_entity, validate_gate_push,
+    UnifiedAtomicCommitter, UpdateFieldsBatchCommand, UpdateFieldsCommand, UpdateFieldsPort,
+    UpsertOutcome, UpsertPort, WriteSideRecordsCommand, batch_update_body_hash, build_push_items,
+    claim_by_item_ids_body_hash, claim_by_query_body_hash, commit_body_hash, compile_entity_schema,
+    generate_query_lease_token, outcome_entry_from_recovery, plan_batch_update,
+    stage_unique_push_keys, validate_api001_reserved_write_fields, validate_entity,
+    validate_gate_push,
 };
 
 /// Resolve the push request-id body fingerprint for ledger record/rebuild.
@@ -3674,21 +3675,25 @@ where
             };
             let response_payload = serde_json::to_string(&response)
                 .map_err(|error| EngineError::Storage(error.to_string()))?;
-            let mut envelopes = plan
+            let updates = plan
                 .commands
                 .into_iter()
-                .map(|(_, command)| {
-                    let item_id = command.item_id;
-                    self.make_envelope(QueueCommand::UpdateFields(command), vec![item_id], now)
-                })
+                .map(|(_, command)| command)
                 .collect::<Vec<_>>();
-            if envelopes.is_empty() {
-                envelopes.push(self.make_envelope(
+            let mut envelopes = if updates.is_empty() {
+                vec![self.make_envelope(
                     QueueCommand::WriteSideRecords(WriteSideRecordsCommand::default()),
                     Vec::new(),
                     now,
-                ));
-            }
+                )]
+            } else {
+                let item_ids = updates.iter().map(|command| command.item_id).collect();
+                vec![self.make_envelope(
+                    QueueCommand::UpdateFieldsBatch(UpdateFieldsBatchCommand { updates }),
+                    item_ids,
+                    now,
+                )]
+            };
             let marker = envelopes
                 .first_mut()
                 .expect("batch update always emits a command or marker");

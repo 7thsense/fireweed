@@ -1416,6 +1416,24 @@ pub(crate) fn apply_command_sql(
             }
             Ok(())
         }
+        QueueCommand::UpdateFieldsBatch(c) => {
+            for update in &c.updates {
+                apply_command_sql(
+                    tx,
+                    queues,
+                    grouped_shards,
+                    claim_scan_hints,
+                    claim_scan_default_fifo,
+                    token_ops,
+                    shard,
+                    position,
+                    seq,
+                    now,
+                    &QueueCommand::UpdateFields(update.clone()),
+                )?;
+            }
+            Ok(())
+        }
         QueueCommand::Finalize(c) => {
             // Resolve Retry-exhaustion for all Retry outcomes in ONE read (was one SELECT per outcome).
             let retry_ids: Vec<String> = c

@@ -1992,11 +1992,7 @@ impl ProjectionData {
         }
         let keys = {
             let rec = self.items.get(&item_id).ok_or(EngineError::NotFound)?;
-            self.record_index_keys(
-                &rec.fields,
-                &rec.index_fields,
-                rec.entity_document.as_ref(),
-            )?
+            self.record_index_keys(&rec.fields, &rec.index_fields, rec.entity_document.as_ref())?
         };
         Ok(self.remember_framed_keys(item_id, keys))
     }
@@ -2295,6 +2291,190 @@ impl ProjectionData {
         }
     }
 
+    fn apply_update_fields(
+        &mut self,
+        terminal_at: Option<UtcTimestamp>,
+        c: &UpdateFieldsCommand,
+    ) -> EngineResult<()> {
+        let model = self.priority_model;
+        let (
+            old_keys,
+            old_elig,
+            new_keys,
+            new_elig,
+            old_gate_keys,
+            new_gate_keys,
+            next_index_fields,
+        ) = {
+            let rec = self.items.get(&c.item_id).ok_or(EngineError::NotFound)?;
+            // A field/payload merge and/or a priority/not_before reschedule (no lifecycle change),
+            // so it relies on `update_fields_validate` having run pre-commit.
+            debug_assert!(
+                !rec.state.is_terminal() && !rec.superseded && !rec.fenced,
+                "UpdateFields applied to a non-updatable item; update_fields_validate was bypassed"
+            );
+            let index_inputs_changed = c.set_fields.is_some()
+                || !c.field_ops.is_empty()
+                || c.set_entity_document.is_some();
+            let old_keys = if index_inputs_changed {
+                self.record_index_keys(
+                    &rec.fields,
+                    &rec.index_fields,
+                    rec.entity_document.as_ref(),
+                )?
+            } else {
+                Vec::new()
+            };
+            let repricing = matches!(c.set_priority, ScheduleUpdate::Set(_))
+                || matches!(c.set_not_before, ScheduleUpdate::Set(_));
+            let eligibility_changed = repricing || c.set_gate_keys.is_some();
+            let was_pending = rec.state == ItemState::Pending;
+            let old_elig = (eligibility_changed
+                && was_pending
+                && !gate_keys_blocked(&self.blocked_gates, &rec.gate_keys))
+            .then(|| EligibilityIndex::token(rec, &model));
+
+            let mut next_fields = c.set_fields.clone().unwrap_or_else(|| rec.fields.clone());
+            for (k, op) in &c.field_ops {
+                match op {
+                    Some(v) => {
+                        next_fields.insert(k.clone(), v.clone());
+                    }
+                    None => {
+                        next_fields.remove(k);
+                    }
+                }
+            }
+            let next_index_fields = if let Some(doc) = c.set_entity_document.as_ref() {
+                fireweed_engine::index_fields::extract_index_fields_from_entity(
+                    &self.typed_index_specs,
+                    doc,
+                )?
+            } else {
+                rec.index_fields.clone()
+            };
+            let next_entity = c
+                .set_entity_document
+                .as_ref()
+                .or(rec.entity_document.as_ref());
+            let new_keys = if index_inputs_changed {
+                self.record_index_keys(&next_fields, &next_index_fields, next_entity)?
+            } else {
+                Vec::new()
+            };
+
+            let new_elig = if eligibility_changed && was_pending {
+                let mut next_rec = rec.clone();
+                next_rec.fields = next_fields;
+                next_rec.index_fields = next_index_fields.clone();
+                if c.set_entity_document.is_some() {
+                    next_rec.entity_document = c.set_entity_document.clone();
+                }
+                if let Some(gate_keys) = &c.set_gate_keys {
+                    next_rec.gate_keys = gate_keys.clone();
+                }
+                if let ScheduleUpdate::Set(p) = &c.set_priority {
+                    next_rec.priority = p.clone();
+                }
+                if let ScheduleUpdate::Set(nb) = &c.set_not_before {
+                    next_rec.not_before = *nb;
+                }
+                (!gate_keys_blocked(&self.blocked_gates, &next_rec.gate_keys))
+                    .then(|| EligibilityIndex::token(&next_rec, &model))
+            } else {
+                None
+            };
+            (
+                old_keys,
+                old_elig,
+                new_keys,
+                new_elig,
+                rec.gate_keys.clone(),
+                c.set_gate_keys
+                    .clone()
+                    .unwrap_or_else(|| rec.gate_keys.clone()),
+                next_index_fields,
+            )
+        };
+        let rec = self
+            .items
+            .get_mut(&c.item_id)
+            .ok_or(EngineError::NotFound)?;
+        if let Some(fields) = &c.set_fields {
+            rec.fields = fields.clone();
+        }
+        for (k, op) in &c.field_ops {
+            match op {
+                Some(v) => {
+                    rec.fields.insert(k.clone(), v.clone());
+                }
+                None => {
+                    rec.fields.remove(k);
+                }
+            }
+        }
+        match &c.payload {
+            PayloadUpdate::Keep => {}
+            PayloadUpdate::Set(p) => rec.payload = p.clone(),
+        }
+        if let Some(metadata) = &c.set_metadata {
+            rec.metadata = metadata.clone();
+        }
+        if let Some(gate_keys) = &c.set_gate_keys {
+            rec.gate_keys = gate_keys.clone();
+        }
+        rec.index_fields = next_index_fields;
+        if c.set_entity_document.is_some() {
+            rec.entity_document = c.set_entity_document.clone();
+        }
+        if let ScheduleUpdate::Set(p) = &c.set_priority {
+            rec.priority = p.clone();
+        }
+        if let ScheduleUpdate::Set(nb) = &c.set_not_before {
+            rec.not_before = *nb;
+            if !c.api001_batch {
+                let now = terminal_at.unwrap_or(rec.eligible_since);
+                rec.eligible_since = nb.unwrap_or(now).max(now);
+            }
+        }
+        rec.item_version += 1;
+        let item_id = c.item_id;
+        let removed: Vec<(String, Vec<u8>)> = old_keys
+            .iter()
+            .filter(|k| !new_keys.contains(k))
+            .cloned()
+            .collect();
+        let added: Vec<(String, Vec<u8>)> = new_keys
+            .iter()
+            .filter(|k| !old_keys.contains(k))
+            .cloned()
+            .collect();
+        self.index_remove_keys(item_id, &removed);
+        self.index_insert_keys(item_id, &added);
+        if self
+            .items
+            .get(&item_id)
+            .is_some_and(|r| r.state == ItemState::Pending && !r.superseded)
+        {
+            self.claim_index_remove_keys(item_id, &removed);
+            self.claim_index_insert_keys(item_id, &added);
+        }
+        if !old_keys.is_empty() || !new_keys.is_empty() {
+            self.remember_framed_keys(item_id, new_keys);
+        }
+        self.replace_gate_memberships(item_id, &old_gate_keys, &new_gate_keys);
+        // Re-key the eligibility index for a repriced/rescheduled Pending item (no-op otherwise —
+        // a non-reprice/non-reschedule or a Leased item leaves the eligibility set unchanged).
+        if let Some(old) = old_elig {
+            self.eligible.remove(old);
+        }
+        if new_elig.is_some() {
+            let rec = self.items.get(&item_id).ok_or(EngineError::NotFound)?;
+            self.eligible.insert(rec, &self.items, &self.priority_model);
+        }
+        Ok(())
+    }
+
     fn apply_command_at(
         &mut self,
         terminal_at: Option<UtcTimestamp>,
@@ -2432,183 +2612,10 @@ impl ProjectionData {
                 }
                 Ok(())
             }
-            QueueCommand::UpdateFields(c) => {
-                let model = self.priority_model;
-                let (
-                    old_keys,
-                    old_elig,
-                    new_keys,
-                    new_elig,
-                    old_gate_keys,
-                    new_gate_keys,
-                    next_index_fields,
-                ) = {
-                    let rec = self.items.get(&c.item_id).ok_or(EngineError::NotFound)?;
-                    // A field/payload merge and/or a priority/not_before reschedule (no lifecycle change),
-                    // so it relies on `update_fields_validate` having run pre-commit.
-                    debug_assert!(
-                        !rec.state.is_terminal() && !rec.superseded && !rec.fenced,
-                        "UpdateFields applied to a non-updatable item; update_fields_validate was bypassed"
-                    );
-                    let index_inputs_changed = c.set_fields.is_some()
-                        || !c.field_ops.is_empty()
-                        || c.set_entity_document.is_some();
-                    let old_keys = if index_inputs_changed {
-                        self.record_index_keys(
-                            &rec.fields,
-                            &rec.index_fields,
-                            rec.entity_document.as_ref(),
-                        )?
-                    } else {
-                        Vec::new()
-                    };
-                    let repricing = matches!(c.set_priority, ScheduleUpdate::Set(_))
-                        || matches!(c.set_not_before, ScheduleUpdate::Set(_));
-                    let eligibility_changed = repricing || c.set_gate_keys.is_some();
-                    let was_pending = rec.state == ItemState::Pending;
-                    let old_elig = (eligibility_changed
-                        && was_pending
-                        && !gate_keys_blocked(&self.blocked_gates, &rec.gate_keys))
-                    .then(|| EligibilityIndex::token(rec, &model));
-
-                    let mut next_fields =
-                        c.set_fields.clone().unwrap_or_else(|| rec.fields.clone());
-                    for (k, op) in &c.field_ops {
-                        match op {
-                            Some(v) => {
-                                next_fields.insert(k.clone(), v.clone());
-                            }
-                            None => {
-                                next_fields.remove(k);
-                            }
-                        }
-                    }
-                    let next_index_fields = if let Some(doc) = c.set_entity_document.as_ref() {
-                        fireweed_engine::index_fields::extract_index_fields_from_entity(
-                            &self.typed_index_specs,
-                            doc,
-                        )?
-                    } else {
-                        rec.index_fields.clone()
-                    };
-                    let next_entity = c
-                        .set_entity_document
-                        .as_ref()
-                        .or(rec.entity_document.as_ref());
-                    let new_keys = if index_inputs_changed {
-                        self.record_index_keys(&next_fields, &next_index_fields, next_entity)?
-                    } else {
-                        Vec::new()
-                    };
-
-                    let new_elig = if eligibility_changed && was_pending {
-                        let mut next_rec = rec.clone();
-                        next_rec.fields = next_fields;
-                        next_rec.index_fields = next_index_fields.clone();
-                        if c.set_entity_document.is_some() {
-                            next_rec.entity_document = c.set_entity_document.clone();
-                        }
-                        if let Some(gate_keys) = &c.set_gate_keys {
-                            next_rec.gate_keys = gate_keys.clone();
-                        }
-                        if let ScheduleUpdate::Set(p) = &c.set_priority {
-                            next_rec.priority = p.clone();
-                        }
-                        if let ScheduleUpdate::Set(nb) = &c.set_not_before {
-                            next_rec.not_before = *nb;
-                        }
-                        (!gate_keys_blocked(&self.blocked_gates, &next_rec.gate_keys))
-                            .then(|| EligibilityIndex::token(&next_rec, &model))
-                    } else {
-                        None
-                    };
-                    (
-                        old_keys,
-                        old_elig,
-                        new_keys,
-                        new_elig,
-                        rec.gate_keys.clone(),
-                        c.set_gate_keys
-                            .clone()
-                            .unwrap_or_else(|| rec.gate_keys.clone()),
-                        next_index_fields,
-                    )
-                };
-                let rec = self
-                    .items
-                    .get_mut(&c.item_id)
-                    .ok_or(EngineError::NotFound)?;
-                if let Some(fields) = &c.set_fields {
-                    rec.fields = fields.clone();
-                }
-                for (k, op) in &c.field_ops {
-                    match op {
-                        Some(v) => {
-                            rec.fields.insert(k.clone(), v.clone());
-                        }
-                        None => {
-                            rec.fields.remove(k);
-                        }
-                    }
-                }
-                match &c.payload {
-                    PayloadUpdate::Keep => {}
-                    PayloadUpdate::Set(p) => rec.payload = p.clone(),
-                }
-                if let Some(metadata) = &c.set_metadata {
-                    rec.metadata = metadata.clone();
-                }
-                if let Some(gate_keys) = &c.set_gate_keys {
-                    rec.gate_keys = gate_keys.clone();
-                }
-                rec.index_fields = next_index_fields;
-                if c.set_entity_document.is_some() {
-                    rec.entity_document = c.set_entity_document.clone();
-                }
-                if let ScheduleUpdate::Set(p) = &c.set_priority {
-                    rec.priority = p.clone();
-                }
-                if let ScheduleUpdate::Set(nb) = &c.set_not_before {
-                    rec.not_before = *nb;
-                    if !c.api001_batch {
-                        let now = terminal_at.unwrap_or(rec.eligible_since);
-                        rec.eligible_since = nb.unwrap_or(now).max(now);
-                    }
-                }
-                rec.item_version += 1;
-                let item_id = c.item_id;
-                let removed: Vec<(String, Vec<u8>)> = old_keys
-                    .iter()
-                    .filter(|k| !new_keys.contains(k))
-                    .cloned()
-                    .collect();
-                let added: Vec<(String, Vec<u8>)> = new_keys
-                    .iter()
-                    .filter(|k| !old_keys.contains(k))
-                    .cloned()
-                    .collect();
-                self.index_remove_keys(item_id, &removed);
-                self.index_insert_keys(item_id, &added);
-                if self
-                    .items
-                    .get(&item_id)
-                    .is_some_and(|r| r.state == ItemState::Pending && !r.superseded)
-                {
-                    self.claim_index_remove_keys(item_id, &removed);
-                    self.claim_index_insert_keys(item_id, &added);
-                }
-                if !old_keys.is_empty() || !new_keys.is_empty() {
-                    self.remember_framed_keys(item_id, new_keys);
-                }
-                self.replace_gate_memberships(item_id, &old_gate_keys, &new_gate_keys);
-                // Re-key the eligibility index for a repriced/rescheduled Pending item (no-op otherwise —
-                // a non-reprice/non-reschedule or a Leased item leaves the eligibility set unchanged).
-                if let Some(old) = old_elig {
-                    self.eligible.remove(old);
-                }
-                if new_elig.is_some() {
-                    let rec = self.items.get(&item_id).ok_or(EngineError::NotFound)?;
-                    self.eligible.insert(rec, &self.items, &self.priority_model);
+            QueueCommand::UpdateFields(c) => self.apply_update_fields(terminal_at, c),
+            QueueCommand::UpdateFieldsBatch(batch) => {
+                for update in &batch.updates {
+                    self.apply_update_fields(terminal_at, update)?;
                 }
                 Ok(())
             }
@@ -4167,9 +4174,7 @@ impl ProjectionData {
                 Err(error) => return Err(error),
             }
             // Batch update path still keys from entity merge; empty native map until native edits land.
-            for (name, key) in
-                self.record_index_keys(&fields, &record.index_fields, entity)?
-            {
+            for (name, key) in self.record_index_keys(&fields, &record.index_fields, entity)? {
                 if !matches!(self.indexes.get(&name), Some(SecondaryIndex::Unique(_))) {
                     continue;
                 }
@@ -5116,11 +5121,8 @@ impl ProjectionData {
                         Some(&new_entity),
                         None,
                     )?;
-                    let new_keys = self.record_index_keys(
-                        &new_fields,
-                        &rec.index_fields,
-                        Some(&new_entity),
-                    )?;
+                    let new_keys =
+                        self.record_index_keys(&new_fields, &rec.index_fields, Some(&new_entity))?;
                     let reservation_conflict = new_keys.iter().any(|(name, key)| {
                         matches!(self.indexes.get(name), Some(SecondaryIndex::Unique(_)))
                             && reservations

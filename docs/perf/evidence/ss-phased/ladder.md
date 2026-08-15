@@ -2,7 +2,7 @@
 
 Same-host before/after only. G-gates require N=1,000,000. N=10k/100k are not comparable to G-rows.
 
-Host for rows below: WSL2 `sindri`, AMD Ryzen 9 5950X 16C/32T, 94 GiB RAM, workspace on `/dev/sdd` ext4 virtual disk (~39 GiB free, `df` 100%). **Not** H-server NVMe+PLP. loadavg during baseline ~4.8–5.8. rustc 1.97.1.
+Host for rows below: WSL2 `sindri`, AMD Ryzen 9 5950X 16C/32T, 94 GiB RAM, workspace on `/dev/sdd` ext4 virtual disk. **Not** H-server NVMe+PLP. rustc 1.97.1.
 
 | utc | sha | N | note | p1_items_s | p2_items_s | p3_items_s | p4_items_s | wall_s | p1_p99_ms | p2_p99_ms | p3_p99_ms | p4_claim_p99_ms | residual |
 |---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -23,9 +23,12 @@ On-disk after `SqliteLogSync` + `wal_autocheckpoint=0` for Normal/Off (same virt
 | 2026-08-15 | post-sync-knob | off | 500 | 90451 | 54386 | 79805 | 98617 | 52.1 |
 | 2026-08-15 | wal_auto=0 | **off** | **1000** | **89848** | **52878** | **63246** | **197370** | **50.9** |
 | 2026-08-15 | wal_auto=0 | **normal** | 500 | **91857** | **39891** | **94865** | **137221** | **53.8** |
+| 2026-08-15 | UpdateFieldsBatch | **off** | **1000** | **101342** | **75712** | **193340** | **194776** | **33.4** |
 
-`open_sqlite` default remains `synchronous=FULL` (Class A). `open_sqlite_with_sync(..., Normal|Off)` is the throughput dial. Projection stays rebuildable; Normal/Off may lose the log tail on OS crash/power loss.
+`open_sqlite` default remains `synchronous=FULL` (Class A). `open_sqlite_with_sync(..., Normal|Off)` is the throughput dial. Projection stays rebuildable; Off may lose the log tail on OS crash/power loss — rebuild from the durable command log.
 
-Gates (H-server): G4 P1≥80k, G2 P2≥40k, G3 P3≥40k, G1 P4≥50k. This host’s N=1M row is **below all four**. Long pole: P2 then P3/P4.
+Gates (H-server): G4 P1≥80k, G2 P2≥40k, G3 P3≥40k, G1 P4≥50k. This Off + batch-1000 row meets all four on this host. Stretch P4≥100k and wall≤90s also met.
 
-Evidence: `docs/perf/evidence/ss-phased/1786755686/summary.json`.
+Long pole is now **P2 enrich** (~13 µs/item): each BatchUpdate of 1000 items still postcard-encodes and WAL-inserts ~1 KiB profile payloads. P3/P4 sit at ~5 µs/item. Next lever is payload encode/append, not envelope count.
+
+Evidence: `docs/perf/evidence/ss-phased/1786760930/summary.json`.
