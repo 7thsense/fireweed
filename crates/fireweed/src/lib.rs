@@ -59,8 +59,10 @@ use fireweed_engine::{
     ItemMutationPort, LeaseState, OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort,
     PushPort, PushSpec, QueueControlPlane, ReassignLeasePort, ReclaimPort, RecoveryReadPort,
     RenewLeasePort, ReschedulePort, SetGatesCommand, SetGatesPort, UpdateFieldsPort, UpsertPort,
-    acquire_and_fence, validate_api001_reserved_write_fields, validate_claim_compatibility,
+    acquire_and_fence, validate_claim_compatibility,
 };
+#[cfg(test)]
+use fireweed_engine::validate_api001_reserved_write_fields;
 
 // ---------------------------------------------------------------------------
 // PUBLIC DEPENDENCY SURFACE (ADR-009): a consumer depends on `fireweed` alone and can name every type its
@@ -5181,6 +5183,7 @@ impl<B: LibBackend> RuntimeCore<B> {
     /// `expected_item_version`: optional CAS — a mismatch rejects with [`EngineError::Conflict`] and commits
     /// nothing (for rolling concurrent updates). Bumps and returns the new `item_version`. Fenced by the
     /// owner's epoch and recorded in the authoritative log when the projection is rebuildable.
+    #[cfg(test)]
     pub async fn update_fields(
         &self,
         queue: &QueueKey,
@@ -5219,6 +5222,9 @@ impl<B: LibBackend> RuntimeCore<B> {
     /// replacement. Entry-local validation failures return [`BatchUpdateOutcome::Invalid`] without
     /// aborting valid siblings, leased entries return `Conflict`, terminal entries return `Terminal`, and
     /// successful entries bump `item_version` while preserving `eligible_since`.
+    /// Replace mutable fields on one or more pending, non-leased items. This is the
+    /// only public item-update verb. A one-item request is accepted and complained
+    /// about; send a larger batch.
     pub async fn batch_update(
         &self,
         queue: &QueueKey,
@@ -5229,6 +5235,9 @@ impl<B: LibBackend> RuntimeCore<B> {
     {
         if request.updates.is_empty() {
             return Err(EngineError::Invalid("empty batch update"));
+        }
+        if request.updates.len() == 1 {
+            crate::facade::complain_singleton_batch_update();
         }
         let epoch = self.session_epoch(queue).await?;
         let now = self.clock.now();
@@ -5253,7 +5262,7 @@ impl<B: LibBackend> RuntimeCore<B> {
     }
 
     /// Reschedule a **live** item's `priority` and/or `not_before` after push (BQ pqueue-7a96f929) — the
-    /// "change when/where this item is delivered" verb, distinct from [`Fireweed::update_fields`] (which merges
+    /// "change when/where this item is delivered" verb, distinct from `update_fields` (which merges
     /// hot-storage fields/payload). [`ScheduleUpdate::Keep`] leaves a dimension unchanged; `Set(Some(v))`
     /// sets it; `Set(None)` clears it (clearing `not_before` makes the item immediately eligible; clearing
     /// `priority` drops it to the unpriced FIFO tail). A priority change re-keys the item in the eligibility
@@ -5261,6 +5270,7 @@ impl<B: LibBackend> RuntimeCore<B> {
     /// until its new time). Legal while the item is Pending OR Leased; pre-validated like `update_fields`
     /// (absent/terminal/superseded id → reject; `expected_item_version` mismatch → [`EngineError::Conflict`]),
     /// fenced by the owner's epoch. Bumps and returns the new `item_version`.
+    #[cfg(test)]
     pub async fn update(
         &self,
         queue: &QueueKey,

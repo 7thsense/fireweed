@@ -2,6 +2,17 @@ use super::*;
 
 type FacadeFuture<'a, T> = Pin<Box<dyn Future<Output = EngineResult<T>> + Send + 'a>>;
 
+/// Size-1 is legal. It is the slow encoding of a batch write; prefer larger batches.
+pub(crate) fn complain_singleton_batch_update() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        eprintln!(
+            "fireweed: BatchUpdate with 1 item; the public write is batch-shaped — send a larger batch"
+        );
+    });
+}
+
 trait FireweedDataPlane: Send + Sync {
     fn ownership<'a>(&'a self, queue: &'a QueueKey) -> FacadeFuture<'a, Ownership>;
     fn renew_owned(&self) -> EngineResult<()>;
@@ -207,23 +218,6 @@ trait FireweedDataPlane: Send + Sync {
         ids: Vec<ItemId>,
         lease_ms: u64,
     ) -> FacadeFuture<'a, ()>;
-    fn update_fields<'a>(
-        &'a self,
-        queue: &'a QueueKey,
-        item_id: ItemId,
-        field_ops: BTreeMap<String, Option<Bytes>>,
-        payload: PayloadUpdate,
-        entity: Option<serde_json::Value>,
-        expected_item_version: Option<u64>,
-    ) -> FacadeFuture<'a, u64>;
-    fn update<'a>(
-        &'a self,
-        queue: &'a QueueKey,
-        item_id: ItemId,
-        priority: ScheduleUpdate<PriorityValue>,
-        not_before: ScheduleUpdate<UtcTimestamp>,
-        expected_item_version: Option<u64>,
-    ) -> FacadeFuture<'a, u64>;
     fn set_gates<'a>(
         &'a self,
         queue: &'a QueueKey,
@@ -883,42 +877,6 @@ impl<B: LibBackend + 'static> FireweedDataPlane for RuntimeCore<B> {
     ) -> FacadeFuture<'a, ()> {
         Box::pin(RuntimeCore::reassign(self, queue, ids, lease_ms))
     }
-    fn update_fields<'a>(
-        &'a self,
-        queue: &'a QueueKey,
-        item_id: ItemId,
-        field_ops: BTreeMap<String, Option<Bytes>>,
-        payload: PayloadUpdate,
-        entity: Option<serde_json::Value>,
-        expected_item_version: Option<u64>,
-    ) -> FacadeFuture<'a, u64> {
-        Box::pin(RuntimeCore::update_fields(
-            self,
-            queue,
-            item_id,
-            field_ops,
-            payload,
-            entity,
-            expected_item_version,
-        ))
-    }
-    fn update<'a>(
-        &'a self,
-        queue: &'a QueueKey,
-        item_id: ItemId,
-        priority: ScheduleUpdate<PriorityValue>,
-        not_before: ScheduleUpdate<UtcTimestamp>,
-        expected_item_version: Option<u64>,
-    ) -> FacadeFuture<'a, u64> {
-        Box::pin(RuntimeCore::update(
-            self,
-            queue,
-            item_id,
-            priority,
-            not_before,
-            expected_item_version,
-        ))
-    }
     fn set_gates<'a>(
         &'a self,
         queue: &'a QueueKey,
@@ -1527,27 +1485,8 @@ impl Fireweed {
             .reassign(queue, ids.into_iter().collect(), lease_ms)
             .await
     }
-    pub async fn update_fields(
-        &self,
-        queue: &QueueKey,
-        item_id: ItemId,
-        field_ops: BTreeMap<String, Option<Bytes>>,
-        payload: PayloadUpdate,
-        entity: Option<serde_json::Value>,
-        expected_item_version: Option<u64>,
-    ) -> EngineResult<u64> {
-        self.inner
-            .update_fields(
-                queue,
-                item_id,
-                field_ops,
-                payload,
-                entity,
-                expected_item_version,
-            )
-            .await
-    }
-
+    /// The only public item-update verb. There is no scalar `update` /
+    /// `update_fields`. A one-item batch is legal and complained about.
     pub async fn batch_update(
         &self,
         queue: &QueueKey,
@@ -1555,6 +1494,9 @@ impl Fireweed {
     ) -> EngineResult<BatchUpdateResponse> {
         if request.updates.is_empty() {
             return Err(EngineError::Invalid("empty batch update"));
+        }
+        if request.updates.len() == 1 {
+            complain_singleton_batch_update();
         }
         self.batch.batch_update(queue, request).await
     }
@@ -1564,18 +1506,6 @@ impl Fireweed {
         request: ItemMutationRequest,
     ) -> EngineResult<ItemMutationResponse> {
         self.mutation.mutate_items(queue, request).await
-    }
-    pub async fn update(
-        &self,
-        queue: &QueueKey,
-        item_id: ItemId,
-        priority: ScheduleUpdate<PriorityValue>,
-        not_before: ScheduleUpdate<UtcTimestamp>,
-        expected_item_version: Option<u64>,
-    ) -> EngineResult<u64> {
-        self.inner
-            .update(queue, item_id, priority, not_before, expected_item_version)
-            .await
     }
     pub async fn set_gates(
         &self,

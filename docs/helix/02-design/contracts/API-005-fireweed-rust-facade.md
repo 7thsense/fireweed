@@ -487,7 +487,11 @@ functionality.
 | Finalize and commit | `ack`, `complete`, `nack`, `retry`, `release`, `nack_retry_after`, `retry_after`, `commit`, `commit_multi_claim`, `commit_capabilities`, `explain_commit`, `side_record`, `fail` |
 | Read and discovery | `peek`, `current_position`, `discover_active_scopes`, `discover_active_scopes_stamped`, `discover`, `live_item`, `live_items`, `query_index_unique`, `query_index`, `query_index_unique_typed`, `query_index_typed`, `claimed` |
 | Metrics and projection query | `metrics`, `metrics_by_query`, `hot_projection_capabilities`, `range_scan`, `grouped_aggregate`, `declared_bucket_segment` |
-| Mutation and maintenance | `renew`, `reassign`, `update_fields`, `batch_update`, `mutate_items`, `update`, `set_gates`, `reclaim_expired`, `reclaim_expired_at`, `rearm`, `rearm_at`, `rearm_after`, `purge`, `bounded_mutation` |
+| Mutation and maintenance | `renew`, `reassign`, `batch_update`, `mutate_items`, `set_gates`, `reclaim_expired`, `reclaim_expired_at`, `rearm`, `rearm_at`, `rearm_after`, `purge`, `bounded_mutation` |
+
+There is no scalar `update` / `update_fields` on [`Fireweed`]. After ingest,
+clients change item state with `batch_update`. A one-item batch is legal and
+is the inefficient form.
 
 Per-constructor parity is a release invariant. One shared conformance suite
 MUST invoke every method family against every supported constructor, including
@@ -502,7 +506,7 @@ erased boundary. This does not change their observable contract.
 `commit_multi_claim` are the explicit retained-request-id mutation bindings in
 this facade. Convenience methods without a `RequestId` parameter—such as
 `push`, `push_batch`, `ack`, `complete`, `nack`, `retry`, `release`, `fail`,
-`renew`, `reassign`, `update`, and `purge`—preserve their current library
+`renew`, `reassign`, and `purge`—preserve their current library
 behavior but MUST NOT be cited as proof of API-001 unknown-outcome replay.
 Where API-001 requires a request id and per-item outcomes not represented by a
 convenience signature, API-001 remains the desired transport-neutral contract

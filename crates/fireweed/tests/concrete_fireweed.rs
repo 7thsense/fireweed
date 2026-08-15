@@ -2,12 +2,12 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fireweed::{
-    ClientItemKey, EligibilityPolicy, Fireweed, NewItem, ObjectLogAuthority,
-    ObjectLogRuntimeConfig, ObjectLogStorage, OrderingMode, PriorityDirection, PriorityModel,
-    PriorityModelKind, PriorityTieBreaker, PriorityValue, ProjectionConfig, QueueDefinition,
-    QueueId, QueueKey, RecoveryPolicy, RecurrencePolicy, ResponseBarrier, RetryPolicy,
-    ScheduleUpdate, SegmentConfig, SystemClock, TenantId, WorkerId, open_memory, open_sqlite,
-    open_sqlite_sqlite_projection,
+    BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateRequest, BatchUpdateValue, ClientItemKey,
+    EligibilityPolicy, Fireweed, NewItem, ObjectLogAuthority, ObjectLogRuntimeConfig,
+    ObjectLogStorage, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
+    PriorityTieBreaker, PriorityValue, ProjectionConfig, QueueDefinition, QueueId, QueueKey,
+    RecoveryPolicy, RecurrencePolicy, RequestId, ResponseBarrier, RetryPolicy, SegmentConfig,
+    SystemClock, TenantId, WorkerId, open_memory, open_sqlite, open_sqlite_sqlite_projection,
 };
 
 fn queue_definition() -> QueueDefinition {
@@ -70,12 +70,21 @@ async fn exercise_operation_families(fireweed: &Fireweed, queue_name: &str) {
         item_id
     );
     fireweed
-        .update(
+        .batch_update(
             &key,
-            item_id,
-            ScheduleUpdate::Set(Some(PriorityValue::Int64(5))),
-            ScheduleUpdate::Keep,
-            None,
+            BatchUpdateRequest {
+                request_id: RequestId::new("cf-reschedule").unwrap(),
+                updates: vec![BatchUpdateEntry {
+                    item_ref: BatchUpdateItemRef::ItemId(item_id),
+                    expected_item_version: None,
+                    priority: BatchUpdateValue::Replace(PriorityValue::Int64(5)),
+                    not_before: BatchUpdateValue::Keep,
+                    payload: BatchUpdateValue::Keep,
+                    metadata: BatchUpdateValue::Keep,
+                    gate_keys: BatchUpdateValue::Keep,
+                    fields: BatchUpdateValue::Keep,
+                }],
+            },
         )
         .await
         .unwrap();

@@ -1637,55 +1637,91 @@ async fn exercise_mutation(cell: &str, fw: &Fireweed, failures: &mut Vec<String>
     };
     let version = call(
         cell,
-        "update",
+        "batch_update[schedule]",
         failures,
-        fw.update(
-            &queue,
-            id,
-            ScheduleUpdate::Set(Some(PriorityValue::Int64(2))),
-            ScheduleUpdate::Keep,
-            Some(1),
-        ),
+        async {
+            let resp = fw
+                .batch_update(
+                    &queue,
+                    BatchUpdateRequest {
+                        request_id: RequestId::new("pi-update-schedule").unwrap(),
+                        updates: vec![BatchUpdateEntry {
+                            item_ref: BatchUpdateItemRef::ItemId(id),
+                            expected_item_version: Some(1),
+                            priority: BatchUpdateValue::Replace(PriorityValue::Int64(2)),
+                            not_before: BatchUpdateValue::Keep,
+                            payload: BatchUpdateValue::Keep,
+                            metadata: BatchUpdateValue::Keep,
+                            gate_keys: BatchUpdateValue::Keep,
+                            fields: BatchUpdateValue::Keep,
+                        }],
+                    },
+                )
+                .await?;
+            match resp.results.as_slice() {
+                [BatchUpdateOutcome::Updated { item_version, .. }] => Ok(*item_version),
+                _ => Err(EngineError::Invalid("unexpected batch_update outcome")),
+            }
+        },
     )
     .await;
     check(
         cell,
-        "update",
+        "batch_update[schedule]",
         failures,
         version.is_some_and(|value| value > 1),
         "did not advance item_version",
     );
     let field_version = call(
         cell,
-        "update_fields",
+        "batch_update[fields]",
         failures,
-        fw.update_fields(
-            &queue,
-            id,
-            BTreeMap::from([("updated".into(), Some(b"yes".to_vec().into()))]),
-            PayloadUpdate::Keep,
-            None,
-            version,
-        ),
+        async {
+            let resp = fw
+                .batch_update(
+                    &queue,
+                    BatchUpdateRequest {
+                        request_id: RequestId::new("pi-update-fields").unwrap(),
+                        updates: vec![BatchUpdateEntry {
+                            item_ref: BatchUpdateItemRef::ItemId(id),
+                            expected_item_version: version,
+                            priority: BatchUpdateValue::Keep,
+                            not_before: BatchUpdateValue::Keep,
+                            payload: BatchUpdateValue::Keep,
+                            metadata: BatchUpdateValue::Keep,
+                            gate_keys: BatchUpdateValue::Keep,
+                            fields: BatchUpdateValue::Replace(BTreeMap::from([(
+                                "updated".into(),
+                                b"yes".to_vec().into(),
+                            )])),
+                        }],
+                    },
+                )
+                .await?;
+            match resp.results.as_slice() {
+                [BatchUpdateOutcome::Updated { item_version, .. }] => Ok(*item_version),
+                _ => Err(EngineError::Invalid("unexpected batch_update outcome")),
+            }
+        },
     )
     .await;
     check(
         cell,
-        "update_fields",
+        "batch_update[fields]",
         failures,
         field_version.is_some_and(|value| version.is_some_and(|prior| value > prior)),
         "did not advance item_version after field mutation",
     );
     let live = call(
         cell,
-        "update/update_fields.post_state",
+        "batch_update.post_state",
         failures,
         fw.live_item(&queue, ClientItemKey::new("mutation-item").unwrap()),
     )
     .await;
     check(
         cell,
-        "update/update_fields",
+        "batch_update",
         failures,
         live.as_ref().is_some_and(|value| {
             value.as_ref().is_some_and(|item| {

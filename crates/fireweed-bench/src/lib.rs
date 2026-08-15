@@ -6,7 +6,7 @@
 //!     and its generator, so every workload can be driven over varied DATA SHAPES;
 //!   * the generic throughput workloads (`ingest`, `claim_ack`) over the [`fireweed::Fireweed`] facade;
 //!   * the fuller [`lifecycle`] workload — a correctness + perf pass that exercises
-//!     push → claim → update_fields → ack/nack(retry) → reclaim_expired and asserts the state-machine
+//!     push → batch_update → claim → ack/nack(retry) → reclaim_expired and asserts the state-machine
 //!     invariants at each step (returning `Err` on any violation so a `cargo test` can fail loudly).
 //!
 //! Everything is driven by `futures::executor::block_on` (NOT tokio) so the sync `postgres` client works.
@@ -15,8 +15,9 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use fireweed::{
-    Bytes, ClaimedItem, EngineError, Fireweed, GroupKey, ItemId, Nack, NewItem, PayloadUpdate,
-    PriorityValue, QueueDefinition, UtcTimestamp,
+    BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateOutcome, BatchUpdateRequest, BatchUpdateValue,
+    Bytes, ClaimedItem, Fireweed, GroupKey, ItemId, Nack, NewItem, PriorityValue, QueueDefinition,
+    RequestId, UtcTimestamp,
 };
 use fireweed_core::{
     CohortOnIncomplete, CohortPolicy, EligibilityPolicy, OrderingMode, PriorityDirection,
@@ -435,17 +436,16 @@ pub struct LifecycleStats {
     pub push: OpStats,
     pub claim: OpStats,
     pub ack: OpStats,
-    /// Whether the in-place `update_fields` step ran (false on the eventual-apply object-log class).
+    /// Whether the pending `batch_update` sample ran.
     pub update_ran: bool,
 }
 
-/// A correctness + perf lifecycle over one (shape, backend): create→push→claim→update_fields→
-/// ack/nack(retry)→reclaim_expired→re-drain. Asserts the state-machine invariants at each step and returns
+/// A correctness + perf lifecycle over one (shape, backend): create→push→batch_update→
+/// claim→ack/nack(retry)→reclaim_expired→re-drain. Asserts the state-machine invariants at each step and returns
 /// `Err(reason)` on any violation, so callers (the e2e test, the binary) fail loudly.
 ///
-/// `supports_update` is the backend's atomic-class capability flag: the object-log backend refuses
-/// `update_fields` with `Unavailable`, so the update step is skipped there (and `LifecycleStats.update_ran`
-/// is false).
+/// `supports_update` is kept for call-site compatibility. Item updates go through
+/// public `batch_update` (pending items only).
 ///
 /// Timing model: a small "abandon" slice is claimed under a SHORT lease so it expires for the
 /// `reclaim_expired` step; everything finalized in-band holds a long lease so an ack/nack never races
@@ -489,6 +489,55 @@ pub async fn lifecycle(
         "clean state after push",
     )?;
 
+    // --- batch_update a pending sample (the only public item-update verb) -------------------
+    let mut update_ran = false;
+    if supports_update {
+        let peeked = fireweed
+            .peek(q, SAMPLE)
+            .await
+            .map_err(|e| format!("peek: {e:?}"))?;
+        if !peeked.is_empty() {
+            let mut updates = Vec::with_capacity(peeked.len());
+            for it in &peeked {
+                let live = fireweed
+                    .live_item(q, it.client_item_key.clone())
+                    .await
+                    .map_err(|e| format!("live_item: {e:?}"))?
+                    .ok_or_else(|| "pending peek had no live item".to_string())?;
+                let mut fields = live.fields;
+                fields.insert("bench_touch".to_string(), Bytes::from_static(b"1"));
+                updates.push(BatchUpdateEntry {
+                    item_ref: BatchUpdateItemRef::ItemId(it.item_id),
+                    expected_item_version: Some(it.item_version),
+                    priority: BatchUpdateValue::Keep,
+                    not_before: BatchUpdateValue::Keep,
+                    payload: BatchUpdateValue::Keep,
+                    metadata: BatchUpdateValue::Keep,
+                    gate_keys: BatchUpdateValue::Keep,
+                    fields: BatchUpdateValue::Replace(fields),
+                });
+            }
+            let n = updates.len();
+            let resp = fireweed
+                .batch_update(
+                    q,
+                    BatchUpdateRequest {
+                        request_id: RequestId::new("bench-lifecycle-update").unwrap(),
+                        updates,
+                    },
+                )
+                .await
+                .map_err(|e| format!("batch_update: {e:?}"))?;
+            let ok = resp
+                .results
+                .iter()
+                .filter(|r| matches!(r, BatchUpdateOutcome::Updated { .. }))
+                .count();
+            check(ok == n, &format!("batch_update updated {ok}/{n}"))?;
+            update_ran = true;
+        }
+    }
+
     // Partition: ~10% abandoned (expire→reclaim), ~10% nack-retry, the rest acked in round 1.
     let abandon_n = (items / 10).max(1);
     let nack_n = (items / 10).max(1);
@@ -523,59 +572,6 @@ pub async fn lifecycle(
         m.pending == 0,
         &format!("pending==0 after claim-all (got {})", m.pending),
     )?;
-
-    // --- update_fields on a sample of the long-leased working set --------------------------
-    let mut update_ran = false;
-    if supports_update {
-        let sample = working.iter().take(SAMPLE).cloned().collect::<Vec<_>>();
-        for it in &sample {
-            let mut ops = BTreeMap::new();
-            ops.insert("bench_touch".to_string(), Some(Bytes::from_static(b"1")));
-            let new_ver = fireweed
-                .update_fields(q, it.item_id, ops, PayloadUpdate::Keep, None, None)
-                .await
-                .map_err(|e| format!("update_fields: {e:?}"))?;
-            check(
-                new_ver > it.item_version,
-                &format!(
-                    "item_version bumped (was {}, got {new_ver})",
-                    it.item_version
-                ),
-            )?;
-            let live = fireweed
-                .live_item(q, it.client_item_key.clone())
-                .await
-                .map_err(|e| format!("live_item: {e:?}"))?
-                .ok_or_else(|| format!("[{}] live_item returned None after update", shape.name))?;
-            check(
-                live.item_version == new_ver,
-                "live_item reflects bumped version",
-            )?;
-            check(
-                live.fields.get("bench_touch").map(|b| b.as_ref()) == Some(b"1".as_ref()),
-                "live_item reflects the set field",
-            )?;
-        }
-        update_ran = true;
-    } else {
-        // Eventual-apply class: the update must be refused, not silently dropped.
-        if let Some(it) = working.first() {
-            let mut ops = BTreeMap::new();
-            ops.insert("bench_touch".to_string(), Some(Bytes::from_static(b"1")));
-            match fireweed
-                .update_fields(q, it.item_id, ops, PayloadUpdate::Keep, None, None)
-                .await
-            {
-                Err(EngineError::Unavailable) => {}
-                other => {
-                    return Err(format!(
-                        "[{}] expected update_fields Unavailable on eventual-apply class, got {other:?}",
-                        shape.name
-                    ));
-                }
-            }
-        }
-    }
 
     // --- finalize round 1: ack most, nack-retry some, abandon the rest ----------------------
     let ack_ids: Vec<ItemId> = working

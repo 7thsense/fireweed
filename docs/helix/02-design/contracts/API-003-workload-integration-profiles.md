@@ -128,7 +128,7 @@ The adapter SHOULD create one queue per logical delivery stream with:
   redelivery policy.
 
 Mutable schedules are a backend-choice constraint, not a new queue feature.
-The adapter MAY use `BatchUpdate` / `update_fields` / `reschedule` to move still-
+The adapter MAY use `BatchUpdate` to move still-
 pending work only on a backend profile that proves the mutable-write race
 closure called out in TD-004. If the deployment does not run on a profile that
 documents that guarantee, Seventh Sense-style ingest-then-reschedule queues
@@ -244,7 +244,7 @@ The embedder maps each workload action onto the public facade operations:
    `QueueDefinition` (queue-creation recommendations from the Scheduled Batch
    Delivery profile apply unchanged).
 2. **Enqueue / update / finalize** through the matching facade operation
-   (`upsert` / batch push, `update_fields`, `ack` / `nack` / `fail` / `rearm`,
+   (`upsert` / batch push, `batch_update`, `ack` / `nack` / `fail` / `rearm`,
    etc.). The facade/backend commit is the durable ack boundary; an embedder MUST
    treat work as acknowledged only after the durable facade operation returns.
 3. **Claim** via `Fireweed::claim`, which applies the single Eligibility

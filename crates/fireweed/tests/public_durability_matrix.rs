@@ -298,12 +298,21 @@ async fn seed(cell: &str, fireweed: &Fireweed) -> SeededState {
     assert_eq!(replay_disp, fireweed::PushDisposition::Replayed);
     assert_eq!(replayed_id, primary_id);
     fireweed
-        .update(
+        .batch_update(
             &queue,
-            primary_id,
-            ScheduleUpdate::Set(Some(PriorityValue::Int64(7))),
-            ScheduleUpdate::Keep,
-            None,
+            BatchUpdateRequest {
+                request_id: RequestId::new("durability-reschedule-primary").unwrap(),
+                updates: vec![BatchUpdateEntry {
+                    item_ref: BatchUpdateItemRef::ItemId(primary_id),
+                    expected_item_version: None,
+                    priority: BatchUpdateValue::Replace(PriorityValue::Int64(7)),
+                    not_before: BatchUpdateValue::Keep,
+                    payload: BatchUpdateValue::Keep,
+                    metadata: BatchUpdateValue::Keep,
+                    gate_keys: BatchUpdateValue::Keep,
+                    fields: BatchUpdateValue::Keep,
+                }],
+            },
         )
         .await
         .unwrap();
@@ -517,12 +526,23 @@ async fn seed(cell: &str, fireweed: &Fireweed) -> SeededState {
     ));
     fireweed.release(&queue, [lease_item_id]).await.unwrap();
     fireweed
-        .update(
+        .batch_update(
             &queue,
-            lease_item_id,
-            ScheduleUpdate::Keep,
-            ScheduleUpdate::Set(Some(UtcTimestamp::new(1_900_000_000, 0).unwrap())),
-            None,
+            BatchUpdateRequest {
+                request_id: RequestId::new("durability-defer-released").unwrap(),
+                updates: vec![BatchUpdateEntry {
+                    item_ref: BatchUpdateItemRef::ItemId(lease_item_id),
+                    expected_item_version: None,
+                    priority: BatchUpdateValue::Keep,
+                    not_before: BatchUpdateValue::Replace(Some(
+                        UtcTimestamp::new(1_900_000_000, 0).unwrap(),
+                    )),
+                    payload: BatchUpdateValue::Keep,
+                    metadata: BatchUpdateValue::Keep,
+                    gate_keys: BatchUpdateValue::Keep,
+                    fields: BatchUpdateValue::Keep,
+                }],
+            },
         )
         .await
         .unwrap();

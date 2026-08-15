@@ -315,6 +315,9 @@ exists.
 
 ### Batch Update
 
+There is no scalar item-update operation. A one-item `updates` array is legal
+and is the inefficient form of this operation.
+
 | Element | Type / Shape | Required | Rules | Notes |
 |---------|--------------|----------|-------|-------|
 | `BatchUpdate` | operation | yes | MUST update one or more pending, non-leased, non-terminal items and return one `item_result` per submitted update. | Best-effort per item. |
