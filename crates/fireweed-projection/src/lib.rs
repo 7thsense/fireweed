@@ -275,8 +275,12 @@ impl ItemRecord {
             fields: self.fields.clone(),
             metadata: self.metadata.clone(),
             gate_keys: self.gate_keys.clone(),
-            entity: self.entity_document.clone(),
+            entity: self.query_entity(),
         })
+    }
+
+    fn query_entity(&self) -> Option<serde_json::Value> {
+        rehydrate_entity_document(self.entity_document.clone(), &self.index_fields)
     }
 
     fn lease_view(&self) -> Option<LeaseView> {
@@ -2000,7 +2004,7 @@ impl ProjectionData {
             fields: item.fields,
             metadata: item.metadata,
             gate_keys: item.gate_keys,
-            entity_document: rehydrate_entity_document(item.entity_document, &item.index_fields),
+            entity_document: item.entity_document,
             index_fields: item.index_fields,
             state: ItemState::Pending,
             item_version: 1,
@@ -4108,8 +4112,9 @@ impl ProjectionData {
                 Err(error) => return Err(error),
             }
             // Batch update path still keys from entity merge; empty native map until native edits land.
-            let empty_index = BTreeMap::<String, TypedValue>::new();
-            for (name, key) in self.record_index_keys(&fields, &empty_index, entity)? {
+            for (name, key) in
+                self.record_index_keys(&fields, &record.index_fields, entity)?
+            {
                 if !matches!(self.indexes.get(&name), Some(SecondaryIndex::Unique(_))) {
                     continue;
                 }
@@ -4341,8 +4346,20 @@ impl ProjectionData {
         entity: Option<&Value>,
         exclude: Option<&ItemId>,
     ) -> EngineResult<()> {
-        let empty_index = BTreeMap::<String, TypedValue>::new();
-        for (name, key) in self.record_index_keys(fields, &empty_index, entity)? {
+        let stored = self
+            .items
+            .get(item_id)
+            .map(|record| record.index_fields.clone())
+            .unwrap_or_default();
+        let proposed = if let Some(doc) = entity {
+            fireweed_engine::index_fields::extract_index_fields_from_entity(
+                &self.typed_index_specs,
+                doc,
+            )?
+        } else {
+            stored
+        };
+        for (name, key) in self.record_index_keys(fields, &proposed, entity)? {
             if let Some(SecondaryIndex::Unique(map)) = self.indexes.get(&name)
                 && let Some(holder) = map.get(&key)
                 && holder != item_id
@@ -4659,7 +4676,8 @@ impl ProjectionData {
             if gate_keys_blocked(&self.blocked_gates, &rec.gate_keys) {
                 return Ok(false);
             }
-            let Some(entity) = rec.entity_document.as_ref() else {
+            let echoed = rec.query_entity();
+            let Some(entity) = echoed.as_ref() else {
                 return Ok(false);
             };
             let Some(row) = self.range_scan_row(spec, rec.item_id, entity)? else {
@@ -4764,7 +4782,8 @@ impl ProjectionData {
 
         let mut rows = Vec::new();
         for rec in self.items.values() {
-            let Some(entity) = rec.entity_document.as_ref() else {
+            let echoed = rec.query_entity();
+            let Some(entity) = echoed.as_ref() else {
                 continue;
             };
             let Some(row) = self.range_scan_row(spec, rec.item_id, entity)? else {
@@ -4869,7 +4888,8 @@ impl ProjectionData {
 
         let mut groups: BTreeMap<String, (BTreeMap<String, TypedValue>, u64)> = BTreeMap::new();
         for rec in self.items.values() {
-            let Some(entity) = rec.entity_document.as_ref() else {
+            let echoed = rec.query_entity();
+            let Some(entity) = echoed.as_ref() else {
                 continue;
             };
             if !matches_filters_on_entity(entity, &request.filters)? {
@@ -4933,7 +4953,8 @@ impl ProjectionData {
         let mut counts: Vec<u64> = vec![0; request.buckets.len()];
         let mut null_count = 0u64;
         for rec in self.items.values() {
-            let Some(entity) = rec.entity_document.as_ref() else {
+            let echoed = rec.query_entity();
+            let Some(entity) = echoed.as_ref() else {
                 continue;
             };
             if !matches_filters_on_entity(entity, &request.filters)? {
@@ -5001,7 +5022,8 @@ impl ProjectionData {
 
         let mut matches = Vec::new();
         for rec in self.items.values() {
-            let Some(entity) = rec.entity_document.as_ref() else {
+            let echoed = rec.query_entity();
+            let Some(entity) = echoed.as_ref() else {
                 continue;
             };
             let Some(row) = self.range_scan_row(spec, rec.item_id, entity)? else {
@@ -5039,9 +5061,11 @@ impl ProjectionData {
                         Some(&new_entity),
                         None,
                     )?;
-                    let empty_index = BTreeMap::<String, TypedValue>::new();
-                    let new_keys =
-                        self.record_index_keys(&new_fields, &empty_index, Some(&new_entity))?;
+                    let new_keys = self.record_index_keys(
+                        &new_fields,
+                        &rec.index_fields,
+                        Some(&new_entity),
+                    )?;
                     let reservation_conflict = new_keys.iter().any(|(name, key)| {
                         matches!(self.indexes.get(name), Some(SecondaryIndex::Unique(_)))
                             && reservations
@@ -5691,6 +5715,129 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(projection.lookup_by_key(&default_key), None);
+    }
+
+    #[test]
+    fn claim_echo_from_index_fields_without_stored_entity() {
+        let sku = QueueIndex {
+            name: "by_sku".into(),
+            declaration: IndexDeclaration::Single(IndexDef {
+                field: "sku".into(),
+                index_type: IndexType::String,
+                unique: true,
+            }),
+        };
+        let mut projection = ProjectionData::new(
+            model(),
+            OrderingMode::Strict,
+            0,
+            RecurrencePolicy::default(),
+            &[],
+        )
+        .with_typed_indexes(std::slice::from_ref(&sku));
+        let mut index_fields = BTreeMap::new();
+        index_fields.insert("sku".into(), TypedValue::String("abc".into()));
+        let id = iid("1");
+        projection
+            .apply_command(&QueueCommand::Push(PushCommand {
+                items: vec![PushItem {
+                    client_item_key: ClientItemKey::new("k-1").unwrap(),
+                    item_id: id,
+                    priority: None,
+                    not_before: None,
+                    group_key: None,
+                    max_attempts: 3,
+                    payload: None,
+                    fields: BTreeMap::new(),
+                    metadata: Metadata::default(),
+                    cohort_size: None,
+                    gate_keys: vec![],
+                    index_fields: index_fields.clone(),
+                    entity_document: None,
+                }],
+            }))
+            .unwrap();
+        assert!(
+            projection.items.get(&id).unwrap().entity_document.is_none(),
+            "insert must not synthesize a stored entity from index_fields"
+        );
+        projection
+            .apply_command(&QueueCommand::Claim(ClaimCommand {
+                item_ids: vec![id],
+                lease_token: LeaseToken::new("lease-1").unwrap(),
+                lease_expires_at: ts(60),
+                worker_id: None,
+            }))
+            .unwrap();
+        let claimed = projection.items.get(&id).unwrap().to_claimed().unwrap();
+        let expected =
+            fireweed_engine::index_fields::echo_entity_document(None, &index_fields).unwrap();
+        assert_eq!(claimed.entity, expected);
+    }
+
+    #[test]
+    fn unique_conflict_on_update_of_index_fields_only_item() {
+        let sku = QueueIndex {
+            name: "by_sku".into(),
+            declaration: IndexDeclaration::Single(IndexDef {
+                field: "sku".into(),
+                index_type: IndexType::String,
+                unique: true,
+            }),
+        };
+        let mut projection = ProjectionData::new(
+            model(),
+            OrderingMode::Strict,
+            0,
+            RecurrencePolicy::default(),
+            &[],
+        )
+        .with_typed_indexes(std::slice::from_ref(&sku));
+        let mut a = BTreeMap::new();
+        a.insert("sku".into(), TypedValue::String("one".into()));
+        let mut b = BTreeMap::new();
+        b.insert("sku".into(), TypedValue::String("two".into()));
+        projection
+            .apply_command(&QueueCommand::Push(PushCommand {
+                items: vec![
+                    PushItem {
+                        client_item_key: ClientItemKey::new("a").unwrap(),
+                        item_id: iid("1"),
+                        priority: None,
+                        not_before: None,
+                        group_key: None,
+                        max_attempts: 3,
+                        payload: None,
+                        fields: BTreeMap::new(),
+                        metadata: Metadata::default(),
+                        cohort_size: None,
+                        gate_keys: vec![],
+                        index_fields: a,
+                        entity_document: None,
+                    },
+                    PushItem {
+                        client_item_key: ClientItemKey::new("b").unwrap(),
+                        item_id: iid("2"),
+                        priority: None,
+                        not_before: None,
+                        group_key: None,
+                        max_attempts: 3,
+                        payload: None,
+                        fields: BTreeMap::new(),
+                        metadata: Metadata::default(),
+                        cohort_size: None,
+                        gate_keys: vec![],
+                        index_fields: b,
+                        entity_document: None,
+                    },
+                ],
+            }))
+            .unwrap();
+        let collide = serde_json::json!({"sku": "two"});
+        let err = projection
+            .index_validate_update_with_entity(&iid("1"), &BTreeMap::new(), Some(&collide))
+            .unwrap_err();
+        assert!(matches!(err, EngineError::Conflict));
     }
 
     #[test]
