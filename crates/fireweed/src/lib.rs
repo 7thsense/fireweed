@@ -3063,6 +3063,54 @@ struct ObjectLogSqliteLifecycle {
     max_tail_commands: u64,
 }
 
+/// fireweed-6fcc28a8: the log store's durable high-water metadata is a lazily-persisted reopen
+/// hint (`advance_high_water` PUTs only on the first append or every 64th), so on a fresh
+/// process it can trail the position live traffic actually reached even though every command
+/// is durably committed. `fireweed-2be7894a` reconciled this for the delete+rebuild path, but
+/// every other recomposition path (plain reopen, worker-reassignment recovery, stale-checkpoint
+/// catch-up) still compared the projection's exact high-water against this stale hint and
+/// misreported "projection is ahead of the authoritative object log" or a hard mismatch. Walk
+/// the log tail forward from the (possibly stale) hint to the true position and persist it —
+/// mirrors the rebuild path's reconciliation, but scoped to just the missed tail instead of a
+/// full replay from genesis.
+#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+async fn reconcile_objectlog_sqlite_high_water(
+    log: &fireweed_objectlog::ObjectLogEngineStore,
+    key: &QueueKey,
+    from: Option<fireweed_engine::CommandPosition>,
+) -> EngineResult<Option<fireweed_engine::CommandPosition>> {
+    use fireweed_engine::AsyncLogStore;
+
+    let mut from = from;
+    let mut last = from.clone();
+    loop {
+        let page = AsyncLogStore::read_from(log, key.clone(), from.clone(), 1_024).await?;
+        if let Some((position, _)) = page.entries.last() {
+            last = Some(position.clone());
+        }
+        match page.next {
+            Some(next) => from = Some(next),
+            None => break,
+        }
+    }
+    if let Some(position) = last.clone() {
+        match AsyncLogStore::set_high_water(log, key.clone(), position).await {
+            Ok(()) | Err(EngineError::Invalid("high-water regression")) => {}
+            Err(other) => return Err(other),
+        }
+    }
+    Ok(last)
+}
+
+#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+fn objectlog_reconcile_high_water(
+    log: &fireweed_objectlog::ObjectLogEngineStore,
+    key: &QueueKey,
+    from: Option<fireweed_engine::CommandPosition>,
+) -> EngineResult<Option<fireweed_engine::CommandPosition>> {
+    fireweed_objectlog::block_on_objectlog(reconcile_objectlog_sqlite_high_water(log, key, from))
+}
+
 #[cfg(all(feature = "objectlog", feature = "sqlite"))]
 fn validate_objectlog_sqlite_catalog(
     log: &fireweed_objectlog::ObjectLogEngineStore,
@@ -3106,9 +3154,20 @@ fn validate_objectlog_sqlite_catalog(
                     || (projected.backend_epoch == authoritative.backend_epoch
                         && projected.sequence > authoritative.sequence) =>
             {
-                return Err(EngineError::Storage(
-                    "projection is ahead of the authoritative object log".into(),
-                ));
+                let reconciled = objectlog_reconcile_high_water(log, &key, Some(authoritative))?;
+                let still_ahead = match &reconciled {
+                    Some(reconciled) => {
+                        projected.backend_epoch > reconciled.backend_epoch
+                            || (projected.backend_epoch == reconciled.backend_epoch
+                                && projected.sequence > reconciled.sequence)
+                    }
+                    None => true,
+                };
+                if still_ahead {
+                    return Err(EngineError::Storage(
+                        "projection is ahead of the authoritative object log".into(),
+                    ));
+                }
             }
             _ => {}
         }
@@ -3162,7 +3221,19 @@ async fn verify_objectlog_sqlite_axes(
     for definition in definitions {
         let key = QueueKey::new(definition.tenant_id, definition.queue_id);
         let projected_position = backend.projection_high_water(&key).await?;
-        let authoritative_position = AsyncLogStore::high_water(log.as_ref(), key.clone()).await?;
+        let mut authoritative_position =
+            AsyncLogStore::high_water(log.as_ref(), key.clone()).await?;
+        if projected_position != authoritative_position {
+            // The log's high-water bookkeeping is a throttled reopen hint (fireweed-2be7894a)
+            // that can trail the real tail across a process restart or recovery path. Walk the
+            // tail forward before concluding the projection has actually drifted.
+            authoritative_position = reconcile_objectlog_sqlite_high_water(
+                log.as_ref(),
+                &key,
+                authoritative_position,
+            )
+            .await?;
+        }
         if projected_position != authoritative_position {
             return Err(EngineError::Storage(format!(
                 "SQLite projection for {}/{} is not at the authoritative position: projection {:?}, log {:?}",
