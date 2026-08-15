@@ -15,7 +15,8 @@ use fireweed_engine::{
     ClaimCompatibility, ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition,
     DiscoveryGranularity, DurabilityClass, EngineError, EngineResult, FinalizeOutcome, IndexHit,
     ItemView, LeaseView, LiveItemView, PendingPage, PendingSummary, PushItem, PushSpec, QueueKey,
-    QueueMetrics, UpdateFieldsCommand,
+    QueueMetrics, UpdateFieldsCommand, admit_push_items_indexes, build_push_items,
+    push_items_fingerprint_sha256,
 };
 use fireweed_engine::{
     CommandPage, LogStore, ProjectionSnapshot, ProjectionStore, RichClaimSelection, SnapshotRef,
@@ -283,8 +284,26 @@ impl ProjectionStore for SqliteRelational {
         items: &[PushSpec],
         now: UtcTimestamp,
     ) -> EngineResult<Option<Vec<ItemId>>> {
-        let fingerprint = fireweed_engine::push_specs_fingerprint_sha256(items)?;
         let mut g = self.lock();
+        // Admission (`admit_push_items_indexes`) can clear `PushSpec::entity` down to `None` once
+        // it's fully covered by declared typed indexes (fireweed-engine::admit_push_item_indexes),
+        // and the durable idempotency record persisted at commit is fingerprinted AFTER that
+        // admission (recovery.rs applies `push_items_fingerprint_sha256` to the committed
+        // `PushItem`s). Fingerprinting the raw pre-admission `PushSpec` here would diverge from the
+        // stored value for any queue with a fully-indexed entity, so replay the same admission step
+        // against a throwaway `PushItem` projection (ids are discarded — normalization to `None` is
+        // id-invariant when the caller omits `client_item_key`, and id-independent otherwise) before
+        // fingerprinting, to match what commit actually persisted.
+        let definition = g.queues.get(shard).cloned().ok_or(EngineError::NotFound)?;
+        let (mut admitted, _discarded_ids) = build_push_items(
+            items.to_vec(),
+            0,
+            0,
+            0,
+            definition.retry_policy.max_attempts,
+        );
+        admit_push_items_indexes(&definition, &mut admitted)?;
+        let fingerprint = push_items_fingerprint_sha256(&admitted)?;
         let tx = st(g.conn.transaction())?;
         let result = check_request_idempotency(
             &tx,
