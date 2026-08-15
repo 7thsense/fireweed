@@ -3071,8 +3071,14 @@ struct ObjectLogSqliteLifecycle {
 /// catch-up) still compared the projection's exact high-water against this stale hint and
 /// misreported "projection is ahead of the authoritative object log" or a hard mismatch. Walk
 /// the log tail forward from the (possibly stale) hint to the true position and persist it —
-/// mirrors the rebuild path's reconciliation, but scoped to just the missed tail instead of a
-/// full replay from genesis.
+/// mirrors the rebuild path's reconciliation, but scoped to just the missed tail when a hint is
+/// available (`from` is `Some`). Callers only reach this with `from: None` when the durable hint
+/// itself is absent, in which case the walk necessarily starts at genesis; on a mismatch this is a
+/// one-time, on-open cost bounded by the log itself, not a per-append cost.
+///
+/// Note for callers: this mutates durable log metadata (`set_high_water`) as a side effect —
+/// it is not a read-only check, even though both call sites below live inside functions named
+/// `validate_*`/`verify_*`.
 #[cfg(all(feature = "objectlog", feature = "sqlite"))]
 async fn reconcile_objectlog_sqlite_high_water(
     log: &fireweed_objectlog::ObjectLogEngineStore,

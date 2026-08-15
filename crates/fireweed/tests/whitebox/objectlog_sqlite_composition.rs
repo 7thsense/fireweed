@@ -469,6 +469,81 @@ fn public_objectlog_sqlite_rebuild_pins_revision_across_reopen() {
     let _ = fs::remove_dir_all(fixture);
 }
 
+/// Bead fireweed-6fcc28a8: `fireweed-2be7894a` only reconciled the throttled high-water hint for
+/// the delete+rebuild path (rebuild_backend explicitly re-persists it once replay proves the true
+/// tail). Every other recomposition path — a plain process restart after ordinary live traffic,
+/// which is the shape SNORRI's worker-reassignment recovery and stale-checkpoint catch-up hit —
+/// still compared the projection's exact high-water against the stale durable hint and misreported
+/// "projection is ahead of the authoritative object log", even though nothing was ever deleted or
+/// rebuilt and every command was durably committed.
+#[test]
+fn public_objectlog_sqlite_reopen_survives_high_water_checkpoint_gap() {
+    let fixture =
+        std::env::temp_dir().join(format!("fireweed-public-sqlite-checkpoint-gap-{}", nonce()));
+    let root = fixture.join("objects");
+    let sqlite = fixture.join("projection.sqlite");
+    let config = local_config(&root, &sqlite);
+    let queue_id = "checkpoint-gap";
+    let key = queue(queue_id);
+
+    let fireweed =
+        fireweed::open_composed_sqlite(config.clone(), Arc::new(ManualClock::at(1_000))).unwrap();
+    block_on(fireweed.create_queue(definition(queue_id))).unwrap();
+    // The first append durably persists the high-water hint (appends == 1); the next two do not
+    // (the durable PUT is throttled to every 64th append), leaving the durable hint pinned at the
+    // first batch while the true tail — and the durably-flushed SQLite projection — has already
+    // reached the fifth item. This is a checkpoint gap, not corruption: nothing is deleted or
+    // rebuilt here, unlike the sibling `..._rebuild_pins_revision_across_reopen` test above.
+    block_on(fireweed.push_batch(&key, vec![item(1), item(2), item(3)])).unwrap();
+    block_on(fireweed.push(&key, item(4))).unwrap();
+    let last = block_on(fireweed.push(&key, item(5))).unwrap();
+
+    let live = block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .verify(),
+    )
+    .unwrap();
+    assert_eq!(
+        live.projection_sequence, live.authoritative_sequence,
+        "live apply is immediately visible in the durable SQLite image"
+    );
+
+    // A plain process restart / worker reassignment: recompose from the sqlite log + object
+    // authority with the checkpoint gap above still open, no delete or rebuild in between.
+    drop(fireweed);
+
+    let reopened =
+        fireweed::open_composed_sqlite(config, Arc::new(ManualClock::at(2_000))).unwrap();
+    assert_eq!(
+        block_on(reopened.peek(&key, 10))
+            .unwrap()
+            .into_iter()
+            .map(|view| view.item_id)
+            .next_back(),
+        Some(last),
+        "reopen must recover every durably-committed item, not just the ones up to the stale hint"
+    );
+    let reopened_verification = block_on(
+        reopened
+            .projection_control()
+            .expect("projection control")
+            .verify(),
+    )
+    .unwrap();
+    assert_eq!(
+        reopened_verification.projection_sequence, reopened_verification.authoritative_sequence,
+        "a plain reopen must not report the caught-up projection as ahead of a stale high-water hint"
+    );
+    assert_eq!(
+        reopened_verification.authoritative_sequence, live.authoritative_sequence,
+        "reopen must reconcile the stale hint to the true tail, not merely avoid erroring"
+    );
+    drop(reopened);
+    let _ = fs::remove_dir_all(fixture);
+}
+
 #[test]
 fn public_objectlog_sqlite_bounded_mutation_replays_from_authoritative_log() {
     let fixture = std::env::temp_dir().join(format!("fireweed-public-mutation-{}", nonce()));
