@@ -580,30 +580,28 @@ impl ProjectionStore for InMemoryProjection {
         }
         let projection = self.get(shard)?;
         let mut selected = Vec::new();
-        for item_id in projection.eligible_candidates(now, usize::MAX) {
+        projection.visit_eligible_candidates(now, |item_id| {
             let item = projection
                 .items
                 .get(&item_id)
                 .expect("eligibility index references a live item");
             // Item-unit claims never lease cohort members; whole_cohort is a separate claim unit.
             if item.cohort_size.is_some() {
-                continue;
+                return true;
             }
             if compatibility
                 .group_key
                 .as_ref()
                 .is_some_and(|required| item.group_key.as_ref() != Some(required))
             {
-                continue;
+                return true;
             }
             if !Self::metadata_matches(projection, &item_id, &compatibility.metadata_equals) {
-                continue;
+                return true;
             }
             selected.push(item_id);
-            if selected.len() == max {
-                break;
-            }
-        }
+            selected.len() < max
+        });
         Ok(selected)
     }
 
@@ -1269,5 +1267,105 @@ mod async_axis_tests {
         ))
         .unwrap();
         assert_eq!(async_selected, vec![east_match]);
+    }
+
+    #[test]
+    fn select_item_claim_stops_at_max() {
+        use fireweed_core::{
+            ClientItemKey, EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel,
+            PriorityModelKind, PriorityTieBreaker, PriorityValue, RecurrencePolicy, RetryPolicy,
+        };
+        use fireweed_engine::{CommandChecksum, CommandId, PushCommand, QueueCommand};
+
+        let mut projection = InMemoryProjection::new();
+        let definition = QueueDefinition {
+            tenant_id: TenantId::new("tenant").unwrap(),
+            queue_id: QueueId::new("queue-stop").unwrap(),
+            priority_model: PriorityModel {
+                kind: PriorityModelKind::Int64,
+                direction: PriorityDirection::Ascending,
+                tie_breaker: PriorityTieBreaker::CreatedSequence,
+            },
+            ordering_mode: OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 60_000,
+            eligibility_policy: EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 500,
+            max_claim_batch_size: 500,
+            max_eligible_group_size: None,
+            secondary_indexes: vec![],
+            entity_schema: None,
+            typed_indexes: vec![],
+            emit_change_records: false,
+        };
+        ProjectionStore::ensure_shard(&mut projection, &definition).unwrap();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        let n = 400usize;
+        let mut md = fireweed_core::Metadata::new();
+        md.insert("phase", MetadataValue::String("ready".into()));
+        let items: Vec<PushItem> = (0..n as u32)
+            .map(|i| PushItem {
+                client_item_key: ClientItemKey::new(format!("k-{i}")).unwrap(),
+                item_id: ItemId::mint(1, 0, i),
+                priority: Some(PriorityValue::Int64(i64::from(i))),
+                not_before: None,
+                group_key: None,
+                max_attempts: 3,
+                payload: None,
+                fields: Default::default(),
+                metadata: md.clone(),
+                cohort_size: None,
+                gate_keys: Vec::new(),
+                index_fields: Default::default(),
+                entity_document: None,
+            })
+            .collect();
+        let ids: Vec<ItemId> = items.iter().map(|item| item.item_id).collect();
+        let envelope = CommandEnvelope {
+            command_id: CommandId::new("push"),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: ids,
+            command: QueueCommand::Push(PushCommand { items }),
+            checksum: CommandChecksum(0),
+            created_at: UtcTimestamp::new(10, 0).unwrap(),
+        };
+        ProjectionStore::apply(
+            &mut projection,
+            &[CommandPosition::new(shard.clone(), 1, 0)],
+            &[envelope],
+        )
+        .unwrap();
+
+        let compatibility = ClaimCompatibility {
+            metadata_equals: BTreeMap::from([(
+                "phase".to_string(),
+                MetadataValue::String("ready".into()),
+            )]),
+            ..ClaimCompatibility::default()
+        };
+        let _ = crate::take_eligible_visits();
+        let selected = ProjectionStore::select_item_claim(
+            &projection,
+            &shard,
+            &compatibility,
+            UtcTimestamp::new(10, 0).unwrap(),
+            8,
+        )
+        .unwrap();
+        let visited = crate::take_eligible_visits();
+        assert_eq!(selected.len(), 8);
+        assert_eq!(
+            visited, 8,
+            "predicate claim must stop after max matches; visited {visited} of {n} eligible"
+        );
     }
 }

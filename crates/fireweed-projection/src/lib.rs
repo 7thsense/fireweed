@@ -19,9 +19,22 @@
 //! collisions) MUST pre-validate via the provided helpers ([`ProjectionData::finalize_validate`],
 //! [`ProjectionData::item_state`]) so `apply_command` is infallible for the command they commit.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Included, Unbounded};
+
+#[cfg(test)]
+thread_local! {
+    /// How many due eligible ids `visit_eligible_candidates` examined in this thread.
+    static ELIGIBLE_VISITS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_eligible_visits() -> usize {
+    ELIGIBLE_VISITS.with(|count| count.replace(0))
+}
 
 mod compose_impls;
 pub use compose_impls::{AsyncInMemoryProjection, AsyncMemoryLog, InMemoryProjection, MemoryLog};
@@ -433,6 +446,26 @@ impl EligibilityIndex {
                 .take(max)
                 .map(|k| k.item)
                 .collect(),
+        }
+    }
+
+    /// Walk due eligible items in claim order. `visit` returns whether to continue.
+    fn visit_due(&self, now: UtcTimestamp, mut visit: impl FnMut(ItemId) -> bool) {
+        match self {
+            Self::Compact(compact) => {
+                for (_, item) in compact {
+                    if !visit(*item) {
+                        return;
+                    }
+                }
+            }
+            Self::Rich(rich) => {
+                for key in rich.iter().filter(|k| due_at(k, now)) {
+                    if !visit(key.item) {
+                        return;
+                    }
+                }
+            }
         }
     }
 
@@ -3617,6 +3650,23 @@ impl ProjectionData {
             return self.eligible.strict_candidates(now, max);
         }
         self.relaxed_candidates(now, max, bound)
+    }
+
+    /// Walk due eligible items in claim order without materializing the full eligible set.
+    /// `visit` returns `true` to continue, `false` to stop.
+    pub fn visit_eligible_candidates(
+        &self,
+        now: UtcTimestamp,
+        mut visit: impl FnMut(ItemId) -> bool,
+    ) {
+        if self.paused {
+            return;
+        }
+        self.eligible.visit_due(now, |item_id| {
+            #[cfg(test)]
+            ELIGIBLE_VISITS.with(|count| count.set(count.get() + 1));
+            visit(item_id)
+        });
     }
 
     /// Strict/0-bound candidate page after a previously selected item. Used by group-commit claim
