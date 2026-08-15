@@ -3209,6 +3209,7 @@ impl ObjectLogSqliteLifecycle {
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             backend.ensure_projection_shard(definition.clone()).await?;
             let mut from = None;
+            let mut last_position = None;
             loop {
                 let page = AsyncLogStore::read_from(log.as_ref(), key.clone(), from.clone(), 1_024)
                     .await?;
@@ -3230,6 +3231,7 @@ impl ObjectLogSqliteLifecycle {
                         .iter()
                         .map(|(_, command)| command.clone())
                         .collect();
+                    last_position = positions.last().cloned().or(last_position);
                     backend
                         .apply_projection_recovery(positions, commands)
                         .await?;
@@ -3237,6 +3239,22 @@ impl ObjectLogSqliteLifecycle {
                 match page.next {
                     Some(next) => from = Some(next),
                     None => break,
+                }
+            }
+            // fireweed-2be7894a: the log store's durable high-water metadata is a lazily-persisted
+            // reopen hint (writes are throttled to every 64th append), so it can trail the position
+            // this rebuild just proved by reading the actual log tail. Reconcile it now — otherwise a
+            // later reopen's catalog validation compares the exactly-rebuilt projection against a
+            // stale hint and misreports "projection is ahead of the authoritative object log".
+            // `high_water()` can't tell us whether the durable copy needs it: its in-process cache is
+            // updated on every append even though the durable PUT is throttled. Always (re)write it;
+            // a concurrent writer that has since moved past `last_position` just turns this into a
+            // harmless no-op rejection.
+            if let Some(last_position) = last_position {
+                match AsyncLogStore::set_high_water(log.as_ref(), key.clone(), last_position).await
+                {
+                    Ok(()) | Err(EngineError::Invalid("high-water regression")) => {}
+                    Err(other) => return Err(other),
                 }
             }
         }

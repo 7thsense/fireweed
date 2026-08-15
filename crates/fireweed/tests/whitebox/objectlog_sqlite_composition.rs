@@ -394,6 +394,81 @@ fn public_objectlog_sqlite_delete_and_rebuild() {
     let _ = fs::remove_dir_all(fixture);
 }
 
+/// Bead fireweed-2be7894a: the object-log's durable high-water metadata is a throttled reopen
+/// hint (`advance_high_water` only PUTs on the first append or every 64th), so a rebuild that
+/// replays the exact tail can leave the projection's recorded revision ahead of that stale hint.
+/// A fresh reopen must not misreport the exactly-rebuilt projection as corrupted "ahead of the
+/// authoritative object log": the revision it recovers must exactly match the one recorded live,
+/// before delete, not merely be consistent with *some* revision.
+#[test]
+fn public_objectlog_sqlite_rebuild_pins_revision_across_reopen() {
+    let fixture = std::env::temp_dir().join(format!("fireweed-public-sqlite-revision-{}", nonce()));
+    let root = fixture.join("objects");
+    let sqlite = fixture.join("projection.sqlite");
+    let config = local_config(&root, &sqlite);
+    let queue_id = "revision-pin";
+    let key = queue(queue_id);
+
+    let fireweed =
+        fireweed::open_composed_sqlite(config.clone(), Arc::new(ManualClock::at(1_000))).unwrap();
+    block_on(fireweed.create_queue(definition(queue_id))).unwrap();
+    // Several separate appends (not a multiple of 64, and not one packed produce) so the log's
+    // durable high-water metadata trails the true tail even though every command is committed.
+    block_on(fireweed.push_batch(&key, vec![item(1), item(2), item(3)])).unwrap();
+    block_on(fireweed.push(&key, item(4))).unwrap();
+    block_on(fireweed.push(&key, item(5))).unwrap();
+
+    let live = block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .verify(),
+    )
+    .unwrap();
+    assert_eq!(
+        live.projection_sequence, live.authoritative_sequence,
+        "live apply is immediately visible in the durable SQLite image"
+    );
+
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .delete(),
+    )
+    .unwrap();
+    block_on(
+        fireweed
+            .projection_control()
+            .expect("projection control")
+            .rebuild(),
+    )
+    .unwrap();
+    drop(fireweed);
+
+    // A fresh process-level open starts with an empty in-memory high-water cache, so this
+    // exercises the durable metadata path exclusively.
+    let reopened =
+        fireweed::open_composed_sqlite(config, Arc::new(ManualClock::at(2_000))).unwrap();
+    let rebuilt = block_on(
+        reopened
+            .projection_control()
+            .expect("projection control")
+            .verify(),
+    )
+    .unwrap();
+    assert_eq!(
+        rebuilt.projection_sequence, rebuilt.authoritative_sequence,
+        "rebuilt projection must not be reported ahead of the authoritative object log on reopen"
+    );
+    assert_eq!(
+        rebuilt.authoritative_sequence, live.authoritative_sequence,
+        "packed-object replay must reconstruct the exact revision recorded during live apply"
+    );
+    drop(reopened);
+    let _ = fs::remove_dir_all(fixture);
+}
+
 #[test]
 fn public_objectlog_sqlite_bounded_mutation_replays_from_authoritative_log() {
     let fixture = std::env::temp_dir().join(format!("fireweed-public-mutation-{}", nonce()));
