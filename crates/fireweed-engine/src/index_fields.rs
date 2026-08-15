@@ -103,12 +103,18 @@ pub fn json_to_typed_value(value: &Value, index_type: &IndexType) -> EngineResul
                 ))
             }
             Value::Number(n) => {
-                let secs = n.as_i64().ok_or(EngineError::Invalid(
-                    "typed index datetime requires integer seconds",
+                // Matches typed_value_to_json's emission and lookup_bytes_to_typed's decoding:
+                // Axon's canonical numeric-datetime unit is epoch NANOS, not seconds.
+                let nanos = n.as_i64().ok_or(EngineError::Invalid(
+                    "typed index datetime requires integer epoch-nanos",
                 ))?;
-                Ok(TypedValue::DateTime(UtcTimestamp::new(secs, 0).map_err(
-                    |_| EngineError::Invalid("typed index datetime out of range"),
-                )?))
+                Ok(TypedValue::DateTime(
+                    UtcTimestamp::new(
+                        nanos.div_euclid(1_000_000_000),
+                        u32::try_from(nanos.rem_euclid(1_000_000_000)).expect("rem < 1e9"),
+                    )
+                    .map_err(|_| EngineError::Invalid("typed index datetime out of range"))?,
+                ))
             }
             _ => Err(EngineError::Invalid(
                 "typed index field requires datetime value",
@@ -490,6 +496,37 @@ mod tests {
         }
     }
 
+    fn minimal_queue_definition(typed_indexes: Vec<QueueIndex>) -> fireweed_core::QueueDefinition {
+        use fireweed_core::*;
+        QueueDefinition {
+            tenant_id: TenantId::new("t").unwrap(),
+            queue_id: QueueId::new("q").unwrap(),
+            priority_model: PriorityModel {
+                kind: PriorityModelKind::Int64,
+                direction: PriorityDirection::Ascending,
+                tie_breaker: PriorityTieBreaker::CreatedSequence,
+            },
+            ordering_mode: OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 60_000,
+            eligibility_policy: EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 10_000,
+            max_claim_batch_size: 10_000,
+            max_eligible_group_size: None,
+            secondary_indexes: vec![],
+            entity_schema: None,
+            typed_indexes,
+            emit_change_records: false,
+        }
+    }
+
     #[test]
     fn extract_native_ints_and_strings() {
         let indexes = vec![
@@ -508,38 +545,7 @@ mod tests {
 
     #[test]
     fn materialize_prefers_explicit_native_over_entity() {
-        let mut def = {
-            // Minimal valid definition shell; only typed_indexes matter here.
-            use fireweed_core::*;
-            QueueDefinition {
-                tenant_id: TenantId::new("t").unwrap(),
-                queue_id: QueueId::new("q").unwrap(),
-                priority_model: PriorityModel {
-                    kind: PriorityModelKind::Int64,
-                    direction: PriorityDirection::Ascending,
-                    tie_breaker: PriorityTieBreaker::CreatedSequence,
-                },
-                ordering_mode: OrderingMode::Strict,
-                max_rank_error: 0,
-                progress_bound_ms: 60_000,
-                eligibility_policy: EligibilityPolicy::default(),
-                cohort_policy: None,
-                recurrence: RecurrencePolicy::default(),
-                request_id_retention_ms: 60_000,
-                client_item_key_retention_ms: 60_000,
-                terminal_retention_ms: 60_000,
-                max_lease_duration_ms: 60_000,
-                retry_policy: RetryPolicy { max_attempts: 3 },
-                max_push_batch_size: 10_000,
-                max_claim_batch_size: 10_000,
-                max_eligible_group_size: None,
-                secondary_indexes: vec![],
-                entity_schema: None,
-                typed_indexes: vec![idx("by_s", "s", IndexType::String)],
-                emit_change_records: false,
-            }
-        };
-        let _ = &mut def;
+        let def = minimal_queue_definition(vec![idx("by_s", "s", IndexType::String)]);
         let explicit = BTreeMap::from([("s".into(), TypedValue::String("native".into()))]);
         let entity = json!({"s": "from-entity"});
         let got = materialize_index_fields(&def, explicit, Some(&entity)).unwrap();
@@ -605,5 +611,77 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(native, axon);
+    }
+
+    #[test]
+    fn typed_value_json_round_trip_identity() {
+        let cases = vec![
+            (TypedValue::String("hello".into()), IndexType::String),
+            (TypedValue::Integer(-42), IndexType::Integer),
+            (TypedValue::Integer(i64::MAX), IndexType::Integer),
+            (TypedValue::Integer(i64::MIN), IndexType::Integer),
+            (TypedValue::Float(3.5), IndexType::Float),
+            (TypedValue::Bool(true), IndexType::Boolean),
+            (TypedValue::Bool(false), IndexType::Boolean),
+            (
+                TypedValue::DateTime(UtcTimestamp::new(1_700_000_000, 123_456_789).unwrap()),
+                IndexType::Datetime,
+            ),
+            (
+                TypedValue::DateTime(UtcTimestamp::new(-1_000, 0).unwrap()),
+                IndexType::Datetime,
+            ),
+            (
+                TypedValue::DateTime(UtcTimestamp::new(0, 0).unwrap()),
+                IndexType::Datetime,
+            ),
+        ];
+        for (value, index_type) in cases {
+            let json = typed_value_to_json(&value).unwrap();
+            let coerced = json_to_typed_value(&json, &index_type).unwrap();
+            assert_eq!(
+                coerced, value,
+                "round trip mismatch for {value:?} ({json:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn datetime_synth_entity_drops_and_round_trips_via_claim_echo() {
+        // ADR-011 equality-gated drop: a queue with a declared Datetime index whose entity
+        // is exactly the index_fields_as_entity synth must be droppable (entity_fully_indexed)
+        // and the claim-echo synth must re-coerce back to the identical TypedValue, with no
+        // overflow anywhere on the round trip.
+        let def = minimal_queue_definition(vec![idx(
+            "by_scheduled_at",
+            "scheduled_at",
+            IndexType::Datetime,
+        )]);
+        let ts = UtcTimestamp::new(1_700_000_000, 500_000_000).unwrap();
+        let fields = BTreeMap::from([("scheduled_at".into(), TypedValue::DateTime(ts))]);
+        let synth = index_fields_as_entity(&fields).unwrap();
+
+        assert!(entity_fully_indexed(&def, &fields, Some(&synth)));
+
+        // Claim echo returns the synth doc when no explicit entity is stored.
+        assert_eq!(
+            echo_entity_document(None, &fields).unwrap(),
+            Some(synth.clone())
+        );
+
+        // Pushing that synth doc back through admission extraction must reproduce the
+        // original native field exactly (no seconds/nanos drift, no i64 overflow).
+        let indexes = vec![idx("by_scheduled_at", "scheduled_at", IndexType::Datetime)];
+        let re_extracted = extract_index_fields_from_entity(&indexes, &synth).unwrap();
+        assert_eq!(re_extracted, fields);
+
+        // Encoding the round-tripped field must not overflow, matching the original key.
+        let original_key = typed_index_key(&def.typed_indexes[0].declaration, &fields)
+            .unwrap()
+            .unwrap();
+        let re_key = typed_index_key(&def.typed_indexes[0].declaration, &re_extracted)
+            .unwrap()
+            .unwrap();
+        assert_eq!(original_key, re_key);
     }
 }
