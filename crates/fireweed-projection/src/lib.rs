@@ -24,6 +24,7 @@ use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::sync::Arc;
 
 #[cfg(test)]
 thread_local! {
@@ -34,6 +35,16 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn take_eligible_visits() -> usize {
     ELIGIBLE_VISITS.with(|count| count.replace(0))
+}
+
+#[cfg(test)]
+thread_local! {
+    static RECORD_INDEX_KEY_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_record_index_key_calls() -> usize {
+    RECORD_INDEX_KEY_CALLS.with(|count| count.replace(0))
 }
 
 mod compose_impls;
@@ -1682,6 +1693,9 @@ pub struct ProjectionData {
     index_specs: Vec<IndexSpec>,
     /// Typed secondary-index declarations, keyed by `QueueIndex.name`.
     typed_index_specs: Vec<QueueIndex>,
+    /// Framed index keys for live items. Derived cache only — unique occupancy stays on `indexes`.
+    /// Rebuilt on snapshot import; not stored in [`ProjectionImage`].
+    framed_index_keys: FastHashMap<ItemId, Arc<[(String, Vec<u8>)]>>,
     /// Opaque non-work side records (Snorri authoritative-commit boundary, epic pqueue-2201fd37). Wholly
     /// SEPARATE from `items`/`eligible`/`by_key`: these are NOT claimable work — they never enter the
     /// eligibility index, do not appear in claim/peek/metrics-as-work, and survive input finalization. Both
@@ -1731,6 +1745,7 @@ impl ProjectionData {
             claim_indexes,
             index_specs: specs.to_vec(),
             typed_index_specs: Vec::new(),
+            framed_index_keys: FastHashMap::default(),
             side_records: BTreeMap::new(),
             instance_fences: BTreeMap::new(),
         }
@@ -1819,6 +1834,7 @@ impl ProjectionData {
                 if rec.state == ItemState::Pending {
                     projection.claim_index_insert_keys(rec.item_id, &keys);
                 }
+                projection.remember_framed_keys(rec.item_id, keys);
             }
             if rec.state == ItemState::Pending
                 && !rec.superseded
@@ -1957,12 +1973,42 @@ impl ProjectionData {
         }
     }
 
+    fn remember_framed_keys(
+        &mut self,
+        item_id: ItemId,
+        keys: Vec<(String, Vec<u8>)>,
+    ) -> Arc<[(String, Vec<u8>)]> {
+        let keys = Arc::<[(String, Vec<u8>)]>::from(keys);
+        self.framed_index_keys.insert(item_id, Arc::clone(&keys));
+        keys
+    }
+
+    fn framed_keys_or_compute(
+        &mut self,
+        item_id: ItemId,
+    ) -> EngineResult<Arc<[(String, Vec<u8>)]>> {
+        if let Some(keys) = self.framed_index_keys.get(&item_id) {
+            return Ok(Arc::clone(keys));
+        }
+        let keys = {
+            let rec = self.items.get(&item_id).ok_or(EngineError::NotFound)?;
+            self.record_index_keys(
+                &rec.fields,
+                &rec.index_fields,
+                rec.entity_document.as_ref(),
+            )?
+        };
+        Ok(self.remember_framed_keys(item_id, keys))
+    }
+
     fn record_index_keys(
         &self,
         fields: &BTreeMap<String, Bytes>,
         index_fields: &BTreeMap<String, TypedValue>,
         entity: Option<&Value>,
     ) -> EngineResult<Vec<(String, Vec<u8>)>> {
+        #[cfg(test)]
+        RECORD_INDEX_KEY_CALLS.with(|count| count.set(count.get() + 1));
         let mut keys = legacy_index_keys(&self.index_specs, fields)?;
         if !index_fields.is_empty() {
             keys.extend(fireweed_engine::index_fields::typed_index_keys(
@@ -2047,6 +2093,7 @@ impl ProjectionData {
         let keys =
             self.record_index_keys(&rec.fields, &rec.index_fields, rec.entity_document.as_ref())?;
         self.insert_keys_into_both(rec.item_id, &keys);
+        self.remember_framed_keys(rec.item_id, keys);
         self.items.insert(rec.item_id, rec);
         self.metrics.pending += 1;
         Ok(())
@@ -2162,24 +2209,10 @@ impl ProjectionData {
         // Claim secondary index holds only Pending rows so claim_by_query never re-walks a growing
         // leased/terminal prefix (fireweed-cd0e5255).
         if old_state == ItemState::Pending && new_state != ItemState::Pending {
-            let keys = {
-                let rec = self.items.get(id).ok_or(EngineError::NotFound)?;
-                self.record_index_keys(
-                    &rec.fields,
-                    &rec.index_fields,
-                    rec.entity_document.as_ref(),
-                )?
-            };
+            let keys = self.framed_keys_or_compute(*id)?;
             self.claim_index_remove_keys(*id, &keys);
         } else if old_state != ItemState::Pending && new_state == ItemState::Pending {
-            let keys = {
-                let rec = self.items.get(id).ok_or(EngineError::NotFound)?;
-                self.record_index_keys(
-                    &rec.fields,
-                    &rec.index_fields,
-                    rec.entity_document.as_ref(),
-                )?
-            };
+            let keys = self.framed_keys_or_compute(*id)?;
             self.claim_index_insert_keys(*id, &keys);
         }
         self.metrics_transition(old_state, new_state);
@@ -2554,6 +2587,7 @@ impl ProjectionData {
                     self.claim_index_remove_keys(item_id, &removed);
                     self.claim_index_insert_keys(item_id, &added);
                 }
+                self.remember_framed_keys(item_id, new_keys);
                 self.replace_gate_memberships(item_id, &old_gate_keys, &new_gate_keys);
                 // Re-key the eligibility index for a repriced/rescheduled Pending item (no-op otherwise —
                 // a non-reprice/non-reschedule or a Leased item leaves the eligibility set unchanged).
@@ -2616,6 +2650,7 @@ impl ProjectionData {
                                 &values.index_fields,
                                 values.entity_document.as_ref(),
                             )?;
+                            self.remember_framed_keys(mutation.item_id, new_index_keys.clone());
                             let record = self
                                 .items
                                 .get_mut(&mutation.item_id)
@@ -2828,6 +2863,7 @@ impl ProjectionData {
                     self.index_remove_keys(c.superseded_item_id, &keys);
                     self.claim_index_remove_keys(c.superseded_item_id, &keys);
                 }
+                self.framed_index_keys.remove(&c.superseded_item_id);
                 self.replace_gate_memberships(c.superseded_item_id, &superseded_gate_keys, &[]);
                 self.by_key.remove(&c.client_item_key);
                 self.insert_pending(c.replacement.clone(), terminal_at)?;
@@ -3883,8 +3919,15 @@ impl ProjectionData {
                 }
             }
         }
-        let keys =
-            self.record_index_keys(&rec.fields, &rec.index_fields, rec.entity_document.as_ref())?;
+        let keys = if let Some(keys) = self.framed_index_keys.remove(&rec.item_id) {
+            keys
+        } else {
+            Arc::from(self.record_index_keys(
+                &rec.fields,
+                &rec.index_fields,
+                rec.entity_document.as_ref(),
+            )?)
+        };
         self.index_remove_keys(rec.item_id, &keys);
         self.claim_index_remove_keys(rec.item_id, &keys);
         Ok(())
@@ -5838,6 +5881,62 @@ mod tests {
             .index_validate_update_with_entity(&iid("1"), &BTreeMap::new(), Some(&collide))
             .unwrap_err();
         assert!(matches!(err, EngineError::Conflict));
+    }
+
+    #[test]
+    fn transition_reuses_cached_framed_index_keys() {
+        let sku = QueueIndex {
+            name: "by_sku".into(),
+            declaration: IndexDeclaration::Single(IndexDef {
+                field: "sku".into(),
+                index_type: IndexType::String,
+                unique: true,
+            }),
+        };
+        let mut projection = ProjectionData::new(
+            model(),
+            OrderingMode::Strict,
+            0,
+            RecurrencePolicy::default(),
+            &[],
+        )
+        .with_typed_indexes(std::slice::from_ref(&sku));
+        let mut index_fields = BTreeMap::new();
+        index_fields.insert("sku".into(), TypedValue::String("warm".into()));
+        let id = iid("1");
+        projection
+            .apply_command(&QueueCommand::Push(PushCommand {
+                items: vec![PushItem {
+                    client_item_key: ClientItemKey::new("k-1").unwrap(),
+                    item_id: id,
+                    priority: None,
+                    not_before: None,
+                    group_key: None,
+                    max_attempts: 3,
+                    payload: None,
+                    fields: BTreeMap::new(),
+                    metadata: Metadata::default(),
+                    cohort_size: None,
+                    gate_keys: vec![],
+                    index_fields,
+                    entity_document: None,
+                }],
+            }))
+            .unwrap();
+        let _ = crate::take_record_index_key_calls();
+        projection
+            .apply_command(&QueueCommand::Claim(ClaimCommand {
+                item_ids: vec![id],
+                lease_token: LeaseToken::new("lease-warm").unwrap(),
+                lease_expires_at: ts(60),
+                worker_id: None,
+            }))
+            .unwrap();
+        assert_eq!(
+            crate::take_record_index_key_calls(),
+            0,
+            "claim transition must reuse framed keys cached at insert"
+        );
     }
 
     #[test]
