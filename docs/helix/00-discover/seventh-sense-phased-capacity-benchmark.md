@@ -11,13 +11,13 @@ ddx:
     - {kind: informs, to: tp-fireweed-performance-matrix}
     - {kind: informs, to: tp-scale-substantiation}
   review:
-    self_hash: 16b2187e923f0e0d5a09ee5aded3a71ef2343f8d7c77dbb470a686e5a358757e
+    self_hash: 91217608181d46431be5faec30afc0b7d04bb34de7cde7778754c323a5f7f8e2
     deps:
       api-workload-integration-profiles: 3c3dd594f1723e987015d4790634b1088016f5f41a049e661eba4b752cfb4c39
       discover-first-principles-performance-model: cda6f175ad5931d1307460863d730e5ca9ea8e4c9c247a5266386d4bcf8ccfdb
       prd: cd3004bd0dc9ac531d1cd2596e875e51c2de4601e330007fee60da1ea7b3d5ce
       product-vision: 745a023af9f66c4b71312a0271dbea18b3947970eb47e051d4312bb6222befeb
-    reviewed_at: "2026-08-15T00:19:55Z"
+    reviewed_at: "2026-08-15T00:43:57Z"
 ---
 
 # Seventh Sense phased capacity benchmark
@@ -90,22 +90,24 @@ That is the model’s **S → M** record, not the Snorri hot record.
 
 ### Phase token
 
-Workers must not steal each other’s work. Carry `metadata.phase` (or a
-single typed field) and claim with `metadata_equals`:
+`phase` is **metadata only** (not a typed index). Public `BatchUpdate`
+rejects leased items (API-003; `batch_update_preflight`). A
+`metadata_equals` claim today walks the entire eligible set
+(`select_item_claim` → `eligible_candidates(now, usize::MAX)`). The
+gated capacity loop therefore does **not** claim to enrich or schedule.
 
-| Phase | Claim predicate | Mutation |
+| Phase | How the batch is selected | Mutation |
 |---|---|---|
-| P2 enrich | `phase=needs_profile` | `BatchUpdate` payload + `phase=needs_schedule`; `release` |
-| P3 schedule | `phase=needs_schedule` | `BatchUpdate` `priority`/`not_before` + `phase=ready`; `release` |
-| P4 deliver | `phase=ready` (due) | `BatchFinalize` `complete` |
+| P2 enrich | Keys retained from P1, 100 at a time | `BatchUpdate` pending: profile payload + `phase=needs_schedule` |
+| P3 schedule | Same key walk | `BatchUpdate` pending: `priority` / `not_before` + `phase=ready` |
+| P4 deliver | `BatchClaim` 100, **no** metadata predicate | `BatchFinalize` `complete` |
 
-Items start eligible. Enrich and schedule **release** so the item stays
-pending. Delivery **completes**. Do not claim-to-delete on enrich.
+P2/P3 are the producer/enricher shape (API-003 obligation 5). P4 is
+the delivery worker: timestamp order **is** next-delivery-date. Do not
+claim-to-amend on the gated path. A later filtered-claim arm requires
+the plan’s **I-select** slice first.
 
-`BatchUpdate` of known keys without a lease is a valid *producer*
-enricher; it is a different benchmark. The default here is the worker
-shape the user described: **pull 100, amend, put back, until none
-remain**.
+Items stay pending through P3. Only P4 completes.
 
 ## Phases (timed separately)
 
@@ -121,26 +123,20 @@ the phase clock. Queue create, 10k warmup, and teardown stay **outside**.
 
 ### P2 — Amend with profiles
 
-Loop until a claim returns 0:
+Walk the P1 key list in batches of 100. `BatchUpdate` those **pending**
+items: set the ~1 KiB profile payload and `phase=needs_schedule`. No
+claim and no lease.
 
-1. `BatchClaim` `max_items=100`, `phase=needs_profile`
-2. `BatchUpdate` those ids: set profile payload, `phase=needs_schedule`
-3. `BatchFinalize` `release` (same lease)
-
-**Report:** items/s, claims/s, batch p50/p95/p99 for claim / update /
-release, items updated == N, no double claim.
+**Report:** items/s, `BatchUpdate` p50/p95/p99, items updated == N.
 
 ### P3 — Scheduler
 
-Same loop, `phase=needs_schedule`:
+Same key walk. `BatchUpdate` `priority` and `not_before` to a delivery
+timestamp (default: all due now, so P4 is a pure drain) and
+`phase=ready`.
 
-1. `BatchClaim` 100
-2. `BatchUpdate` `priority` and `not_before` to a delivery timestamp
-   (default: all due now, so P4 is a pure drain; optional spread for a
-   latency-under-schedule arm)
-3. `release`
-
-**Report:** items/s, batch percentiles, all N have `phase=ready`.
+**Report:** items/s, batch percentiles, sampled live reads show the
+delivery timestamp.
 
 ### P4 — Deliver by next-delivery-date
 
@@ -163,7 +159,7 @@ One row per phase, plus a rollup. Never a single “durable TPS”.
 |---|---|
 | `phase` | P1..P4 |
 | `items` | items that finished the phase |
-| `mutations` | P1: 1; P2: 3; P3: 3; P4: 2 |
+| `mutations` | P1: 1; P2: 1; P3: 1; P4: 2 |
 | `items_per_s` | items / wall |
 | `mutations_per_s` | mutations × items / wall |
 | `batch_p50/p95/p99_ms` | per public call |
@@ -180,14 +176,13 @@ projection, batch 100, declared host. They are not gates.
 | Phase | If apply is lean | If apply is still 13k-probe-expensive |
 |---|---|---|
 | P1 ingest (S) | 100–400k items/s | 20–50k |
-| P2 enrich (claim+update+release) | 30–80k items/s | 8–15k |
-| P3 schedule (same shape, small writes) | 40–100k items/s | 8–15k |
+| P2 enrich (pending `BatchUpdate`) | 40–150k items/s | 15–40k |
+| P3 schedule (pending `BatchUpdate`) | 40–150k items/s | 15–40k |
 | P4 deliver (claim+complete) | 50–120k items/s | 10–20k |
 | Full lifecycle N / wall | 1M in ~30–90 s | 1M in ~4–8 min |
 
-P2/P3 are three public commits per 100 items unless a later design
-coalesces update+release. That is the real worker cost; do not hide it
-inside `claim_finalize_push_cycle`.
+P2/P3 are one `BatchUpdate` per 100 pending items. P4 is claim+complete.
+Do not hide delivery inside `claim_finalize_push_cycle`.
 
 100k **completed deliveries/s** (P4 alone, 1 KiB, batch 100) remains the
 high-performance *headline* from the model. This benchmark asks a
