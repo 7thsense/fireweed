@@ -5112,8 +5112,13 @@ impl ProjectionData {
                 }
                 Some(rec) if rec.item_version != seen_version => MutationOutcome::Conflict,
                 Some(rec) => {
+                    // Merge onto the rehydrated document (entity_document + index_fields), not the raw
+                    // entity_document alone — client-declared typed index fields (ADR-011) admitted via
+                    // `NewItem::index_fields`/`entity` projection live only in `index_fields` and would
+                    // otherwise be dropped by this replace-style merge (fireweed-1d4bd8ec).
+                    let echoed_entity = rec.query_entity();
                     let new_entity =
-                        merge_entity_document(rec.entity_document.as_ref(), &request.set_fields)?;
+                        merge_entity_document(echoed_entity.as_ref(), &request.set_fields)?;
                     let new_fields = merge_field_bytes(&rec.fields, &request.set_fields)?;
                     self.index_validate_with_entity(
                         &item_id,
