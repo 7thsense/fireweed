@@ -2450,11 +2450,18 @@ impl ProjectionData {
                         !rec.state.is_terminal() && !rec.superseded && !rec.fenced,
                         "UpdateFields applied to a non-updatable item; update_fields_validate was bypassed"
                     );
-                    let old_keys = self.record_index_keys(
-                        &rec.fields,
-                        &rec.index_fields,
-                        rec.entity_document.as_ref(),
-                    )?;
+                    let index_inputs_changed = c.set_fields.is_some()
+                        || !c.field_ops.is_empty()
+                        || c.set_entity_document.is_some();
+                    let old_keys = if index_inputs_changed {
+                        self.record_index_keys(
+                            &rec.fields,
+                            &rec.index_fields,
+                            rec.entity_document.as_ref(),
+                        )?
+                    } else {
+                        Vec::new()
+                    };
                     let repricing = matches!(c.set_priority, ScheduleUpdate::Set(_))
                         || matches!(c.set_not_before, ScheduleUpdate::Set(_));
                     let eligibility_changed = repricing || c.set_gate_keys.is_some();
@@ -2488,39 +2495,42 @@ impl ProjectionData {
                         .set_entity_document
                         .as_ref()
                         .or(rec.entity_document.as_ref());
-                    let new_keys =
-                        self.record_index_keys(&next_fields, &next_index_fields, next_entity)?;
+                    let new_keys = if index_inputs_changed {
+                        self.record_index_keys(&next_fields, &next_index_fields, next_entity)?
+                    } else {
+                        Vec::new()
+                    };
 
-                    let mut next_rec = rec.clone();
-                    next_rec.fields = next_fields;
-                    next_rec.index_fields = next_index_fields.clone();
-                    if c.set_entity_document.is_some() {
-                        next_rec.entity_document = c.set_entity_document.clone();
-                    }
-                    if let PayloadUpdate::Set(p) = &c.payload {
-                        next_rec.payload = p.clone();
-                    }
-                    if let Some(gate_keys) = &c.set_gate_keys {
-                        next_rec.gate_keys = gate_keys.clone();
-                    }
-                    if let ScheduleUpdate::Set(p) = &c.set_priority {
-                        next_rec.priority = p.clone();
-                    }
-                    if let ScheduleUpdate::Set(nb) = &c.set_not_before {
-                        next_rec.not_before = *nb;
-                    }
-                    next_rec.item_version += 1;
-                    let new_elig = (eligibility_changed
-                        && was_pending
-                        && !gate_keys_blocked(&self.blocked_gates, &next_rec.gate_keys))
-                    .then(|| EligibilityIndex::token(&next_rec, &model));
+                    let new_elig = if eligibility_changed && was_pending {
+                        let mut next_rec = rec.clone();
+                        next_rec.fields = next_fields;
+                        next_rec.index_fields = next_index_fields.clone();
+                        if c.set_entity_document.is_some() {
+                            next_rec.entity_document = c.set_entity_document.clone();
+                        }
+                        if let Some(gate_keys) = &c.set_gate_keys {
+                            next_rec.gate_keys = gate_keys.clone();
+                        }
+                        if let ScheduleUpdate::Set(p) = &c.set_priority {
+                            next_rec.priority = p.clone();
+                        }
+                        if let ScheduleUpdate::Set(nb) = &c.set_not_before {
+                            next_rec.not_before = *nb;
+                        }
+                        (!gate_keys_blocked(&self.blocked_gates, &next_rec.gate_keys))
+                            .then(|| EligibilityIndex::token(&next_rec, &model))
+                    } else {
+                        None
+                    };
                     (
                         old_keys,
                         old_elig,
                         new_keys,
                         new_elig,
                         rec.gate_keys.clone(),
-                        next_rec.gate_keys,
+                        c.set_gate_keys
+                            .clone()
+                            .unwrap_or_else(|| rec.gate_keys.clone()),
                         next_index_fields,
                     )
                 };
@@ -2587,7 +2597,9 @@ impl ProjectionData {
                     self.claim_index_remove_keys(item_id, &removed);
                     self.claim_index_insert_keys(item_id, &added);
                 }
-                self.remember_framed_keys(item_id, new_keys);
+                if !old_keys.is_empty() || !new_keys.is_empty() {
+                    self.remember_framed_keys(item_id, new_keys);
+                }
                 self.replace_gate_memberships(item_id, &old_gate_keys, &new_gate_keys);
                 // Re-key the eligibility index for a repriced/rescheduled Pending item (no-op otherwise —
                 // a non-reprice/non-reschedule or a Leased item leaves the eligibility set unchanged).
@@ -5936,6 +5948,26 @@ mod tests {
             crate::take_record_index_key_calls(),
             0,
             "claim transition must reuse framed keys cached at insert"
+        );
+        let _ = crate::take_record_index_key_calls();
+        projection
+            .apply_command(&QueueCommand::UpdateFields(UpdateFieldsCommand {
+                item_id: id,
+                field_ops: BTreeMap::new(),
+                payload: PayloadUpdate::Set(Some(Bytes::from_static(b"profile"))),
+                set_priority: ScheduleUpdate::Keep,
+                set_not_before: ScheduleUpdate::Keep,
+                set_fields: None,
+                set_metadata: None,
+                set_gate_keys: None,
+                set_entity_document: None,
+                api001_batch: true,
+            }))
+            .unwrap();
+        assert_eq!(
+            crate::take_record_index_key_calls(),
+            0,
+            "payload-only UpdateFields must not recompute index keys"
         );
     }
 

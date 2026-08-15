@@ -33,7 +33,10 @@ fn env_usize(name: &str, default: usize) -> usize {
 }
 
 fn tmp_log() -> PathBuf {
-    let p = std::env::temp_dir().join(format!(
+    let dir = std::env::var("SS_LOG_DIR").unwrap_or_else(|_| {
+        std::env::temp_dir().to_string_lossy().into_owned()
+    });
+    let p = PathBuf::from(dir).join(format!(
         "fireweed-ss-phased-{}-{}.db",
         std::process::id(),
         SystemTime::now()

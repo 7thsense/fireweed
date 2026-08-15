@@ -73,12 +73,12 @@ pub struct SeqIdGen {
 
 impl IdGen for SeqIdGen {
     fn next_item_id(&self) -> ItemId {
-        let n = self.counter.fetch_add(1, Ordering::SeqCst);
+        let n = self.counter.fetch_add(1, Ordering::Relaxed);
         ItemId::from_u64(n)
     }
 
     fn next_command_id(&self) -> CommandId {
-        let n = self.counter.fetch_add(1, Ordering::SeqCst);
+        let n = self.counter.fetch_add(1, Ordering::Relaxed);
         CommandId::new(format!("cmd-{n}"))
     }
 }
