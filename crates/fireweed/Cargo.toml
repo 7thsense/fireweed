@@ -72,6 +72,11 @@ postgres = "0.19"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 [[test]]
+name = "ss_phased_capacity"
+path = "tests/ss_phased_capacity.rs"
+required-features = ["sqlite"]
+
+[[test]]
 name = "concrete_fireweed"
 path = "tests/concrete_fireweed.rs"
 
