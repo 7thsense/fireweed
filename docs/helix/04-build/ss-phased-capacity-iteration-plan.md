@@ -28,7 +28,7 @@ ddx:
 
 # Implementation Plan: SS phased capacity iteration
 
-**Status**: adopted after adversarial review (claude + codex, 2026-08-15).  
+**Status**: **success** (2026-08-15). G1–G5 met on two N=1M tmpfs runs (`SS_LOG_DIR=/dev/shm`, `SS_PUSH_BATCH=1000`). Evidence: `docs/perf/evidence/ss-phased/ladder.md`.  
 **Round-1 evidence**: `docs/helix/04-build/reviews/ss-phased-round1/`.  
 **Mode**: measure first, one slice per commit, re-measure, stop on declared-host gates.  
 **Does not authorize**: changing CQRS, the strict response barrier, `synchronous=FULL` on the sqlite log, claim exclusivity, retiring the 13k sealer ratchet, or making projection state a function of read traffic (ADR-013).

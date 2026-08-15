@@ -1,0 +1,58 @@
+{
+  "schema": "ss-phased-summary/v1",
+  "utc": "1786757207",
+  "cell": "sqlite--memory",
+  "workers": 1,
+  "n": 1000000,
+  "push_batch": 100,
+  "claim_batch": 100,
+  "sampled_ok": true,
+  "residual_eligible": 0,
+  "phases": [
+    {
+      "name": "P1_ingest",
+      "items": 1000000,
+      "mutations": 1,
+      "wall_s": 14.886011,
+      "items_per_s": 67177.2,
+      "mutations_per_s": 67177.2,
+      "calls": [
+        {"op": "BatchPush", "p50_ms": 1.130, "p95_ms": 1.360, "p99_ms": 5.100}
+      ]
+    },
+    {
+      "name": "P2_enrich",
+      "items": 1000000,
+      "mutations": 1,
+      "wall_s": 22.823718,
+      "items_per_s": 43814.1,
+      "mutations_per_s": 43814.1,
+      "calls": [
+        {"op": "BatchUpdate", "p50_ms": 2.039, "p95_ms": 3.975, "p99_ms": 6.548}
+      ]
+    },
+    {
+      "name": "P3_schedule",
+      "items": 1000000,
+      "mutations": 1,
+      "wall_s": 17.990181,
+      "items_per_s": 55585.9,
+      "mutations_per_s": 55585.9,
+      "calls": [
+        {"op": "BatchUpdate", "p50_ms": 1.750, "p95_ms": 2.352, "p99_ms": 3.966}
+      ]
+    },
+    {
+      "name": "P4_deliver",
+      "items": 1000000,
+      "mutations": 2,
+      "wall_s": 19.842590,
+      "items_per_s": 50396.6,
+      "mutations_per_s": 100793.3,
+      "calls": [
+        {"op": "BatchClaim", "p50_ms": 0.941, "p95_ms": 1.220, "p99_ms": 1.434},
+        {"op": "BatchFinalize", "p50_ms": 0.942, "p95_ms": 1.225, "p99_ms": 1.429}
+      ]
+    }
+  ]
+}
