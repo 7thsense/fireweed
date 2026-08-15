@@ -31,6 +31,59 @@ use crate::error::{EngineError, EngineResult};
 /// Four-byte magic for the native durable command frame (FireWeed Command v1).
 pub const NATIVE_ENVELOPE_MAGIC: &[u8; 4] = b"FWC1";
 
+/// Four-byte magic for a native object-log batch frame (epoch + envelopes).
+pub const NATIVE_BATCH_MAGIC: &[u8; 4] = b"FWB1";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct NativeLogBatch {
+    backend_epoch: u64,
+    commands: Vec<CommandEnvelope>,
+}
+
+/// Encode a produce payload: `FWB1` + postcard(`epoch`, envelopes).
+///
+/// This is the object-log hot path. Do not JSON-encode command envelopes here —
+/// payloads would Base64 and the batch would be cloned into a serde Value.
+pub fn encode_log_batch(backend_epoch: u64, commands: &[CommandEnvelope]) -> EngineResult<Vec<u8>> {
+    let body = postcard::to_allocvec(&NativeLogBatchRef {
+        backend_epoch,
+        commands,
+    })
+    .map_err(|e| EngineError::Storage(format!("native log-batch encode failed: {e}")))?;
+    let mut out = Vec::with_capacity(NATIVE_BATCH_MAGIC.len() + body.len());
+    out.extend_from_slice(NATIVE_BATCH_MAGIC);
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+#[derive(serde::Serialize)]
+struct NativeLogBatchRef<'a> {
+    backend_epoch: u64,
+    commands: &'a [CommandEnvelope],
+}
+
+/// Decode a produce payload. `FWB1` is native; anything else is legacy JSON
+/// `BatchFrame` (`{backend_epoch, commands}`) so existing object-log history
+/// still rebuilds.
+pub fn decode_log_batch(bytes: &[u8]) -> EngineResult<(u64, Vec<CommandEnvelope>)> {
+    if bytes.starts_with(NATIVE_BATCH_MAGIC) {
+        let body = &bytes[NATIVE_BATCH_MAGIC.len()..];
+        let batch: NativeLogBatch = postcard::from_bytes(body).map_err(|e| {
+            EngineError::Storage(format!("native log-batch decode failed: {e}"))
+        })?;
+        return Ok((batch.backend_epoch, batch.commands));
+    }
+    #[derive(serde::Deserialize)]
+    struct LegacyJsonBatch {
+        backend_epoch: u64,
+        commands: Vec<CommandEnvelope>,
+    }
+    let batch: LegacyJsonBatch = serde_json::from_slice(bytes).map_err(|e| {
+        EngineError::Storage(format!("legacy json log-batch decode failed: {e}"))
+    })?;
+    Ok((batch.backend_epoch, batch.commands))
+}
+
 /// Encode a command envelope for durable append (native binary frame).
 ///
 /// Payload and field maps are raw bytes; core ids are native integers; typed
@@ -268,5 +321,30 @@ mod tests {
         assert_eq!(postcard::from_bytes::<ItemId>(&bin).unwrap(), id);
         // Packed u64 varint is a few bytes, not a decimal string.
         assert!(bin.len() <= 10, "postcard ItemId len {}", bin.len());
+    }
+
+    #[test]
+    fn log_batch_native_round_trips_and_legacy_json_still_decodes() {
+        let commands = vec![claim_env(2), finalize_env(2)];
+        let native = encode_log_batch(7, &commands).unwrap();
+        assert!(native.starts_with(NATIVE_BATCH_MAGIC));
+        let (epoch, back) = decode_log_batch(&native).unwrap();
+        assert_eq!(epoch, 7);
+        assert_eq!(back.len(), 2);
+
+        let json = serde_json::json!({
+            "backend_epoch": 3,
+            "commands": commands,
+        });
+        let json_bytes = serde_json::to_vec(&json).unwrap();
+        let (epoch, back) = decode_log_batch(&json_bytes).unwrap();
+        assert_eq!(epoch, 3);
+        assert_eq!(back.len(), 2);
+        assert!(
+            native.len() < json_bytes.len(),
+            "native batch {} should beat json {}",
+            native.len(),
+            json_bytes.len()
+        );
     }
 }

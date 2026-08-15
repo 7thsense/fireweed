@@ -42,8 +42,11 @@ Filesystem object log (same protocol as S3) × in-memory projection. `open_objec
 
 | utc | sha | N | note | p1_items_s | p2_items_s | p3_items_s | p4_items_s | wall_s |
 |---|---|---:|---|---:|---:|---:|---:|---:|
-| 2026-08-15 | harness+UpdateFieldsBatch | 1000000 | `open_objectlog` 256KiB/50ms linger, push=1000 claim=1000 | 15314 | 15246 | 16666 | 4370 | 419.7 |
+| 2026-08-15 | 6d5e929d | 1000000 | product linger 50ms + S3 50 PUT/s budget (serial waiter) | 15314 | 15246 | 16666 | 4370 | 419.7 |
+| 2026-08-15 | flush+FWB1 | 1000000 | idle early-flush 1ms, FWB1 batch, high-water every 64, inflight=1 | 24302 | 21729 | 25678 | 15808 | 189.4 |
 
-P50 on this row: P1 48.7 ms, P2 57.4 ms, P3 51.2 ms, P4 claim 94.2 ms + finalize 96.8 ms. One worker, one in-flight call: small claim/finalize envelopes wait the 50 ms linger instead of co-buffering. That is an object-log group-commit shape, not a sqlite fsync number.
+Same-host durable PUT probe (temp + fdatasync + rename + dir fsync, 20 samples): **1 MiB p50 18.0 ms**, **tiny p50 13.7 ms**. A sequenced produce is a data object plus a manifest object. P1/P3 p50 ~33 ms ≈ two local PUTs. P4 wall 63 s ≈ 2000 tiny produces × ~32 ms. That is this virt disk's object-log I/O floor, not projection CPU.
 
-Evidence: `docs/perf/evidence/ss-phased/1786761950/summary.json`.
+`SS_INFLIGHT=8` on this disk is slower (wall 244 s): concurrent fsyncs thrash. Raise in-flight on PLP NVMe or real S3.
+
+Evidence: `docs/perf/evidence/ss-phased/1786761950/summary.json` (linger-bound), `docs/perf/evidence/ss-phased/1786763497/summary.json` (I/O-bound).

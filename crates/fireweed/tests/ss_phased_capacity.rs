@@ -276,8 +276,15 @@ async fn ss_phased_capacity_smoke() {
 
     let cell = Cell::parse();
     let clock = Arc::new(SystemClock);
-    eprintln!("{}", cell.describe());
-    let fw = cell.open(clock);
+    let inflight = match &cell {
+        // Local filesystem object PUTs fsync; extra in-flight thrashes this virt disk.
+        // Raise SS_INFLIGHT on a real object store / PLP NVMe to pack seals.
+        Cell::ObjectLogFilesystemMemory { .. } => env_usize("SS_INFLIGHT", 1).max(1),
+        #[cfg(feature = "sqlite")]
+        Cell::SqliteCommandLogMemory { .. } => env_usize("SS_INFLIGHT", 1).max(1),
+    };
+    eprintln!("{} inflight={inflight}", cell.describe());
+    let fw = Arc::new(cell.open(clock));
 
     let warmup_def = qdef("t-ss-phased", "q-warmup", push_batch, claim_batch);
     fw.create_queue(warmup_def).await.expect("warmup queue");
@@ -329,13 +336,16 @@ async fn ss_phased_capacity_smoke() {
     // --- P1 ingest ---
     let mut p1_calls = CallStats::new();
     let t0 = Instant::now();
-    let mut keys = Vec::with_capacity(n);
-    for chunk in (0..n).step_by(push_batch) {
-        let end = (chunk + push_batch).min(n);
-        let items: Vec<NewItem> = (chunk..end)
-            .map(|i| {
-                keys.push(key(i));
-                NewItem {
+    let keys: Vec<ClientItemKey> = (0..n).map(key).collect();
+    let starts: Vec<usize> = (0..n).step_by(push_batch).collect();
+    for window in starts.chunks(inflight) {
+        let futs = window.iter().map(|&chunk| {
+            let fw = Arc::clone(&fw);
+            let queue = queue.clone();
+            let stub = stub.clone();
+            let end = (chunk + push_batch).min(n);
+            let items: Vec<NewItem> = (chunk..end)
+                .map(|i| NewItem {
                     client_item_key: Some(key(i)),
                     group_key: Some(job_key(i, n)),
                     payload: Some(stub.clone()),
@@ -343,13 +353,18 @@ async fn ss_phased_capacity_smoke() {
                     not_before: Some(now),
                     priority: Some(PriorityValue::Timestamp(now)),
                     ..Default::default()
-                }
-            })
-            .collect();
-        let c0 = Instant::now();
-        let ids = fw.push_batch(&queue, items).await.expect("P1 push");
-        p1_calls.record(c0.elapsed());
-        assert_eq!(ids.len(), end - chunk);
+                })
+                .collect();
+            async move {
+                let c0 = Instant::now();
+                let ids = fw.push_batch(&queue, items).await.expect("P1 push");
+                (c0.elapsed(), ids.len(), end - chunk)
+            }
+        });
+        for (elapsed, got, expect) in futures::future::join_all(futs).await {
+            p1_calls.record(elapsed);
+            assert_eq!(got, expect);
+        }
     }
     let p1 = PhaseRow {
         name: "P1_ingest",
@@ -363,34 +378,46 @@ async fn ss_phased_capacity_smoke() {
     let mut p2_calls = CallStats::new();
     let t0 = Instant::now();
     let mut updated = 0usize;
-    for chunk in keys.chunks(claim_batch) {
-        let updates: Vec<BatchUpdateEntry> = chunk
-            .iter()
-            .map(|k| BatchUpdateEntry {
-                item_ref: BatchUpdateItemRef::ClientItemKey(k.clone()),
-                expected_item_version: None,
-                priority: BatchUpdateValue::Keep,
-                not_before: BatchUpdateValue::Keep,
-                payload: BatchUpdateValue::Replace(Some(profile.clone())),
-                metadata: BatchUpdateValue::Replace(phase_meta("needs_schedule")),
-                gate_keys: BatchUpdateValue::Keep,
-                fields: BatchUpdateValue::Keep,
-            })
-            .collect();
-        let req = BatchUpdateRequest {
-            request_id: RequestId::new(format!("p2-{}", updated)).unwrap(),
-            updates,
-        };
-        let c0 = Instant::now();
-        let resp = fw.batch_update(&queue, req).await.expect("P2 update");
-        p2_calls.record(c0.elapsed());
-        let ok = resp
-            .results
-            .iter()
-            .filter(|r| matches!(r, BatchUpdateOutcome::Updated { .. }))
-            .count();
-        assert_eq!(ok, chunk.len(), "P2 every entry Updated");
-        updated += ok;
+    for (window_i, window) in keys.chunks(claim_batch * inflight).enumerate() {
+        let futs = window.chunks(claim_batch).enumerate().map(|(j, chunk)| {
+            let fw = Arc::clone(&fw);
+            let queue = queue.clone();
+            let profile = profile.clone();
+            let chunk = chunk.to_vec();
+            let req_i = window_i * inflight + j;
+            async move {
+                let updates: Vec<BatchUpdateEntry> = chunk
+                    .iter()
+                    .map(|k| BatchUpdateEntry {
+                        item_ref: BatchUpdateItemRef::ClientItemKey(k.clone()),
+                        expected_item_version: None,
+                        priority: BatchUpdateValue::Keep,
+                        not_before: BatchUpdateValue::Keep,
+                        payload: BatchUpdateValue::Replace(Some(profile.clone())),
+                        metadata: BatchUpdateValue::Replace(phase_meta("needs_schedule")),
+                        gate_keys: BatchUpdateValue::Keep,
+                        fields: BatchUpdateValue::Keep,
+                    })
+                    .collect();
+                let req = BatchUpdateRequest {
+                    request_id: RequestId::new(format!("p2-{req_i}")).unwrap(),
+                    updates,
+                };
+                let c0 = Instant::now();
+                let resp = fw.batch_update(&queue, req).await.expect("P2 update");
+                let ok = resp
+                    .results
+                    .iter()
+                    .filter(|r| matches!(r, BatchUpdateOutcome::Updated { .. }))
+                    .count();
+                (c0.elapsed(), ok, chunk.len())
+            }
+        });
+        for (elapsed, ok, expect) in futures::future::join_all(futs).await {
+            p2_calls.record(elapsed);
+            assert_eq!(ok, expect, "P2 every entry Updated");
+            updated += ok;
+        }
     }
     assert_eq!(updated, n);
     let p2 = PhaseRow {
@@ -420,34 +447,45 @@ async fn ss_phased_capacity_smoke() {
     let t0 = Instant::now();
     let due = UtcTimestamp::new(now.seconds.saturating_sub(1), 0).unwrap();
     updated = 0;
-    for chunk in keys.chunks(claim_batch) {
-        let updates: Vec<BatchUpdateEntry> = chunk
-            .iter()
-            .map(|k| BatchUpdateEntry {
-                item_ref: BatchUpdateItemRef::ClientItemKey(k.clone()),
-                expected_item_version: None,
-                priority: BatchUpdateValue::Replace(PriorityValue::Timestamp(due)),
-                not_before: BatchUpdateValue::Replace(Some(due)),
-                payload: BatchUpdateValue::Keep,
-                metadata: BatchUpdateValue::Replace(phase_meta("ready")),
-                gate_keys: BatchUpdateValue::Keep,
-                fields: BatchUpdateValue::Keep,
-            })
-            .collect();
-        let req = BatchUpdateRequest {
-            request_id: RequestId::new(format!("p3-{}", updated)).unwrap(),
-            updates,
-        };
-        let c0 = Instant::now();
-        let resp = fw.batch_update(&queue, req).await.expect("P3 update");
-        p3_calls.record(c0.elapsed());
-        let ok = resp
-            .results
-            .iter()
-            .filter(|r| matches!(r, BatchUpdateOutcome::Updated { .. }))
-            .count();
-        assert_eq!(ok, chunk.len(), "P3 every entry Updated");
-        updated += ok;
+    for (window_i, window) in keys.chunks(claim_batch * inflight).enumerate() {
+        let futs = window.chunks(claim_batch).enumerate().map(|(j, chunk)| {
+            let fw = Arc::clone(&fw);
+            let queue = queue.clone();
+            let chunk = chunk.to_vec();
+            let req_i = window_i * inflight + j;
+            async move {
+                let updates: Vec<BatchUpdateEntry> = chunk
+                    .iter()
+                    .map(|k| BatchUpdateEntry {
+                        item_ref: BatchUpdateItemRef::ClientItemKey(k.clone()),
+                        expected_item_version: None,
+                        priority: BatchUpdateValue::Replace(PriorityValue::Timestamp(due)),
+                        not_before: BatchUpdateValue::Replace(Some(due)),
+                        payload: BatchUpdateValue::Keep,
+                        metadata: BatchUpdateValue::Replace(phase_meta("ready")),
+                        gate_keys: BatchUpdateValue::Keep,
+                        fields: BatchUpdateValue::Keep,
+                    })
+                    .collect();
+                let req = BatchUpdateRequest {
+                    request_id: RequestId::new(format!("p3-{req_i}")).unwrap(),
+                    updates,
+                };
+                let c0 = Instant::now();
+                let resp = fw.batch_update(&queue, req).await.expect("P3 update");
+                let ok = resp
+                    .results
+                    .iter()
+                    .filter(|r| matches!(r, BatchUpdateOutcome::Updated { .. }))
+                    .count();
+                (c0.elapsed(), ok, chunk.len())
+            }
+        });
+        for (elapsed, ok, expect) in futures::future::join_all(futs).await {
+            p3_calls.record(elapsed);
+            assert_eq!(ok, expect, "P3 every entry Updated");
+            updated += ok;
+        }
     }
     assert_eq!(updated, n);
     let p3 = PhaseRow {
@@ -473,23 +511,47 @@ async fn ss_phased_capacity_smoke() {
     }
 
     // --- P4 deliver: unfiltered claim + complete ---
+    // Claims stay serial (planner must see prior apply). Finalize of batch N
+    // overlaps the next claim so two produces can group-commit.
     let mut p4_claim = CallStats::new();
     let mut p4_fin = CallStats::new();
     let t0 = Instant::now();
     let mut completed = 0usize;
+    let c0 = Instant::now();
+    let mut prev = fw.claim(&queue, claim_batch, 30_000).await.expect("P4 claim");
+    p4_claim.record(c0.elapsed());
     loop {
-        let c0 = Instant::now();
-        let claimed = fw.claim(&queue, claim_batch, 30_000).await.expect("P4 claim");
-        p4_claim.record(c0.elapsed());
-        if claimed.is_empty() {
+        if prev.is_empty() {
             break;
         }
-        let ids: Vec<_> = claimed.iter().map(|c| c.item_id).collect();
+        let ids: Vec<_> = prev.iter().map(|c| c.item_id).collect();
         let n_ids = ids.len();
-        let c1 = Instant::now();
-        fw.complete(&queue, ids).await.expect("P4 complete");
-        p4_fin.record(c1.elapsed());
+        let fw_fin = Arc::clone(&fw);
+        let fw_claim = Arc::clone(&fw);
+        let queue_fin = queue.clone();
+        let queue_claim = queue.clone();
+        let (fin_elapsed, (claim_elapsed, next)) = tokio::join!(
+            async move {
+                let c1 = Instant::now();
+                fw_fin
+                    .complete(&queue_fin, ids)
+                    .await
+                    .expect("P4 complete");
+                c1.elapsed()
+            },
+            async move {
+                let c0 = Instant::now();
+                let claimed = fw_claim
+                    .claim(&queue_claim, claim_batch, 30_000)
+                    .await
+                    .expect("P4 claim");
+                (c0.elapsed(), claimed)
+            }
+        );
+        p4_fin.record(fin_elapsed);
+        p4_claim.record(claim_elapsed);
         completed += n_ids;
+        prev = next;
     }
     assert_eq!(completed, n, "P4 completed all items");
     let p4 = PhaseRow {
@@ -508,7 +570,7 @@ async fn ss_phased_capacity_smoke() {
 
     let phases = [p1, p2, p3, p4];
     eprintln!(
-        "=== ss_phased_capacity cell={} log_axis={} workers=1 N={n} push={push_batch} claim={claim_batch} ===",
+        "=== ss_phased_capacity cell={} log_axis={} inflight={inflight} N={n} push={push_batch} claim={claim_batch} ===",
         cell.cell_name(),
         cell.log_axis()
     );
@@ -559,6 +621,14 @@ fn write_evidence(
     json.push_str(&format!("  \"log_axis\": \"{}\",\n", cell.log_axis()));
     json.push_str("  \"projection_axis\": \"memory\",\n");
     json.push_str("  \"workers\": 1,\n");
+    json.push_str(&format!(
+        "  \"inflight\": {},\n",
+        match cell {
+            Cell::ObjectLogFilesystemMemory { .. } => env_usize("SS_INFLIGHT", 1).max(1),
+            #[cfg(feature = "sqlite")]
+            Cell::SqliteCommandLogMemory { .. } => env_usize("SS_INFLIGHT", 1).max(1),
+        }
+    ));
     json.push_str(&format!("  \"n\": {n},\n"));
     json.push_str(&format!("  \"push_batch\": {push_batch},\n"));
     json.push_str(&format!("  \"claim_batch\": {claim_batch},\n"));

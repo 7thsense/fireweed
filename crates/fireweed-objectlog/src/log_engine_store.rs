@@ -81,12 +81,6 @@ fn parse_partition(key: &PartitionKey) -> Option<QueueKey> {
     ))
 }
 
-#[derive(Serialize, Deserialize)]
-struct BatchFrame {
-    backend_epoch: u64,
-    commands: Vec<CommandEnvelope>,
-}
-
 #[derive(Serialize, Deserialize, Default)]
 struct EpochDoc {
     epoch: u64,
@@ -179,6 +173,9 @@ pub struct ObjectLogEngineStore<S: Sequencer = ManifestSequencer> {
     /// In-process epoch cache (also written to blob for reopen).
     epochs: Arc<EpochCache>,
     high_water: Arc<HighWaterCache>,
+    /// Appends since last durable high-water PUT, per partition. The produce is
+    /// already sequenced; the high-water blob is reopen acceleration only.
+    high_water_appends: Mutex<HashMap<String, u64>>,
     metadata_permits: Arc<MetadataPermits>,
     catalog: Mutex<CatalogDoc>,
     meta_prefix: String,
@@ -259,6 +256,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             blob,
             epochs,
             high_water,
+            high_water_appends: Mutex::new(HashMap::new()),
             metadata_permits,
             catalog: Mutex::new(CatalogDoc::default()),
             meta_prefix: "fwmeta/".to_string(),
@@ -422,6 +420,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             blob,
             epochs: Arc::new(Mutex::new(HashMap::new())),
             high_water: Arc::new(Mutex::new(HashMap::new())),
+            high_water_appends: Mutex::new(HashMap::new()),
             metadata_permits: Arc::new(Mutex::new(HashMap::new())),
             catalog: Mutex::new(CatalogDoc::default()),
             meta_prefix,
@@ -811,13 +810,28 @@ fn publish_local_definition(root: &Path, key: &str, bytes: &[u8]) -> EngineResul
 }
 
 /// Map env-style segment knobs onto object-log flush config (names unchanged at product edge).
+///
+/// `target_bytes` is a packing *preference*, not the engine hard ceiling.
+/// Stuffing it into `FlushConfig::max_bytes` (historical) forced a seal on every
+/// large command and stopped linger from co-buffering concurrent produces.
+/// `max_bytes` stays the object-log physics ceiling (default 1 GiB) unless the
+/// caller asks for a larger one.
+///
+/// Sequential sole-owner produces (one in-flight Sequenced waiter) must not wait
+/// the full linger: that is an empty group-commit window, not hardware. Idle
+/// early-flush is 1 ms and is not gated on the S3-default 50 PUT/s token bucket.
 pub fn flush_config_from_segment(target_bytes: usize, max_latency_ms: u64) -> FlushConfig {
     let mut cfg = FlushConfig::default();
-    if target_bytes > 0 {
+    if target_bytes > cfg.max_bytes {
         cfg.max_bytes = target_bytes;
     }
     cfg.max_batches = fireweed_engine::PRODUCTION_OBJECT_LOG_MAX_BATCHES;
-    cfg.linger = Duration::from_millis(max_latency_ms);
+    cfg.linger = Duration::from_millis(max_latency_ms.max(1));
+    cfg.max_inflight_flushes = 8;
+    cfg.budget.early_flush_idle = Duration::from_millis(1);
+    cfg.budget.early_flush_fill_ratio = 0.0;
+    cfg.budget.early_flush_cooldown = Duration::ZERO;
+    cfg.budget.default_capacity_per_sec = 10_000.0;
     cfg
 }
 
@@ -912,11 +926,10 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
             if epoch != expected_epoch {
                 return Err(EngineError::EpochFenced);
             }
-            let frame = BatchFrame {
-                backend_epoch: expected_epoch,
-                commands: commands.clone(),
-            };
-            let payload = Bytes::from(serde_json::to_vec(&frame).map_err(store_err)?);
+            let payload = Bytes::from(
+                fireweed_engine::command_codec::encode_log_batch(expected_epoch, &commands)
+                    .map_err(store_err)?,
+            );
             let record_count = i32::try_from(commands.len())
                 .map_err(|_| EngineError::Invalid("batch too large for object-log record_count"))?;
             let outcome = self
@@ -946,18 +959,32 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
                     .get(&partition_key(&shard).0)
                     .is_none_or(|current| current.precedes(last));
                 if should_advance {
+                    let pk = partition_key(&shard).0;
                     self.high_water
                         .lock()
                         .expect("high_water")
-                        .insert(partition_key(&shard).0, last.clone());
-                    self.put_json(
-                        &self.high_water_key(&shard),
-                        &HighWaterDoc {
-                            backend_epoch: last.backend_epoch,
-                            sequence: last.sequence,
-                        },
-                    )
-                    .await?;
+                        .insert(pk.clone(), last.clone());
+                    let appends = {
+                        let mut counts = self
+                            .high_water_appends
+                            .lock()
+                            .expect("high_water_appends");
+                        let n = counts.entry(pk).or_insert(0);
+                        *n += 1;
+                        *n
+                    };
+                    // Sequenced produce is already durable. The high-water blob is
+                    // reopen acceleration; persist every 64 advances, not per command.
+                    if appends == 1 || appends.is_multiple_of(64) {
+                        self.put_json(
+                            &self.high_water_key(&shard),
+                            &HighWaterDoc {
+                                backend_epoch: last.backend_epoch,
+                                sequence: last.sequence,
+                            },
+                        )
+                        .await?;
+                    }
                 }
             }
             Ok(positions)
@@ -982,15 +1009,16 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
                 .map_err(store_err)?;
             let mut entries = Vec::new();
             for batch in batches {
-                let frame: BatchFrame =
-                    serde_json::from_slice(&batch.payload).map_err(store_err)?;
-                for (i, env) in frame.commands.into_iter().enumerate() {
+                let (backend_epoch, decoded) =
+                    fireweed_engine::command_codec::decode_log_batch(&batch.payload)
+                        .map_err(store_err)?;
+                for (i, env) in decoded.into_iter().enumerate() {
                     let seq = batch.base_offset as u64 + i as u64;
                     if seq < from_seq {
                         continue;
                     }
                     entries.push((
-                        CommandPosition::new(shard.clone(), frame.backend_epoch, seq),
+                        CommandPosition::new(shard.clone(), backend_epoch, seq),
                         env,
                     ));
                     if entries.len() >= limit {
