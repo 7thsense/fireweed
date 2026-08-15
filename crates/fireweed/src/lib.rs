@@ -5270,7 +5270,6 @@ impl<B: LibBackend> RuntimeCore<B> {
     /// until its new time). Legal while the item is Pending OR Leased; pre-validated like `update_fields`
     /// (absent/terminal/superseded id → reject; `expected_item_version` mismatch → [`EngineError::Conflict`]),
     /// fenced by the owner's epoch. Bumps and returns the new `item_version`.
-    #[cfg(test)]
     pub async fn update(
         &self,
         queue: &QueueKey,

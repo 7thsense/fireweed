@@ -218,7 +218,7 @@ trait FireweedDataPlane: Send + Sync {
         ids: Vec<ItemId>,
         lease_ms: u64,
     ) -> FacadeFuture<'a, ()>;
-    fn update<'a>(
+    fn reschedule<'a>(
         &'a self,
         queue: &'a QueueKey,
         item_id: ItemId,
@@ -885,7 +885,7 @@ impl<B: LibBackend + 'static> FireweedDataPlane for RuntimeCore<B> {
     ) -> FacadeFuture<'a, ()> {
         Box::pin(RuntimeCore::reassign(self, queue, ids, lease_ms))
     }
-    fn update<'a>(
+    fn reschedule<'a>(
         &'a self,
         queue: &'a QueueKey,
         item_id: ItemId,
@@ -1035,7 +1035,7 @@ impl Fireweed {
         expected_item_version: Option<u64>,
     ) -> EngineResult<u64> {
         self.inner
-            .update(queue, item_id, priority, not_before, expected_item_version)
+            .reschedule(queue, item_id, priority, not_before, expected_item_version)
             .await
     }
 
