@@ -1,11 +1,12 @@
 //! Narrow async mutation-path scaffolding from ADR-017.
 
-use std::collections::HashSet;
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use fireweed_core::{
     BodyHash, CohortId, GateKeyPolicy, ItemId, LeaseToken, PriorityModelKind, PriorityValue,
-    QueueDefinition, RequestId, UtcTimestamp,
+    QueueDefinition, RequestId, TypedValue, UtcTimestamp,
 };
 
 use crate::{
@@ -1088,13 +1089,24 @@ fn push_item_matches(
     // Admission (`admit_push_item_indexes`) materializes typed indexes from the spec and
     // may drop a fully-indexed entity document from the durable item; validate against the
     // admitted form, not the raw spec.
-    let Ok(expected_index_fields) = crate::index_fields::materialize_index_fields(
-        definition,
-        spec.index_fields.clone(),
-        spec.entity.as_ref(),
-    ) else {
-        return false;
-    };
+    //
+    // `materialize_index_fields` returns the explicit map unchanged whenever it is
+    // non-empty, so when the caller already passed explicit fields (the common case once
+    // index fields are set on every item), borrow `spec.index_fields` directly instead of
+    // cloning a potentially large map per item per commit just to hand it right back.
+    let expected_index_fields: Cow<'_, BTreeMap<String, TypedValue>> =
+        if spec.index_fields.is_empty() {
+            match crate::index_fields::materialize_index_fields(
+                definition,
+                BTreeMap::new(),
+                spec.entity.as_ref(),
+            ) {
+                Ok(map) => Cow::Owned(map),
+                Err(_) => return false,
+            }
+        } else {
+            Cow::Borrowed(&spec.index_fields)
+        };
     let entity_dropped = crate::index_fields::entity_fully_indexed(
         definition,
         &expected_index_fields,
@@ -1116,7 +1128,7 @@ fn push_item_matches(
         && planned.metadata == spec.metadata
         && planned.cohort_size == spec.cohort_size
         && planned.gate_keys == spec.gate_keys
-        && planned.index_fields == expected_index_fields
+        && planned.index_fields == *expected_index_fields
         && planned.entity_document == expected_entity
 }
 
@@ -3767,6 +3779,53 @@ mod tests {
             crate::push_specs_fingerprint_sha256(&duplicated).unwrap(),
             crate::push_specs_fingerprint_sha256(&canonical).unwrap()
         );
+    }
+
+    #[test]
+    fn push_item_matches_explicit_index_fields_without_entity() {
+        let def = definition("typed");
+        let spec = PushSpec {
+            index_fields: BTreeMap::from([(
+                "s".into(),
+                fireweed_core::TypedValue::String("native".into()),
+            )]),
+            ..Default::default()
+        };
+        let (mut items, ids) =
+            build_push_items(vec![spec.clone()], 1, 1, 1, def.retry_policy.max_attempts);
+        crate::admit_push_items_indexes(&def, &mut items).unwrap();
+        assert!(push_item_matches(&items[0], &spec, ids[0], &def));
+
+        let mut tampered = items[0].clone();
+        tampered.index_fields.insert(
+            "s".into(),
+            fireweed_core::TypedValue::String("wrong".into()),
+        );
+        assert!(!push_item_matches(&tampered, &spec, ids[0], &def));
+    }
+
+    #[test]
+    fn push_item_matches_entity_derived_index_fields() {
+        use axon_esf::{IndexDeclaration, IndexDef};
+        use fireweed_core::{IndexType, QueueIndex};
+
+        let mut def = definition("typed-entity");
+        def.typed_indexes = vec![QueueIndex {
+            name: "by_s".into(),
+            declaration: IndexDeclaration::Single(IndexDef {
+                field: "s".into(),
+                index_type: IndexType::String,
+                unique: false,
+            }),
+        }];
+        let spec = PushSpec {
+            entity: Some(serde_json::json!({"s": "from-entity"})),
+            ..Default::default()
+        };
+        let (mut items, ids) =
+            build_push_items(vec![spec.clone()], 1, 1, 1, def.retry_policy.max_attempts);
+        crate::admit_push_items_indexes(&def, &mut items).unwrap();
+        assert!(push_item_matches(&items[0], &spec, ids[0], &def));
     }
 
     #[test]
