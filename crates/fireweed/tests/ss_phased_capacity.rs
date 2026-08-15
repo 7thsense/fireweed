@@ -1,16 +1,24 @@
-//! I0 — Seventh Sense phased capacity harness (adopted plan).
+//! Seventh Sense phased capacity harness.
 //!
 //! Public facade only. Default `SS_N=10000`. Capacity: `SS_N=1000000`.
-//! Cell: `open_sqlite` (`sqlite--memory`). Workers: 1. No metadata predicate on P4.
+//! Workers: 1. No metadata predicate on P4.
+//!
+//! Two log axes. Do not mix their numbers.
+//!
+//! * `SS_CELL=objectlog` (default) — production log axis: filesystem object log
+//!   (same protocol as S3) × in-memory projection. `open_objectlog`.
+//!   Cell name: `filesystem--memory`.
+//! * `SS_CELL=sqlite` — SQLite *command log* × in-memory projection. Calibration
+//!   only. Not the production deployment. Cell name: `sqlite--memory`.
+//!   `SS_SQLITE_SYNC` applies only to this cell.
 //!
 //! ```text
-//! SS_N=10000 cargo test -p fireweed --test ss_phased_capacity --release --features sqlite -- --nocapture
+//! SS_N=10000 cargo test -p fireweed --test ss_phased_capacity --release -- --nocapture
+//! SS_CELL=objectlog SS_N=1000000 SS_PUSH_BATCH=1000 SS_CLAIM_BATCH=1000 SS_EVIDENCE=1 \
+//!   cargo test -p fireweed --test ss_phased_capacity --release -- --nocapture
 //! ```
-//!
-//! summary.json schema v1:
-//! `{schema, utc, cell, n, push_batch, claim_batch, workers, phases[{name, items, mutations, wall_s, items_per_s, mutations_per_s, calls[{op, p50_ms, p95_ms, p99_ms}]}], residual_eligible, sampled_ok}`
 
-#![cfg(feature = "sqlite")]
+#![cfg(feature = "objectlog")]
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,22 +40,145 @@ fn env_usize(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-fn tmp_log() -> PathBuf {
-    let dir = std::env::var("SS_LOG_DIR").unwrap_or_else(|_| {
+fn parent_dir() -> PathBuf {
+    PathBuf::from(std::env::var("SS_LOG_DIR").unwrap_or_else(|_| {
         std::env::temp_dir().to_string_lossy().into_owned()
-    });
-    let p = PathBuf::from(dir).join(format!(
-        "fireweed-ss-phased-{}-{}.db",
+    }))
+}
+
+fn unique_suffix() -> String {
+    format!(
+        "{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos()
-    ));
-    let _ = std::fs::remove_file(&p);
-    let _ = std::fs::remove_file(format!("{}-wal", p.display()));
-    let _ = std::fs::remove_file(format!("{}-shm", p.display()));
-    p
+    )
+}
+
+/// Production-shaped cell vs sqlite-command-log calibration. These are not the same log.
+enum Cell {
+    /// Filesystem object log (S3 protocol) × memory projection.
+    ObjectLogFilesystemMemory { root: PathBuf },
+    /// SQLite command log × memory projection. Not production.
+    #[cfg(feature = "sqlite")]
+    SqliteCommandLogMemory {
+        path: PathBuf,
+        sync: SqliteLogSync,
+    },
+}
+
+impl Cell {
+    fn parse() -> Self {
+        let raw = std::env::var("SS_CELL").unwrap_or_else(|_| "objectlog".into());
+        let sync_set = std::env::var("SS_SQLITE_SYNC").ok();
+        match raw.to_ascii_lowercase().as_str() {
+            "objectlog" | "filesystem" | "filesystem--memory" => {
+                if let Some(sync) = sync_set {
+                    panic!(
+                        "SS_SQLITE_SYNC={sync} is a sqlite-command-log knob; it does not apply to \
+                         the object-log cell. Unset it or use SS_CELL=sqlite (calibration only)."
+                    );
+                }
+                let root = parent_dir().join(format!("fireweed-ss-phased-ol-{}", unique_suffix()));
+                let _ = std::fs::remove_dir_all(&root);
+                std::fs::create_dir_all(&root).expect("object-log root");
+                Self::ObjectLogFilesystemMemory { root }
+            }
+            "sqlite" | "sqlite--memory" | "sqlite-log" => {
+                #[cfg(feature = "sqlite")]
+                {
+                    let sync = match sync_set
+                        .unwrap_or_else(|| "full".into())
+                        .to_ascii_lowercase()
+                        .as_str()
+                    {
+                        "normal" => SqliteLogSync::Normal,
+                        "off" => SqliteLogSync::Off,
+                        _ => SqliteLogSync::Full,
+                    };
+                    let path = parent_dir()
+                        .join(format!("fireweed-ss-phased-sl-{}.db", unique_suffix()));
+                    let _ = std::fs::remove_file(&path);
+                    let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+                    let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+                    return Self::SqliteCommandLogMemory { path, sync };
+                }
+                #[cfg(not(feature = "sqlite"))]
+                panic!(
+                    "SS_CELL=sqlite requires the sqlite cargo feature; it is not the production log"
+                );
+            }
+            other => panic!(
+                "SS_CELL must be objectlog (production log axis) or sqlite \
+                 (sqlite command-log calibration), got {other:?}"
+            ),
+        }
+    }
+
+    fn cell_name(&self) -> &'static str {
+        match self {
+            Self::ObjectLogFilesystemMemory { .. } => "filesystem--memory",
+            #[cfg(feature = "sqlite")]
+            Self::SqliteCommandLogMemory { .. } => "sqlite--memory",
+        }
+    }
+
+    fn log_axis(&self) -> &'static str {
+        match self {
+            Self::ObjectLogFilesystemMemory { .. } => "filesystem",
+            #[cfg(feature = "sqlite")]
+            Self::SqliteCommandLogMemory { .. } => "sqlite",
+        }
+    }
+
+    fn open(&self, clock: Arc<dyn Clock>) -> Fireweed {
+        match self {
+            Self::ObjectLogFilesystemMemory { root } => {
+                open_objectlog(root, clock).expect("open_objectlog")
+            }
+            #[cfg(feature = "sqlite")]
+            Self::SqliteCommandLogMemory { path, sync } => {
+                open_sqlite_with_sync(path.to_str().unwrap(), clock, *sync)
+                    .expect("open_sqlite")
+            }
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Self::ObjectLogFilesystemMemory { root } => {
+                format!(
+                    "cell=filesystem--memory log_axis=filesystem (object-log, production) \
+                     projection=memory root={}",
+                    root.display()
+                )
+            }
+            #[cfg(feature = "sqlite")]
+            Self::SqliteCommandLogMemory { path, sync } => {
+                format!(
+                    "cell=sqlite--memory log_axis=sqlite (command-log calibration, NOT production) \
+                     projection=memory sqlite_sync={sync:?} path={}",
+                    path.display()
+                )
+            }
+        }
+    }
+
+    fn cleanup(&self) {
+        match self {
+            Self::ObjectLogFilesystemMemory { root } => {
+                let _ = std::fs::remove_dir_all(root);
+            }
+            #[cfg(feature = "sqlite")]
+            Self::SqliteCommandLogMemory { path, .. } => {
+                let _ = std::fs::remove_file(path);
+                let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+                let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+            }
+        }
+    }
 }
 
 fn phase_meta(phase: &str) -> Metadata {
@@ -143,19 +274,10 @@ async fn ss_phased_capacity_smoke() {
     let claim_batch = env_usize("SS_CLAIM_BATCH", 100);
     assert!(n > 0 && n.is_multiple_of(claim_batch), "SS_N must be >0 and divisible by SS_CLAIM_BATCH");
 
-    let log = tmp_log();
+    let cell = Cell::parse();
     let clock = Arc::new(SystemClock);
-    let sync = match std::env::var("SS_SQLITE_SYNC")
-        .unwrap_or_else(|_| "full".into())
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "normal" => SqliteLogSync::Normal,
-        "off" => SqliteLogSync::Off,
-        _ => SqliteLogSync::Full,
-    };
-    eprintln!("sqlite_sync={sync:?} log={}", log.display());
-    let fw = open_sqlite_with_sync(log.to_str().unwrap(), clock, sync).expect("open_sqlite");
+    eprintln!("{}", cell.describe());
+    let fw = cell.open(clock);
 
     let warmup_def = qdef("t-ss-phased", "q-warmup", push_batch, claim_batch);
     fw.create_queue(warmup_def).await.expect("warmup queue");
@@ -385,7 +507,11 @@ async fn ss_phased_capacity_smoke() {
     assert_eq!(metrics.complete, n as u64, "complete count");
 
     let phases = [p1, p2, p3, p4];
-    eprintln!("=== ss_phased_capacity cell=sqlite--memory workers=1 N={n} push={push_batch} claim={claim_batch} ===");
+    eprintln!(
+        "=== ss_phased_capacity cell={} log_axis={} workers=1 N={n} push={push_batch} claim={claim_batch} ===",
+        cell.cell_name(),
+        cell.log_axis()
+    );
     eprintln!("phase\titems\twall_s\titems_per_s\tmutations_per_s");
     for p in &phases {
         eprintln!(
@@ -408,23 +534,30 @@ async fn ss_phased_capacity_smoke() {
     }
 
     if std::env::var("SS_EVIDENCE").ok().as_deref() == Some("1") {
-        write_evidence(&phases, n, push_batch, claim_batch);
+        write_evidence(&cell, &phases, n, push_batch, claim_batch);
     }
 
-    let _ = std::fs::remove_file(&log);
-    let _ = std::fs::remove_file(format!("{}-wal", log.display()));
-    let _ = std::fs::remove_file(format!("{}-shm", log.display()));
+    drop(fw);
+    cell.cleanup();
 }
 
-fn write_evidence(phases: &[PhaseRow], n: usize, push_batch: usize, claim_batch: usize) {
+fn write_evidence(
+    cell: &Cell,
+    phases: &[PhaseRow],
+    n: usize,
+    push_batch: usize,
+    claim_batch: usize,
+) {
     let utc = chrono_like_utc();
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/perf/evidence/ss-phased")
         .join(&utc);
     let _ = std::fs::create_dir_all(&dir);
-    let mut json = String::from("{\n  \"schema\": \"ss-phased-summary/v1\",\n");
+    let mut json = String::from("{\n  \"schema\": \"ss-phased-summary/v2\",\n");
     json.push_str(&format!("  \"utc\": \"{utc}\",\n"));
-    json.push_str("  \"cell\": \"sqlite--memory\",\n");
+    json.push_str(&format!("  \"cell\": \"{}\",\n", cell.cell_name()));
+    json.push_str(&format!("  \"log_axis\": \"{}\",\n", cell.log_axis()));
+    json.push_str("  \"projection_axis\": \"memory\",\n");
     json.push_str("  \"workers\": 1,\n");
     json.push_str(&format!("  \"n\": {n},\n"));
     json.push_str(&format!("  \"push_batch\": {push_batch},\n"));

@@ -15,6 +15,11 @@ Host for rows below: WSL2 `sindri`, AMD Ryzen 9 5950X 16C/32T, 94 GiB RAM, works
 
 **Stop (success):** both best-of-2 rows meet G1–G5 on `sqlite--memory` via `open_sqlite` with the log on tmpfs (`SS_LOG_DIR=/dev/shm`). Ingest batch 1000 is allowed by the plan; claim batch remains 100. Stretch P4≥100k is **not** met (best P4 61.5k). I5 dense `index_fields` skipped — gated harness has zero typed indexes.
 
+## SQLite command-log cell (`sqlite--memory`) — calibration only
+
+This table is **not** the production log. Production deploys an object log (filesystem/S3 protocol).
+Do not quote these rates as object-storage capacity. `SS_SQLITE_SYNC=off` is a sqlite WAL knob.
+
 On-disk after `SqliteLogSync` + `wal_autocheckpoint=0` for Normal/Off (same virt disk, `SS_PUSH_BATCH=1000`):
 
 | utc | sha | sync | claim | p1 | p2 | p3 | p4 | wall_s |
@@ -25,10 +30,20 @@ On-disk after `SqliteLogSync` + `wal_autocheckpoint=0` for Normal/Off (same virt
 | 2026-08-15 | wal_auto=0 | **normal** | 500 | **91857** | **39891** | **94865** | **137221** | **53.8** |
 | 2026-08-15 | UpdateFieldsBatch | **off** | **1000** | **101342** | **75712** | **193340** | **194776** | **33.4** |
 
-`open_sqlite` default remains `synchronous=FULL` (Class A). `open_sqlite_with_sync(..., Normal|Off)` is the throughput dial. Projection stays rebuildable; Off may lose the log tail on OS crash/power loss — rebuild from the durable command log.
+`open_sqlite` default remains `synchronous=FULL` (Class A). `open_sqlite_with_sync(..., Normal|Off)` is the sqlite-log throughput dial. Those knobs do not exist on the object log.
 
-Gates (H-server): G4 P1≥80k, G2 P2≥40k, G3 P3≥40k, G1 P4≥50k. This Off + batch-1000 row meets all four on this host. Stretch P4≥100k and wall≤90s also met.
-
-Long pole is now **P2 enrich** (~13 µs/item): each BatchUpdate of 1000 items still postcard-encodes and WAL-inserts ~1 KiB profile payloads. P3/P4 sit at ~5 µs/item. Next lever is payload encode/append, not envelope count.
+Gates (H-server) were written against this sqlite-log cell. They are not object-log SLAs.
 
 Evidence: `docs/perf/evidence/ss-phased/1786760930/summary.json`.
+
+## Object-log cell (`filesystem--memory`) — production log axis
+
+Filesystem object log (same protocol as S3) × in-memory projection. `open_objectlog` product defaults (256 KiB / 50 ms linger). This is not a SQLite WAL. Local directory, not a remote S3 endpoint.
+
+| utc | sha | N | note | p1_items_s | p2_items_s | p3_items_s | p4_items_s | wall_s |
+|---|---|---:|---|---:|---:|---:|---:|---:|
+| 2026-08-15 | harness+UpdateFieldsBatch | 1000000 | `open_objectlog` 256KiB/50ms linger, push=1000 claim=1000 | 15314 | 15246 | 16666 | 4370 | 419.7 |
+
+P50 on this row: P1 48.7 ms, P2 57.4 ms, P3 51.2 ms, P4 claim 94.2 ms + finalize 96.8 ms. One worker, one in-flight call: small claim/finalize envelopes wait the 50 ms linger instead of co-buffering. That is an object-log group-commit shape, not a sqlite fsync number.
+
+Evidence: `docs/perf/evidence/ss-phased/1786761950/summary.json`.
