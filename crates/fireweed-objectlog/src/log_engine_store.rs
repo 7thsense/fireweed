@@ -21,12 +21,14 @@ use bytes::Bytes;
 use fireweed_core::QueueDefinition;
 use fireweed_engine::{
     AsyncLogStore, CommandEnvelope, CommandPage, CommandPosition, CreateQueueOutcome,
-    DurabilityClass, EngineError, EngineResult, ProjectionSnapshot, QueueKey, SnapshotRef,
+    DurabilityClass, EngineError, EngineResult, PayloadUpdate, ProjectionSnapshot, QueueCommand,
+    QueueKey, SnapshotRef,
 };
 use object_log::{
     BlobStore, Durability, FlushConfig, LocalBlobStore, LogEngine, ManifestSequencer,
     MemoryBlobStore, PartitionKey, Sequencer,
 };
+use tokio::sync::{Notify, oneshot};
 use serde::{Deserialize, Serialize};
 
 use crate::s3_create_only::S3CreateOnlyPut;
@@ -112,6 +114,55 @@ type EpochCache = Mutex<HashMap<String, u64>>;
 type HighWaterCache = Mutex<HashMap<String, CommandPosition>>;
 type MetadataPermits = Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
 
+/// Coalesce concurrent same-shard appends into one object PUT.
+///
+/// The composed admit permit allows only one `submit_commit` per queue, so
+/// LogEngine linger never sees a second produce. Ports that call
+/// [`ObjectLogEngineStore::packed_append`] bypass that permit and wait here.
+const PACK_TARGET_BYTES: usize = 4 * 1024 * 1024;
+const PACK_MAX_BATCHES: usize = 16;
+const PACK_LINGER: Duration = Duration::from_millis(20);
+
+struct PackWaiter {
+    shard: QueueKey,
+    epoch: u64,
+    commands: Vec<CommandEnvelope>,
+    tx: oneshot::Sender<EngineResult<Vec<CommandPosition>>>,
+}
+
+struct PackState {
+    pending: Vec<PackWaiter>,
+    bytes: usize,
+    oldest: Option<std::time::Instant>,
+}
+
+struct ObjectLogPacker {
+    state: Mutex<PackState>,
+    notify: Notify,
+}
+
+impl ObjectLogPacker {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(PackState {
+                pending: Vec::new(),
+                bytes: 0,
+                oldest: None,
+            }),
+            notify: Notify::new(),
+        }
+    }
+
+    fn ready_locked(state: &PackState) -> bool {
+        if state.pending.is_empty() {
+            return false;
+        }
+        state.bytes >= PACK_TARGET_BYTES
+            || state.pending.len() >= PACK_MAX_BATCHES
+            || state.oldest.is_some_and(|t| t.elapsed() >= PACK_LINGER)
+    }
+}
+
 struct LocalEngineRegistration {
     engine: Weak<LocalEngine>,
     epochs: Weak<EpochCache>,
@@ -176,6 +227,7 @@ pub struct ObjectLogEngineStore<S: Sequencer = ManifestSequencer> {
     /// Appends since last durable high-water PUT, per partition. The produce is
     /// already sequenced; the high-water blob is reopen acceleration only.
     high_water_appends: Mutex<HashMap<String, u64>>,
+    packer: Arc<ObjectLogPacker>,
     metadata_permits: Arc<MetadataPermits>,
     catalog: Mutex<CatalogDoc>,
     meta_prefix: String,
@@ -257,6 +309,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             epochs,
             high_water,
             high_water_appends: Mutex::new(HashMap::new()),
+            packer: Arc::new(ObjectLogPacker::new()),
             metadata_permits,
             catalog: Mutex::new(CatalogDoc::default()),
             meta_prefix: "fwmeta/".to_string(),
@@ -421,6 +474,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             epochs: Arc::new(Mutex::new(HashMap::new())),
             high_water: Arc::new(Mutex::new(HashMap::new())),
             high_water_appends: Mutex::new(HashMap::new()),
+            packer: Arc::new(ObjectLogPacker::new()),
             metadata_permits: Arc::new(Mutex::new(HashMap::new())),
             catalog: Mutex::new(CatalogDoc::default()),
             meta_prefix,
@@ -817,21 +871,19 @@ fn publish_local_definition(root: &Path, key: &str, bytes: &[u8]) -> EngineResul
 /// `max_bytes` stays the object-log physics ceiling (default 1 GiB) unless the
 /// caller asks for a larger one.
 ///
-/// Sequential sole-owner produces (one in-flight Sequenced waiter) must not wait
-/// the full linger: that is an empty group-commit window, not hardware. Idle
-/// early-flush is 1 ms and is not gated on the S3-default 50 PUT/s token bucket.
+/// Packing of concurrent Fireweed appends is owned by [`ObjectLogPacker`].
+/// The engine linger is 1 ms so a already-packed produce seals immediately.
 pub fn flush_config_from_segment(target_bytes: usize, max_latency_ms: u64) -> FlushConfig {
     let mut cfg = FlushConfig::default();
     if target_bytes > cfg.max_bytes {
         cfg.max_bytes = target_bytes;
     }
     cfg.max_batches = fireweed_engine::PRODUCTION_OBJECT_LOG_MAX_BATCHES;
-    cfg.linger = Duration::from_millis(max_latency_ms.max(1));
+    let _ = max_latency_ms;
+    // Packer already grouped commands. Engine must not add another linger.
+    cfg.linger = Duration::from_millis(1);
     cfg.max_inflight_flushes = 8;
-    cfg.budget.early_flush_idle = Duration::from_millis(1);
-    cfg.budget.early_flush_fill_ratio = 0.0;
-    cfg.budget.early_flush_cooldown = Duration::ZERO;
-    cfg.budget.default_capacity_per_sec = 10_000.0;
+    cfg.budget.enabled = false;
     cfg
 }
 
@@ -871,6 +923,228 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         }
         Ok(records.len())
     }
+
+    /// Group-commit path for ports that do not hold the per-queue admit permit
+    /// (BatchUpdate / upsert). Concurrent callers of the same shard share one
+    /// object PUT when they arrive within [`PACK_LINGER`] or fill [`PACK_TARGET_BYTES`].
+    pub async fn packed_append(
+        &self,
+        shard: QueueKey,
+        commands: Vec<CommandEnvelope>,
+        expected_epoch: u64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        if commands.is_empty() {
+            return Ok(Vec::new());
+        }
+        let epoch = self.load_epoch(&shard).await?;
+        if epoch != expected_epoch {
+            return Err(EngineError::EpochFenced);
+        }
+        let bytes = estimate_pack_bytes(&commands);
+        let (tx, rx) = oneshot::channel();
+        let should_seal = {
+            let mut state = self.packer.state.lock().expect("packer");
+            if !state.pending.is_empty()
+                && state
+                    .pending
+                    .iter()
+                    .any(|w| w.shard != shard || w.epoch != expected_epoch)
+            {
+                self.packer.notify.notify_waiters();
+            }
+            state.pending.push(PackWaiter {
+                shard,
+                epoch: expected_epoch,
+                commands,
+                tx,
+            });
+            state.bytes = state.bytes.saturating_add(bytes);
+            if state.oldest.is_none() {
+                state.oldest = Some(std::time::Instant::now());
+            }
+            ObjectLogPacker::ready_locked(&state)
+        };
+        if should_seal {
+            self.packer.notify.notify_waiters();
+            self.seal_packed().await;
+            return rx
+                .await
+                .map_err(|_| EngineError::Storage("object-log packer waiter dropped".into()))?;
+        }
+        tokio::pin!(rx);
+        tokio::select! {
+            result = &mut rx => {
+                return result.map_err(|_| {
+                    EngineError::Storage("object-log packer waiter dropped".into())
+                })?;
+            }
+            _ = tokio::time::sleep(PACK_LINGER) => {
+                self.seal_packed().await;
+            }
+        }
+        rx.await
+            .map_err(|_| EngineError::Storage("object-log packer waiter dropped".into()))?
+    }
+
+    async fn seal_packed(&self) {
+        let pending = {
+            let mut state = self.packer.state.lock().expect("packer");
+            if state.pending.is_empty() {
+                return;
+            }
+            if !ObjectLogPacker::ready_locked(&state)
+                && state.oldest.is_some_and(|t| t.elapsed() < PACK_LINGER)
+            {
+                return;
+            }
+            state.bytes = 0;
+            state.oldest = None;
+            std::mem::take(&mut state.pending)
+        };
+        if pending.is_empty() {
+            return;
+        }
+        let mut groups: HashMap<(QueueKey, u64), Vec<PackWaiter>> = HashMap::new();
+        for w in pending {
+            groups
+                .entry((w.shard.clone(), w.epoch))
+                .or_default()
+                .push(w);
+        }
+        for ((shard, epoch), waiters) in groups {
+            let counts: Vec<usize> = waiters.iter().map(|w| w.commands.len()).collect();
+            let mut all = Vec::with_capacity(counts.iter().sum());
+            for w in &waiters {
+                all.extend(w.commands.iter().cloned());
+            }
+            match self.produce_immediate(&shard, all, epoch).await {
+                Ok(positions) => {
+                    let mut offset = 0usize;
+                    for (w, n) in waiters.into_iter().zip(counts) {
+                        let slice = positions
+                            .get(offset..offset + n)
+                            .map(|s| s.to_vec())
+                            .unwrap_or_default();
+                        offset += n;
+                        let _ = w.tx.send(Ok(slice));
+                    }
+                }
+                Err(error) => {
+                    let msg = error.to_string();
+                    for w in waiters {
+                        let _ = w.tx.send(Err(EngineError::Storage(msg.clone())));
+                    }
+                }
+            }
+        }
+    }
+
+    async fn produce_immediate(
+        &self,
+        shard: &QueueKey,
+        commands: Vec<CommandEnvelope>,
+        expected_epoch: u64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        if commands.is_empty() {
+            return Ok(Vec::new());
+        }
+        let payload = Bytes::from(
+            fireweed_engine::command_codec::encode_log_batch(expected_epoch, &commands)
+                .map_err(store_err)?,
+        );
+        let record_count = i32::try_from(commands.len())
+            .map_err(|_| EngineError::Invalid("batch too large for object-log record_count"))?;
+        let outcome = self
+            .engine
+            .produce(
+                partition_key(shard),
+                payload,
+                record_count,
+                (),
+                Durability::Sequenced,
+            )
+            .await
+            .map_err(store_err)?;
+        let base = outcome.base_offset.ok_or_else(|| {
+            EngineError::Storage("sequenced produce missing base_offset".into())
+        })? as u64;
+        let positions: Vec<CommandPosition> = (0..commands.len() as u64)
+            .map(|i| CommandPosition::new(shard.clone(), expected_epoch, base + i))
+            .collect();
+        if let Some(last) = positions.last() {
+            self.advance_high_water(shard, last).await?;
+        }
+        Ok(positions)
+    }
+
+    async fn advance_high_water(
+        &self,
+        shard: &QueueKey,
+        last: &CommandPosition,
+    ) -> EngineResult<()> {
+        let permit = self.metadata_permit(shard);
+        let _guard = permit.lock().await;
+        let should_advance = self
+            .high_water
+            .lock()
+            .expect("high_water")
+            .get(&partition_key(shard).0)
+            .is_none_or(|current| current.precedes(last));
+        if !should_advance {
+            return Ok(());
+        }
+        let pk = partition_key(shard).0;
+        self.high_water
+            .lock()
+            .expect("high_water")
+            .insert(pk.clone(), last.clone());
+        let appends = {
+            let mut counts = self.high_water_appends.lock().expect("high_water_appends");
+            let n = counts.entry(pk).or_insert(0);
+            *n += 1;
+            *n
+        };
+        if appends == 1 || appends.is_multiple_of(64) {
+            self.put_json(
+                &self.high_water_key(shard),
+                &HighWaterDoc {
+                    backend_epoch: last.backend_epoch,
+                    sequence: last.sequence,
+                },
+            )
+            .await?;
+        }
+        Ok(())
+    }
+}
+
+fn estimate_pack_bytes(commands: &[CommandEnvelope]) -> usize {
+    commands.len().saturating_mul(256)
+        + commands
+            .iter()
+            .map(|c| match &c.command {
+                QueueCommand::UpdateFieldsBatch(b) => b
+                    .updates
+                    .iter()
+                    .map(|u| {
+                        u.set_fields
+                            .as_ref()
+                            .map(|m| m.values().map(|v| v.len()).sum::<usize>())
+                            .unwrap_or(0)
+                            + match &u.payload {
+                                PayloadUpdate::Set(Some(p)) => p.len(),
+                                _ => 0,
+                            }
+                    })
+                    .sum::<usize>(),
+                QueueCommand::Push(p) => p
+                    .items
+                    .iter()
+                    .map(|i| i.payload.as_ref().map(|b| b.len()).unwrap_or(0))
+                    .sum(),
+                _ => 128,
+            })
+            .sum::<usize>()
 }
 
 impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S> {
@@ -919,75 +1193,12 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
         expected_epoch: u64,
     ) -> impl std::future::Future<Output = EngineResult<Vec<CommandPosition>>> + Send {
         async move {
-            if commands.is_empty() {
-                return Ok(Vec::new());
-            }
             let epoch = self.load_epoch(&shard).await?;
             if epoch != expected_epoch {
                 return Err(EngineError::EpochFenced);
             }
-            let payload = Bytes::from(
-                fireweed_engine::command_codec::encode_log_batch(expected_epoch, &commands)
-                    .map_err(store_err)?,
-            );
-            let record_count = i32::try_from(commands.len())
-                .map_err(|_| EngineError::Invalid("batch too large for object-log record_count"))?;
-            let outcome = self
-                .engine
-                .produce(
-                    partition_key(&shard),
-                    payload,
-                    record_count,
-                    (),
-                    Durability::Sequenced,
-                )
+            self.produce_immediate(&shard, commands, expected_epoch)
                 .await
-                .map_err(store_err)?;
-            let base = outcome.base_offset.ok_or_else(|| {
-                EngineError::Storage("sequenced produce missing base_offset".into())
-            })? as u64;
-            let positions: Vec<CommandPosition> = (0..commands.len() as u64)
-                .map(|i| CommandPosition::new(shard.clone(), expected_epoch, base + i))
-                .collect();
-            if let Some(last) = positions.last() {
-                let permit = self.metadata_permit(&shard);
-                let _guard = permit.lock().await;
-                let should_advance = self
-                    .high_water
-                    .lock()
-                    .expect("high_water")
-                    .get(&partition_key(&shard).0)
-                    .is_none_or(|current| current.precedes(last));
-                if should_advance {
-                    let pk = partition_key(&shard).0;
-                    self.high_water
-                        .lock()
-                        .expect("high_water")
-                        .insert(pk.clone(), last.clone());
-                    let appends = {
-                        let mut counts = self
-                            .high_water_appends
-                            .lock()
-                            .expect("high_water_appends");
-                        let n = counts.entry(pk).or_insert(0);
-                        *n += 1;
-                        *n
-                    };
-                    // Sequenced produce is already durable. The high-water blob is
-                    // reopen acceleration; persist every 64 advances, not per command.
-                    if appends == 1 || appends.is_multiple_of(64) {
-                        self.put_json(
-                            &self.high_water_key(&shard),
-                            &HighWaterDoc {
-                                backend_epoch: last.backend_epoch,
-                                sequence: last.sequence,
-                            },
-                        )
-                        .await?;
-                    }
-                }
-            }
-            Ok(positions)
         }
     }
 

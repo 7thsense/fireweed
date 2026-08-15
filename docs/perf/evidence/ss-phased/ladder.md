@@ -44,8 +44,9 @@ Filesystem object log (same protocol as S3) × in-memory projection. `open_objec
 |---|---|---:|---|---:|---:|---:|---:|---:|
 | 2026-08-15 | 6d5e929d | 1000000 | product linger 50ms + S3 50 PUT/s budget (serial waiter) | 15314 | 15246 | 16666 | 4370 | 419.7 |
 | 2026-08-15 | flush+FWB1 | 1000000 | idle early-flush 1ms, FWB1 batch, high-water every 64, inflight=1 | 24302 | 21729 | 25678 | 15808 | 189.4 |
+| 2026-08-15 | ObjectLogPacker | 1000000 | pack 8 BatchUpdates / 4MiB / 20ms; P1/P4 still 1 PUT/command (admit) | 25932 | **56278** | **95293** | 12868 | 144.5 |
 
-Same-host durable PUT probe (temp + fdatasync + rename + dir fsync, 20 samples): **1 MiB p50 18.0 ms**, **tiny p50 13.7 ms**. A sequenced produce is a data object plus a manifest object. P1/P3 p50 ~33 ms ≈ two local PUTs. P4 wall 63 s ≈ 2000 tiny produces × ~32 ms. That is this virt disk's object-log I/O floor, not projection CPU.
+Packed run tree: **6806 objects, 1.79 GiB, ~269 KiB/object**. P2/P3 share one PUT across 8 in-flight BatchUpdates (4 MiB / 20 ms packer). P1 push and P4 claim/finalize still take the per-queue admit permit, so they cannot join a pack — those remain one object per public call. That is the remaining small-object storm, not a hardware floor.
 
 `SS_INFLIGHT=8` on this disk is slower (wall 244 s): concurrent fsyncs thrash. Raise in-flight on PLP NVMe or real S3.
 

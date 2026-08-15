@@ -500,12 +500,16 @@ impl AsyncObjectLogMemoryBackend {
         if envelopes.is_empty() {
             return Ok(());
         }
-        self.engine
-            .submit_commit(RawCommitRequest::new(shard.clone(), envelopes, epoch))
-            .await
-            .map_err(|error| {
-                EngineError::Storage(format!("async product port submission failed: {error:?}"))
-            })??;
+        let positions = self
+            .log
+            .packed_append(shard.clone(), envelopes.clone(), epoch)
+            .await?;
+        fireweed_engine::AsyncProjectionStore::apply_live(
+            self.projection.as_ref(),
+            positions,
+            envelopes,
+        )
+        .await?;
         Ok(())
     }
 

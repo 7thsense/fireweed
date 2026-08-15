@@ -40,6 +40,27 @@ fn env_usize(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn count_tree(root: &std::path::Path) -> (u64, u64) {
+    let mut objects = 0u64;
+    let mut bytes = 0u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Ok(meta) = entry.metadata() {
+                objects += 1;
+                bytes += meta.len();
+            }
+        }
+    }
+    (objects, bytes)
+}
+
 fn parent_dir() -> PathBuf {
     PathBuf::from(std::env::var("SS_LOG_DIR").unwrap_or_else(|_| {
         std::env::temp_dir().to_string_lossy().into_owned()
@@ -277,9 +298,8 @@ async fn ss_phased_capacity_smoke() {
     let cell = Cell::parse();
     let clock = Arc::new(SystemClock);
     let inflight = match &cell {
-        // Local filesystem object PUTs fsync; extra in-flight thrashes this virt disk.
-        // Raise SS_INFLIGHT on a real object store / PLP NVMe to pack seals.
-        Cell::ObjectLogFilesystemMemory { .. } => env_usize("SS_INFLIGHT", 1).max(1),
+        // Concurrent BatchUpdates share one packed object PUT (ObjectLogPacker).
+        Cell::ObjectLogFilesystemMemory { .. } => env_usize("SS_INFLIGHT", 8).max(1),
         #[cfg(feature = "sqlite")]
         Cell::SqliteCommandLogMemory { .. } => env_usize("SS_INFLIGHT", 1).max(1),
     };
@@ -569,6 +589,14 @@ async fn ss_phased_capacity_smoke() {
     assert_eq!(metrics.complete, n as u64, "complete count");
 
     let phases = [p1, p2, p3, p4];
+    if let Cell::ObjectLogFilesystemMemory { root } = &cell {
+        let (objects, bytes) = count_tree(root);
+        eprintln!(
+            "object_log_tree objects={objects} bytes={bytes} ({:.1} MiB) bytes/object={:.0}",
+            bytes as f64 / (1024.0 * 1024.0),
+            if objects == 0 { 0.0 } else { bytes as f64 / objects as f64 }
+        );
+    }
     eprintln!(
         "=== ss_phased_capacity cell={} log_axis={} inflight={inflight} N={n} push={push_batch} claim={claim_batch} ===",
         cell.cell_name(),
@@ -624,7 +652,7 @@ fn write_evidence(
     json.push_str(&format!(
         "  \"inflight\": {},\n",
         match cell {
-            Cell::ObjectLogFilesystemMemory { .. } => env_usize("SS_INFLIGHT", 1).max(1),
+            Cell::ObjectLogFilesystemMemory { .. } => env_usize("SS_INFLIGHT", 8).max(1),
             #[cfg(feature = "sqlite")]
             Cell::SqliteCommandLogMemory { .. } => env_usize("SS_INFLIGHT", 1).max(1),
         }
