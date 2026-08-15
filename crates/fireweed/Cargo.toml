@@ -74,7 +74,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 [[test]]
 name = "ss_phased_capacity"
 path = "tests/ss_phased_capacity.rs"
-required-features = ["sqlite"]
+required-features = ["objectlog"]
 
 [[test]]
 name = "concrete_fireweed"
