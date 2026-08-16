@@ -47,7 +47,9 @@ use std::thread;
 use std::time::Instant;
 
 use fireweed_conformance::qdef;
-use fireweed_core::{CohortPolicy, GroupKey, LeaseToken, QueueDefinition, QueueId, UtcTimestamp, WorkerId};
+use fireweed_core::{
+    CohortPolicy, GroupKey, LeaseToken, QueueDefinition, QueueId, UtcTimestamp, WorkerId,
+};
 use fireweed_engine::{
     ClaimCompatibility, ClaimPort, ClaimRequest, ControlPlaneStore, EngineResult, PushPort,
     PushSpec, QueueKey,
@@ -84,7 +86,10 @@ fn cohort_qdef(queue_id: &str) -> QueueDefinition {
 }
 
 fn shard_for(queue_id: &str) -> QueueKey {
-    QueueKey::new(fireweed_conformance::tenant(), QueueId::new(queue_id).unwrap())
+    QueueKey::new(
+        fireweed_conformance::tenant(),
+        QueueId::new(queue_id).unwrap(),
+    )
 }
 
 fn claim_req(shard: QueueKey, worker: &str, now: i64) -> ClaimRequest {
@@ -128,7 +133,11 @@ fn seed_cohorts(backend: &PostgresRelationalBackend, queue_id: &str, start: usiz
 
 /// Drain every complete cohort on ONE shard with `workers` concurrent whole-cohort claim loops
 /// (same-queue contention — this is what the claim pool cannot help, see the module doc above).
-fn drain_one_queue(backend: Arc<PostgresRelationalBackend>, queue_id: &str, workers: usize) -> (usize, u128) {
+fn drain_one_queue(
+    backend: Arc<PostgresRelationalBackend>,
+    queue_id: &str,
+    workers: usize,
+) -> (usize, u128) {
     let shard = shard_for(queue_id);
     let barrier = Arc::new(Barrier::new(workers));
     let start_gate = Arc::new(Barrier::new(workers + 1));
@@ -237,7 +246,10 @@ fn cohort_claim_pool_does_not_scale_on_one_queue() {
 
     let expect = COHORT_COUNT * COHORT_SIZE as usize;
     assert_eq!(single.0, expect, "single-worker must drain every cohort");
-    assert_eq!(pooled.0, expect, "pooled multi-worker must drain every cohort");
+    assert_eq!(
+        pooled.0, expect,
+        "pooled multi-worker must drain every cohort"
+    );
 
     let single_rps = rps(single.0, single.1);
     let pooled_rps = rps(pooled.0, pooled.1);
@@ -298,7 +310,10 @@ fn cohort_claim_one_queue_per_worker_scales_with_workers() {
 
     let expect_single = COHORT_COUNT * COHORT_SIZE as usize;
     let expect_multi = expect_single * WORKERS;
-    assert_eq!(single.0, expect_single, "single-worker baseline must drain every cohort");
+    assert_eq!(
+        single.0, expect_single,
+        "single-worker baseline must drain every cohort"
+    );
     assert_eq!(
         multi_queue.0, expect_multi,
         "one-backend-per-worker must drain every worker's full-size queue"

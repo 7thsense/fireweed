@@ -251,10 +251,7 @@ impl SqliteLog {
                 values.push(Value::Integer(seq));
                 values.push(Value::Blob(envelope));
             }
-            st(tx.execute(
-                &insert_batch_sql(take),
-                params_from_iter(values.iter()),
-            ))?;
+            st(tx.execute(&insert_batch_sql(take), params_from_iter(values.iter())))?;
         }
 
         let last_seq = first_seq

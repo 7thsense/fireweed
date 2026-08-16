@@ -2129,8 +2129,8 @@ pub fn commit_body_hash(entries: &[crate::port::CommitTransitionEntry]) -> Engin
             }
             // Entity: hash canonical JSON once per item only when present (needed for uniqueness).
             if let Some(entity) = &item.entity {
-                let bytes = serde_json::to_vec(entity)
-                    .map_err(|e| EngineError::Storage(e.to_string()))?;
+                let bytes =
+                    serde_json::to_vec(entity).map_err(|e| EngineError::Storage(e.to_string()))?;
                 bytes.hash(&mut h);
             } else {
                 1u8.hash(&mut h);

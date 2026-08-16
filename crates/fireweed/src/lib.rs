@@ -3233,12 +3233,9 @@ async fn verify_objectlog_sqlite_axes(
             // The log's high-water bookkeeping is a throttled reopen hint (fireweed-2be7894a)
             // that can trail the real tail across a process restart or recovery path. Walk the
             // tail forward before concluding the projection has actually drifted.
-            authoritative_position = reconcile_objectlog_sqlite_high_water(
-                log.as_ref(),
-                &key,
-                authoritative_position,
-            )
-            .await?;
+            authoritative_position =
+                reconcile_objectlog_sqlite_high_water(log.as_ref(), &key, authoritative_position)
+                    .await?;
         }
         if projected_position != authoritative_position {
             return Err(EngineError::Storage(format!(

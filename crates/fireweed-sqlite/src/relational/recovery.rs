@@ -736,9 +736,8 @@ pub(crate) fn export_projection_image_sql(
         let entity_document = entity_document
             .map(|raw| serde_json::from_str(&raw).map_err(|e| EngineError::Storage(e.to_string())))
             .transpose()?;
-        let index_fields = fireweed_engine::index_fields::decode_index_fields_blob(
-            index_fields_blob.as_deref(),
-        )?;
+        let index_fields =
+            fireweed_engine::index_fields::decode_index_fields_blob(index_fields_blob.as_deref())?;
         let cohort_size = cohort_size.map(u64::try_from).transpose().map_err(|_| {
             EngineError::Storage("negative cohort_size in sqlite projection".into())
         })?;

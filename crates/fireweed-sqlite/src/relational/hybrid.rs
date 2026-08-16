@@ -341,9 +341,10 @@ impl HybridProjectionStore {
             .into_iter()
             .zip(commands)
             .map(|(position, command)| {
-                let encoded_bytes = fireweed_engine::command_codec::encode_command_envelope(&command)
-                    .map_err(|error| EngineError::Storage(error.to_string()))?
-                    .len() as u64;
+                let encoded_bytes =
+                    fireweed_engine::command_codec::encode_command_envelope(&command)
+                        .map_err(|error| EngineError::Storage(error.to_string()))?
+                        .len() as u64;
                 Ok(DeferredCheckpoint {
                     position,
                     command,

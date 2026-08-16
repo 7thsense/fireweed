@@ -241,10 +241,7 @@ async fn native_index_fields_write_typed_index_rows() {
         .push(
             &shard(),
             vec![PushSpec {
-                index_fields: BTreeMap::from([(
-                    "email".into(),
-                    TypedValue::String("n@x".into()),
-                )]),
+                index_fields: BTreeMap::from([("email".into(), TypedValue::String("n@x".into()))]),
                 ..Default::default()
             }],
             ts(0),

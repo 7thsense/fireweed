@@ -20,14 +20,20 @@ mod auth;
 mod byte_admission;
 mod claim_validation;
 mod command;
+/// Native binary durable command-envelope codec (FWC1 frame only).
+pub mod command_codec;
 mod commit;
 mod compose;
 mod control_plane;
 mod density;
+/// Entity document wire: natural JSON on human-readable; opaque JSON blob on native binary.
+mod entity_wire;
 mod epoch;
 mod error;
 mod finalize_validation;
 mod idempotency;
+/// Client-controllable typed index values as native [`TypedValue`]s (no JSON on the log).
+pub mod index_fields;
 mod maintenance;
 mod object_log_segment_safety;
 mod operator;
@@ -38,12 +44,6 @@ pub mod sequenced_metadata;
 mod types;
 /// Compact Base64 wire encoding for durable envelope byte fields (fireweed-659490cc).
 pub mod wire_bytes;
-/// Entity document wire: natural JSON on human-readable; opaque JSON blob on native binary.
-mod entity_wire;
-/// Client-controllable typed index values as native [`TypedValue`]s (no JSON on the log).
-pub mod index_fields;
-/// Native binary durable command-envelope codec (FWC1 frame only).
-pub mod command_codec;
 
 pub use active_scope::{
     ActiveScope, DiscoveryGranularity, project_scopes, resolve_granularity, roll_up_queue_scopes,
@@ -155,10 +155,9 @@ pub use command::{
     RenewLeaseCommand, ReplacePendingCommand, RequestOutcome, ResolvedItemMutation,
     ResolvedItemMutationAction, ResolvedItemValues, ScheduleUpdate, SetGatesCommand, SideRecord,
     UnfenceLeaseCommand, UpdateFieldsBatchCommand, UpdateFieldsCommand, WriteSideRecordsCommand,
-    admit_push_item_indexes,
-    admit_push_items_indexes, build_push_items, command_envelope_change_records,
-    stage_unique_push_keys, unique_index_keys_for_push_item, validate_gate_command,
-    validate_gate_push, validate_request_replay_metadata,
+    admit_push_item_indexes, admit_push_items_indexes, build_push_items,
+    command_envelope_change_records, stage_unique_push_keys, unique_index_keys_for_push_item,
+    validate_gate_command, validate_gate_push, validate_request_replay_metadata,
 };
 pub use commit::{RawCommitFault, RawCommitOutcome, RawCommitRequest};
 pub use error::{CommitRejection, DurableIntegrityStage, EngineError, EngineResult};
@@ -186,9 +185,8 @@ pub use port::{
     PushDisposition, PushPort, PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver,
     ReclaimPort, RecoveryReadPort, RenewLeasePort, RequestIdReplayProbe, ReschedulePort,
     SelectedMutation, SetGatesPort, SideRecordPage, SnapshotRef, SnapshotStore,
-    TerminalEmissionMetrics,
-    TickReport, TimestampComparison, UpdateFieldsPort, UpsertOutcome, UpsertPort,
-    generate_query_lease_token, is_api001_reserved_write_field,
+    TerminalEmissionMetrics, TickReport, TimestampComparison, UpdateFieldsPort, UpsertOutcome,
+    UpsertPort, generate_query_lease_token, is_api001_reserved_write_field,
     validate_api001_reserved_write_fields, validate_distinct_commit_claims,
     validate_instance_fence,
 };

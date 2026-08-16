@@ -28,8 +28,8 @@ use object_log::{
     BlobStore, Durability, FlushConfig, LocalBlobStore, LogEngine, ManifestSequencer,
     MemoryBlobStore, PartitionKey, Sequencer,
 };
-use tokio::sync::{Notify, oneshot};
 use serde::{Deserialize, Serialize};
+use tokio::sync::{Notify, oneshot};
 
 use crate::s3_create_only::S3CreateOnlyPut;
 
@@ -1065,9 +1065,10 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             )
             .await
             .map_err(store_err)?;
-        let base = outcome.base_offset.ok_or_else(|| {
-            EngineError::Storage("sequenced produce missing base_offset".into())
-        })? as u64;
+        let base = outcome
+            .base_offset
+            .ok_or_else(|| EngineError::Storage("sequenced produce missing base_offset".into()))?
+            as u64;
         let positions: Vec<CommandPosition> = (0..commands.len() as u64)
             .map(|i| CommandPosition::new(shard.clone(), expected_epoch, base + i))
             .collect();
@@ -1228,10 +1229,7 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
                     if seq < from_seq {
                         continue;
                     }
-                    entries.push((
-                        CommandPosition::new(shard.clone(), backend_epoch, seq),
-                        env,
-                    ));
+                    entries.push((CommandPosition::new(shard.clone(), backend_epoch, seq), env));
                     if entries.len() >= limit {
                         break;
                     }

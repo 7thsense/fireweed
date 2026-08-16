@@ -457,10 +457,7 @@ pub mod option_instance {
                 } else {
                     struct PairSer<'a>(&'a [u8], u64);
                     impl Serialize for PairSer<'_> {
-                        fn serialize<S2: Serializer>(
-                            &self,
-                            s: S2,
-                        ) -> Result<S2::Ok, S2::Error> {
+                        fn serialize<S2: Serializer>(&self, s: S2) -> Result<S2::Ok, S2::Error> {
                             use serde::ser::SerializeTuple;
                             let mut t = s.serialize_tuple(2)?;
                             t.serialize_element(&BytesSer(self.0))?;

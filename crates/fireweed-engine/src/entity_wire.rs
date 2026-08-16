@@ -35,8 +35,7 @@ pub mod option_entity {
                 if serializer.is_human_readable() {
                     serializer.serialize_some(doc)
                 } else {
-                    let bytes =
-                        serde_json::to_vec(doc).map_err(serde::ser::Error::custom)?;
+                    let bytes = serde_json::to_vec(doc).map_err(serde::ser::Error::custom)?;
                     serializer.serialize_some(&JsonBlob(bytes))
                 }
             }
@@ -79,7 +78,10 @@ pub mod option_entity {
                         fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
                             Ok(v.to_vec())
                         }
-                        fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<Self::Value, E> {
+                        fn visit_byte_buf<E: de::Error>(
+                            self,
+                            v: Vec<u8>,
+                        ) -> Result<Self::Value, E> {
                             Ok(v)
                         }
                         fn visit_seq<A: de::SeqAccess<'de>>(
