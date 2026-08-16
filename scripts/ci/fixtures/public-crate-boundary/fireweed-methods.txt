@@ -32,6 +32,7 @@ live_item
 live_items
 metrics
 metrics_by_query
+mutate_items
 nack
 nack_retry_after
 ownership
@@ -56,6 +57,7 @@ rebuild
 reclaim_expired
 reclaim_expired_at
 release
+reschedule
 renew
 renew_owned
 retry
@@ -64,7 +66,5 @@ set_gates
 snapshot_policy
 side_record
 side_records
-update
-update_fields
 upsert
 verify
