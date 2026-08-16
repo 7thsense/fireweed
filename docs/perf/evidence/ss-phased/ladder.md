@@ -61,6 +61,7 @@ RSS is the second scoreboard. `filesystem--memory` is the O(N) control, not the 
 | utc | sha | N | note | p1 | p2 | p3 | p4 | wall_s | rss_delta_MiB | B/item | proj_MiB |
 |---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
 | 1786847365 | harness | 10000 | `filesystem--memory` control | 16152 | 13586 | 16648 | 2107 | 11.8 | **46.1** | 4834 | — |
-| 1786848162 | harness | 10000 | `filesystem--turso` first baseline (N UpdateFields envelopes) | 112 | **48** | 66 | 82 | 618 | 93.9 | 9845 | 23.6 |
+| 1786848162 | ebd375f3 | 10000 | `filesystem--turso` first baseline (N UpdateFields envelopes) | 112 | **48** | 66 | 82 | 618 | 93.9 | 9845 | 23.6 |
+| 1786850873 | da18e3d7 | 10000 | Turso `UpdateFieldsBatch` + set-based apply | 134 | **77** | 68 | 86 | 502 | 93.7 | 9829 | 23.6 |
 
 Turso at N=10k is **slower and fatter** than memory. RSS is fixed overhead + page cache + WAL, not yet the win (M2 needs N=100k). P2 is the long pole: the Turso `BatchUpdate` port still appends **one `UpdateFields` envelope per item**. Memory uses `UpdateFieldsBatch`. Packed apply on Turso was tried and rejected (`expected sequence 300, got 500`) — Turso apply is ordered; out-of-order waiter apply is illegal.
