@@ -1,27 +1,14 @@
 //! Seventh Sense phased capacity harness.
 //!
-//! Public facade only. Default `SS_N=10000`. Capacity: `SS_N=1000000`.
-//! Workers: 1. No metadata predicate on P4.
-//!
-//! Three cells. Do not mix their numbers.
-//!
-//! * `SS_CELL=objectlog` (default) — filesystem object log × in-memory projection.
-//!   Calibration for the log axis. Cell name: `filesystem--memory`.
-//! * `SS_CELL=objectlog-turso` — **production pair**: filesystem object log
-//!   (same protocol as S3) × Turso projection. `open(StorageConfig)`.
-//!   Cell name: `filesystem--turso`. The point of Turso vs memory is a
-//!   cache-bound working set that can evict pages, not an O(N) resident map.
-//! * `SS_CELL=sqlite` — SQLite *command log* × in-memory projection. Calibration
-//!   only. Not the production deployment. Cell name: `sqlite--memory`.
-//!   `SS_SQLITE_SYNC` applies only to this cell.
-//!
-//! Memory: each phase records `/proc/self/status` VmRSS / VmHWM.
+//! Default cell is the production pair: filesystem object log × Turso
+//! (`filesystem--turso`). No environment variables are required.
 //!
 //! ```text
-//! SS_N=10000 cargo test -p fireweed --test ss_phased_capacity --release -- --nocapture
-//! SS_CELL=objectlog-turso SS_N=100000 SS_PUSH_BATCH=1000 SS_CLAIM_BATCH=1000 SS_EVIDENCE=1 \
-//!   cargo test -p fireweed --test ss_phased_capacity --release -- --nocapture
+//! cargo test -p fireweed --test ss_phased_capacity --release -- --nocapture
 //! ```
+//!
+//! Optional overrides (calibration only): `SS_N`, `SS_CELL=objectlog` (memory
+//! projection control), `SS_CELL=sqlite` (sqlite command-log, not production).
 
 #![cfg(feature = "objectlog")]
 
@@ -132,7 +119,16 @@ enum Cell {
 
 impl Cell {
     fn parse() -> Self {
-        let raw = std::env::var("SS_CELL").unwrap_or_else(|_| "objectlog".into());
+        let raw = std::env::var("SS_CELL").unwrap_or_else(|_| {
+            #[cfg(feature = "turso")]
+            {
+                "objectlog-turso".into()
+            }
+            #[cfg(not(feature = "turso"))]
+            {
+                "objectlog".into()
+            }
+        });
         let sync_set = std::env::var("SS_SQLITE_SYNC").ok();
         match raw.to_ascii_lowercase().as_str() {
             "objectlog" | "filesystem" | "filesystem--memory" => {
@@ -234,7 +230,8 @@ impl Cell {
         match self {
             Self::ObjectLogFilesystemMemory { .. } => env_usize("SS_INFLIGHT", 8).max(1),
             #[cfg(feature = "turso")]
-            Self::ObjectLogFilesystemTurso { .. } => env_usize("SS_INFLIGHT", 8).max(1),
+            // One Turso writer; extra in-flight only queues on the mutex.
+            Self::ObjectLogFilesystemTurso { .. } => env_usize("SS_INFLIGHT", 1).max(1),
             #[cfg(feature = "sqlite")]
             Self::SqliteCommandLogMemory { .. } => env_usize("SS_INFLIGHT", 1).max(1),
         }
@@ -814,17 +811,15 @@ async fn ss_phased_capacity_smoke() {
         }
     }
 
-    if std::env::var("SS_EVIDENCE").ok().as_deref() == Some("1") {
-        write_evidence(
-            &cell,
-            &phases,
-            n,
-            push_batch,
-            claim_batch,
-            mem_before_open,
-            mem_end,
-        );
-    }
+    write_evidence(
+        &cell,
+        &phases,
+        n,
+        push_batch,
+        claim_batch,
+        mem_before_open,
+        mem_end,
+    );
 
     drop(fw);
     cell.cleanup();

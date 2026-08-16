@@ -448,6 +448,8 @@ async fn configure_connection(connection: &Connection, config: &TursoConfig) -> 
         .pragma_update("journal_mode", config.journal_mode.pragma_value())
         .await?;
     connection.pragma_update("synchronous", "NORMAL").await?;
+    // Negative cache_size is KiB. Bound the pager so RSS is a cache, not O(N).
+    connection.pragma_update("cache_size", "-16384").await?;
     connection.busy_timeout(config.busy_timeout)?;
     Ok(())
 }

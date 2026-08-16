@@ -28,14 +28,14 @@ use fireweed_engine::{
     HistoricalProjectionRead, HotProjectionQueryPort, IdGen, InProcessControlPlane,
     InProcessLogStore, IndexQueryPort, InlineOwnedTaskDispatcher, ItemMutationPort,
     ItemMutationRequest, ItemMutationResponse, ItemView, LeaseView, LiveItemView, LogStore,
-    OwnedTask, PendingPage, PendingSummary, ProjectionClaimPlanner, ProjectionLifecyclePlanner,
-    ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner, ProjectionSnapshot, PurgePort,
-    PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics, RawCommitFault,
-    RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
-    ReclaimPort, RenewLeasePort, RenewTarget, SeparateReplayCommit, SeparateReplayCommitter,
-    SeqIdGen, SetGatesPort, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
-    UnifiedAtomicCommit, UnifiedAtomicCommitter, UpdateFieldsBatchCommand, UpdateFieldsPort,
-    UpsertOutcome, UpsertPort,
+    OwnedTask, PendingPage, PendingSummary, PreparedClaim, PreparedFinalize, PreparedPush,
+    ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead,
+    ProjectionReclaimPlanner, ProjectionSnapshot, PurgePort, PushPort, PushSpec, QueueCommand,
+    QueueCounters, QueueKey, QueueMetrics, RawCommitFault, RawCommitOutcome, RawCommitRequest,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort,
+    RenewTarget, SeparateReplayCommit, SeparateReplayCommitter, SeqIdGen, SetGatesPort,
+    SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport, UnifiedAtomicCommit,
+    UnifiedAtomicCommitter, UpdateFieldsBatchCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
 };
 use fireweed_projection::InMemoryProjection;
 use fireweed_turso::{TursoConfig, TursoRelational};
@@ -383,6 +383,53 @@ where
     pub fn projection(&self) -> &Arc<TursoRelational> {
         &self.projection
     }
+
+    async fn dispatch_push(
+        &self,
+        request: AsyncPushRequest,
+    ) -> EngineResult<fireweed_engine::PushBatchOutcome> {
+        self.engine.push(request).await.map_err(map_push)
+    }
+
+    async fn dispatch_claim(&self, request: ClaimRequest) -> EngineResult<Claimed> {
+        self.engine.claim(request).await.map_err(map_claim)
+    }
+
+    async fn dispatch_finalize(
+        &self,
+        shard: &QueueKey,
+        outcomes: Vec<FinalizeOutcome>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<()> {
+        let ids = outcomes
+            .iter()
+            .map(|outcome| outcome.item_id)
+            .collect::<Vec<_>>();
+        let claimed = self.claimed_targets(shard, &ids).await?;
+        let targets = outcomes
+            .into_iter()
+            .zip(claimed)
+            .map(|(outcome, item)| {
+                Ok(FinalizeTarget {
+                    item_id: outcome.item_id,
+                    lease_token: item.lease_token.ok_or(EngineError::StaleLease)?,
+                    item_version: item.item_version,
+                    kind: outcome.kind,
+                    not_before: outcome.not_before,
+                })
+            })
+            .collect::<EngineResult<Vec<_>>>()?;
+        self.engine
+            .finalize(AsyncFinalizeRequest {
+                shard: shard.clone(),
+                targets,
+                now,
+                expected_epoch,
+            })
+            .await
+            .map_err(map_lifecycle)
+    }
 }
 
 impl<S> AtomicTursoBackend<InProcessLogStore<S>>
@@ -539,18 +586,16 @@ macro_rules! impl_turso_product_ports {
                 expected_epoch: Option<u64>,
             ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
                 async move {
-                    let outcome = self
-                        .engine
-                        .push(AsyncPushRequest {
+                    Ok(self
+                        .dispatch_push(AsyncPushRequest {
                             shard: shard.clone(),
                             request_id: None,
                             items,
                             now,
                             expected_epoch,
                         })
-                        .await
-                        .map_err(map_push)?;
-                    Ok(outcome.into_item_ids())
+                        .await?
+                        .into_item_ids())
                 }
             }
             fn push_with_request_id(
@@ -563,16 +608,14 @@ macro_rules! impl_turso_product_ports {
             ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::PushBatchOutcome>> + Send
             {
                 async move {
-                    self.engine
-                        .push(AsyncPushRequest {
-                            shard: shard.clone(),
-                            request_id: Some(request_id),
-                            items,
-                            now,
-                            expected_epoch,
-                        })
-                        .await
-                        .map_err(map_push)
+                    self.dispatch_push(AsyncPushRequest {
+                        shard: shard.clone(),
+                        request_id: Some(request_id),
+                        items,
+                        now,
+                        expected_epoch,
+                    })
+                    .await
                 }
             }
         }
@@ -582,7 +625,7 @@ macro_rules! impl_turso_product_ports {
                 &self,
                 request: ClaimRequest,
             ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
-                async move { self.engine.claim(request).await.map_err(map_claim) }
+                async move { self.dispatch_claim(request).await }
             }
         }
 
@@ -771,33 +814,8 @@ macro_rules! impl_turso_product_ports {
                 expected_epoch: Option<u64>,
             ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
                 async move {
-                    let ids = outcomes
-                        .iter()
-                        .map(|outcome| outcome.item_id)
-                        .collect::<Vec<_>>();
-                    let claimed = self.claimed_targets(shard, &ids).await?;
-                    let targets = outcomes
-                        .into_iter()
-                        .zip(claimed)
-                        .map(|(outcome, item)| {
-                            Ok(FinalizeTarget {
-                                item_id: outcome.item_id,
-                                lease_token: item.lease_token.ok_or(EngineError::StaleLease)?,
-                                item_version: item.item_version,
-                                kind: outcome.kind,
-                                not_before: outcome.not_before,
-                            })
-                        })
-                        .collect::<EngineResult<Vec<_>>>()?;
-                    self.engine
-                        .finalize(AsyncFinalizeRequest {
-                            shard: shard.clone(),
-                            targets,
-                            now,
-                            expected_epoch,
-                        })
+                    self.dispatch_finalize(shard, outcomes, now, expected_epoch)
                         .await
-                        .map_err(map_lifecycle)
                 }
             }
         }
@@ -1219,6 +1237,7 @@ impl_turso_product_ports!(
 struct ObjectLogTursoCommitter {
     log: Arc<ObjectLogEngineStore>,
     projection: Arc<TursoRelational>,
+    apply_turn: Arc<tokio::sync::Notify>,
 }
 
 #[cfg(feature = "objectlog")]
@@ -1244,6 +1263,7 @@ impl SeparateReplayCommitter for ObjectLogTursoCommitter {
     fn commit_replayable(&self, request: Self::Request) -> OwnedTask<Self::Output> {
         let log = Arc::clone(&self.log);
         let projection = Arc::clone(&self.projection);
+        let apply_turn = Arc::clone(&self.apply_turn);
         Box::pin(async move {
             let (shard, commands, expected_epoch, fault) = request.into_parts();
             match fault {
@@ -1252,22 +1272,50 @@ impl SeparateReplayCommitter for ObjectLogTursoCommitter {
                 }
                 RawCommitFault::None | RawCommitFault::AfterAppendBeforeApply => {}
             }
-            let positions = AsyncLogStore::append(
-                log.as_ref(),
-                shard.clone(),
-                commands.clone(),
-                expected_epoch,
-            )
-            .await?;
+            let positions = log
+                .packed_append(shard.clone(), commands.clone(), expected_epoch)
+                .await?;
             if matches!(fault, RawCommitFault::AfterAppendBeforeApply) {
                 return Ok(RawCommitOutcome::appended(positions));
             }
-            // Sole-Turso serving: apply under the same owned-task boundary as Strict.
-            // Deferred async-apply debt for dual-axis products remains out of this facade slice.
+            wait_turso_apply_turn(projection.as_ref(), &shard, &positions, &apply_turn).await?;
+            // Sole-Turso serving: apply in log order. Packed waiters share one PUT but
+            // must not apply out of sequence (replay gap).
             AsyncProjectionStore::apply_live(projection.as_ref(), positions.clone(), commands)
                 .await?;
+            apply_turn.notify_waiters();
             Ok(RawCommitOutcome::applied(positions))
         })
+    }
+}
+
+#[cfg(feature = "objectlog")]
+async fn wait_turso_apply_turn(
+    projection: &TursoRelational,
+    shard: &QueueKey,
+    positions: &[CommandPosition],
+    apply_turn: &tokio::sync::Notify,
+) -> EngineResult<()> {
+    let Some(first) = positions.first() else {
+        return Ok(());
+    };
+    loop {
+        let high_water =
+            AsyncProjectionStore::recovery_high_water(projection, shard.clone()).await?;
+        let expected = high_water
+            .as_ref()
+            .map(|position| position.sequence.saturating_add(1))
+            .unwrap_or(0);
+        if expected == first.sequence {
+            return Ok(());
+        }
+        if expected > first.sequence {
+            return Err(EngineError::Storage(format!(
+                "Turso packed apply skipped sequence: expected {expected}, first {}",
+                first.sequence
+            )));
+        }
+        apply_turn.notified().await;
     }
 }
 
@@ -1324,6 +1372,7 @@ impl DerivedObjectLogTursoBackend {
         let committer = ObjectLogTursoCommitter {
             log: Arc::clone(&log),
             projection: Arc::clone(&projection),
+            apply_turn: Arc::new(tokio::sync::Notify::new()),
         };
         let strategy = SeparateReplayCommit::for_profile(DurabilityClass::EventualApply, committer)
             .map_err(|e| EngineError::Storage(e.to_string()))?;
@@ -1462,6 +1511,64 @@ impl DerivedObjectLogTursoBackend {
     /// Borrow the Turso projection axis (rebuild/read diagnostics).
     pub fn projection(&self) -> &Arc<TursoRelational> {
         &self.projection
+    }
+
+    async fn commit_prepared(&self, request: RawCommitRequest) -> EngineResult<()> {
+        use fireweed_engine::AsyncCommitStrategy;
+        self.engine.commit_strategy().commit(request).await?;
+        Ok(())
+    }
+
+    async fn dispatch_push(
+        &self,
+        request: AsyncPushRequest,
+    ) -> EngineResult<fireweed_engine::PushBatchOutcome> {
+        match self.engine.prepare_push(request).await.map_err(map_push)? {
+            PreparedPush::Replay(item_ids) => {
+                Ok(fireweed_engine::PushBatchOutcome::replayed(item_ids))
+            }
+            PreparedPush::Commit { request, item_ids } => {
+                self.commit_prepared(request).await?;
+                Ok(fireweed_engine::PushBatchOutcome::fresh(item_ids))
+            }
+        }
+    }
+
+    async fn dispatch_claim(&self, request: ClaimRequest) -> EngineResult<Claimed> {
+        match self
+            .engine
+            .prepare_claim(request.clone())
+            .await
+            .map_err(map_claim)?
+        {
+            PreparedClaim::Empty => Ok(Claimed::default()),
+            PreparedClaim::Commit {
+                request: commit,
+                item_ids,
+                cohort_id,
+            } => {
+                self.commit_prepared(commit).await?;
+                self.engine
+                    .render_prepared_claim(request, item_ids, cohort_id)
+                    .await
+                    .map_err(map_claim)
+            }
+        }
+    }
+
+    async fn dispatch_finalize(
+        &self,
+        shard: &QueueKey,
+        outcomes: Vec<FinalizeOutcome>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<()> {
+        let PreparedFinalize { request, .. } = self
+            .engine
+            .prepare_finalize(shard.clone(), outcomes, now, expected_epoch)
+            .await
+            .map_err(map_lifecycle)?;
+        self.commit_prepared(request).await
     }
 
     fn create_queue_impl(

@@ -1,7 +1,7 @@
 # Goal: object-log × Turso capacity with a cache-bound working set
 
-**Status**: active iteration (2026-08-15).  
-**Cell**: `filesystem--turso` via public `open(StorageConfig)` — filesystem object log (same protocol as S3) × Turso ordinary-WAL projection.  
+**Status**: active iteration (2026-08-16). Not yet at T/M gates.  
+**Cell**: `filesystem--turso` via public `open(StorageConfig)` — filesystem object log (same protocol as S3) × Turso ordinary-WAL projection. The SS harness **defaults to this cell**; no env var is required.  
 **Not this program**: sqlite command log; in-memory projection as the production serving store.
 
 In-memory projection is the log-axis calibration cell (`filesystem--memory`). It keeps every live item resident. Turso exists so the serving set can sit on disk and evict pages: **RSS is a cache, not a function of N**.
