@@ -1436,6 +1436,48 @@ struct Api001UpdateRow {
     gate_keys: Option<Vec<String>>,
 }
 
+fn collect_api001_updates(commands: &[CommandEnvelope]) -> Option<Vec<&UpdateFieldsCommand>> {
+    let mut updates = Vec::new();
+    for envelope in commands {
+        match &envelope.command {
+            QueueCommand::UpdateFields(update)
+                if update.api001_batch && update.set_entity_document.is_none() =>
+            {
+                updates.push(update);
+            }
+            QueueCommand::UpdateFieldsBatch(batch)
+                if batch
+                    .updates
+                    .iter()
+                    .all(|update| update.api001_batch && update.set_entity_document.is_none()) =>
+            {
+                updates.extend(batch.updates.iter());
+            }
+            QueueCommand::UpdateFields(_) | QueueCommand::UpdateFieldsBatch(_) => {
+                return None;
+            }
+            _ => {}
+        }
+    }
+    Some(updates)
+}
+
+fn api001_update_lengths_ok(
+    commands: &[CommandEnvelope],
+    updates: &[&UpdateFieldsCommand],
+) -> bool {
+    if commands.len() == updates.len() {
+        return true;
+    }
+    matches!(
+        commands,
+        [CommandEnvelope {
+            command: QueueCommand::UpdateFieldsBatch(batch),
+            ..
+        }] if batch.updates.len() == updates.len()
+    )
+}
+
 /// Apply API-001 updates using a bounded number of set-based statements. The commands have already
 /// passed the engine's batch preflight, but replay still validates the durable row state so a stale
 /// or corrupt log cannot partially mutate the projection.
@@ -1455,7 +1497,7 @@ async fn apply_api001_update_batch(
         .iter()
         .any(|position| position.queue != first_position.queue)
         || positions.len() != commands.len()
-        || commands.len() != updates.len()
+        || !api001_update_lengths_ok(commands, updates)
     {
         return Err(storage(
             "BatchUpdate projection apply crossed queue or length boundaries",
@@ -1495,7 +1537,12 @@ async fn apply_api001_update_batch(
     let groups = groups_for_items(transaction, &tenant, &queue, &ids).await?;
 
     let mut rows = Vec::with_capacity(updates.len());
-    for ((position, envelope), update) in positions.iter().zip(commands).zip(updates) {
+    for (index, update) in updates.iter().enumerate() {
+        let (position, envelope) = if commands.len() == 1 {
+            (&positions[0], &commands[0])
+        } else {
+            (&positions[index], &commands[index])
+        };
         let values = current
             .remove(&update.item_id)
             .ok_or(EngineError::NotFound)?;
@@ -1735,17 +1782,7 @@ async fn apply_owned(
     if positions.len() != commands.len() {
         return Err(storage("positions/commands length mismatch"));
     }
-    let api001_updates = commands
-        .iter()
-        .map(|envelope| match &envelope.command {
-            QueueCommand::UpdateFields(update)
-                if update.api001_batch && update.set_entity_document.is_none() =>
-            {
-                Some(update)
-            }
-            _ => None,
-        })
-        .collect::<Option<Vec<_>>>();
+    let api001_updates = collect_api001_updates(&commands);
     let api001_updates = api001_updates.filter(|updates| !updates.is_empty());
     let mut statement_shape = api001_updates
         .as_ref()
@@ -1840,7 +1877,11 @@ async fn apply_owned(
             return Err(error);
         }
         if api001_updates.is_some() {
-            api001_pending_commands += 1;
+            api001_pending_commands += match &envelope.command {
+                QueueCommand::UpdateFieldsBatch(batch) => batch.updates.len(),
+                QueueCommand::UpdateFields(_) => 1,
+                _ => 0,
+            };
         }
 
         match &envelope.command {
