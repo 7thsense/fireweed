@@ -481,6 +481,40 @@
       "reason": "Immutable published release note with historical Garage claims; bytes frozen as non-current public identity (P17a).",
       "owner_surface": "P17a published garage claim history",
       "removal_condition": "Retain while the corresponding release tags remain part of project history."
+    },
+    {
+      "id": "legacy-postgres-test-url-compat",
+      "class": "historical/audit",
+      "paths": [
+        "crates/fireweed/src/lib.rs"
+      ],
+      "match_pattern": "PQUEUE_PG_TEST_URL",
+      "reason": "Fail-closed live-postgres tests accept the retired env var as a one-token compat alias after FIREWEED_PG_TEST_URL.",
+      "owner_surface": "Live-postgres test URL dual-env reader",
+      "removal_condition": "Remove when the PQUEUE_PG_TEST_URL alias is deleted from postgres_test_url()."
+    },
+    {
+      "id": "microsite-design-historical-identity",
+      "class": "historical/audit",
+      "paths": [
+        "docs/site/DESIGN.md"
+      ],
+      "match_pattern": "(?:pqueue|(?i:queueyard))",
+      "reason": "The public design note names retired identities only to forbid using them as current product names.",
+      "owner_surface": "Public microsite naming guidance",
+      "removal_condition": "Retain while the microsite must keep an explicit never-current identity footnote."
+    },
+    {
+      "id": "storage-remediation-identity-inventory",
+      "class": "negative-test",
+      "paths": [
+        "scripts/ci/inventory-storage-remediation.py",
+        "scripts/ci/storage-remediation-inventory.json"
+      ],
+      "match_pattern": "(?:PQUEUE_PG_TEST_URL|pqueue|(?i:queueyard)|pq)",
+      "reason": "The storage-remediation inventory scanner and its snapshot must spell the retired tokens they classify as intentional lineage or compat.",
+      "owner_surface": "Storage-remediation identity inventory",
+      "removal_condition": "Retain while the inventory classifies these exact lineage/compat residues."
     }
   ]
 }
