@@ -34,7 +34,8 @@ use fireweed_engine::{
     RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
     ReclaimPort, RenewLeasePort, RenewTarget, SeparateReplayCommit, SeparateReplayCommitter,
     SeqIdGen, SetGatesPort, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
-    UnifiedAtomicCommit, UnifiedAtomicCommitter, UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    UnifiedAtomicCommit, UnifiedAtomicCommitter, UpdateFieldsBatchCommand, UpdateFieldsPort,
+    UpsertOutcome, UpsertPort,
 };
 use fireweed_projection::InMemoryProjection;
 use fireweed_turso::{TursoConfig, TursoRelational};
@@ -720,26 +721,29 @@ macro_rules! impl_turso_product_ports {
 
                     let plan =
                         plan_batch_update(&definition, true, request.updates, snapshot);
-                    let envelopes: Vec<CommandEnvelope> = plan
+                    let updates: Vec<_> = plan
                         .commands
                         .into_iter()
-                        .map(|(_idx, update)| CommandEnvelope {
-                            command_id: self.ids.next_command_id(),
-                            request_id: Some(request_id.clone()),
-                            request_fingerprint: Some(fingerprint.0),
-                            request_outcome: None,
-                            item_ids: vec![update.item_id],
-                            command: QueueCommand::UpdateFields(update),
-                            checksum: CommandChecksum(0),
-                            created_at: now,
-                        })
+                        .map(|(_idx, update)| update)
                         .collect();
-
                     let response = fireweed_engine::BatchUpdateResponse {
-                        request_id,
+                        request_id: request_id.clone(),
                         results: plan.outcomes,
                     };
-                    if !envelopes.is_empty() {
+                    if !updates.is_empty() {
+                        let item_ids: Vec<_> = updates.iter().map(|u| u.item_id).collect();
+                        let envelope = CommandEnvelope {
+                            command_id: self.ids.next_command_id(),
+                            request_id: Some(request_id),
+                            request_fingerprint: Some(fingerprint.0),
+                            request_outcome: None,
+                            item_ids,
+                            command: QueueCommand::UpdateFieldsBatch(UpdateFieldsBatchCommand {
+                                updates,
+                            }),
+                            checksum: CommandChecksum(0),
+                            created_at: now,
+                        };
                         let epoch = match expected_epoch {
                             Some(e) => e,
                             None => {
@@ -750,7 +754,7 @@ macro_rules! impl_turso_product_ports {
                         use fireweed_engine::AsyncCommitStrategy;
                         let strategy = self.engine.commit_strategy();
                         strategy
-                            .commit(RawCommitRequest::new(shard, envelopes, epoch))
+                            .commit(RawCommitRequest::new(shard, vec![envelope], epoch))
                             .await?;
                     }
                     Ok(response)
