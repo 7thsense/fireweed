@@ -159,6 +159,35 @@ impl AsyncPushPlan {
     }
 }
 
+/// Push plan after queue-local admission, before the durable append.
+///
+/// Object-log products commit this without holding the admit permit so concurrent
+/// same-shard appends can share one packed PUT. Sqlite-log keeps plan+commit
+/// under the permit via [`AsyncComposedBackend::push`].
+pub enum PreparedPush {
+    Replay(Vec<ItemId>),
+    Commit {
+        request: RawCommitRequest,
+        item_ids: Vec<ItemId>,
+    },
+}
+
+/// Claim plan after queue-local admission, before the durable append.
+pub enum PreparedClaim {
+    Empty,
+    Commit {
+        request: RawCommitRequest,
+        item_ids: Vec<ItemId>,
+        cohort_id: Option<CohortId>,
+    },
+}
+
+/// Finalize plan after queue-local admission, before the durable append.
+pub struct PreparedFinalize {
+    pub request: RawCommitRequest,
+    pub expected_finalize_outcomes: Option<Vec<crate::FinalizeOutcome>>,
+}
+
 /// Construction-injected push preparation capability. It may resolve retained replay or allocate IDs
 /// and build an envelope, but it has no durable commit authority.
 pub trait AsyncPushPlanner: Send + Sync + 'static {
@@ -807,59 +836,97 @@ where
         let planner = Arc::clone(&self.push_planner);
         self.submit_operation(queue.clone(), move || {
             Box::pin(async move {
-                let mut request = request;
-                let original_items = request.items.clone();
-                canonicalize_push_gate_keys(&mut request.items);
-                let definition = planner
-                    .queue_definition(queue.clone())
-                    .await
-                    .map_err(PushExecutionError::BeforeCommit)?;
-                validate_push_definition(&queue, &request, &definition, planner.supports_gates())
-                    .map_err(PushExecutionError::BeforeCommit)?;
-                let fingerprint = request
-                    .request_id
-                    .as_ref()
-                    .map(|_| {
-                        Ok(PushFingerprint {
-                            canonical_sha256: crate::push_specs_fingerprint_sha256(&request.items)?,
-                            legacy_body_hash: crate::compose::push_body_hash(&original_items)?,
-                        })
-                    })
-                    .transpose()
-                    .map_err(PushExecutionError::BeforeCommit)?;
-                let plan = planner
-                    .plan_push(request.clone(), definition.clone(), fingerprint)
-                    .await
-                    .map_err(PushExecutionError::BeforeCommit)?;
-                let (commit, item_ids) = match plan.kind {
-                    AsyncPushPlanKind::Replay(item_ids) => {
-                        validate_push_replay(&request, &item_ids)
-                            .map_err(PushExecutionError::BeforeCommit)?;
-                        return Ok::<crate::PushBatchOutcome, PushExecutionError>(
+                match planned_push(planner, request).await? {
+                    PreparedPush::Replay(item_ids) => {
+                        Ok::<crate::PushBatchOutcome, PushExecutionError>(
                             crate::PushBatchOutcome::replayed(item_ids),
-                        );
+                        )
                     }
-                    AsyncPushPlanKind::Commit { request, item_ids } => (request, item_ids),
-                };
-                validate_push_plan(&request, &definition, fingerprint, &commit, &item_ids)
-                    .map_err(PushExecutionError::BeforeCommit)?;
-                let expected_epoch = commit.expected_epoch();
-                let outcome = strategy
-                    .commit(commit)
-                    .await
-                    .map_err(PushExecutionError::Commit)?;
-                validate_push_commit_outcome(&queue, expected_epoch, &outcome).map_err(
-                    |source| PushExecutionError::AfterCommit {
-                        stage: AsyncPushPostCommitStage::CommitOutcome,
-                        source,
-                    },
-                )?;
-                Ok(crate::PushBatchOutcome::fresh(item_ids))
+                    PreparedPush::Commit { request, item_ids } => {
+                        let expected_epoch = request.expected_epoch();
+                        let outcome = strategy
+                            .commit(request)
+                            .await
+                            .map_err(PushExecutionError::Commit)?;
+                        validate_push_commit_outcome(&queue, expected_epoch, &outcome).map_err(
+                            |source| PushExecutionError::AfterCommit {
+                                stage: AsyncPushPostCommitStage::CommitOutcome,
+                                source,
+                            },
+                        )?;
+                        Ok(crate::PushBatchOutcome::fresh(item_ids))
+                    }
+                }
             })
         })
         .await
         .map_err(AsyncPushError::Submit)?
         .map_err(AsyncPushError::from)
+    }
+
+    /// Plan a push under the queue permit and release it before the caller appends.
+    ///
+    /// Object-log uses this so [`crate::AsyncCommitStrategy::commit`] can pack concurrent
+    /// produces. Do not use on sqlite-log: releasing the permit before commit lets a second
+    /// planner observe pre-apply state.
+    pub async fn prepare_push(
+        &self,
+        request: AsyncPushRequest,
+    ) -> Result<PreparedPush, AsyncPushError> {
+        let planner = Arc::clone(&self.push_planner);
+        self.submit_operation(request.shard.clone(), move || {
+            Box::pin(async move { planned_push(planner, request).await })
+        })
+        .await
+        .map_err(AsyncPushError::Submit)?
+        .map_err(AsyncPushError::from)
+    }
+}
+
+async fn planned_push<U: AsyncPushPlanner>(
+    planner: Arc<U>,
+    mut request: AsyncPushRequest,
+) -> Result<PreparedPush, PushExecutionError> {
+    let queue = request.shard.clone();
+    let original_items = request.items.clone();
+    canonicalize_push_gate_keys(&mut request.items);
+    let definition = planner
+        .queue_definition(queue.clone())
+        .await
+        .map_err(PushExecutionError::BeforeCommit)?;
+    validate_push_definition(&queue, &request, &definition, planner.supports_gates())
+        .map_err(PushExecutionError::BeforeCommit)?;
+    let fingerprint = request
+        .request_id
+        .as_ref()
+        .map(|_| {
+            Ok(PushFingerprint {
+                canonical_sha256: crate::push_specs_fingerprint_sha256(&request.items)?,
+                legacy_body_hash: crate::compose::push_body_hash(&original_items)?,
+            })
+        })
+        .transpose()
+        .map_err(PushExecutionError::BeforeCommit)?;
+    let plan = planner
+        .plan_push(request.clone(), definition.clone(), fingerprint)
+        .await
+        .map_err(PushExecutionError::BeforeCommit)?;
+    match plan.kind {
+        AsyncPushPlanKind::Replay(item_ids) => {
+            validate_push_replay(&request, &item_ids).map_err(PushExecutionError::BeforeCommit)?;
+            Ok(PreparedPush::Replay(item_ids))
+        }
+        AsyncPushPlanKind::Commit {
+            request: commit,
+            item_ids,
+        } => {
+            validate_push_plan(&request, &definition, fingerprint, &commit, &item_ids)
+                .map_err(PushExecutionError::BeforeCommit)?;
+            Ok(PreparedPush::Commit {
+                request: commit,
+                item_ids,
+            })
+        }
     }
 }
 
@@ -1439,53 +1506,41 @@ where
         let strategy = Arc::clone(&self.strategy);
         self.submit_operation(queue.clone(), move || {
             Box::pin(async move {
-                let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id).collect();
-                let claimed = lifecycle
-                    .resolve_lease_targets(shard.clone(), item_ids.clone())
-                    .await
-                    .map_err(LifecycleExecutionError::BeforeCommit)?;
-                if claimed.len() != outcomes.len() {
-                    return Err(LifecycleExecutionError::BeforeCommit(
-                        EngineError::StaleLease,
-                    ));
-                }
-                let targets = outcomes
-                    .into_iter()
-                    .zip(claimed)
-                    .map(|(outcome, item)| {
-                        Ok(FinalizeTarget {
-                            item_id: outcome.item_id,
-                            lease_token: item.lease_token.ok_or(EngineError::StaleLease)?,
-                            item_version: item.item_version,
-                            kind: outcome.kind,
-                            not_before: outcome.not_before,
-                        })
-                    })
-                    .collect::<EngineResult<Vec<_>>>()
-                    .map_err(LifecycleExecutionError::BeforeCommit)?;
-                let request = AsyncFinalizeRequest {
-                    shard,
-                    targets,
-                    now,
-                    expected_epoch,
-                };
-                let plan = lifecycle
-                    .plan_finalize(request.clone())
-                    .await
-                    .map_err(LifecycleExecutionError::BeforeCommit)?;
-                validate_finalize_plan(
-                    &request,
-                    &plan.request,
-                    plan.expected_finalize_outcomes.as_deref(),
-                )
-                .map_err(LifecycleExecutionError::BeforeCommit)?;
-                let epoch = plan.request.expected_epoch();
+                let prepared =
+                    planned_finalize(lifecycle, shard, outcomes, now, expected_epoch).await?;
+                let epoch = prepared.request.expected_epoch();
                 let outcome = strategy
-                    .commit(plan.request)
+                    .commit(prepared.request)
                     .await
                     .map_err(LifecycleExecutionError::Commit)?;
                 validate_lifecycle_commit_outcome(&queue, epoch, &outcome)
                     .map_err(LifecycleExecutionError::AfterCommit)
+            })
+        })
+        .await
+        .map_err(AsyncLifecycleError::Submit)?
+        .map_err(AsyncLifecycleError::from)
+    }
+
+    /// Plan a finalize under the queue permit and release it before the caller appends.
+    ///
+    /// Same sqlite-log restriction as [`Self::prepare_push`].
+    pub async fn prepare_finalize(
+        &self,
+        shard: QueueKey,
+        outcomes: Vec<crate::FinalizeOutcome>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> Result<PreparedFinalize, AsyncLifecycleError> {
+        if outcomes.is_empty() {
+            return Err(AsyncLifecycleError::BeforeCommit(EngineError::Invalid(
+                "finalize item batch must not be empty",
+            )));
+        }
+        let lifecycle = Arc::clone(&self.lifecycle_planner);
+        self.submit_operation(shard.clone(), move || {
+            Box::pin(async move {
+                planned_finalize(lifecycle, shard, outcomes, now, expected_epoch).await
             })
         })
         .await
@@ -1794,87 +1849,205 @@ where
         let planner = Arc::clone(&self.claim_planner);
         self.submit_operation(queue.clone(), move || {
             Box::pin(async move {
-                let definition = planner
-                    .queue_definition(queue.clone())
-                    .await
-                    .map_err(ClaimExecutionError::BeforeCommit)?;
-                if definition.tenant_id != queue.tenant_id || definition.queue_id != queue.queue_id
-                {
-                    return Err(ClaimExecutionError::BeforeCommit(EngineError::Storage(
-                        "async claim planner returned the wrong queue definition".to_string(),
-                    )));
-                }
-                if request.max_items == 0
-                    || request.max_items > definition.max_claim_batch_size as usize
-                {
-                    return Err(ClaimExecutionError::BeforeCommit(EngineError::Invalid(
-                        "claim batch is outside queue limits",
-                    )));
-                }
-                let unit = validate_claim_compatibility(
-                    &request.compatibility,
-                    request.max_items as u64,
-                    &definition,
-                )
-                .map_err(ClaimExecutionError::BeforeCommit)?;
-                let plan = planner
-                    .plan_claim(request.clone(), unit)
-                    .await
-                    .map_err(ClaimExecutionError::BeforeCommit)?;
-                let AsyncClaimPlanKind::Commit {
-                    request: commit,
-                    item_ids,
-                    cohort_id,
-                } = plan.kind
-                else {
-                    return Ok::<Claimed, ClaimExecutionError>(Claimed::default());
-                };
-                validate_claim_plan(&request, &queue, &commit, &item_ids, cohort_id.as_ref())
-                    .map_err(ClaimExecutionError::BeforeCommit)?;
-                let expected_epoch = commit.expected_epoch();
-                let outcome = strategy
-                    .commit(commit)
-                    .await
-                    .map_err(ClaimExecutionError::Commit)?;
-                validate_claim_commit_outcome(&queue, expected_epoch, &outcome).map_err(
-                    |source| ClaimExecutionError::AfterCommit {
-                        stage: AsyncClaimPostCommitStage::CommitOutcome,
-                        source,
-                    },
-                )?;
-                let mut items = planner
-                    .render_claimed(queue.clone(), item_ids.clone())
-                    .await
-                    .map_err(|source| ClaimExecutionError::AfterCommit {
-                        stage: AsyncClaimPostCommitStage::Render,
-                        source,
-                    })?;
-                validate_rendered_claim(&request, &item_ids, &items).map_err(|source| {
-                    ClaimExecutionError::AfterCommit {
-                        stage: AsyncClaimPostCommitStage::RenderValidation,
-                        source,
+                match planned_claim(Arc::clone(&planner), request.clone()).await? {
+                    PreparedClaim::Empty => Ok::<Claimed, ClaimExecutionError>(Claimed::default()),
+                    PreparedClaim::Commit {
+                        request: commit,
+                        item_ids,
+                        cohort_id,
+                    } => {
+                        let expected_epoch = commit.expected_epoch();
+                        let outcome = strategy
+                            .commit(commit)
+                            .await
+                            .map_err(ClaimExecutionError::Commit)?;
+                        validate_claim_commit_outcome(&queue, expected_epoch, &outcome).map_err(
+                            |source| ClaimExecutionError::AfterCommit {
+                                stage: AsyncClaimPostCommitStage::CommitOutcome,
+                                source,
+                            },
+                        )?;
+                        finish_rendered_claim(planner, request, item_ids, cohort_id).await
                     }
-                })?;
-                let mut claimed = Claimed {
-                    items: Vec::new(),
-                    cohort_lease_token: None,
-                    cohort_id: None,
-                };
-                if let Some(cohort_id) = cohort_id {
-                    for item in &mut items {
-                        item.lease_token = None;
-                    }
-                    claimed.cohort_lease_token = Some(request.lease_token);
-                    claimed.cohort_id = Some(cohort_id);
                 }
-                claimed.items = items;
-                Ok(claimed)
             })
         })
         .await
         .map_err(AsyncClaimError::Submit)?
         .map_err(AsyncClaimError::from)
     }
+
+    /// Plan a claim under the queue permit and release it before the caller appends.
+    ///
+    /// Same sqlite-log restriction as [`Self::prepare_push`].
+    pub async fn prepare_claim(
+        &self,
+        request: ClaimRequest,
+    ) -> Result<PreparedClaim, AsyncClaimError> {
+        let planner = Arc::clone(&self.claim_planner);
+        self.submit_operation(request.shard.clone(), move || {
+            Box::pin(async move { planned_claim(planner, request).await })
+        })
+        .await
+        .map_err(AsyncClaimError::Submit)?
+        .map_err(AsyncClaimError::from)
+    }
+
+    pub fn claim_planner(&self) -> Arc<P> {
+        Arc::clone(&self.claim_planner)
+    }
+
+    /// Render a claim after the caller appended the prepared commit (object-log pack path).
+    pub async fn render_prepared_claim(
+        &self,
+        request: ClaimRequest,
+        item_ids: Vec<ItemId>,
+        cohort_id: Option<CohortId>,
+    ) -> Result<Claimed, AsyncClaimError> {
+        finish_rendered_claim(
+            Arc::clone(&self.claim_planner),
+            request,
+            item_ids,
+            cohort_id,
+        )
+        .await
+        .map_err(AsyncClaimError::from)
+    }
+}
+
+async fn planned_finalize<V: AsyncLifecyclePlanner>(
+    lifecycle: Arc<V>,
+    shard: QueueKey,
+    outcomes: Vec<crate::FinalizeOutcome>,
+    now: UtcTimestamp,
+    expected_epoch: Option<u64>,
+) -> Result<PreparedFinalize, LifecycleExecutionError> {
+    let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id).collect();
+    let claimed = lifecycle
+        .resolve_lease_targets(shard.clone(), item_ids.clone())
+        .await
+        .map_err(LifecycleExecutionError::BeforeCommit)?;
+    if claimed.len() != outcomes.len() {
+        return Err(LifecycleExecutionError::BeforeCommit(
+            EngineError::StaleLease,
+        ));
+    }
+    let targets = outcomes
+        .into_iter()
+        .zip(claimed)
+        .map(|(outcome, item)| {
+            Ok(FinalizeTarget {
+                item_id: outcome.item_id,
+                lease_token: item.lease_token.ok_or(EngineError::StaleLease)?,
+                item_version: item.item_version,
+                kind: outcome.kind,
+                not_before: outcome.not_before,
+            })
+        })
+        .collect::<EngineResult<Vec<_>>>()
+        .map_err(LifecycleExecutionError::BeforeCommit)?;
+    let request = AsyncFinalizeRequest {
+        shard,
+        targets,
+        now,
+        expected_epoch,
+    };
+    let plan = lifecycle
+        .plan_finalize(request.clone())
+        .await
+        .map_err(LifecycleExecutionError::BeforeCommit)?;
+    validate_finalize_plan(
+        &request,
+        &plan.request,
+        plan.expected_finalize_outcomes.as_deref(),
+    )
+    .map_err(LifecycleExecutionError::BeforeCommit)?;
+    Ok(PreparedFinalize {
+        request: plan.request,
+        expected_finalize_outcomes: plan.expected_finalize_outcomes,
+    })
+}
+
+async fn planned_claim<P: AsyncClaimPlanner>(
+    planner: Arc<P>,
+    request: ClaimRequest,
+) -> Result<PreparedClaim, ClaimExecutionError> {
+    let queue = request.shard.clone();
+    let definition = planner
+        .queue_definition(queue.clone())
+        .await
+        .map_err(ClaimExecutionError::BeforeCommit)?;
+    if definition.tenant_id != queue.tenant_id || definition.queue_id != queue.queue_id {
+        return Err(ClaimExecutionError::BeforeCommit(EngineError::Storage(
+            "async claim planner returned the wrong queue definition".to_string(),
+        )));
+    }
+    if request.max_items == 0 || request.max_items > definition.max_claim_batch_size as usize {
+        return Err(ClaimExecutionError::BeforeCommit(EngineError::Invalid(
+            "claim batch is outside queue limits",
+        )));
+    }
+    let unit = validate_claim_compatibility(
+        &request.compatibility,
+        request.max_items as u64,
+        &definition,
+    )
+    .map_err(ClaimExecutionError::BeforeCommit)?;
+    let plan = planner
+        .plan_claim(request.clone(), unit)
+        .await
+        .map_err(ClaimExecutionError::BeforeCommit)?;
+    let AsyncClaimPlanKind::Commit {
+        request: commit,
+        item_ids,
+        cohort_id,
+    } = plan.kind
+    else {
+        return Ok(PreparedClaim::Empty);
+    };
+    validate_claim_plan(&request, &queue, &commit, &item_ids, cohort_id.as_ref())
+        .map_err(ClaimExecutionError::BeforeCommit)?;
+    Ok(PreparedClaim::Commit {
+        request: commit,
+        item_ids,
+        cohort_id,
+    })
+}
+
+async fn finish_rendered_claim<P: AsyncClaimPlanner>(
+    planner: Arc<P>,
+    request: ClaimRequest,
+    item_ids: Vec<ItemId>,
+    cohort_id: Option<CohortId>,
+) -> Result<Claimed, ClaimExecutionError> {
+    let queue = request.shard.clone();
+    let mut items = planner
+        .render_claimed(queue, item_ids.clone())
+        .await
+        .map_err(|source| ClaimExecutionError::AfterCommit {
+            stage: AsyncClaimPostCommitStage::Render,
+            source,
+        })?;
+    validate_rendered_claim(&request, &item_ids, &items).map_err(|source| {
+        ClaimExecutionError::AfterCommit {
+            stage: AsyncClaimPostCommitStage::RenderValidation,
+            source,
+        }
+    })?;
+    let mut claimed = Claimed {
+        items: Vec::new(),
+        cohort_lease_token: None,
+        cohort_id: None,
+    };
+    if let Some(cohort_id) = cohort_id {
+        for item in &mut items {
+            item.lease_token = None;
+        }
+        claimed.cohort_lease_token = Some(request.lease_token);
+        claimed.cohort_id = Some(cohort_id);
+    }
+    claimed.items = items;
+    Ok(claimed)
 }
 
 enum ClaimExecutionError {

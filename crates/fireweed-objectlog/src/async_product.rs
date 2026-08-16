@@ -23,11 +23,12 @@ use fireweed_engine::{
     Backend, ClaimPort, ClaimRef, ClaimRequest, Claimed, CommandEnvelope, CommandPage,
     CommandPosition, CommitTransitionEntry, ControlPlane, ControlPlaneStore, CreateQueueOutcome,
     DurabilityClass, EngineError, EngineResult, FinalizeKind, FinalizeOutcome, FinalizePort, IdGen,
-    InProcessControlPlane, LogRead, OwnedTask, ProjectionClaimPlanner, ProjectionLifecyclePlanner,
-    ProjectionPushPlanner, ProjectionRead, ProjectionStore, PurgePort, PushPort, PushSpec,
-    QueueCommand, QueueCounters, QueueKey, RawCommitOutcome, RawCommitRequest, ReassignLeasePort,
-    ReclaimDriver, ReclaimPort, RenewLeasePort, RequestIdReplayProbe, SeparateReplayCommit,
-    SeparateReplayCommitter, SideRecordPage, TickReport, UpsertOutcome, UpsertPort,
+    InProcessControlPlane, LogRead, OwnedTask, PreparedClaim, PreparedFinalize, PreparedPush,
+    ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead,
+    ProjectionStore, PurgePort, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey,
+    RawCommitOutcome, RawCommitRequest, ReassignLeasePort, ReclaimDriver, ReclaimPort,
+    RenewLeasePort, RequestIdReplayProbe, SeparateReplayCommit, SeparateReplayCommitter,
+    SideRecordPage, TickReport, UpsertOutcome, UpsertPort,
 };
 use fireweed_projection::{AsyncInMemoryProjection, InMemoryProjection};
 use object_log::FlushConfig;
@@ -117,19 +118,18 @@ impl SeparateReplayCommitter for ObjectLogEngineProjectionCommitter {
                 Some(coordinator) => Some(coordinator.reserve(shard.clone(), &commands).await?),
                 None => None,
             };
-            let positions =
-                match AsyncLogStore::append(log.as_ref(), shard, commands.clone(), expected_epoch)
-                    .await
-                {
-                    Ok(positions) => positions,
-                    Err(error) => {
-                        if let (Some(coordinator), Some(reservation)) = (&async_apply, reservation)
-                        {
-                            coordinator.cancel(reservation).await;
-                        }
-                        return Err(error);
+            let positions = match log
+                .packed_append(shard.clone(), commands.clone(), expected_epoch)
+                .await
+            {
+                Ok(positions) => positions,
+                Err(error) => {
+                    if let (Some(coordinator), Some(reservation)) = (&async_apply, reservation) {
+                        coordinator.cancel(reservation).await;
                     }
-                };
+                    return Err(error);
+                }
+            };
             if matches!(
                 fault,
                 fireweed_engine::RawCommitFault::AfterAppendBeforeApply
@@ -416,7 +416,7 @@ impl AsyncObjectLogMemoryBackend {
                 replay_log_into_projection(log.as_ref(), projection.as_ref(), &shard, false)
                     .await?;
             if let Some(coordinator) = &async_apply {
-                replay_log_into_projection(
+                let selected = replay_log_into_projection(
                     log.as_ref(),
                     coordinator.projection().as_ref(),
                     &shard,
@@ -424,10 +424,7 @@ impl AsyncObjectLogMemoryBackend {
                 )
                 .await?;
                 coordinator
-                    .seed_high_water(
-                        shard.clone(),
-                        AsyncLogStore::high_water(log.as_ref(), shard.clone()).await?,
-                    )
+                    .seed_high_water(shard.clone(), selected.last_applied)
                     .await;
             }
             recovery_stats.insert(shard.clone(), stats);
@@ -489,6 +486,73 @@ impl AsyncObjectLogMemoryBackend {
     ) -> EngineResult<T> {
         self.ensure_async_projection_healthy(shard)?;
         self.projection.with_store(query)
+    }
+
+    /// Plan under the admit permit, then packed-append without it so concurrent
+    /// push/claim/finalize on the same shard share one object PUT.
+    async fn pack_push(
+        &self,
+        request: AsyncPushRequest,
+    ) -> EngineResult<fireweed_engine::PushBatchOutcome> {
+        self.ensure_async_projection_healthy(&request.shard)?;
+        match self
+            .engine
+            .prepare_push(request)
+            .await
+            .map_err(Self::map_push)?
+        {
+            PreparedPush::Replay(item_ids) => {
+                Ok(fireweed_engine::PushBatchOutcome::replayed(item_ids))
+            }
+            PreparedPush::Commit { request, item_ids } => {
+                self.commit_prepared(request).await?;
+                Ok(fireweed_engine::PushBatchOutcome::fresh(item_ids))
+            }
+        }
+    }
+
+    async fn pack_claim(&self, request: ClaimRequest) -> EngineResult<Claimed> {
+        self.ensure_async_projection_healthy(&request.shard)?;
+        match self
+            .engine
+            .prepare_claim(request.clone())
+            .await
+            .map_err(Self::map_claim)?
+        {
+            PreparedClaim::Empty => Ok(Claimed::default()),
+            PreparedClaim::Commit {
+                request: commit,
+                item_ids,
+                cohort_id,
+            } => {
+                self.commit_prepared(commit).await?;
+                self.engine
+                    .render_prepared_claim(request, item_ids, cohort_id)
+                    .await
+                    .map_err(Self::map_claim)
+            }
+        }
+    }
+
+    async fn pack_finalize(
+        &self,
+        shard: QueueKey,
+        outcomes: Vec<FinalizeOutcome>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<()> {
+        self.ensure_async_projection_healthy(&shard)?;
+        let PreparedFinalize { request, .. } = self
+            .engine
+            .prepare_finalize(shard, outcomes, now, expected_epoch)
+            .await
+            .map_err(Self::map_lifecycle)?;
+        self.commit_prepared(request).await
+    }
+
+    async fn commit_prepared(&self, request: RawCommitRequest) -> EngineResult<()> {
+        self.engine.commit_strategy().commit(request).await?;
+        Ok(())
     }
 
     async fn submit_envelopes(
@@ -623,7 +687,7 @@ impl ControlPlaneStore for AsyncObjectLogMemoryBackend {
                 )
                 .await?;
                 if let Some(coordinator) = &self.async_apply {
-                    replay_log_into_projection(
+                    let selected = replay_log_into_projection(
                         self.log.as_ref(),
                         coordinator.projection().as_ref(),
                         &shard,
@@ -631,10 +695,7 @@ impl ControlPlaneStore for AsyncObjectLogMemoryBackend {
                     )
                     .await?;
                     coordinator
-                        .seed_high_water(
-                            shard.clone(),
-                            AsyncLogStore::high_water(self.log.as_ref(), shard.clone()).await?,
-                        )
+                        .seed_high_water(shard.clone(), selected.last_applied)
                         .await;
                 }
                 self.projection.with_store(|projection| {
@@ -712,19 +773,16 @@ impl PushPort for AsyncObjectLogMemoryBackend {
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         async move {
-            self.ensure_async_projection_healthy(shard)?;
-            let outcome = self
-                .engine
-                .push(AsyncPushRequest {
+            Ok(self
+                .pack_push(AsyncPushRequest {
                     shard: shard.clone(),
                     request_id: None,
                     items,
                     now,
                     expected_epoch,
                 })
-                .await
-                .map_err(Self::map_push)?;
-            Ok(outcome.into_item_ids())
+                .await?
+                .into_item_ids())
         }
     }
 
@@ -738,17 +796,14 @@ impl PushPort for AsyncObjectLogMemoryBackend {
     ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::PushBatchOutcome>> + Send
     {
         async move {
-            self.ensure_async_projection_healthy(shard)?;
-            self.engine
-                .push(AsyncPushRequest {
-                    shard: shard.clone(),
-                    request_id: Some(request_id),
-                    items,
-                    now,
-                    expected_epoch,
-                })
-                .await
-                .map_err(Self::map_push)
+            self.pack_push(AsyncPushRequest {
+                shard: shard.clone(),
+                request_id: Some(request_id),
+                items,
+                now,
+                expected_epoch,
+            })
+            .await
         }
     }
 }
@@ -758,10 +813,7 @@ impl ClaimPort for AsyncObjectLogMemoryBackend {
         &self,
         request: ClaimRequest,
     ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
-        async move {
-            self.ensure_async_projection_healthy(&request.shard)?;
-            self.engine.claim(request).await.map_err(Self::map_claim)
-        }
+        async move { self.pack_claim(request).await }
     }
 }
 
@@ -773,13 +825,9 @@ impl FinalizePort for AsyncObjectLogMemoryBackend {
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
-        // fireweed-c8e0a7a5 / fireweed-2be744bd: resolve leases under the same queue permit as plan+commit.
         async move {
-            self.ensure_async_projection_healthy(shard)?;
-            self.engine
-                .finalize_outcomes(shard.clone(), outcomes, now, expected_epoch)
+            self.pack_finalize(shard.clone(), outcomes, now, expected_epoch)
                 .await
-                .map_err(Self::map_lifecycle)
         }
     }
 }

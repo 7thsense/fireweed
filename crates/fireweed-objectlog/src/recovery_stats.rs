@@ -56,6 +56,8 @@ pub struct RecoveryStats {
     pub recovery_peak_cursor_bytes_buffered: u64,
     /// Authority index traversal stayed within bounded budgets.
     pub bounded_authority_index: bool,
+    /// Last command position applied during this replay, if any.
+    pub last_applied: Option<CommandPosition>,
 }
 
 impl Default for RecoveryStats {
@@ -80,6 +82,7 @@ impl Default for RecoveryStats {
             recovery_peak_index_node_bytes_buffered: 0,
             recovery_peak_cursor_bytes_buffered: 0,
             bounded_authority_index: true,
+            last_applied: None,
         }
     }
 }
@@ -157,6 +160,7 @@ where
 
         tail_replayed = tail_replayed.saturating_add(page_len);
         if let Some((pos, _)) = page.entries.last() {
+            stats.last_applied = Some(pos.clone());
             record_replay_progress(&mut stats.replay_progress_samples, pos.sequence);
             stats.recovery_peak_cursor_bytes_buffered = stats
                 .recovery_peak_cursor_bytes_buffered
