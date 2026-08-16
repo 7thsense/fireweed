@@ -3,18 +3,23 @@
 //! Public facade only. Default `SS_N=10000`. Capacity: `SS_N=1000000`.
 //! Workers: 1. No metadata predicate on P4.
 //!
-//! Two log axes. Do not mix their numbers.
+//! Three cells. Do not mix their numbers.
 //!
-//! * `SS_CELL=objectlog` (default) — production log axis: filesystem object log
-//!   (same protocol as S3) × in-memory projection. `open_objectlog`.
-//!   Cell name: `filesystem--memory`.
+//! * `SS_CELL=objectlog` (default) — filesystem object log × in-memory projection.
+//!   Calibration for the log axis. Cell name: `filesystem--memory`.
+//! * `SS_CELL=objectlog-turso` — **production pair**: filesystem object log
+//!   (same protocol as S3) × Turso projection. `open(StorageConfig)`.
+//!   Cell name: `filesystem--turso`. The point of Turso vs memory is a
+//!   cache-bound working set that can evict pages, not an O(N) resident map.
 //! * `SS_CELL=sqlite` — SQLite *command log* × in-memory projection. Calibration
 //!   only. Not the production deployment. Cell name: `sqlite--memory`.
 //!   `SS_SQLITE_SYNC` applies only to this cell.
 //!
+//! Memory: each phase records `/proc/self/status` VmRSS / VmHWM.
+//!
 //! ```text
 //! SS_N=10000 cargo test -p fireweed --test ss_phased_capacity --release -- --nocapture
-//! SS_CELL=objectlog SS_N=1000000 SS_PUSH_BATCH=1000 SS_CLAIM_BATCH=1000 SS_EVIDENCE=1 \
+//! SS_CELL=objectlog-turso SS_N=100000 SS_PUSH_BATCH=1000 SS_CLAIM_BATCH=1000 SS_EVIDENCE=1 \
 //!   cargo test -p fireweed --test ss_phased_capacity --release -- --nocapture
 //! ```
 
@@ -38,6 +43,37 @@ fn env_usize(name: &str, default: usize) -> usize {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(default)
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct MemSample {
+    rss_bytes: u64,
+    hwm_bytes: u64,
+}
+
+fn read_mem() -> MemSample {
+    let Ok(text) = std::fs::read_to_string("/proc/self/status") else {
+        return MemSample::default();
+    };
+    let mut rss = 0u64;
+    let mut hwm = 0u64;
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(key) = parts.next() else { continue };
+        let Some(value) = parts.next().and_then(|v| v.parse::<u64>().ok()) else {
+            continue;
+        };
+        // /proc values are KiB.
+        match key {
+            "VmRSS:" => rss = value.saturating_mul(1024),
+            "VmHWM:" => hwm = value.saturating_mul(1024),
+            _ => {}
+        }
+    }
+    MemSample {
+        rss_bytes: rss,
+        hwm_bytes: hwm,
+    }
 }
 
 fn count_tree(root: &std::path::Path) -> (u64, u64) {
@@ -79,10 +115,16 @@ fn unique_suffix() -> String {
     )
 }
 
-/// Production-shaped cell vs sqlite-command-log calibration. These are not the same log.
+/// Production-shaped cells vs sqlite-command-log calibration. These are not the same log.
 enum Cell {
-    /// Filesystem object log (S3 protocol) × memory projection.
+    /// Filesystem object log (S3 protocol) × memory projection. Log-axis calibration.
     ObjectLogFilesystemMemory { root: PathBuf },
+    /// Filesystem object log × Turso projection. Production pair.
+    #[cfg(feature = "turso")]
+    ObjectLogFilesystemTurso {
+        log_root: PathBuf,
+        projection_path: PathBuf,
+    },
     /// SQLite command log × memory projection. Not production.
     #[cfg(feature = "sqlite")]
     SqliteCommandLogMemory { path: PathBuf, sync: SqliteLogSync },
@@ -104,6 +146,27 @@ impl Cell {
                 let _ = std::fs::remove_dir_all(&root);
                 std::fs::create_dir_all(&root).expect("object-log root");
                 Self::ObjectLogFilesystemMemory { root }
+            }
+            "objectlog-turso" | "filesystem--turso" | "turso" => {
+                #[cfg(feature = "turso")]
+                {
+                    if let Some(sync) = sync_set {
+                        panic!(
+                            "SS_SQLITE_SYNC={sync} is a sqlite-command-log knob; it does not apply \
+                             to filesystem--turso. Unset it."
+                        );
+                    }
+                    let root =
+                        parent_dir().join(format!("fireweed-ss-phased-olt-{}", unique_suffix()));
+                    let _ = std::fs::remove_dir_all(&root);
+                    std::fs::create_dir_all(&root).expect("object-log+turso root");
+                    return Self::ObjectLogFilesystemTurso {
+                        log_root: root.join("log"),
+                        projection_path: root.join("projection.db"),
+                    };
+                }
+                #[cfg(not(feature = "turso"))]
+                panic!("SS_CELL=objectlog-turso requires the turso cargo feature (default-on)");
             }
             "sqlite" | "sqlite--memory" | "sqlite-log" => {
                 #[cfg(feature = "sqlite")]
@@ -130,8 +193,9 @@ impl Cell {
                 );
             }
             other => panic!(
-                "SS_CELL must be objectlog (production log axis) or sqlite \
-                 (sqlite command-log calibration), got {other:?}"
+                "SS_CELL must be objectlog (filesystem--memory), objectlog-turso \
+                 (filesystem--turso, production pair), or sqlite (command-log calibration), \
+                 got {other:?}"
             ),
         }
     }
@@ -139,6 +203,8 @@ impl Cell {
     fn cell_name(&self) -> &'static str {
         match self {
             Self::ObjectLogFilesystemMemory { .. } => "filesystem--memory",
+            #[cfg(feature = "turso")]
+            Self::ObjectLogFilesystemTurso { .. } => "filesystem--turso",
             #[cfg(feature = "sqlite")]
             Self::SqliteCommandLogMemory { .. } => "sqlite--memory",
         }
@@ -147,8 +213,30 @@ impl Cell {
     fn log_axis(&self) -> &'static str {
         match self {
             Self::ObjectLogFilesystemMemory { .. } => "filesystem",
+            #[cfg(feature = "turso")]
+            Self::ObjectLogFilesystemTurso { .. } => "filesystem",
             #[cfg(feature = "sqlite")]
             Self::SqliteCommandLogMemory { .. } => "sqlite",
+        }
+    }
+
+    fn projection_axis(&self) -> &'static str {
+        match self {
+            Self::ObjectLogFilesystemMemory { .. } => "memory",
+            #[cfg(feature = "turso")]
+            Self::ObjectLogFilesystemTurso { .. } => "turso",
+            #[cfg(feature = "sqlite")]
+            Self::SqliteCommandLogMemory { .. } => "memory",
+        }
+    }
+
+    fn inflight(&self) -> usize {
+        match self {
+            Self::ObjectLogFilesystemMemory { .. } => env_usize("SS_INFLIGHT", 8).max(1),
+            #[cfg(feature = "turso")]
+            Self::ObjectLogFilesystemTurso { .. } => env_usize("SS_INFLIGHT", 8).max(1),
+            #[cfg(feature = "sqlite")]
+            Self::SqliteCommandLogMemory { .. } => env_usize("SS_INFLIGHT", 1).max(1),
         }
     }
 
@@ -156,6 +244,36 @@ impl Cell {
         match self {
             Self::ObjectLogFilesystemMemory { root } => {
                 open_objectlog(root, clock).expect("open_objectlog")
+            }
+            #[cfg(feature = "turso")]
+            Self::ObjectLogFilesystemTurso {
+                log_root,
+                projection_path,
+            } => {
+                std::fs::create_dir_all(log_root).expect("turso log root");
+                open(
+                    StorageConfig {
+                        log: LogConfig::Filesystem {
+                            root: log_root.clone(),
+                        },
+                        projection: ProjectionStoreConfig::Turso {
+                            path: projection_path.clone(),
+                        },
+                        control_plane: None,
+                        authority: None,
+                        response_barrier: ResponseBarrier::Strict,
+                        async_projection: None,
+                        sqlite_projection_deferred_flush_chunk: None,
+                        segments: SegmentConfig {
+                            target_bytes: 256 * 1024,
+                            max_latency_ms: 50,
+                        },
+                        namespace: "ss-phased".to_owned(),
+                        recovery: RecoveryPolicy::default(),
+                    },
+                    clock,
+                )
+                .expect("open filesystem--turso")
             }
             #[cfg(feature = "sqlite")]
             Self::SqliteCommandLogMemory { path, sync } => {
@@ -168,9 +286,21 @@ impl Cell {
         match self {
             Self::ObjectLogFilesystemMemory { root } => {
                 format!(
-                    "cell=filesystem--memory log_axis=filesystem (object-log, production) \
-                     projection=memory root={}",
+                    "cell=filesystem--memory log_axis=filesystem (object-log) \
+                     projection=memory (O(N) resident) root={}",
                     root.display()
+                )
+            }
+            #[cfg(feature = "turso")]
+            Self::ObjectLogFilesystemTurso {
+                log_root,
+                projection_path,
+            } => {
+                format!(
+                    "cell=filesystem--turso log_axis=filesystem (object-log, production) \
+                     projection=turso (cache-bound, swappable) log={} proj={}",
+                    log_root.display(),
+                    projection_path.display()
                 )
             }
             #[cfg(feature = "sqlite")]
@@ -189,12 +319,54 @@ impl Cell {
             Self::ObjectLogFilesystemMemory { root } => {
                 let _ = std::fs::remove_dir_all(root);
             }
+            #[cfg(feature = "turso")]
+            Self::ObjectLogFilesystemTurso {
+                log_root,
+                projection_path,
+            } => {
+                let _ = std::fs::remove_dir_all(log_root);
+                let _ = std::fs::remove_file(projection_path);
+                let _ = std::fs::remove_file(format!("{}-wal", projection_path.display()));
+                let _ = std::fs::remove_file(format!("{}-shm", projection_path.display()));
+            }
             #[cfg(feature = "sqlite")]
             Self::SqliteCommandLogMemory { path, .. } => {
                 let _ = std::fs::remove_file(path);
                 let _ = std::fs::remove_file(format!("{}-wal", path.display()));
                 let _ = std::fs::remove_file(format!("{}-shm", path.display()));
             }
+        }
+    }
+
+    fn log_root(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::ObjectLogFilesystemMemory { root } => Some(root),
+            #[cfg(feature = "turso")]
+            Self::ObjectLogFilesystemTurso { log_root, .. } => Some(log_root),
+            #[cfg(feature = "sqlite")]
+            Self::SqliteCommandLogMemory { .. } => None,
+        }
+    }
+
+    fn projection_bytes(&self) -> u64 {
+        match self {
+            #[cfg(feature = "turso")]
+            Self::ObjectLogFilesystemTurso {
+                projection_path, ..
+            } => {
+                let mut n = 0u64;
+                for p in [
+                    projection_path.clone(),
+                    PathBuf::from(format!("{}-wal", projection_path.display())),
+                    PathBuf::from(format!("{}-shm", projection_path.display())),
+                ] {
+                    if let Ok(meta) = std::fs::metadata(&p) {
+                        n = n.saturating_add(meta.len());
+                    }
+                }
+                n
+            }
+            _ => 0,
         }
     }
 }
@@ -297,13 +469,9 @@ async fn ss_phased_capacity_smoke() {
 
     let cell = Cell::parse();
     let clock = Arc::new(SystemClock);
-    let inflight = match &cell {
-        // Concurrent BatchUpdates share one packed object PUT (ObjectLogPacker).
-        Cell::ObjectLogFilesystemMemory { .. } => env_usize("SS_INFLIGHT", 8).max(1),
-        #[cfg(feature = "sqlite")]
-        Cell::SqliteCommandLogMemory { .. } => env_usize("SS_INFLIGHT", 1).max(1),
-    };
+    let inflight = cell.inflight();
     eprintln!("{} inflight={inflight}", cell.describe());
+    let mem_before_open = read_mem();
     let fw = Arc::new(cell.open(clock));
 
     let warmup_def = qdef("t-ss-phased", "q-warmup", push_batch, claim_batch);
@@ -589,7 +757,8 @@ async fn ss_phased_capacity_smoke() {
     assert_eq!(metrics.complete, n as u64, "complete count");
 
     let phases = [p1, p2, p3, p4];
-    if let Cell::ObjectLogFilesystemMemory { root } = &cell {
+    let mem_end = read_mem();
+    if let Some(root) = cell.log_root() {
         let (objects, bytes) = count_tree(root);
         eprintln!(
             "object_log_tree objects={objects} bytes={bytes} ({:.1} MiB) bytes/object={:.0}",
@@ -601,10 +770,28 @@ async fn ss_phased_capacity_smoke() {
             }
         );
     }
+    let proj_bytes = cell.projection_bytes();
+    if proj_bytes > 0 {
+        eprintln!(
+            "turso_projection_bytes={} ({:.1} MiB)",
+            proj_bytes,
+            proj_bytes as f64 / (1024.0 * 1024.0)
+        );
+    }
     eprintln!(
-        "=== ss_phased_capacity cell={} log_axis={} inflight={inflight} N={n} push={push_batch} claim={claim_batch} ===",
+        "memory before_open rss={:.1} MiB hwm={:.1} MiB | after_run rss={:.1} MiB hwm={:.1} MiB | delta_rss={:.1} MiB ({:.0} B/item)",
+        mem_before_open.rss_bytes as f64 / (1024.0 * 1024.0),
+        mem_before_open.hwm_bytes as f64 / (1024.0 * 1024.0),
+        mem_end.rss_bytes as f64 / (1024.0 * 1024.0),
+        mem_end.hwm_bytes as f64 / (1024.0 * 1024.0),
+        mem_end.rss_bytes.saturating_sub(mem_before_open.rss_bytes) as f64 / (1024.0 * 1024.0),
+        mem_end.rss_bytes.saturating_sub(mem_before_open.rss_bytes) as f64 / n.max(1) as f64
+    );
+    eprintln!(
+        "=== ss_phased_capacity cell={} log_axis={} projection={} inflight={inflight} N={n} push={push_batch} claim={claim_batch} ===",
         cell.cell_name(),
-        cell.log_axis()
+        cell.log_axis(),
+        cell.projection_axis()
     );
     eprintln!("phase\titems\twall_s\titems_per_s\tmutations_per_s");
     for p in &phases {
@@ -628,7 +815,15 @@ async fn ss_phased_capacity_smoke() {
     }
 
     if std::env::var("SS_EVIDENCE").ok().as_deref() == Some("1") {
-        write_evidence(&cell, &phases, n, push_batch, claim_batch);
+        write_evidence(
+            &cell,
+            &phases,
+            n,
+            push_batch,
+            claim_batch,
+            mem_before_open,
+            mem_end,
+        );
     }
 
     drop(fw);
@@ -641,25 +836,47 @@ fn write_evidence(
     n: usize,
     push_batch: usize,
     claim_batch: usize,
+    mem_before_open: MemSample,
+    mem_end: MemSample,
 ) {
     let utc = chrono_like_utc();
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/perf/evidence/ss-phased")
         .join(&utc);
     let _ = std::fs::create_dir_all(&dir);
-    let mut json = String::from("{\n  \"schema\": \"ss-phased-summary/v2\",\n");
+    let mut json = String::from("{\n  \"schema\": \"ss-phased-summary/v3\",\n");
     json.push_str(&format!("  \"utc\": \"{utc}\",\n"));
     json.push_str(&format!("  \"cell\": \"{}\",\n", cell.cell_name()));
     json.push_str(&format!("  \"log_axis\": \"{}\",\n", cell.log_axis()));
-    json.push_str("  \"projection_axis\": \"memory\",\n");
-    json.push_str("  \"workers\": 1,\n");
     json.push_str(&format!(
-        "  \"inflight\": {},\n",
-        match cell {
-            Cell::ObjectLogFilesystemMemory { .. } => env_usize("SS_INFLIGHT", 8).max(1),
-            #[cfg(feature = "sqlite")]
-            Cell::SqliteCommandLogMemory { .. } => env_usize("SS_INFLIGHT", 1).max(1),
-        }
+        "  \"projection_axis\": \"{}\",\n",
+        cell.projection_axis()
+    ));
+    json.push_str("  \"workers\": 1,\n");
+    json.push_str(&format!("  \"inflight\": {},\n", cell.inflight()));
+    json.push_str(&format!(
+        "  \"rss_before_open_bytes\": {},\n",
+        mem_before_open.rss_bytes
+    ));
+    json.push_str(&format!(
+        "  \"hwm_before_open_bytes\": {},\n",
+        mem_before_open.hwm_bytes
+    ));
+    json.push_str(&format!(
+        "  \"rss_after_run_bytes\": {},\n",
+        mem_end.rss_bytes
+    ));
+    json.push_str(&format!(
+        "  \"hwm_after_run_bytes\": {},\n",
+        mem_end.hwm_bytes
+    ));
+    json.push_str(&format!(
+        "  \"rss_delta_bytes\": {},\n",
+        mem_end.rss_bytes.saturating_sub(mem_before_open.rss_bytes)
+    ));
+    json.push_str(&format!(
+        "  \"projection_bytes\": {},\n",
+        cell.projection_bytes()
     ));
     json.push_str(&format!("  \"n\": {n},\n"));
     json.push_str(&format!("  \"push_batch\": {push_batch},\n"));

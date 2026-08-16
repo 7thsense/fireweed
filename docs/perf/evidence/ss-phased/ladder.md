@@ -1,6 +1,8 @@
 # SS phased capacity ladder
 
-Same-host before/after only. G-gates require N=1,000,000. N=10k/100k are not comparable to G-rows.
+Same-host before/after only. Sqlite-log G-gates require N=1,000,000. N=10k/100k are not comparable to those G-rows.
+
+**Active program:** object-log × Turso (`filesystem--turso`) plus RSS. Goal: [ss-objectlog-turso-memory-goal.md](../../../helix/04-build/ss-objectlog-turso-memory-goal.md).
 
 Host for rows below: WSL2 `sindri`, AMD Ryzen 9 5950X 16C/32T, 94 GiB RAM, workspace on `/dev/sdd` ext4 virtual disk. **Not** H-server NVMe+PLP. rustc 1.97.1.
 
@@ -51,3 +53,14 @@ Packed run tree: **6806 objects, 1.79 GiB, ~269 KiB/object**. P2/P3 share one PU
 `SS_INFLIGHT=8` on this disk is slower (wall 244 s): concurrent fsyncs thrash. Raise in-flight on PLP NVMe or real S3.
 
 Evidence: `docs/perf/evidence/ss-phased/1786761950/summary.json` (linger-bound), `docs/perf/evidence/ss-phased/1786763497/summary.json` (I/O-bound).
+
+## Object-log × Turso (`filesystem--turso`) — production pair
+
+RSS is the second scoreboard. `filesystem--memory` is the O(N) control, not the product serving store.
+
+| utc | sha | N | note | p1 | p2 | p3 | p4 | wall_s | rss_delta_MiB | B/item | proj_MiB |
+|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1786847365 | harness | 10000 | `filesystem--memory` control | 16152 | 13586 | 16648 | 2107 | 11.8 | **46.1** | 4834 | — |
+| 1786848162 | harness | 10000 | `filesystem--turso` first baseline (N UpdateFields envelopes) | 112 | **48** | 66 | 82 | 618 | 93.9 | 9845 | 23.6 |
+
+Turso at N=10k is **slower and fatter** than memory. RSS is fixed overhead + page cache + WAL, not yet the win (M2 needs N=100k). P2 is the long pole: the Turso `BatchUpdate` port still appends **one `UpdateFields` envelope per item**. Memory uses `UpdateFieldsBatch`. Packed apply on Turso was tried and rejected (`expected sequence 300, got 500`) — Turso apply is ordered; out-of-order waiter apply is illegal.
