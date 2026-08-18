@@ -259,10 +259,31 @@ CREATE TABLE IF NOT EXISTS fireweed_checkpoint_lineage (
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (tenant, queue)
 );
+-- Class S claim outbox (one-projection-cleanup): lease commits in this
+-- database first; the full Claim envelope sits here until the object-log PUT
+-- is known-durable. Reopen drains this table. Not a process-local map.
+CREATE TABLE IF NOT EXISTS fireweed_claim_outbox (
+    tenant_id TEXT NOT NULL,
+    queue_id TEXT NOT NULL,
+    outbox_id TEXT NOT NULL,
+    item_ids TEXT NOT NULL,
+    lease_token TEXT NOT NULL,
+    lease_expires_at INTEGER NOT NULL,
+    request_id TEXT,
+    request_fingerprint INTEGER,
+    worker_id TEXT,
+    claim_unit TEXT NOT NULL DEFAULT 'item',
+    cohort_id TEXT,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, outbox_id)
+);
+CREATE INDEX IF NOT EXISTS fireweed_claim_outbox_queue_idx
+    ON fireweed_claim_outbox (tenant_id, queue_id, created_at);
 "#;
 
 /// Application tables owned by a disposable relational projection, in dependency-safe drop order.
 pub const OWNED_PROJECTION_TABLES: &[&str] = &[
+    "fireweed_claim_outbox",
     "fireweed_checkpoint_lineage",
     "fireweed_item_index",
     "fireweed_instance_fences",
