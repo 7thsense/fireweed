@@ -7828,6 +7828,34 @@ fn claim_item_level_in_tx(
         std::slice::from_ref(&position),
         std::slice::from_ref(&envelope),
     )?;
+    let outbox_id = format!("pg-claim-{seq}");
+    let item_ids_json = serde_json::to_string(
+        &claimed_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|e| EngineError::Storage(e.to_string()))?;
+    st(tx.execute(
+        "INSERT INTO fireweed_claim_outbox (\
+         tenant_id, queue_id, outbox_id, item_ids, lease_token, lease_expires_at, \
+         request_id, request_fingerprint, worker_id, claim_unit, cohort_id, created_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,NULL,NULL,$7,'item',NULL,$8)",
+        &[
+            &t,
+            &q,
+            &outbox_id,
+            &item_ids_json,
+            &req.lease_token.as_str(),
+            &exp,
+            &req.worker_id.as_str(),
+            &now_n,
+        ],
+    ))?;
+    st(tx.execute(
+        "DELETE FROM fireweed_claim_outbox WHERE tenant_id=$1 AND queue_id=$2 AND outbox_id=$3",
+        &[&t, &q, &outbox_id],
+    ))?;
     let mut gate_keys_by_id = item_gate_keys_by_id(tx, &req.shard, &claimed_ids)?;
     let mut items = Vec::with_capacity(rows.len());
     let mut token_ops = Vec::new();
