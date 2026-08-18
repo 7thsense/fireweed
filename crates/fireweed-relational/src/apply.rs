@@ -1013,6 +1013,74 @@ pub fn exec_items_in(
     Ok(())
 }
 
+fn leased_item_id_set(
+    tx: &impl RelTx,
+    shard: &QueueKey,
+    ids: &[String],
+) -> EngineResult<HashSet<String>> {
+    item_ids_in_state(tx, shard, ids, "Leased")
+}
+
+fn item_ids_in_state(
+    tx: &impl RelTx,
+    shard: &QueueKey,
+    ids: &[String],
+    state: &str,
+) -> EngineResult<HashSet<String>> {
+    if ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let (t, q) = parts(shard);
+    let mut out = HashSet::new();
+    for chunk in ids.chunks(SQLITE_BATCH) {
+        let ph = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "SELECT item_id FROM fireweed_items WHERE tenant_id=? AND queue_id=? \
+             AND lifecycle_state=? AND item_id IN ({ph})"
+        );
+        let mut params = vec![
+            RelValue::Text(t.clone()),
+            RelValue::Text(q.clone()),
+            RelValue::Text(state.to_string()),
+        ];
+        params.extend(chunk.iter().cloned().map(RelValue::Text));
+        for row in crate::rel_query(tx, &sql, params)? {
+            out.insert(row.get(0)?);
+        }
+    }
+    Ok(out)
+}
+
+fn item_ids_with_lease_hash(
+    tx: &impl RelTx,
+    shard: &QueueKey,
+    ids: &[String],
+    hash: &[u8],
+) -> EngineResult<HashSet<String>> {
+    if ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let (t, q) = parts(shard);
+    let mut out = HashSet::new();
+    for chunk in ids.chunks(SQLITE_BATCH) {
+        let ph = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "SELECT item_id FROM fireweed_items WHERE tenant_id=? AND queue_id=? \
+             AND lease_token_hash=? AND item_id IN ({ph})"
+        );
+        let mut params = vec![
+            RelValue::Text(t.clone()),
+            RelValue::Text(q.clone()),
+            RelValue::Blob(hash.to_vec()),
+        ];
+        params.extend(chunk.iter().cloned().map(RelValue::Text));
+        for row in crate::rel_query(tx, &sql, params)? {
+            out.insert(row.get(0)?);
+        }
+    }
+    Ok(out)
+}
+
 pub fn reap_terminal_items_sql(
     tx: &impl RelTx,
     shard: &QueueKey,
@@ -2483,9 +2551,10 @@ pub fn apply_command_sql(
                 tx,
                 "UPDATE fireweed_items SET lease_token_hash=?, lease_expires_at=?, \
                  retry_count=retry_count+1, item_version=item_version+1, updated_at=?, \
-                 last_command_sequence=? WHERE tenant_id=? AND queue_id=? AND item_id IN",
+                 last_command_sequence=? WHERE tenant_id=? AND queue_id=? \
+                 AND lifecycle_state='Leased' AND item_id IN",
                 &[
-                    RelValue::Blob(hash),
+                    RelValue::Blob(hash.clone()),
                     RelValue::Integer(exp),
                     RelValue::Integer(now_n),
                     RelValue::Integer(seq as i64),
@@ -2494,8 +2563,11 @@ pub fn apply_command_sql(
                 &q,
                 &ids,
             )?;
+            let assigned = item_ids_with_lease_hash(tx, shard, &ids, &hash)?;
             for id in &c.item_ids {
-                token_ops.push(TokenOp::Set(shard.clone(), *id, c.lease_token.clone()));
+                if assigned.contains(&id.to_string()) {
+                    token_ops.push(TokenOp::Set(shard.clone(), *id, c.lease_token.clone()));
+                }
             }
             Ok(())
         }
@@ -3031,18 +3103,28 @@ pub fn apply_command_sql(
         QueueCommand::LeaseExpired(c) => {
             reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
             let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
+            // Never unlease a live Class S claim. Only rows that are still Leased *and*
+            // past expiry move back to Pending. Token/version mismatch is a no-op.
             exec_items_in(
                 tx,
                 "UPDATE fireweed_items SET lifecycle_state='Pending', lease_token_hash=NULL, \
                  lease_expires_at=NULL, worker_id=NULL, item_version=item_version+1, updated_at=?, \
-                 last_command_sequence=? WHERE tenant_id=? AND queue_id=? AND item_id IN",
-                &[RelValue::Integer(now_n), RelValue::Integer(seq as i64)],
+                 last_command_sequence=? WHERE lease_expires_at IS NOT NULL AND lease_expires_at<? \
+                 AND tenant_id=? AND queue_id=? AND lifecycle_state='Leased' AND item_id IN",
+                &[
+                    RelValue::Integer(now_n),
+                    RelValue::Integer(seq as i64),
+                    RelValue::Integer(now_n),
+                ],
                 &t,
                 &q,
                 &ids,
             )?;
+            let still_leased = leased_item_id_set(tx, shard, &ids)?;
             for id in &c.item_ids {
-                token_ops.push(TokenOp::Clear(shard.clone(), *id));
+                if !still_leased.contains(&id.to_string()) {
+                    token_ops.push(TokenOp::Clear(shard.clone(), *id));
+                }
             }
             if grouped_shards.contains(shard) {
                 let groups = groups_of(tx, shard, &c.item_ids)?;

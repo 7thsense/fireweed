@@ -284,7 +284,9 @@ mod class_s_apply_tests {
     use std::collections::{HashMap, HashSet};
 
     use fireweed_core::{LeaseToken, QueueId, TenantId, UtcTimestamp};
-    use fireweed_engine::{ClaimCommand, CommandPosition, QueueCommand, QueueKey};
+    use fireweed_engine::{
+        ClaimCommand, CommandPosition, LeaseExpiredCommand, QueueCommand, QueueKey,
+    };
     use fireweed_relational::RELATIONAL_SCHEMA;
     use rusqlite::Connection;
 
@@ -423,5 +425,58 @@ mod class_s_apply_tests {
             )
             .expect("state");
         assert_eq!(state, "Complete");
+    }
+
+    #[test]
+    fn apply_lease_expired_does_not_unlease_a_live_token() {
+        let conn = Connection::open_in_memory().expect("memory");
+        let item_id = fireweed_core::ItemId::mint(1, 0, 3);
+        seed_pending(&conn, &item_id.to_string());
+        let shard = shard();
+        let live = LeaseToken::new("live-token").expect("token");
+        let now = UtcTimestamp::new(10, 0).expect("now");
+        let queues = HashMap::new();
+        let mut grouped = HashSet::new();
+        let mut hints = HashMap::new();
+        let mut fifo = HashMap::new();
+        let mut tokens = Vec::new();
+        apply_command_sql(
+            &conn,
+            &queues,
+            &mut grouped,
+            &mut hints,
+            &mut fifo,
+            &mut tokens,
+            &shard,
+            &CommandPosition::new(shard.clone(), 1, 2),
+            2,
+            now,
+            &claim_cmd(item_id, &live),
+        )
+        .expect("live claim");
+        apply_command_sql(
+            &conn,
+            &queues,
+            &mut grouped,
+            &mut hints,
+            &mut fifo,
+            &mut tokens,
+            &shard,
+            &CommandPosition::new(shard.clone(), 1, 3),
+            3,
+            now,
+            &QueueCommand::LeaseExpired(LeaseExpiredCommand {
+                item_ids: vec![item_id],
+            }),
+        )
+        .expect("expired apply must not poison");
+        let state: String = conn
+            .query_row(
+                "SELECT lifecycle_state FROM fireweed_items WHERE item_id=?1",
+                [item_id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("state");
+        assert_eq!(state, "Leased");
     }
 }
