@@ -64,5 +64,13 @@ RSS is the second scoreboard. `filesystem--memory` is the O(N) control, not the 
 | 1786848162 | ebd375f3 | 10000 | `filesystem--turso` first baseline (N UpdateFields envelopes) | 112 | **48** | 66 | 82 | 618 | 93.9 | 9845 | 23.6 |
 | 1786850873 | da18e3d7 | 10000 | Turso `UpdateFieldsBatch` + set-based apply | 134 | **77** | 68 | 86 | 502 | 93.7 | 9829 | 23.6 |
 | 1786891285 | this | 10000 | default cell; `cache_size` 16 MiB; inflight=1; ordered pack path | 120 | 79 | 82 | **101** | 469 | **55.9** | 5865 | 23.6 |
+| 1786911948 | incremental group-summary | 1000 | set-based P2 + skip non-eligibility refresh + incremental Push/Claim/P3 | **1259** | **1153** | **1142** | **1498** | 3.2 | **35.7** | 37482 | 8.2 |
+| 1786912158 | incremental group-summary | 10000 | same; still O(table) Turso apply/append | 225 | 232 | 231 | 402 | 156 | 57.2 | 6003 | 22.4 |
+| 1786915554 | gather→log→apply→ack | 1000 | pack all ops; one apply/PUT; `AsyncProjection` (ack after log) | **4888** | **2146** | **1377** | **1939** | 1.9 | 42.7 | 44798 | 9.0 |
+| 1786916098 | gather→log→apply→ack | 10000 | same; P1 still apply/plan-bound on one Turso writer | 228 | 223 | 268 | 399 | 151 | 98.5 | 10333 | 21.5 |
+| 1786977588 | planner map | 1000 | Push/BatchUpdate plan from log-ordered map; no Turso on produce | **12255** | **9911** | **10853** | 1060 | 1.2 | 49.3 | 51700 | 8.1 |
+| 1786977711 | planner map | 10000 | 1k→10k produce slope fixed (P1/P2/P3 faster at 10k); P4 still Turso catch-up | **21022** | **15392** | **20447** | 315 | 33.4 | 141.9 | 14877 | 20.1 |
+| 1786981218 | map claim+finalize | 10000 | claims/finalizes plan from map; claim apply still ordered Turso+summary | **17781** | **14336** | **32354** | 354 | 30.0 | 115.7 | 12129 | 20.1 |
+| 1787070603 | be5c6111 | 10000 | v0.31.17 Class S (lease in Turso txn then log); no planner map; inflight=1 | 115 | 73 | 73 | **86** | 515 | 99.7 | 10454 | 454.9 |
 
-Turso at N=10k is **slower and fatter** than memory. RSS is fixed overhead + page cache + WAL, not yet the win (M2 needs N=100k). P2 is the long pole: the Turso `BatchUpdate` port still appends **one `UpdateFields` envelope per item**. Memory uses `UpdateFieldsBatch`. Packed apply on Turso was tried and rejected (`expected sequence 300, got 500`) — Turso apply is ordered; out-of-order waiter apply is illegal.
+N=10k produce is no longer super-linear: P1 p50 35 ms / 100 items vs 39 ms at N=1k. Objects at N=10k: 484 (was 648). P4 is the remaining pole (claim still selects on Turso after catch-up of apply debt). T1 (8k/s P1 at N=100k) is now a plausible next measurement; T2 is not until claim leaves the Turso writer.
