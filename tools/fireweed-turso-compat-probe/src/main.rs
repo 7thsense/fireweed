@@ -5,8 +5,9 @@ use tempfile::tempdir;
 use tokio::sync::{Barrier, oneshot};
 use turso::{Builder, Database, Error as TursoError, transaction::TransactionBehavior};
 
-const HELPERS_RS: &str = include_str!("../../../crates/fireweed-sqlite/src/relational/helpers.rs");
+const SCHEMA_RS: &str = include_str!("../../../crates/fireweed-relational/src/schema.rs");
 const WRITER_COUNT: usize = 16;
+const READ_WHILE_WRITE_TIMEOUT: Duration = Duration::from_millis(750);
 
 #[derive(Debug, PartialEq, Eq)]
 struct LeaseState {
@@ -29,12 +30,12 @@ struct ProjectionState {
 }
 
 fn relational_schema() -> &'static str {
-    let marker = "pub(crate) const RELATIONAL_SCHEMA: &str = r#\"";
-    let start = HELPERS_RS
+    let marker = "pub const RELATIONAL_SCHEMA: &str = r#\"";
+    let start = SCHEMA_RS
         .find(marker)
         .expect("RELATIONAL_SCHEMA declaration")
         + marker.len();
-    let tail = &HELPERS_RS[start..];
+    let tail = &SCHEMA_RS[start..];
     let end = tail.find("\"#;").expect("RELATIONAL_SCHEMA terminator");
     &tail[..end]
 }
@@ -201,6 +202,163 @@ async fn disjoint_writer(db: Database, writer: usize, gate: Arc<Barrier>) -> Res
         }
     }
     Err(format!("writer {writer} exhausted retry budget"))
+}
+
+fn classify_reader_while_writer(result: Result<Result<String, TursoError>, tokio::time::error::Elapsed>) -> String {
+    match result {
+        Ok(Ok(value)) if value == "before" => "pass pre_txn_value=before".into(),
+        Ok(Ok(value)) => format!("fail saw_writer_or_other:{value}"),
+        Ok(Err(error)) => format!("fail select_error:{error:?}"),
+        Err(_) => "fail select_blocked".into(),
+    }
+}
+
+/// Hold IMMEDIATE on connection A and SELECT on connection B (`database.connect()`).
+/// Pass means B returned the pre-txn row without waiting for A.
+async fn probe_reader_while_writer(
+    path: &str,
+    label: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let db = Builder::new_local(path).build().await?;
+    let mut writer = db.connect()?;
+    writer.busy_timeout(Duration::from_millis(50))?;
+    writer
+        .execute_batch("CREATE TABLE rww(id INTEGER PRIMARY KEY, v TEXT NOT NULL); INSERT INTO rww VALUES(1,'before');")
+        .await?;
+    let tx = writer
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await?;
+    tx.execute("UPDATE rww SET v='inside-txn' WHERE id=1", ())
+        .await?;
+
+    let reader = db.connect()?;
+    let select = tokio::spawn(async move {
+        let mut rows = reader.query("SELECT v FROM rww WHERE id=1", ()).await?;
+        let row = rows.next().await?.ok_or(TursoError::QueryReturnedNoRows)?;
+        row.get::<String>(0)
+    });
+    let select = tokio::time::timeout(READ_WHILE_WRITE_TIMEOUT, select).await;
+    let verdict = match select {
+        Ok(Ok(inner)) => classify_reader_while_writer(Ok(inner)),
+        Ok(Err(join)) => format!("fail select_join:{join}"),
+        Err(_) => "fail select_blocked".into(),
+    };
+    let _ = tx.rollback().await;
+    let line = format!("turso.reader_while_writer.{label}={verdict}");
+    println!("{line}");
+    Ok(line)
+}
+
+async fn probe_wal_truncate_with_reader_open(
+    path: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let db = Builder::new_local(path).build().await?;
+    let writer = db.connect()?;
+    writer
+        .execute_batch("CREATE TABLE w(id INTEGER PRIMARY KEY, v TEXT NOT NULL); INSERT INTO w VALUES(1,'a');")
+        .await?;
+    let _ = writer.query("PRAGMA wal_checkpoint(PASSIVE)", ()).await;
+    let reader = db.connect()?;
+    let mut held = reader.query("SELECT v FROM w WHERE id=1", ()).await?;
+    let held_value: String = held
+        .next()
+        .await?
+        .ok_or("reader returned no row")?
+        .get(0)?;
+    assert_eq!(held_value, "a");
+    let truncate = tokio::time::timeout(READ_WHILE_WRITE_TIMEOUT, async {
+        let mut rows = writer.query("PRAGMA wal_checkpoint(TRUNCATE)", ()).await?;
+        match rows.next().await? {
+            Some(row) => {
+                let col = |i| row.get::<Option<i64>>(i).map(|v| v.unwrap_or(-1));
+                Ok::<String, TursoError>(format!("({},{},{})", col(0)?, col(1)?, col(2)?))
+            }
+            None => Ok("no-row".into()),
+        }
+    })
+    .await;
+    let verdict = match truncate {
+        Ok(Ok(shape)) => format!("pass checkpoint={shape}"),
+        Ok(Err(error)) => format!("fail checkpoint_error:{error:?}"),
+        Err(_) => "fail checkpoint_blocked".into(),
+    };
+    drop(held);
+    let line = format!("turso.wal_truncate_with_reader_open.file={verdict}");
+    println!("{line}");
+    Ok(line)
+}
+
+async fn probe_drop_open_txn(path: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let db = Builder::new_local(path).build().await?;
+    {
+        let mut conn = db.connect()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await?;
+        tx.execute("CREATE TABLE d(id INTEGER PRIMARY KEY)", ()).await?;
+        tx.execute("INSERT INTO d VALUES(1)", ()).await?;
+        drop(tx);
+        drop(conn);
+    }
+    let checker = db.connect()?;
+    let count = match tokio::time::timeout(READ_WHILE_WRITE_TIMEOUT, async {
+        scalar_i64(&checker, "SELECT COUNT(*) FROM sqlite_master WHERE name='d'").await
+    })
+    .await
+    {
+        Ok(Ok(count)) => count,
+        Ok(Err(error)) => {
+            let line = format!("turso.drop_open_txn.file=fail select_error:{error:?}");
+            println!("{line}");
+            return Ok(line);
+        }
+        Err(_) => {
+            let line = "turso.drop_open_txn.file=fail select_blocked".to_string();
+            println!("{line}");
+            return Ok(line);
+        }
+    };
+    let mut next = db.connect()?;
+    let begin = tokio::time::timeout(
+        READ_WHILE_WRITE_TIMEOUT,
+        next.transaction_with_behavior(TransactionBehavior::Immediate),
+    )
+    .await;
+    let verdict = match (count, begin) {
+        (0, Ok(Ok(tx))) => {
+            let _ = tx.rollback().await;
+            "pass uncommitted_table_absent writer_reacquired".to_string()
+        }
+        (0, Ok(Err(error))) => format!("fail table_absent begin_error:{error:?}"),
+        (0, Err(_)) => "fail table_absent begin_blocked".to_string(),
+        (n, Ok(Ok(tx))) => {
+            let _ = tx.rollback().await;
+            format!("fail leftover_table={n} writer_reacquired")
+        }
+        (n, other) => format!("fail leftover_table={n} begin={other:?}"),
+    };
+    let line = format!("turso.drop_open_txn.file={verdict}");
+    println!("{line}");
+    Ok(line)
+}
+
+async fn run_reader_while_writer_suite(
+    root: &std::path::Path,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let file = root.join("rww-file.db");
+    let lines = vec![
+        probe_reader_while_writer(":memory:", "memory").await?,
+        probe_reader_while_writer(file.to_str().unwrap(), "file").await?,
+        probe_wal_truncate_with_reader_open(root.join("rww-wal.db").to_str().unwrap()).await?,
+        probe_drop_open_txn(root.join("rww-drop.db").to_str().unwrap()).await?,
+    ];
+    assert!(
+        lines.iter().any(|line| line.contains("reader_while_writer"))
+            && lines.iter().any(|line| line.contains("wal_truncate"))
+            && lines.iter().any(|line| line.contains("drop_open_txn")),
+        "probe must emit a pass/fail line for each reader-while-writer case: {lines:?}"
+    );
+    Ok(lines)
 }
 
 async fn run_turso(
@@ -571,6 +729,7 @@ fn run_rusqlite(path: &str) -> Result<ProjectionState, Box<dyn std::error::Error
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = tempdir()?;
+    let _ = run_reader_while_writer_suite(root.path()).await?;
     let turso_path = root.path().join("turso.db");
     let sqlite_path = root.path().join("rusqlite.db");
     let (turso_state, writers, _) = run_turso(turso_path.to_str().unwrap()).await?;
@@ -587,4 +746,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
          fireweed's synchronous ProjectionStore unit of work or adding a blocking database actor."
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reader_while_writer_emits_pass_or_fail_line() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let lines = run_reader_while_writer_suite(root.path())
+            .await
+            .expect("reader-while-writer suite");
+        for line in &lines {
+            eprintln!("{line}");
+        }
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("turso.reader_while_writer.")),
+            "missing read-while-write line: {lines:?}"
+        );
+    }
 }
