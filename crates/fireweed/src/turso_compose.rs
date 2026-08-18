@@ -46,13 +46,8 @@ use fireweed_objectlog::{
     AsyncProjectionApplyCoordinator, ObjectLogEngineStore, ObjectLogTaskDispatcher,
 };
 
-#[cfg(all(feature = "turso", feature = "objectlog"))]
-use crate::map_push_planner::MapPushPlanner;
-#[cfg(all(feature = "turso", feature = "objectlog"))]
-use crate::planner_map::{PlannerMap, Reservation};
-
 #[cfg(feature = "objectlog")]
-type PlannedReservation = Reservation;
+struct PlannedReservation;
 #[cfg(not(feature = "objectlog"))]
 struct PlannedReservation;
 
@@ -1415,7 +1410,12 @@ type ObjectLogEngine = AsyncComposedBackend<
     SeparateReplayCommit<ObjectLogTursoCommitter>,
     ObjectLogTaskDispatcher,
     ProjectionClaimPlanner<InProcessControlPlane, ObjectLogEngineStore, TursoRelational, SeqIdGen>,
-    MapPushPlanner<InProcessControlPlane, ObjectLogEngineStore, SeqIdGen>,
+    ProjectionPushPlanner<
+        InProcessControlPlane,
+        ObjectLogEngineStore,
+        TursoRelational,
+        SeqIdGen,
+    >,
     ProjectionLifecyclePlanner<
         InProcessControlPlane,
         ObjectLogEngineStore,
@@ -1445,7 +1445,6 @@ pub struct DerivedObjectLogTursoBackend {
     #[allow(dead_code)]
     node_id: u8,
     async_apply: Option<AsyncProjectionApplyCoordinator<TursoRelational>>,
-    planner: PlannerMap,
 }
 
 #[cfg(feature = "objectlog")]
@@ -1462,7 +1461,6 @@ impl DerivedObjectLogTursoBackend {
         let control = Arc::new(InProcessControlPlane::new());
         let ids = Arc::new(SeqIdGen::default());
         let counters = Arc::new(QueueCounters::default());
-        let planner = PlannerMap::new();
         let async_apply = match _async_spec {
             Some(spec) => Some(AsyncProjectionApplyCoordinator::new(
                 Arc::clone(&projection),
@@ -1484,13 +1482,13 @@ impl DerivedObjectLogTursoBackend {
             Arc::clone(&projection),
             Arc::clone(&ids),
         );
-        let push = MapPushPlanner::from_shared(
+        let push = ProjectionPushPlanner::from_shared(
             Arc::clone(&control),
             Arc::clone(&log),
+            Arc::clone(&projection),
             Arc::clone(&ids),
             Arc::clone(&counters),
             node_id,
-            planner.clone(),
         );
         let lifecycle = ProjectionLifecyclePlanner::from_shared(
             Arc::clone(&control),
@@ -1524,7 +1522,6 @@ impl DerivedObjectLogTursoBackend {
             counters,
             node_id,
             async_apply,
-            planner,
         };
         backend.recover_async().await?;
         Ok(backend)
@@ -1560,9 +1557,6 @@ impl DerivedObjectLogTursoBackend {
         shard: &QueueKey,
         keys: &[ClientItemKey],
     ) -> EngineResult<Vec<Option<LiveItemView>>> {
-        // Produce plans from the planner map. Reads must wait for Turso apply:
-        // keys can exist from an earlier command while a later payload/schedule
-        // update is still in the apply queue.
         if self.async_apply.is_some() {
             self.catch_up_projection(shard).await?;
         }
@@ -1573,28 +1567,32 @@ impl DerivedObjectLogTursoBackend {
         &self,
         shard: &QueueKey,
         keys: &[ClientItemKey],
-        ids: &[ItemId],
+        _ids: &[ItemId],
     ) -> EngineResult<Vec<fireweed_engine::BatchUpdateSnapshotItem>> {
-        Ok(self.planner.snapshot(shard, keys, ids))
+        let views = self.snapshot_live_items(shard, keys).await?;
+        Ok(views
+            .into_iter()
+            .flatten()
+            .map(|view| fireweed_engine::BatchUpdateSnapshotItem {
+                item_id: view.item_id,
+                client_item_key: view.client_item_key,
+                state: view.lifecycle_state,
+                item_version: view.item_version,
+                fenced: false,
+                superseded: false,
+            })
+            .collect())
     }
 
     fn reserve_planned_updates(
         &self,
-        shard: &QueueKey,
-        updates: &[fireweed_engine::UpdateFieldsCommand],
+        _shard: &QueueKey,
+        _updates: &[fireweed_engine::UpdateFieldsCommand],
     ) -> EngineResult<Option<PlannedReservation>> {
-        Ok(Some(self.planner.reserve_updates(shard, updates)?))
+        Ok(None)
     }
 
-    fn finish_planned(&self, planned: Option<PlannedReservation>, ok: bool) {
-        if let Some(reservation) = planned {
-            if ok {
-                self.planner.commit(reservation);
-            } else {
-                self.planner.rollback(reservation);
-            }
-        }
-    }
+    fn finish_planned(&self, _planned: Option<PlannedReservation>, _ok: bool) {}
 
     async fn recover_async(&self) -> EngineResult<()> {
         let definitions = AsyncLogStore::recover_definitions(self.log.as_ref()).await?;
@@ -1619,7 +1617,6 @@ impl DerivedObjectLogTursoBackend {
                     for item_id in &env.item_ids {
                         self.counters.observe(&shard, *item_id);
                     }
-                    self.planner.apply_recovered(&shard, &env.command);
                 }
                 let tail: Vec<_> = page
                     .entries
@@ -1756,10 +1753,7 @@ impl DerivedObjectLogTursoBackend {
                 Ok(fireweed_engine::PushBatchOutcome::replayed(item_ids))
             }
             PreparedPush::Commit { request, item_ids } => {
-                let shard = request.shard().clone();
-                let result = self.commit_prepared(request).await;
-                self.planner.finish_push(&shard, &item_ids, result.is_ok());
-                result?;
+                self.commit_prepared(request).await?;
                 Ok(fireweed_engine::PushBatchOutcome::fresh(item_ids))
             }
         }
@@ -1940,16 +1934,7 @@ impl DerivedObjectLogTursoBackend {
                 item_ids,
                 cohort_id,
             } => {
-                let planned =
-                    self.planner
-                        .reserve_claim(&request.shard, &item_ids, &request.lease_token)?;
-                let committed = self.commit_prepared(commit).await;
-                if committed.is_ok() {
-                    self.planner.commit(planned);
-                } else {
-                    self.planner.rollback(planned);
-                }
-                committed?;
+                self.commit_prepared(commit).await?;
                 self.engine
                     .render_prepared_claim(request, item_ids, cohort_id)
                     .await
@@ -1970,68 +1955,12 @@ impl DerivedObjectLogTursoBackend {
                 "finalize item batch must not be empty",
             ));
         }
-        if outcomes
-            .iter()
-            .all(|outcome| matches!(outcome.kind, FinalizeKind::Complete | FinalizeKind::Fail))
-        {
-            return self
-                .dispatch_finalize_from_map(shard, outcomes, now, expected_epoch)
-                .await;
-        }
         let PreparedFinalize { request, .. } = self
             .engine
-            .prepare_finalize(shard.clone(), outcomes.clone(), now, expected_epoch)
+            .prepare_finalize(shard.clone(), outcomes, now, expected_epoch)
             .await
             .map_err(map_lifecycle)?;
-        let planned = self.planner.reserve_finalize(shard, &outcomes)?;
-        let committed = self.commit_prepared(request).await;
-        if committed.is_ok() {
-            self.planner.commit(planned);
-        } else {
-            self.planner.rollback(planned);
-        }
-        committed
-    }
-
-    async fn dispatch_finalize_from_map(
-        &self,
-        shard: &QueueKey,
-        mut outcomes: Vec<FinalizeOutcome>,
-        now: UtcTimestamp,
-        expected_epoch: Option<u64>,
-    ) -> EngineResult<()> {
-        for outcome in &mut outcomes {
-            outcome.applied_state = Some(match outcome.kind {
-                FinalizeKind::Complete => ItemState::Complete,
-                FinalizeKind::Fail => ItemState::Failed,
-                _ => ItemState::Pending,
-            });
-        }
-        let planned = self.planner.reserve_finalize(shard, &outcomes)?;
-        let epoch = match expected_epoch {
-            Some(epoch) => epoch,
-            None => AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?,
-        };
-        let item_ids: Vec<_> = outcomes.iter().map(|outcome| outcome.item_id).collect();
-        let envelope = CommandEnvelope {
-            command_id: self.ids.next_command_id(),
-            request_id: None,
-            request_fingerprint: None,
-            request_outcome: None,
-            item_ids,
-            command: QueueCommand::Finalize(FinalizeCommand { outcomes }),
-            checksum: CommandChecksum(0),
-            created_at: now,
-        };
-        let committed = self
-            .commit_prepared(RawCommitRequest::new(shard.clone(), vec![envelope], epoch))
-            .await;
-        if committed.is_ok() {
-            self.planner.commit(planned);
-        } else {
-            self.planner.rollback(planned);
-        }
-        committed
+        self.commit_prepared(request).await
     }
 
     fn create_queue_impl(
