@@ -8,7 +8,8 @@ use crate::{RelTx, RelValue, lease_hash, rel_exec, rel_query};
 /// Next due pending items, including payloads. Same eligibility predicates as
 /// [`crate::sql::async_projection::SELECT_ELIGIBLE`], plus the pending-order key.
 pub const SELECT_CLASS_S_DUE: &str = "SELECT item_id, client_item_key, payload, item_version, \
-     retry_count FROM fireweed_items \
+     retry_count, priority, group_key, not_before, fields, metadata, max_attempts, \
+     entity_document, index_fields FROM fireweed_items \
      WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
      AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
      AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
@@ -54,6 +55,29 @@ pub struct ClassSClaimedItem {
     pub item_version: i64,
     pub retry_count: i64,
     pub lease_expires_at: i64,
+    pub priority: Option<String>,
+    pub group_key: Option<String>,
+    pub not_before: Option<i64>,
+    pub fields_json: String,
+    pub metadata_json: String,
+    pub max_attempts: i64,
+    pub entity_document: Option<String>,
+    pub index_fields: Option<Vec<u8>>,
+    pub gate_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimOutboxRow {
+    pub outbox_id: String,
+    pub item_ids_json: String,
+    pub lease_token: String,
+    pub lease_expires_at: i64,
+    pub request_id: Option<String>,
+    pub request_fingerprint: Option<i64>,
+    pub worker_id: Option<String>,
+    pub claim_unit: String,
+    pub cohort_id: Option<String>,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +121,15 @@ pub fn class_s_claim(
             item_version: row.get::<i64>(3)? + 1,
             retry_count: row.get::<i64>(4)? + 1,
             lease_expires_at: request.lease_expires_at,
+            priority: row.get(5)?,
+            group_key: row.get(6)?,
+            not_before: row.get(7)?,
+            fields_json: row.get::<Option<String>>(8)?.unwrap_or_else(|| "{}".into()),
+            metadata_json: row.get::<Option<String>>(9)?.unwrap_or_else(|| "{}".into()),
+            max_attempts: row.get::<Option<i64>>(10)?.unwrap_or(0),
+            entity_document: row.get(11)?,
+            index_fields: row.get(12)?,
+            gate_keys: Vec::new(),
         });
     }
 
@@ -126,6 +159,8 @@ pub fn class_s_claim(
     }
 
     let item_ids_json = serde_json::to_string(&ids).map_err(|e| EngineError::Storage(e.to_string()))?;
+    load_class_s_gate_keys(tx, request.tenant_id, request.queue_id, &mut items)?;
+
     rel_exec(
         tx,
         INSERT_CLAIM_OUTBOX,
@@ -149,6 +184,87 @@ pub fn class_s_claim(
         items,
         outbox_id: request.outbox_id.to_string(),
     })
+}
+
+fn load_class_s_gate_keys(
+    tx: &impl RelTx,
+    tenant_id: &str,
+    queue_id: &str,
+    items: &mut [ClassSClaimedItem],
+) -> EngineResult<()> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<String> = items.iter().map(|item| item.item_id.clone()).collect();
+    let placeholders = vec!["?"; ids.len()].join(",");
+    let sql = format!(
+        "SELECT item_id, gate_key FROM fireweed_item_gates \
+         WHERE tenant_id=? AND queue_id=? AND item_id IN ({placeholders}) \
+         ORDER BY item_id, gate_key"
+    );
+    let mut params = vec![
+        RelValue::Text(tenant_id.to_string()),
+        RelValue::Text(queue_id.to_string()),
+    ];
+    params.extend(ids.into_iter().map(RelValue::Text));
+    for row in rel_query(tx, &sql, params)? {
+        let item_id: String = row.get(0)?;
+        let gate: String = row.get(1)?;
+        if let Some(item) = items.iter_mut().find(|item| item.item_id == item_id) {
+            item.gate_keys.push(gate);
+        }
+    }
+    Ok(())
+}
+
+/// Load durable Claim envelopes that committed in SQL but are not yet on the log.
+pub fn select_claim_outbox(
+    tx: &impl RelTx,
+    tenant_id: &str,
+    queue_id: &str,
+) -> EngineResult<Vec<ClaimOutboxRow>> {
+    let rows = rel_query(
+        tx,
+        SELECT_CLAIM_OUTBOX_FOR_QUEUE,
+        [
+            RelValue::Text(tenant_id.to_string()),
+            RelValue::Text(queue_id.to_string()),
+        ],
+    )?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(ClaimOutboxRow {
+            outbox_id: row.get(0)?,
+            item_ids_json: row.get(1)?,
+            lease_token: row.get(2)?,
+            lease_expires_at: row.get(3)?,
+            request_id: row.get(4)?,
+            request_fingerprint: row.get(5)?,
+            worker_id: row.get(6)?,
+            claim_unit: row.get(7)?,
+            cohort_id: row.get(8)?,
+            created_at: row.get(9)?,
+        });
+    }
+    Ok(out)
+}
+
+pub fn delete_claim_outbox(
+    tx: &impl RelTx,
+    tenant_id: &str,
+    queue_id: &str,
+    outbox_id: &str,
+) -> EngineResult<()> {
+    rel_exec(
+        tx,
+        DELETE_CLAIM_OUTBOX,
+        [
+            RelValue::Text(tenant_id.to_string()),
+            RelValue::Text(queue_id.to_string()),
+            RelValue::Text(outbox_id.to_string()),
+        ],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -231,6 +347,9 @@ mod tests {
         }
 
         fn query(&self, sql: &str, params: &[RelValue]) -> EngineResult<Vec<RelRow>> {
+            if sql.contains("SELECT item_id, gate_key FROM fireweed_item_gates") {
+                return Ok(Vec::new());
+            }
             if sql != SELECT_CLASS_S_DUE {
                 return Err(EngineError::Storage(format!("unexpected query: {sql}")));
             }
@@ -256,6 +375,14 @@ mod tests {
                         RelValue::Blob(item.payload),
                         RelValue::Integer(item.item_version),
                         RelValue::Integer(item.retry_count),
+                        RelValue::Null,
+                        RelValue::Null,
+                        RelValue::Null,
+                        RelValue::Text("{}".into()),
+                        RelValue::Text("{}".into()),
+                        RelValue::Integer(3),
+                        RelValue::Null,
+                        RelValue::Null,
                     ])
                 })
                 .collect())

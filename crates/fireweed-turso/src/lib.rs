@@ -8,6 +8,8 @@
 mod local;
 #[cfg(feature = "local")]
 mod projection;
+#[cfg(feature = "local")]
+mod tx;
 
 #[cfg(feature = "local")]
 pub use local::*;

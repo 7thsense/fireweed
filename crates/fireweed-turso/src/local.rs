@@ -4,9 +4,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use fireweed_core::{ItemId, LeaseToken};
-use fireweed_engine::QueueKey;
-use fireweed_relational::{OWNED_PROJECTION_TABLES, RELATIONAL_SCHEMA};
+use bytes::Bytes;
+use fireweed_core::{ClientItemKey, GroupKey, ItemId, LeaseToken};
+use fireweed_engine::{Claimed, ClaimedItem, EngineError, EngineResult, QueueKey};
+use fireweed_relational::{
+    ClassSClaimRequest, ClassSClaimResult, OWNED_PROJECTION_TABLES, RELATIONAL_SCHEMA,
+    class_s_claim, delete_claim_outbox, entity_from_json, fields_from_json, metadata_from_json,
+    nanos_ts, parse_priority, select_claim_outbox, ClaimOutboxRow,
+};
+use crate::tx::TursoRel;
 use tokio::sync::Mutex;
 use turso::{Builder, Connection, Database, Value, transaction::TransactionBehavior};
 
@@ -206,6 +212,9 @@ pub struct TursoRelational {
     pub(crate) live_tokens: Arc<Mutex<BTreeMap<(QueueKey, ItemId), LeaseToken>>>,
     pub(crate) live_tokens_by_consumer: Arc<Mutex<ConsumerLeaseIndex>>,
     pub(crate) last_batch_update_shape: Arc<StdMutex<Option<TursoBatchUpdateStatementShape>>>,
+    pub(crate) claim_scan_hints: Arc<StdMutex<std::collections::HashMap<QueueKey, i64>>>,
+    pub(crate) claim_scan_default_fifo: Arc<StdMutex<std::collections::HashMap<QueueKey, bool>>>,
+    pub(crate) grouped_shards: Arc<StdMutex<std::collections::HashSet<QueueKey>>>,
     config: TursoConfig,
 }
 
@@ -239,6 +248,9 @@ impl TursoRelational {
             live_tokens: Arc::new(Mutex::new(BTreeMap::new())),
             live_tokens_by_consumer: Arc::new(Mutex::new(BTreeMap::new())),
             last_batch_update_shape: Arc::new(StdMutex::new(None)),
+            claim_scan_hints: Arc::new(StdMutex::new(std::collections::HashMap::new())),
+            claim_scan_default_fifo: Arc::new(StdMutex::new(std::collections::HashMap::new())),
+            grouped_shards: Arc::new(StdMutex::new(std::collections::HashSet::new())),
             config,
         })
     }
@@ -317,6 +329,198 @@ impl TursoRelational {
         let connection = self.writer.lock().await;
         collect_rows(&connection, sql.as_ref(), params).await
     }
+
+    /// Class S claim: lease + outbox in one IMMEDIATE writer txn, then drop the writer.
+    pub async fn class_s_claim(
+        &self,
+        request: ClassSClaimRequest<'_>,
+    ) -> EngineResult<ClassSClaimResult> {
+        let mut writer = self.writer.lock().await;
+        let tx = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|e| EngineError::Storage(e.to_string()))?;
+        let result = class_s_claim(&TursoRel(&tx), &request);
+        match result {
+            Ok(ok) => {
+                tx.commit()
+                    .await
+                    .map_err(|e| EngineError::Storage(e.to_string()))?;
+                Ok(ok)
+            }
+            Err(error) => {
+                let _ = tx.rollback().await;
+                Err(error)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn class_s_claim_for_queue(
+        &self,
+        tenant_id: &str,
+        queue_id: &str,
+        now_nanos: i64,
+        limit: i64,
+        lease_token: &LeaseToken,
+        lease_expires_at: i64,
+        outbox_id: &str,
+        worker_id: Option<&str>,
+    ) -> EngineResult<ClassSClaimResult> {
+        self.class_s_claim(ClassSClaimRequest {
+            tenant_id,
+            queue_id,
+            now_nanos,
+            limit,
+            lease_token,
+            lease_expires_at,
+            outbox_id,
+            request_id: None,
+            request_fingerprint: None,
+            worker_id,
+            claim_unit: "item",
+            cohort_id: None,
+        })
+        .await
+    }
+
+    pub async fn delete_claim_outbox_row(
+        &self,
+        tenant_id: &str,
+        queue_id: &str,
+        outbox_id: &str,
+    ) -> EngineResult<()> {
+        let mut writer = self.writer.lock().await;
+        let tx = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|e| EngineError::Storage(e.to_string()))?;
+        let result = delete_claim_outbox(&TursoRel(&tx), tenant_id, queue_id, outbox_id);
+        match result {
+            Ok(()) => tx
+                .commit()
+                .await
+                .map_err(|e| EngineError::Storage(e.to_string())),
+            Err(error) => {
+                let _ = tx.rollback().await;
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn pending_claim_outbox(
+        &self,
+        tenant_id: &str,
+        queue_id: &str,
+    ) -> EngineResult<Vec<ClaimOutboxRow>> {
+        let writer = self.writer.lock().await;
+        select_claim_outbox(&TursoRel(&writer), tenant_id, queue_id)
+    }
+
+    pub async fn remember_leases(
+        &self,
+        shard: &QueueKey,
+        item_ids: &[ItemId],
+        token: LeaseToken,
+    ) {
+        let mut tokens = self.live_tokens.lock().await;
+        let mut by_consumer = self.live_tokens_by_consumer.lock().await;
+        for item_id in item_ids {
+            tokens.insert((shard.clone(), *item_id), token.clone());
+            by_consumer.insert((shard.clone(), token.as_str().to_string(), *item_id), ());
+        }
+    }
+}
+
+#[cfg(test)]
+mod class_s_tests {
+    use fireweed_core::LeaseToken;
+
+    use super::*;
+
+    fn insert_pending(item_id: &str, created_seq: i64) -> String {
+        format!(
+            "INSERT INTO fireweed_items(\
+             tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority_sort,\
+             eligible_since,payload,fields,metadata,retry_count,item_version,\
+             last_command_sequence,created_at,updated_at,fenced,superseded,max_attempts,created_seq) \
+             VALUES('t','q','{item_id}','key-{item_id}','Pending',X'00',1,X'CAFE','{{}}','{{}}',0,1,1,1,1,0,0,3,{created_seq})"
+        )
+    }
+
+    #[tokio::test]
+    async fn class_s_sequential_claims_are_disjoint() {
+        let store = TursoRelational::in_memory().await.expect("open");
+        let ids: Vec<String> = (1..=5)
+            .map(|seq| ItemId::mint(1, 0, seq as u32).to_string())
+            .collect();
+        for (seq, item_id) in ids.iter().enumerate() {
+            store
+                .execute(insert_pending(item_id, (seq as i64) + 1), vec![])
+                .await
+                .expect("insert");
+        }
+        let token_a = LeaseToken::new("token-a").expect("token");
+        let token_b = LeaseToken::new("token-b").expect("token");
+        let first = store
+            .class_s_claim_for_queue("t", "q", 10, 2, &token_a, 1_000, "out-1", Some("w"))
+            .await
+            .expect("first");
+        let second = store
+            .class_s_claim_for_queue("t", "q", 10, 2, &token_b, 1_000, "out-2", Some("w"))
+            .await
+            .expect("second");
+        let first_ids: Vec<_> = first.items.iter().map(|i| i.item_id.as_str()).collect();
+        let second_ids: Vec<_> = second.items.iter().map(|i| i.item_id.as_str()).collect();
+        assert_eq!(first_ids, [ids[0].as_str(), ids[1].as_str()]);
+        assert_eq!(second_ids, [ids[2].as_str(), ids[3].as_str()]);
+        assert!(first_ids.iter().all(|id| !second_ids.contains(id)));
+        let claimed = claimed_from_class_s(&token_a, first).expect("map");
+        assert_eq!(claimed.items.len(), 2);
+        assert_eq!(
+            claimed.items[0].payload.as_deref(),
+            Some(&[0xCA, 0xFE][..])
+        );
+    }
+}
+
+pub fn claimed_from_class_s(
+    lease_token: &LeaseToken,
+    result: ClassSClaimResult,
+) -> EngineResult<Claimed> {
+    let mut items = Vec::with_capacity(result.items.len());
+    for item in result.items {
+        items.push(ClaimedItem {
+            item_id: ItemId::new(&item.item_id).map_err(|e| EngineError::Storage(e.to_string()))?,
+            client_item_key: ClientItemKey::new(item.client_item_key)
+                .map_err(|e| EngineError::Storage(e.to_string()))?,
+            item_version: u64::try_from(item.item_version)
+                .map_err(|_| EngineError::Storage("item_version".into()))?,
+            priority: parse_priority(item.priority)?,
+            group_key: item
+                .group_key
+                .map(GroupKey::new)
+                .transpose()
+                .map_err(|e| EngineError::Storage(e.to_string()))?,
+            not_before: item.not_before.map(nanos_ts),
+            lease_token: Some(lease_token.clone()),
+            lease_expires_at: nanos_ts(item.lease_expires_at),
+            attempt_count: u32::try_from(item.retry_count)
+                .map_err(|_| EngineError::Storage("retry_count".into()))?,
+            max_attempts: u32::try_from(item.max_attempts)
+                .map_err(|_| EngineError::Storage("max_attempts".into()))?,
+            payload: item.payload.map(Bytes::from),
+            fields: fields_from_json(item.fields_json)?,
+            metadata: metadata_from_json(item.metadata_json)?,
+            gate_keys: item.gate_keys,
+            entity: entity_from_json(item.entity_document)?,
+        });
+    }
+    Ok(Claimed {
+        items,
+        cohort_lease_token: None,
+        cohort_id: None,
+    })
 }
 
 /// Validate one benchmark evidence record without accepting missing or zero-valued observations.
@@ -447,9 +651,12 @@ async fn configure_connection(connection: &Connection, config: &TursoConfig) -> 
     connection
         .pragma_update("journal_mode", config.journal_mode.pragma_value())
         .await?;
-    connection.pragma_update("synchronous", "NORMAL").await?;
-    // Negative cache_size is KiB. Bound the pager so RSS is a cache, not O(N).
-    connection.pragma_update("cache_size", "-16384").await?;
+    // Projection is derived and rebuildable from the log (ADR-016). Crash durability
+    // lives on the log; OFF avoids a per-commit fsync storm on the serving store.
+    connection.pragma_update("synchronous", "OFF").await?;
+    // Negative cache_size is KiB. 128 MiB is a cache cap, not an O(N) working set.
+    connection.pragma_update("cache_size", "-131072").await?;
+    let _ = connection.pragma_update("wal_autocheckpoint", "1000").await;
     connection.busy_timeout(config.busy_timeout)?;
     Ok(())
 }
@@ -481,9 +688,9 @@ async fn verify_connection_settings(connection: &Connection, config: &TursoConfi
             settings.journal_mode, expected_journal
         )));
     }
-    if settings.synchronous != 1 {
+    if settings.synchronous != 0 {
         return Err(TursoRelationalError::Configuration(format!(
-            "synchronous read back as {}, expected NORMAL (1)",
+            "synchronous read back as {}, expected OFF (0)",
             settings.synchronous
         )));
     }

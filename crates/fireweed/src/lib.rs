@@ -41,7 +41,11 @@ use std::sync::{Arc, Mutex};
 #[cfg(any(feature = "sqlite", feature = "objectlog", feature = "postgres", test))]
 mod blocking_backend;
 mod facade;
+#[cfg(all(feature = "turso", feature = "objectlog"))]
+mod map_push_planner;
 mod operator;
+#[cfg(all(feature = "turso", feature = "objectlog"))]
+mod planner_map;
 #[cfg(feature = "turso")]
 pub mod turso_compose;
 
