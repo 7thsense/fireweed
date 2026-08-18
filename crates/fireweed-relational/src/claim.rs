@@ -160,6 +160,24 @@ pub fn class_s_claim(
 
     let item_ids_json = serde_json::to_string(&ids).map_err(|e| EngineError::Storage(e.to_string()))?;
     load_class_s_gate_keys(tx, request.tenant_id, request.queue_id, &mut items)?;
+    if !ids.is_empty() {
+        let placeholders = vec!["(?,?,?,?)"; ids.len()].join(",");
+        let sql = format!(
+            "INSERT INTO fireweed_lease_bearers(tenant_id,queue_id,item_id,lease_token) \
+             VALUES {placeholders} \
+             ON CONFLICT(tenant_id,queue_id,item_id) DO UPDATE SET lease_token=excluded.lease_token"
+        );
+        let mut params = Vec::with_capacity(ids.len() * 4);
+        for id in &ids {
+            params.extend([
+                RelValue::Text(request.tenant_id.to_string()),
+                RelValue::Text(request.queue_id.to_string()),
+                RelValue::Text(id.clone()),
+                RelValue::Text(request.lease_token.as_str().to_string()),
+            ]);
+        }
+        rel_exec(tx, &sql, params)?;
+    }
 
     rel_exec(
         tx,
@@ -334,6 +352,9 @@ mod tests {
                     }
                 }
                 return Ok(changed);
+            }
+            if sql.contains("INSERT INTO fireweed_lease_bearers") {
+                return Ok(self.items.borrow().iter().filter(|item| item.leased).count());
             }
             if sql == INSERT_CLAIM_OUTBOX {
                 let outbox_id = match &params[2] {

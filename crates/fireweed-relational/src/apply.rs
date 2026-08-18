@@ -1013,6 +1013,35 @@ pub fn exec_items_in(
     Ok(())
 }
 
+fn persist_lease_bearers(
+    tx: &impl RelTx,
+    shard: &QueueKey,
+    ids: &[ItemId],
+    token: &LeaseToken,
+) -> EngineResult<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let (t, q) = parts(shard);
+    let placeholders = vec!["(?,?,?,?)"; ids.len()].join(",");
+    let sql = format!(
+        "INSERT INTO fireweed_lease_bearers(tenant_id,queue_id,item_id,lease_token) \
+         VALUES {placeholders} \
+         ON CONFLICT(tenant_id,queue_id,item_id) DO UPDATE SET lease_token=excluded.lease_token"
+    );
+    let mut params = Vec::with_capacity(ids.len() * 4);
+    for id in ids {
+        params.extend([
+            RelValue::Text(t.clone()),
+            RelValue::Text(q.clone()),
+            RelValue::Text(id.to_string()),
+            RelValue::Text(token.as_str().to_string()),
+        ]);
+    }
+    crate::rel_exec(tx, &sql, params)?;
+    Ok(())
+}
+
 fn leased_item_id_set(
     tx: &impl RelTx,
     shard: &QueueKey,
@@ -2454,6 +2483,7 @@ pub fn apply_command_sql(
             for id in &c.item_ids {
                 token_ops.push(TokenOp::Set(shard.clone(), *id, c.lease_token.clone()));
             }
+            persist_lease_bearers(tx, shard, &c.item_ids, &c.lease_token)?;
             if grouped_shards.contains(shard) {
                 let removed = load_grouped_items(tx, shard, &c.item_ids)?;
                 apply_group_summary_remove(tx, shard, &removed, now)?;
@@ -2756,6 +2786,17 @@ pub fn apply_command_sql(
             &c.updates,
         ),
         QueueCommand::Finalize(c) => {
+            let finalize_ids: Vec<String> = c.outcomes.iter().map(|o| o.item_id.to_string()).collect();
+            if !finalize_ids.is_empty() {
+                exec_items_in(
+                    tx,
+                    "DELETE FROM fireweed_lease_bearers WHERE tenant_id=? AND queue_id=? AND item_id IN",
+                    &[],
+                    &t,
+                    &q,
+                    &finalize_ids,
+                )?;
+            }
             // Resolve Retry-exhaustion for all Retry outcomes in ONE read (was one SELECT per outcome).
             let retry_ids: Vec<String> = c
                 .outcomes

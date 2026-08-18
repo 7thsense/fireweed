@@ -4636,12 +4636,10 @@ impl AsyncProjectionStore for TursoRelational {
         ids: Vec<ItemId>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
         async move {
-            let tokens = self.live_tokens.lock().await.clone();
-            let visible: Vec<_> = ids
-                .iter()
-                .copied()
-                .filter(|id| tokens.contains_key(&(shard.clone(), *id)))
-                .collect();
+            // SQL is the serving authority. Bearer tokens come from fireweed_lease_bearers,
+            // not the leftover process live_tokens map.
+            let visible = ids.clone();
+            let mut tokens = HashMap::<ItemId, LeaseToken>::new();
             let mut item_rows = HashMap::<ItemId, Vec<Value>>::with_capacity(visible.len());
             let mut gate_keys = HashMap::<ItemId, Vec<String>>::new();
             for chunk in visible.chunks(500) {
@@ -4673,9 +4671,18 @@ impl AsyncProjectionStore for TursoRelational {
                     "SELECT item_id,gate_key FROM fireweed_item_gates WHERE tenant_id=?1 \
                      AND queue_id=?2 AND item_id IN ({placeholders}) ORDER BY item_id,gate_key"
                 );
-                for row in self.query(gate_sql, params).await.map_err(storage)? {
+                for row in self.query(gate_sql, params.clone()).await.map_err(storage)? {
                     let id = ItemId::new(text(&row.values[0])?).map_err(storage)?;
                     gate_keys.entry(id).or_default().push(text(&row.values[1])?);
+                }
+                let bearer_sql = format!(
+                    "SELECT item_id,lease_token FROM fireweed_lease_bearers \
+                     WHERE tenant_id=?1 AND queue_id=?2 AND item_id IN ({placeholders})"
+                );
+                for row in self.query(bearer_sql, params).await.map_err(storage)? {
+                    let id = ItemId::new(text(&row.values[0])?).map_err(storage)?;
+                    let token = LeaseToken::new(text(&row.values[1])?).map_err(storage)?;
+                    tokens.insert(id, token);
                 }
             }
             let mut claimed = Vec::new();

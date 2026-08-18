@@ -845,32 +845,32 @@ pub(crate) fn pending_sql(
     shard: &QueueKey,
 ) -> EngineResult<Vec<LeaseView>> {
     let (t, q) = parts(shard);
+    let _ = live_tokens;
     let mut stmt = st(conn.prepare(
-        "SELECT item_id, lease_expires_at, retry_count FROM fireweed_items \
-         WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased'",
+        "SELECT i.item_id, i.lease_expires_at, i.retry_count, b.lease_token \
+         FROM fireweed_items i \
+         JOIN fireweed_lease_bearers b \
+           ON b.tenant_id=i.tenant_id AND b.queue_id=i.queue_id AND b.item_id=i.item_id \
+         WHERE i.tenant_id=?1 AND i.queue_id=?2 AND i.lifecycle_state='Leased'",
     ))?;
     let rows = st(stmt.query_map(params![t, q], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, Option<i64>>(1)?,
             row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
         ))
     }))?;
     let mut out = Vec::new();
     for r in rows {
-        let (id, exp, retry) = st(r)?;
+        let (id, exp, retry, token) = st(r)?;
         let item_id = ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?;
-        let (Some(token), Some(exp)) = (
-            live_tokens
-                .get(shard)
-                .and_then(|tokens| tokens.get(&item_id)),
-            exp,
-        ) else {
+        let (Ok(token), Some(exp)) = (LeaseToken::new(token), exp) else {
             continue;
         };
         out.push(LeaseView {
             item_id,
-            lease_token: token.clone(),
+            lease_token: token,
             lease_expires_at: nanos_ts(exp),
             attempt_count: retry as u32,
         });

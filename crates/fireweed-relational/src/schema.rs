@@ -279,10 +279,21 @@ CREATE TABLE IF NOT EXISTS fireweed_claim_outbox (
 );
 CREATE INDEX IF NOT EXISTS fireweed_claim_outbox_queue_idx
     ON fireweed_claim_outbox (tenant_id, queue_id, created_at);
+-- Bearer tokens for consumer listing. Not stored on fireweed_items (hash only there).
+CREATE TABLE IF NOT EXISTS fireweed_lease_bearers (
+    tenant_id TEXT NOT NULL,
+    queue_id TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    lease_token TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, item_id)
+);
+CREATE INDEX IF NOT EXISTS fireweed_lease_bearers_token_idx
+    ON fireweed_lease_bearers (tenant_id, queue_id, lease_token);
 "#;
 
 /// Application tables owned by a disposable relational projection, in dependency-safe drop order.
 pub const OWNED_PROJECTION_TABLES: &[&str] = &[
+    "fireweed_lease_bearers",
     "fireweed_claim_outbox",
     "fireweed_checkpoint_lineage",
     "fireweed_item_index",
