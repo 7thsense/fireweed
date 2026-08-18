@@ -4687,7 +4687,7 @@ impl AsyncProjectionStore for TursoRelational {
             }
             let mut claimed = Vec::new();
             for id in ids {
-                let Some(token) = tokens.get(&(shard.clone(), id)).cloned() else {
+                let Some(token) = tokens.get(&id).cloned() else {
                     continue;
                 };
                 let Some(values) = item_rows.get(&id) else {
