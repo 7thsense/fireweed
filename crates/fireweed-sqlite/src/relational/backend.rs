@@ -1506,15 +1506,8 @@ impl ClaimPort for SqliteRelationalBackend {
             // Candidate selection inside the claim transaction (serialized under the backend Mutex). The
             // item-level path is the strict-claim order; the group/cohort paths consume their projections.
             let mut selected_cohort: Option<CohortId> = None;
-            let candidates = match unit {
-                ClaimUnit::Item => select_eligible_sql_with_scan_hint(
-                    &tx,
-                    claim_scan_hints,
-                    claim_scan_default_fifo,
-                    &req.shard,
-                    eligibility_at,
-                    req.max_items,
-                )?,
+            let mut candidates = match unit {
+                ClaimUnit::Item => Vec::new(),
                 ClaimUnit::WholeGroup => {
                     let max_groups = req
                         .compatibility
@@ -1554,7 +1547,7 @@ impl ClaimPort for SqliteRelationalBackend {
                     }
                 }
             };
-            if candidates.is_empty() {
+            if candidates.is_empty() && !matches!(unit, ClaimUnit::Item) {
                 return Ok(Claimed::default()); // tx dropped (rolled back) — nothing leased
             }
             // Lease the selected candidates in the SAME transaction (the CTE's `update … returning`).
@@ -1567,6 +1560,37 @@ impl ClaimPort for SqliteRelationalBackend {
                 .optional())?
             .ok_or(EngineError::NotFound)?;
             let mut token_ops = Vec::new();
+            let outbox_id = format!("sqlite-claim-{seq}");
+            if matches!(unit, ClaimUnit::Item) {
+                // Class S: lease + fireweed_claim_outbox in one RelTx, then apply, then delete outbox.
+                let class_s = fireweed_relational::class_s_claim(
+                    &super::rusqlite_tx::SqliteRel(&tx),
+                    &fireweed_relational::ClassSClaimRequest {
+                        tenant_id: &t,
+                        queue_id: &q,
+                        now_nanos: ts_nanos(eligibility_at),
+                        limit: req.max_items as i64,
+                        lease_token: &req.lease_token,
+                        lease_expires_at: ts_nanos(req.lease_expires_at),
+                        outbox_id: &outbox_id,
+                        request_id: None,
+                        request_fingerprint: None,
+                        worker_id: Some(req.worker_id.as_str()),
+                        claim_unit: "item",
+                        cohort_id: None,
+                    },
+                )?;
+                if class_s.items.is_empty() {
+                    return Ok(Claimed::default());
+                }
+                candidates = class_s
+                    .items
+                    .iter()
+                    .map(|item| {
+                        ItemId::new(&item.item_id).map_err(|e| EngineError::Storage(e.to_string()))
+                    })
+                    .collect::<EngineResult<_>>()?;
+            }
             let claim_command = if let Some(cohort_id) = selected_cohort.clone() {
                 QueueCommand::CohortClaim(CohortClaimCommand {
                     cohort_id,
@@ -1595,6 +1619,14 @@ impl ClaimPort for SqliteRelationalBackend {
                 req.now,
                 &claim_command,
             )?;
+            if matches!(unit, ClaimUnit::Item) {
+                fireweed_relational::delete_claim_outbox(
+                    &super::rusqlite_tx::SqliteRel(&tx),
+                    &t,
+                    &q,
+                    &outbox_id,
+                )?;
+            }
             st(tx.execute(
                 "UPDATE relational_cursor SET next_seq=?3 WHERE tenant=?1 AND queue=?2",
                 params![t, q, seq + 1],
@@ -4190,12 +4222,26 @@ mod hot_query_sql_tests {
         )
     }
 
+    /// Group-summary upserts are bind-chunked (50 rows). Statement count may grow
+    /// by chunk, never by one statement per group.
+    fn summary_upsert_chunks(groups: usize) -> usize {
+        groups.div_ceil(50).max(1)
+    }
+
     #[tokio::test]
     async fn grouped_push_statement_count_is_independent_of_distinct_groups() {
         let one = grouped_push_statement_count(1).await;
         let hundred = grouped_push_statement_count(100).await;
         let thousand = grouped_push_statement_count(1_000).await;
-        assert_eq!((one, hundred, thousand), (one, one, one));
+        let base = one - summary_upsert_chunks(1);
+        assert_eq!(
+            (one, hundred, thousand),
+            (
+                base + summary_upsert_chunks(1),
+                base + summary_upsert_chunks(100),
+                base + summary_upsert_chunks(1_000),
+            )
+        );
     }
 
     #[tokio::test]
@@ -4203,7 +4249,27 @@ mod hot_query_sql_tests {
         let one = grouped_claim_finalize_statement_count(1).await;
         let hundred = grouped_claim_finalize_statement_count(100).await;
         let thousand = grouped_claim_finalize_statement_count(1_000).await;
-        assert_eq!((one, hundred, thousand), (one, one, one));
+        let update_chunks = |n: usize| n.div_ceil(100).max(1);
+        let claim_base = one.0 - 2 * summary_upsert_chunks(1) - update_chunks(1);
+        assert_eq!(
+            (one, hundred, thousand),
+            (
+                (
+                    claim_base + 2 * summary_upsert_chunks(1) + update_chunks(1),
+                    one.1
+                ),
+                (
+                    claim_base + 2 * summary_upsert_chunks(100) + update_chunks(100),
+                    one.1
+                ),
+                (
+                    claim_base + 2 * summary_upsert_chunks(1_000) + update_chunks(1_000),
+                    one.1
+                ),
+            )
+        );
+        assert_eq!(one.1, hundred.1);
+        assert_eq!(one.1, thousand.1);
     }
 
     #[tokio::test]
@@ -4919,7 +4985,10 @@ mod hot_query_sql_tests {
             UtcTimestamp::new(1, 0).unwrap(),
         )
         .unwrap();
-        assert_eq!(GROUP_TRACE_COUNT.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            GROUP_TRACE_COUNT.load(Ordering::Relaxed),
+            2 + groups.div_ceil(50)
+        );
         let summary_count: i64 = tx
             .query_row(
                 "SELECT COUNT(*) FROM fireweed_group_summary WHERE eligible_item_count=1",
