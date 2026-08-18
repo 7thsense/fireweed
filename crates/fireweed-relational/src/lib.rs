@@ -3,17 +3,21 @@
 //! This crate owns schema text, row/value codecs, and SQL constants that must remain identical across
 //! relational drivers. It deliberately contains no database client or connection abstraction.
 
+mod apply;
 mod claim;
 mod codec;
 mod exec;
+mod query;
 mod row;
 mod schema;
 mod sql;
 mod value;
 
+pub use apply::*;
 pub use claim::*;
 pub use codec::*;
 pub use exec::*;
+pub use query::*;
 pub use row::*;
 pub use schema::*;
 pub use sql::*;

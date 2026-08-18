@@ -10,7 +10,14 @@ use fireweed_engine::{
     ClaimRef, CommandPosition, CommitEntryOutcome, CommitEntryStatus, CommitTransitionEntry,
     EngineError, EngineResult, EntryRecovery, PushItem, PushSpec, QueueKey,
 };
-pub(crate) use fireweed_relational::*;
+pub(crate) use fireweed_relational::{
+    OWNED_PROJECTION_TABLES, RELATIONAL_SCHEMA, RangeScanCursorState, SELECT_MATERIALIZED_ITEM_IDS,
+    SELECT_RELATIONAL_CURSOR, TypedIndexRows, claim_by_query_replay_item_ids, days_from_civil,
+    elig_sort, entity_from_json, fields_from_json, fields_to_json, lease_hash,
+    merge_entity_document, metadata_from_json, metadata_to_json, nanos_ts, parse_priority,
+    parse_state, parse_utc_timestamp, state_str, ts_nanos, ts_nanos_opt,
+    typed_index_row_from_entity, typed_value_compare, typed_value_for_json,
+};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 use serde_json::Value as JsonValue;

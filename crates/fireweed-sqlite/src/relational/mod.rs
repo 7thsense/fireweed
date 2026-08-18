@@ -56,6 +56,7 @@ mod helpers;
 mod hybrid;
 mod monitor;
 mod projection;
+mod rusqlite_tx;
 #[cfg(test)]
 pub(crate) use projection::EXPIRED_LEASES_BOUNDED_SQL;
 mod query;
