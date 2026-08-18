@@ -1998,15 +1998,10 @@ async fn apply_owned(
                         Value::Text(tenant.clone()),
                         Value::Text(queue.clone()),
                     ];
-                    let changed =
+                    let _changed =
                         execute_for_items(&transaction, sql::claim_items, params, &claim.item_ids)
                             .await?;
-                    let expected = u64::try_from(claim.item_ids.len())
-                        .map_err(|_| storage("claim item count exceeds u64"))?;
-                    if changed != expected {
-                        transaction.rollback().await.map_err(storage)?;
-                        return Err(storage("claim changed an unexpected row count"));
-                    }
+                    // Class S already leased these rows. Replay must not poison on a 0-row UPDATE.
                     token_ops.extend(claim.item_ids.iter().map(|item| {
                         TokenOp::Set(position.queue.clone(), *item, claim.lease_token.clone())
                     }));
