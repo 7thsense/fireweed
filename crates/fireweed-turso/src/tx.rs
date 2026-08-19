@@ -30,9 +30,42 @@ fn storage(error: impl std::fmt::Display) -> EngineError {
     EngineError::Storage(error.to_string())
 }
 
+thread_local! {
+    static RELTX_HOP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static RELTX_HANDLE: std::cell::RefCell<Option<tokio::runtime::Handle>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run one apply hop inside `block_in_place` so RelTx statements reuse the current runtime
+/// instead of hopping to the RelTx worker per statement. Current-thread tests keep the
+/// per-statement worker.
+pub fn run_reltx_hop<T>(work: impl FnOnce() -> T) -> T {
+    if RELTX_HOP.get() {
+        return work();
+    }
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| {
+                RELTX_HOP.set(true);
+                RELTX_HANDLE.with(|slot| *slot.borrow_mut() = Some(handle.clone()));
+                let result = work();
+                RELTX_HANDLE.with(|slot| *slot.borrow_mut() = None);
+                RELTX_HOP.set(false);
+                result
+            })
+        }
+        Ok(_) | Err(_) => work(),
+    }
+}
+
 fn block_on_turso<T: Send + 'static>(
     future: impl std::future::Future<Output = T> + Send + 'static,
 ) -> T {
+    if RELTX_HOP.get() {
+        if let Some(handle) = RELTX_HANDLE.with(|slot| slot.borrow().clone()) {
+            return handle.block_on(future);
+        }
+    }
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
             tokio::task::block_in_place(|| handle.block_on(future))

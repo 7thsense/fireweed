@@ -1,6 +1,8 @@
 # Cleanup: one log, one projection
 
-**Status**: plan (2026-08-18), revised after review. Not implemented.
+**Status**: in progress (2026-08-19). SQLite-family apply is the shared RelTx hop
+(`apply_committed_batch_sql`). Postgres apply remains dialect-forked (`$n` /
+`UNNEST` / no `json_each`).
 
 This document **supersedes** the “planner map as produce-path authority”
 section in `ss-objectlog-turso-memory-goal.md`. That map was a locking
@@ -261,14 +263,16 @@ adapters.
 
 ### 4. Apply
 
-- Push: insert the command’s rows. Duplicate active key: skip the row,
-  do not fail the pack.
-- Update: only columns the command changes. Refuse `Leased`.
-- Claim: lease those ids if still `Pending`; if already this token,
-  no-op; if another token, leave it. No group-member scan on the
-  delivery path. Group-summary: incremental, or skip on item-level
-  claim and refresh on grouped read.
-- Complete/fail: mark terminal. No group-summary refresh.
+Implemented for SQLite and Turso in `fireweed-relational::apply_committed_batch_sql`:
+
+- One RelTx for the packed hop. Cursor is read once and written once per queue.
+- Contiguous `Push` envelopes coalesce into one `insert_item_specs`.
+- `Claim` + `Finalize(Complete)` fuse into one UPDATE (no leased row).
+- Contiguous set-based `UpdateFields` coalesce into `UPDATE FROM VALUES`
+  (payload, metadata, fields, priority, gates).
+- Turso runs that hop inside one `block_in_place` so RelTx statements do not
+  hop to the worker thread per statement.
+- Postgres still uses its own `$n` apply. Do not run SQLite SQL on Postgres.
 
 One runtime hop per packed apply object, not per statement. That is its
 own slice (writer), not a store.

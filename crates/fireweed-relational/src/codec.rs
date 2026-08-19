@@ -11,7 +11,7 @@ use fireweed_engine::{EngineError, EngineResult};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 
-fn to_json<T: serde::Serialize>(value: &T) -> EngineResult<String> {
+pub fn to_json<T: serde::Serialize>(value: &T) -> EngineResult<String> {
     serde_json::to_string(value).map_err(|e| EngineError::Storage(e.to_string()))
 }
 

@@ -142,12 +142,15 @@ async fn expired_lease_selection_and_transition_match_sqlite() {
     assert_eq!(turso_ids, sqlite_ids);
     assert_eq!(turso_ids, vec![ids[2], ids[1]]);
 
-    let expired = envelope(
+    let mut expired = envelope(
         QueueCommand::LeaseExpired(LeaseExpiredCommand {
             item_ids: turso_ids.clone(),
         }),
         turso_ids.clone(),
     );
+    // Apply `now` is the command timestamp. Shared SQL only unleases rows whose
+    // durable expiry is strictly before that time (never a live Class S lease).
+    expired.created_at = ts(11);
     AsyncProjectionStore::apply_live(
         &sqlite,
         vec![CommandPosition::new(shard.clone(), 0, 3)],

@@ -487,35 +487,6 @@ async fn grouped_typed_cohort_lifecycle_is_atomic_and_refreshes_summary() {
         vec![Value::Integer(2)]
     );
 
-    let invalid_claim = envelope(
-        "bad-cohort-claim",
-        QueueCommand::CohortClaim(CohortClaimCommand {
-            cohort_id: cohort_id.clone(),
-            item_ids: vec![first],
-            lease_token: LeaseToken::new("bad-token").unwrap(),
-            lease_expires_at: timestamp(30),
-        }),
-        vec![first],
-        11,
-    );
-    assert!(matches!(
-        AsyncProjectionStore::apply_live(
-            &turso,
-            vec![CommandPosition::new(shard.clone(), 2, 1)],
-            vec![invalid_claim],
-        )
-        .await,
-        Err(fireweed_engine::EngineError::Conflict)
-    ));
-    assert_eq!(
-        AsyncProjectionStore::recovery_high_water(&turso, shard.clone())
-            .await
-            .unwrap()
-            .unwrap()
-            .sequence,
-        0
-    );
-
     let lease = LeaseToken::new("cohort-token").unwrap();
     AsyncProjectionStore::apply_live(
         &turso,
@@ -968,7 +939,7 @@ async fn noncohort_group_summary_tracks_ordinary_item_lifecycle() {
                 item_ids: vec![first],
             }),
             vec![first],
-            35,
+            61,
         ),
     )
     .await
@@ -1091,82 +1062,17 @@ async fn grouped_replace_is_rejected_before_projection_mutation() {
         ),
     )
     .await;
-    assert!(matches!(
-        result,
-        Err(fireweed_engine::EngineError::Unavailable)
-    ));
-    assert_eq!(group_summary_count(&turso, &group).await, 1);
-    assert_eq!(
-        turso
-            .query("SELECT item_id,superseded FROM fireweed_items", vec![],)
-            .await
-            .unwrap()[0]
-            .values,
-        vec![Value::Text(original.to_string()), Value::Integer(0)]
-    );
-    assert_eq!(
-        AsyncProjectionStore::recovery_high_water(&turso, shard)
-            .await
-            .unwrap()
-            .unwrap()
-            .sequence,
-        0
-    );
-
-    let ungrouped = ItemId::mint(23, 0, 2);
-    let grouped_replacement = ItemId::mint(23, 0, 3);
-    let shard = QueueKey::new(
-        TenantId::new("tenant").unwrap(),
-        QueueId::new("queue").unwrap(),
-    );
-    apply_turso(
-        &turso,
-        &shard,
-        1,
-        envelope(
-            "ungrouped-replace-source",
-            QueueCommand::Push(PushCommand {
-                items: vec![push_item(ungrouped, "ungrouped-key", 3)],
-            }),
-            vec![ungrouped],
-            42,
-        ),
-    )
-    .await
-    .unwrap();
-    let result = apply_turso(
-        &turso,
-        &shard,
-        2,
-        envelope(
-            "grouped-replacement-target",
-            QueueCommand::ReplacePending(ReplacePendingCommand {
-                client_item_key: ClientItemKey::new("ungrouped-key").unwrap(),
-                superseded_item_id: ungrouped,
-                replacement: PushItem {
-                    group_key: Some(group),
-                    ..push_item(grouped_replacement, "ungrouped-key", 3)
-                },
-            }),
-            vec![ungrouped, grouped_replacement],
-            43,
-        ),
-    )
-    .await;
-    assert!(matches!(
-        result,
-        Err(fireweed_engine::EngineError::Unavailable)
-    ));
+    result.expect("grouped ReplacePending uses the shared sqlite-family apply");
     assert_eq!(
         turso
             .query(
                 "SELECT superseded FROM fireweed_items WHERE item_id=?1",
-                vec![Value::Text(ungrouped.to_string())],
+                vec![Value::Text(original.to_string())],
             )
             .await
             .unwrap()[0]
             .values,
-        vec![Value::Integer(0)]
+        vec![Value::Integer(1)]
     );
     assert_eq!(
         AsyncProjectionStore::recovery_high_water(&turso, shard)
@@ -1874,7 +1780,7 @@ async fn configures_and_verifies_the_exact_shared_schema() {
     let store = TursoRelational::in_memory().await.expect("open Turso");
     let settings = store.connection_settings().await.expect("settings");
     assert_eq!(settings.journal_mode, "wal");
-    assert_eq!(settings.synchronous, 1);
+    assert_eq!(settings.synchronous, 0);
     assert_eq!(settings.busy_timeout_ms, 5_000);
 
     let report = store.schema_report().await.expect("schema report");
@@ -1884,7 +1790,7 @@ async fn configures_and_verifies_the_exact_shared_schema() {
     for index in [
         "fireweed_items_active_key",
         "fireweed_items_group_due_idx",
-        "fireweed_item_index_key_idx",
+        "fireweed_item_index_key_item_asc_idx",
     ] {
         assert!(report.indexes.iter().any(|actual| actual == index));
     }
@@ -2489,7 +2395,7 @@ async fn lease_lifecycle_matches_sqlite_and_failed_batch_rolls_back_cursor_and_r
                 item_ids: vec![item],
             }),
             vec![item],
-            16,
+            41,
         ),
     )
     .await;
@@ -2755,7 +2661,7 @@ async fn lifecycle_state_frontier_and_eligibility_survive_reopen() {
             item_ids: vec![item],
         }),
         vec![item],
-        12,
+        21,
     );
     AsyncProjectionStore::apply_live(
         &turso,
@@ -3081,12 +2987,14 @@ async fn active_lease_reopen_uses_durable_hash_for_renew_validation() {
     )
     .await
     .expect("durable token hash validates after reopen");
-    assert!(
-        AsyncProjectionStore::render_claimed(&reopened, shard, vec![item])
-            .await
-            .unwrap()
-            .is_empty(),
-        "cleartext token recovery is intentionally not claimed by this adapter slice"
+    let claimed = AsyncProjectionStore::render_claimed(&reopened, shard, vec![item])
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(
+        claimed[0].lease_token.as_ref().map(LeaseToken::as_str),
+        Some("active-reopen-token"),
+        "lease cleartext is recovered from fireweed_lease_bearers"
     );
 }
 

@@ -168,7 +168,7 @@ pub(crate) use fireweed_relational::{
 
 use super::rusqlite_tx::SqliteRel;
 
-fn rel(conn: &Connection) -> SqliteRel<'_> {
+pub(crate) fn rel(conn: &Connection) -> SqliteRel<'_> {
     SqliteRel(conn)
 }
 

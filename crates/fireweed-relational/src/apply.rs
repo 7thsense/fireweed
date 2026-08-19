@@ -7,9 +7,10 @@ use fireweed_core::{
     QueueDefinition, QueueIndex, UtcTimestamp, is_retry_exhausted,
 };
 use fireweed_engine::{
-    CommandPosition, EngineError, EngineResult, FinalizeCommand, FinalizeKind, FinalizeOutcome,
-    PayloadUpdate, PushItem, QueueCommand, QueueKey, ResolvedItemMutationAction, ScheduleUpdate,
-    SetGatesCommand, UpdateFieldsCommand,
+    BatchUpdateResponse, CommandEnvelope, CommandPosition, EngineError, EngineResult,
+    FinalizeCommand, FinalizeKind, FinalizeOutcome, PayloadUpdate, PushItem, QueueCommand,
+    QueueKey, RequestOutcome, ResolvedItemMutationAction, ScheduleUpdate, SetGatesCommand,
+    UpdateFieldsCommand, push_items_fingerprint_sha256,
 };
 use serde_json::Value as JsonValue;
 
@@ -24,6 +25,611 @@ pub use crate::RELATIONAL_BATCH as SQLITE_BATCH;
 const TYPED_INDEX_CHECK_CHUNK: usize = 1_000;
 const TYPED_INDEX_INSERT_CHUNK: usize = 1_500;
 const IDEMPOTENCY_OPERATION_CLAIM_BY_QUERY: &str = "claim_by_query";
+const IDEMPOTENCY_OPERATION_PUSH: &str = "push";
+const IDEMPOTENCY_OPERATION_BATCH_UPDATE: &str = "batch_update";
+const IDEMPOTENCY_OPERATION_ITEM_MUTATION: &str = "item_mutation";
+const IDEMPOTENCY_OPERATION_COMMIT: &str = "commit";
+
+fn request_expires_at(
+    queues: &HashMap<QueueKey, QueueDefinition>,
+    shard: &QueueKey,
+    now: UtcTimestamp,
+) -> EngineResult<i64> {
+    let retention_ms = queues
+        .get(shard)
+        .map(|definition| definition.request_id_retention_ms)
+        .ok_or(EngineError::NotFound)?;
+    Ok(ts_nanos(now).saturating_add((retention_ms as i64).saturating_mul(1_000_000)))
+}
+
+fn command_positions_json(position: &CommandPosition) -> EngineResult<String> {
+    serde_json::to_string(&vec![(position.backend_epoch, position.sequence)])
+        .map_err(|error| EngineError::Storage(error.to_string()))
+}
+
+fn persist_request_row(
+    tx: &impl RelTx,
+    shard: &QueueKey,
+    operation: &str,
+    request_id: &str,
+    fingerprint: Vec<u8>,
+    response_payload: String,
+    position: &CommandPosition,
+    created_at: UtcTimestamp,
+    expires_at: i64,
+    extend_only: bool,
+) -> EngineResult<()> {
+    let (t, q) = parts(shard);
+    let conflict = if extend_only {
+        "ON CONFLICT(tenant_id,queue_id,operation,request_id) DO UPDATE SET \
+         expires_at=max(fireweed_request_idempotency.expires_at,excluded.expires_at) \
+         WHERE fireweed_request_idempotency.request_fingerprint=excluded.request_fingerprint \
+           AND fireweed_request_idempotency.response_payload=excluded.response_payload"
+    } else {
+        "ON CONFLICT(tenant_id,queue_id,operation,request_id) DO UPDATE SET \
+         request_fingerprint=excluded.request_fingerprint,response_payload=excluded.response_payload,\
+         command_positions=excluded.command_positions,expires_at=excluded.expires_at,\
+         created_at=excluded.created_at \
+         WHERE fireweed_request_idempotency.expires_at<=excluded.created_at OR \
+          (fireweed_request_idempotency.request_fingerprint=excluded.request_fingerprint \
+           AND fireweed_request_idempotency.response_payload=excluded.response_payload)"
+    };
+    let affected = crate::rel_exec(
+        tx,
+        &format!(
+            "INSERT INTO fireweed_request_idempotency \
+             (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,\
+              command_positions,expires_at,created_at) \
+             VALUES (?,?,?,?,?,?,?,?,?) {conflict}"
+        ),
+        [
+            RelValue::Text(t.to_string()),
+            RelValue::Text(q.to_string()),
+            RelValue::Text(operation.to_string()),
+            RelValue::Text(request_id.to_string()),
+            RelValue::Blob(fingerprint),
+            RelValue::Text(response_payload),
+            RelValue::Text(command_positions_json(position)?),
+            RelValue::Integer(expires_at),
+            RelValue::Integer(ts_nanos(created_at)),
+        ],
+    )?;
+    if affected == 0 {
+        return Err(EngineError::RequestIdConflict);
+    }
+    Ok(())
+}
+
+/// Persist a replayable request-id outcome in the same apply transaction.
+pub fn persist_request_outcome_sql(
+    tx: &impl RelTx,
+    queues: &HashMap<QueueKey, QueueDefinition>,
+    shard: &QueueKey,
+    envelope: &CommandEnvelope,
+    position: &CommandPosition,
+) -> EngineResult<()> {
+    if let (
+        Some(request_id),
+        Some(fingerprint),
+        Some(RequestOutcome::ItemMutation { response_payload }),
+    ) = (
+        envelope.request_id.as_ref(),
+        envelope.request_fingerprint,
+        envelope.request_outcome.as_ref(),
+    ) {
+        let _: fireweed_engine::ItemMutationResponse = serde_json::from_str(response_payload)
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        return persist_request_row(
+            tx,
+            shard,
+            IDEMPOTENCY_OPERATION_ITEM_MUTATION,
+            request_id.as_str(),
+            fingerprint.to_be_bytes().to_vec(),
+            response_payload.clone(),
+            position,
+            envelope.created_at,
+            request_expires_at(queues, shard, envelope.created_at)?,
+            false,
+        );
+    }
+    if let (
+        Some(request_id),
+        Some(fingerprint),
+        Some(RequestOutcome::BatchUpdate { response_payload }),
+    ) = (
+        envelope.request_id.as_ref(),
+        envelope.request_fingerprint,
+        envelope.request_outcome.as_ref(),
+    ) {
+        let _: BatchUpdateResponse = serde_json::from_str(response_payload)
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        return persist_request_row(
+            tx,
+            shard,
+            IDEMPOTENCY_OPERATION_BATCH_UPDATE,
+            request_id.as_str(),
+            fingerprint.to_be_bytes().to_vec(),
+            response_payload.clone(),
+            position,
+            envelope.created_at,
+            request_expires_at(queues, shard, envelope.created_at)?,
+            false,
+        );
+    }
+    if let (
+        Some(request_id),
+        Some(fingerprint),
+        Some(RequestOutcome::CommitTransition { entries }),
+    ) = (
+        envelope.request_id.as_ref(),
+        envelope.request_fingerprint,
+        envelope.request_outcome.as_ref(),
+    ) {
+        let response_payload = serde_json::to_string(entries)
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        return persist_request_row(
+            tx,
+            shard,
+            IDEMPOTENCY_OPERATION_COMMIT,
+            request_id.as_str(),
+            fingerprint.to_be_bytes().to_vec(),
+            response_payload,
+            position,
+            envelope.created_at,
+            request_expires_at(queues, shard, envelope.created_at)?,
+            false,
+        );
+    }
+    if let (
+        Some(request_id),
+        Some(fingerprint),
+        Some(RequestOutcome::ClaimByQuery {
+            item_ids,
+            lease_token,
+            worker_id,
+        }),
+    ) = (
+        envelope.request_id.as_ref(),
+        envelope.request_fingerprint,
+        envelope.request_outcome.as_ref(),
+    ) {
+        let response = serde_json::to_string(&serde_json::json!({
+            "item_ids": item_ids,
+            "lease_token": lease_token,
+            "worker_id": worker_id,
+        }))
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+        persist_request_row(
+            tx,
+            shard,
+            IDEMPOTENCY_OPERATION_CLAIM_BY_QUERY,
+            request_id.as_str(),
+            fingerprint.to_be_bytes().to_vec(),
+            response,
+            position,
+            envelope.created_at,
+            ts_nanos(match envelope.command {
+                QueueCommand::Claim(ref claim) => claim.lease_expires_at,
+                QueueCommand::CohortClaim(ref claim) => claim.lease_expires_at,
+                _ => envelope.created_at,
+            }),
+            true,
+        )?;
+        let ids = serde_json::to_string(
+            &item_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+        let (t, q) = parts(shard);
+        crate::rel_exec(
+            tx,
+            "INSERT OR IGNORE INTO fireweed_claim_replay_items \
+             (tenant_id,queue_id,request_id,item_id) \
+             SELECT ?,?,?,value FROM json_each(?)",
+            [
+                RelValue::Text(t.to_string()),
+                RelValue::Text(q.to_string()),
+                RelValue::Text(request_id.as_str().to_string()),
+                RelValue::Text(ids),
+            ],
+        )?;
+        return Ok(());
+    }
+    let QueueCommand::Push(push) = &envelope.command else {
+        return Ok(());
+    };
+    let Some(request_id) = envelope.request_id.as_ref() else {
+        return Ok(());
+    };
+    let (Some(_), Some(RequestOutcome::Push { item_ids })) = (
+        envelope.request_fingerprint,
+        envelope.request_outcome.as_ref(),
+    ) else {
+        return Ok(());
+    };
+    let response = serde_json::to_string(
+        &item_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| EngineError::Storage(error.to_string()))?;
+    persist_request_row(
+        tx,
+        shard,
+        IDEMPOTENCY_OPERATION_PUSH,
+        request_id.as_str(),
+        push_items_fingerprint_sha256(&push.items)?.to_vec(),
+        response,
+        position,
+        envelope.created_at,
+        request_expires_at(queues, shard, envelope.created_at)?,
+        false,
+    )
+}
+
+/// Apply many already-durable commands in one RelTx. Reads each queue cursor once and writes it
+/// once at the end. Consecutive Push envelopes coalesce into one insert; Claim+Complete fuse into
+/// one UPDATE; consecutive set-based UpdateFields coalesce into VALUES UPDATE.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_committed_batch_sql(
+    tx: &impl RelTx,
+    queues: &HashMap<QueueKey, QueueDefinition>,
+    grouped_shards: &mut HashSet<QueueKey>,
+    claim_scan_hints: &mut HashMap<QueueKey, i64>,
+    claim_scan_default_fifo: &mut HashMap<QueueKey, bool>,
+    token_ops: &mut Vec<TokenOp>,
+    positions: &[CommandPosition],
+    envelopes: &[CommandEnvelope],
+) -> EngineResult<bool> {
+    if positions.len() != envelopes.len() {
+        return Err(EngineError::Storage(
+            "apply_committed_batch: positions/envelopes length mismatch".into(),
+        ));
+    }
+    if positions.is_empty() {
+        return Ok(false);
+    }
+    let mut applied_update_fields = false;
+    let mut next_seq: HashMap<QueueKey, i64> = HashMap::new();
+    let mut max_epoch: HashMap<QueueKey, i64> = HashMap::new();
+    let mut i = 0usize;
+    while i < positions.len() {
+        let pos = &positions[i];
+        let env = &envelopes[i];
+        let (t, q) = parts(&pos.queue);
+        let cursor = match next_seq.get(&pos.queue) {
+            Some(&n) => n,
+            None => {
+                let n: i64 = crate::query_optional(
+                    tx,
+                    "SELECT next_seq FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+                    [RelValue::Text(t.to_string()), RelValue::Text(q.to_string())],
+                    |row| row.get(0),
+                )?
+                .ok_or(EngineError::NotFound)?;
+                next_seq.insert(pos.queue.clone(), n);
+                n
+            }
+        };
+        let incoming = pos.sequence as i64;
+        if incoming < cursor {
+            collect_token_ops_from_command(token_ops, &pos.queue, &env.command);
+            i += 1;
+            continue;
+        }
+        if incoming > cursor {
+            return Err(EngineError::Storage(format!(
+                "relational projection replay gap for {}:{}: expected sequence {cursor}, got {incoming}",
+                pos.queue.tenant_id.as_str(),
+                pos.queue.queue_id.as_str()
+            )));
+        }
+        if !queues.contains_key(&pos.queue) {
+            return Err(EngineError::NotFound);
+        }
+
+        if let QueueCommand::Claim(claim) = &env.command
+            && i + 1 < positions.len()
+            && positions[i + 1].queue == pos.queue
+            && positions[i + 1].sequence == pos.sequence.saturating_add(1)
+            && let QueueCommand::Finalize(fin) = &envelopes[i + 1].command
+            && finalize_completes_claim(claim, fin)
+        {
+            apply_fused_claim_complete_sql(
+                tx,
+                claim_scan_hints,
+                claim_scan_default_fifo,
+                token_ops,
+                &pos.queue,
+                &positions[i + 1],
+                envelopes[i + 1].created_at,
+                claim,
+            )?;
+            persist_request_outcome_sql(tx, queues, &pos.queue, env, pos)?;
+            persist_request_outcome_sql(
+                tx,
+                queues,
+                &positions[i + 1].queue,
+                &envelopes[i + 1],
+                &positions[i + 1],
+            )?;
+            let fin_seq = positions[i + 1].sequence as i64;
+            let new_next = fin_seq
+                .checked_add(1)
+                .ok_or_else(|| EngineError::Storage("command sequence overflow".into()))?;
+            next_seq.insert(pos.queue.clone(), new_next);
+            let e = positions[i + 1].backend_epoch as i64;
+            let slot = max_epoch.entry(pos.queue.clone()).or_insert(e);
+            if e > *slot {
+                *slot = e;
+            }
+            i += 2;
+            continue;
+        }
+
+        if matches!(env.command, QueueCommand::Push(_)) {
+            let shard = pos.queue.clone();
+            let mut run_end = i;
+            let mut expected = incoming;
+            while run_end < positions.len() {
+                let p = &positions[run_end];
+                let e = &envelopes[run_end];
+                if p.queue != shard || !matches!(e.command, QueueCommand::Push(_)) {
+                    break;
+                }
+                let seq_i = p.sequence as i64;
+                if seq_i < expected {
+                    run_end += 1;
+                    continue;
+                }
+                if seq_i > expected {
+                    break;
+                }
+                expected = seq_i
+                    .checked_add(1)
+                    .ok_or_else(|| EngineError::Storage("command sequence overflow".into()))?;
+                run_end += 1;
+            }
+            apply_push_run_sql(
+                tx,
+                queues,
+                grouped_shards,
+                claim_scan_hints,
+                claim_scan_default_fifo,
+                &shard,
+                &positions[i..run_end],
+                &envelopes[i..run_end],
+                cursor,
+            )?;
+            let mut exp = cursor;
+            for (p, e) in positions[i..run_end]
+                .iter()
+                .zip(envelopes[i..run_end].iter())
+            {
+                let seq_i = p.sequence as i64;
+                if seq_i < exp {
+                    continue;
+                }
+                persist_request_outcome_sql(tx, queues, &p.queue, e, p)?;
+                exp = seq_i
+                    .checked_add(1)
+                    .ok_or_else(|| EngineError::Storage("command sequence overflow".into()))?;
+                let ep = p.backend_epoch as i64;
+                let slot = max_epoch.entry(p.queue.clone()).or_insert(ep);
+                if ep > *slot {
+                    *slot = ep;
+                }
+            }
+            next_seq.insert(shard, exp);
+            i = run_end;
+            continue;
+        }
+
+        if let Some(run_end) = coalescible_update_run_end(positions, envelopes, i) {
+            let shard = pos.queue.clone();
+            let mut collected = Vec::new();
+            let mut last_seq = pos.sequence;
+            let mut last_now = env.created_at;
+            for (p, e) in positions[i..run_end].iter().zip(&envelopes[i..run_end]) {
+                last_seq = p.sequence;
+                last_now = e.created_at;
+                match &e.command {
+                    QueueCommand::UpdateFields(update) => collected.push(update.clone()),
+                    QueueCommand::UpdateFieldsBatch(batch) => {
+                        collected.extend(batch.updates.iter().cloned())
+                    }
+                    _ => {}
+                }
+            }
+            apply_update_fields_batch_sql(
+                tx,
+                queues,
+                grouped_shards,
+                claim_scan_hints,
+                claim_scan_default_fifo,
+                &shard,
+                last_seq,
+                last_now,
+                &collected,
+            )?;
+            applied_update_fields = true;
+            let mut exp = incoming;
+            for (p, e) in positions[i..run_end].iter().zip(&envelopes[i..run_end]) {
+                persist_request_outcome_sql(tx, queues, &p.queue, e, p)?;
+                exp = (p.sequence as i64)
+                    .checked_add(1)
+                    .ok_or_else(|| EngineError::Storage("command sequence overflow".into()))?;
+                let ep = p.backend_epoch as i64;
+                let slot = max_epoch.entry(p.queue.clone()).or_insert(ep);
+                if ep > *slot {
+                    *slot = ep;
+                }
+            }
+            next_seq.insert(shard, exp);
+            i = run_end;
+            continue;
+        }
+
+        applied_update_fields |= matches!(
+            env.command,
+            QueueCommand::UpdateFields(_) | QueueCommand::UpdateFieldsBatch(_)
+        );
+        apply_command_sql(
+            tx,
+            queues,
+            grouped_shards,
+            claim_scan_hints,
+            claim_scan_default_fifo,
+            token_ops,
+            &pos.queue,
+            pos,
+            pos.sequence,
+            env.created_at,
+            &env.command,
+        )?;
+        persist_request_outcome_sql(tx, queues, &pos.queue, env, pos)?;
+        let new_next = incoming
+            .checked_add(1)
+            .ok_or_else(|| EngineError::Storage("command sequence overflow".into()))?;
+        next_seq.insert(pos.queue.clone(), new_next);
+        let e = pos.backend_epoch as i64;
+        let slot = max_epoch.entry(pos.queue.clone()).or_insert(e);
+        if e > *slot {
+            *slot = e;
+        }
+        i += 1;
+    }
+    for (queue, &next) in &next_seq {
+        let (t, q) = parts(queue);
+        let epoch = max_epoch.get(queue).copied().unwrap_or(0);
+        crate::rel_exec(
+            tx,
+            "UPDATE relational_cursor SET \
+             next_seq=?3, \
+             assignment_epoch=CASE WHEN assignment_epoch<?4 THEN ?4 ELSE assignment_epoch END \
+             WHERE tenant=?1 AND queue=?2",
+            [
+                RelValue::Text(t.to_string()),
+                RelValue::Text(q.to_string()),
+                RelValue::Integer(next),
+                RelValue::Integer(epoch),
+            ],
+        )?;
+    }
+    Ok(applied_update_fields)
+}
+
+fn coalescible_update_run_end(
+    positions: &[CommandPosition],
+    envelopes: &[CommandEnvelope],
+    start: usize,
+) -> Option<usize> {
+    let first = envelopes.get(start)?;
+    if !command_is_set_based_update(&first.command) {
+        return None;
+    }
+    let shard = &positions[start].queue;
+    let mut expected = positions[start].sequence;
+    let mut end = start;
+    while end < positions.len() {
+        let p = &positions[end];
+        let e = &envelopes[end];
+        if p.queue != *shard || !command_is_set_based_update(&e.command) {
+            break;
+        }
+        if p.sequence != expected {
+            break;
+        }
+        expected = expected.saturating_add(1);
+        end += 1;
+    }
+    (end > start).then_some(end)
+}
+
+fn command_is_set_based_update(command: &QueueCommand) -> bool {
+    match command {
+        QueueCommand::UpdateFields(update) => {
+            update_fields_batch_is_set_based(std::slice::from_ref(update))
+        }
+        QueueCommand::UpdateFieldsBatch(batch) => update_fields_batch_is_set_based(&batch.updates),
+        _ => false,
+    }
+}
+
+fn apply_push_run_sql(
+    tx: &impl RelTx,
+    queues: &HashMap<QueueKey, QueueDefinition>,
+    grouped_shards: &mut HashSet<QueueKey>,
+    claim_scan_hints: &mut HashMap<QueueKey, i64>,
+    claim_scan_default_fifo: &mut HashMap<QueueKey, bool>,
+    shard: &QueueKey,
+    positions: &[CommandPosition],
+    envelopes: &[CommandEnvelope],
+    cursor: i64,
+) -> EngineResult<()> {
+    let model = queues
+        .get(shard)
+        .map(|d| d.priority_model)
+        .ok_or(EngineError::NotFound)?;
+    let mut specs: Vec<InsertItemSpec<'_>> = Vec::new();
+    let mut minted_ids: Vec<ItemId> = Vec::new();
+    let mut groups: HashSet<GroupKey> = HashSet::new();
+    let mut last_now: Option<UtcTimestamp> = None;
+    for (pos, env) in positions.iter().zip(envelopes.iter()) {
+        if (pos.sequence as i64) < cursor {
+            continue;
+        }
+        let QueueCommand::Push(c) = &env.command else {
+            return Err(EngineError::Storage(
+                "apply_push_run_sql: non-Push envelope in Push run".into(),
+            ));
+        };
+        last_now = Some(env.created_at);
+        for item in &c.items {
+            specs.push(InsertItemSpec {
+                item,
+                command_seq: pos.sequence,
+                now: env.created_at,
+            });
+            minted_ids.push(item.item_id);
+            if let Some(g) = &item.group_key {
+                groups.insert(g.clone());
+            }
+        }
+    }
+    if specs.is_empty() {
+        return Ok(());
+    }
+    insert_item_specs(tx, queues, &model, shard, &specs)?;
+    advance_id_high_water_sql(tx, shard, &minted_ids)?;
+    let item_refs: Vec<&PushItem> = specs.iter().map(|s| s.item).collect();
+    observe_push_for_claim_scan(claim_scan_hints, claim_scan_default_fifo, shard, &item_refs);
+    if !groups.is_empty() {
+        let now = last_now.ok_or_else(|| {
+            EngineError::Storage("apply_push_run_sql: group refresh without timestamps".into())
+        })?;
+        grouped_shards.insert(shard.clone());
+        let now_n = ts_nanos(now);
+        let added: Vec<GroupItemRef> = load_grouped_items(tx, shard, &minted_ids)?
+            .into_iter()
+            .filter(|item| {
+                specs.iter().any(|spec| {
+                    spec.item.item_id.to_string() == item.item_id
+                        && spec
+                            .item
+                            .not_before
+                            .is_none_or(|not_before| ts_nanos(not_before) <= now_n)
+                })
+            })
+            .collect();
+        let group_list: Vec<GroupKey> = groups.into_iter().collect();
+        apply_group_summary_add(tx, shard, &group_list, &added, now)?;
+    }
+    Ok(())
+}
 type TypedIndexKey = (String, Vec<u8>);
 type TypedIndexBatchItem = (String, Vec<TypedIndexKey>);
 
@@ -2081,9 +2687,7 @@ const UPDATE_FIELDS_BATCH: usize = 100;
 
 fn update_fields_batch_is_set_based(updates: &[UpdateFieldsCommand]) -> bool {
     updates.iter().all(|update| {
-        update.field_ops.is_empty()
-            && update.set_gate_keys.is_none()
-            && update.set_entity_document.is_none()
+        update.field_ops.is_empty() && update.set_entity_document.is_none()
     })
 }
 
@@ -2311,6 +2915,48 @@ fn apply_update_fields_batch_sql(
             RelValue::Text(q.clone()),
         ]);
         crate::rel_exec(tx, &sql, params)?;
+    }
+    let mut gate_deletes = Vec::new();
+    let mut gate_inserts = Vec::new();
+    for update in updates {
+        if let Some(gates) = &update.set_gate_keys {
+            gate_deletes.push(update.item_id.to_string());
+            for gate in gates {
+                gate_inserts.push((update.item_id.to_string(), gate.clone()));
+            }
+        }
+    }
+    for chunk in gate_deletes.chunks(UPDATE_FIELDS_BATCH) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let mut params = vec![RelValue::Text(t.clone()), RelValue::Text(q.clone())];
+        params.extend(chunk.iter().cloned().map(RelValue::Text));
+        crate::rel_exec(
+            tx,
+            &format!(
+                "DELETE FROM fireweed_item_gates WHERE tenant_id=? AND queue_id=? AND item_id IN ({placeholders})"
+            ),
+            params,
+        )?;
+    }
+    for chunk in gate_inserts.chunks(UPDATE_FIELDS_BATCH) {
+        let values = vec!["(?,?,?,?)"; chunk.len()].join(",");
+        let mut params = Vec::with_capacity(chunk.len() * 4);
+        for (item_id, gate) in chunk {
+            params.extend([
+                RelValue::Text(t.clone()),
+                RelValue::Text(q.clone()),
+                RelValue::Text(item_id.clone()),
+                RelValue::Text(gate.clone()),
+            ]);
+        }
+        crate::rel_exec(
+            tx,
+            &format!(
+                "INSERT INTO fireweed_item_gates(tenant_id,queue_id,item_id,gate_key) VALUES {values} \
+                 ON CONFLICT(tenant_id,queue_id,item_id,gate_key) DO NOTHING"
+            ),
+            params,
+        )?;
     }
     let touches_eligibility = updates.iter().any(|update| {
         matches!(update.set_priority, ScheduleUpdate::Set(_))
@@ -2599,6 +3245,7 @@ pub fn apply_command_sql(
                     token_ops.push(TokenOp::Set(shard.clone(), *id, c.lease_token.clone()));
                 }
             }
+            persist_lease_bearers(tx, shard, &c.item_ids, &c.lease_token)?;
             Ok(())
         }
         QueueCommand::UpdateFields(c) => {
@@ -3162,6 +3809,21 @@ pub fn apply_command_sql(
                 &ids,
             )?;
             let still_leased = leased_item_id_set(tx, shard, &ids)?;
+            let released: Vec<String> = ids
+                .iter()
+                .filter(|id| !still_leased.contains(*id))
+                .cloned()
+                .collect();
+            if !released.is_empty() {
+                exec_items_in(
+                    tx,
+                    "DELETE FROM fireweed_lease_bearers WHERE tenant_id=? AND queue_id=? AND item_id IN",
+                    &[],
+                    &t,
+                    &q,
+                    &released,
+                )?;
+            }
             for id in &c.item_ids {
                 if !still_leased.contains(&id.to_string()) {
                     token_ops.push(TokenOp::Clear(shard.clone(), *id));

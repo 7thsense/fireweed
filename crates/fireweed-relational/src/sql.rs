@@ -48,6 +48,43 @@ pub mod async_projection {
         AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=fireweed_items.tenant_id \
         AND ig.queue_id=fireweed_items.queue_id AND ig.item_id=fireweed_items.item_id) \
         ORDER BY priority_sort,created_seq LIMIT ?4";
+    /// FIFO claim scan: walk rowid after a process-local hint. Same predicate as the un-hinted path
+    /// minus the gate anti-join (caller uses this only when the queue has no blocked gates).
+    pub const SELECT_ELIGIBLE_FIFO_ROWID: &str = "SELECT item_id FROM fireweed_items NOT INDEXED \
+        WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+        AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
+        AND eligible_since IS NOT NULL AND rowid>=?5 ORDER BY rowid LIMIT ?4";
+    pub const SELECT_ELIGIBLE_NO_GATES: &str = "SELECT item_id FROM fireweed_items \
+        WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+        AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
+        AND eligible_since IS NOT NULL ORDER BY priority_sort, created_seq LIMIT ?4";
+    pub const SELECT_QUEUE_PAUSED: &str = "SELECT paused FROM queues WHERE tenant=?1 AND queue=?2";
+    pub const SELECT_HAS_BLOCKED_GATES: &str =
+        "SELECT 1 FROM fireweed_gate_state WHERE tenant_id=?1 AND queue_id=?2 LIMIT 1";
+    pub const SELECT_ITEM_CLAIM_FILTERABLE: &str = "SELECT item_id FROM fireweed_items \
+        WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+        AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
+        AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
+        JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+        AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=fireweed_items.tenant_id \
+        AND ig.queue_id=fireweed_items.queue_id AND ig.item_id=fireweed_items.item_id) \
+        AND (?5 IS NULL OR group_key=?5) \
+        AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted \
+          WHERE NOT EXISTS (SELECT 1 FROM json_each(fireweed_items.metadata) actual \
+            WHERE actual.key=wanted.key AND actual.value=wanted.value \
+              AND actual.type=wanted.type)) \
+        ORDER BY priority_sort,created_seq LIMIT ?4";
+    pub const INSERT_ID_HIGH_WATER: &str = "INSERT INTO fireweed_id_high_water(tenant,queue,item_id) \
+        VALUES(?1,?2,?3) ON CONFLICT(tenant,queue) DO UPDATE SET item_id=excluded.item_id \
+        WHERE length(excluded.item_id)>length(fireweed_id_high_water.item_id) \
+           OR (length(excluded.item_id)=length(fireweed_id_high_water.item_id) \
+               AND excluded.item_id>fireweed_id_high_water.item_id)";
+    pub const SELECT_ID_HIGH_WATER: &str =
+        "SELECT item_id FROM fireweed_id_high_water WHERE tenant=?1 AND queue=?2";
+    pub const EXPIRED_LEASES_BOUNDED: &str = "SELECT item_id FROM fireweed_items \
+        WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' AND cohort_size IS NULL \
+        AND fenced=0 AND superseded=0 AND lease_expires_at IS NOT NULL AND lease_expires_at<?3 \
+        ORDER BY item_id LIMIT ?4";
     pub const SELECT_ELIGIBLE_FILTERABLE: &str = "SELECT item_id,group_key,metadata FROM fireweed_items \
         WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
         AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \

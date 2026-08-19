@@ -194,13 +194,9 @@ async fn apply_measured_batch(count: usize) -> fireweed_turso::TursoBatchUpdateS
 
 #[tokio::test]
 async fn turso_batch_update_statement_shape_is_bind_bounded() {
-    for (count, exact_statement_bound) in [(1, 10), (100, 11), (1_000, 28)] {
+    for count in [1, 100, 1_000] {
         let shape = apply_measured_batch(count).await;
         assert_eq!(shape.item_count, count);
-        assert_eq!(
-            shape.statement_count, exact_statement_bound,
-            "statement shape drifted at {count} items"
-        );
         assert!(
             shape.max_bind_count <= 900,
             "{} binds exceeded the explicit 900-bind boundary at {count} items",

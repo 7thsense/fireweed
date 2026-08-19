@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use fireweed_core::{ClientItemKey, GroupKey, ItemId, LeaseToken};
+use fireweed_core::{ClientItemKey, GroupKey, ItemId, LeaseToken, QueueId, TenantId};
 use fireweed_engine::{Claimed, ClaimedItem, EngineError, EngineResult, QueueKey};
 use fireweed_relational::{
     ClassSClaimRequest, ClassSClaimResult, OWNED_PROJECTION_TABLES, RELATIONAL_SCHEMA,
@@ -249,6 +249,7 @@ impl TursoRelational {
         // read_uncommitted keep ingest packing while apply is caught up.
         let _ = reader.pragma_update("query_only", "ON").await;
         let _ = reader.pragma_update("read_uncommitted", "ON").await;
+        let grouped_shards = load_grouped_shards(&writer).await?;
         Ok(Self {
             database,
             writer: Arc::new(Mutex::new(writer)),
@@ -258,7 +259,7 @@ impl TursoRelational {
             last_batch_update_shape: Arc::new(StdMutex::new(None)),
             claim_scan_hints: Arc::new(StdMutex::new(std::collections::HashMap::new())),
             claim_scan_default_fifo: Arc::new(StdMutex::new(std::collections::HashMap::new())),
-            grouped_shards: Arc::new(StdMutex::new(std::collections::HashSet::new())),
+            grouped_shards: Arc::new(StdMutex::new(grouped_shards)),
             config,
         })
     }
@@ -759,6 +760,45 @@ async fn verify_schema(connection: &Connection) -> Result<SchemaReport> {
         )));
     }
     Ok(SchemaReport { tables, indexes })
+}
+
+async fn load_grouped_shards(
+    connection: &Connection,
+) -> Result<std::collections::HashSet<QueueKey>> {
+    let rows = collect_rows(
+        connection,
+        "SELECT DISTINCT tenant_id, queue_id FROM fireweed_items WHERE group_key IS NOT NULL",
+        vec![],
+    )
+    .await?;
+    let mut shards = std::collections::HashSet::new();
+    for row in rows {
+        let tenant = match row.values.first() {
+            Some(Value::Text(value)) => value.clone(),
+            other => {
+                return Err(TursoRelationalError::Schema(format!(
+                    "grouped shard tenant was {other:?}"
+                )));
+            }
+        };
+        let queue = match row.values.get(1) {
+            Some(Value::Text(value)) => value.clone(),
+            other => {
+                return Err(TursoRelationalError::Schema(format!(
+                    "grouped shard queue was {other:?}"
+                )));
+            }
+        };
+        shards.insert(QueueKey::new(
+            TenantId::new(tenant).map_err(|error| {
+                TursoRelationalError::Schema(format!("grouped shard tenant: {error}"))
+            })?,
+            QueueId::new(queue).map_err(|error| {
+                TursoRelationalError::Schema(format!("grouped shard queue: {error}"))
+            })?,
+        ));
+    }
+    Ok(shards)
 }
 
 async fn collect_rows(
