@@ -72,5 +72,7 @@ RSS is the second scoreboard. `filesystem--memory` is the O(N) control, not the 
 | 1786977711 | planner map | 10000 | 1k→10k produce slope fixed (P1/P2/P3 faster at 10k); P4 still Turso catch-up | **21022** | **15392** | **20447** | 315 | 33.4 | 141.9 | 14877 | 20.1 |
 | 1786981218 | map claim+finalize | 10000 | claims/finalizes plan from map; claim apply still ordered Turso+summary | **17781** | **14336** | **32354** | 354 | 30.0 | 115.7 | 12129 | 20.1 |
 | 1787070603 | be5c6111 | 10000 | v0.31.17 Class S (lease in Turso txn then log); no planner map; inflight=1 | 115 | 73 | 73 | **86** | 515 | 99.7 | 10454 | 454.9 |
+| 1787108514 | 5ad99cac | 1000 | reader + produce cursor; inflight=8 | **14885** | 681 | **7093** | 788 | 37.5 | 51.8 | 54297 | 31.0 |
+| 1787110479 | f09f45a2 | 10000 | reader + produce cursor; no group-summary on item claim/complete; inflight=8 | **29073** | 262 | **7576** | **508** | 233 | 138.6 | 14529 | 293 |
 
 N=10k produce is no longer super-linear: P1 p50 35 ms / 100 items vs 39 ms at N=1k. Objects at N=10k: 484 (was 648). P4 is the remaining pole (claim still selects on Turso after catch-up of apply debt). T1 (8k/s P1 at N=100k) is now a plausible next measurement; T2 is not until claim leaves the Turso writer.
