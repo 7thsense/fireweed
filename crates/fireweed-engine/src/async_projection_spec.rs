@@ -3,8 +3,9 @@ use crate::{EngineError, EngineResult};
 /// Provider-neutral bounds for returning before a selected projection has applied through the
 /// committed log position.
 ///
-/// These limits describe the asynchronous response policy shared by every projection adapter. They
-/// deliberately do not contain adapter-specific batching or checkpoint knobs.
+/// These limits describe the asynchronous response policy shared by every projection adapter.
+/// `apply_start_delay_ms` defaults to `0` (SQLite/memory). Turso object-log compose may raise it
+/// so apply does not unseal the object-log packer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AsyncProjectionSpec {
     pub apply_lag_max_commands: u64,
@@ -12,6 +13,10 @@ pub struct AsyncProjectionSpec {
     pub apply_queue_depth_max: usize,
     pub oldest_unapplied_max_ms: u64,
     pub apply_poison_retry_threshold: u32,
+    /// Milliseconds to wait after the first enqueue before the apply worker
+    /// starts. `0` (default) starts immediately. Turso object-log compose sets
+    /// this so apply does not unseal the packer; SQLite/memory leave it `0`.
+    pub apply_start_delay_ms: u64,
 }
 
 impl Default for AsyncProjectionSpec {
@@ -22,6 +27,7 @@ impl Default for AsyncProjectionSpec {
             apply_queue_depth_max: 1_024,
             oldest_unapplied_max_ms: 60_000,
             apply_poison_retry_threshold: 3,
+            apply_start_delay_ms: 0,
         }
     }
 }
@@ -58,6 +64,7 @@ impl AsyncProjectionSpec {
             apply_queue_depth_max,
             oldest_unapplied_max_ms,
             apply_poison_retry_threshold,
+            apply_start_delay_ms: 0,
         })
     }
 }
@@ -74,6 +81,7 @@ mod tests {
         assert_eq!(spec.apply_queue_depth_max, 1_024);
         assert_eq!(spec.oldest_unapplied_max_ms, 60_000);
         assert_eq!(spec.apply_poison_retry_threshold, 3);
+        assert_eq!(spec.apply_start_delay_ms, 0);
     }
 
     #[test]

@@ -274,6 +274,7 @@ fn hybrid_async_thresholds(
             "FIREWEED_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD",
             d.apply_poison_retry_threshold,
         ),
+        apply_start_delay_ms: 0,
     };
     let zero_name = [
         (spec.apply_lag_max_commands == 0, "apply_lag_max_commands"),

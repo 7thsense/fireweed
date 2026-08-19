@@ -1506,7 +1506,12 @@ impl DerivedObjectLogTursoBackend {
         let async_apply = match _async_spec {
             Some(spec) => Some(AsyncProjectionApplyCoordinator::new(
                 Arc::clone(&projection),
-                spec,
+                fireweed_engine::AsyncProjectionSpec {
+                    // Turso apply and object-log packing share a disk. SQLite
+                    // and memory coordinators keep apply_start_delay_ms = 0.
+                    apply_start_delay_ms: spec.apply_start_delay_ms.max(300),
+                    ..spec
+                },
             )?),
             None => None,
         };

@@ -459,12 +459,12 @@ async fn run_worker<P>(inner: Arc<CoordinatorInner<P>>)
 where
     P: AsyncProjectionStore + 'static,
 {
-    // Object-log packing and Turso apply share a disk. Starting apply on the
-    // first enqueue unseals the packer (one PUT per push). Wait one packer
-    // window so ingest can ack at packer rate; apply then catches up from the
-    // queued packs. Group-summary maintenance is O(batch) and does not need
-    // to run on the produce path.
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    if inner.spec.apply_start_delay_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(
+            inner.spec.apply_start_delay_ms,
+        ))
+        .await;
+    }
     loop {
         if inner.paused.load(Ordering::Acquire) {
             inner.worker_running.store(false, Ordering::Release);
