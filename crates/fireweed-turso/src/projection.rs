@@ -1405,9 +1405,10 @@ async fn apply_owned(
             queues.insert(position.queue.clone(), definition);
         }
     }
-    match crate::tx::run_reltx_hop(|| {
-        fireweed_relational::apply_committed_batch_sql(
-            &crate::tx::TursoRel(&transaction),
+    let hop_txn = transaction.clone();
+    match crate::tx::run_reltx_blocking(move || {
+        let applied = fireweed_relational::apply_committed_batch_sql(
+            &crate::tx::TursoRel(&hop_txn),
             &queues,
             &mut grouped_shards,
             &mut claim_scan_hints,
@@ -1415,9 +1416,24 @@ async fn apply_owned(
             &mut token_ops,
             &positions,
             &commands,
-        )
-    }) {
-        Ok(applied) => applied_api001 = applied,
+        )?;
+        Ok::<_, EngineError>((
+            applied,
+            grouped_shards,
+            claim_scan_hints,
+            claim_scan_default_fifo,
+            token_ops,
+        ))
+    })
+    .await
+    {
+        Ok((applied, next_grouped, next_hints, next_fifo, next_tokens)) => {
+            applied_api001 = applied;
+            grouped_shards = next_grouped;
+            claim_scan_hints = next_hints;
+            claim_scan_default_fifo = next_fifo;
+            token_ops = next_tokens;
+        }
         Err(error) => {
             transaction.rollback().await.map_err(storage)?;
             return Err(error);

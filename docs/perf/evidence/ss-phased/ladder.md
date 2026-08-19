@@ -75,5 +75,7 @@ RSS is the second scoreboard. `filesystem--memory` is the O(N) control, not the 
 | 1787108514 | 5ad99cac | 1000 | reader + produce cursor; inflight=8 | **14885** | 681 | **7093** | 788 | 37.5 | 51.8 | 54297 | 31.0 |
 | 1787110479 | f09f45a2 | 10000 | reader + produce cursor; no group-summary on item claim/complete; inflight=8 | **29073** | 262 | **7576** | **508** | 233 | 138.6 | 14529 | 293 |
 | 1787153500 | ingest-bump | 10000 | push group summary O(batch); apply starts after packer window; inflight=8 | **31226** | **3686** | 2749 | 502 | 164 | 142.3 | 14920 | 275 |
+| 1787166918 | 8355e5e3 | 10000 | shared RelTx hop + `block_in_place`; ingest serialized | 298 | 2635 | 2665 | 311 | 176 | 121.1 | 12703 | 369 |
+| 1787169221 | hop-fix | 10000 | RelTx hop on spawn_blocking; group refs from PushItem; per-shard produce delay | **30569** | 3042 | 2720 | 316 | 138 | 131.1 | 13745 | 318 |
 
 N=10k produce is no longer super-linear: P1 p50 35 ms / 100 items vs 39 ms at N=1k. Objects at N=10k: 484 (was 648). P4 is the remaining pole (claim still selects on Turso after catch-up of apply debt). T1 (8k/s P1 at N=100k) is now a plausible next measurement; T2 is not until claim leaves the Turso writer.

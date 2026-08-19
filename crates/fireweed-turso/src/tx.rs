@@ -31,40 +31,42 @@ fn storage(error: impl std::fmt::Display) -> EngineError {
 }
 
 thread_local! {
-    static RELTX_HOP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static RELTX_HANDLE: std::cell::RefCell<Option<tokio::runtime::Handle>> =
-        const { std::cell::RefCell::new(None) };
+    static LOCAL_RT: std::cell::OnceCell<tokio::runtime::Runtime> = const { std::cell::OnceCell::new() };
+    static USE_LOCAL_RT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Run one apply hop inside `block_in_place` so RelTx statements reuse the current runtime
-/// instead of hopping to the RelTx worker per statement. Current-thread tests keep the
-/// per-statement worker.
-pub fn run_reltx_hop<T>(work: impl FnOnce() -> T) -> T {
-    if RELTX_HOP.get() {
-        return work();
-    }
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| {
-                RELTX_HOP.set(true);
-                RELTX_HANDLE.with(|slot| *slot.borrow_mut() = Some(handle.clone()));
-                let result = work();
-                RELTX_HANDLE.with(|slot| *slot.borrow_mut() = None);
-                RELTX_HOP.set(false);
-                result
-            })
-        }
-        Ok(_) | Err(_) => work(),
-    }
+/// Run RelTx work on a blocking thread with a thread-local current-thread runtime so each
+/// statement is `block_on` locally (no object-log `block_in_place`, no per-statement channel hop).
+pub async fn run_reltx_blocking<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    tokio::task::spawn_blocking(move || {
+        USE_LOCAL_RT.set(true);
+        let result = work();
+        USE_LOCAL_RT.set(false);
+        result
+    })
+    .await
+    .expect("turso RelTx blocking hop")
+}
+
+fn block_on_local<T>(future: impl std::future::Future<Output = T>) -> T {
+    LOCAL_RT.with(|slot| {
+        let rt = slot.get_or_init(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("turso RelTx local runtime")
+        });
+        rt.block_on(future)
+    })
 }
 
 fn block_on_turso<T: Send + 'static>(
     future: impl std::future::Future<Output = T> + Send + 'static,
 ) -> T {
-    if RELTX_HOP.get() {
-        if let Some(handle) = RELTX_HANDLE.with(|slot| slot.borrow().clone()) {
-            return handle.block_on(future);
-        }
+    if USE_LOCAL_RT.get() {
+        return block_on_local(future);
     }
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
@@ -123,6 +125,15 @@ fn turso_reltx_worker() -> &'static TursoRelTxWorker {
 impl RelTx for TursoRel<'_> {
     fn execute(&self, sql: &str, params: &[RelValue]) -> EngineResult<usize> {
         let params: Vec<Value> = params.iter().map(to_turso).collect();
+        if USE_LOCAL_RT.get() {
+            return block_on_local(async {
+                let mut stmt = self.0.prepare_cached(sql).await.map_err(storage)?;
+                stmt.execute(params)
+                    .await
+                    .map(|changed| changed as usize)
+                    .map_err(storage)
+            });
+        }
         let conn = self.0.clone();
         let sql = sql.to_string();
         block_on_turso(async move {
@@ -136,6 +147,22 @@ impl RelTx for TursoRel<'_> {
 
     fn query(&self, sql: &str, params: &[RelValue]) -> EngineResult<Vec<RelRow>> {
         let params: Vec<Value> = params.iter().map(to_turso).collect();
+        if USE_LOCAL_RT.get() {
+            return block_on_local(async {
+                let mut stmt = self.0.prepare_cached(sql).await.map_err(storage)?;
+                let mut rows = stmt.query(params).await.map_err(storage)?;
+                let width = rows.column_count();
+                let mut collected = Vec::new();
+                while let Some(row) = rows.next().await.map_err(storage)? {
+                    let mut values = Vec::with_capacity(width);
+                    for index in 0..width {
+                        values.push(from_turso(row.get_value(index).map_err(storage)?));
+                    }
+                    collected.push(RelRow(values));
+                }
+                Ok(collected)
+            });
+        }
         let conn = self.0.clone();
         let sql = sql.to_string();
         block_on_turso(async move {

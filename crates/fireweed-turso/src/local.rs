@@ -491,6 +491,41 @@ mod class_s_tests {
             Some(&[0xCA, 0xFE][..])
         );
     }
+
+    #[tokio::test]
+    async fn reader_select_does_not_wait_on_held_immediate_writer() {
+        use std::time::{Duration, Instant};
+        use turso::transaction::TransactionBehavior;
+
+        let store = TursoRelational::in_memory().await.expect("open");
+        store
+            .execute(insert_pending("1", 1), vec![])
+            .await
+            .expect("insert");
+        let mut writer = store.writer.lock().await;
+        let _txn = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .expect("begin immediate");
+        let started = Instant::now();
+        let reader = store.reader.lock().await;
+        let query = async {
+            let mut rows = reader
+                .query(
+                    "SELECT item_id FROM fireweed_items WHERE tenant_id='t' AND queue_id='q' LIMIT 1",
+                    Vec::<turso::Value>::new(),
+                )
+                .await
+                .expect("reader query");
+            rows.next().await.expect("reader row")
+        };
+        let timed = tokio::time::timeout(Duration::from_millis(50), query).await;
+        let waited = started.elapsed();
+        assert!(
+            timed.is_ok(),
+            "reader waited {waited:?} on a held IMMEDIATE writer; produce will serialize on apply"
+        );
+    }
 }
 
 pub fn claimed_from_class_s(

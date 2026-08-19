@@ -207,7 +207,8 @@ pub(crate) fn insert_item_specs(
     shard: &QueueKey,
     specs: &[InsertItemSpec<'_>],
 ) -> EngineResult<()> {
-    fireweed_relational::insert_item_specs(&rel(tx), queues, model, shard, specs)
+    fireweed_relational::insert_item_specs(&rel(tx), queues, model, shard, specs)?;
+    Ok(())
 }
 
 pub(crate) fn insert_items(

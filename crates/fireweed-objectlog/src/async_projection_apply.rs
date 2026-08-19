@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use fireweed_engine::{
     AsyncProjectionSpec, AsyncProjectionStore, CommandEnvelope, CommandPosition, EngineError,
-    EngineResult, QueueKey,
+    EngineResult, QueueCommand, QueueKey,
 };
 use tokio::sync::{Mutex, Notify};
 
@@ -138,6 +138,7 @@ struct ShardApplyState {
     retry_count: u32,
     applied_high_water: Option<CommandPosition>,
     poison_reason: Option<String>,
+    produce_delay_spent: bool,
 }
 
 impl<P> AsyncProjectionApplyCoordinator<P>
@@ -145,13 +146,15 @@ where
     P: AsyncProjectionStore + 'static,
 {
     pub fn new(projection: Arc<P>, spec: AsyncProjectionSpec) -> EngineResult<Self> {
-        let spec = AsyncProjectionSpec::new(
+        let apply_start_delay_ms = spec.apply_start_delay_ms;
+        let mut spec = AsyncProjectionSpec::new(
             spec.apply_lag_max_commands,
             spec.apply_debt_max_bytes,
             spec.apply_queue_depth_max,
             spec.oldest_unapplied_max_ms,
             spec.apply_poison_retry_threshold,
         )?;
+        spec.apply_start_delay_ms = apply_start_delay_ms;
         Ok(Self {
             inner: Arc::new(CoordinatorInner {
                 projection,
@@ -408,6 +411,7 @@ where
                 retry_count: 0,
                 applied_high_water: high_water,
                 poison_reason: None,
+                produce_delay_spent: false,
             },
         );
         drop(state);
@@ -459,12 +463,6 @@ async fn run_worker<P>(inner: Arc<CoordinatorInner<P>>)
 where
     P: AsyncProjectionStore + 'static,
 {
-    if inner.spec.apply_start_delay_ms > 0 {
-        tokio::time::sleep(std::time::Duration::from_millis(
-            inner.spec.apply_start_delay_ms,
-        ))
-        .await;
-    }
     loop {
         if inner.paused.load(Ordering::Acquire) {
             inner.worker_running.store(false, Ordering::Release);
@@ -543,6 +541,28 @@ where
         #[cfg(not(test))]
         let injected_failure = false;
 
+        if inner.spec.apply_start_delay_ms > 0 && batch_is_produce(&batch.commands) {
+            let needs_delay = {
+                let state = inner.state.lock().await;
+                !state
+                    .shards
+                    .get(&batch.shard)
+                    .is_some_and(|shard| shard.produce_delay_spent)
+            };
+            if needs_delay {
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    inner.spec.apply_start_delay_ms,
+                ))
+                .await;
+                let mut state = inner.state.lock().await;
+                state
+                    .shards
+                    .entry(batch.shard.clone())
+                    .or_default()
+                    .produce_delay_spent = true;
+            }
+        }
+
         let result = if injected_failure {
             Err(EngineError::Storage(
                 "injected async projection apply failure".into(),
@@ -597,6 +617,17 @@ where
         inner.changed.notify_waiters();
         tokio::task::yield_now().await;
     }
+}
+
+fn batch_is_produce(commands: &[CommandEnvelope]) -> bool {
+    commands.iter().any(|envelope| {
+        matches!(
+            envelope.command,
+            QueueCommand::Push(_)
+                | QueueCommand::UpdateFields(_)
+                | QueueCommand::UpdateFieldsBatch(_)
+        )
+    })
 }
 
 fn next_runnable(state: &CoordinatorState) -> Option<(usize, ApplyBatch)> {

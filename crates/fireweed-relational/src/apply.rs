@@ -603,7 +603,7 @@ fn apply_push_run_sql(
     if specs.is_empty() {
         return Ok(());
     }
-    insert_item_specs(tx, queues, &model, shard, &specs)?;
+    let base_seq = insert_item_specs(tx, queues, &model, shard, &specs)?;
     advance_id_high_water_sql(tx, shard, &minted_ids)?;
     let item_refs: Vec<&PushItem> = specs.iter().map(|s| s.item).collect();
     observe_push_for_claim_scan(claim_scan_hints, claim_scan_default_fifo, shard, &item_refs);
@@ -612,19 +612,7 @@ fn apply_push_run_sql(
             EngineError::Storage("apply_push_run_sql: group refresh without timestamps".into())
         })?;
         grouped_shards.insert(shard.clone());
-        let now_n = ts_nanos(now);
-        let added: Vec<GroupItemRef> = load_grouped_items(tx, shard, &minted_ids)?
-            .into_iter()
-            .filter(|item| {
-                specs.iter().any(|spec| {
-                    spec.item.item_id.to_string() == item.item_id
-                        && spec
-                            .item
-                            .not_before
-                            .is_none_or(|not_before| ts_nanos(not_before) <= now_n)
-                })
-            })
-            .collect();
+        let added = group_item_refs_from_specs(&specs, &model, base_seq);
         let group_list: Vec<GroupKey> = groups.into_iter().collect();
         apply_group_summary_add(tx, shard, &group_list, &added, now)?;
     }
@@ -1173,7 +1161,35 @@ pub fn insert_items(
             now,
         })
         .collect();
-    insert_item_specs(tx, queues, model, shard, &specs)
+    insert_item_specs(tx, queues, model, shard, &specs)?;
+    Ok(())
+}
+
+fn group_item_refs_from_specs(
+    specs: &[InsertItemSpec<'_>],
+    model: &PriorityModel,
+    base_seq: i64,
+) -> Vec<GroupItemRef> {
+    let mut added = Vec::new();
+    for (offset, spec) in specs.iter().enumerate() {
+        let Some(group) = spec.item.group_key.clone() else {
+            continue;
+        };
+        let now_n = ts_nanos(spec.now);
+        let not_before = ts_nanos_opt(spec.item.not_before);
+        if not_before.is_some_and(|ts| ts > now_n) {
+            continue;
+        }
+        added.push(GroupItemRef {
+            group_key: group,
+            item_id: spec.item.item_id.to_string(),
+            eligible_since: not_before.unwrap_or(now_n),
+            priority_sort: elig_sort(&spec.item.priority, model),
+            created_at: now_n,
+            created_seq: base_seq + offset as i64,
+        });
+    }
+    added
 }
 
 /// Like [`insert_items`], but each row may carry its own command sequence and timestamp (coalesced Push
@@ -1184,9 +1200,9 @@ pub fn insert_item_specs(
     model: &PriorityModel,
     shard: &QueueKey,
     specs: &[InsertItemSpec<'_>],
-) -> EngineResult<()> {
+) -> EngineResult<i64> {
     if specs.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
     let (t, q) = parts(shard);
     // Bulk-allocate the stable FIFO positions in one read+advance (was a read+UPDATE per item).
@@ -1220,7 +1236,7 @@ pub fn insert_item_specs(
             .all(|item| is_default_empty_push_item(item))
     {
         insert_default_empty_item_specs(tx, &t, &q, specs, base_seq)?;
-        return Ok(());
+        return Ok(base_seq);
     }
     if homogeneous_now
         && items_only
@@ -1229,7 +1245,7 @@ pub fn insert_item_specs(
     {
         insert_payload_index_item_specs(tx, &t, &q, specs, base_seq)?;
         maintain_typed_indexes_on_insert(tx, &t, &q, typed_indexes, &items_only)?;
-        return Ok(());
+        return Ok(base_seq);
     }
     let mut rows: Vec<Vec<RelValue>> = Vec::with_capacity(specs.len());
     for (i, spec) in specs.iter().enumerate() {
@@ -1287,7 +1303,7 @@ pub fn insert_item_specs(
     upsert_cohorts(tx, queues, shard, &t, &q, &items_only, cohort_now_n)?;
     // ADR-011: typed secondary index maintenance.
     maintain_typed_indexes_on_insert(tx, &t, &q, typed_indexes, &items_only)?;
-    Ok(())
+    Ok(base_seq)
 }
 
 pub fn is_default_empty_push_item(item: &PushItem) -> bool {
@@ -3022,7 +3038,16 @@ pub fn apply_command_sql(
                 .get(shard)
                 .map(|d| d.priority_model)
                 .ok_or(EngineError::NotFound)?;
-            insert_items(tx, queues, &model, shard, &c.items, seq, now)?;
+            let specs: Vec<InsertItemSpec<'_>> = c
+                .items
+                .iter()
+                .map(|item| InsertItemSpec {
+                    item,
+                    command_seq: seq,
+                    now,
+                })
+                .collect();
+            let base_seq = insert_item_specs(tx, queues, &model, shard, &specs)?;
             let minted_ids: Vec<ItemId> = c.items.iter().map(|item| item.item_id).collect();
             advance_id_high_water_sql(tx, shard, &minted_ids)?;
             let item_refs: Vec<&PushItem> = c.items.iter().collect();
@@ -3042,17 +3067,7 @@ pub fn apply_command_sql(
             }
             let groups: Vec<GroupKey> = groups.into_iter().collect();
             if !groups.is_empty() {
-                let added: Vec<GroupItemRef> = load_grouped_items(tx, shard, &minted_ids)?
-                    .into_iter()
-                    .filter(|item| {
-                        c.items.iter().any(|push| {
-                            push.item_id.to_string() == item.item_id
-                                && push
-                                    .not_before
-                                    .is_none_or(|not_before| ts_nanos(not_before) <= now_n)
-                        })
-                    })
-                    .collect();
+                let added = group_item_refs_from_specs(&specs, &model, base_seq);
                 apply_group_summary_add(tx, shard, &groups, &added, now)?;
             }
             Ok(())
