@@ -1661,19 +1661,34 @@ impl DerivedObjectLogTursoBackend {
         keys: &[ClientItemKey],
         _ids: &[ItemId],
     ) -> EngineResult<Vec<fireweed_engine::BatchUpdateSnapshotItem>> {
-        let views = self.snapshot_live_items(shard, keys).await?;
-        Ok(views
-            .into_iter()
-            .flatten()
-            .map(|view| fireweed_engine::BatchUpdateSnapshotItem {
-                item_id: view.item_id,
-                client_item_key: view.client_item_key,
-                state: view.lifecycle_state,
-                item_version: view.item_version,
-                fenced: false,
-                superseded: false,
-            })
-            .collect())
+        loop {
+            let snapshot = self.projection.server_update_snapshot(shard, keys).await?;
+            if self.async_apply.is_none() || snapshot.len() == keys.len() {
+                return Ok(snapshot);
+            }
+            let target = self.last_produce.lock().await.get(shard).cloned();
+            let Some(target) = target else {
+                return Ok(snapshot);
+            };
+            let projected = AsyncProjectionStore::recovery_high_water(
+                self.projection.as_ref(),
+                shard.clone(),
+            )
+            .await?;
+            if let Some(projected) = projected
+                && (projected.backend_epoch > target.backend_epoch
+                    || (projected.backend_epoch == target.backend_epoch
+                        && projected.sequence >= target.sequence))
+            {
+                return Ok(snapshot);
+            }
+            if let Some(coordinator) = &self.async_apply {
+                coordinator.ensure_healthy(shard)?;
+                coordinator.wait_for_progress(shard).await?;
+            } else {
+                return Ok(snapshot);
+            }
+        }
     }
 
     fn reserve_planned_updates(

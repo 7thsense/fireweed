@@ -11,12 +11,13 @@ use fireweed_core::{
     QueueDefinition, QueueIndex, RequestId, UtcTimestamp, is_retry_exhausted,
 };
 use fireweed_engine::{
-    AsyncProjectionStore, BatchUpdateResponse, ClaimCompatibility, ClaimRef, ClaimUnit,
-    ClaimedItem, CohortLeaseTarget, CommandEnvelope, CommandPosition, CreateQueueOutcome,
-    EngineError, EngineResult, FinalizeKind, FinalizeTarget, IdempotencyDecision, ItemView,
-    LeaseView, LiveItemView, PayloadUpdate, PendingPage, PendingSummary, PushFingerprint, PushItem,
-    QueueCommand, QueueKey, QueueMetrics, RenewTarget, RequestOutcome, ResolvedItemMutationAction,
-    RichClaimSelection, ScheduleUpdate, TerminalEmissionMetrics, UpdateFieldsCommand,
+    AsyncProjectionStore, BatchUpdateResponse, BatchUpdateSnapshotItem, ClaimCompatibility,
+    ClaimRef, ClaimUnit, ClaimedItem, CohortLeaseTarget, CommandEnvelope, CommandPosition,
+    CreateQueueOutcome, EngineError, EngineResult, FinalizeKind, FinalizeTarget,
+    IdempotencyDecision, ItemView, LeaseView, LiveItemView, PayloadUpdate, PendingPage,
+    PendingSummary, PushFingerprint, PushItem, QueueCommand, QueueKey, QueueMetrics, RenewTarget,
+    RequestOutcome, ResolvedItemMutationAction, RichClaimSelection, ScheduleUpdate,
+    TerminalEmissionMetrics, UpdateFieldsCommand,
 };
 use fireweed_relational::{
     async_projection as sql, elig_sort, entity_from_json, fields_from_json, fields_to_json,
@@ -1507,6 +1508,88 @@ fn api001_command_for_update<'a>(
     None
 }
 
+fn api001_payload_metadata_only(updates: &[&UpdateFieldsCommand]) -> bool {
+    updates.iter().all(|update| {
+        update.field_ops.is_empty()
+            && update.set_fields.is_none()
+            && update.set_entity_document.is_none()
+            && update.set_gate_keys.is_none()
+            && matches!(update.payload, PayloadUpdate::Set(_))
+            && update.set_metadata.is_some()
+            && matches!(update.set_priority, ScheduleUpdate::Keep)
+            && matches!(update.set_not_before, ScheduleUpdate::Keep)
+    })
+}
+
+/// Payload+metadata replacement: one UPDATE from the command values. Do not read current
+/// blobs back. Eligibility is unchanged, so skip group-summary refresh. Leased rows stay
+/// unchanged (`WHERE Pending`).
+async fn apply_api001_payload_metadata_only(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    positions: &[CommandPosition],
+    commands: &[CommandEnvelope],
+    updates: &[&UpdateFieldsCommand],
+    shape: &mut Option<TursoBatchUpdateStatementShape>,
+) -> EngineResult<()> {
+    const COLS: usize = 5;
+    const CHUNK: usize = 179; // tenant + queue + 179 * 5 = 897
+    let mut expected = 0u64;
+    for chunk in updates.chunks(CHUNK) {
+        let mut params = Vec::with_capacity(chunk.len() * COLS + 2);
+        for (offset, update) in chunk.iter().enumerate() {
+            let index = expected as usize + offset;
+            let (position, envelope) = api001_command_for_update(commands, positions, index)
+                .ok_or_else(|| {
+                    storage("BatchUpdate projection apply crossed queue or length boundaries")
+                })?;
+            let PayloadUpdate::Set(payload) = &update.payload else {
+                return Err(storage("payload-metadata apply expected Set payload"));
+            };
+            let metadata = update
+                .set_metadata
+                .as_ref()
+                .ok_or_else(|| storage("payload-metadata apply expected metadata"))?;
+            params.extend([
+                Value::Text(update.item_id.to_string()),
+                payload
+                    .as_ref()
+                    .map_or(Value::Null, |bytes| Value::Blob(bytes.to_vec())),
+                Value::Text(metadata_to_json(metadata)?),
+                Value::Integer(ts_nanos(envelope.created_at)),
+                Value::Integer(
+                    i64::try_from(position.sequence)
+                        .map_err(|_| storage("command sequence exceeds relational integer range"))?,
+                ),
+            ]);
+        }
+        params.extend([Value::Text(tenant.to_string()), Value::Text(queue.to_string())]);
+        let tenant_bind = chunk.len() * COLS + 1;
+        let queue_bind = tenant_bind + 1;
+        record_statement(shape, params.len());
+        let changed = transaction
+            .execute(
+                format!(
+                    "WITH updates(item_id,payload,metadata,updated_at,last_command_sequence) AS (VALUES {}) \
+                     UPDATE fireweed_items AS i SET payload=u.payload,metadata=u.metadata,\
+                     item_version=i.item_version+1,updated_at=u.updated_at,\
+                     last_command_sequence=u.last_command_sequence \
+                     FROM updates AS u WHERE i.tenant_id=?{tenant_bind} AND i.queue_id=?{queue_bind} \
+                     AND i.item_id=u.item_id AND i.lifecycle_state='Pending' AND i.superseded=0 AND i.fenced=0",
+                    numbered_values_rows(chunk.len(), COLS, 1)
+                ),
+                params,
+            )
+            .await
+            .map_err(storage)?;
+        expected = expected.saturating_add(u64::try_from(chunk.len()).map_err(storage)?);
+        // Leased rows are skipped by the WHERE. Do not poison the pack.
+        let _ = changed;
+    }
+    Ok(())
+}
+
 /// Apply API-001 updates using a bounded number of set-based statements. The commands have already
 /// passed the engine's batch preflight, but replay still validates the durable row state so a stale
 /// or corrupt log cannot partially mutate the projection.
@@ -1535,6 +1618,19 @@ async fn apply_api001_update_batch(
     let mut unique = HashSet::with_capacity(updates.len());
     if updates.iter().any(|update| !unique.insert(update.item_id)) {
         return Err(storage("BatchUpdate projection apply repeated an item id"));
+    }
+
+    if api001_payload_metadata_only(updates) {
+        return apply_api001_payload_metadata_only(
+            transaction,
+            &tenant,
+            &queue,
+            positions,
+            commands,
+            updates,
+            shape,
+        )
+        .await;
     }
 
     record_statement(shape, 2);
@@ -3791,6 +3887,60 @@ impl TursoRelational {
                 .collect()
         };
         self.server_pending_by_ids(shard, &ids).await
+    }
+
+    pub async fn server_update_snapshot(
+        &self,
+        shard: &QueueKey,
+        keys: &[ClientItemKey],
+    ) -> EngineResult<Vec<BatchUpdateSnapshotItem>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut by_key = HashMap::with_capacity(keys.len());
+        for chunk in keys.chunks(VALIDATION_ITEM_CHUNK) {
+            let mut params = vec![
+                shard.tenant_id.as_str().to_string().into(),
+                shard.queue_id.as_str().to_string().into(),
+            ];
+            params.extend(
+                chunk
+                    .iter()
+                    .map(|key| Value::Text(key.as_str().to_string())),
+            );
+            let placeholders = (0..chunk.len())
+                .map(|offset| format!("?{}", offset + 3))
+                .collect::<Vec<_>>()
+                .join(",");
+            let rows = self
+                .query(
+                    format!(
+                        "SELECT item_id,client_item_key,item_version,lifecycle_state,fenced \
+                         FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
+                         AND client_item_key IN ({placeholders}) \
+                         AND lifecycle_state IN ('Pending','Leased') AND superseded=0"
+                    ),
+                    params,
+                )
+                .await
+                .map_err(storage)?;
+            for row in rows {
+                let values = &row.values;
+                let key = ClientItemKey::new(text(&values[1])?).map_err(storage)?;
+                by_key.insert(
+                    key.clone(),
+                    BatchUpdateSnapshotItem {
+                        item_id: ItemId::new(text(&values[0])?).map_err(storage)?,
+                        client_item_key: key,
+                        item_version: nonnegative_u64(integer(&values[2])?, "item_version")?,
+                        state: parse_state(&text(&values[3])?).map_err(storage)?,
+                        fenced: integer(&values[4])? != 0,
+                        superseded: false,
+                    },
+                );
+            }
+        }
+        Ok(keys.iter().filter_map(|key| by_key.remove(key)).collect())
     }
 
     pub async fn server_live_items(
