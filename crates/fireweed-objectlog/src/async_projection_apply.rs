@@ -359,6 +359,20 @@ where
         }
     }
 
+    /// Wait until at least one apply batch completes (or the queue is already empty).
+    pub async fn wait_for_progress(&self, shard: &QueueKey) -> EngineResult<()> {
+        let changed = self.inner.changed.notified();
+        let snapshot = self.snapshot(shard).await;
+        if let Some(reason) = snapshot.poison_reason {
+            return Err(poisoned(&reason));
+        }
+        if snapshot.apply_queue_depth == 0 {
+            return Ok(());
+        }
+        changed.await;
+        Ok(())
+    }
+
     /// Wait until the selected projection covers every currently admitted batch for `shard`.
     pub async fn wait_for_catch_up(&self, shard: &QueueKey) -> EngineResult<()> {
         loop {

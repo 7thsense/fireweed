@@ -1616,7 +1616,7 @@ impl DerivedObjectLogTursoBackend {
             {
                 return Ok(());
             }
-            coordinator.wait_for_catch_up(shard).await?;
+            coordinator.wait_for_progress(shard).await?;
         }
     }
 
@@ -1625,12 +1625,34 @@ impl DerivedObjectLogTursoBackend {
         shard: &QueueKey,
         keys: &[ClientItemKey],
     ) -> EngineResult<Vec<Option<LiveItemView>>> {
-        let views = self.projection.server_live_items(shard, keys).await?;
-        if self.async_apply.is_none() || views.iter().all(|view| view.is_some()) {
-            return Ok(views);
+        loop {
+            let views = self.projection.server_live_items(shard, keys).await?;
+            if self.async_apply.is_none() || views.iter().all(|view| view.is_some()) {
+                return Ok(views);
+            }
+            let target = self.last_produce.lock().await.get(shard).cloned();
+            let Some(target) = target else {
+                return Ok(views);
+            };
+            let projected = AsyncProjectionStore::recovery_high_water(
+                self.projection.as_ref(),
+                shard.clone(),
+            )
+            .await?;
+            if let Some(projected) = projected
+                && (projected.backend_epoch > target.backend_epoch
+                    || (projected.backend_epoch == target.backend_epoch
+                        && projected.sequence >= target.sequence))
+            {
+                return Ok(views);
+            }
+            if let Some(coordinator) = &self.async_apply {
+                coordinator.ensure_healthy(shard)?;
+                coordinator.wait_for_progress(shard).await?;
+            } else {
+                return Ok(views);
+            }
         }
-        self.catch_up_produce(shard).await?;
-        self.projection.server_live_items(shard, keys).await
     }
 
     async fn planner_update_snapshot(

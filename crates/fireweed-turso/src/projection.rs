@@ -2021,8 +2021,6 @@ async fn apply_owned(
             }
             QueueCommand::Claim(claim) => {
                 if !claim.item_ids.is_empty() {
-                    let groups =
-                        groups_for_items(&transaction, &tenant, &queue, &claim.item_ids).await?;
                     let params = vec![
                         Value::Blob(lease_hash(&claim.lease_token)),
                         Value::Integer(ts_nanos(claim.lease_expires_at)),
@@ -2041,14 +2039,6 @@ async fn apply_owned(
                     token_ops.extend(claim.item_ids.iter().map(|item| {
                         TokenOp::Set(position.queue.clone(), *item, claim.lease_token.clone())
                     }));
-                    refresh_group_summaries(
-                        &transaction,
-                        &tenant,
-                        &queue,
-                        &groups,
-                        ts_nanos(envelope.created_at),
-                    )
-                    .await?;
                 }
                 if let (
                     Some(request_id),
@@ -2235,13 +2225,6 @@ async fn apply_owned(
                 }));
             }
             QueueCommand::Finalize(finalize) => {
-                let finalized_ids: Vec<ItemId> = finalize
-                    .outcomes
-                    .iter()
-                    .map(|outcome| outcome.item_id)
-                    .collect();
-                let groups =
-                    groups_for_items(&transaction, &tenant, &queue, &finalized_ids).await?;
                 let retry_ids: Vec<ItemId> = finalize
                     .outcomes
                     .iter()
@@ -2327,7 +2310,6 @@ async fn apply_owned(
                     .await?;
                 }
                 update_item_schedules(&transaction, &tenant, &queue, &schedules).await?;
-                refresh_group_summaries(&transaction, &tenant, &queue, &groups, now).await?;
             }
             QueueCommand::CohortFinalize(finalize) => {
                 if matches!(finalize.kind, FinalizeKind::Rearm) {
