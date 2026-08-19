@@ -945,6 +945,157 @@ async fn refresh_group_summaries(
     Ok(())
 }
 
+struct GroupBump {
+    count: i64,
+    oldest: i64,
+    rep_sort: Vec<u8>,
+    rep_created: i64,
+    rep_item: String,
+}
+
+/// Maintain group summaries from the new rows only. Do not scan fireweed_items.
+async fn bump_group_summaries_on_push(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    definition: &fireweed_core::QueueDefinition,
+    items: &[PushItem],
+    base: i64,
+    now: i64,
+) -> EngineResult<()> {
+    let mut bumps: HashMap<String, GroupBump> = HashMap::new();
+    for (offset, item) in items.iter().enumerate() {
+        let Some(group) = &item.group_key else {
+            continue;
+        };
+        let not_before = ts_nanos_opt(item.not_before);
+        if not_before.is_some_and(|ts| ts > now) {
+            continue;
+        }
+        let created_seq = base
+            .checked_add(i64::try_from(offset).map_err(storage)?)
+            .ok_or_else(|| storage("item sequence overflow"))?;
+        let sort = elig_sort(&item.priority, &definition.priority_model);
+        let eligible_since = not_before.unwrap_or(now);
+        let item_id = item.item_id.to_string();
+        let entry = bumps.entry(group.as_str().to_string()).or_insert(GroupBump {
+            count: 0,
+            oldest: eligible_since,
+            rep_sort: sort.clone(),
+            rep_created: created_seq,
+            rep_item: item_id.clone(),
+        });
+        entry.count += 1;
+        if eligible_since < entry.oldest {
+            entry.oldest = eligible_since;
+        }
+        if sort < entry.rep_sort
+            || (sort == entry.rep_sort && created_seq < entry.rep_created)
+            || (sort == entry.rep_sort
+                && created_seq == entry.rep_created
+                && item_id < entry.rep_item)
+        {
+            entry.rep_sort = sort;
+            entry.rep_created = created_seq;
+            entry.rep_item = item_id;
+        }
+    }
+    if bumps.is_empty() {
+        return Ok(());
+    }
+    let groups: Vec<String> = bumps.keys().cloned().collect();
+    for chunk in groups.chunks(GROUP_COUNT_CHUNK) {
+        let mut params = vec![
+            Value::Text(tenant.to_string()),
+            Value::Text(queue.to_string()),
+        ];
+        params.extend(chunk.iter().cloned().map(Value::Text));
+        let placeholders = (0..chunk.len())
+            .map(|offset| format!("?{}", offset + 3))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut rows = transaction
+            .query(
+                format!(
+                    "SELECT group_key,oldest_eligible_at,rep_priority_sort,rep_created_at,rep_item_id,eligible_item_count \
+                     FROM fireweed_group_summary WHERE tenant_id=?1 AND queue_id=?2 AND group_key IN ({placeholders})"
+                ),
+                params,
+            )
+            .await
+            .map_err(storage)?;
+        while let Some(row) = rows.next().await.map_err(storage)? {
+            let group = text(&row.get_value(0).map_err(storage)?)?;
+            let Some(bump) = bumps.get_mut(&group) else {
+                continue;
+            };
+            if let Some(oldest) = optional_integer(&row.get_value(1).map_err(storage)?)? {
+                if oldest < bump.oldest {
+                    bump.oldest = oldest;
+                }
+            }
+            if let Some(existing_sort) = optional_blob(&row.get_value(2).map_err(storage)?)? {
+                let existing_created = optional_integer(&row.get_value(3).map_err(storage)?)?;
+                let existing_item = optional_text(&row.get_value(4).map_err(storage)?)?;
+                let new_is_better = bump.rep_sort < existing_sort
+                    || (bump.rep_sort == existing_sort
+                        && existing_item
+                            .as_ref()
+                            .is_some_and(|item| bump.rep_item.as_str() < item.as_str()));
+                if !new_is_better {
+                    bump.rep_sort = existing_sort;
+                    bump.rep_created = existing_created.unwrap_or(bump.rep_created);
+                    if let Some(item) = existing_item {
+                        bump.rep_item = item;
+                    }
+                }
+            }
+            bump.count = bump
+                .count
+                .saturating_add(integer(&row.get_value(5).map_err(storage)?)?);
+        }
+    }
+    for chunk in bumps.into_iter().collect::<Vec<_>>().chunks(81) {
+        let mut params = Vec::with_capacity(chunk.len() * 11);
+        for (group, bump) in chunk {
+            params.extend([
+                Value::Text(tenant.to_string()),
+                Value::Text(queue.to_string()),
+                Value::Text(group.clone()),
+                Value::Integer(bump.oldest),
+                Value::Null,
+                Value::Blob(bump.rep_sort.clone()),
+                Value::Integer(bump.rep_created),
+                Value::Text(bump.rep_item.clone()),
+                Value::Integer(bump.count),
+                Value::Integer(0),
+                Value::Integer(now),
+            ]);
+        }
+        transaction
+            .execute(
+                format!(
+                    "INSERT INTO fireweed_group_summary(\
+                     tenant_id,queue_id,group_key,oldest_eligible_at,rep_progress_guard_sort,\
+                     rep_priority_sort,rep_created_at,rep_item_id,eligible_item_count,at_risk_count,updated_at) \
+                     VALUES {} \
+                     ON CONFLICT(tenant_id,queue_id,group_key) DO UPDATE SET \
+                     oldest_eligible_at=excluded.oldest_eligible_at,\
+                     rep_priority_sort=excluded.rep_priority_sort,\
+                     rep_created_at=excluded.rep_created_at,\
+                     rep_item_id=excluded.rep_item_id,\
+                     eligible_item_count=excluded.eligible_item_count,\
+                     updated_at=excluded.updated_at",
+                    values_rows(chunk.len(), 11)
+                ),
+                params,
+            )
+            .await
+            .map_err(storage)?;
+    }
+    Ok(())
+}
+
 async fn queue_paused(transaction: &Connection, tenant: &str, queue: &str) -> EngineResult<bool> {
     let row = one_row(
         transaction,
@@ -2066,13 +2217,16 @@ async fn apply_owned(
                     true,
                 )
                 .await?;
-                let groups: HashSet<GroupKey> = push
-                    .items
-                    .iter()
-                    .filter_map(|item| item.group_key.clone())
-                    .collect();
-                let groups = groups.into_iter().collect::<Vec<_>>();
-                refresh_group_summaries(&transaction, &tenant, &queue, &groups, now).await?;
+                bump_group_summaries_on_push(
+                    &transaction,
+                    &tenant,
+                    &queue,
+                    &definition,
+                    &push.items,
+                    base,
+                    now,
+                )
+                .await?;
                 if let (
                     Some(request_id),
                     Some(_fingerprint),

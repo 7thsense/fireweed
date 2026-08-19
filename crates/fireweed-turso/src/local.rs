@@ -245,6 +245,10 @@ impl TursoRelational {
         verify_schema(&writer).await?;
         let reader = database.connect()?;
         configure_connection(&reader, &config).await?;
+        // Plan-time SELECTs must not wait for the writer txn. query_only +
+        // read_uncommitted keep ingest packing while apply is caught up.
+        let _ = reader.pragma_update("query_only", "ON").await;
+        let _ = reader.pragma_update("read_uncommitted", "ON").await;
         Ok(Self {
             database,
             writer: Arc::new(Mutex::new(writer)),
@@ -660,7 +664,10 @@ async fn configure_connection(connection: &Connection, config: &TursoConfig) -> 
     connection.pragma_update("synchronous", "OFF").await?;
     // Negative cache_size is KiB. 128 MiB is a cache cap, not an O(N) working set.
     connection.pragma_update("cache_size", "-131072").await?;
-    let _ = connection.pragma_update("wal_autocheckpoint", "1000").await;
+    // Autocheckpoint during ingest fights object-log fsyncs on the same disk and
+    // stalls the reader used for plan SELECTs (busy_timeout). The projection is
+    // rebuildable; checkpoint on close/idle, not on every WAL fill.
+    let _ = connection.pragma_update("wal_autocheckpoint", "0").await;
     connection.busy_timeout(config.busy_timeout)?;
     Ok(())
 }
