@@ -209,6 +209,7 @@ pub(crate) type ConsumerLeaseIndex = BTreeMap<(QueueKey, String, ItemId), ()>;
 pub struct TursoRelational {
     database: Database,
     pub(crate) writer: Arc<Mutex<Connection>>,
+    pub(crate) reader: Arc<Mutex<Connection>>,
     pub(crate) live_tokens: Arc<Mutex<BTreeMap<(QueueKey, ItemId), LeaseToken>>>,
     pub(crate) live_tokens_by_consumer: Arc<Mutex<ConsumerLeaseIndex>>,
     pub(crate) last_batch_update_shape: Arc<StdMutex<Option<TursoBatchUpdateStatementShape>>>,
@@ -242,9 +243,12 @@ impl TursoRelational {
         migrate_connection(&mut writer).await?;
         verify_connection_settings(&writer, &config).await?;
         verify_schema(&writer).await?;
+        let reader = database.connect()?;
+        configure_connection(&reader, &config).await?;
         Ok(Self {
             database,
             writer: Arc::new(Mutex::new(writer)),
+            reader: Arc::new(Mutex::new(reader)),
             live_tokens: Arc::new(Mutex::new(BTreeMap::new())),
             live_tokens_by_consumer: Arc::new(Mutex::new(BTreeMap::new())),
             last_batch_update_shape: Arc::new(StdMutex::new(None)),
@@ -326,7 +330,7 @@ impl TursoRelational {
 
     /// Run a query and detach all rows from the connection guard.
     pub async fn query(&self, sql: impl AsRef<str>, params: Vec<Value>) -> Result<Vec<OwnedRow>> {
-        let connection = self.writer.lock().await;
+        let connection = self.reader.lock().await;
         collect_rows(&connection, sql.as_ref(), params).await
     }
 

@@ -230,8 +230,9 @@ impl Cell {
         match self {
             Self::ObjectLogFilesystemMemory { .. } => env_usize("SS_INFLIGHT", 8).max(1),
             #[cfg(feature = "turso")]
-            // One Turso writer; extra in-flight only queues on the mutex.
-            Self::ObjectLogFilesystemTurso { .. } => env_usize("SS_INFLIGHT", 1).max(1),
+            // Gather concurrent produces into one packed PUT. Apply is one transaction
+            // per object; ack is log-durable (AsyncProjection).
+            Self::ObjectLogFilesystemTurso { .. } => env_usize("SS_INFLIGHT", 8).max(1),
             #[cfg(feature = "sqlite")]
             Self::SqliteCommandLogMemory { .. } => env_usize("SS_INFLIGHT", 1).max(1),
         }
@@ -258,8 +259,8 @@ impl Cell {
                         },
                         control_plane: None,
                         authority: None,
-                        response_barrier: ResponseBarrier::Strict,
-                        async_projection: None,
+                        response_barrier: ResponseBarrier::AsyncProjection,
+                        async_projection: Some(AsyncProjectionSpec::default()),
                         sqlite_projection_deferred_flush_chunk: None,
                         segments: SegmentConfig {
                             target_bytes: 256 * 1024,
@@ -696,8 +697,8 @@ async fn ss_phased_capacity_smoke() {
     }
 
     // --- P4 deliver: unfiltered claim + complete ---
-    // Claims stay serial (planner must see prior apply). Finalize of batch N
-    // overlaps the next claim so two produces can group-commit.
+    // Map plans claims without Turso. Render still catch-up-applies, so keep
+    // one claim in flight and overlap finalize of batch N with claim N+1.
     let mut p4_claim = CallStats::new();
     let mut p4_fin = CallStats::new();
     let t0 = Instant::now();

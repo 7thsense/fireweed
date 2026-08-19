@@ -9,13 +9,13 @@
 
 #![allow(clippy::manual_async_fn)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use fireweed_core::{
-    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, Metadata, PriorityValue,
+    ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, PriorityValue,
     QueryCapabilityFlags, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
@@ -24,8 +24,8 @@ use fireweed_engine::{
     AsyncPurgeRequest, AsyncPushError, AsyncPushRequest, AsyncReclaimRequest, AsyncRenewRequest,
     Backend, BatchUpdatePort, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed,
     CommandChecksum, CommandEnvelope, CommandPosition, ControlPlaneStore, CreateQueueOutcome,
-    DEFAULT_BLOCKING_AXIS_IN_FLIGHT, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
-    FinalizeKind, FinalizeOutcome, FinalizePort, FinalizeTarget, HistoricalProjectionRead,
+    DEFAULT_BLOCKING_AXIS_IN_FLIGHT, DurabilityClass, EngineError, EngineResult,
+    FinalizeOutcome, FinalizePort, FinalizeTarget, HistoricalProjectionRead,
     HotProjectionQueryPort, IdGen, InProcessControlPlane, InProcessLogStore, IndexQueryPort,
     InlineOwnedTaskDispatcher, ItemMutationPort, ItemMutationRequest, ItemMutationResponse,
     ItemView, LeaseView, LiveItemView, LogStore, OwnedTask, PendingPage, PendingSummary,
@@ -265,6 +265,10 @@ where
     fn finish_planned(&self, _planned: Option<PlannedReservation>, _ok: bool) {}
 
     async fn catch_up_projection(&self, _shard: &QueueKey) -> EngineResult<()> {
+        Ok(())
+    }
+
+    async fn catch_up_produce(&self, _shard: &QueueKey) -> EngineResult<()> {
         Ok(())
     }
 
@@ -1225,7 +1229,12 @@ macro_rules! impl_turso_product_ports {
                 keys: &[ClientItemKey],
             ) -> impl std::future::Future<Output = EngineResult<Vec<Option<LiveItemView>>>> + Send
             {
-                self.snapshot_live_items(shard, keys)
+                let shard = shard.clone();
+                let keys = keys.to_vec();
+                async move {
+                    self.catch_up_produce(&shard).await?;
+                    self.projection.server_live_items(&shard, &keys).await
+                }
             }
             fn metrics(
                 &self,
@@ -1276,12 +1285,42 @@ impl_turso_product_ports!(
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "objectlog")]
+async fn note_produce_positions(
+    last_produce: &tokio::sync::Mutex<HashMap<QueueKey, CommandPosition>>,
+    positions: &[CommandPosition],
+    commands: &[CommandEnvelope],
+) {
+    let mut guard = last_produce.lock().await;
+    for (position, envelope) in positions.iter().zip(commands) {
+        match &envelope.command {
+            QueueCommand::Push(_)
+            | QueueCommand::UpdateFields(_)
+            | QueueCommand::UpdateFieldsBatch(_) => {
+                guard
+                    .entry(position.queue.clone())
+                    .and_modify(|current| {
+                        if position.backend_epoch > current.backend_epoch
+                            || (position.backend_epoch == current.backend_epoch
+                                && position.sequence > current.sequence)
+                        {
+                            *current = position.clone();
+                        }
+                    })
+                    .or_insert_with(|| position.clone());
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(feature = "objectlog")]
 #[derive(Clone)]
 struct ObjectLogTursoCommitter {
     log: Arc<ObjectLogEngineStore>,
     projection: Arc<TursoRelational>,
     apply_turn: Arc<tokio::sync::Notify>,
     async_apply: Option<AsyncProjectionApplyCoordinator<TursoRelational>>,
+    last_produce: Arc<tokio::sync::Mutex<HashMap<QueueKey, CommandPosition>>>,
 }
 
 #[cfg(feature = "objectlog")]
@@ -1309,6 +1348,7 @@ impl SeparateReplayCommitter for ObjectLogTursoCommitter {
         let projection = Arc::clone(&self.projection);
         let apply_turn = Arc::clone(&self.apply_turn);
         let async_apply = self.async_apply.clone();
+        let last_produce = Arc::clone(&self.last_produce);
         Box::pin(async move {
             let (shard, commands, expected_epoch, fault) = request.into_parts();
             match fault {
@@ -1333,6 +1373,7 @@ impl SeparateReplayCommitter for ObjectLogTursoCommitter {
                     return Err(error);
                 }
             };
+            note_produce_positions(&last_produce, &outcome.positions, &commands).await;
             if matches!(fault, RawCommitFault::AfterAppendBeforeApply) {
                 if let (Some(coordinator), Some(reservation)) = (&async_apply, reservation) {
                     coordinator.cancel(reservation).await;
@@ -1445,6 +1486,7 @@ pub struct DerivedObjectLogTursoBackend {
     #[allow(dead_code)]
     node_id: u8,
     async_apply: Option<AsyncProjectionApplyCoordinator<TursoRelational>>,
+    last_produce: Arc<tokio::sync::Mutex<HashMap<QueueKey, CommandPosition>>>,
 }
 
 #[cfg(feature = "objectlog")]
@@ -1468,11 +1510,13 @@ impl DerivedObjectLogTursoBackend {
             )?),
             None => None,
         };
+        let last_produce = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let committer = ObjectLogTursoCommitter {
             log: Arc::clone(&log),
             projection: Arc::clone(&projection),
             apply_turn: Arc::new(tokio::sync::Notify::new()),
             async_apply: async_apply.clone(),
+            last_produce: Arc::clone(&last_produce),
         };
         let strategy = SeparateReplayCommit::for_profile(DurabilityClass::EventualApply, committer)
             .map_err(|e| EngineError::Storage(e.to_string()))?;
@@ -1522,6 +1566,7 @@ impl DerivedObjectLogTursoBackend {
             counters,
             node_id,
             async_apply,
+            last_produce,
         };
         backend.recover_async().await?;
         Ok(backend)
@@ -1534,6 +1579,29 @@ impl DerivedObjectLogTursoBackend {
         coordinator.ensure_healthy(shard)?;
         let target = AsyncLogStore::high_water(self.log.as_ref(), shard.clone()).await?;
         let Some(target) = target else {
+            return Ok(());
+        };
+        self.wait_for_projection(shard, &target).await
+    }
+
+    async fn catch_up_produce(&self, shard: &QueueKey) -> EngineResult<()> {
+        let Some(coordinator) = &self.async_apply else {
+            return Ok(());
+        };
+        coordinator.ensure_healthy(shard)?;
+        let target = self.last_produce.lock().await.get(shard).cloned();
+        let Some(target) = target else {
+            return Ok(());
+        };
+        self.wait_for_projection(shard, &target).await
+    }
+
+    async fn wait_for_projection(
+        &self,
+        shard: &QueueKey,
+        target: &CommandPosition,
+    ) -> EngineResult<()> {
+        let Some(coordinator) = &self.async_apply else {
             return Ok(());
         };
         loop {
@@ -1557,9 +1625,11 @@ impl DerivedObjectLogTursoBackend {
         shard: &QueueKey,
         keys: &[ClientItemKey],
     ) -> EngineResult<Vec<Option<LiveItemView>>> {
-        if self.async_apply.is_some() {
-            self.catch_up_projection(shard).await?;
+        let views = self.projection.server_live_items(shard, keys).await?;
+        if self.async_apply.is_none() || views.iter().all(|view| view.is_some()) {
+            return Ok(views);
         }
+        self.catch_up_produce(shard).await?;
         self.projection.server_live_items(shard, keys).await
     }
 
@@ -1767,7 +1837,7 @@ impl DerivedObjectLogTursoBackend {
     }
 
     async fn dispatch_class_s_claim(&self, request: ClaimRequest) -> EngineResult<Claimed> {
-        self.catch_up_projection(&request.shard).await?;
+        self.catch_up_produce(&request.shard).await?;
         let epoch = match request.expected_epoch {
             Some(epoch) => epoch,
             None => AsyncLogStore::current_epoch(self.log.as_ref(), request.shard.clone()).await?,

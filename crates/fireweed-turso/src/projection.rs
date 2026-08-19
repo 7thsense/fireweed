@@ -556,6 +556,7 @@ async fn maintain_typed_indexes_on_insert(
     queue: &str,
     indexes: &[QueueIndex],
     items: &[PushItem],
+    persist: bool,
 ) -> EngineResult<()> {
     let mut batch_unique: HashMap<(String, Vec<u8>), String> = HashMap::new();
     let mut rows = Vec::with_capacity(items.len());
@@ -603,6 +604,9 @@ async fn maintain_typed_indexes_on_insert(
         }
     }
 
+    if !persist {
+        return Ok(());
+    }
     let rows: Vec<_> = rows
         .into_iter()
         .flat_map(|(item_id, keys)| {
@@ -1469,13 +1473,38 @@ fn api001_update_lengths_ok(
     if commands.len() == updates.len() {
         return true;
     }
-    matches!(
-        commands,
-        [CommandEnvelope {
-            command: QueueCommand::UpdateFieldsBatch(batch),
-            ..
-        }] if batch.updates.len() == updates.len()
-    )
+    let mut count = 0usize;
+    for command in commands {
+        match &command.command {
+            QueueCommand::UpdateFieldsBatch(batch) => count += batch.updates.len(),
+            QueueCommand::UpdateFields(_) => count += 1,
+            _ => return false,
+        }
+    }
+    count == updates.len()
+}
+
+fn api001_command_for_update<'a>(
+    commands: &'a [CommandEnvelope],
+    positions: &'a [CommandPosition],
+    update_index: usize,
+) -> Option<(&'a CommandPosition, &'a CommandEnvelope)> {
+    if commands.len() == 1 {
+        return Some((positions.first()?, commands.first()?));
+    }
+    let mut cursor = 0usize;
+    for (position, envelope) in positions.iter().zip(commands) {
+        let span = match &envelope.command {
+            QueueCommand::UpdateFieldsBatch(batch) => batch.updates.len(),
+            QueueCommand::UpdateFields(_) => 1,
+            _ => 0,
+        };
+        if update_index < cursor.saturating_add(span) {
+            return Some((position, envelope));
+        }
+        cursor = cursor.saturating_add(span);
+    }
+    None
 }
 
 /// Apply API-001 updates using a bounded number of set-based statements. The commands have already
@@ -1538,14 +1567,20 @@ async fn apply_api001_update_batch(
 
     let mut rows = Vec::with_capacity(updates.len());
     for (index, update) in updates.iter().enumerate() {
-        let (position, envelope) = if commands.len() == 1 {
-            (&positions[0], &commands[0])
-        } else {
-            (&positions[index], &commands[index])
+        let (position, envelope) = match api001_command_for_update(commands, positions, index) {
+            Some(pair) => pair,
+            None => {
+                return Err(storage(
+                    "BatchUpdate projection apply crossed queue or length boundaries",
+                ));
+            }
         };
         let values = current
             .remove(&update.item_id)
             .ok_or(EngineError::NotFound)?;
+        if text(&values[1])? == "Leased" {
+            continue;
+        }
         if text(&values[1])? != "Pending" || integer(&values[7])? != 0 || integer(&values[8])? != 0
         {
             return Err(EngineError::Conflict);
@@ -1932,6 +1967,7 @@ async fn apply_owned(
                     &queue,
                     &definition.typed_indexes,
                     &push.items,
+                    true,
                 )
                 .await?;
                 let groups: HashSet<GroupKey> = push
@@ -2726,6 +2762,7 @@ async fn apply_owned(
                     &queue,
                     &definition.typed_indexes,
                     std::slice::from_ref(item),
+                    true,
                 )
                 .await?;
             }
@@ -3404,10 +3441,21 @@ async fn apply_owned(
 
     if let Some(updates) = &api001_updates {
         if api001_pending_commands == updates.len() {
+            let (update_positions, update_commands): (Vec<_>, Vec<_>) = positions
+                .iter()
+                .zip(&commands)
+                .filter(|(_, envelope)| {
+                    matches!(
+                        envelope.command,
+                        QueueCommand::UpdateFields(_) | QueueCommand::UpdateFieldsBatch(_)
+                    )
+                })
+                .map(|(position, envelope)| (position.clone(), envelope.clone()))
+                .unzip();
             apply_api001_update_batch(
                 &transaction,
-                &positions,
-                &commands,
+                &update_positions,
+                &update_commands,
                 updates,
                 &mut statement_shape,
             )
@@ -3863,17 +3911,13 @@ impl AsyncProjectionStore for TursoRelational {
         items: Vec<PushItem>,
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
-        let writer = self.writer.clone();
+        let reader = self.reader.clone();
         async move {
-            let mut connection = writer.lock().await;
-            let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .await
-                .map_err(storage)?;
+            let connection = reader.lock().await;
             let tenant = shard.tenant_id.as_str().to_string();
             let queue = shard.queue_id.as_str().to_string();
             let result = async {
-                let definition = definition_in_transaction(&transaction, &shard).await?;
+                let definition = definition_in_transaction(&connection, &shard).await?;
                 let mut keys = HashSet::new();
                 let mut item_ids = HashSet::new();
                 let mut group_order = Vec::new();
@@ -3910,7 +3954,7 @@ impl AsyncProjectionStore for TursoRelational {
                         ]);
                     }
                     let conflict = one_row(
-                        &transaction,
+                        &connection,
                         &format!(
                             "WITH requested(item_id,client_item_key) AS (VALUES {}) \
                              SELECT 1 FROM requested r WHERE EXISTS (SELECT 1 FROM fireweed_items i \
@@ -3938,7 +3982,7 @@ impl AsyncProjectionStore for TursoRelational {
                         let mut params =
                             vec![Value::Text(tenant.clone()), Value::Text(queue.clone())];
                         params.extend(chunk.iter().cloned().map(Value::Text));
-                        let mut rows = transaction
+                        let mut rows = connection
                             .query(
                                 format!(
                                     "SELECT group_key,COUNT(*) FROM fireweed_items \
@@ -3974,11 +4018,17 @@ impl AsyncProjectionStore for TursoRelational {
                         }
                     }
                 }
-                maintain_typed_indexes_on_insert(&transaction, &tenant, &queue, &definition.typed_indexes, &items).await?;
-                upsert_cohorts(&transaction, &tenant, &queue, &items, ts_nanos(now)).await?;
+                maintain_typed_indexes_on_insert(
+                    &connection,
+                    &tenant,
+                    &queue,
+                    &definition.typed_indexes,
+                    &items,
+                    false,
+                )
+                .await?;
                 Ok(())
             }.await;
-            transaction.rollback().await.map_err(storage)?;
             result
         }
     }
@@ -3987,9 +4037,9 @@ impl AsyncProjectionStore for TursoRelational {
         &self,
         shard: QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<bool>> + Send {
-        let writer = self.writer.clone();
+        let reader = self.reader.clone();
         async move {
-            let connection = writer.lock().await;
+            let connection = reader.lock().await;
             let row = one_row(
                 &connection,
                 "SELECT pause_drain_intake FROM queues WHERE tenant=?1 AND queue=?2",
@@ -4012,9 +4062,9 @@ impl AsyncProjectionStore for TursoRelational {
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<IdempotencyDecision<Vec<ItemId>>>> + Send
     {
-        let writer = self.writer.clone();
+        let reader = self.reader.clone();
         async move {
-            let connection = writer.lock().await;
+            let connection = reader.lock().await;
             let row = one_row(&connection,
                 "SELECT request_fingerprint,response_payload,expires_at FROM fireweed_request_idempotency \
                  WHERE tenant_id=?1 AND queue_id=?2 AND operation='push' AND request_id=?3",
