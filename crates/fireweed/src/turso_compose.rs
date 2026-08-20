@@ -2036,7 +2036,7 @@ impl DerivedObjectLogTursoBackend {
         envelope: CommandEnvelope,
         epoch: u64,
         reservation: Option<fireweed_objectlog::AsyncProjectionApplyReservation>,
-        _outbox_id: &str,
+        outbox_id: &str,
     ) -> EngineResult<()> {
         let commands = vec![envelope];
         let outcome = match self
@@ -2061,6 +2061,13 @@ impl DerivedObjectLogTursoBackend {
             None,
         )
         .await?;
+        self.projection
+            .delete_claim_outbox_row(
+                shard.tenant_id.as_str(),
+                shard.queue_id.as_str(),
+                outbox_id,
+            )
+            .await?;
         Ok(())
     }
 
