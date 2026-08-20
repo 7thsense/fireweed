@@ -880,7 +880,10 @@ async fn refresh_due_group_summaries(
              ON gstate.tenant_id=ig.tenant_id AND gstate.queue_id=ig.queue_id \
              AND gstate.gate_key=ig.gate_key WHERE ig.tenant_id=i.tenant_id \
              AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id) \
-             AND (gs.group_key IS NULL OR gs.oldest_eligible_at IS NULL OR gs.rep_item_id IS NULL) \
+             AND (gs.group_key IS NULL OR gs.oldest_eligible_at IS NULL OR gs.rep_item_id IS NULL \
+                  OR NOT EXISTS (SELECT 1 FROM fireweed_items r \
+                    WHERE r.tenant_id=i.tenant_id AND r.queue_id=i.queue_id AND r.item_id=gs.rep_item_id \
+                      AND r.lifecycle_state='Pending' AND r.superseded=0)) \
              ORDER BY i.group_key LIMIT 128",
             vec![
                 Value::Text(tenant.to_string()),

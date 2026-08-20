@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use fireweed_core::{
@@ -1426,6 +1427,13 @@ impl SeparateReplayCommitter for ObjectLogTursoCommitter {
     }
 }
 
+fn position_covers(have: Option<&CommandPosition>, target: &CommandPosition) -> bool {
+    have.is_some_and(|have| {
+        have.backend_epoch > target.backend_epoch
+            || (have.backend_epoch == target.backend_epoch && have.sequence >= target.sequence)
+    })
+}
+
 #[cfg(feature = "objectlog")]
 async fn publish_packed_apply(
     coordinator: Option<&AsyncProjectionApplyCoordinator<TursoRelational>>,
@@ -1669,15 +1677,21 @@ impl DerivedObjectLogTursoBackend {
         };
         loop {
             coordinator.ensure_healthy(shard)?;
+            let snap = coordinator.snapshot(shard).await;
+            if position_covers(snap.applied_high_water.as_ref(), target) {
+                return Ok(());
+            }
             let projected =
                 AsyncProjectionStore::recovery_high_water(self.projection.as_ref(), shard.clone())
                     .await?;
-            if let Some(projected) = projected
-                && (projected.backend_epoch > target.backend_epoch
-                    || (projected.backend_epoch == target.backend_epoch
-                        && projected.sequence >= target.sequence))
-            {
+            if position_covers(projected.as_ref(), target) {
                 return Ok(());
+            }
+            if snap.apply_queue_depth == 0 {
+                // Apply is idle; the reader cursor can lag the coordinator high-water.
+                // Do not busy-spin on recovery_high_water.
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                continue;
             }
             coordinator.wait_for_progress(shard).await?;
         }

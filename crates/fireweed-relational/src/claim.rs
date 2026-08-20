@@ -3,20 +3,23 @@
 use fireweed_core::LeaseToken;
 use fireweed_engine::{EngineError, EngineResult};
 
-use crate::{RelTx, RelValue, lease_hash, rel_exec, rel_query};
+use crate::sql::async_projection as sql;
+use crate::{RelTx, RelValue, lease_hash, query_optional, rel_exec, rel_query};
 
-/// Next due pending items, including payloads. Same eligibility predicates as
-/// [`crate::sql::async_projection::SELECT_ELIGIBLE`], plus the pending-order key.
+/// Next due pending items with payloads. Gate anti-join is appended when the queue has blocked gates.
 pub const SELECT_CLASS_S_DUE: &str = "SELECT item_id, client_item_key, payload, item_version, \
-     retry_count, priority, group_key, not_before, fields, metadata, max_attempts \
+     retry_count, priority, group_key, not_before, max_attempts \
      FROM fireweed_items \
      WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
      AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
-     AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
+     AND eligible_since IS NOT NULL";
+
+const CLASS_S_DUE_ORDER: &str = " ORDER BY priority_sort, created_seq, item_id LIMIT ?4";
+
+const GATE_ANTI_JOIN: &str = " AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
      JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
      AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=fireweed_items.tenant_id \
-     AND ig.queue_id=fireweed_items.queue_id AND ig.item_id=fireweed_items.item_id) \
-     ORDER BY priority_sort, created_seq, item_id LIMIT ?4";
+     AND ig.queue_id=fireweed_items.queue_id AND ig.item_id=fireweed_items.item_id)";
 
 pub const INSERT_CLAIM_OUTBOX: &str = "INSERT INTO fireweed_claim_outbox (\
      tenant_id, queue_id, outbox_id, item_ids, lease_token, lease_expires_at, \
@@ -92,9 +95,24 @@ pub fn class_s_claim(
     tx: &impl RelTx,
     request: &ClassSClaimRequest<'_>,
 ) -> EngineResult<ClassSClaimResult> {
+    let include_gates = query_optional(
+        tx,
+        sql::SELECT_HAS_BLOCKED_GATES,
+        [
+            RelValue::from(request.tenant_id),
+            RelValue::from(request.queue_id),
+        ],
+        |row| row.get::<i64>(0),
+    )?
+    .is_some();
+    let select_sql = if include_gates {
+        format!("{SELECT_CLASS_S_DUE}{GATE_ANTI_JOIN}{CLASS_S_DUE_ORDER}")
+    } else {
+        format!("{SELECT_CLASS_S_DUE}{CLASS_S_DUE_ORDER}")
+    };
     let selected = rel_query(
         tx,
-        SELECT_CLASS_S_DUE,
+        &select_sql,
         [
             RelValue::Text(request.tenant_id.to_string()),
             RelValue::Text(request.queue_id.to_string()),
@@ -124,9 +142,9 @@ pub fn class_s_claim(
             priority: row.get(5)?,
             group_key: row.get(6)?,
             not_before: row.get(7)?,
-            fields_json: row.get::<Option<String>>(8)?.unwrap_or_else(|| "{}".into()),
-            metadata_json: row.get::<Option<String>>(9)?.unwrap_or_else(|| "{}".into()),
-            max_attempts: row.get::<Option<i64>>(10)?.unwrap_or(0),
+            fields_json: "{}".into(),
+            metadata_json: "{}".into(),
+            max_attempts: row.get::<Option<i64>>(8)?.unwrap_or(0),
             entity_document: None,
             index_fields: None,
             gate_keys: Vec::new(),
@@ -158,8 +176,11 @@ pub fn class_s_claim(
         )));
     }
 
-    let item_ids_json = serde_json::to_string(&ids).map_err(|e| EngineError::Storage(e.to_string()))?;
-    load_class_s_gate_keys(tx, request.tenant_id, request.queue_id, &mut items)?;
+    let item_ids_json =
+        serde_json::to_string(&ids).map_err(|e| EngineError::Storage(e.to_string()))?;
+    if include_gates {
+        load_class_s_gate_keys(tx, request.tenant_id, request.queue_id, &mut items)?;
+    }
     if !ids.is_empty() {
         let placeholders = vec!["(?,?,?,?)"; ids.len()].join(",");
         let sql = format!(
@@ -354,7 +375,12 @@ mod tests {
                 return Ok(changed);
             }
             if sql.contains("INSERT INTO fireweed_lease_bearers") {
-                return Ok(self.items.borrow().iter().filter(|item| item.leased).count());
+                return Ok(self
+                    .items
+                    .borrow()
+                    .iter()
+                    .filter(|item| item.leased)
+                    .count());
             }
             if sql == INSERT_CLAIM_OUTBOX {
                 let outbox_id = match &params[2] {
@@ -368,10 +394,12 @@ mod tests {
         }
 
         fn query(&self, sql: &str, params: &[RelValue]) -> EngineResult<Vec<RelRow>> {
-            if sql.contains("SELECT item_id, gate_key FROM fireweed_item_gates") {
+            if sql.contains("SELECT item_id, gate_key FROM fireweed_item_gates")
+                || sql.contains("fireweed_gate_state")
+            {
                 return Ok(Vec::new());
             }
-            if sql != SELECT_CLASS_S_DUE {
+            if !sql.contains("SELECT item_id, client_item_key, payload, item_version") {
                 return Err(EngineError::Storage(format!("unexpected query: {sql}")));
             }
             let limit = match params.get(3) {
@@ -399,11 +427,7 @@ mod tests {
                         RelValue::Null,
                         RelValue::Null,
                         RelValue::Null,
-                        RelValue::Text("{}".into()),
-                        RelValue::Text("{}".into()),
                         RelValue::Integer(3),
-                        RelValue::Null,
-                        RelValue::Null,
                     ])
                 })
                 .collect())
