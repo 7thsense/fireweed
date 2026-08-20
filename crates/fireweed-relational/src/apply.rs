@@ -340,6 +340,7 @@ pub fn apply_committed_batch_sql(
                 envelopes[i + 1].created_at,
                 claim,
             )?;
+            crate::delete_claim_outbox(tx, &t, &q, &env.command_id.0)?;
             persist_request_outcome_sql(tx, queues, &pos.queue, env, pos)?;
             persist_request_outcome_sql(
                 tx,
@@ -482,6 +483,9 @@ pub fn apply_committed_batch_sql(
             env.created_at,
             &env.command,
         )?;
+        if matches!(env.command, QueueCommand::Claim(_)) {
+            crate::delete_claim_outbox(tx, &t, &q, &env.command_id.0)?;
+        }
         persist_request_outcome_sql(tx, queues, &pos.queue, env, pos)?;
         let new_next = incoming
             .checked_add(1)
@@ -2290,6 +2294,19 @@ fn apply_group_summary_add(
     relect_group_summaries(tx, shard, &fallback, now)
 }
 
+/// Drop claimed (or otherwise no-longer-eligible) items from `fireweed_group_summary`.
+/// Used by the sqlite Class S lease txn (same IMMEDIATE as the lease). Live Turso apply
+/// of an already-leased Claim skips this; rebuild still goes through `QueueCommand::Claim`.
+pub fn remove_ids_from_group_summaries(
+    tx: &impl RelTx,
+    shard: &QueueKey,
+    ids: &[ItemId],
+    now: UtcTimestamp,
+) -> EngineResult<()> {
+    let removed = load_grouped_items(tx, shard, ids)?;
+    apply_group_summary_remove(tx, shard, &removed, now)
+}
+
 /// Items leaving eligibility (Claim, or becoming deferred). Recompute only groups that lost their
 /// representative or whose oldest timestamp may have moved.
 fn apply_group_summary_remove(
@@ -3096,11 +3113,12 @@ pub fn apply_command_sql(
             let exp = ts_nanos(c.lease_expires_at);
             let worker_id = c.worker_id.as_ref().map(|worker| worker.as_str());
             let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
+            let mut pending_moved = 0usize;
             if claim_scan_default_fifo.get(shard).copied().unwrap_or(false)
                 && let Some((min_rowid, max_rowid)) =
                     fifo_rowid_range_for_id_strings(tx, shard, &ids, Some("Pending"))?
             {
-                let _ = crate::rel_exec(
+                pending_moved = crate::rel_exec(
                     tx,
                     "UPDATE fireweed_items SET lifecycle_state='Leased', lease_token_hash=?1, \
                      lease_expires_at=?2, worker_id=?3, retry_count=retry_count+1, \
@@ -3150,7 +3168,7 @@ pub fn apply_command_sql(
                         RelValue::Text(t.to_string()),
                         RelValue::Text(q.to_string()),
                     ]);
-                    crate::rel_exec(tx, &sql, params)?;
+                    pending_moved += crate::rel_exec(tx, &sql, params)?;
                 }
                 advance_claim_scan_hint_for_ids(
                     tx,
@@ -3163,10 +3181,14 @@ pub fn apply_command_sql(
             for id in &c.item_ids {
                 token_ops.push(TokenOp::Set(shard.clone(), *id, c.lease_token.clone()));
             }
-            persist_lease_bearers(tx, shard, &c.item_ids, &c.lease_token)?;
-            if grouped_shards.contains(shard) {
-                let removed = load_grouped_items(tx, shard, &c.item_ids)?;
-                apply_group_summary_remove(tx, shard, &removed, now)?;
+            // Class S already leased these rows. Rebuild (still Pending) takes the
+            // path above (`pending_moved > 0`) and maintains groups. Live apply does not.
+            if pending_moved > 0 {
+                persist_lease_bearers(tx, shard, &c.item_ids, &c.lease_token)?;
+                if grouped_shards.contains(shard) {
+                    let removed = load_grouped_items(tx, shard, &c.item_ids)?;
+                    apply_group_summary_remove(tx, shard, &removed, now)?;
+                }
             }
             Ok(())
         }

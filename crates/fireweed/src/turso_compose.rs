@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use fireweed_core::{
-    ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, PriorityValue,
-    QueryCapabilityFlags, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
+    ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, PriorityValue, QueryCapabilityFlags,
+    QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
     AsyncClaimError, AsyncComposedBackend, AsyncControlPlane, AsyncFinalizeRequest,
@@ -24,19 +24,19 @@ use fireweed_engine::{
     AsyncPurgeRequest, AsyncPushError, AsyncPushRequest, AsyncReclaimRequest, AsyncRenewRequest,
     Backend, BatchUpdatePort, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed,
     CommandChecksum, CommandEnvelope, CommandPosition, ControlPlaneStore, CreateQueueOutcome,
-    DEFAULT_BLOCKING_AXIS_IN_FLIGHT, DurabilityClass, EngineError, EngineResult,
-    FinalizeOutcome, FinalizePort, FinalizeTarget, HistoricalProjectionRead,
-    HotProjectionQueryPort, IdGen, InProcessControlPlane, InProcessLogStore, IndexQueryPort,
-    InlineOwnedTaskDispatcher, ItemMutationPort, ItemMutationRequest, ItemMutationResponse,
-    ItemView, LeaseView, LiveItemView, LogStore, OwnedTask, PendingPage, PendingSummary,
-    PreparedClaim, PreparedFinalize, PreparedPush, ProjectionClaimPlanner,
-    ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner,
-    ProjectionSnapshot, PurgePort, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey,
-    QueueMetrics, RawCommitFault, RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand,
-    ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort, RenewTarget,
-    SeparateReplayCommit, SeparateReplayCommitter, SeqIdGen, SetGatesPort, SnapshotRef,
-    SnapshotStore, TerminalEmissionMetrics, TickReport, UnifiedAtomicCommit,
-    UnifiedAtomicCommitter, UpdateFieldsBatchCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    DEFAULT_BLOCKING_AXIS_IN_FLIGHT, DurabilityClass, EngineError, EngineResult, FinalizeOutcome,
+    FinalizePort, FinalizeTarget, HistoricalProjectionRead, HotProjectionQueryPort, IdGen,
+    InProcessControlPlane, InProcessLogStore, IndexQueryPort, InlineOwnedTaskDispatcher,
+    ItemMutationPort, ItemMutationRequest, ItemMutationResponse, ItemView, LeaseView, LiveItemView,
+    LogStore, OwnedTask, PendingPage, PendingSummary, PreparedClaim, PreparedFinalize,
+    PreparedPush, ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner,
+    ProjectionRead, ProjectionReclaimPlanner, ProjectionSnapshot, PurgePort, PushPort, PushSpec,
+    QueueCommand, QueueCounters, QueueKey, QueueMetrics, RawCommitFault, RawCommitOutcome,
+    RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
+    RenewLeasePort, RenewTarget, SeparateReplayCommit, SeparateReplayCommitter, SeqIdGen,
+    SetGatesPort, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
+    UnifiedAtomicCommit, UnifiedAtomicCommitter, UpdateFieldsBatchCommand, UpdateFieldsPort,
+    UpsertOutcome, UpsertPort,
 };
 use fireweed_projection::InMemoryProjection;
 use fireweed_turso::{TursoConfig, TursoRelational, claimed_from_class_s};
@@ -1437,8 +1437,7 @@ async fn publish_packed_apply(
 ) -> EngineResult<Vec<CommandPosition>> {
     let positions = outcome.positions.clone();
     if let Some(batch) = outcome.apply_batch {
-        let result = if let (Some(coordinator), Some(reservation)) = (coordinator, reservation)
-        {
+        let result = if let (Some(coordinator), Some(reservation)) = (coordinator, reservation) {
             coordinator
                 .enqueue_reserved(reservation, batch.positions, batch.commands)
                 .await
@@ -1446,8 +1445,7 @@ async fn publish_packed_apply(
             if let Some(apply_turn) = apply_turn {
                 wait_turso_apply_turn(projection, shard, &batch.positions, apply_turn).await?;
             }
-            AsyncProjectionStore::apply_live(projection, batch.positions, batch.commands)
-                .await?;
+            AsyncProjectionStore::apply_live(projection, batch.positions, batch.commands).await?;
             if let Some(apply_turn) = apply_turn {
                 apply_turn.notify_waiters();
             }
@@ -1501,12 +1499,7 @@ type ObjectLogEngine = AsyncComposedBackend<
     SeparateReplayCommit<ObjectLogTursoCommitter>,
     ObjectLogTaskDispatcher,
     ProjectionClaimPlanner<InProcessControlPlane, ObjectLogEngineStore, TursoRelational, SeqIdGen>,
-    ProjectionPushPlanner<
-        InProcessControlPlane,
-        ObjectLogEngineStore,
-        TursoRelational,
-        SeqIdGen,
-    >,
+    ProjectionPushPlanner<InProcessControlPlane, ObjectLogEngineStore, TursoRelational, SeqIdGen>,
     ProjectionLifecyclePlanner<
         InProcessControlPlane,
         ObjectLogEngineStore,
@@ -1704,11 +1697,9 @@ impl DerivedObjectLogTursoBackend {
             let Some(target) = target else {
                 return Ok(views);
             };
-            let projected = AsyncProjectionStore::recovery_high_water(
-                self.projection.as_ref(),
-                shard.clone(),
-            )
-            .await?;
+            let projected =
+                AsyncProjectionStore::recovery_high_water(self.projection.as_ref(), shard.clone())
+                    .await?;
             if let Some(projected) = projected
                 && (projected.backend_epoch > target.backend_epoch
                     || (projected.backend_epoch == target.backend_epoch
@@ -2033,7 +2024,7 @@ impl DerivedObjectLogTursoBackend {
         envelope: CommandEnvelope,
         epoch: u64,
         reservation: Option<fireweed_objectlog::AsyncProjectionApplyReservation>,
-        outbox_id: &str,
+        _outbox_id: &str,
     ) -> EngineResult<()> {
         let commands = vec![envelope];
         let outcome = match self
@@ -2058,13 +2049,6 @@ impl DerivedObjectLogTursoBackend {
             None,
         )
         .await?;
-        self.projection
-            .delete_claim_outbox_row(
-                shard.tenant_id.as_str(),
-                shard.queue_id.as_str(),
-                outbox_id,
-            )
-            .await?;
         Ok(())
     }
 

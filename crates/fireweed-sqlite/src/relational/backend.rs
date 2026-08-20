@@ -1590,6 +1590,14 @@ impl ClaimPort for SqliteRelationalBackend {
                         ItemId::new(&item.item_id).map_err(|e| EngineError::Storage(e.to_string()))
                     })
                     .collect::<EngineResult<_>>()?;
+                if grouped_shards.contains(&req.shard) {
+                    fireweed_relational::remove_ids_from_group_summaries(
+                        &super::rusqlite_tx::SqliteRel(&tx),
+                        &req.shard,
+                        &candidates,
+                        req.now,
+                    )?;
+                }
             }
             let claim_command = if let Some(cohort_id) = selected_cohort.clone() {
                 QueueCommand::CohortClaim(CohortClaimCommand {
