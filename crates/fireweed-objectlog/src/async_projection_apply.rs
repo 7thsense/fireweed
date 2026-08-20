@@ -498,39 +498,6 @@ where
             return;
         };
 
-        let lineage_error = {
-            let state = inner.state.lock().await;
-            state
-                .shards
-                .get(&batch.shard)
-                .and_then(|shard_state| shard_state.applied_high_water.as_ref())
-                .and_then(|high_water| {
-                    let first = batch.positions.first()?;
-                    let ordered = high_water.precedes(first);
-                    let contiguous = high_water.backend_epoch != first.backend_epoch
-                        || high_water.sequence.checked_add(1) == Some(first.sequence);
-                    (!ordered || !contiguous).then(|| {
-                        format!(
-                            "async projection batch does not follow applied high-water: {high_water:?} -> {first:?}"
-                        )
-                    })
-                })
-        };
-        if let Some(reason) = lineage_error {
-            let mut state = inner.state.lock().await;
-            state
-                .shards
-                .entry(batch.shard.clone())
-                .or_default()
-                .poison_reason = Some(reason.clone());
-            drop(state);
-            if let Ok(mut poisoned) = inner.poisoned.write() {
-                poisoned.insert(batch.shard.clone(), reason);
-            }
-            inner.changed.notify_waiters();
-            continue;
-        }
-
         #[cfg(test)]
         let injected_failure = inner
             .injected_apply_failures
@@ -631,28 +598,54 @@ fn batch_is_produce(commands: &[CommandEnvelope]) -> bool {
 }
 
 fn next_runnable(state: &CoordinatorState) -> Option<(usize, ApplyBatch)> {
-    let mut blocked_shards = HashSet::new();
+    let mut skipped_shards = HashSet::new();
     for (index, entry) in state.entries.iter().enumerate() {
         let shard = entry.shard();
         if state
             .shards
             .get(shard)
             .is_some_and(|shard_state| shard_state.poison_reason.is_some())
+            || skipped_shards.contains(shard)
         {
-            blocked_shards.insert(shard.clone());
             continue;
         }
-        match entry {
-            ApplyEntry::Reserved { .. } => {
-                blocked_shards.insert(shard.clone());
-            }
-            ApplyEntry::Ready(batch) if !blocked_shards.contains(shard) => {
-                return Some((index, batch.clone()));
-            }
-            ApplyEntry::Ready(_) => {}
+        let ApplyEntry::Ready(batch) = entry else {
+            continue;
+        };
+        if ready_follows_high_water(state, batch) {
+            return Some((index, batch.clone()));
         }
+        skipped_shards.insert(shard.clone());
     }
     None
+}
+
+fn ready_follows_high_water(state: &CoordinatorState, batch: &ApplyBatch) -> bool {
+    let Some(first) = batch.positions.first() else {
+        return false;
+    };
+    match state
+        .shards
+        .get(&batch.shard)
+        .and_then(|shard| shard.applied_high_water.as_ref())
+    {
+        None => !state.entries.iter().any(|entry| {
+            let ApplyEntry::Ready(other) = entry else {
+                return false;
+            };
+            other.shard == batch.shard
+                && other.id != batch.id
+                && other.positions.first().is_some_and(|position| {
+                    (position.backend_epoch, position.sequence)
+                        < (first.backend_epoch, first.sequence)
+                })
+        }),
+        Some(high_water) => {
+            high_water.precedes(first)
+                && (high_water.backend_epoch != first.backend_epoch
+                    || high_water.sequence.checked_add(1) == Some(first.sequence))
+        }
+    }
 }
 
 struct Debt {
@@ -728,5 +721,58 @@ impl Write for CountingWriter {
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fireweed_core::{QueueId, TenantId};
+
+    fn shard() -> QueueKey {
+        QueueKey::new(TenantId::new("t").unwrap(), QueueId::new("q").unwrap())
+    }
+
+    fn pos(sequence: u64) -> CommandPosition {
+        CommandPosition::new(shard(), 0, sequence)
+    }
+
+    fn ready(id: u64, sequence: u64) -> ApplyEntry {
+        ApplyEntry::Ready(ApplyBatch {
+            id,
+            shard: shard(),
+            positions: vec![pos(sequence)],
+            commands: Vec::new(),
+            command_count: 1,
+            debt_bytes: 0,
+            enqueued_at: Instant::now(),
+        })
+    }
+
+    #[test]
+    fn holds_non_contiguous_ready_until_the_hole_is_filled() {
+        let mut state = CoordinatorState::default();
+        state.shards.entry(shard()).or_default().applied_high_water = Some(pos(300));
+        state.entries.push_back(ready(1, 302));
+        assert!(next_runnable(&state).is_none());
+        state.entries.push_front(ready(2, 301));
+        let (_index, batch) = next_runnable(&state).expect("301 is runnable");
+        assert_eq!(batch.positions[0].sequence, 301);
+    }
+
+    #[test]
+    fn reserved_does_not_hide_a_contiguous_ready_batch() {
+        let mut state = CoordinatorState::default();
+        state.shards.entry(shard()).or_default().applied_high_water = Some(pos(300));
+        state.entries.push_back(ApplyEntry::Reserved {
+            id: 1,
+            shard: shard(),
+            command_count: 1,
+            debt_bytes: 0,
+            enqueued_at: Instant::now(),
+        });
+        state.entries.push_back(ready(2, 301));
+        let (_index, batch) = next_runnable(&state).expect("ready 301 despite reserved");
+        assert_eq!(batch.positions[0].sequence, 301);
     }
 }

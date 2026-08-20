@@ -44,6 +44,7 @@ use fireweed_turso::{TursoConfig, TursoRelational, claimed_from_class_s};
 #[cfg(feature = "objectlog")]
 use fireweed_objectlog::{
     AsyncProjectionApplyCoordinator, ObjectLogEngineStore, ObjectLogTaskDispatcher,
+    PackedAppendOutcome,
 };
 
 #[cfg(feature = "objectlog")]
@@ -1392,45 +1393,68 @@ impl SeparateReplayCommitter for ObjectLogTursoCommitter {
             };
             note_produce_positions(&last_produce, &outcome.positions, &commands).await;
             if matches!(fault, RawCommitFault::AfterAppendBeforeApply) {
+                outcome.apply_published.notify();
                 if let (Some(coordinator), Some(reservation)) = (&async_apply, reservation) {
                     coordinator.cancel(reservation).await;
                 }
                 return Ok(RawCommitOutcome::appended(outcome.positions));
             }
-            if let Some(batch) = outcome.apply_batch {
-                if let (Some(coordinator), Some(reservation)) = (&async_apply, reservation) {
-                    coordinator
-                        .enqueue_reserved(reservation, batch.positions, batch.commands)
-                        .await?;
-                } else {
-                    wait_turso_apply_turn(
-                        projection.as_ref(),
-                        &shard,
-                        &batch.positions,
-                        &apply_turn,
-                    )
-                    .await?;
-                    AsyncProjectionStore::apply_live(
-                        projection.as_ref(),
-                        batch.positions,
-                        batch.commands,
-                    )
-                    .await?;
-                    apply_turn.notify_waiters();
-                }
-            } else if let (Some(coordinator), Some(reservation)) = (&async_apply, reservation) {
-                coordinator.cancel(reservation).await;
-            } else {
-                wait_turso_apply_turn(projection.as_ref(), &shard, &outcome.positions, &apply_turn)
-                    .await?;
-            }
+            let positions = publish_packed_apply(
+                async_apply.as_ref(),
+                reservation,
+                outcome,
+                projection.as_ref(),
+                &shard,
+                Some(&apply_turn),
+            )
+            .await?;
             Ok(if async_apply.is_some() {
-                RawCommitOutcome::appended(outcome.positions)
+                RawCommitOutcome::appended(positions)
             } else {
-                RawCommitOutcome::applied(outcome.positions)
+                RawCommitOutcome::applied(positions)
             })
         })
     }
+}
+
+#[cfg(feature = "objectlog")]
+async fn publish_packed_apply(
+    coordinator: Option<&AsyncProjectionApplyCoordinator<TursoRelational>>,
+    reservation: Option<fireweed_objectlog::AsyncProjectionApplyReservation>,
+    outcome: PackedAppendOutcome,
+    projection: &TursoRelational,
+    shard: &QueueKey,
+    apply_turn: Option<&tokio::sync::Notify>,
+) -> EngineResult<Vec<CommandPosition>> {
+    let positions = outcome.positions.clone();
+    if let Some(batch) = outcome.apply_batch {
+        let result = if let (Some(coordinator), Some(reservation)) = (coordinator, reservation)
+        {
+            coordinator
+                .enqueue_reserved(reservation, batch.positions, batch.commands)
+                .await
+        } else {
+            if let Some(apply_turn) = apply_turn {
+                wait_turso_apply_turn(projection, shard, &batch.positions, apply_turn).await?;
+            }
+            AsyncProjectionStore::apply_live(projection, batch.positions, batch.commands)
+                .await?;
+            if let Some(apply_turn) = apply_turn {
+                apply_turn.notify_waiters();
+            }
+            Ok(())
+        };
+        outcome.apply_published.notify();
+        result?;
+    } else {
+        outcome.apply_published.wait().await;
+        if let (Some(coordinator), Some(reservation)) = (coordinator, reservation) {
+            coordinator.cancel(reservation).await;
+        } else if let Some(apply_turn) = apply_turn {
+            wait_turso_apply_turn(projection, shard, &positions, apply_turn).await?;
+        }
+    }
+    Ok(positions)
 }
 
 #[cfg(feature = "objectlog")]
@@ -2016,22 +2040,15 @@ impl DerivedObjectLogTursoBackend {
                 return Err(error);
             }
         };
-        if let Some(batch) = outcome.apply_batch {
-            if let (Some(coordinator), Some(reservation)) = (&self.async_apply, reservation) {
-                coordinator
-                    .enqueue_reserved(reservation, batch.positions, batch.commands)
-                    .await?;
-            } else {
-                AsyncProjectionStore::apply_live(
-                    self.projection.as_ref(),
-                    batch.positions,
-                    batch.commands,
-                )
-                .await?;
-            }
-        } else if let (Some(coordinator), Some(reservation)) = (&self.async_apply, reservation) {
-            coordinator.cancel(reservation).await;
-        }
+        publish_packed_apply(
+            self.async_apply.as_ref(),
+            reservation,
+            outcome,
+            self.projection.as_ref(),
+            &shard,
+            None,
+        )
+        .await?;
         self.projection
             .delete_claim_outbox_row(
                 shard.tenant_id.as_str(),

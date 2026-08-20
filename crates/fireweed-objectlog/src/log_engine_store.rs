@@ -120,14 +120,75 @@ type MetadataPermits = Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
 /// LogEngine linger never sees a second produce. Ports that call
 /// [`ObjectLogEngineStore::packed_append`] bypass that permit and wait here.
 const PACK_TARGET_BYTES: usize = 4 * 1024 * 1024;
-const PACK_MAX_BATCHES: usize = 16;
+const PACK_MAX_BATCHES: usize = 8;
+/// Gather window for concurrent produces. Seal immediately once a full window
+/// is waiting; otherwise wait this long for more callers to join the PUT.
 const PACK_LINGER: Duration = Duration::from_millis(20);
+
+/// Signaled after the pack leader has published apply (or skipped it).
+/// Followers wait on this before cancelling their apply reservation.
+pub struct ApplyPublish {
+    done: Notify,
+    finished: std::sync::atomic::AtomicBool,
+}
+
+impl ApplyPublish {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            done: Notify::new(),
+            finished: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    fn already_done() -> Arc<Self> {
+        let publish = Self::new();
+        publish.notify();
+        publish
+    }
+
+    pub fn notify(&self) {
+        self.finished.store(true, Ordering::Release);
+        self.done.notify_waiters();
+    }
+
+    pub async fn wait(&self) {
+        if self.finished.load(Ordering::Acquire) {
+            return;
+        }
+        let notified = self.done.notified();
+        if self.finished.load(Ordering::Acquire) {
+            return;
+        }
+        notified.await;
+    }
+}
+
+impl std::fmt::Debug for ApplyPublish {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ApplyPublish")
+    }
+}
+
+/// One packed object-log produce. `apply_batch` is set on exactly one waiter so
+/// the projection apply happens once per PUT, not once per public call.
+#[derive(Debug)]
+pub struct PackedAppendOutcome {
+    pub positions: Vec<CommandPosition>,
+    pub apply_batch: Option<PackedApplyBatch>,
+    pub apply_published: Arc<ApplyPublish>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PackedApplyBatch {
+    pub positions: Vec<CommandPosition>,
+    pub commands: Vec<CommandEnvelope>,
+}
 
 struct PackWaiter {
     shard: QueueKey,
     epoch: u64,
     commands: Vec<CommandEnvelope>,
-    tx: oneshot::Sender<EngineResult<Vec<CommandPosition>>>,
+    tx: oneshot::Sender<EngineResult<PackedAppendOutcome>>,
 }
 
 struct PackState {
@@ -136,9 +197,25 @@ struct PackState {
     oldest: Option<std::time::Instant>,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PackerStats {
+    pub seals: u64,
+    pub waiters: u64,
+    pub commands: u64,
+    pub bytes: u64,
+}
+
+struct PackerCounters {
+    seals: AtomicU64,
+    waiters: AtomicU64,
+    commands: AtomicU64,
+    bytes: AtomicU64,
+}
+
 struct ObjectLogPacker {
     state: Mutex<PackState>,
     notify: Notify,
+    counters: PackerCounters,
 }
 
 impl ObjectLogPacker {
@@ -150,6 +227,21 @@ impl ObjectLogPacker {
                 oldest: None,
             }),
             notify: Notify::new(),
+            counters: PackerCounters {
+                seals: AtomicU64::new(0),
+                waiters: AtomicU64::new(0),
+                commands: AtomicU64::new(0),
+                bytes: AtomicU64::new(0),
+            },
+        }
+    }
+
+    fn snapshot(&self) -> PackerStats {
+        PackerStats {
+            seals: self.counters.seals.load(Ordering::Relaxed),
+            waiters: self.counters.waiters.load(Ordering::Relaxed),
+            commands: self.counters.commands.load(Ordering::Relaxed),
+            bytes: self.counters.bytes.load(Ordering::Relaxed),
         }
     }
 
@@ -924,6 +1016,26 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         Ok(records.len())
     }
 
+    /// Exclusive produce: skip the packer. Push/Claim/Finalize already hold the
+    /// per-queue admit permit, so a linger can never attract a second waiter.
+    pub async fn append_exclusive(
+        &self,
+        shard: QueueKey,
+        commands: Vec<CommandEnvelope>,
+        expected_epoch: u64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        let epoch = self.load_epoch(&shard).await?;
+        if epoch != expected_epoch {
+            return Err(EngineError::EpochFenced);
+        }
+        self.produce_immediate(&shard, commands, expected_epoch)
+            .await
+    }
+
+    pub fn packer_stats(&self) -> PackerStats {
+        self.packer.snapshot()
+    }
+
     /// Group-commit path for ports that do not hold the per-queue admit permit
     /// (BatchUpdate / upsert). Concurrent callers of the same shard share one
     /// object PUT when they arrive within [`PACK_LINGER`] or fill [`PACK_TARGET_BYTES`].
@@ -932,9 +1044,13 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         shard: QueueKey,
         commands: Vec<CommandEnvelope>,
         expected_epoch: u64,
-    ) -> EngineResult<Vec<CommandPosition>> {
+    ) -> EngineResult<PackedAppendOutcome> {
         if commands.is_empty() {
-            return Ok(Vec::new());
+            return Ok(PackedAppendOutcome {
+                positions: Vec::new(),
+                apply_batch: None,
+                apply_published: ApplyPublish::already_done(),
+            });
         }
         let epoch = self.load_epoch(&shard).await?;
         if epoch != expected_epoch {
@@ -1012,21 +1128,55 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                 .push(w);
         }
         for ((shard, epoch), waiters) in groups {
+            let waiter_n = waiters.len() as u64;
+            let command_n = waiters.iter().map(|w| w.commands.len() as u64).sum::<u64>();
+            let byte_n = waiters
+                .iter()
+                .map(|w| estimate_pack_bytes(&w.commands) as u64)
+                .sum::<u64>();
+            self.packer.counters.seals.fetch_add(1, Ordering::Relaxed);
+            self.packer
+                .counters
+                .waiters
+                .fetch_add(waiter_n, Ordering::Relaxed);
+            self.packer
+                .counters
+                .commands
+                .fetch_add(command_n, Ordering::Relaxed);
+            self.packer
+                .counters
+                .bytes
+                .fetch_add(byte_n, Ordering::Relaxed);
             let counts: Vec<usize> = waiters.iter().map(|w| w.commands.len()).collect();
             let mut all = Vec::with_capacity(counts.iter().sum());
             for w in &waiters {
                 all.extend(w.commands.iter().cloned());
             }
-            match self.produce_immediate(&shard, all, epoch).await {
+            match self.produce_immediate(&shard, all.clone(), epoch).await {
                 Ok(positions) => {
                     let mut offset = 0usize;
+                    let mut leader = true;
+                    let apply_published = ApplyPublish::new();
                     for (w, n) in waiters.into_iter().zip(counts) {
                         let slice = positions
                             .get(offset..offset + n)
                             .map(|s| s.to_vec())
                             .unwrap_or_default();
                         offset += n;
-                        let _ = w.tx.send(Ok(slice));
+                        let apply_batch = if leader {
+                            leader = false;
+                            Some(PackedApplyBatch {
+                                positions: positions.clone(),
+                                commands: all.clone(),
+                            })
+                        } else {
+                            None
+                        };
+                        let _ = w.tx.send(Ok(PackedAppendOutcome {
+                            positions: slice,
+                            apply_batch,
+                            apply_published: Arc::clone(&apply_published),
+                        }));
                     }
                 }
                 Err(error) => {
