@@ -7,96 +7,94 @@ ddx:
     - {kind: informed_by, to: td-object-log-turso-projection}
     - {kind: informed_by, to: adr-cqrs-log-projection-storage-model}
     - {kind: informed_by, to: adr-async-commit-strategy-and-dispatch}
+  review:
+    round: 1
+    claude: BLOCK
+    codex: BLOCK
+    folded: docs/helix/04-build/reviews/later-phase-speed-round1/
+    disposition: "wire/outcome/seam/rerank/rebuild folds landed; implementing"
 ---
 
 # Pipeline produce. One seam before lease.
 
-Baseline `v0.31.19` / `1787169221`, `filesystem--turso`, N=10k, inflight=8:
+Baseline `v0.31.19` / `1787169221`, `filesystem--turso`, N=10k, inflight=8.
 
-| phase | items/s | call p50 | target |
-|---|---:|---:|---|
-| ingest | 30569 | 23 ms | floor |
-| enrich | 3042 | 117 ms | **faster than ingest** |
-| schedule | 2720 | 150 ms | **faster than ingest** |
-| deliver | 316 | 316 / 279 ms | **faster than ingest** |
+Target: every later phase ≥ ingest on this cell. Apply of enrich/schedule **overlaps** those phases (it does not move onto the deliver clock).
 
-Ingest is already a pipeline: append, ack, apply in the background. Enrich, schedule, and deliver should ride that same pipeline. They do not. Each BatchUpdate **stops and waits for SQL to look like the log**, and each claim **stops the writer for work that is not the lease**.
-
-Success: same cell, same N / inflight / batch, every later phase ≥ ingest. Do not change harness payloads, groups, or drop complete to move the scoreboard.
+Round-1 Claude and Codex both **BLOCK**ed. The text below is the fold, not the pre-review cuts.
 
 ## The pipeline
 
 ```
-ingest append ──► ack ──► ingest append ──► ack ──► …
-     \ apply inserts
-enrich append ──► ack ──► enrich append ──► ack ──► …
-     \ apply column/payload updates
+ingest append ──► ack ──► …
+     \ apply inserts (overlaps the next appends)
+enrich append ──► ack ──► …
+     \ apply updates (overlaps)
 schedule append ──► ack ──► …
-     \ apply a few columns
-──────── seam: SQL covers last Push/Update ────────
-claim lease+append ──► ack ──► claim lease+append ──► …
+     \ apply a few columns (overlaps)
+──────── seam: projection ≥ last appended Push/Update ────────
+claim lease+append ──► ack ──► …
 complete append ──► ack     (overlaps the next claim)
-     \ apply is background; never on these clocks
 ```
 
-Log order is the order apply will see. If ingest is already on the log, enrich does not need those rows in SQL to append. Apply of the update runs after apply of the push. That is the whole trick.
+Default `open()` stays Strict. SS / `AsyncProjection` is the pipeline.
 
-The only required stop is the **Class S seam**: a lease mutates SQL *before* its Claim is on the log. If a Push/Update is logged but not applied, a lease can take a stale Pending row and live diverges from rebuild (`BatchUpdate` must not touch `Leased`). So: drain produce apply once, then lease. Completes do not affect pending rows and do not belong on that seam.
-
-Default `open()` stays `ResponseBarrier::Strict` (apply before ack; snapshot is free). SS / `AsyncProjection` is the pipeline.
-
-## What breaks the pipeline today
-
-**Enrich/schedule.** `batch_update` reads SQL (`planner_update_snapshot`) and **loops until the keys exist**. Missing keys are treated as `NotFound`, so the loop waits on apply — including the 300 ms first-apply sleep on `q-ss`. The call clock is apply lag, not the update. Eight in-flight calls serialize on one reader mutex, so they also stop overlapping at the log.
-
-`plan_batch_update` needs a snapshot only to turn `ClientItemKey` into `item_id` and to reject leased/missing *now*. Under `AsyncProjection` that “now” is the wrong time. The right time is apply.
-
-**Deliver.** Every claim calls `catch_up_produce` (fine once, waste every time). Class S RelTx `block_in_place`s on the 2-thread runtime. Outbox delete runs *after* apply is enqueued, so it queues behind apply of **this** claim. Claim apply still scans group members. Finalize `finalize_validate` takes the writer, `BEGIN IMMEDIATE`, SELECT, `ROLLBACK`. Complete is Class L; that validate is a bubble.
-
-**Apply (makes the seam expensive).** Schedule Keep-payload still SELECTs the blob. First schedule hop rewrites every group representative and `refresh_group_summaries` reads ~10k pending rows on the writer. First claim then sits on the seam behind that.
-
-Not a work item: sharing one object-log write across in-flight appends. That already happens when the pipeline is full. Do not build a “packer feature.”
+**Seam scope:** appended-but-unapplied produce. SS phases are sequential, so at the produce→claim boundary every produce is on the log. An in-flight linger vs a concurrent claim is pre-existing and not this cut.
 
 ## Cuts
 
-### 1. BatchUpdate appends. It does not wait for apply.
+### 1. BatchUpdate appends. One peek, no wait.
 
-Under `AsyncProjection` only:
+Under `AsyncProjection` only (`crates/fireweed/src/turso_compose.rs`):
 
-- Validate the request (batch size, types, gates, reserved fields). No projection.
-- One optional reader peek, **no retry, no `wait_for_progress`**. Hits fill `item_id` / version in the response.
-- Misses still go on the log, addressed by the client’s `item_ref` (`ClientItemKey` or `ItemId`).
-- `UpdateFieldsCommand` carries that ref (keep `item_id` for old envelopes). Apply resolves against `fireweed_items` in log order.
-- Apply: missing → no-op that row; `Leased` / terminal / version mismatch → skip that row. The envelope stays durable. Class L does not reject after append.
-- Response: `Updated` for every syntactically valid entry (SS already matches that). Strict path unchanged (snapshot after apply).
+- Validate shape/types/gates from the request. No wait loop.
+- One reader peek. **No `wait_for_progress`.**
+- Peek-hit Pending: plan as today (`item_id`, advisory `item_version+1`). Log those commands.
+- Peek-hit leased / terminal / version mismatch / Both-mismatch / duplicate: today’s `Conflict` / `Terminal` / `Invalid`. **Do not log.**
+- Peek-miss on `ClientItemKey` (apply lag, not absence): log the entry. Add
 
-Delete `apply_start_delay_ms.max(300)`. It is a sleep in the apply pipeline.
+  ```
+  #[serde(default)]
+  pub client_item_key: Option<ClientItemKey>
+  ```
 
-Do **not** add a process map. The log is the queue; SQL is the consumer.
+  on `UpdateFieldsCommand`. Keep `item_id` required. Unresolved rows use `item_id = ItemId::from_u64(0)` and `client_item_key = Some(key)`. Old envelopes have `client_item_key: None` and a real id.
+- Response for a logged miss: `Updated { item_id: 0, client_item_key, item_version: 0 }`. Under `AsyncProjection` those two numbers are advisory (they already were: apply has not run). SS matches `Updated { .. }`.
+- `expected_item_version: Some` + peek hit + mismatch → `Conflict`, not logged. Peek miss → log the expected version on the command (`#[serde(default)] expected_item_version: Option<u64>`); apply skips on mismatch.
 
-### 2. Apply is a few columns, in the background.
+Apply (`apply_update_fields_batch_sql`):
 
-Off the produce clock, but the Class S seam waits for it, so keep it cheap.
+- If `client_item_key` is set and `item_id` is 0, resolve the live (`superseded=0`) row by key. None → skip that row.
+- `api001_batch`: skip `Leased` / terminal. Non-`api001_batch` (FAC-1) still updates leased rows. Do **not** change the `IN ('Pending','Leased')` filter globally.
+- Envelope `item_ids`: real ids when known; omit `0`.
 
-- All-Keep payload: do not read or write the blob. All-Set: write the new blob, do not read the old one.
-- `UPDATE` only changed columns. Schedule: `priority`, `priority_sort`, `not_before`, `metadata`.
-- Group rerank from the updated refs + the existing summary row. No `refresh_group_summaries` over the whole group because the representative moved.
-- Item-level Claim apply: cursor + idempotent no-op. No `load_grouped_items`. If a grouped claim needs a live summary, do it in the Class S lease txn.
+Delete `apply_start_delay_ms.max(300)`. Ingest p50 must stay in the same band.
 
-### 3. Claim leases, then the pipeline continues.
+Do not add a process map.
 
-- Seam once: wait until projection ≥ last Push/Update (`last_produce`). Completes do not move it. After a catch-up, later claims compare the cursor and go.
-- Class S: one IMMEDIATE txn (select due + lease + outbox + bearers). Run it on `run_reltx_blocking`, same as apply. Then append. Then drop the writer.
-- Delete outbox after the durable append, **before** enqueue apply. Crash before delete: drain re-appends; apply of the same token is a no-op.
-- `finalize_validate` on the reader. No IMMEDIATE, no rollback. Plan SELECT is token + version + attempts — no payload.
-- Complete appends and returns. Overlap with the next claim. Do not wait for apply of this claim or this complete.
-- Harness inflight=8 on claim, same as ingest. That is workers in the pipeline, not a workaround. Prove one claim is a lease+append first (p50 in the ingest band).
+### 2. Apply stays cheap so the seam is a no-op.
 
-No `SKIP LOCKED`. No reservation table. One writer is the lock. Payloads stay in the Class S SELECT (the worker needs them).
+Apply runs **during** enrich/schedule, not after they ack the last batch.
+
+- All-Keep payload: do not SELECT or write the blob. All-Set: write the new blob, do not read the old one.
+- `UPDATE` only columns the batch sets. Homogeneous SS batches: schedule writes `priority`, `priority_sort`, `not_before`, `metadata` only.
+- **Keep `refresh_group_summaries` when the representative moved.** Incremental refs+summary cannot elect an unchanged member. SS first schedule window touches 100 groups; that refresh is correct.
+- Claim apply **keeps** lease + bearers + `load_grouped_items` / group-remove. Rebuild has no live lease txn. Live Class S does not duplicate group work.
+
+### 3. Claim leases, then continues.
+
+- `catch_up_produce`: wait until projection ≥ `last_produce`. Remember that position per shard. Later claims skip the wait while `last_produce` has not advanced. Completes do not move `last_produce`. A new Push/Update invalidates the memory via `note_produce_positions`.
+- Class S RelTx on `run_reltx_blocking` (same hop as apply). Writer held only for that txn.
+- Delete outbox after the durable append, **before** enqueue apply. Drain may re-append; Claim apply of the same token is a no-op on already-Leased rows; bearers upsert is idempotent.
+- `finalize_validate` on the reader. No IMMEDIATE, no rollback. Finalize apply no-ops if the row is not leased / token mismatch (TOCTOU is apply’s problem, not validate’s).
+- Plan SELECT for finalize: token + version + attempts. No payload.
+- SS P4 uses the same inflight=8 as ingest: up to 8 concurrent `claim(100)` (writer serializes the lease; appends overlap). Do not stop the phase on the first empty claim; stop when a full wave returns empty. Overlap complete of wave N with claim of wave N+1 as today, at wave grain.
+
+No `SKIP LOCKED`. No reservation table.
 
 ## Out of scope
 
-Planner map. Process item HashMap. `SKIP LOCKED`. Reservation table. Sync apply on produce. Collapsing sqlite-log vs object-log. Changing harness payloads or dropping groups.
+Planner map. Process item HashMap. `SKIP LOCKED`. Reservation table. Sync apply on produce. Collapsing log axes. Changing payloads or dropping groups. Inventing a group-rerank that cannot see unchanged members. Closing the in-flight linger vs claim race.
 
 ## Measure
 
@@ -104,5 +102,5 @@ Planner map. Process item HashMap. `SKIP LOCKED`. Reservation table. Sync apply 
 cargo test -p fireweed --test ss_phased_capacity --release -- --nocapture
 ```
 
-Cut 1 done: enrich and schedule ≥ ingest, p99 off ~294 ms, ingest not regressed.  
-Cuts 2–3 done: deliver ≥ ingest. First claim may include the produce seam; the rest must be lease+append.
+Cut 1: enrich and schedule ≥ ingest, ingest not regressed, p99 not a 300 ms sleep.  
+Cuts 2–3: deliver ≥ ingest at inflight=8; first claim may include a short seam; later claims are lease+append. Report total wall as well as per-phase items/s.
