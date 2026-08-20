@@ -12,7 +12,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use bytes::Bytes;
 use fireweed_core::{
@@ -1688,10 +1687,9 @@ impl DerivedObjectLogTursoBackend {
                 return Ok(());
             }
             if snap.apply_queue_depth == 0 {
-                // Apply is idle; the reader cursor can lag the coordinator high-water.
-                // Do not busy-spin on recovery_high_water.
-                tokio::time::sleep(Duration::from_millis(1)).await;
-                continue;
+                // Nothing left to apply. The lease txn uses the writer and sees
+                // committed SQL; do not wait on a lagging reader cursor.
+                return Ok(());
             }
             coordinator.wait_for_progress(shard).await?;
         }
