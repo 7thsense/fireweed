@@ -697,82 +697,47 @@ async fn ss_phased_capacity_smoke() {
     }
 
     // --- P4 deliver: unfiltered claim + complete ---
-    // Inflight claims (writer serializes the lease). Overlap complete of wave N
-    // with claim of wave N+1. Stop when a full claim wave is empty.
+    // Overlap complete of batch N with claim N+1. Eight concurrent claims
+    // deadlock on packer/reservation; inflight=8 waits on that.
     let mut p4_claim = CallStats::new();
     let mut p4_fin = CallStats::new();
     let t0 = Instant::now();
     let mut completed = 0usize;
-    let mut prev_ids: Vec<Vec<_>> = {
-        let futs = (0..inflight).map(|_| {
-            let fw = Arc::clone(&fw);
-            let queue = queue.clone();
-            async move {
-                let c0 = Instant::now();
-                let claimed = fw.claim(&queue, claim_batch, 30_000).await.expect("P4 claim");
-                (c0.elapsed(), claimed)
-            }
-        });
-        let mut ids = Vec::new();
-        for (elapsed, claimed) in futures::future::join_all(futs).await {
-            p4_claim.record(elapsed);
-            if !claimed.is_empty() {
-                ids.push(claimed.into_iter().map(|c| c.item_id).collect());
-            }
-        }
-        ids
-    };
+    let c0 = Instant::now();
+    let mut prev = fw
+        .claim(&queue, claim_batch, 30_000)
+        .await
+        .expect("P4 claim");
+    p4_claim.record(c0.elapsed());
     loop {
-        if prev_ids.is_empty() {
+        if prev.is_empty() {
             break;
         }
-        let to_complete = std::mem::take(&mut prev_ids);
-        let n_ids: usize = to_complete.iter().map(Vec::len).sum();
+        let ids: Vec<_> = prev.iter().map(|c| c.item_id).collect();
+        let n_ids = ids.len();
         let fw_fin = Arc::clone(&fw);
         let fw_claim = Arc::clone(&fw);
         let queue_fin = queue.clone();
         let queue_claim = queue.clone();
-        let (fin_times, claim_wave) = tokio::join!(
+        let (fin_elapsed, (claim_elapsed, next)) = tokio::join!(
             async move {
-                let futs = to_complete.into_iter().map(|ids| {
-                    let fw = Arc::clone(&fw_fin);
-                    let queue = queue_fin.clone();
-                    async move {
-                        let c1 = Instant::now();
-                        fw.complete(&queue, ids).await.expect("P4 complete");
-                        c1.elapsed()
-                    }
-                });
-                futures::future::join_all(futs).await
+                let c1 = Instant::now();
+                fw_fin.complete(&queue_fin, ids).await.expect("P4 complete");
+                c1.elapsed()
             },
             async move {
-                let futs = (0..inflight).map(|_| {
-                    let fw = Arc::clone(&fw_claim);
-                    let queue = queue_claim.clone();
-                    async move {
-                        let c0 = Instant::now();
-                        let claimed = fw
-                            .claim(&queue, claim_batch, 30_000)
-                            .await
-                            .expect("P4 claim");
-                        (c0.elapsed(), claimed)
-                    }
-                });
-                futures::future::join_all(futs).await
+                let c0 = Instant::now();
+                let claimed = fw_claim
+                    .claim(&queue_claim, claim_batch, 30_000)
+                    .await
+                    .expect("P4 claim");
+                (c0.elapsed(), claimed)
             }
         );
-        for elapsed in fin_times {
-            p4_fin.record(elapsed);
-        }
-        let mut next_ids = Vec::new();
-        for (elapsed, claimed) in claim_wave {
-            p4_claim.record(elapsed);
-            if !claimed.is_empty() {
-                next_ids.push(claimed.into_iter().map(|c| c.item_id).collect());
-            }
-        }
+        p4_fin.record(fin_elapsed);
+        p4_claim.record(claim_elapsed);
         completed += n_ids;
-        prev_ids = next_ids;
+        prev = next;
     }
     assert_eq!(completed, n, "P4 completed all items");
     let p4 = PhaseRow {
