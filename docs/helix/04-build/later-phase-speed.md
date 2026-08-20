@@ -22,7 +22,7 @@ Deliver is `BatchClaim` + `complete`. Claim is not a second protocol. It is: nex
 
 `one-projection-cleanup.md` already specified this (Class S). The live path does not follow it.
 
-Latest `1787259713`, `filesystem--turso`, N=10k: ingest 31692/s, enrich 33465, schedule 51361, deliver **382** (claim p50 256 ms).
+Latest `1787269858`, `filesystem--turso`, N=10k, inflight=8: ingest 32030/s, enrich 35636, schedule 49552, deliver **913** (claim p50 493 ms). Sequential P4 was 490/s (`1787266565`). Still ≪ ingest: the lease txn serializes on the Turso writer.
 
 Target: deliver ≥ ingest. Payloads and groups stay. `apply_start_delay_ms.max(300)` stays (produce only). No planner map, `SKIP LOCKED`, or reservation table. Default `open()` stays Strict. Sqlite-log Class A stays one sqlite txn.
 
@@ -78,3 +78,5 @@ cargo test -p fireweed --test ss_phased_capacity --release -- --nocapture
 | 1 | already-leased Claim apply does not scan groups; caller does not `writer.lock()` after enqueue |
 | 2 | one IMMEDIATE; thin SELECT; claim p50 ≪ 256 ms |
 | 3 | inflight=8 P4; deliver ≥ ingest at N=10k |
+
+Cuts 1–3 are in tree (`1787269858`). Inflight=8 no longer hangs (apply worker used to skip a whole shard when a Ready batch was enqueued ahead of an earlier contiguous one). Deliver is 913/s, not ≥ ingest. Remaining: the IMMEDIATE lease txn is still the only exclusivity, and eight claims still queue on that one writer.

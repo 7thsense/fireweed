@@ -140,7 +140,7 @@ impl ApplyPublish {
         })
     }
 
-    fn already_done() -> Arc<Self> {
+    pub fn already_done() -> Arc<Self> {
         let publish = Self::new();
         publish.notify();
         publish
@@ -184,9 +184,29 @@ pub struct PackedApplyBatch {
     pub commands: Vec<CommandEnvelope>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum PackLane {
+    Claim,
+    Mutate,
+}
+
+fn pack_lane(commands: &[CommandEnvelope]) -> PackLane {
+    if commands.iter().all(|envelope| {
+        matches!(
+            envelope.command,
+            QueueCommand::Claim(_) | QueueCommand::CohortClaim(_)
+        )
+    }) {
+        PackLane::Claim
+    } else {
+        PackLane::Mutate
+    }
+}
+
 struct PackWaiter {
     shard: QueueKey,
     epoch: u64,
+    lane: PackLane,
     commands: Vec<CommandEnvelope>,
     tx: oneshot::Sender<EngineResult<PackedAppendOutcome>>,
 }
@@ -320,6 +340,9 @@ pub struct ObjectLogEngineStore<S: Sequencer = ManifestSequencer> {
     /// already sequenced; the high-water blob is reopen acceleration only.
     high_water_appends: Mutex<HashMap<String, u64>>,
     packer: Arc<ObjectLogPacker>,
+    /// One sequenced produce at a time. Concurrent seals otherwise assign
+    /// overlapping or gapped offsets and the apply coordinator holds forever.
+    produce_lock: tokio::sync::Mutex<()>,
     metadata_permits: Arc<MetadataPermits>,
     catalog: Mutex<CatalogDoc>,
     meta_prefix: String,
@@ -402,6 +425,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             high_water,
             high_water_appends: Mutex::new(HashMap::new()),
             packer: Arc::new(ObjectLogPacker::new()),
+            produce_lock: tokio::sync::Mutex::new(()),
             metadata_permits,
             catalog: Mutex::new(CatalogDoc::default()),
             meta_prefix: "fwmeta/".to_string(),
@@ -567,6 +591,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             high_water: Arc::new(Mutex::new(HashMap::new())),
             high_water_appends: Mutex::new(HashMap::new()),
             packer: Arc::new(ObjectLogPacker::new()),
+            produce_lock: tokio::sync::Mutex::new(()),
             metadata_permits: Arc::new(Mutex::new(HashMap::new())),
             catalog: Mutex::new(CatalogDoc::default()),
             meta_prefix,
@@ -1071,6 +1096,7 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             state.pending.push(PackWaiter {
                 shard,
                 epoch: expected_epoch,
+                lane: pack_lane(&commands),
                 commands,
                 tx,
             });
@@ -1082,7 +1108,7 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         };
         if should_seal {
             self.packer.notify.notify_waiters();
-            self.seal_packed().await;
+            self.seal_packed(true).await;
             return rx
                 .await
                 .map_err(|_| EngineError::Storage("object-log packer waiter dropped".into()))?;
@@ -1095,20 +1121,21 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                 })?;
             }
             _ = tokio::time::sleep(PACK_LINGER) => {
-                self.seal_packed().await;
+                self.seal_packed(true).await;
             }
         }
         rx.await
             .map_err(|_| EngineError::Storage("object-log packer waiter dropped".into()))?
     }
 
-    async fn seal_packed(&self) {
+    async fn seal_packed(&self, force: bool) {
         let pending = {
             let mut state = self.packer.state.lock().expect("packer");
             if state.pending.is_empty() {
                 return;
             }
-            if !ObjectLogPacker::ready_locked(&state)
+            if !force
+                && !ObjectLogPacker::ready_locked(&state)
                 && state.oldest.is_some_and(|t| t.elapsed() < PACK_LINGER)
             {
                 return;
@@ -1120,14 +1147,14 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         if pending.is_empty() {
             return;
         }
-        let mut groups: HashMap<(QueueKey, u64), Vec<PackWaiter>> = HashMap::new();
+        let mut groups: HashMap<(QueueKey, u64, PackLane), Vec<PackWaiter>> = HashMap::new();
         for w in pending {
             groups
-                .entry((w.shard.clone(), w.epoch))
+                .entry((w.shard.clone(), w.epoch, w.lane))
                 .or_default()
                 .push(w);
         }
-        for ((shard, epoch), waiters) in groups {
+        for ((shard, epoch, _lane), waiters) in groups {
             let waiter_n = waiters.len() as u64;
             let command_n = waiters.iter().map(|w| w.commands.len() as u64).sum::<u64>();
             let byte_n = waiters
@@ -1198,6 +1225,7 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         if commands.is_empty() {
             return Ok(Vec::new());
         }
+        let _produce = self.produce_lock.lock().await;
         let payload = Bytes::from(
             fireweed_engine::command_codec::encode_log_batch(expected_epoch, &commands)
                 .map_err(store_err)?,

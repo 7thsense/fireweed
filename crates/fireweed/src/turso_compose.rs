@@ -1686,9 +1686,9 @@ impl DerivedObjectLogTursoBackend {
             if position_covers(projected.as_ref(), target) {
                 return Ok(());
             }
-            if snap.apply_queue_depth == 0 {
-                // Nothing left to apply. The lease txn uses the writer and sees
-                // committed SQL; do not wait on a lagging reader cursor.
+            if snap.apply_queue_depth == 0 || !coordinator.has_ready(shard).await {
+                // Reserved sibling claims are not produce work. The lease txn
+                // uses the writer and sees committed SQL.
                 return Ok(());
             }
             coordinator.wait_for_progress(shard).await?;
@@ -1930,29 +1930,6 @@ impl DerivedObjectLogTursoBackend {
             None => AsyncLogStore::current_epoch(self.log.as_ref(), request.shard.clone()).await?,
         };
         let command_id = self.ids.next_command_id();
-        let stub = CommandEnvelope {
-            command_id: command_id.clone(),
-            request_id: None,
-            request_fingerprint: None,
-            request_outcome: None,
-            item_ids: Vec::new(),
-            command: QueueCommand::Claim(ClaimCommand {
-                item_ids: Vec::new(),
-                lease_token: request.lease_token.clone(),
-                lease_expires_at: request.lease_expires_at,
-                worker_id: Some(request.worker_id.clone()),
-            }),
-            checksum: CommandChecksum(0),
-            created_at: request.now,
-        };
-        let reservation = match &self.async_apply {
-            Some(coordinator) => Some(
-                coordinator
-                    .reserve(request.shard.clone(), std::slice::from_ref(&stub))
-                    .await?,
-            ),
-            None => None,
-        };
         let now_nanos = request
             .eligibility_at()
             .seconds
@@ -1963,7 +1940,7 @@ impl DerivedObjectLogTursoBackend {
             .seconds
             .saturating_mul(1_000_000_000)
             .saturating_add(i64::from(request.lease_expires_at.nanoseconds));
-        let leased = match self
+        let leased = self
             .projection
             .class_s_claim_for_queue(
                 request.shard.tenant_id.as_str(),
@@ -1976,20 +1953,8 @@ impl DerivedObjectLogTursoBackend {
                 command_id.0.as_str(),
                 Some(request.worker_id.as_str()),
             )
-            .await
-        {
-            Ok(leased) => leased,
-            Err(error) => {
-                if let (Some(coordinator), Some(reservation)) = (&self.async_apply, reservation) {
-                    coordinator.cancel(reservation).await;
-                }
-                return Err(error);
-            }
-        };
+            .await?;
         if leased.items.is_empty() {
-            if let (Some(coordinator), Some(reservation)) = (&self.async_apply, reservation) {
-                coordinator.cancel(reservation).await;
-            }
             return Ok(Claimed::default());
         }
         let item_ids: Vec<ItemId> = leased
@@ -2011,6 +1976,14 @@ impl DerivedObjectLogTursoBackend {
             }),
             checksum: CommandChecksum(0),
             created_at: request.now,
+        };
+        let reservation = match &self.async_apply {
+            Some(coordinator) => Some(
+                coordinator
+                    .reserve(request.shard.clone(), std::slice::from_ref(&envelope))
+                    .await?,
+            ),
+            None => None,
         };
         let committed = self
             .append_class_s_claim(

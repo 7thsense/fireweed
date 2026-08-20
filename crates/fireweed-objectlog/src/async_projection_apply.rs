@@ -3,7 +3,7 @@
 //! The serving projection remains on the response path. This coordinator owns only the selected
 //! projection that may lag under `ResponseBarrier::AsyncProjection`.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -341,6 +341,13 @@ where
         self.kick();
     }
 
+    pub async fn has_ready(&self, shard: &QueueKey) -> bool {
+        let state = self.inner.state.lock().await;
+        state.entries.iter().any(|entry| {
+            matches!(entry, ApplyEntry::Ready(batch) if batch.shard == *shard)
+        })
+    }
+
     pub async fn snapshot(&self, shard: &QueueKey) -> AsyncProjectionApplySnapshot {
         let state = self.inner.state.lock().await;
         snapshot_for(
@@ -598,26 +605,39 @@ fn batch_is_produce(commands: &[CommandEnvelope]) -> bool {
 }
 
 fn next_runnable(state: &CoordinatorState) -> Option<(usize, ApplyBatch)> {
-    let mut skipped_shards = HashSet::new();
+    let mut best: Option<(usize, ApplyBatch)> = None;
     for (index, entry) in state.entries.iter().enumerate() {
         let shard = entry.shard();
         if state
             .shards
             .get(shard)
             .is_some_and(|shard_state| shard_state.poison_reason.is_some())
-            || skipped_shards.contains(shard)
         {
             continue;
         }
         let ApplyEntry::Ready(batch) = entry else {
             continue;
         };
-        if ready_follows_high_water(state, batch) {
-            return Some((index, batch.clone()));
+        if !ready_follows_high_water(state, batch) {
+            continue;
         }
-        skipped_shards.insert(shard.clone());
+        let first = batch.positions.first().map(|p| (p.backend_epoch, p.sequence));
+        let better = match &best {
+            None => true,
+            Some((_, other)) => {
+                other.shard != batch.shard
+                    || first
+                        < other
+                            .positions
+                            .first()
+                            .map(|p| (p.backend_epoch, p.sequence))
+            }
+        };
+        if better {
+            best = Some((index, batch.clone()));
+        }
     }
-    None
+    best
 }
 
 fn ready_follows_high_water(state: &CoordinatorState, batch: &ApplyBatch) -> bool {
@@ -757,6 +777,16 @@ mod tests {
         assert!(next_runnable(&state).is_none());
         state.entries.push_front(ready(2, 301));
         let (_index, batch) = next_runnable(&state).expect("301 is runnable");
+        assert_eq!(batch.positions[0].sequence, 301);
+    }
+
+    #[test]
+    fn later_contiguous_ready_is_not_hidden_by_an_earlier_gap() {
+        let mut state = CoordinatorState::default();
+        state.shards.entry(shard()).or_default().applied_high_water = Some(pos(300));
+        state.entries.push_back(ready(1, 302));
+        state.entries.push_back(ready(2, 301));
+        let (_index, batch) = next_runnable(&state).expect("301 is runnable behind 302");
         assert_eq!(batch.positions[0].sequence, 301);
     }
 

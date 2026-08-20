@@ -3109,7 +3109,20 @@ pub fn apply_command_sql(
             let exp = ts_nanos(c.lease_expires_at);
             let worker_id = c.worker_id.as_ref().map(|worker| worker.as_str());
             let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
+            // Class S already committed the lease. Rebuild still sees Pending.
+            let class_s_live = match ids.first() {
+                Some(id) => {
+                    item_ids_in_state(tx, shard, std::slice::from_ref(id), "Pending")?.is_empty()
+                }
+                None => true,
+            };
             let mut pending_moved = 0usize;
+            if class_s_live {
+                for id in &c.item_ids {
+                    token_ops.push(TokenOp::Set(shard.clone(), *id, c.lease_token.clone()));
+                }
+                return Ok(());
+            }
             if claim_scan_default_fifo.get(shard).copied().unwrap_or(false)
                 && let Some((min_rowid, max_rowid)) =
                     fifo_rowid_range_for_id_strings(tx, shard, &ids, Some("Pending"))?

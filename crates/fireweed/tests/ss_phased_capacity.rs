@@ -455,7 +455,7 @@ fn job_key(i: usize, n: usize) -> GroupKey {
     GroupKey::new(format!("job-{}", i % jobs)).unwrap()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn ss_phased_capacity_smoke() {
     let n = env_usize("SS_N", DEFAULT_N);
     let push_batch = env_usize("SS_PUSH_BATCH", 100);
@@ -697,46 +697,85 @@ async fn ss_phased_capacity_smoke() {
     }
 
     // --- P4 deliver: unfiltered claim + complete ---
-    // Overlap complete of batch N with claim N+1. Eight concurrent claims still
-    // hang on packer/reservation; keep one claim in flight until that is fixed.
+    // Waves of `inflight` claims. Writer serializes the lease txn; appends pack.
+    // Overlap complete of wave N with claim wave N+1. One empty claim is not "done".
     let mut p4_claim = CallStats::new();
     let mut p4_fin = CallStats::new();
     let t0 = Instant::now();
     let mut completed = 0usize;
-    let c0 = Instant::now();
-    let mut prev = fw
-        .claim(&queue, claim_batch, 30_000)
-        .await
-        .expect("P4 claim");
-    p4_claim.record(c0.elapsed());
+    let claim_wave = inflight;
+    let mut prev = {
+        let futs = (0..claim_wave).map(|_| {
+            let fw = Arc::clone(&fw);
+            let queue = queue.clone();
+            async move {
+                let c0 = Instant::now();
+                let items = fw
+                    .claim(&queue, claim_batch, 30_000)
+                    .await
+                    .expect("P4 claim");
+                (c0.elapsed(), items)
+            }
+        });
+        futures::future::join_all(futs).await
+    };
+    for (elapsed, _) in &prev {
+        p4_claim.record(*elapsed);
+    }
     loop {
-        if prev.is_empty() {
+        let batches: Vec<Vec<_>> = prev
+            .into_iter()
+            .map(|(_, items)| items)
+            .filter(|items| !items.is_empty())
+            .collect();
+        if batches.is_empty() {
             break;
         }
-        let ids: Vec<_> = prev.iter().map(|c| c.item_id).collect();
-        let n_ids = ids.len();
+        completed += batches.iter().map(|batch| batch.len()).sum::<usize>();
+        let finishing = completed >= n;
         let fw_fin = Arc::clone(&fw);
         let fw_claim = Arc::clone(&fw);
         let queue_fin = queue.clone();
         let queue_claim = queue.clone();
-        let (fin_elapsed, (claim_elapsed, next)) = tokio::join!(
+        let (fin_times, next) = tokio::join!(
             async move {
-                let c1 = Instant::now();
-                fw_fin.complete(&queue_fin, ids).await.expect("P4 complete");
-                c1.elapsed()
+                let futs = batches.into_iter().map(|batch| {
+                    let fw = Arc::clone(&fw_fin);
+                    let queue = queue_fin.clone();
+                    async move {
+                        let ids: Vec<_> = batch.iter().map(|item| item.item_id).collect();
+                        let c1 = Instant::now();
+                        fw.complete(&queue, ids).await.expect("P4 complete");
+                        c1.elapsed()
+                    }
+                });
+                futures::future::join_all(futs).await
             },
             async move {
-                let c0 = Instant::now();
-                let claimed = fw_claim
-                    .claim(&queue_claim, claim_batch, 30_000)
-                    .await
-                    .expect("P4 claim");
-                (c0.elapsed(), claimed)
+                if finishing {
+                    return Vec::new();
+                }
+                let futs = (0..claim_wave).map(|_| {
+                    let fw = Arc::clone(&fw_claim);
+                    let queue = queue_claim.clone();
+                    async move {
+                        let c0 = Instant::now();
+                        let items = fw
+                            .claim(&queue, claim_batch, 30_000)
+                            .await
+                            .expect("P4 claim");
+                        (c0.elapsed(), items)
+                    }
+                });
+                futures::future::join_all(futs).await
             }
         );
-        p4_fin.record(fin_elapsed);
-        p4_claim.record(claim_elapsed);
-        completed += n_ids;
+        for elapsed in fin_times {
+            p4_fin.record(elapsed);
+        }
+        for (elapsed, _) in &next {
+            p4_claim.record(*elapsed);
+        }
         prev = next;
     }
     assert_eq!(completed, n, "P4 completed all items");
