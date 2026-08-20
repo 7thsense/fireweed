@@ -2441,8 +2441,11 @@ fn apply_group_summary_rerank(
         return Ok(());
     }
     let groups = unique_groups(updated);
-    if eligible_since_changed || has_blocked_gates(tx, shard)? {
+    if has_blocked_gates(tx, shard)? {
         return refresh_group_summaries(tx, shard, &groups, now);
+    }
+    if eligible_since_changed {
+        return relect_group_summaries(tx, shard, &groups, now);
     }
     let existing = load_summaries(tx, shard, &groups)?;
     let updated = items_by_group(updated);
@@ -2495,7 +2498,7 @@ fn apply_group_summary_rerank(
         });
     }
     upsert_group_summaries(tx, shard, &writes, now)?;
-    refresh_group_summaries(tx, shard, &fallback, now)
+    relect_group_summaries(tx, shard, &fallback, now)
 }
 
 /// Recompute `fireweed_group_summary` for one group from `fireweed_items` (exact aggregate over the group's
@@ -2514,6 +2517,73 @@ fn apply_group_summary_rerank(
 /// Implementation: pull the eligible rows for the target groups and aggregate in-process. Turso 0.7
 /// pays a large CPU tax for `json_each` + `ROW_NUMBER()` windows over the same set; the result is
 /// identical, including zero-count upserts for groups that now have no eligible items.
+fn relect_group_summaries(
+    tx: &impl RelTx,
+    shard: &QueueKey,
+    group_keys: &[GroupKey],
+    now: UtcTimestamp,
+) -> EngineResult<()> {
+    if group_keys.is_empty() {
+        return Ok(());
+    }
+    if has_blocked_gates(tx, shard)? {
+        return refresh_group_summaries(tx, shard, group_keys, now);
+    }
+    let (t, q) = parts(shard);
+    let now_n = ts_nanos(now);
+    let mut writes = Vec::with_capacity(group_keys.len());
+    for group in group_keys {
+        let counts: (i64, Option<i64>) = crate::query_optional(
+            tx,
+            "SELECT COUNT(*), MIN(eligible_since) FROM fireweed_items \
+             WHERE tenant_id=? AND queue_id=? AND lifecycle_state='Pending' AND superseded=0 \
+             AND group_key=? AND (not_before IS NULL OR not_before<=?)",
+            [
+                RelValue::Text(t.clone()),
+                RelValue::Text(q.clone()),
+                RelValue::Text(group.as_str().to_string()),
+                RelValue::Integer(now_n),
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?
+        .unwrap_or((0, None));
+        let representative: Option<(String, Vec<u8>, i64)> = crate::query_optional(
+            tx,
+            "SELECT item_id,priority_sort,created_at \
+             FROM fireweed_items \
+             WHERE tenant_id=? AND queue_id=? AND lifecycle_state='Pending' AND superseded=0 \
+             AND group_key=? AND (not_before IS NULL OR not_before<=?) \
+             ORDER BY priority_sort, created_seq, item_id LIMIT 1",
+            [
+                RelValue::Text(t.clone()),
+                RelValue::Text(q.clone()),
+                RelValue::Text(group.as_str().to_string()),
+                RelValue::Integer(now_n),
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        writes.push(match representative {
+            Some((item_id, priority_sort, created_at)) => SummaryWrite {
+                group_key: group.clone(),
+                oldest: counts.1,
+                rep_priority_sort: Some(priority_sort),
+                rep_created_at: Some(created_at),
+                rep_item_id: Some(item_id),
+                count: counts.0,
+            },
+            None => SummaryWrite {
+                group_key: group.clone(),
+                oldest: None,
+                rep_priority_sort: None,
+                rep_created_at: None,
+                rep_item_id: None,
+                count: 0,
+            },
+        });
+    }
+    upsert_group_summaries(tx, shard, &writes, now)
+}
+
 pub fn refresh_group_summaries(
     tx: &impl RelTx,
     shard: &QueueKey,

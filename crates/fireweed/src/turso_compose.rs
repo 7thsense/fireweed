@@ -806,7 +806,16 @@ macro_rules! impl_turso_product_ports {
                             BatchUpdateItemRef::ItemId(item_id) => ids.push(*item_id),
                         }
                     }
-                    let snapshot = self.planner_update_snapshot(&shard, &keys, &ids).await?;
+                    let needs_version_peek = request
+                        .updates
+                        .iter()
+                        .any(|update| update.expected_item_version.is_some());
+                    let snapshot = if self.pipeline_unresolved_updates() && !needs_version_peek
+                    {
+                        Vec::new()
+                    } else {
+                        self.planner_update_snapshot(&shard, &keys, &ids).await?
+                    };
 
                     let plan = if self.pipeline_unresolved_updates() {
                         plan_batch_update_pipelined(

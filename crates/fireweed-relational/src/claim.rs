@@ -8,8 +8,8 @@ use crate::{RelTx, RelValue, lease_hash, rel_exec, rel_query};
 /// Next due pending items, including payloads. Same eligibility predicates as
 /// [`crate::sql::async_projection::SELECT_ELIGIBLE`], plus the pending-order key.
 pub const SELECT_CLASS_S_DUE: &str = "SELECT item_id, client_item_key, payload, item_version, \
-     retry_count, priority, group_key, not_before, fields, metadata, max_attempts, \
-     entity_document, index_fields FROM fireweed_items \
+     retry_count, priority, group_key, not_before, fields, metadata, max_attempts \
+     FROM fireweed_items \
      WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
      AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
      AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
@@ -127,8 +127,8 @@ pub fn class_s_claim(
             fields_json: row.get::<Option<String>>(8)?.unwrap_or_else(|| "{}".into()),
             metadata_json: row.get::<Option<String>>(9)?.unwrap_or_else(|| "{}".into()),
             max_attempts: row.get::<Option<i64>>(10)?.unwrap_or(0),
-            entity_document: row.get(11)?,
-            index_fields: row.get(12)?,
+            entity_document: None,
+            index_fields: None,
             gate_keys: Vec::new(),
         });
     }
