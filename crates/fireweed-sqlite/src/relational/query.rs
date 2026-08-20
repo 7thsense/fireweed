@@ -315,7 +315,7 @@ pub(crate) fn refresh_due_group_summaries(
         groups.push(GroupKey::new(st(r)?).map_err(|e| EngineError::Storage(e.to_string()))?);
     }
     drop(stmt);
-    refresh_group_summaries(tx, shard, &groups, now)?;
+    relect_group_summaries(tx, shard, &groups, now)?;
     Ok(())
 }
 
@@ -784,7 +784,7 @@ mod peek_page_tests {
 ///
 /// `progress_bound_risk_count` is reported as `None` ("no signal"), NOT `Some(0)`: the summary's
 /// `at_risk_count` is a hardcoded `0` placeholder while the progress-guard/at-risk derivation is deferred
-/// (see `refresh_group_summaries`), and the [`ActiveScope`] contract reserves `None` for an uncomputed
+/// (see `relect_group_summaries`), and the [`ActiveScope`] contract reserves `None` for an uncomputed
 /// signal vs `Some(0)` for a measured zero. When at-risk becomes live, map it to `Some` here.
 ///
 /// PAUSE (intentional divergence from the claim path): discovery reports a scope's INTRINSIC eligibility

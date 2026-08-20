@@ -249,13 +249,13 @@ pub(crate) fn groups_of(
     fireweed_relational::groups_of(&rel(tx), shard, ids)
 }
 
-pub(crate) fn refresh_group_summaries(
+pub(crate) fn relect_group_summaries(
     tx: &Connection,
     shard: &QueueKey,
     group_keys: &[fireweed_core::GroupKey],
     now: UtcTimestamp,
 ) -> EngineResult<()> {
-    fireweed_relational::refresh_group_summaries(&rel(tx), shard, group_keys, now)
+    fireweed_relational::relect_group_summaries(&rel(tx), shard, group_keys, now)
 }
 
 pub(crate) fn apply_fused_claim_complete_sql(

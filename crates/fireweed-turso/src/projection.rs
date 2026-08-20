@@ -20,9 +20,9 @@ use fireweed_engine::{
     TerminalEmissionMetrics, UpdateFieldsCommand,
 };
 use fireweed_relational::{
-    TokenOp, async_projection as sql, elig_sort, entity_from_json, fields_from_json, fields_to_json,
-    lease_hash, metadata_from_json, metadata_to_json, nanos_ts, parse_priority, parse_state,
-    ts_nanos, ts_nanos_opt,
+    TokenOp, async_projection as sql, elig_sort, entity_from_json, fields_from_json,
+    fields_to_json, lease_hash, metadata_from_json, metadata_to_json, nanos_ts, parse_priority,
+    parse_state, ts_nanos, ts_nanos_opt,
 };
 use tokio::sync::Mutex;
 use turso::{Connection, Value, transaction::TransactionBehavior};
@@ -763,51 +763,89 @@ async fn groups_for_items(
     Ok(groups.into_iter().collect())
 }
 
-async fn refresh_group_summaries(
+async fn relect_group_summaries(
     transaction: &Connection,
     tenant: &str,
     queue: &str,
     groups: &[GroupKey],
     now: i64,
 ) -> EngineResult<()> {
-    for chunk in groups.chunks(GROUP_SUMMARY_CHUNK) {
-        let target_rows = (0..chunk.len())
-            .map(|offset| format!("(?{})", offset + 4))
-            .collect::<Vec<_>>()
-            .join(",");
+    const GATE_ANTI_JOIN: &str = " AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates ig \
+         JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+         AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=fireweed_items.tenant_id \
+         AND ig.queue_id=fireweed_items.queue_id AND ig.item_id=fireweed_items.item_id)";
+    let mut writes = Vec::with_capacity(groups.len());
+    for group in groups {
+        let params = vec![
+            Value::Text(tenant.to_string()),
+            Value::Text(queue.to_string()),
+            Value::Text(group.as_str().to_string()),
+            Value::Integer(now),
+        ];
+        let count_row = one_row(
+            transaction,
+            &format!(
+                "SELECT COUNT(*), MIN(eligible_since) FROM fireweed_items \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+                 AND group_key=?3 AND (not_before IS NULL OR not_before<=?4){GATE_ANTI_JOIN}"
+            ),
+            params.clone(),
+        )
+        .await?;
+        let (count, oldest) = match count_row {
+            Some(row) => (integer(&row[0])?, optional_integer(&row[1])?),
+            None => (0, None),
+        };
+        let head = one_row(
+            transaction,
+            &format!(
+                "SELECT item_id,priority_sort,created_at FROM fireweed_items \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+                 AND group_key=?3 AND (not_before IS NULL OR not_before<=?4){GATE_ANTI_JOIN} \
+                 ORDER BY priority_sort, created_seq, item_id LIMIT 1"
+            ),
+            params,
+        )
+        .await?;
+        writes.push((group, count, oldest, head));
+    }
+    for chunk in writes.chunks(GROUP_SUMMARY_CHUNK) {
+        let values = vec!["(?,?,?,?,NULL,?,?,?,?,0,?)"; chunk.len()].join(",");
         let sql = format!(
-            "WITH target_input(group_key) AS (VALUES {target_rows}), \
-             target AS (SELECT DISTINCT group_key FROM target_input), \
-             eligible AS (SELECT i.group_key,i.eligible_since,i.priority_sort,i.created_at,i.item_id,i.created_seq \
-               FROM fireweed_items i JOIN target t ON t.group_key=i.group_key \
-               WHERE i.tenant_id=?1 AND i.queue_id=?2 AND i.lifecycle_state='Pending' AND i.superseded=0 \
-               AND (i.not_before IS NULL OR i.not_before<=?3) AND NOT EXISTS (SELECT 1 \
-                 FROM fireweed_item_gates ig JOIN fireweed_gate_state gs ON gs.tenant_id=ig.tenant_id \
-                 AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=i.tenant_id \
-                 AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id)), \
-             ranked AS (SELECT *,ROW_NUMBER() OVER (PARTITION BY group_key ORDER BY priority_sort,created_seq) AS rn FROM eligible), \
-             aggregate AS (SELECT group_key,COUNT(*) AS item_count,MIN(eligible_since) AS oldest FROM eligible GROUP BY group_key) \
-             INSERT INTO fireweed_group_summary \
+            "INSERT INTO fireweed_group_summary \
              (tenant_id,queue_id,group_key,oldest_eligible_at,rep_progress_guard_sort,rep_priority_sort,\
               rep_created_at,rep_item_id,eligible_item_count,at_risk_count,updated_at) \
-             SELECT ?1,?2,t.group_key,a.oldest,NULL,r.priority_sort,r.created_at,r.item_id,COALESCE(a.item_count,0),0,?3 \
-             FROM target t LEFT JOIN aggregate a ON a.group_key=t.group_key \
-             LEFT JOIN ranked r ON r.group_key=t.group_key AND r.rn=1 WHERE true \
+             VALUES {values} \
              ON CONFLICT(tenant_id,queue_id,group_key) DO UPDATE SET \
               oldest_eligible_at=excluded.oldest_eligible_at,rep_progress_guard_sort=excluded.rep_progress_guard_sort,\
               rep_priority_sort=excluded.rep_priority_sort,rep_created_at=excluded.rep_created_at,\
               rep_item_id=excluded.rep_item_id,eligible_item_count=excluded.eligible_item_count,\
               at_risk_count=excluded.at_risk_count,updated_at=excluded.updated_at"
         );
-        let mut params = Vec::with_capacity(3 + chunk.len());
-        params.push(Value::Text(tenant.to_string()));
-        params.push(Value::Text(queue.to_string()));
-        params.push(Value::Integer(now));
-        params.extend(
-            chunk
-                .iter()
-                .map(|group| Value::Text(group.as_str().to_string())),
-        );
+        let mut params = Vec::with_capacity(chunk.len() * 9);
+        for (group, count, oldest, head) in chunk {
+            params.push(Value::Text(tenant.to_string()));
+            params.push(Value::Text(queue.to_string()));
+            params.push(Value::Text(group.as_str().to_string()));
+            match head {
+                Some(row) => {
+                    params.push(oldest.map_or(Value::Null, Value::Integer));
+                    params.push(row[1].clone());
+                    params.push(row[2].clone());
+                    params.push(row[0].clone());
+                    params.push(Value::Integer(*count));
+                    params.push(Value::Integer(now));
+                }
+                None => {
+                    params.push(Value::Null);
+                    params.push(Value::Null);
+                    params.push(Value::Null);
+                    params.push(Value::Null);
+                    params.push(Value::Integer(0));
+                    params.push(Value::Integer(now));
+                }
+            }
+        }
         transaction.execute(sql, params).await.map_err(storage)?;
     }
     Ok(())
@@ -857,7 +895,7 @@ async fn refresh_due_group_summaries(
         groups.push(GroupKey::new(text(&row.get_value(0).map_err(storage)?)?).map_err(storage)?);
     }
     drop(rows);
-    refresh_group_summaries(transaction, tenant, queue, &groups, now).await?;
+    relect_group_summaries(transaction, tenant, queue, &groups, now).await?;
     Ok(())
 }
 
@@ -2222,9 +2260,15 @@ impl AsyncProjectionStore for TursoRelational {
                 for target in chunk {
                     let row = rows.get(&target.item_id).ok_or(EngineError::NotFound)?;
                     let state = parse_state(&text(&row[0])?).map_err(storage)?;
-                    if integer(&row[1])? != 0 { return Err(EngineError::StaleLease); }
-                    if state.is_terminal() { return Err(EngineError::Terminal); }
-                    if integer(&row[2])? != 0 { return Err(EngineError::Superseded); }
+                    if integer(&row[1])? != 0 {
+                        return Err(EngineError::StaleLease);
+                    }
+                    if state.is_terminal() {
+                        return Err(EngineError::Terminal);
+                    }
+                    if integer(&row[2])? != 0 {
+                        return Err(EngineError::Superseded);
+                    }
                     if !matches!(row[3], Value::Null) {
                         return Err(EngineError::Invalid("cohort member requires cohort lease"));
                     }
@@ -2244,10 +2288,7 @@ impl AsyncProjectionStore for TursoRelational {
                     attempts.push(fireweed_engine::FinalizeLeaseMember {
                         item_id: target.item_id,
                         attempt_count: nonnegative_u32(integer(&row[7])?, "retry_count")?,
-                        max_attempts: nonnegative_u32(
-                            integer(&row[8])?,
-                            "max_attempts",
-                        )?,
+                        max_attempts: nonnegative_u32(integer(&row[8])?, "max_attempts")?,
                     });
                 }
             }
@@ -2722,7 +2763,11 @@ impl AsyncProjectionStore for TursoRelational {
                     "SELECT item_id,gate_key FROM fireweed_item_gates WHERE tenant_id=?1 \
                      AND queue_id=?2 AND item_id IN ({placeholders}) ORDER BY item_id,gate_key"
                 );
-                for row in self.query(gate_sql, params.clone()).await.map_err(storage)? {
+                for row in self
+                    .query(gate_sql, params.clone())
+                    .await
+                    .map_err(storage)?
+                {
                     let id = ItemId::new(text(&row.values[0])?).map_err(storage)?;
                     gate_keys.entry(id).or_default().push(text(&row.values[1])?);
                 }

@@ -2585,7 +2585,7 @@ impl fireweed_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                 if !groups.is_empty() {
                     grouped_shards.insert(shard.clone());
                 }
-                refresh_group_summaries(&tx, shard, &groups, created_at)?;
+                relect_group_summaries(&tx, shard, &groups, created_at)?;
                 reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
                 st(tx.execute(
                     "UPDATE relational_cursor SET next_seq=?3 WHERE tenant=?1 AND queue=?2",
@@ -3149,7 +3149,7 @@ impl fireweed_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                     })
                     .collect::<EngineResult<Vec<_>>>()?;
                 let groups = groups_of(&tx, shard, &updated_ids)?;
-                refresh_group_summaries(&tx, shard, &groups, now)?;
+                relect_group_summaries(&tx, shard, &groups, now)?;
                 st(tx.execute(
                     "UPDATE relational_cursor SET next_seq=?3 WHERE tenant=?1 AND queue=?2",
                     params![tenant, queue, seq + 1],
@@ -3409,8 +3409,8 @@ impl UpdateFieldsPort for SqliteRelationalBackend {
                     set_metadata: None,
                     set_gate_keys: None,
                     api001_batch: false,
-                client_item_key: None,
-                expected_item_version: None,
+                    client_item_key: None,
+                    expected_item_version: None,
                 }),
                 now,
                 expected_epoch,
@@ -4247,27 +4247,22 @@ mod hot_query_sql_tests {
     }
 
     #[tokio::test]
-    async fn grouped_claim_and_finalize_statements_are_independent_of_distinct_groups() {
+    async fn grouped_claim_relects_one_head_per_group_and_finalize_is_constant() {
         let one = grouped_claim_finalize_statement_count(1).await;
         let hundred = grouped_claim_finalize_statement_count(100).await;
         let thousand = grouped_claim_finalize_statement_count(1_000).await;
         let update_chunks = |n: usize| n.div_ceil(100).max(1);
-        let claim_base = one.0 - 2 * summary_upsert_chunks(1) - update_chunks(1);
+        // Each claimed group lost its representative: batched COUNT + LIMIT 1 union, then chunked upsert.
+        let relect_stmts = |n: usize| 1 + 2 * summary_upsert_chunks(n);
+        let claim_base = one.0 - relect_stmts(1) - summary_upsert_chunks(1) - update_chunks(1);
+        let expected =
+            |n: usize| claim_base + relect_stmts(n) + summary_upsert_chunks(n) + update_chunks(n);
         assert_eq!(
             (one, hundred, thousand),
             (
-                (
-                    claim_base + 2 * summary_upsert_chunks(1) + update_chunks(1),
-                    one.1
-                ),
-                (
-                    claim_base + 2 * summary_upsert_chunks(100) + update_chunks(100),
-                    one.1
-                ),
-                (
-                    claim_base + 2 * summary_upsert_chunks(1_000) + update_chunks(1_000),
-                    one.1
-                ),
+                (expected(1), one.1),
+                (expected(100), one.1),
+                (expected(1_000), one.1),
             )
         );
         assert_eq!(one.1, hundred.1);
@@ -4977,7 +4972,7 @@ mod hot_query_sql_tests {
         }
         GROUP_TRACE_COUNT.store(0, Ordering::Relaxed);
         steps.store(0, Ordering::Relaxed);
-        refresh_group_summaries(
+        relect_group_summaries(
             &tx,
             &QueueKey::new(
                 TenantId::new("tenant").unwrap(),
@@ -4987,9 +4982,10 @@ mod hot_query_sql_tests {
             UtcTimestamp::new(1, 0).unwrap(),
         )
         .unwrap();
+        // has_blocked_gates + COUNT/UNION/upsert per 50-group chunk
         assert_eq!(
             GROUP_TRACE_COUNT.load(Ordering::Relaxed),
-            2 + groups.div_ceil(50)
+            1 + 3 * groups.div_ceil(50)
         );
         let summary_count: i64 = tx
             .query_row(
@@ -5003,7 +4999,7 @@ mod hot_query_sql_tests {
     }
 
     #[test]
-    fn grouped_summary_refresh_has_constant_statements_and_linear_vm_work() {
+    fn grouped_summary_relect_is_one_seek_per_group_and_linear_vm_work() {
         let one = grouped_refresh_cost(1);
         let hundred = grouped_refresh_cost(100);
         let thousand = grouped_refresh_cost(1_000);

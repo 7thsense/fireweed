@@ -17,14 +17,14 @@ ddx:
 
 # Pipeline the later phases for real
 
-Shipped `v0.31.20` / `1787186460`, `filesystem--turso`, N=10k, inflight=8:
+Latest `1787259713`, `filesystem--turso`, N=10k, inflight=8 (P4 still one claim at a time):
 
 | phase | items/s | call p50 | vs ingest |
 |---|---:|---:|---|
-| ingest | 31197 | 23 ms | floor |
-| enrich | 4139 | 85 ms | 8× slower per wave |
-| schedule | 2795 | 143 ms | apply rescans groups |
-| deliver | 350 | claim 189 / complete 90 | **serial** |
+| ingest | 31692 | 23 ms | floor |
+| enrich | 33465 | 19 ms | ≥ ingest |
+| schedule | 51361 | 12 ms | ≥ ingest |
+| deliver | 382 | claim 256 / complete 90 | **serial** |
 
 Target unchanged: every later phase ≥ ingest. Do not drop groups or payloads. Keep `apply_start_delay_ms.max(300)` (without it ingest is ~300/s). No planner map, no `SKIP LOCKED`, no reservation table. Default `open()` stays Strict.
 
@@ -34,7 +34,7 @@ Ingest is 12.5 waves of 8 appends in 0.32 s (~25 ms/wave). Enrich is 2.4 s (~190
 
 1. **Deliver is serial.** Overlapping complete N with claim N+1 packed two appends. The follower **cancels** its apply reservation before the leader enqueues the combined batch. Apply then sees high-water 300 and a batch starting at 302 and poisons. The harness is sequential claim→complete to avoid that. 100 × (189+90) ms = 28 s. That is the run.
 2. **Claim still holds the writer for a fat SELECT** (payload, fields, metadata, entity, index_fields, gate anti-join) plus apply of *this* Claim (`load_grouped_items`). Next lease waits on that writer.
-3. **Schedule apply dumps the group.** First 100-key window rewrites every representative (`job_key = i % 100`). `refresh_group_summaries` SELECTs every pending member of those 100 groups (~10k rows) on the writer.
+3. **Claim/schedule apply used to dump the group.** First 100-key window rewrites every representative (`job_key = i % 100`). That path now re-elects with COUNT + `LIMIT 1`; there is no member dump.
 4. **Enrich/schedule still peek SQL** on the single reader mutex before they append. Eight in-flight updates line up there instead of going to the log.
 
 ## Cuts
@@ -81,7 +81,7 @@ LIMIT 1
 
 plus `COUNT(*)` with the same predicate (or one scan of LIMIT 1 + a count query). 100 groups → 100 index seeks, not 10k rows.
 
-Keep `refresh_group_summaries` as a fallback only when that index cannot answer (blocked gates). Do not store extra process maps.
+Blocked gates use the same COUNT + `LIMIT 1` with the claim anti-join. There is no member-dump helper. Do not store extra process maps.
 
 Claim apply: if the row is already `Leased` (Class S), do not `load_grouped_items`. `SELECT group_key FROM fireweed_items WHERE item_id IN (...)` (the 100 ids in the command) and `apply_group_summary_remove` those refs. Rebuild of a *Pending* Claim still leases in apply as today.
 

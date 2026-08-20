@@ -215,13 +215,9 @@ pub fn persist_request_outcome_sql(
             }),
             true,
         )?;
-        let ids = serde_json::to_string(
-            &item_ids
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>(),
-        )
-        .map_err(|error| EngineError::Storage(error.to_string()))?;
+        let ids =
+            serde_json::to_string(&item_ids.iter().map(ToString::to_string).collect::<Vec<_>>())
+                .map_err(|error| EngineError::Storage(error.to_string()))?;
         let (t, q) = parts(shard);
         crate::rel_exec(
             tx,
@@ -249,13 +245,9 @@ pub fn persist_request_outcome_sql(
     ) else {
         return Ok(());
     };
-    let response = serde_json::to_string(
-        &item_ids
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|error| EngineError::Storage(error.to_string()))?;
+    let response =
+        serde_json::to_string(&item_ids.iter().map(ToString::to_string).collect::<Vec<_>>())
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
     persist_request_row(
         tx,
         shard,
@@ -2228,7 +2220,7 @@ fn apply_group_summary_add(
         return Ok(());
     }
     if has_blocked_gates(tx, shard)? {
-        return refresh_group_summaries(tx, shard, groups, now);
+        return relect_group_summaries(tx, shard, groups, now);
     }
     let existing = load_summaries(tx, shard, groups)?;
     let added = items_by_group(added);
@@ -2295,7 +2287,7 @@ fn apply_group_summary_add(
         }
     }
     upsert_group_summaries(tx, shard, &writes, now)?;
-    refresh_group_summaries(tx, shard, &fallback, now)
+    relect_group_summaries(tx, shard, &fallback, now)
 }
 
 /// Items leaving eligibility (Claim, or becoming deferred). Recompute only groups that lost their
@@ -2311,7 +2303,7 @@ fn apply_group_summary_remove(
     }
     let groups = unique_groups(removed);
     if has_blocked_gates(tx, shard)? {
-        return refresh_group_summaries(tx, shard, &groups, now);
+        return relect_group_summaries(tx, shard, &groups, now);
     }
     let existing = load_summaries(tx, shard, &groups)?;
     let removed = items_by_group(removed);
@@ -2354,78 +2346,7 @@ fn apply_group_summary_remove(
         });
     }
     upsert_group_summaries(tx, shard, &writes, now)?;
-    recompute_group_heads(tx, shard, &fallback, now)
-}
-
-/// Recompute summaries for groups that lost their representative: one LIMIT-1 head
-/// plus a COUNT, not a scan of every remaining member.
-fn recompute_group_heads(
-    tx: &impl RelTx,
-    shard: &QueueKey,
-    groups: &[GroupKey],
-    now: UtcTimestamp,
-) -> EngineResult<()> {
-    if groups.is_empty() {
-        return Ok(());
-    }
-    if has_blocked_gates(tx, shard)? {
-        return refresh_group_summaries(tx, shard, groups, now);
-    }
-    let (t, q) = parts(shard);
-    let now_n = ts_nanos(now);
-    let mut writes = Vec::with_capacity(groups.len());
-    let mut seen = HashSet::new();
-    for chunk in groups.chunks(SUMMARY_UPSERT_BATCH) {
-        let placeholders = vec!["?"; chunk.len()].join(",");
-        let sql = format!(
-            "SELECT group_key,item_id,priority_sort,created_at,eligible_since,cnt,oldest FROM (\
-               SELECT group_key,item_id,priority_sort,created_at,eligible_since,\
-                 ROW_NUMBER() OVER (PARTITION BY group_key ORDER BY priority_sort,created_seq) AS rn,\
-                 COUNT(*) OVER (PARTITION BY group_key) AS cnt,\
-                 MIN(eligible_since) OVER (PARTITION BY group_key) AS oldest \
-               FROM fireweed_items WHERE tenant_id=? AND queue_id=? \
-                 AND lifecycle_state='Pending' AND superseded=0 \
-                 AND (not_before IS NULL OR not_before<=?) \
-                 AND group_key IN ({placeholders})\
-             ) WHERE rn=1"
-        );
-        let mut params = vec![
-            RelValue::Text(t.clone()),
-            RelValue::Text(q.clone()),
-            RelValue::Integer(now_n),
-        ];
-        params.extend(
-            chunk
-                .iter()
-                .map(|group| RelValue::Text(group.as_str().to_string())),
-        );
-        for row in crate::rel_query(tx, &sql, params)? {
-            let group = GroupKey::new(row.get::<String>(0)?)
-                .map_err(|e| EngineError::Storage(e.to_string()))?;
-            seen.insert(group.clone());
-            writes.push(SummaryWrite {
-                group_key: group,
-                oldest: row.get(6)?,
-                rep_priority_sort: Some(row.get(2)?),
-                rep_created_at: row.get(3)?,
-                rep_item_id: Some(row.get(1)?),
-                count: row.get::<i64>(5)?,
-            });
-        }
-    }
-    for group in groups {
-        if !seen.contains(group) {
-            writes.push(SummaryWrite {
-                group_key: group.clone(),
-                oldest: None,
-                rep_priority_sort: None,
-                rep_created_at: None,
-                rep_item_id: None,
-                count: 0,
-            });
-        }
-    }
-    upsert_group_summaries(tx, shard, &writes, now)
+    relect_group_summaries(tx, shard, &fallback, now)
 }
 
 /// Priority / schedule change for items that stay eligible. Recompute a group only when its current
@@ -2442,7 +2363,7 @@ fn apply_group_summary_rerank(
     }
     let groups = unique_groups(updated);
     if has_blocked_gates(tx, shard)? {
-        return refresh_group_summaries(tx, shard, &groups, now);
+        return relect_group_summaries(tx, shard, &groups, now);
     }
     if eligible_since_changed {
         return relect_group_summaries(tx, shard, &groups, now);
@@ -2501,23 +2422,21 @@ fn apply_group_summary_rerank(
     relect_group_summaries(tx, shard, &fallback, now)
 }
 
-/// Recompute `fireweed_group_summary` for one group from `fireweed_items` (exact aggregate over the group's
-/// currently-eligible items, in the SAME transaction as the mutation that touched it). The representative
-/// is the would-be-first-claimed eligible item (strict-claim key `priority_sort, created_seq`), matching
-/// the claim selection, including live gate state; `rep_progress_guard_sort`/`at_risk_count` stay NULL/0
-/// while the progress-guard derivation is deferred (parity with the strict claim ordering, BQ-14).
+/// Recompute `fireweed_group_summary` from `fireweed_items` for the named groups.
 ///
-/// EXACT AT MUTATION TIME, lagged across a time-only `not_before` crossing: the aggregate filters
-/// `not_before<=now`, so a deferred item that becomes due WITHOUT a subsequent mutation is not reflected
-/// in `oldest_eligible_at`/`rep_*`/`eligible_item_count` until the next mutation refreshes its group. The
-/// per-item `select_eligible` path re-evaluates `not_before` on read and is unaffected. BQ-14 g1/g4
-/// consumers refresh due groups before mutation-backed group claims; read-only discovery still cannot
-/// mutate and therefore may under-report until a due sweep or later mutation refreshes the group.
+/// Incremental add/remove/rerank keep the summary row from the mutated refs when that is enough.
+/// This is the fallback when they cannot: COUNT + MIN over the group, and one `LIMIT 1` index seek
+/// for the would-be-first-claimed item (`priority_sort, created_seq, item_id`). Blocked gates add
+/// the same eligibility anti-join the claim path uses; they do not require loading every remaining
+/// member into the process. `rep_progress_guard_sort`/`at_risk_count` stay NULL/0 while that
+/// derivation is deferred (BQ-14).
 ///
-/// Implementation: pull the eligible rows for the target groups and aggregate in-process. Turso 0.7
-/// pays a large CPU tax for `json_each` + `ROW_NUMBER()` windows over the same set; the result is
-/// identical, including zero-count upserts for groups that now have no eligible items.
-fn relect_group_summaries(
+/// Exact at mutation time, lagged across a time-only `not_before` crossing: the filter is
+/// `not_before<=now`, so a deferred item that becomes due without a later mutation is not in
+/// `oldest_eligible_at`/`rep_*`/`eligible_item_count` until the next write to its group. Per-item
+/// `select_eligible` re-evaluates `not_before` on read. BQ-14 g1/g4 refresh due groups before
+/// mutation-backed group claims; read-only discovery may under-report until then.
+pub fn relect_group_summaries(
     tx: &impl RelTx,
     shard: &QueueKey,
     group_keys: &[GroupKey],
@@ -2526,127 +2445,96 @@ fn relect_group_summaries(
     if group_keys.is_empty() {
         return Ok(());
     }
-    if has_blocked_gates(tx, shard)? {
-        return refresh_group_summaries(tx, shard, group_keys, now);
-    }
+    let gate = if has_blocked_gates(tx, shard)? {
+        GATE_ANTI_JOIN
+    } else {
+        ""
+    };
     let (t, q) = parts(shard);
     let now_n = ts_nanos(now);
     let mut writes = Vec::with_capacity(group_keys.len());
-    for group in group_keys {
-        let counts: (i64, Option<i64>) = crate::query_optional(
-            tx,
-            "SELECT COUNT(*), MIN(eligible_since) FROM fireweed_items \
-             WHERE tenant_id=? AND queue_id=? AND lifecycle_state='Pending' AND superseded=0 \
-             AND group_key=? AND (not_before IS NULL OR not_before<=?)",
-            [
-                RelValue::Text(t.clone()),
-                RelValue::Text(q.clone()),
-                RelValue::Text(group.as_str().to_string()),
-                RelValue::Integer(now_n),
-            ],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?
-        .unwrap_or((0, None));
-        let representative: Option<(String, Vec<u8>, i64)> = crate::query_optional(
-            tx,
-            "SELECT item_id,priority_sort,created_at \
-             FROM fireweed_items \
-             WHERE tenant_id=? AND queue_id=? AND lifecycle_state='Pending' AND superseded=0 \
-             AND group_key=? AND (not_before IS NULL OR not_before<=?) \
-             ORDER BY priority_sort, created_seq, item_id LIMIT 1",
-            [
-                RelValue::Text(t.clone()),
-                RelValue::Text(q.clone()),
-                RelValue::Text(group.as_str().to_string()),
-                RelValue::Integer(now_n),
-            ],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
-        writes.push(match representative {
-            Some((item_id, priority_sort, created_at)) => SummaryWrite {
-                group_key: group.clone(),
-                oldest: counts.1,
-                rep_priority_sort: Some(priority_sort),
-                rep_created_at: Some(created_at),
-                rep_item_id: Some(item_id),
-                count: counts.0,
-            },
-            None => SummaryWrite {
-                group_key: group.clone(),
-                oldest: None,
-                rep_priority_sort: None,
-                rep_created_at: None,
-                rep_item_id: None,
-                count: 0,
-            },
-        });
-    }
-    upsert_group_summaries(tx, shard, &writes, now)
-}
-
-pub fn refresh_group_summaries(
-    tx: &impl RelTx,
-    shard: &QueueKey,
-    group_keys: &[GroupKey],
-    now: UtcTimestamp,
-) -> EngineResult<()> {
-    if group_keys.is_empty() {
-        return Ok(());
-    }
-    let (t, q) = parts(shard);
-    let now_n = ts_nanos(now);
-    let include_gates = has_blocked_gates(tx, shard)?;
-    let mut eligible: HashMap<GroupKey, Vec<GroupItemRef>> = HashMap::new();
-    for chunk in group_keys.chunks(SQLITE_BATCH) {
+    for chunk in group_keys.chunks(SUMMARY_UPSERT_BATCH) {
         let placeholders = vec!["?"; chunk.len()].join(",");
-        let sql = format!(
-            "SELECT group_key,item_id,eligible_since,priority_sort,created_at,created_seq \
-             FROM fireweed_items WHERE tenant_id=? AND queue_id=? \
-             AND lifecycle_state='Pending' AND superseded=0 \
-             AND (not_before IS NULL OR not_before<=?) \
-             AND group_key IN ({placeholders}){}",
-            if include_gates { GATE_ANTI_JOIN } else { "" }
-        );
-        let mut params = vec![
+        let mut count_params = vec![
             RelValue::Text(t.clone()),
             RelValue::Text(q.clone()),
             RelValue::Integer(now_n),
         ];
-        params.extend(
+        count_params.extend(
             chunk
                 .iter()
                 .map(|group| RelValue::Text(group.as_str().to_string())),
         );
-        for row in crate::rel_query(tx, &sql, params)? {
+        let mut counts: HashMap<GroupKey, (i64, Option<i64>)> = HashMap::new();
+        for row in crate::rel_query(
+            tx,
+            &format!(
+                "SELECT group_key, COUNT(*), MIN(eligible_since) FROM fireweed_items \
+                 WHERE tenant_id=? AND queue_id=? AND lifecycle_state='Pending' AND superseded=0 \
+                 AND (not_before IS NULL OR not_before<=?) AND group_key IN ({placeholders}){gate} \
+                 GROUP BY group_key"
+            ),
+            count_params,
+        )? {
             let group = GroupKey::new(row.get::<String>(0)?)
                 .map_err(|e| EngineError::Storage(e.to_string()))?;
-            eligible
-                .entry(group.clone())
-                .or_default()
-                .push(GroupItemRef {
-                    group_key: group,
-                    item_id: row.get(1)?,
-                    eligible_since: row.get(2)?,
-                    priority_sort: row.get(3)?,
-                    created_at: row.get(4)?,
-                    created_seq: row.get(5)?,
-                });
+            counts.insert(group, (row.get(1)?, row.get(2)?));
+        }
+        let heads_sql = chunk
+            .iter()
+            .enumerate()
+            .map(|(offset, _)| {
+                let group_param = offset + 4;
+                format!(
+                    "SELECT group_key,item_id,priority_sort,created_at FROM (\
+                       SELECT group_key,item_id,priority_sort,created_at FROM fireweed_items \
+                       WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+                         AND (not_before IS NULL OR not_before<=?3) AND group_key=?{group_param}{gate} \
+                       ORDER BY priority_sort, created_seq, item_id LIMIT 1)"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" UNION ALL ");
+        let mut head_params = vec![
+            RelValue::Text(t.clone()),
+            RelValue::Text(q.clone()),
+            RelValue::Integer(now_n),
+        ];
+        head_params.extend(
+            chunk
+                .iter()
+                .map(|group| RelValue::Text(group.as_str().to_string())),
+        );
+        let mut heads: HashMap<GroupKey, (String, Vec<u8>, i64)> = HashMap::new();
+        for row in crate::rel_query(tx, &heads_sql, head_params)? {
+            let group = GroupKey::new(row.get::<String>(0)?)
+                .map_err(|e| EngineError::Storage(e.to_string()))?;
+            heads.insert(group, (row.get(1)?, row.get(2)?, row.get(3)?));
+        }
+        for group in chunk {
+            writes.push(match heads.get(group) {
+                Some((item_id, priority_sort, created_at)) => {
+                    let (count, oldest) = counts.get(group).copied().unwrap_or((0, None));
+                    SummaryWrite {
+                        group_key: group.clone(),
+                        oldest,
+                        rep_priority_sort: Some(priority_sort.clone()),
+                        rep_created_at: Some(*created_at),
+                        rep_item_id: Some(item_id.clone()),
+                        count,
+                    }
+                }
+                None => SummaryWrite {
+                    group_key: group.clone(),
+                    oldest: None,
+                    rep_priority_sort: None,
+                    rep_created_at: None,
+                    rep_item_id: None,
+                    count: 0,
+                },
+            });
         }
     }
-    let writes: Vec<SummaryWrite> = group_keys
-        .iter()
-        .map(|group| match eligible.get(group) {
-            Some(items) => write_from_items(group, items),
-            None => SummaryWrite {
-                group_key: group.clone(),
-                oldest: None,
-                rep_priority_sort: None,
-                rep_created_at: None,
-                rep_item_id: None,
-                count: 0,
-            },
-        })
-        .collect();
     upsert_group_summaries(tx, shard, &writes, now)
 }
 
@@ -2699,7 +2587,8 @@ pub fn apply_fused_claim_complete_sql(
     let epoch = finalize_position.backend_epoch as i64;
     let hash = lease_hash(&claim.lease_token);
     if claim_scan_default_fifo.get(shard).copied().unwrap_or(false)
-        && let Some((min_rowid, max_rowid)) = fifo_rowid_range_for_id_strings(tx, shard, &ids, None)?
+        && let Some((min_rowid, max_rowid)) =
+            fifo_rowid_range_for_id_strings(tx, shard, &ids, None)?
     {
         let _ = crate::rel_exec(
             tx,
@@ -2772,9 +2661,9 @@ pub fn apply_fused_claim_complete_sql(
 const UPDATE_FIELDS_BATCH: usize = 100;
 
 fn update_fields_batch_is_set_based(updates: &[UpdateFieldsCommand]) -> bool {
-    updates.iter().all(|update| {
-        update.field_ops.is_empty() && update.set_entity_document.is_none()
-    })
+    updates
+        .iter()
+        .all(|update| update.field_ops.is_empty() && update.set_entity_document.is_none())
 }
 
 fn apply_update_fields_batch_sql(
@@ -3119,7 +3008,7 @@ fn apply_update_fields_batch_sql(
             .collect();
         if !mixed.is_empty() {
             let groups: Vec<GroupKey> = mixed.iter().cloned().collect();
-            refresh_group_summaries(tx, shard, &groups, now)?;
+            relect_group_summaries(tx, shard, &groups, now)?;
         }
         let ranked: Vec<GroupItemRef> = ranked
             .into_iter()
@@ -3317,7 +3206,7 @@ pub fn apply_command_sql(
             }
             if grouped_shards.contains(shard) {
                 let groups = groups_of(tx, shard, &c.item_ids)?;
-                refresh_group_summaries(tx, shard, &groups, now)?;
+                relect_group_summaries(tx, shard, &groups, now)?;
             }
             Ok(())
         }
@@ -3521,7 +3410,7 @@ pub fn apply_command_sql(
                 {
                     reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
                     if grouped_shards.contains(shard) {
-                        refresh_group_summaries(
+                        relect_group_summaries(
                             tx,
                             shard,
                             &groups_of(tx, shard, std::slice::from_ref(&c.item_id))?,
@@ -3578,7 +3467,8 @@ pub fn apply_command_sql(
             &c.updates,
         ),
         QueueCommand::Finalize(c) => {
-            let finalize_ids: Vec<String> = c.outcomes.iter().map(|o| o.item_id.to_string()).collect();
+            let finalize_ids: Vec<String> =
+                c.outcomes.iter().map(|o| o.item_id.to_string()).collect();
             if !finalize_ids.is_empty() {
                 exec_items_in(
                     tx,
@@ -3930,7 +3820,7 @@ pub fn apply_command_sql(
                 grouped_shards.insert(shard.clone());
                 groups.push(g.clone());
             }
-            refresh_group_summaries(tx, shard, &groups, now)?;
+            relect_group_summaries(tx, shard, &groups, now)?;
             Ok(())
         }
         QueueCommand::LeaseExpired(c) => {
@@ -3976,7 +3866,7 @@ pub fn apply_command_sql(
             }
             if grouped_shards.contains(shard) {
                 let groups = groups_of(tx, shard, &c.item_ids)?;
-                refresh_group_summaries(tx, shard, &groups, now)?;
+                relect_group_summaries(tx, shard, &groups, now)?;
             }
             Ok(())
         }
@@ -4036,7 +3926,7 @@ pub fn apply_command_sql(
                 ],
             )?;
             // The whole cohort (group) is now terminal — refresh its summary to empty.
-            refresh_group_summaries(tx, shard, std::slice::from_ref(&c.group_key), now)?;
+            relect_group_summaries(tx, shard, std::slice::from_ref(&c.group_key), now)?;
             Ok(())
         }
         QueueCommand::FenceLease(c) => {
@@ -4172,7 +4062,7 @@ pub fn apply_command_sql(
             for id in &c.item_ids {
                 token_ops.push(TokenOp::Clear(shard.clone(), *id));
             }
-            refresh_group_summaries(tx, shard, &groups, now)?;
+            relect_group_summaries(tx, shard, &groups, now)?;
             Ok(())
         }
         QueueCommand::SetGates(c) => {
@@ -4456,7 +4346,7 @@ pub fn apply_command_sql(
                     }),
                 )?;
             }
-            refresh_group_summaries(tx, shard, &groups, now)?;
+            relect_group_summaries(tx, shard, &groups, now)?;
             Ok(())
         }
     }
