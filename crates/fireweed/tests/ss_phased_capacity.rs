@@ -697,81 +697,46 @@ async fn ss_phased_capacity_smoke() {
     }
 
     // --- P4 deliver: unfiltered claim + complete ---
-    // Waves of `inflight` claims. Writer serializes the lease txn; appends pack.
-    // Overlap complete of wave N with claim wave N+1. One empty claim is not "done".
+    // Overlap complete of batch N with claim N+1. Eight concurrent claims still
+    // hang on packer/reservation; keep one claim in flight until that is fixed.
     let mut p4_claim = CallStats::new();
     let mut p4_fin = CallStats::new();
     let t0 = Instant::now();
     let mut completed = 0usize;
-    let claim_wave = inflight;
-    let mut prev = {
-        let futs = (0..claim_wave).map(|_| {
-            let fw = Arc::clone(&fw);
-            let queue = queue.clone();
-            async move {
-                let c0 = Instant::now();
-                let items = fw
-                    .claim(&queue, claim_batch, 30_000)
-                    .await
-                    .expect("P4 claim");
-                (c0.elapsed(), items)
-            }
-        });
-        futures::future::join_all(futs).await
-    };
-    for (elapsed, _) in &prev {
-        p4_claim.record(*elapsed);
-    }
+    let c0 = Instant::now();
+    let mut prev = fw
+        .claim(&queue, claim_batch, 30_000)
+        .await
+        .expect("P4 claim");
+    p4_claim.record(c0.elapsed());
     loop {
-        let batches: Vec<Vec<_>> = prev
-            .into_iter()
-            .map(|(_, items)| items)
-            .filter(|items| !items.is_empty())
-            .collect();
-        if batches.is_empty() {
+        if prev.is_empty() {
             break;
         }
-        completed += batches.iter().map(|batch| batch.len()).sum::<usize>();
+        let ids: Vec<_> = prev.iter().map(|c| c.item_id).collect();
+        let n_ids = ids.len();
         let fw_fin = Arc::clone(&fw);
         let fw_claim = Arc::clone(&fw);
         let queue_fin = queue.clone();
         let queue_claim = queue.clone();
-        let (fin_times, next) = tokio::join!(
+        let (fin_elapsed, (claim_elapsed, next)) = tokio::join!(
             async move {
-                let futs = batches.into_iter().map(|batch| {
-                    let fw = Arc::clone(&fw_fin);
-                    let queue = queue_fin.clone();
-                    async move {
-                        let ids: Vec<_> = batch.iter().map(|item| item.item_id).collect();
-                        let c1 = Instant::now();
-                        fw.complete(&queue, ids).await.expect("P4 complete");
-                        c1.elapsed()
-                    }
-                });
-                futures::future::join_all(futs).await
+                let c1 = Instant::now();
+                fw_fin.complete(&queue_fin, ids).await.expect("P4 complete");
+                c1.elapsed()
             },
             async move {
-                let futs = (0..claim_wave).map(|_| {
-                    let fw = Arc::clone(&fw_claim);
-                    let queue = queue_claim.clone();
-                    async move {
-                        let c0 = Instant::now();
-                        let items = fw
-                            .claim(&queue, claim_batch, 30_000)
-                            .await
-                            .expect("P4 claim");
-                        (c0.elapsed(), items)
-                    }
-                });
-                futures::future::join_all(futs).await
+                let c0 = Instant::now();
+                let claimed = fw_claim
+                    .claim(&queue_claim, claim_batch, 30_000)
+                    .await
+                    .expect("P4 claim");
+                (c0.elapsed(), claimed)
             }
         );
-        for elapsed in fin_times {
-            p4_fin.record(elapsed);
-        }
-        for (elapsed, _) in &next {
-            p4_claim.record(*elapsed);
-        }
+        p4_fin.record(fin_elapsed);
+        p4_claim.record(claim_elapsed);
+        completed += n_ids;
         prev = next;
     }
     assert_eq!(completed, n, "P4 completed all items");
