@@ -1,0 +1,67 @@
+{
+  "schema": "ss-phased-summary/v3",
+  "utc": "1787186218",
+  "cell": "filesystem--turso",
+  "log_axis": "filesystem",
+  "projection_axis": "turso",
+  "workers": 1,
+  "inflight": 8,
+  "rss_before_open_bytes": 6815744,
+  "hwm_before_open_bytes": 6815744,
+  "rss_after_run_bytes": 131686400,
+  "hwm_after_run_bytes": 131686400,
+  "rss_delta_bytes": 124870656,
+  "projection_bytes": 384453352,
+  "n": 10000,
+  "push_batch": 100,
+  "claim_batch": 100,
+  "sampled_ok": true,
+  "residual_eligible": 0,
+  "phases": [
+    {
+      "name": "P1_ingest",
+      "items": 10000,
+      "mutations": 1,
+      "wall_s": 32.498529,
+      "items_per_s": 307.7,
+      "mutations_per_s": 307.7,
+      "calls": [
+        {"op": "BatchPush", "p50_ms": 1130.434, "p95_ms": 3870.733, "p99_ms": 4738.432}
+      ]
+    },
+    {
+      "name": "P2_enrich",
+      "items": 10000,
+      "mutations": 1,
+      "wall_s": 3.591485,
+      "items_per_s": 2784.4,
+      "mutations_per_s": 2784.4,
+      "calls": [
+        {"op": "BatchUpdate", "p50_ms": 141.210, "p95_ms": 273.178, "p99_ms": 281.264}
+      ]
+    },
+    {
+      "name": "P3_schedule",
+      "items": 10000,
+      "mutations": 1,
+      "wall_s": 3.526678,
+      "items_per_s": 2835.5,
+      "mutations_per_s": 2835.5,
+      "calls": [
+        {"op": "BatchUpdate", "p50_ms": 140.882, "p95_ms": 272.218, "p99_ms": 279.733}
+      ]
+    },
+    {
+      "name": "P4_deliver",
+      "items": 10000,
+      "mutations": 2,
+      "wall_s": 28.589021,
+      "items_per_s": 349.8,
+      "mutations_per_s": 699.6,
+      "calls": [
+        {"op": "BatchClaim", "p50_ms": 180.548, "p95_ms": 291.311, "p99_ms": 305.171},
+        {"op": "BatchFinalize", "p50_ms": 94.384, "p95_ms": 103.120, "p99_ms": 105.437}
+      ]
+    }
+  ]
+}

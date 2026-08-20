@@ -119,6 +119,8 @@ async fn generated_rich_history_has_exact_projection_image_and_read_parity() {
                 set_metadata: None,
                 set_gate_keys: None,
                 api001_batch: false,
+                client_item_key: None,
+                expected_item_version: None,
             }),
             vec![replacement],
         ),

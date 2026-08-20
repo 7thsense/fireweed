@@ -5154,6 +5154,8 @@ impl ProjectionData {
                                 set_metadata: None,
                                 set_gate_keys: None,
                                 api001_batch: false,
+                client_item_key: None,
+                expected_item_version: None,
                             },
                             expected_item_version: seen_version,
                         });
@@ -5969,6 +5971,8 @@ mod tests {
                 set_gate_keys: None,
                 set_entity_document: None,
                 api001_batch: true,
+                client_item_key: None,
+                expected_item_version: None,
             }))
             .unwrap();
         assert_eq!(
@@ -6963,6 +6967,8 @@ mod tests {
                 set_metadata: None,
                 set_gate_keys: None,
                 api001_batch: false,
+                client_item_key: None,
+                expected_item_version: None,
             })),
             None,
         )
@@ -7050,6 +7056,8 @@ mod tests {
                 set_metadata: Some(metadata.clone()),
                 set_gate_keys: Some(vec!["gate-a".into()]),
                 api001_batch: true,
+                client_item_key: None,
+                expected_item_version: None,
             })),
             None,
         )

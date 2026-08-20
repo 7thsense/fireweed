@@ -109,6 +109,7 @@ pub use compose::{
     claim_by_item_ids_body_hash, claim_by_query_body_hash, commit_body_hash,
     definition_page_from_sorted_rows, definition_page_from_storage_rows, item_mutation_fingerprint,
     max_position, outcome_entry_from_recovery, outcomes_from_recovery, plan_batch_update,
+    plan_batch_update_pipelined,
     push_body_hash, push_items_fingerprint_sha256, push_specs_fingerprint_sha256,
     queue_worker_partition, recovery_from_outcome_entry, request_expires_at,
     resolve_recovery_start, validate_gate_command_definition, validate_gate_key_sets,

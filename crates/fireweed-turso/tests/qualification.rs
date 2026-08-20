@@ -55,6 +55,8 @@ fn batch_fixture(
             set_metadata: Some(Metadata::default()),
             set_gate_keys: Some(vec![format!("gate-{index}")]),
             api001_batch: true,
+                client_item_key: None,
+                expected_item_version: None,
         });
     }
     (pushed, ids, updates)

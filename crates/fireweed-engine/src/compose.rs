@@ -1908,6 +1908,27 @@ pub fn plan_batch_update(
     updates: Vec<crate::port::BatchUpdateEntry>,
     snapshot: Vec<BatchUpdateSnapshotItem>,
 ) -> PlannedBatchUpdate {
+    plan_batch_update_inner(definition, supports_gates, updates, snapshot, false)
+}
+
+/// Same as [`plan_batch_update`], but a missing `ClientItemKey` is treated as apply lag:
+/// the command is logged with `item_id = 0` and the key, and the outcome is advisory `Updated`.
+pub fn plan_batch_update_pipelined(
+    definition: &QueueDefinition,
+    supports_gates: bool,
+    updates: Vec<crate::port::BatchUpdateEntry>,
+    snapshot: Vec<BatchUpdateSnapshotItem>,
+) -> PlannedBatchUpdate {
+    plan_batch_update_inner(definition, supports_gates, updates, snapshot, true)
+}
+
+fn plan_batch_update_inner(
+    definition: &QueueDefinition,
+    supports_gates: bool,
+    updates: Vec<crate::port::BatchUpdateEntry>,
+    snapshot: Vec<BatchUpdateSnapshotItem>,
+    unresolved_as_apply_lag: bool,
+) -> PlannedBatchUpdate {
     let mut by_id = HashMap::with_capacity(snapshot.len());
     let mut by_key = HashMap::<ClientItemKey, ItemId>::with_capacity(snapshot.len());
     for item in snapshot {
@@ -1940,7 +1961,15 @@ pub fn plan_batch_update(
             },
         };
         let Some(item_id) = resolved else {
-            outcomes[outcome_index] = BatchUpdateOutcome::NotFound;
+            if unresolved_as_apply_lag
+                && let Some((outcome, command)) =
+                    pipeline_unresolved_update(definition, supports_gates, update)
+            {
+                outcomes[outcome_index] = outcome;
+                commands.push((outcome_index, command));
+            } else {
+                outcomes[outcome_index] = BatchUpdateOutcome::NotFound;
+            }
             continue;
         };
         let Some(current) = by_id.get(&item_id) else {
@@ -2062,11 +2091,122 @@ pub fn plan_batch_update(
                 set_metadata,
                 set_gate_keys,
                 api001_batch: true,
+                client_item_key: Some(current.client_item_key.clone()),
+                expected_item_version: update.expected_item_version,
             },
         ));
     }
 
     PlannedBatchUpdate { outcomes, commands }
+}
+
+fn pipeline_unresolved_update(
+    definition: &QueueDefinition,
+    supports_gates: bool,
+    update: crate::port::BatchUpdateEntry,
+) -> Option<(BatchUpdateOutcome, UpdateFieldsCommand)> {
+    let key = match &update.item_ref {
+        BatchUpdateItemRef::ClientItemKey(key) => key.clone(),
+        BatchUpdateItemRef::Both {
+            client_item_key, ..
+        } => client_item_key.clone(),
+        BatchUpdateItemRef::ItemId(_) => return None,
+    };
+    let set_fields = match update.fields {
+        BatchUpdateValue::Keep => None,
+        BatchUpdateValue::Replace(fields) => {
+            let reserved = fields.keys().cloned().map(|name| (name, None)).collect();
+            if validate_api001_reserved_write_fields(&reserved).is_err() {
+                return None;
+            }
+            Some(fields)
+        }
+    };
+    let set_metadata = match update.metadata {
+        BatchUpdateValue::Keep => None,
+        BatchUpdateValue::Replace(metadata) => Some(metadata),
+    };
+    let set_gate_keys = match update.gate_keys {
+        BatchUpdateValue::Keep => None,
+        BatchUpdateValue::Replace(mut gate_keys) => {
+            gate_keys.sort();
+            gate_keys.dedup();
+            let malformed = gate_keys.iter().any(|key| {
+                key.is_empty()
+                    || key.len() > 256
+                    || !key
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+            });
+            let disabled = definition.eligibility_policy.gate_keys
+                != fireweed_core::GateKeyPolicy::Dynamic
+                && !gate_keys.is_empty();
+            let unsupported = !supports_gates && !gate_keys.is_empty();
+            let over_cap = definition
+                .eligibility_policy
+                .max_gate_keys_per_item
+                .is_some_and(|max| gate_keys.len() as u64 > max);
+            if malformed || disabled || unsupported || over_cap {
+                return None;
+            }
+            Some(gate_keys)
+        }
+    };
+    let set_priority = match update.priority {
+        BatchUpdateValue::Keep => ScheduleUpdate::Keep,
+        BatchUpdateValue::Replace(priority) => {
+            let type_matches = matches!(
+                (&definition.priority_model.kind, &priority),
+                (
+                    fireweed_core::PriorityModelKind::Timestamp,
+                    PriorityValue::Timestamp(_)
+                ) | (
+                    fireweed_core::PriorityModelKind::Int64,
+                    PriorityValue::Int64(_)
+                ) | (
+                    fireweed_core::PriorityModelKind::Decimal,
+                    PriorityValue::Decimal(_)
+                ) | (
+                    fireweed_core::PriorityModelKind::Text,
+                    PriorityValue::Text(_)
+                )
+            );
+            if !type_matches {
+                return None;
+            }
+            ScheduleUpdate::Set(Some(priority))
+        }
+    };
+    let set_not_before = match update.not_before {
+        BatchUpdateValue::Keep => ScheduleUpdate::Keep,
+        BatchUpdateValue::Replace(value) => ScheduleUpdate::Set(value),
+    };
+    let payload = match update.payload {
+        BatchUpdateValue::Keep => PayloadUpdate::Keep,
+        BatchUpdateValue::Replace(value) => PayloadUpdate::Set(value),
+    };
+    let item_id = ItemId::from_u64(0);
+    Some((
+        BatchUpdateOutcome::Updated {
+            item_id,
+            client_item_key: key.clone(),
+            item_version: 0,
+        },
+        UpdateFieldsCommand {
+            item_id,
+            field_ops: BTreeMap::new(),
+            payload,
+            set_priority,
+            set_not_before,
+            set_entity_document: None,
+            set_fields,
+            set_metadata,
+            set_gate_keys,
+            api001_batch: true,
+            client_item_key: Some(key),
+            expected_item_version: update.expected_item_version,
+        },
+    ))
 }
 
 /// Stable body fingerprint for the vectorized commit path (shared with async compositions).

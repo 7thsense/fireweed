@@ -349,7 +349,39 @@ impl TursoRelational {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|e| EngineError::Storage(e.to_string()))?;
-        let result = class_s_claim(&TursoRel(&tx), &request);
+        let hop_txn = tx.clone();
+        let tenant_id = request.tenant_id.to_string();
+        let queue_id = request.queue_id.to_string();
+        let now_nanos = request.now_nanos;
+        let limit = request.limit;
+        let lease_token = request.lease_token.clone();
+        let lease_expires_at = request.lease_expires_at;
+        let outbox_id = request.outbox_id.to_string();
+        let request_id = request.request_id.map(str::to_string);
+        let request_fingerprint = request.request_fingerprint;
+        let worker_id = request.worker_id.map(str::to_string);
+        let claim_unit = request.claim_unit.to_string();
+        let cohort_id = request.cohort_id.map(str::to_string);
+        let result = crate::tx::run_reltx_blocking(move || {
+            class_s_claim(
+                &TursoRel(&hop_txn),
+                &ClassSClaimRequest {
+                    tenant_id: &tenant_id,
+                    queue_id: &queue_id,
+                    now_nanos,
+                    limit,
+                    lease_token: &lease_token,
+                    lease_expires_at,
+                    outbox_id: &outbox_id,
+                    request_id: request_id.as_deref(),
+                    request_fingerprint,
+                    worker_id: worker_id.as_deref(),
+                    claim_unit: &claim_unit,
+                    cohort_id: cohort_id.as_deref(),
+                },
+            )
+        })
+        .await;
         match result {
             Ok(ok) => {
                 tx.commit()

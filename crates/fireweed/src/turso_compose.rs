@@ -254,6 +254,10 @@ where
             .collect())
     }
 
+    fn pipeline_unresolved_updates(&self) -> bool {
+        false
+    }
+
     fn reserve_planned_updates(
         &self,
         _shard: &QueueKey,
@@ -773,6 +777,7 @@ macro_rules! impl_turso_product_ports {
                     use fireweed_engine::{
                         BatchUpdateItemRef, CommandChecksum,
                         CommandEnvelope, QueueCommand, batch_update_body_hash, plan_batch_update,
+                        plan_batch_update_pipelined,
                     };
 
                     if request.updates.is_empty() {
@@ -802,8 +807,16 @@ macro_rules! impl_turso_product_ports {
                     }
                     let snapshot = self.planner_update_snapshot(&shard, &keys, &ids).await?;
 
-                    let plan =
-                        plan_batch_update(&definition, true, request.updates, snapshot);
+                    let plan = if self.pipeline_unresolved_updates() {
+                        plan_batch_update_pipelined(
+                            &definition,
+                            true,
+                            request.updates,
+                            snapshot,
+                        )
+                    } else {
+                        plan_batch_update(&definition, true, request.updates, snapshot)
+                    };
                     let updates: Vec<_> = plan
                         .commands
                         .into_iter()
@@ -815,7 +828,11 @@ macro_rules! impl_turso_product_ports {
                     };
                     if !updates.is_empty() {
                         let planned = self.reserve_planned_updates(&shard, &updates)?;
-                        let item_ids: Vec<_> = updates.iter().map(|u| u.item_id).collect();
+                        let item_ids: Vec<_> = updates
+                            .iter()
+                            .map(|u| u.item_id)
+                            .filter(|id| id.as_u64() != 0)
+                            .collect();
                         let envelope = CommandEnvelope {
                             command_id: self.ids.next_command_id(),
                             request_id: Some(request_id),
@@ -1487,6 +1504,7 @@ pub struct DerivedObjectLogTursoBackend {
     node_id: u8,
     async_apply: Option<AsyncProjectionApplyCoordinator<TursoRelational>>,
     last_produce: Arc<tokio::sync::Mutex<HashMap<QueueKey, CommandPosition>>>,
+    produce_caught_up: Arc<tokio::sync::Mutex<HashMap<QueueKey, CommandPosition>>>,
 }
 
 #[cfg(feature = "objectlog")]
@@ -1516,6 +1534,7 @@ impl DerivedObjectLogTursoBackend {
             None => None,
         };
         let last_produce = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let produce_caught_up = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let committer = ObjectLogTursoCommitter {
             log: Arc::clone(&log),
             projection: Arc::clone(&projection),
@@ -1572,6 +1591,7 @@ impl DerivedObjectLogTursoBackend {
             node_id,
             async_apply,
             last_produce,
+            produce_caught_up,
         };
         backend.recover_async().await?;
         Ok(backend)
@@ -1598,7 +1618,19 @@ impl DerivedObjectLogTursoBackend {
         let Some(target) = target else {
             return Ok(());
         };
-        self.wait_for_projection(shard, &target).await
+        if let Some(caught) = self.produce_caught_up.lock().await.get(shard)
+            && (caught.backend_epoch > target.backend_epoch
+                || (caught.backend_epoch == target.backend_epoch
+                    && caught.sequence >= target.sequence))
+        {
+            return Ok(());
+        }
+        self.wait_for_projection(shard, &target).await?;
+        self.produce_caught_up
+            .lock()
+            .await
+            .insert(shard.clone(), target);
+        Ok(())
     }
 
     async fn wait_for_projection(
@@ -1666,34 +1698,11 @@ impl DerivedObjectLogTursoBackend {
         keys: &[ClientItemKey],
         _ids: &[ItemId],
     ) -> EngineResult<Vec<fireweed_engine::BatchUpdateSnapshotItem>> {
-        loop {
-            let snapshot = self.projection.server_update_snapshot(shard, keys).await?;
-            if self.async_apply.is_none() || snapshot.len() == keys.len() {
-                return Ok(snapshot);
-            }
-            let target = self.last_produce.lock().await.get(shard).cloned();
-            let Some(target) = target else {
-                return Ok(snapshot);
-            };
-            let projected = AsyncProjectionStore::recovery_high_water(
-                self.projection.as_ref(),
-                shard.clone(),
-            )
-            .await?;
-            if let Some(projected) = projected
-                && (projected.backend_epoch > target.backend_epoch
-                    || (projected.backend_epoch == target.backend_epoch
-                        && projected.sequence >= target.sequence))
-            {
-                return Ok(snapshot);
-            }
-            if let Some(coordinator) = &self.async_apply {
-                coordinator.ensure_healthy(shard)?;
-                coordinator.wait_for_progress(shard).await?;
-            } else {
-                return Ok(snapshot);
-            }
-        }
+        self.projection.server_update_snapshot(shard, keys).await
+    }
+
+    fn pipeline_unresolved_updates(&self) -> bool {
+        self.async_apply.is_some()
     }
 
     fn reserve_planned_updates(

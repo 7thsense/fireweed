@@ -1255,6 +1255,8 @@ impl UpdateFieldsPort for PostgresBackend {
                 set_metadata: None,
                 set_gate_keys: None,
                 api001_batch: false,
+                client_item_key: None,
+                expected_item_version: None,
             });
             let env = g.make_envelope(cmd, vec![item_id], now);
             g.commit_locked(shard, env, expected_epoch)?;

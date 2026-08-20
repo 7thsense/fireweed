@@ -126,6 +126,8 @@ async fn api001_update_command_applies_every_replacement_field() {
                 set_metadata: Some(metadata.clone()),
                 set_gate_keys: Some(vec!["gate-a".into()]),
                 api001_batch: true,
+                client_item_key: None,
+                expected_item_version: None,
             }),
             vec![item_id],
         ),

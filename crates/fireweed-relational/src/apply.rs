@@ -2761,31 +2761,70 @@ fn apply_update_fields_batch_sql(
         group_key: Option<String>,
         created_at: i64,
         created_seq: i64,
+        item_version: i64,
+        lifecycle_state: String,
     }
-    let need_payload = updates
-        .iter()
-        .any(|update| matches!(update.payload, PayloadUpdate::Keep));
     let write_payload = updates
         .iter()
         .any(|update| matches!(update.payload, PayloadUpdate::Set(_)));
+    let keep_payload = updates
+        .iter()
+        .any(|update| matches!(update.payload, PayloadUpdate::Keep));
+    let need_payload = write_payload && keep_payload;
+    let mut key_resolved: HashMap<String, String> = HashMap::new();
+    let unresolved_keys: Vec<String> = updates
+        .iter()
+        .filter(|update| update.item_id.as_u64() == 0)
+        .filter_map(|update| {
+            update
+                .client_item_key
+                .as_ref()
+                .map(|key| key.as_str().to_string())
+        })
+        .collect();
+    for chunk in unresolved_keys.chunks(UPDATE_FIELDS_BATCH) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "SELECT item_id,client_item_key FROM fireweed_items \
+             WHERE tenant_id=? AND queue_id=? AND client_item_key IN ({placeholders}) \
+             AND superseded=0"
+        );
+        let mut params = vec![RelValue::Text(t.clone()), RelValue::Text(q.clone())];
+        params.extend(chunk.iter().cloned().map(RelValue::Text));
+        for row in crate::rel_query(tx, &sql, params)? {
+            key_resolved.insert(row.get::<String>(1)?, row.get::<String>(0)?);
+        }
+    }
     let mut current: HashMap<String, CurrentUpdateRow> = HashMap::new();
     let ids: Vec<String> = updates
         .iter()
-        .map(|update| update.item_id.to_string())
+        .filter_map(|update| {
+            if update.item_id.as_u64() == 0 {
+                update
+                    .client_item_key
+                    .as_ref()
+                    .and_then(|key| key_resolved.get(key.as_str()).cloned())
+            } else {
+                Some(update.item_id.to_string())
+            }
+        })
         .collect();
     for chunk in ids.chunks(UPDATE_FIELDS_BATCH) {
         let placeholders = vec!["?"; chunk.len()].join(",");
         let sql = if need_payload {
             format!(
                 "SELECT item_id,fields,lifecycle_state,priority,not_before,eligible_since,payload,metadata,\
-                        group_key,created_at,created_seq \
+                        group_key,created_at,created_seq,item_version \
                  FROM fireweed_items WHERE tenant_id=? AND queue_id=? AND item_id IN ({placeholders}) \
                  AND lifecycle_state IN ('Pending','Leased') AND superseded=0 AND fenced=0"
             )
         } else {
             format!(
                 "SELECT item_id,fields,lifecycle_state,priority,not_before,eligible_since,NULL,metadata,\
-                        group_key,created_at,created_seq \
+                        group_key,created_at,created_seq,item_version \
                  FROM fireweed_items WHERE tenant_id=? AND queue_id=? AND item_id IN ({placeholders}) \
                  AND lifecycle_state IN ('Pending','Leased') AND superseded=0 AND fenced=0"
             )
@@ -2805,6 +2844,8 @@ fn apply_update_fields_batch_sql(
                     group_key: row.get(8)?,
                     created_at: row.get(9)?,
                     created_seq: row.get(10)?,
+                    item_version: row.get(11)?,
+                    lifecycle_state: row.get(2)?,
                 },
             );
         }
@@ -2813,10 +2854,27 @@ fn apply_update_fields_batch_sql(
     let mut ranked: Vec<GroupItemRef> = Vec::new();
     let mut left_eligible: Vec<GroupItemRef> = Vec::new();
     for update in updates {
-        let id = update.item_id.to_string();
+        let id = if update.item_id.as_u64() == 0 {
+            update
+                .client_item_key
+                .as_ref()
+                .and_then(|key| key_resolved.get(key.as_str()).cloned())
+                .unwrap_or_default()
+        } else {
+            update.item_id.to_string()
+        };
         let Some(row) = current.remove(&id) else {
             continue;
         };
+        if update.api001_batch && row.lifecycle_state != "Pending" {
+            continue;
+        }
+        if update
+            .expected_item_version
+            .is_some_and(|expected| expected != row.item_version as u64)
+        {
+            continue;
+        }
         let CurrentUpdateRow {
             fields: raw_fields,
             priority: mut priority_json,
@@ -2827,6 +2885,8 @@ fn apply_update_fields_batch_sql(
             group_key,
             created_at,
             created_seq,
+            item_version: _,
+            lifecycle_state: _,
         } = row;
         let fields_json = match &update.set_fields {
             Some(fields) => fields_to_json(fields)?,

@@ -1435,7 +1435,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "fireweed"
-version = "0.31.19"
+version = "0.31.20"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -1458,7 +1458,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-conformance"
-version = "0.31.19"
+version = "0.31.20"
 dependencies = [
  "bytes",
  "fireweed",
@@ -1477,7 +1477,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-core"
-version = "0.31.19"
+version = "0.31.20"
 dependencies = [
  "axon-esf",
  "proptest",
@@ -1487,7 +1487,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-engine"
-version = "0.31.19"
+version = "0.31.20"
 dependencies = [
  "axon-esf",
  "base64",
@@ -1506,7 +1506,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-loadgen"
-version = "0.31.19"
+version = "0.31.20"
 dependencies = [
  "fireweed-release",
  "serde",
@@ -1515,7 +1515,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-memory"
-version = "0.31.19"
+version = "0.31.20"
 dependencies = [
  "bytes",
  "fireweed-conformance",
@@ -1527,7 +1527,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-objectlog"
-version = "0.31.19"
+version = "0.31.20"
 dependencies = [
  "aws-sdk-s3",
  "bytes",
@@ -1546,7 +1546,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-postgres"
-version = "0.31.19"
+version = "0.31.20"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -1568,7 +1568,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-projection"
-version = "0.31.19"
+version = "0.31.20"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -1582,7 +1582,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-relational"
-version = "0.31.19"
+version = "0.31.20"
 dependencies = [
  "bytes",
  "fireweed-core",
@@ -1594,7 +1594,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-release"
-version = "0.31.19"
+version = "0.31.20"
 dependencies = [
  "serde",
  "serde_json",
@@ -1603,7 +1603,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-resp"
-version = "0.31.19"
+version = "0.31.20"
 dependencies = [
  "bytes",
  "fireweed-core",
@@ -1618,7 +1618,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-server"
-version = "0.31.19"
+version = "0.31.20"
 dependencies = [
  "bytes",
  "chrono",
@@ -1650,11 +1650,11 @@ dependencies = [
 
 [[package]]
 name = "fireweed-sim-support"
-version = "0.31.19"
+version = "0.31.20"
 
 [[package]]
 name = "fireweed-sqlite"
-version = "0.31.19"
+version = "0.31.20"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -1673,7 +1673,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-turso"
-version = "0.31.19"
+version = "0.31.20"
 dependencies = [
  "bytes",
  "fireweed-conformance",

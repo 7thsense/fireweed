@@ -697,47 +697,30 @@ async fn ss_phased_capacity_smoke() {
     }
 
     // --- P4 deliver: unfiltered claim + complete ---
-    // Map plans claims without Turso. Render still catch-up-applies, so keep
-    // one claim in flight and overlap finalize of batch N with claim N+1.
+    // Sequential claim then complete. Overlapping complete N with claim N+1
+    // packs two appends; the follower cancels its apply reservation and the
+    // leader can enqueue a non-contiguous batch (poison 300→302). Ordered
+    // enqueue is a follow-up.
     let mut p4_claim = CallStats::new();
     let mut p4_fin = CallStats::new();
     let t0 = Instant::now();
     let mut completed = 0usize;
-    let c0 = Instant::now();
-    let mut prev = fw
-        .claim(&queue, claim_batch, 30_000)
-        .await
-        .expect("P4 claim");
-    p4_claim.record(c0.elapsed());
     loop {
-        if prev.is_empty() {
+        let c0 = Instant::now();
+        let claimed = fw
+            .claim(&queue, claim_batch, 30_000)
+            .await
+            .expect("P4 claim");
+        p4_claim.record(c0.elapsed());
+        if claimed.is_empty() {
             break;
         }
-        let ids: Vec<_> = prev.iter().map(|c| c.item_id).collect();
+        let ids: Vec<_> = claimed.iter().map(|c| c.item_id).collect();
         let n_ids = ids.len();
-        let fw_fin = Arc::clone(&fw);
-        let fw_claim = Arc::clone(&fw);
-        let queue_fin = queue.clone();
-        let queue_claim = queue.clone();
-        let (fin_elapsed, (claim_elapsed, next)) = tokio::join!(
-            async move {
-                let c1 = Instant::now();
-                fw_fin.complete(&queue_fin, ids).await.expect("P4 complete");
-                c1.elapsed()
-            },
-            async move {
-                let c0 = Instant::now();
-                let claimed = fw_claim
-                    .claim(&queue_claim, claim_batch, 30_000)
-                    .await
-                    .expect("P4 claim");
-                (c0.elapsed(), claimed)
-            }
-        );
-        p4_fin.record(fin_elapsed);
-        p4_claim.record(claim_elapsed);
+        let c1 = Instant::now();
+        fw.complete(&queue, ids).await.expect("P4 complete");
+        p4_fin.record(c1.elapsed());
         completed += n_ids;
-        prev = next;
     }
     assert_eq!(completed, n, "P4 completed all items");
     let p4 = PhaseRow {

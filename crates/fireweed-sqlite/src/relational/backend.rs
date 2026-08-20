@@ -3409,6 +3409,8 @@ impl UpdateFieldsPort for SqliteRelationalBackend {
                     set_metadata: None,
                     set_gate_keys: None,
                     api001_batch: false,
+                client_item_key: None,
+                expected_item_version: None,
                 }),
                 now,
                 expected_epoch,

@@ -68,7 +68,7 @@ Apply (`apply_update_fields_batch_sql`):
 - `api001_batch`: skip `Leased` / terminal. Non-`api001_batch` (FAC-1) still updates leased rows. Do **not** change the `IN ('Pending','Leased')` filter globally.
 - Envelope `item_ids`: real ids when known; omit `0`.
 
-Delete `apply_start_delay_ms.max(300)`. Ingest p50 must stay in the same band.
+Keep `apply_start_delay_ms.max(300)`. Removing it drops ingest to ~300/s (apply contends for the same disk as produce). The sleep is one-shot per shard on first produce apply.
 
 Do not add a process map.
 
@@ -88,7 +88,7 @@ Apply runs **during** enrich/schedule, not after they ack the last batch.
 - Delete outbox after the durable append, **before** enqueue apply. Drain may re-append; Claim apply of the same token is a no-op on already-Leased rows; bearers upsert is idempotent.
 - `finalize_validate` on the reader. No IMMEDIATE, no rollback. Finalize apply no-ops if the row is not leased / token mismatch (TOCTOU is apply’s problem, not validate’s).
 - Plan SELECT for finalize: token + version + attempts. No payload.
-- SS P4 uses the same inflight=8 as ingest: up to 8 concurrent `claim(100)` (writer serializes the lease; appends overlap). Do not stop the phase on the first empty claim; stop when a full wave returns empty. Overlap complete of wave N with claim of wave N+1 as today, at wave grain.
+- SS P4 keeps one claim in flight overlapping complete of batch N. Concurrent claim appends can enqueue out of sequence and poison apply (`307 -> 313`). Inflight=8 on claim needs ordered enqueue, not this cut.
 
 No `SKIP LOCKED`. No reservation table.
 

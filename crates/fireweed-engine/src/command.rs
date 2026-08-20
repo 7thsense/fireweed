@@ -564,6 +564,32 @@ pub struct UpdateFieldsCommand {
     /// the older FAC-1/reschedule command behavior while retaining one replay-compatible command variant.
     #[serde(default)]
     pub api001_batch: bool,
+    /// Present when the producer addressed the row by key and `item_id` is unresolved (`0`).
+    /// Absent on historical envelopes; apply then uses `item_id` only.
+    #[serde(default)]
+    pub client_item_key: Option<ClientItemKey>,
+    /// Copied from the request when the producer could not peek the row. Apply skips on mismatch.
+    #[serde(default)]
+    pub expected_item_version: Option<u64>,
+}
+
+impl Default for UpdateFieldsCommand {
+    fn default() -> Self {
+        Self {
+            item_id: ItemId::from_u64(0),
+            field_ops: BTreeMap::new(),
+            payload: PayloadUpdate::Keep,
+            set_priority: ScheduleUpdate::Keep,
+            set_not_before: ScheduleUpdate::Keep,
+            set_entity_document: None,
+            set_fields: None,
+            set_metadata: None,
+            set_gate_keys: None,
+            api001_batch: false,
+            client_item_key: None,
+            expected_item_version: None,
+        }
+    }
 }
 
 /// Batched in-place field/payload/schedule merge. Same per-item semantics as
@@ -585,7 +611,9 @@ pub enum ScheduleUpdate<T> {
 /// Disposition of an item's payload under [`UpdateFieldsCommand`]: leave it as-is, or replace it
 /// (`Set(None)` clears it).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Default)]
 pub enum PayloadUpdate {
+    #[default]
     Keep,
     #[serde(with = "crate::wire_bytes::option_bytes")]
     Set(Option<Bytes>),
@@ -1470,6 +1498,8 @@ mod serde_tests {
                 set_metadata: None,
                 set_gate_keys: None,
                 api001_batch: false,
+                client_item_key: None,
+                expected_item_version: None,
             }),
             QueueCommand::UpdateFieldsBatch(UpdateFieldsBatchCommand {
                 updates: vec![UpdateFieldsCommand {
@@ -1483,6 +1513,8 @@ mod serde_tests {
                     set_metadata: None,
                     set_gate_keys: None,
                     api001_batch: true,
+                client_item_key: None,
+                expected_item_version: None,
                 }],
             }),
             QueueCommand::LeaseExpired(LeaseExpiredCommand {
@@ -1917,6 +1949,8 @@ mod serde_tests {
                     set_metadata: None,
                     set_gate_keys: None,
                     api001_batch: false,
+                client_item_key: None,
+                expected_item_version: None,
                 }),
                 vec![ExpectedRecord {
                     item_id: Some(iid("a")),
@@ -1942,6 +1976,8 @@ mod serde_tests {
                             set_metadata: None,
                             set_gate_keys: None,
                             api001_batch: true,
+                client_item_key: None,
+                expected_item_version: None,
                         },
                         UpdateFieldsCommand {
                             item_id: iid("b"),
@@ -1954,6 +1990,8 @@ mod serde_tests {
                             set_metadata: None,
                             set_gate_keys: None,
                             api001_batch: true,
+                client_item_key: None,
+                expected_item_version: None,
                         },
                     ],
                 }),

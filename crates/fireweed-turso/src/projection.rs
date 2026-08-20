@@ -2203,64 +2203,55 @@ impl AsyncProjectionStore for TursoRelational {
         _default_max_attempts: u32,
     ) -> impl std::future::Future<Output = EngineResult<Vec<fireweed_engine::FinalizeLeaseMember>>> + Send
     {
-        let writer = self.writer.clone();
+        let reader = self.reader.clone();
         async move {
-            let mut connection = writer.lock().await;
-            let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .await
-                .map_err(storage)?;
+            let connection = reader.lock().await;
             let tenant = shard.tenant_id.as_str().to_string();
             let queue = shard.queue_id.as_str().to_string();
             let now_nanos = ts_nanos(now);
-            let result = async {
-                let mut attempts = Vec::with_capacity(targets.len());
-                for chunk in targets.chunks(VALIDATION_ITEM_CHUNK) {
-                    let rows = validation_rows_by_item(
-                        &transaction,
-                        &tenant,
-                        &queue,
-                        &chunk.iter().map(|target| target.item_id).collect::<Vec<_>>(),
-                        "lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash,item_version,retry_count,max_attempts",
-                    )
-                    .await?;
-                    for target in chunk {
-                        let row = rows.get(&target.item_id).ok_or(EngineError::NotFound)?;
-                        let state = parse_state(&text(&row[0])?).map_err(storage)?;
-                        if integer(&row[1])? != 0 { return Err(EngineError::StaleLease); }
-                        if state.is_terminal() { return Err(EngineError::Terminal); }
-                        if integer(&row[2])? != 0 { return Err(EngineError::Superseded); }
-                        if !matches!(row[3], Value::Null) {
-                            return Err(EngineError::Invalid("cohort member requires cohort lease"));
-                        }
-                        if state != ItemState::Leased {
-                            return Err(EngineError::Invalid("item is not leased"));
-                        }
-                        if blob(&row[5])? != lease_hash(&target.lease_token)
-                            || matches!(row[4], Value::Null)
-                            || integer(&row[4])? < now_nanos
-                        {
-                            return Err(EngineError::StaleLease);
-                        }
-                        let version = integer(&row[6])?;
-                        if version < 0 || version as u64 != target.item_version {
-                            return Err(EngineError::Conflict);
-                        }
-                        attempts.push(fireweed_engine::FinalizeLeaseMember {
-                            item_id: target.item_id,
-                            attempt_count: nonnegative_u32(integer(&row[7])?, "retry_count")?,
-                            max_attempts: nonnegative_u32(
-                                integer(&row[8])?,
-                                "max_attempts",
-                            )?,
-                        });
+            let mut attempts = Vec::with_capacity(targets.len());
+            for chunk in targets.chunks(VALIDATION_ITEM_CHUNK) {
+                let rows = validation_rows_by_item(
+                    &connection,
+                    &tenant,
+                    &queue,
+                    &chunk.iter().map(|target| target.item_id).collect::<Vec<_>>(),
+                    "lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash,item_version,retry_count,max_attempts",
+                )
+                .await?;
+                for target in chunk {
+                    let row = rows.get(&target.item_id).ok_or(EngineError::NotFound)?;
+                    let state = parse_state(&text(&row[0])?).map_err(storage)?;
+                    if integer(&row[1])? != 0 { return Err(EngineError::StaleLease); }
+                    if state.is_terminal() { return Err(EngineError::Terminal); }
+                    if integer(&row[2])? != 0 { return Err(EngineError::Superseded); }
+                    if !matches!(row[3], Value::Null) {
+                        return Err(EngineError::Invalid("cohort member requires cohort lease"));
                     }
+                    if state != ItemState::Leased {
+                        return Err(EngineError::Invalid("item is not leased"));
+                    }
+                    if blob(&row[5])? != lease_hash(&target.lease_token)
+                        || matches!(row[4], Value::Null)
+                        || integer(&row[4])? < now_nanos
+                    {
+                        return Err(EngineError::StaleLease);
+                    }
+                    let version = integer(&row[6])?;
+                    if version < 0 || version as u64 != target.item_version {
+                        return Err(EngineError::Conflict);
+                    }
+                    attempts.push(fireweed_engine::FinalizeLeaseMember {
+                        item_id: target.item_id,
+                        attempt_count: nonnegative_u32(integer(&row[7])?, "retry_count")?,
+                        max_attempts: nonnegative_u32(
+                            integer(&row[8])?,
+                            "max_attempts",
+                        )?,
+                    });
                 }
-                Ok(attempts)
             }
-            .await;
-            transaction.rollback().await.map_err(storage)?;
-            result
+            Ok(attempts)
         }
     }
 
