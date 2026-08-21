@@ -11,6 +11,11 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
+use crate::command::{
+    QueueCommand, SelectionFenceDisposition, selection_fence_disposition,
+    selection_fence_disposition_for_commands,
+};
+use crate::commit::{AppendAdmissionClass, RawCommitRequest};
 use crate::{KeyedQueueGate, QueueGateAcquire, QueueGateError, QueueGatePermit};
 
 pub const CLAIM_MAX_CALLERS: usize = 1_024;
@@ -32,6 +37,99 @@ pub const SHARED_DRIVER_SLOTS_RESOURCE: &str = "shared driver read slots";
 pub const OUTCOME_READ_SLOTS_RESOURCE: &str = "committed outcome read slots";
 pub const MUTATION_SEQUENCER_RESOURCE: &str = "mutation sequencer capacity";
 pub const SELECTION_FENCE_WAITERS_RESOURCE: &str = "selection fence waiters";
+
+/// Compatible microbatch overlays currently have exactly the two reviewed FIFO shapes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutationGenerationKind {
+    Push,
+    BatchUpdate,
+}
+
+/// Whether one command joins a compatible mutation generation, owns a singleton generation, or does
+/// not mutate candidate selection and therefore never joins the mutation sequencer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutationGenerationDisposition {
+    Compatible(MutationGenerationKind),
+    Singleton,
+    NotCandidateMutating,
+}
+
+/// Classify mutation-generation membership with no wildcard command arms.
+pub fn mutation_generation_disposition(command: &QueueCommand) -> MutationGenerationDisposition {
+    use MutationGenerationDisposition::{Compatible, NotCandidateMutating, Singleton};
+
+    match command {
+        QueueCommand::CreateQueue(_) => Singleton,
+        QueueCommand::Push(_) => Compatible(MutationGenerationKind::Push),
+        QueueCommand::Claim(_) => NotCandidateMutating,
+        QueueCommand::CohortClaim(_) => NotCandidateMutating,
+        QueueCommand::RenewLease(_) => NotCandidateMutating,
+        QueueCommand::CohortRenewLease(_) => NotCandidateMutating,
+        QueueCommand::ReassignLease(_) => NotCandidateMutating,
+        QueueCommand::Finalize(_) => match selection_fence_disposition(command) {
+            SelectionFenceDisposition::Shared => Singleton,
+            SelectionFenceDisposition::Bypass => NotCandidateMutating,
+            SelectionFenceDisposition::Exclusive => NotCandidateMutating,
+        },
+        QueueCommand::CohortFinalize(_) => match selection_fence_disposition(command) {
+            SelectionFenceDisposition::Shared => Singleton,
+            SelectionFenceDisposition::Bypass => NotCandidateMutating,
+            SelectionFenceDisposition::Exclusive => NotCandidateMutating,
+        },
+        QueueCommand::ReplacePending(_) => Singleton,
+        QueueCommand::UpdateFields(_) => Singleton,
+        QueueCommand::UpdateFieldsBatch(_) => Compatible(MutationGenerationKind::BatchUpdate),
+        QueueCommand::MutateItems(_) => Singleton,
+        QueueCommand::LeaseExpired(_) => Singleton,
+        QueueCommand::CohortExpired(_) => Singleton,
+        QueueCommand::FenceLease(_) => Singleton,
+        QueueCommand::UnfenceLease(_) => Singleton,
+        QueueCommand::PauseQueue(_) => Singleton,
+        QueueCommand::ResumeQueue => Singleton,
+        QueueCommand::PurgeItems(_) => Singleton,
+        QueueCommand::SetGates(_) => Singleton,
+        QueueCommand::WriteSideRecords(_) => NotCandidateMutating,
+        QueueCommand::AdvanceInstanceFence(_) => NotCandidateMutating,
+    }
+}
+
+/// Validate the one-admission invariant for an inert derived append classification.
+///
+/// `Some(1)` is one reviewed non-bypass admission, `Some(0)` is an allowed bypass/non-serving class,
+/// and `None` is a carrier/disposition mismatch. No permit or fence is acquired here.
+pub fn audited_append_admission_count(
+    append_admission: AppendAdmissionClass,
+    disposition: SelectionFenceDisposition,
+) -> Option<usize> {
+    match append_admission {
+        AppendAdmissionClass::NonDerived
+        | AppendAdmissionClass::AtomicNative
+        | AppendAdmissionClass::RecoveryOnly => Some(0),
+        AppendAdmissionClass::KeyedPermitLive => Some(usize::from(
+            disposition != SelectionFenceDisposition::Bypass,
+        )),
+        AppendAdmissionClass::SelectionRequired => match disposition {
+            SelectionFenceDisposition::Shared | SelectionFenceDisposition::Exclusive => Some(1),
+            SelectionFenceDisposition::Bypass => None,
+        },
+        AppendAdmissionClass::Bypass => match disposition {
+            SelectionFenceDisposition::Bypass => Some(0),
+            SelectionFenceDisposition::Shared | SelectionFenceDisposition::Exclusive => None,
+        },
+        AppendAdmissionClass::ClaimCoordinatorLive => match disposition {
+            SelectionFenceDisposition::Exclusive => Some(1),
+            SelectionFenceDisposition::Bypass | SelectionFenceDisposition::Shared => None,
+        },
+    }
+}
+
+/// Audit a complete sealed request against its carried append-time routing class.
+pub fn audited_append_request_admission_count(request: &RawCommitRequest) -> Option<usize> {
+    let disposition = selection_fence_disposition_for_commands(
+        request.commands().iter().map(|envelope| &envelope.command),
+    );
+    audited_append_admission_count(request.append_admission(), disposition)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoordinationError {
@@ -1916,7 +2014,13 @@ where
 mod tests {
     use std::task::{Wake, Waker};
 
+    use fireweed_core::{ItemId, LeaseToken, UtcTimestamp};
+
     use super::*;
+    use crate::{
+        ClaimCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome, LeaseExpiredCommand,
+        PushCommand, RenewLeaseCommand, UpdateFieldsBatchCommand, WriteSideRecordsCommand,
+    };
 
     struct NoopWake;
 
@@ -1944,6 +2048,156 @@ mod tests {
             Poll::Ready(Err(actual)) => assert_eq!(actual, expected),
             Poll::Ready(Ok(_)) | Poll::Pending => panic!("expected ready coordination error"),
         }
+    }
+
+    fn finalize(kind: FinalizeKind) -> QueueCommand {
+        QueueCommand::Finalize(FinalizeCommand {
+            outcomes: vec![FinalizeOutcome {
+                item_id: ItemId::from_u64(1),
+                kind,
+                applied_state: None,
+                not_before: None,
+            }],
+        })
+    }
+
+    fn claim() -> QueueCommand {
+        QueueCommand::Claim(ClaimCommand {
+            item_ids: vec![ItemId::from_u64(1)],
+            lease_token: LeaseToken::new("lease").unwrap(),
+            lease_expires_at: UtcTimestamp::new(2, 0).unwrap(),
+            worker_id: None,
+        })
+    }
+
+    #[test]
+    fn candidate_mutations_join_generations_and_pending_consumers_do_not() {
+        let compatible = [
+            (
+                QueueCommand::Push(PushCommand { items: Vec::new() }),
+                MutationGenerationKind::Push,
+            ),
+            (
+                QueueCommand::UpdateFieldsBatch(UpdateFieldsBatchCommand {
+                    updates: Vec::new(),
+                }),
+                MutationGenerationKind::BatchUpdate,
+            ),
+        ];
+        for (command, kind) in compatible {
+            assert_eq!(
+                selection_fence_disposition(&command),
+                SelectionFenceDisposition::Shared
+            );
+            assert_eq!(
+                mutation_generation_disposition(&command),
+                MutationGenerationDisposition::Compatible(kind)
+            );
+        }
+
+        for command in [
+            QueueCommand::LeaseExpired(LeaseExpiredCommand {
+                item_ids: vec![ItemId::from_u64(1)],
+            }),
+            finalize(FinalizeKind::Retry),
+        ] {
+            assert_eq!(
+                selection_fence_disposition(&command),
+                SelectionFenceDisposition::Shared
+            );
+            assert_eq!(
+                mutation_generation_disposition(&command),
+                MutationGenerationDisposition::Singleton
+            );
+        }
+
+        let pending_consumer = claim();
+        assert_eq!(
+            selection_fence_disposition(&pending_consumer),
+            SelectionFenceDisposition::Exclusive
+        );
+        assert_eq!(
+            mutation_generation_disposition(&pending_consumer),
+            MutationGenerationDisposition::NotCandidateMutating
+        );
+    }
+
+    #[test]
+    fn leased_and_non_work_commands_bypass_generations() {
+        let commands = [
+            QueueCommand::RenewLease(RenewLeaseCommand {
+                item_ids: vec![ItemId::from_u64(1)],
+                lease_expires_at: UtcTimestamp::new(3, 0).unwrap(),
+            }),
+            finalize(FinalizeKind::Complete),
+            QueueCommand::WriteSideRecords(WriteSideRecordsCommand::default()),
+        ];
+        for command in commands {
+            assert_eq!(
+                selection_fence_disposition(&command),
+                SelectionFenceDisposition::Bypass
+            );
+            assert_eq!(
+                mutation_generation_disposition(&command),
+                MutationGenerationDisposition::NotCandidateMutating
+            );
+        }
+    }
+
+    #[test]
+    fn non_bypass_derived_append_has_exactly_one_audited_admission() {
+        for (class, disposition) in [
+            (
+                AppendAdmissionClass::KeyedPermitLive,
+                SelectionFenceDisposition::Shared,
+            ),
+            (
+                AppendAdmissionClass::SelectionRequired,
+                SelectionFenceDisposition::Shared,
+            ),
+            (
+                AppendAdmissionClass::SelectionRequired,
+                SelectionFenceDisposition::Exclusive,
+            ),
+            (
+                AppendAdmissionClass::ClaimCoordinatorLive,
+                SelectionFenceDisposition::Exclusive,
+            ),
+        ] {
+            assert_eq!(audited_append_admission_count(class, disposition), Some(1));
+        }
+
+        assert_eq!(
+            audited_append_admission_count(
+                AppendAdmissionClass::Bypass,
+                SelectionFenceDisposition::Bypass,
+            ),
+            Some(0)
+        );
+        for class in [
+            AppendAdmissionClass::AtomicNative,
+            AppendAdmissionClass::RecoveryOnly,
+            AppendAdmissionClass::NonDerived,
+        ] {
+            assert_eq!(
+                audited_append_admission_count(class, SelectionFenceDisposition::Shared),
+                Some(0)
+            );
+        }
+        assert_eq!(
+            audited_append_admission_count(
+                AppendAdmissionClass::ClaimCoordinatorLive,
+                SelectionFenceDisposition::Shared,
+            ),
+            None
+        );
+        assert_eq!(
+            audited_append_admission_count(
+                AppendAdmissionClass::Bypass,
+                SelectionFenceDisposition::Exclusive,
+            ),
+            None
+        );
     }
 
     #[test]

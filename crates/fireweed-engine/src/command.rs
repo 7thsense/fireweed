@@ -89,6 +89,123 @@ pub enum QueueCommand {
     AdvanceInstanceFence(AdvanceInstanceFenceCommand),
 }
 
+/// Selection-fence participation for one durable command.
+///
+/// Ordering makes sealed-vector aggregation explicit: bypass < shared < exclusive.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SelectionFenceDisposition {
+    #[default]
+    Bypass,
+    Shared,
+    Exclusive,
+}
+
+fn classify_schedule_update<T>(update: &ScheduleUpdate<T>) {
+    match update {
+        ScheduleUpdate::Keep => {}
+        ScheduleUpdate::Set(_) => {}
+    }
+}
+
+fn classify_payload_update(update: &PayloadUpdate) {
+    match update {
+        PayloadUpdate::Keep => {}
+        PayloadUpdate::Set(_) => {}
+    }
+}
+
+fn classify_update_fields(command: &UpdateFieldsCommand) {
+    classify_payload_update(&command.payload);
+    classify_schedule_update(&command.set_priority);
+    classify_schedule_update(&command.set_not_before);
+}
+
+fn classify_mutate_items(command: &MutateItemsCommand) {
+    for mutation in &command.items {
+        match &mutation.action {
+            ResolvedItemMutationAction::Purge => {}
+            ResolvedItemMutationAction::Replace(_) => {}
+        }
+    }
+    for change in &command.gate_changes {
+        let _ = change.blocked;
+    }
+}
+
+fn finalize_kind_disposition(kind: FinalizeKind) -> SelectionFenceDisposition {
+    match kind {
+        FinalizeKind::Complete | FinalizeKind::Fail => SelectionFenceDisposition::Bypass,
+        FinalizeKind::Retry | FinalizeKind::Release | FinalizeKind::Rearm => {
+            SelectionFenceDisposition::Shared
+        }
+    }
+}
+
+/// Classify one command without wildcard arms so command and nested-action additions fail compilation
+/// until their selection effect is reviewed.
+pub fn selection_fence_disposition(command: &QueueCommand) -> SelectionFenceDisposition {
+    use SelectionFenceDisposition::{Bypass, Exclusive, Shared};
+
+    match command {
+        QueueCommand::CreateQueue(_) => Shared,
+        QueueCommand::Push(_) => Shared,
+        QueueCommand::Claim(_) => Exclusive,
+        QueueCommand::CohortClaim(_) => Exclusive,
+        QueueCommand::RenewLease(_) => Bypass,
+        QueueCommand::CohortRenewLease(_) => Bypass,
+        QueueCommand::ReassignLease(_) => Bypass,
+        QueueCommand::Finalize(command) => command
+            .outcomes
+            .iter()
+            .map(|outcome| finalize_kind_disposition(outcome.kind))
+            .max()
+            .unwrap_or(Bypass),
+        QueueCommand::CohortFinalize(command) => finalize_kind_disposition(command.kind),
+        QueueCommand::ReplacePending(_) => Shared,
+        QueueCommand::UpdateFields(command) => {
+            classify_update_fields(command);
+            Shared
+        }
+        QueueCommand::UpdateFieldsBatch(command) => {
+            for update in &command.updates {
+                classify_update_fields(update);
+            }
+            Shared
+        }
+        QueueCommand::MutateItems(command) => {
+            classify_mutate_items(command);
+            Shared
+        }
+        QueueCommand::LeaseExpired(_) => Shared,
+        QueueCommand::CohortExpired(_) => Shared,
+        QueueCommand::FenceLease(_) => Shared,
+        QueueCommand::UnfenceLease(_) => Shared,
+        QueueCommand::PauseQueue(command) => {
+            let _ = command.drain_intake;
+            Shared
+        }
+        QueueCommand::ResumeQueue => Shared,
+        QueueCommand::PurgeItems(_) => Shared,
+        QueueCommand::SetGates(command) => {
+            let _ = command.blocked;
+            Shared
+        }
+        QueueCommand::WriteSideRecords(_) => Bypass,
+        QueueCommand::AdvanceInstanceFence(_) => Bypass,
+    }
+}
+
+/// Take the strongest selection-fence disposition across a sealed append vector.
+pub fn selection_fence_disposition_for_commands<'a>(
+    commands: impl IntoIterator<Item = &'a QueueCommand>,
+) -> SelectionFenceDisposition {
+    commands
+        .into_iter()
+        .map(selection_fence_disposition)
+        .max()
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CreateQueueCommand {
     pub definition: QueueDefinition,
@@ -1556,6 +1673,125 @@ mod serde_tests {
             let decoded: CommandEnvelope = serde_json::from_str(&json).expect("deserialize");
             let reencoded = serde_json::to_string(&decoded).expect("re-serialize");
             assert_eq!(json, reencoded, "round-trip mismatch for {json}");
+        }
+    }
+
+    #[test]
+    fn packed_command_vector_takes_maximum_selection_fence_disposition() {
+        let terminal = QueueCommand::Finalize(FinalizeCommand {
+            outcomes: vec![
+                FinalizeOutcome {
+                    item_id: iid("a"),
+                    kind: FinalizeKind::Complete,
+                    applied_state: Some(ItemState::Complete),
+                    not_before: None,
+                },
+                FinalizeOutcome {
+                    item_id: iid("b"),
+                    kind: FinalizeKind::Fail,
+                    applied_state: Some(ItemState::Failed),
+                    not_before: None,
+                },
+            ],
+        });
+        let mixed = QueueCommand::Finalize(FinalizeCommand {
+            outcomes: vec![
+                FinalizeOutcome {
+                    item_id: iid("a"),
+                    kind: FinalizeKind::Complete,
+                    applied_state: Some(ItemState::Complete),
+                    not_before: None,
+                },
+                FinalizeOutcome {
+                    item_id: iid("b"),
+                    kind: FinalizeKind::Retry,
+                    applied_state: Some(ItemState::Pending),
+                    not_before: Some(ts(5)),
+                },
+            ],
+        });
+        let claim = QueueCommand::Claim(ClaimCommand {
+            item_ids: vec![iid("a")],
+            lease_token: LeaseToken::new("lease").unwrap(),
+            lease_expires_at: ts(10),
+            worker_id: None,
+        });
+
+        assert_eq!(
+            selection_fence_disposition(&terminal),
+            SelectionFenceDisposition::Bypass
+        );
+        assert_eq!(
+            selection_fence_disposition(&mixed),
+            SelectionFenceDisposition::Shared
+        );
+        assert_eq!(
+            selection_fence_disposition_for_commands([&terminal, &mixed]),
+            SelectionFenceDisposition::Shared
+        );
+        assert_eq!(
+            selection_fence_disposition_for_commands([&terminal, &mixed, &claim]),
+            SelectionFenceDisposition::Exclusive
+        );
+    }
+
+    #[test]
+    fn nested_schedule_payload_item_and_gate_actions_are_explicitly_shared() {
+        for payload in [
+            PayloadUpdate::Keep,
+            PayloadUpdate::Set(Some(Bytes::from_static(b"payload"))),
+        ] {
+            for priority in [ScheduleUpdate::Keep, ScheduleUpdate::Set(None)] {
+                let command = QueueCommand::UpdateFields(UpdateFieldsCommand {
+                    payload: payload.clone(),
+                    set_priority: priority,
+                    set_not_before: ScheduleUpdate::Set(Some(ts(20))),
+                    ..UpdateFieldsCommand::default()
+                });
+                assert_eq!(
+                    selection_fence_disposition(&command),
+                    SelectionFenceDisposition::Shared
+                );
+            }
+        }
+
+        for action in [
+            ResolvedItemMutationAction::Purge,
+            ResolvedItemMutationAction::Replace(Box::new(ResolvedItemValues {
+                state: ItemState::Pending,
+                item_version: 2,
+                priority: None,
+                not_before: None,
+                eligible_since: ts(1),
+                payload: None,
+                fields: BTreeMap::new(),
+                metadata: Metadata::default(),
+                gate_keys: Vec::new(),
+                index_fields: BTreeMap::new(),
+                entity_document: None,
+                invalidate_lease: false,
+            })),
+        ] {
+            let command = QueueCommand::MutateItems(MutateItemsCommand {
+                items: vec![ResolvedItemMutation {
+                    item_id: iid("a"),
+                    action,
+                }],
+                gate_changes: vec![
+                    crate::GateChange {
+                        gate_keys: vec!["g".into()],
+                        blocked: true,
+                    },
+                    crate::GateChange {
+                        gate_keys: vec!["g".into()],
+                        blocked: false,
+                    },
+                ],
+            });
+            assert_eq!(
+                selection_fence_disposition(&command),
+                SelectionFenceDisposition::Shared
+            );
         }
     }
 

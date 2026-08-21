@@ -103,11 +103,13 @@ pub use claim_batch::{
     CoordinationError, DRIVER_SLOT_DEFAULT_MAX_WAIT, GENERATION_MAX_ITEMS,
     GENERATION_MAX_RESPONSE_BYTES, MUTATION_MAX_GENERATIONS_PER_QUEUE,
     MUTATION_MAX_REQUESTS_PER_QUEUE, MUTATION_SEQUENCER_RESOURCE, MutationGenerationBatch,
-    MutationIngress, MutationSequencer, MutationTicket, OUTCOME_READ_SLOTS_RESOURCE,
-    OUTCOME_SLOT_DEFAULT_MAX_WAIT, OutcomeReadAdmission, SELECTION_FENCE_WAITERS_RESOURCE,
-    SHARED_DRIVER_SLOTS_RESOURCE, SelectionFence, SelectionFenceAcquire, SelectionFenceAdmission,
-    SelectionFenceMode, SelectionFencePermit, SelectionFenceWaiterPermit,
-    SharedDriverReadAdmission, SlotAcquire, SlotPermit,
+    MutationGenerationDisposition, MutationGenerationKind, MutationIngress, MutationSequencer,
+    MutationTicket, OUTCOME_READ_SLOTS_RESOURCE, OUTCOME_SLOT_DEFAULT_MAX_WAIT,
+    OutcomeReadAdmission, SELECTION_FENCE_WAITERS_RESOURCE, SHARED_DRIVER_SLOTS_RESOURCE,
+    SelectionFence, SelectionFenceAcquire, SelectionFenceAdmission, SelectionFenceMode,
+    SelectionFencePermit, SelectionFenceWaiterPermit, SharedDriverReadAdmission, SlotAcquire,
+    SlotPermit, audited_append_admission_count, audited_append_request_admission_count,
+    mutation_generation_disposition,
 };
 pub use claim_validation::{
     ClaimCompatibility, ClaimUnit, GroupBatching, require_item_level_claim,
@@ -169,11 +171,13 @@ pub use command::{
     FinalizeOutcome, LeaseExpiredCommand, MutateItemsCommand, PauseQueueCommand, PayloadUpdate,
     PurgeItemsCommand, PushCommand, PushItem, QueueCommand, QueueCounters, ReassignLeaseCommand,
     RenewLeaseCommand, ReplacePendingCommand, RequestOutcome, ResolvedItemMutation,
-    ResolvedItemMutationAction, ResolvedItemValues, ScheduleUpdate, SetGatesCommand, SideRecord,
-    UnfenceLeaseCommand, UpdateFieldsBatchCommand, UpdateFieldsCommand, WriteSideRecordsCommand,
-    admit_push_item_indexes, admit_push_items_indexes, build_push_items,
-    command_envelope_change_records, stage_unique_push_keys, unique_index_keys_for_push_item,
-    validate_gate_command, validate_gate_push, validate_request_replay_metadata,
+    ResolvedItemMutationAction, ResolvedItemValues, ScheduleUpdate, SelectionFenceDisposition,
+    SetGatesCommand, SideRecord, UnfenceLeaseCommand, UpdateFieldsBatchCommand,
+    UpdateFieldsCommand, WriteSideRecordsCommand, admit_push_item_indexes,
+    admit_push_items_indexes, build_push_items, command_envelope_change_records,
+    selection_fence_disposition, selection_fence_disposition_for_commands, stage_unique_push_keys,
+    unique_index_keys_for_push_item, validate_gate_command, validate_gate_push,
+    validate_request_replay_metadata,
 };
 pub use commit::{AppendAdmissionClass, RawCommitFault, RawCommitOutcome, RawCommitRequest};
 pub use error::{CommitRejection, DurableIntegrityStage, EngineError, EngineResult};
