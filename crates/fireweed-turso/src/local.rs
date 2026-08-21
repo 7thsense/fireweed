@@ -430,9 +430,7 @@ impl TursoRelational {
             Err(error) => {
                 let msg = error.to_string();
                 for waiter in pending {
-                    let _ = waiter
-                        .tx
-                        .send(Err(EngineError::Storage(msg.clone())));
+                    let _ = waiter.tx.send(Err(EngineError::Storage(msg.clone())));
                 }
                 return;
             }
@@ -587,7 +585,9 @@ impl TursoRelational {
 
 #[cfg(test)]
 mod class_s_tests {
-    use fireweed_core::LeaseToken;
+    use std::collections::BTreeMap;
+
+    use fireweed_core::{LeaseToken, MetadataValue, PriorityValue, TypedValue};
 
     use super::*;
 
@@ -634,6 +634,136 @@ mod class_s_tests {
     }
 
     #[tokio::test]
+    async fn class_s_claim_preserves_fields_metadata_and_entity() {
+        let store = TursoRelational::in_memory().await.expect("open");
+        let stored_id = ItemId::mint(1, 0, 1);
+        let compact_id = ItemId::mint(1, 0, 2);
+        let index_fields = BTreeMap::from([
+            ("profile.rank".to_string(), TypedValue::Integer(42)),
+            (
+                "profile.region".to_string(),
+                TypedValue::String("east".to_string()),
+            ),
+        ]);
+        let encoded_index_fields =
+            fireweed_engine::index_fields::encode_index_fields_blob(&index_fields)
+                .expect("encode index fields")
+                .expect("nonempty index fields");
+        let insert = "INSERT INTO fireweed_items(\
+             tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
+             not_before,eligible_since,group_key,payload,fields,metadata,entity_document,index_fields,\
+             retry_count,item_version,last_command_sequence,created_at,updated_at,fenced,superseded,\
+             max_attempts,created_seq) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+        for (id, entity, native_indexes, created_seq) in [
+            (
+                stored_id,
+                Value::Text(r#"{"kind":"stored","rank":7}"#.to_string()),
+                Value::Null,
+                1_i64,
+            ),
+            (
+                compact_id,
+                Value::Null,
+                Value::Blob(encoded_index_fields),
+                2_i64,
+            ),
+        ] {
+            store
+                .execute(
+                    insert,
+                    vec![
+                        Value::Text("t".to_string()),
+                        Value::Text("q".to_string()),
+                        Value::Text(id.to_string()),
+                        Value::Text(format!("key-{id}")),
+                        Value::Text("Pending".to_string()),
+                        Value::Text(
+                            serde_json::to_string(&PriorityValue::Int64(7)).expect("priority"),
+                        ),
+                        Value::Blob(vec![0, created_seq as u8]),
+                        Value::Integer(7),
+                        Value::Integer(1),
+                        Value::Text("group-a".to_string()),
+                        Value::Blob(vec![0xCA, 0xFE]),
+                        Value::Text(r#"{"blob":[1,2,3]}"#.to_string()),
+                        Value::Text(r#"{"attempt":7,"source":"class-s"}"#.to_string()),
+                        entity,
+                        native_indexes,
+                        Value::Integer(2),
+                        Value::Integer(4),
+                        Value::Integer(1),
+                        Value::Integer(1),
+                        Value::Integer(1),
+                        Value::Integer(0),
+                        Value::Integer(0),
+                        Value::Integer(9),
+                        Value::Integer(created_seq),
+                    ],
+                )
+                .await
+                .expect("insert complete serving row");
+        }
+        // Gate-state rows contain only currently blocked keys. This membership therefore describes
+        // a satisfied gate and must be echoed even though the optimized SELECT omits its anti-join.
+        store
+            .execute(
+                "INSERT INTO fireweed_item_gates(tenant_id,queue_id,item_id,gate_key) \
+                 VALUES('t','q',?,'gate-satisfied')",
+                vec![Value::Text(stored_id.to_string())],
+            )
+            .await
+            .expect("insert satisfied gate membership");
+
+        let token = LeaseToken::new("token-fidelity").expect("token");
+        let relational = store
+            .class_s_claim_for_queue("t", "q", 10, 2, &token, 1_000, "out-fidelity", Some("w"))
+            .await
+            .expect("class S claim");
+        let claimed = claimed_from_class_s(&token, relational).expect("render public claim");
+        assert_eq!(claimed.items.len(), 2);
+
+        let stored = &claimed.items[0];
+        assert_eq!(stored.item_id, stored_id);
+        assert_eq!(stored.payload.as_deref(), Some(&[0xCA, 0xFE][..]));
+        assert_eq!(
+            stored.fields.get("blob").map(Bytes::as_ref),
+            Some(&[1, 2, 3][..])
+        );
+        assert_eq!(
+            stored.metadata.get("source"),
+            Some(&MetadataValue::String("class-s".to_string()))
+        );
+        assert_eq!(
+            stored.metadata.get("attempt"),
+            Some(&MetadataValue::Integer(7))
+        );
+        assert_eq!(
+            stored.entity,
+            Some(serde_json::json!({"kind": "stored", "rank": 7}))
+        );
+        assert_eq!(stored.gate_keys, ["gate-satisfied"]);
+        assert_eq!(stored.priority, Some(PriorityValue::Int64(7)));
+        assert_eq!(
+            stored.group_key.as_ref().map(GroupKey::as_str),
+            Some("group-a")
+        );
+        assert_eq!(stored.not_before, Some(nanos_ts(7)));
+        assert_eq!(stored.attempt_count, 3);
+        assert_eq!(stored.max_attempts, 9);
+
+        let compact = &claimed.items[1];
+        assert_eq!(compact.item_id, compact_id);
+        assert_eq!(
+            compact.entity,
+            Some(serde_json::json!({"profile": {"rank": 42, "region": "east"}}))
+        );
+        assert!(compact.gate_keys.is_empty());
+        assert_eq!(compact.priority, stored.priority);
+        assert_eq!(compact.group_key, stored.group_key);
+        assert_eq!(compact.not_before, stored.not_before);
+    }
+
+    #[tokio::test]
     async fn reader_select_does_not_wait_on_held_immediate_writer() {
         use std::time::{Duration, Instant};
         use turso::transaction::TransactionBehavior;
@@ -673,8 +803,24 @@ pub fn claimed_from_class_s(
     lease_token: &LeaseToken,
     result: ClassSClaimResult,
 ) -> EngineResult<Claimed> {
-    let mut items = Vec::with_capacity(result.items.len());
-    for item in result.items {
+    Ok(Claimed {
+        items: render_class_s_claimed_items(lease_token, result.items)?,
+        cohort_lease_token: None,
+        cohort_id: None,
+    })
+}
+
+/// Render complete public Claim items from relational Class-S rows in one reusable bulk helper.
+/// Native index fields stay inside the relational carrier and are used only to echo a compacted
+/// entity document when the durable row omitted the equivalent JSON.
+pub fn render_class_s_claimed_items(
+    lease_token: &LeaseToken,
+    relational_items: Vec<fireweed_relational::ClassSClaimedItem>,
+) -> EngineResult<Vec<ClaimedItem>> {
+    let mut items = Vec::with_capacity(relational_items.len());
+    for item in relational_items {
+        let index_fields =
+            fireweed_engine::index_fields::decode_index_fields_blob(item.index_fields.as_deref())?;
         items.push(ClaimedItem {
             item_id: ItemId::new(&item.item_id).map_err(|e| EngineError::Storage(e.to_string()))?,
             client_item_key: ClientItemKey::new(item.client_item_key)
@@ -698,14 +844,13 @@ pub fn claimed_from_class_s(
             fields: fields_from_json(item.fields_json)?,
             metadata: metadata_from_json(item.metadata_json)?,
             gate_keys: item.gate_keys,
-            entity: entity_from_json(item.entity_document)?,
+            entity: fireweed_engine::index_fields::echo_entity_document(
+                entity_from_json(item.entity_document)?,
+                &index_fields,
+            )?,
         });
     }
-    Ok(Claimed {
-        items,
-        cohort_lease_token: None,
-        cohort_id: None,
-    })
+    Ok(items)
 }
 
 /// Validate one benchmark evidence record without accepting missing or zero-valued observations.

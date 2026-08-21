@@ -4,11 +4,12 @@ use fireweed_core::LeaseToken;
 use fireweed_engine::{EngineError, EngineResult};
 
 use crate::sql::async_projection as sql;
-use crate::{RelTx, RelValue, lease_hash, query_optional, rel_exec, rel_query};
+use crate::{RelRow, RelTx, RelValue, lease_hash, query_optional, rel_exec, rel_query};
 
 /// Next due pending items with payloads. Gate anti-join is appended when the queue has blocked gates.
 pub const SELECT_CLASS_S_DUE: &str = "SELECT item_id, client_item_key, payload, item_version, \
-     retry_count, priority, group_key, not_before, max_attempts \
+     retry_count, priority, group_key, not_before, fields, metadata, max_attempts, \
+     entity_document, index_fields \
      FROM fireweed_items \
      WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
      AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
@@ -129,26 +130,11 @@ pub fn class_s_claim(
 
     let mut items = Vec::with_capacity(selected.len());
     let mut ids = Vec::with_capacity(selected.len());
-    for row in selected {
-        let item_id: String = row.get(0)?;
+    for row in &selected {
+        let item = class_s_claimed_item_from_row(row, request.lease_expires_at)?;
+        let item_id = item.item_id.clone();
         ids.push(item_id.clone());
-        items.push(ClassSClaimedItem {
-            item_id,
-            client_item_key: row.get(1)?,
-            payload: row.get(2)?,
-            item_version: row.get::<i64>(3)? + 1,
-            retry_count: row.get::<i64>(4)? + 1,
-            lease_expires_at: request.lease_expires_at,
-            priority: row.get(5)?,
-            group_key: row.get(6)?,
-            not_before: row.get(7)?,
-            fields_json: "{}".into(),
-            metadata_json: "{}".into(),
-            max_attempts: row.get::<Option<i64>>(8)?.unwrap_or(0),
-            entity_document: None,
-            index_fields: None,
-            gate_keys: Vec::new(),
-        });
+        items.push(item);
     }
 
     let placeholders = vec!["?"; ids.len()].join(",");
@@ -178,9 +164,9 @@ pub fn class_s_claim(
 
     let item_ids_json =
         serde_json::to_string(&ids).map_err(|e| EngineError::Storage(e.to_string()))?;
-    if include_gates {
-        load_class_s_gate_keys(tx, request.tenant_id, request.queue_id, &mut items)?;
-    }
+    // `fireweed_gate_state` contains only blocked gates. Membership rows remain after a gate is
+    // satisfied and are part of the public Claim response, so render them on both SELECT variants.
+    load_class_s_gate_keys(tx, request.tenant_id, request.queue_id, &mut items)?;
     if !ids.is_empty() {
         let placeholders = vec!["(?,?,?,?)"; ids.len()].join(",");
         let sql = format!(
@@ -225,6 +211,31 @@ pub fn class_s_claim(
     })
 }
 
+/// Decode the complete serving row selected for a Class-S claim. Keeping this mapping in one
+/// helper lets the packed Claim driver reuse the same carrier without widening `ClaimedItem`.
+fn class_s_claimed_item_from_row(
+    row: &RelRow,
+    lease_expires_at: i64,
+) -> EngineResult<ClassSClaimedItem> {
+    Ok(ClassSClaimedItem {
+        item_id: row.get(0)?,
+        client_item_key: row.get(1)?,
+        payload: row.get(2)?,
+        item_version: row.get::<i64>(3)? + 1,
+        retry_count: row.get::<i64>(4)? + 1,
+        lease_expires_at,
+        priority: row.get(5)?,
+        group_key: row.get(6)?,
+        not_before: row.get(7)?,
+        fields_json: row.get::<Option<String>>(8)?.unwrap_or_else(|| "{}".into()),
+        metadata_json: row.get::<Option<String>>(9)?.unwrap_or_else(|| "{}".into()),
+        max_attempts: row.get::<Option<i64>>(10)?.unwrap_or(0),
+        entity_document: row.get(11)?,
+        index_fields: row.get(12)?,
+        gate_keys: Vec::new(),
+    })
+}
+
 fn load_class_s_gate_keys(
     tx: &impl RelTx,
     tenant_id: &str,
@@ -246,11 +257,16 @@ fn load_class_s_gate_keys(
         RelValue::Text(queue_id.to_string()),
     ];
     params.extend(ids.into_iter().map(RelValue::Text));
+    let positions: std::collections::HashMap<String, usize> = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| (item.item_id.clone(), index))
+        .collect();
     for row in rel_query(tx, &sql, params)? {
         let item_id: String = row.get(0)?;
         let gate: String = row.get(1)?;
-        if let Some(item) = items.iter_mut().find(|item| item.item_id == item_id) {
-            item.gate_keys.push(gate);
+        if let Some(index) = positions.get(&item_id) {
+            items[*index].gate_keys.push(gate);
         }
     }
     Ok(())
@@ -427,7 +443,11 @@ mod tests {
                         RelValue::Null,
                         RelValue::Null,
                         RelValue::Null,
+                        RelValue::Text("{}".into()),
+                        RelValue::Text("{}".into()),
                         RelValue::Integer(3),
+                        RelValue::Null,
+                        RelValue::Null,
                     ])
                 })
                 .collect())
