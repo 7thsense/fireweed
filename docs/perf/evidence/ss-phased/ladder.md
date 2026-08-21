@@ -86,6 +86,66 @@ RSS is the second scoreboard. `filesystem--memory` is the O(N) control, not the 
 | 1787269858 | inflight=8 P4 | 10000 | waves of 8 claims; coordinator applies out-of-order Ready; still writer-bound | **32030** | **35636** | **49552** | **913** | 126 | 139.7 | 14647 | 314 |
 | 1787274546 | lease group-commit | 10000 | **diagnostic/fidelity-reduced**: 8 Class S waiters one IMMEDIATE; Claim omitted fields/metadata/entity/satisfied gates | **31780** | **34898** | **49912** | **1290** | 119 | 139.9 | 14667 | 214 |
 | 1787301436 | B-1 worktree | 10000 | fidelity-restored diagnostic; anomalous P1, not an S0 baseline | 420 | 15559 | 35950 | 1240 | 142 | 133.0 | 13945 | 247.1 |
+| 1787310542 | b64d68fc | 10000 | **S0 v4 settled baseline**; fidelity-restored; same SHA as mixed control | **12628** | **284** | **317** | **1057** | 108.6 | 146.7 | 15380 | 215.0 |
+
+### S0 settlement-aware same-SHA controls
+
+The authoritative pre-activation controls are [phased v4](1787310542/summary.json)
+and [mixed v1](1787310419/mixed-summary.json), both from
+`b64d68fc36a45d6563a83bcc1023a730f6d227b9` on `sindri`. All rates below end
+at a projection-settlement barrier. The phased residual is exactly
+`pending=0, leased=0, complete=10000, failed=0, eligible=0`; the mixed lane
+completed every original ready-item ID and retained the intentionally
+far-future items as pending.
+
+| phase | ack items/s | settled items/s | settled mutations/s | settlement lag s | service p95/p99 ms |
+|---|---:|---:|---:|---:|---:|
+| P1 ingest | 25957 | 12628 | 12628 | 0.407 | 34.68 / 45.96 |
+| P2 enrich | 29163 | **284** | 284 | **34.906** | 29.71 / 37.03 |
+| P3 schedule | 41633 | **317** | 317 | **31.335** | 20.76 / 37.59 |
+| P4 Claim/Complete | 1339 | 1057 | 2113 | 1.997 | Claim 362.31 / 362.80; Complete 592.01 / 649.93 |
+
+The ack-only view overstates the two BatchUpdate stages by roughly 103× and
+131×. S0 therefore confirms the current bottleneck is background Turso apply,
+not public batch admission: further packing or pipelining is not a valid win
+unless settled throughput moves with it.
+
+| mixed N=10k control | settled items/s | fill p50/p95/p99 | response bytes p50/p95/p99 | admitted service p95/p99 ms | wall s |
+|---|---:|---:|---:|---:|---:|
+| far-future Push + Claim/Complete | **48.4** | 100 / 100 / 100 | 143700 / 143700 / 143700 | append 3021.92 / 3118.78; Claim 401.34 / 1311.71; Complete 2669.32 / 2756.07 | 261.2 |
+
+| fixed-25 ms retry cohort | requests / units | capacity rejections | settled units/s | admitted service p50/p95/p99 ms | original age p99 ms |
+|---|---:|---:|---:|---:|---:|
+| compatible BatchUpdate | 32 / 64 | 0 | 154.6 | 60.35 / 71.67 / 71.68 | 71.68 |
+| four incompatible legal Claim keys | 4 / 4 | 0 | 5.65 | 143.92 / 144.05 / 144.05 | 144.05 |
+| mixed renew/reassign/purge, one KeyedQueueGate key | 32 / 32 | 0 | 9.43 | 1354.94 / 2260.66 / 2423.08 | 2423.08 |
+
+Every cohort records each original request ID; the incompatible Claim cohort
+also records all four distinct `group_key` compatibility values, and the mixed
+cohort records each item's declared terminal or retained outcome.
+
+| committed-reader observation (16 samples each) | rate/s | p50 ms | p95 ms | p99 ms |
+|---|---:|---:|---:|---:|
+| `server_peek` | 2501 | 0.105 | 0.136 | 4.773 |
+| `server_pending` | 6553 | 0.139 | 0.182 | 0.313 |
+| `server_pending_page` | 6431 | 0.152 | 0.162 | 0.188 |
+| `server_pending_range` | 6482 | 0.148 | 0.162 | 0.224 |
+| `server_live_items` | 759 | 1.315 | 1.348 | 1.389 |
+| `server_metrics` | 7435 | 0.133 | 0.140 | 0.157 |
+
+The mixed control measured epoch acquisition at 13.89 ms and terminal-emission
+cursor observation at 141.51 ms with zero emission lag. Turso WAL grew from
+482072 to 586210112 bytes. The public erased handle does not expose direct
+packer-wait counters at S0; the evidence records the configured 20 ms linger
+and the compatible-mutation admitted-service proxy (p50/p95/p99
+60.35/71.67/71.68 ms) without relabeling it as direct pack wait.
+
+Exact commands, also embedded in the artifacts:
+
+```text
+SS_CELL=filesystem--turso SS_N=10000 SS_PUSH_BATCH=100 SS_CLAIM_BATCH=100 SS_INFLIGHT=8 cargo test -p fireweed --test ss_phased_capacity --release ss_phased_capacity_smoke -- --exact --nocapture
+SS_MIXED_N=10000 cargo test -p fireweed --test ss_mixed_overlap --release ss_mixed_overlap_baseline -- --exact --nocapture
+```
 
 Evidence `1787274546` measured the thin Class-S regression from `5999aa77` and is
 useful only for diagnosing transaction cost. Evidence `1787301436` is the first
