@@ -12,7 +12,7 @@ use fireweed_core::{ClientItemKey, ItemId, Metadata, PriorityValue, RequestId};
 use fireweed_engine::{
     AsyncProjectionStore, BatchUpdateOutcome, BatchUpdateResponse, CommandEnvelope,
     CommandPosition, PayloadUpdate, PushCommand, QueueCommand, QueueKey, RequestOutcome,
-    ScheduleUpdate, UpdateFieldsCommand,
+    ScheduleUpdate, UpdateFieldsBatchCommand, UpdateFieldsCommand,
 };
 use fireweed_relational::{fields_from_json, metadata_from_json, parse_priority};
 use fireweed_turso::{
@@ -192,6 +192,418 @@ async fn apply_measured_batch(count: usize) -> fireweed_turso::TursoBatchUpdateS
     assert_eq!(replayed_versions[0].values, [turso::Value::Integer(0)]);
     assert_eq!(store.last_batch_update_statement_shape(), None);
     shape
+}
+
+async fn apply_operation_shaped_batch(
+    count: usize,
+    schedule: bool,
+    uniform: bool,
+) -> (
+    fireweed_turso::TursoBatchUpdateStatementShape,
+    fireweed_turso::TursoApplyPhaseObservation,
+) {
+    let mut definition = qdef();
+    definition.max_push_batch_size = 1_000;
+    let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let store = TursoRelational::in_memory().await.unwrap();
+    AsyncProjectionStore::ensure_shard(&store, definition)
+        .await
+        .unwrap();
+    let (pushed, ids, _) = batch_fixture(count);
+    AsyncProjectionStore::apply_live(
+        &store,
+        vec![CommandPosition::new(shard.clone(), 0, 0)],
+        vec![envelope(
+            QueueCommand::Push(PushCommand { items: pushed }),
+            ids.clone(),
+        )],
+    )
+    .await
+    .unwrap();
+
+    let due = ts(100);
+    let updates = (0..count)
+        .map(|index| UpdateFieldsCommand {
+            item_id: ItemId::from_u64(0),
+            field_ops: BTreeMap::new(),
+            payload: if schedule {
+                PayloadUpdate::Keep
+            } else {
+                PayloadUpdate::Set(Some(Bytes::from(if uniform {
+                    "profile-uniform".to_string()
+                } else {
+                    format!("profile-{index}")
+                })))
+            },
+            set_priority: if schedule {
+                ScheduleUpdate::Set(Some(PriorityValue::Int64(if uniform {
+                    7
+                } else {
+                    index as i64 + 7
+                })))
+            } else {
+                ScheduleUpdate::Keep
+            },
+            set_not_before: if schedule {
+                ScheduleUpdate::Set(Some(due))
+            } else {
+                ScheduleUpdate::Keep
+            },
+            set_entity_document: None,
+            set_fields: None,
+            set_metadata: Some(Metadata::default()),
+            set_gate_keys: None,
+            api001_batch: true,
+            client_item_key: Some(
+                ClientItemKey::new(format!("batch-key-{count}-{index}")).unwrap(),
+            ),
+            expected_item_version: None,
+        })
+        .collect::<Vec<_>>();
+    let request_id = RequestId::new(format!(
+        "operation-shaped-{}-{}-{count}",
+        if schedule { "schedule" } else { "enrich" },
+        if uniform { "uniform" } else { "varying" }
+    ))
+    .unwrap();
+    let response = BatchUpdateResponse {
+        request_id: request_id.clone(),
+        results: ids
+            .iter()
+            .enumerate()
+            .map(|(index, _)| BatchUpdateOutcome::Updated {
+                item_id: ItemId::from_u64(0),
+                client_item_key: ClientItemKey::new(format!("batch-key-{count}-{index}")).unwrap(),
+                item_version: 0,
+            })
+            .collect(),
+    };
+    let response_payload = serde_json::to_string(&response).unwrap();
+    let mut command = envelope(
+        QueueCommand::UpdateFieldsBatch(UpdateFieldsBatchCommand { updates }),
+        ids.clone(),
+    );
+    command.request_id = Some(request_id.clone());
+    command.request_fingerprint = Some(71);
+    command.request_outcome = Some(RequestOutcome::BatchUpdate {
+        response_payload: response_payload.clone(),
+    });
+    let position = CommandPosition::new(shard.clone(), 0, 1);
+    AsyncProjectionStore::apply_live(&store, vec![position.clone()], vec![command.clone()])
+        .await
+        .unwrap();
+    let shape = store.last_batch_update_statement_shape().unwrap();
+    let phase = store.last_apply_phase_observation().unwrap();
+
+    for index in [0, count - 1] {
+        let rows = store
+            .query(
+                "SELECT item_version,lifecycle_state,payload,metadata,priority,not_before,eligible_since \
+                 FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                vec![
+                    shard.tenant_id.as_str().to_string().into(),
+                    shard.queue_id.as_str().to_string().into(),
+                    ids[index].to_string().into(),
+                ],
+            )
+            .await
+            .unwrap();
+        let values = &rows[0].values;
+        assert_eq!(values[0], turso::Value::Integer(2));
+        assert_eq!(values[1], turso::Value::Text("Pending".into()));
+        if schedule {
+            assert_eq!(values[2], turso::Value::Null);
+            let turso::Value::Text(priority) = &values[4] else {
+                panic!("priority was not text")
+            };
+            assert_eq!(
+                parse_priority(Some(priority.clone())).unwrap(),
+                Some(PriorityValue::Int64(if uniform {
+                    7
+                } else {
+                    index as i64 + 7
+                }))
+            );
+            assert_eq!(values[5], turso::Value::Integer(100_000_000_000));
+            assert_eq!(values[6], turso::Value::Integer(0));
+        } else {
+            assert_eq!(
+                values[2],
+                turso::Value::Blob(
+                    Bytes::from(if uniform {
+                        "profile-uniform".to_string()
+                    } else {
+                        format!("profile-{index}")
+                    })
+                    .to_vec()
+                )
+            );
+        }
+    }
+    let replay = store
+        .query(
+            "SELECT response_payload FROM fireweed_request_idempotency \
+             WHERE tenant_id=?1 AND queue_id=?2 AND operation='batch_update' AND request_id=?3",
+            vec![
+                shard.tenant_id.as_str().to_string().into(),
+                shard.queue_id.as_str().to_string().into(),
+                request_id.as_str().to_string().into(),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay[0].values, [turso::Value::Text(response_payload)]);
+    AsyncProjectionStore::apply_recovery(&store, vec![position], vec![command])
+        .await
+        .unwrap();
+    let versions = store
+        .query(
+            "SELECT COUNT(*) FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 \
+             AND item_version<>2",
+            vec![
+                shard.tenant_id.as_str().to_string().into(),
+                shard.queue_id.as_str().to_string().into(),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(versions[0].values, [turso::Value::Integer(0)]);
+    assert_eq!(store.last_batch_update_statement_shape(), None);
+    (shape, phase)
+}
+
+#[tokio::test]
+async fn turso_batch_update_apply_is_operation_shaped() {
+    for count in [1, 100, 800] {
+        for schedule in [false, true] {
+            for uniform in [false, true] {
+                let (shape, phase) = apply_operation_shaped_batch(count, schedule, uniform).await;
+                let chunks = count.div_ceil(100);
+                assert_eq!(shape.item_count, count);
+                assert_eq!(
+                    shape.broad_current_row_read_count, 0,
+                    "operation-shaped apply materialized broad current rows"
+                );
+                assert!(shape.read_statement_count <= 2, "shape={shape:?}");
+                assert!(
+                    shape.statement_count <= chunks + 6,
+                    "statement growth exceeded fixed overhead plus chunks: {shape:?}"
+                );
+                assert!(shape.max_bind_count <= 900, "shape={shape:?}");
+                assert_eq!(phase.row_read_us, 0, "live cursor seed was not reused");
+                assert!(phase.total_us >= phase.commit_us, "phase={phase:?}");
+                eprintln!(
+                    "count={count} schedule={schedule} uniform={uniform} shape={shape:?} phase={phase:?}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn turso_batch_update_apply_preserves_conditional_fallbacks() {
+    let mut definition = qdef();
+    definition.max_push_batch_size = 100;
+    let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let store = TursoRelational::in_memory().await.unwrap();
+    AsyncProjectionStore::ensure_shard(&store, definition)
+        .await
+        .unwrap();
+    let (pushed, ids, _) = batch_fixture(4);
+    AsyncProjectionStore::apply_live(
+        &store,
+        vec![CommandPosition::new(shard.clone(), 0, 0)],
+        vec![envelope(
+            QueueCommand::Push(PushCommand { items: pushed }),
+            ids.clone(),
+        )],
+    )
+    .await
+    .unwrap();
+    store
+        .execute(
+            "UPDATE fireweed_items SET lifecycle_state='Leased' \
+             WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+            vec![
+                shard.tenant_id.as_str().to_string().into(),
+                shard.queue_id.as_str().to_string().into(),
+                ids[2].to_string().into(),
+            ],
+        )
+        .await
+        .unwrap();
+    store
+        .execute(
+            "UPDATE fireweed_items SET lifecycle_state='Complete' \
+             WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+            vec![
+                shard.tenant_id.as_str().to_string().into(),
+                shard.queue_id.as_str().to_string().into(),
+                ids[3].to_string().into(),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let replacement = UpdateFieldsCommand {
+        item_id: ids[0],
+        field_ops: BTreeMap::new(),
+        payload: PayloadUpdate::Set(Some(Bytes::from_static(b"conditional-payload"))),
+        set_priority: ScheduleUpdate::Set(Some(PriorityValue::Int64(44))),
+        set_not_before: ScheduleUpdate::Set(Some(ts(200))),
+        set_entity_document: None,
+        set_fields: Some(BTreeMap::from([(
+            "conditional".into(),
+            Bytes::from_static(b"updated"),
+        )])),
+        set_metadata: Some(Metadata::default()),
+        set_gate_keys: Some(vec!["conditional-gate".into()]),
+        api001_batch: true,
+        client_item_key: None,
+        expected_item_version: Some(1),
+    };
+    let skipped = (1..4)
+        .map(|index| UpdateFieldsCommand {
+            item_id: ids[index],
+            field_ops: BTreeMap::new(),
+            payload: PayloadUpdate::Set(Some(Bytes::from_static(b"must-not-apply"))),
+            set_priority: ScheduleUpdate::Keep,
+            set_not_before: ScheduleUpdate::Keep,
+            set_entity_document: None,
+            set_fields: None,
+            set_metadata: None,
+            set_gate_keys: Some(Vec::new()),
+            api001_batch: true,
+            client_item_key: None,
+            expected_item_version: (index == 1).then_some(99),
+        })
+        .collect::<Vec<_>>();
+    let request_id = RequestId::new("conditional-fallbacks").unwrap();
+    let response = BatchUpdateResponse {
+        request_id: request_id.clone(),
+        results: vec![
+            BatchUpdateOutcome::Updated {
+                item_id: ids[0],
+                client_item_key: ClientItemKey::new("batch-key-4-0").unwrap(),
+                item_version: 2,
+            },
+            BatchUpdateOutcome::Conflict,
+            BatchUpdateOutcome::Invalid,
+            BatchUpdateOutcome::Terminal,
+        ],
+    };
+    let response_payload = serde_json::to_string(&response).unwrap();
+    let mut updates = vec![replacement];
+    updates.extend(skipped);
+    let mut command = envelope(
+        QueueCommand::UpdateFieldsBatch(UpdateFieldsBatchCommand { updates }),
+        ids.clone(),
+    );
+    command.request_id = Some(request_id.clone());
+    command.request_fingerprint = Some(72);
+    command.request_outcome = Some(RequestOutcome::BatchUpdate {
+        response_payload: response_payload.clone(),
+    });
+    let position = CommandPosition::new(shard.clone(), 0, 1);
+    AsyncProjectionStore::apply_live(&store, vec![position.clone()], vec![command.clone()])
+        .await
+        .unwrap();
+
+    let changed = store
+        .query(
+            "SELECT item_version,fields,payload,priority,not_before,eligible_since \
+             FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+            vec![
+                shard.tenant_id.as_str().to_string().into(),
+                shard.queue_id.as_str().to_string().into(),
+                ids[0].to_string().into(),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed[0].values[0], turso::Value::Integer(2));
+    let turso::Value::Text(fields) = &changed[0].values[1] else {
+        panic!("fields were not text")
+    };
+    assert_eq!(
+        fields_from_json(fields.clone()).unwrap().get("conditional"),
+        Some(&Bytes::from_static(b"updated"))
+    );
+    assert_eq!(
+        changed[0].values[2],
+        turso::Value::Blob(b"conditional-payload".to_vec())
+    );
+    assert_eq!(changed[0].values[4], turso::Value::Integer(200_000_000_000));
+    assert_eq!(changed[0].values[5], turso::Value::Integer(0));
+    let gates = store
+        .query(
+            "SELECT gate_key FROM fireweed_item_gates WHERE tenant_id=?1 AND queue_id=?2 \
+             AND item_id=?3",
+            vec![
+                shard.tenant_id.as_str().to_string().into(),
+                shard.queue_id.as_str().to_string().into(),
+                ids[0].to_string().into(),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        gates[0].values,
+        [turso::Value::Text("conditional-gate".into())]
+    );
+    let untouched = store
+        .query(
+            "SELECT item_id,item_version,lifecycle_state,payload FROM fireweed_items \
+             WHERE tenant_id=?1 AND queue_id=?2 AND item_id IN (?3,?4,?5) ORDER BY item_id",
+            vec![
+                shard.tenant_id.as_str().to_string().into(),
+                shard.queue_id.as_str().to_string().into(),
+                ids[1].to_string().into(),
+                ids[2].to_string().into(),
+                ids[3].to_string().into(),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(untouched.len(), 3);
+    for row in &untouched {
+        assert_eq!(row.values[1], turso::Value::Integer(1));
+        assert_eq!(row.values[3], turso::Value::Null);
+    }
+    assert_eq!(untouched[0].values[2], turso::Value::Text("Pending".into()));
+    assert_eq!(untouched[1].values[2], turso::Value::Text("Leased".into()));
+    assert_eq!(
+        untouched[2].values[2],
+        turso::Value::Text("Complete".into())
+    );
+    let replay = store
+        .query(
+            "SELECT response_payload FROM fireweed_request_idempotency \
+             WHERE tenant_id=?1 AND queue_id=?2 AND operation='batch_update' AND request_id=?3",
+            vec![
+                shard.tenant_id.as_str().to_string().into(),
+                shard.queue_id.as_str().to_string().into(),
+                request_id.as_str().to_string().into(),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay[0].values, [turso::Value::Text(response_payload)]);
+    AsyncProjectionStore::apply_recovery(&store, vec![position], vec![command])
+        .await
+        .unwrap();
+    let version = store
+        .query(
+            "SELECT item_version FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+            vec![
+                shard.tenant_id.as_str().to_string().into(),
+                shard.queue_id.as_str().to_string().into(),
+                ids[0].to_string().into(),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(version[0].values, [turso::Value::Integer(2)]);
 }
 
 #[tokio::test]

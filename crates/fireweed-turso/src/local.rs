@@ -39,7 +39,7 @@ struct LeasePackState {
 }
 
 /// Exact Turso release qualified by this adapter.
-pub const TURSO_SUPPORTED_VERSION: &str = "0.7.0";
+pub const TURSO_SUPPORTED_VERSION: &str = "0.7.2";
 /// Public mode boundary. Remote, sync, embedded-replica, and MVCC modes are not qualified.
 pub const TURSO_SUPPORTED_BOUNDARY: &str = "embedded_local_ordinary_wal";
 
@@ -202,6 +202,9 @@ pub struct SchemaReport {
 pub struct TursoBatchUpdateStatementShape {
     pub item_count: usize,
     pub statement_count: usize,
+    pub read_statement_count: usize,
+    pub write_statement_count: usize,
+    pub broad_current_row_read_count: usize,
     pub max_bind_count: usize,
 }
 
@@ -210,14 +213,39 @@ impl TursoBatchUpdateStatementShape {
         Self {
             item_count,
             statement_count: 0,
+            read_statement_count: 0,
+            write_statement_count: 0,
+            broad_current_row_read_count: 0,
             max_bind_count: 0,
         }
     }
 
-    pub(crate) fn record(&mut self, bind_count: usize) {
+    pub(crate) fn record(&mut self, sql: &str, bind_count: usize) {
         self.statement_count += 1;
         self.max_bind_count = self.max_bind_count.max(bind_count);
+        let normalized = sql.trim_start().to_ascii_uppercase();
+        if normalized.starts_with("SELECT") {
+            self.read_statement_count += 1;
+        } else {
+            self.write_statement_count += 1;
+        }
+        if normalized.contains("SELECT ITEM_ID,FIELDS,LIFECYCLE_STATE") {
+            self.broad_current_row_read_count += 1;
+        }
     }
+}
+
+/// Wall-time attribution for the most recent projection apply transaction.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TursoApplyPhaseObservation {
+    pub writer_wait_us: u64,
+    pub begin_us: u64,
+    pub cursor_definition_us: u64,
+    pub row_read_us: u64,
+    pub transform_bridge_us: u64,
+    pub update_side_us: u64,
+    pub commit_us: u64,
+    pub total_us: u64,
 }
 
 pub(crate) type ConsumerLeaseIndex = BTreeMap<(QueueKey, String, ItemId), ()>;
@@ -235,6 +263,7 @@ pub struct TursoRelational {
     pub(crate) live_tokens: Arc<Mutex<BTreeMap<(QueueKey, ItemId), LeaseToken>>>,
     pub(crate) live_tokens_by_consumer: Arc<Mutex<ConsumerLeaseIndex>>,
     pub(crate) last_batch_update_shape: Arc<StdMutex<Option<TursoBatchUpdateStatementShape>>>,
+    pub(crate) last_apply_phase: Arc<StdMutex<Option<TursoApplyPhaseObservation>>>,
     pub(crate) claim_scan_hints: Arc<StdMutex<std::collections::HashMap<QueueKey, i64>>>,
     pub(crate) claim_scan_default_fifo: Arc<StdMutex<std::collections::HashMap<QueueKey, bool>>>,
     pub(crate) grouped_shards: Arc<StdMutex<std::collections::HashSet<QueueKey>>>,
@@ -286,6 +315,7 @@ impl TursoRelational {
             live_tokens: Arc::new(Mutex::new(BTreeMap::new())),
             live_tokens_by_consumer: Arc::new(Mutex::new(BTreeMap::new())),
             last_batch_update_shape: Arc::new(StdMutex::new(None)),
+            last_apply_phase: Arc::new(StdMutex::new(None)),
             claim_scan_hints: Arc::new(StdMutex::new(std::collections::HashMap::new())),
             claim_scan_default_fifo: Arc::new(StdMutex::new(std::collections::HashMap::new())),
             grouped_shards: Arc::new(StdMutex::new(grouped_shards)),
@@ -308,6 +338,14 @@ impl TursoRelational {
             .last_batch_update_shape
             .lock()
             .expect("Turso statement-shape mutex poisoned")
+    }
+
+    /// Most recent writer/apply phase timings, used by qualification evidence.
+    pub fn last_apply_phase_observation(&self) -> Option<TursoApplyPhaseObservation> {
+        *self
+            .last_apply_phase
+            .lock()
+            .expect("Turso apply-phase mutex poisoned")
     }
 
     /// Obtain a separately configured connection for future read-side fan-out.

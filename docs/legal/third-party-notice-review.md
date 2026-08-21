@@ -17,7 +17,7 @@ licenses were also checked with `cargo deny check licenses`.
 One resolved package ships notice material:
 
 - `shuttle 0.8.1` includes `NOTICE` and `THIRD-PARTY`. It is a transitive
-  dependency of `turso_core 0.7.0`, reached through the workspace's
+  dependency of `turso_core 0.7.2`, reached through the workspace's
   `fireweed-turso` package. The upstream notice identifies Amazon as Shuttle's
   copyright holder and identifies code derived from Tokio, Loom, and the Rust
   standard library.

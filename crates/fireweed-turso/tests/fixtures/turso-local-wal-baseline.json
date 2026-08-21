@@ -1,5 +1,5 @@
 {
-  "turso_version": "0.7.0",
+  "turso_version": "0.7.2",
   "turso_features": ["local"],
   "boundary": "embedded_local_ordinary_wal",
   "batch_sizes": [1, 100, 1000],

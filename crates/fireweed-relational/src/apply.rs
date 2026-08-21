@@ -276,6 +276,36 @@ pub fn apply_committed_batch_sql(
     positions: &[CommandPosition],
     envelopes: &[CommandEnvelope],
 ) -> EngineResult<bool> {
+    apply_committed_batch_sql_with_cursor_seeds(
+        tx,
+        queues,
+        grouped_shards,
+        claim_scan_hints,
+        claim_scan_default_fifo,
+        token_ops,
+        positions,
+        envelopes,
+        &HashMap::new(),
+    )
+}
+
+/// Apply commands with transaction-local cursor values already read by the driver.
+///
+/// A driver that must read the same cursor to enforce a live epoch can pass that value here and
+/// avoid repeating the query through its synchronous compatibility bridge. Recovery callers leave
+/// the seed map empty and retain the normal durable cursor lookup.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_committed_batch_sql_with_cursor_seeds(
+    tx: &impl RelTx,
+    queues: &HashMap<QueueKey, QueueDefinition>,
+    grouped_shards: &mut HashSet<QueueKey>,
+    claim_scan_hints: &mut HashMap<QueueKey, i64>,
+    claim_scan_default_fifo: &mut HashMap<QueueKey, bool>,
+    token_ops: &mut Vec<TokenOp>,
+    positions: &[CommandPosition],
+    envelopes: &[CommandEnvelope],
+    cursor_seeds: &HashMap<QueueKey, i64>,
+) -> EngineResult<bool> {
     if positions.len() != envelopes.len() {
         return Err(EngineError::Storage(
             "apply_committed_batch: positions/envelopes length mismatch".into(),
@@ -285,7 +315,7 @@ pub fn apply_committed_batch_sql(
         return Ok(false);
     }
     let mut applied_update_fields = false;
-    let mut next_seq: HashMap<QueueKey, i64> = HashMap::new();
+    let mut next_seq = cursor_seeds.clone();
     let mut max_epoch: HashMap<QueueKey, i64> = HashMap::new();
     let mut i = 0usize;
     while i < positions.len() {
@@ -2683,6 +2713,268 @@ fn update_fields_batch_is_set_based(updates: &[UpdateFieldsCommand]) -> bool {
         .all(|update| update.field_ops.is_empty() && update.set_entity_document.is_none())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Api001UpdateAddress {
+    ItemId,
+    ClientItemKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Api001UpdateShape {
+    address: Api001UpdateAddress,
+    fields: bool,
+    payload: bool,
+    metadata: bool,
+    priority: bool,
+    not_before: bool,
+}
+
+fn api001_update_shape(update: &UpdateFieldsCommand) -> Option<Api001UpdateShape> {
+    if !update.api001_batch
+        || !update.field_ops.is_empty()
+        || update.set_entity_document.is_some()
+        || update.set_gate_keys.is_some()
+        || update.expected_item_version.is_some()
+    {
+        return None;
+    }
+    let address = if update.item_id.as_u64() == 0 {
+        update
+            .client_item_key
+            .as_ref()
+            .map(|_| Api001UpdateAddress::ClientItemKey)?
+    } else {
+        Api001UpdateAddress::ItemId
+    };
+    Some(Api001UpdateShape {
+        address,
+        fields: update.set_fields.is_some(),
+        payload: matches!(update.payload, PayloadUpdate::Set(_)),
+        metadata: update.set_metadata.is_some(),
+        priority: matches!(update.set_priority, ScheduleUpdate::Set(_)),
+        not_before: matches!(update.set_not_before, ScheduleUpdate::Set(_)),
+    })
+}
+
+/// Apply the common API-001 replacement form without materializing current rows.
+///
+/// This is deliberately narrower than the general BatchUpdate path. Conditional versions,
+/// gate membership, legacy delta updates, entity indexes, grouped eligibility, mixed shapes,
+/// and duplicate targets retain the read/transform implementation below. The fast path is for
+/// one homogeneous replacement shape over distinct pending rows, which is exactly the phased
+/// enrich and schedule workload.
+#[allow(clippy::too_many_arguments)]
+fn try_apply_operation_shaped_api001_batch(
+    tx: &impl RelTx,
+    grouped_shards: &HashSet<QueueKey>,
+    claim_scan_hints: &mut HashMap<QueueKey, i64>,
+    claim_scan_default_fifo: &mut HashMap<QueueKey, bool>,
+    shard: &QueueKey,
+    seq: u64,
+    now_n: i64,
+    model: &PriorityModel,
+    updates: &[UpdateFieldsCommand],
+) -> EngineResult<bool> {
+    let Some(shape) = updates.first().and_then(api001_update_shape) else {
+        return Ok(false);
+    };
+    if !updates
+        .iter()
+        .all(|update| api001_update_shape(update) == Some(shape))
+    {
+        return Ok(false);
+    }
+    if grouped_shards.contains(shard) && (shape.priority || shape.not_before) {
+        return Ok(false);
+    }
+
+    let mut targets = HashSet::with_capacity(updates.len());
+    for update in updates {
+        let target = match shape.address {
+            Api001UpdateAddress::ItemId => update.item_id.to_string(),
+            Api001UpdateAddress::ClientItemKey => update
+                .client_item_key
+                .as_ref()
+                .expect("shape requires client item key")
+                .as_str()
+                .to_string(),
+        };
+        if !targets.insert(target) {
+            return Ok(false);
+        }
+    }
+
+    let (tenant, queue) = parts(shard);
+    let address_column = match shape.address {
+        Api001UpdateAddress::ItemId => "item_id",
+        Api001UpdateAddress::ClientItemKey => "client_item_key",
+    };
+    let target = |update: &UpdateFieldsCommand| match shape.address {
+        Api001UpdateAddress::ItemId => update.item_id.to_string(),
+        Api001UpdateAddress::ClientItemKey => update
+            .client_item_key
+            .as_ref()
+            .expect("shape requires client item key")
+            .as_str()
+            .to_string(),
+    };
+    let mut replacement_columns = Vec::new();
+    if shape.fields {
+        replacement_columns.push("fields");
+    }
+    if shape.payload {
+        replacement_columns.push("payload");
+    }
+    if shape.metadata {
+        replacement_columns.push("metadata");
+    }
+    if shape.priority {
+        replacement_columns.extend(["priority", "priority_sort"]);
+    }
+    if shape.not_before {
+        replacement_columns.push("not_before");
+    }
+    let replacement_values = updates
+        .iter()
+        .map(|update| {
+            let mut values = Vec::with_capacity(replacement_columns.len());
+            if shape.fields {
+                values.push(RelValue::Text(fields_to_json(
+                    update
+                        .set_fields
+                        .as_ref()
+                        .expect("shape requires fields replacement"),
+                )?));
+            }
+            if shape.payload {
+                let PayloadUpdate::Set(payload) = &update.payload else {
+                    unreachable!("shape requires payload replacement")
+                };
+                values.push(RelValue::opt_blob(
+                    payload.as_ref().map(|bytes| bytes.to_vec()),
+                ));
+            }
+            if shape.metadata {
+                values.push(RelValue::Text(metadata_to_json(
+                    update
+                        .set_metadata
+                        .as_ref()
+                        .expect("shape requires metadata replacement"),
+                )?));
+            }
+            if shape.priority {
+                let ScheduleUpdate::Set(priority) = &update.set_priority else {
+                    unreachable!("shape requires priority replacement")
+                };
+                values.push(RelValue::opt_text(
+                    priority.as_ref().map(to_json).transpose()?,
+                ));
+                values.push(RelValue::Blob(elig_sort(priority, model)));
+            }
+            if shape.not_before {
+                let ScheduleUpdate::Set(not_before) = update.set_not_before else {
+                    unreachable!("shape requires schedule replacement")
+                };
+                values.push(RelValue::opt_int(not_before.map(ts_nanos)));
+            }
+            Ok::<_, EngineError>(values)
+        })
+        .collect::<EngineResult<Vec<_>>>()?;
+    let uniform_values = replacement_values
+        .first()
+        .filter(|first| replacement_values.iter().all(|values| values == *first));
+    if let Some(values) = uniform_values {
+        let range_bind_count = usize::from(shape.address == Api001UpdateAddress::ClientItemKey) * 2;
+        let chunk_size = 900 - values.len() - 4 - range_bind_count;
+        for chunk in updates.chunks(chunk_size) {
+            let mut assignments = replacement_columns
+                .iter()
+                .map(|column| format!("{column}=?"))
+                .collect::<Vec<_>>();
+            assignments.extend([
+                "item_version=item_version+1".to_string(),
+                "updated_at=?".to_string(),
+                "last_command_sequence=?".to_string(),
+            ]);
+            let mut params = values.clone();
+            params.extend([
+                RelValue::Integer(now_n),
+                RelValue::Integer(seq as i64),
+                RelValue::Text(tenant.to_string()),
+                RelValue::Text(queue.to_string()),
+            ]);
+            let targets = chunk.iter().map(target).collect::<Vec<_>>();
+            let range_predicate = if shape.address == Api001UpdateAddress::ClientItemKey {
+                let first = targets.iter().min().expect("non-empty update chunk");
+                let last = targets.iter().max().expect("non-empty update chunk");
+                params.extend([RelValue::Text(first.clone()), RelValue::Text(last.clone())]);
+                format!(" AND {address_column} BETWEEN ? AND ?")
+            } else {
+                String::new()
+            };
+            params.extend(targets.into_iter().map(RelValue::Text));
+            let sql = format!(
+                "UPDATE fireweed_items SET {} \
+                 WHERE tenant_id=? AND queue_id=?{range_predicate} AND {address_column} IN ({}) \
+                   AND lifecycle_state='Pending' AND superseded=0 AND fenced=0",
+                assignments.join(","),
+                vec!["?"; chunk.len()].join(",")
+            );
+            crate::rel_exec(tx, &sql, params)?;
+        }
+        if shape.priority || shape.not_before {
+            reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
+        }
+        return Ok(true);
+    }
+
+    let supplied_column_count = replacement_columns.len();
+    // Each CASE arm binds the target and replacement, and the indexed IN predicate binds each
+    // target once more. Four fixed binds carry time, sequence, tenant, and queue.
+    let chunk_size = (900 - 4) / (supplied_column_count * 2 + 1);
+    for (chunk, value_chunk) in updates
+        .chunks(chunk_size)
+        .zip(replacement_values.chunks(chunk_size))
+    {
+        let mut assignments = Vec::with_capacity(supplied_column_count + 3);
+        let mut params = Vec::with_capacity(chunk.len() * (supplied_column_count * 2 + 1) + 4);
+        for (column_index, column) in replacement_columns.iter().enumerate() {
+            assignments.push(format!(
+                "{column}=CASE {address_column} {} ELSE {column} END",
+                vec!["WHEN ? THEN ?"; chunk.len()].join(" ")
+            ));
+            for (update, values) in chunk.iter().zip(value_chunk) {
+                params.push(RelValue::Text(target(update)));
+                params.push(values[column_index].clone());
+            }
+        }
+        assignments.extend([
+            "item_version=item_version+1".to_string(),
+            "updated_at=?".to_string(),
+            "last_command_sequence=?".to_string(),
+        ]);
+        params.extend([
+            RelValue::Integer(now_n),
+            RelValue::Integer(seq as i64),
+            RelValue::Text(tenant.to_string()),
+            RelValue::Text(queue.to_string()),
+        ]);
+        params.extend(chunk.iter().map(|update| RelValue::Text(target(update))));
+        let sql = format!(
+            "UPDATE fireweed_items SET {} \
+             WHERE tenant_id=? AND queue_id=? AND {address_column} IN ({}) \
+               AND lifecycle_state='Pending' AND superseded=0 AND fenced=0",
+            assignments.join(","),
+            vec!["?"; chunk.len()].join(",")
+        );
+        crate::rel_exec(tx, &sql, params)?;
+    }
+    if shape.priority || shape.not_before {
+        reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
+    }
+    Ok(true)
+}
+
 fn apply_update_fields_batch_sql(
     tx: &impl RelTx,
     queues: &HashMap<QueueKey, QueueDefinition>,
@@ -2721,6 +3013,19 @@ fn apply_update_fields_batch_sql(
         .get(shard)
         .map(|definition| definition.priority_model)
         .ok_or(EngineError::NotFound)?;
+    if try_apply_operation_shaped_api001_batch(
+        tx,
+        grouped_shards,
+        claim_scan_hints,
+        claim_scan_default_fifo,
+        shard,
+        seq,
+        now_n,
+        &model,
+        updates,
+    )? {
+        return Ok(());
+    }
     if updates.iter().any(|update| {
         matches!(update.set_priority, ScheduleUpdate::Set(_))
             || matches!(update.set_not_before, ScheduleUpdate::Set(_))

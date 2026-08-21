@@ -55,7 +55,7 @@ determined by the selected log under ADR-012/ADR-013. With the Class B memory
 log, only the persisted Turso projection may survive process death, and that
 cell does not acquire log-history semantics.
 
-The supported boundary is embedded/local `turso = 0.7.0`, pinned with default
+The supported boundary is embedded/local `turso = 0.7.2`, pinned with default
 features disabled and using ordinary WAL. Remote databases, embedded replicas,
 sync/remote replication, experimental MVCC, FTS, and allocator features are not
 supported public modes. Initialization uses individual pragma operations with

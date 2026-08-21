@@ -68,7 +68,7 @@ In scope:
 
 - async storage-axis migration required to call a native-async projection without blocking;
 - a driver-neutral relational schema/codec/query substrate shared by SQLite and Turso;
-- `fireweed-turso`, pinned to Turso 0.7.0 in ordinary local WAL mode;
+- `fireweed-turso`, pinned to Turso 0.7.2 in ordinary local WAL mode;
 - feature-gated Turso composition with memory, SQLite, Postgres, filesystem, and
   S3 logs;
 - full relational differential, cancellation, replay, reopen, conformance, and
@@ -226,7 +226,7 @@ upgrade refuses a newer/unknown schema until the compatibility probe and migrati
 
 ### External Dependencies
 
-- `turso = "=0.7.0"`, `default-features = false`.
+- `turso = "=0.7.2"`, `default-features = false`.
 - Tokio synchronization/runtime support stays in adapter and composition crates, not domain contracts.
 - If Turso is unavailable or poisoned, new mutations fail with the existing typed storage/backpressure
   error; recovery rebuilds from the trusted object-log frontier.
