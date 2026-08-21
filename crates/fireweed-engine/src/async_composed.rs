@@ -10,14 +10,14 @@ use fireweed_core::{
 };
 
 use crate::{
-    AsyncCohortFinalizeRequest, AsyncCohortLifecyclePlanner, AsyncCohortRenewRequest,
-    AsyncCommitStrategy, AsyncReclaimPlanner, AsyncReclaimRequest, ClaimCommand, ClaimRequest,
-    ClaimUnit, Claimed, ClaimedItem, CohortClaimCommand, CommandChecksum, DispatchError,
-    DurabilityClass, EngineError, EngineResult, KeyedQueueGate, NoAsyncCohortLifecyclePlanner,
-    OwnedTask, OwnedTaskDispatcher, PreparedAsyncCommitStrategy, PushCommand, PushItem, PushSpec,
-    QueueCommand, QueueGateError, QueueKey, RawCommitFault, RawCommitOutcome, RawCommitRequest,
-    RequestOutcome, TaskOutcomeError, compile_entity_schema, validate_claim_compatibility,
-    validate_entity, validate_gate_push,
+    AppendAdmissionClass, AsyncCohortFinalizeRequest, AsyncCohortLifecyclePlanner,
+    AsyncCohortRenewRequest, AsyncCommitStrategy, AsyncReclaimPlanner, AsyncReclaimRequest,
+    ClaimCommand, ClaimRequest, ClaimUnit, Claimed, ClaimedItem, CohortClaimCommand,
+    CommandChecksum, DispatchError, DurabilityClass, EngineError, EngineResult, KeyedQueueGate,
+    NoAsyncCohortLifecyclePlanner, OwnedTask, OwnedTaskDispatcher, PreparedAsyncCommitStrategy,
+    PushCommand, PushItem, PushSpec, QueueCommand, QueueGateError, QueueKey, RawCommitFault,
+    RawCommitOutcome, RawCommitRequest, RequestOutcome, TaskOutcomeError, compile_entity_schema,
+    validate_claim_compatibility, validate_entity, validate_gate_push,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -403,6 +403,7 @@ pub struct AsyncComposedBackend<
     cohort_lifecycle_planner: Arc<C>,
     admission: KeyedQueueGate<crate::QueueKey>,
     durability: DurabilityClass,
+    append_admission: AppendAdmissionClass,
 }
 
 impl<S, D> AsyncComposedBackend<S, D, NoAsyncClaimPlanner>
@@ -422,6 +423,7 @@ where
             cohort_lifecycle_planner: Arc::new(NoAsyncCohortLifecyclePlanner),
             admission: KeyedQueueGate::new(max_queued_commits),
             durability,
+            append_admission: AppendAdmissionClass::NonDerived,
         }
     }
 }
@@ -448,6 +450,7 @@ where
             cohort_lifecycle_planner: Arc::new(NoAsyncCohortLifecyclePlanner),
             admission: KeyedQueueGate::new(max_queued_commits),
             durability,
+            append_admission: AppendAdmissionClass::NonDerived,
         }
     }
 }
@@ -521,6 +524,7 @@ where
     where
         S: PreparedAsyncCommitStrategy<Request = RawCommitRequest>,
     {
+        let request = request.with_append_admission(self.append_admission);
         let queue = request.shard().clone();
         let prepared = self
             .strategy
@@ -566,6 +570,7 @@ where
         let queue = request.shard.clone();
         let planner = Arc::clone(&self.reclaim_planner);
         let strategy = Arc::clone(&self.strategy);
+        let append_admission = self.append_admission;
         self.submit_operation(queue.clone(), move || {
             Box::pin(async move {
                 let plan = planner
@@ -585,7 +590,7 @@ where
                     .map_err(LifecycleExecutionError::BeforeCommit)?;
                 let epoch = commit.expected_epoch();
                 let outcome = strategy
-                    .commit(commit)
+                    .commit(commit.with_append_admission(append_admission))
                     .await
                     .map_err(LifecycleExecutionError::Commit)?;
                 validate_lifecycle_commit_outcome(
@@ -617,6 +622,7 @@ where
         let queue = request.shard.clone();
         let planner = Arc::clone(&self.cohort_lifecycle_planner);
         let strategy = Arc::clone(&self.strategy);
+        let append_admission = self.append_admission;
         self.submit_operation(queue.clone(), move || {
             Box::pin(async move {
                 let plan = planner
@@ -627,7 +633,7 @@ where
                     .map_err(LifecycleExecutionError::BeforeCommit)?;
                 let epoch = plan.request.expected_epoch();
                 let outcome = strategy
-                    .commit(plan.request)
+                    .commit(plan.request.with_append_admission(append_admission))
                     .await
                     .map_err(LifecycleExecutionError::Commit)?;
                 validate_lifecycle_commit_outcome(
@@ -651,6 +657,7 @@ where
         let queue = request.shard.clone();
         let planner = Arc::clone(&self.cohort_lifecycle_planner);
         let strategy = Arc::clone(&self.strategy);
+        let append_admission = self.append_admission;
         self.submit_operation(queue.clone(), move || {
             Box::pin(async move {
                 let plan = planner
@@ -666,7 +673,7 @@ where
                     .map_err(LifecycleExecutionError::BeforeCommit)?;
                 let epoch = plan.request.expected_epoch();
                 let outcome = strategy
-                    .commit(plan.request)
+                    .commit(plan.request.with_append_admission(append_admission))
                     .await
                     .map_err(LifecycleExecutionError::Commit)?;
                 validate_lifecycle_commit_outcome(
@@ -849,6 +856,7 @@ where
         let queue = request.shard.clone();
         let strategy = Arc::clone(&self.strategy);
         let planner = Arc::clone(&self.push_planner);
+        let append_admission = self.append_admission;
         self.submit_operation(queue.clone(), move || {
             Box::pin(async move {
                 match planned_push(planner, request).await? {
@@ -860,7 +868,7 @@ where
                     PreparedPush::Commit { request, item_ids } => {
                         let expected_epoch = request.expected_epoch();
                         let outcome = strategy
-                            .commit(request)
+                            .commit(request.with_append_admission(append_admission))
                             .await
                             .map_err(PushExecutionError::Commit)?;
                         validate_push_commit_outcome(&queue, expected_epoch, &outcome).map_err(
@@ -1376,6 +1384,7 @@ where
             cohort_lifecycle_planner: Arc::new(NoAsyncCohortLifecyclePlanner),
             admission: KeyedQueueGate::new(max_queued_commits),
             durability,
+            append_admission: AppendAdmissionClass::NonDerived,
         }
     }
 }
@@ -1396,6 +1405,7 @@ impl<S, D, P, U, V, R, C> AsyncComposedBackend<S, D, P, U, V, R, C> {
             cohort_lifecycle_planner: self.cohort_lifecycle_planner,
             admission: self.admission,
             durability: self.durability,
+            append_admission: self.append_admission,
         }
     }
 
@@ -1413,6 +1423,7 @@ impl<S, D, P, U, V, R, C> AsyncComposedBackend<S, D, P, U, V, R, C> {
             cohort_lifecycle_planner: self.cohort_lifecycle_planner,
             admission: self.admission,
             durability: self.durability,
+            append_admission: self.append_admission,
         }
     }
 
@@ -1430,7 +1441,15 @@ impl<S, D, P, U, V, R, C> AsyncComposedBackend<S, D, P, U, V, R, C> {
             cohort_lifecycle_planner: Arc::new(cohort_lifecycle_planner),
             admission: self.admission,
             durability: self.durability,
+            append_admission: self.append_admission,
         }
+    }
+
+    /// Configure the inert provenance attached to commits executed under this backend's queue gate.
+    /// Generic compositions retain [`AppendAdmissionClass::NonDerived`].
+    pub fn with_append_admission(mut self, append_admission: AppendAdmissionClass) -> Self {
+        self.append_admission = append_admission;
+        self
     }
 }
 
@@ -1448,6 +1467,7 @@ where
         let queue = request.shard.clone();
         let planner = Arc::clone(&self.lifecycle_planner);
         let strategy = Arc::clone(&self.strategy);
+        let append_admission = self.append_admission;
         self.submit_operation(queue.clone(), move || {
             Box::pin(async move {
                 let plan = planner
@@ -1458,7 +1478,7 @@ where
                     .map_err(LifecycleExecutionError::BeforeCommit)?;
                 let epoch = plan.request.expected_epoch();
                 let outcome = strategy
-                    .commit(plan.request)
+                    .commit(plan.request.with_append_admission(append_admission))
                     .await
                     .map_err(LifecycleExecutionError::Commit)?;
                 validate_lifecycle_commit_outcome(
@@ -1479,6 +1499,7 @@ where
         let queue = request.shard.clone();
         let planner = Arc::clone(&self.lifecycle_planner);
         let strategy = Arc::clone(&self.strategy);
+        let append_admission = self.append_admission;
         self.submit_operation(queue.clone(), move || {
             Box::pin(async move {
                 let plan = planner
@@ -1493,7 +1514,7 @@ where
                 .map_err(LifecycleExecutionError::BeforeCommit)?;
                 let epoch = plan.request.expected_epoch();
                 let outcome = strategy
-                    .commit(plan.request)
+                    .commit(plan.request.with_append_admission(append_admission))
                     .await
                     .map_err(LifecycleExecutionError::Commit)?;
                 validate_lifecycle_commit_outcome(
@@ -1530,13 +1551,14 @@ where
         let queue = shard.clone();
         let lifecycle = Arc::clone(&self.lifecycle_planner);
         let strategy = Arc::clone(&self.strategy);
+        let append_admission = self.append_admission;
         self.submit_operation(queue.clone(), move || {
             Box::pin(async move {
                 let prepared =
                     planned_finalize(lifecycle, shard, outcomes, now, expected_epoch).await?;
                 let epoch = prepared.request.expected_epoch();
                 let outcome = strategy
-                    .commit(prepared.request)
+                    .commit(prepared.request.with_append_admission(append_admission))
                     .await
                     .map_err(LifecycleExecutionError::Commit)?;
                 validate_lifecycle_commit_outcome(
@@ -1598,6 +1620,7 @@ where
         let queue = shard.clone();
         let lifecycle = Arc::clone(&self.lifecycle_planner);
         let strategy = Arc::clone(&self.strategy);
+        let append_admission = self.append_admission;
         self.submit_operation(queue.clone(), move || {
             Box::pin(async move {
                 let claimed = lifecycle
@@ -1634,7 +1657,7 @@ where
                     .map_err(LifecycleExecutionError::BeforeCommit)?;
                 let epoch = plan.request.expected_epoch();
                 let outcome = strategy
-                    .commit(plan.request)
+                    .commit(plan.request.with_append_admission(append_admission))
                     .await
                     .map_err(LifecycleExecutionError::Commit)?;
                 validate_lifecycle_commit_outcome(
@@ -1659,6 +1682,7 @@ where
         let queue = request.shard.clone();
         let planner = Arc::clone(&self.lifecycle_planner);
         let strategy = Arc::clone(&self.strategy);
+        let append_admission = self.append_admission;
         self.submit_operation(queue.clone(), move || {
             Box::pin(async move {
                 let plan = planner
@@ -1672,7 +1696,7 @@ where
                 }
                 let epoch = plan.request.expected_epoch();
                 let outcome = strategy
-                    .commit(plan.request)
+                    .commit(plan.request.with_append_admission(append_admission))
                     .await
                     .map_err(LifecycleExecutionError::Commit)?;
                 validate_lifecycle_commit_outcome(
@@ -1709,6 +1733,7 @@ where
         let queue = shard.clone();
         let lifecycle = Arc::clone(&self.lifecycle_planner);
         let strategy = Arc::clone(&self.strategy);
+        let append_admission = self.append_admission;
         self.submit_operation(queue.clone(), move || {
             Box::pin(async move {
                 let claimed = lifecycle
@@ -1746,7 +1771,7 @@ where
                     .map_err(LifecycleExecutionError::BeforeCommit)?;
                 let epoch = plan.request.expected_epoch();
                 let outcome = strategy
-                    .commit(plan.request)
+                    .commit(plan.request.with_append_admission(append_admission))
                     .await
                     .map_err(LifecycleExecutionError::Commit)?;
                 validate_lifecycle_commit_outcome(
@@ -1893,6 +1918,7 @@ where
         let queue = request.shard.clone();
         let strategy = Arc::clone(&self.strategy);
         let planner = Arc::clone(&self.claim_planner);
+        let append_admission = self.append_admission;
         self.submit_operation(queue.clone(), move || {
             Box::pin(async move {
                 match planned_claim(Arc::clone(&planner), request.clone()).await? {
@@ -1904,7 +1930,7 @@ where
                     } => {
                         let expected_epoch = commit.expected_epoch();
                         let outcome = strategy
-                            .commit(commit)
+                            .commit(commit.with_append_admission(append_admission))
                             .await
                             .map_err(ClaimExecutionError::Commit)?;
                         validate_claim_commit_outcome(&queue, expected_epoch, &outcome).map_err(

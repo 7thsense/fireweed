@@ -7,6 +7,29 @@
 
 use crate::{CommandEnvelope, CommandPosition, QueueKey};
 
+/// Provenance for the admission that is still live when a raw request reaches append.
+///
+/// This is an inert carrier. It does not acquire a permit or fence; later contention slices use it to
+/// prove that derived append sites activate exactly one routing domain without guessing from commands.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AppendAdmissionClass {
+    /// Generic object-log/raw callers that do not participate in the derived Turso protocol.
+    #[default]
+    NonDerived,
+    /// A derived append executing while its [`crate::KeyedQueueGate`] permit remains live.
+    KeyedPermitLive,
+    /// A direct derived append that will require selection admission before fence activation.
+    SelectionRequired,
+    /// A direct derived append whose leased-only/non-work command class bypasses selection fencing.
+    Bypass,
+    /// An atomic Turso append governed by the native atomic writer path.
+    AtomicNative,
+    /// A single-owner append performed while reopen blocks serving traffic.
+    RecoveryOnly,
+    /// The dedicated default item-Claim append owned by the Claim coordinator.
+    ClaimCoordinatorLive,
+}
+
 /// A typed fault control at one of the legal raw-commit suspension boundaries.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RawCommitFault {
@@ -29,6 +52,7 @@ pub struct RawCommitRequest {
     commands: Vec<CommandEnvelope>,
     expected_epoch: u64,
     fault: RawCommitFault,
+    append_admission: AppendAdmissionClass,
 }
 
 impl RawCommitRequest {
@@ -39,12 +63,19 @@ impl RawCommitRequest {
             commands,
             expected_epoch,
             fault: RawCommitFault::None,
+            append_admission: AppendAdmissionClass::NonDerived,
         }
     }
 
     /// Select a typed fault boundary for this request.
     pub fn with_fault(mut self, fault: RawCommitFault) -> Self {
         self.fault = fault;
+        self
+    }
+
+    /// Attach append-time admission provenance without activating admission or fencing.
+    pub fn with_append_admission(mut self, append_admission: AppendAdmissionClass) -> Self {
+        self.append_admission = append_admission;
         self
     }
 
@@ -64,9 +95,71 @@ impl RawCommitRequest {
         self.fault
     }
 
+    pub fn append_admission(&self) -> AppendAdmissionClass {
+        self.append_admission
+    }
+
     /// Consume the request at an adapter ownership boundary without cloning its command batch.
     pub fn into_parts(self) -> (QueueKey, Vec<CommandEnvelope>, u64, RawCommitFault) {
         (self.shard, self.commands, self.expected_epoch, self.fault)
+    }
+
+    /// Consume the request at a derived adapter boundary while retaining append-admission provenance.
+    pub fn into_parts_with_append_admission(
+        self,
+    ) -> (
+        QueueKey,
+        Vec<CommandEnvelope>,
+        u64,
+        RawCommitFault,
+        AppendAdmissionClass,
+    ) {
+        (
+            self.shard,
+            self.commands,
+            self.expected_epoch,
+            self.fault,
+            self.append_admission,
+        )
+    }
+}
+
+#[cfg(test)]
+mod append_admission_tests {
+    use fireweed_core::{QueueId, TenantId};
+
+    use super::*;
+
+    fn queue() -> QueueKey {
+        QueueKey::new(
+            TenantId::new("tenant").unwrap(),
+            QueueId::new("queue").unwrap(),
+        )
+    }
+
+    #[test]
+    fn raw_commit_defaults_generic_callers_to_non_derived() {
+        let request = RawCommitRequest::new(queue(), Vec::new(), 1);
+        assert_eq!(request.append_admission(), AppendAdmissionClass::NonDerived);
+    }
+
+    #[test]
+    fn raw_commit_carries_each_append_admission_class_without_behavior() {
+        let classes = [
+            AppendAdmissionClass::NonDerived,
+            AppendAdmissionClass::KeyedPermitLive,
+            AppendAdmissionClass::SelectionRequired,
+            AppendAdmissionClass::Bypass,
+            AppendAdmissionClass::AtomicNative,
+            AppendAdmissionClass::RecoveryOnly,
+            AppendAdmissionClass::ClaimCoordinatorLive,
+        ];
+        for class in classes {
+            let request =
+                RawCommitRequest::new(queue(), Vec::new(), 1).with_append_admission(class);
+            let (_, _, _, _, carried) = request.into_parts_with_append_admission();
+            assert_eq!(carried, class);
+        }
     }
 }
 

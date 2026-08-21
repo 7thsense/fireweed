@@ -19,24 +19,25 @@ use fireweed_core::{
     QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
-    AsyncClaimError, AsyncCommitSubmitError, AsyncComposedBackend, AsyncControlPlane,
-    AsyncFinalizeRequest, AsyncLifecycleError, AsyncLogStore, AsyncProjectionSpec,
-    AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError, AsyncPushRequest, AsyncReclaimRequest,
-    AsyncRenewRequest, Backend, BatchUpdatePort, ClaimCommand, ClaimCompatibility, ClaimPort,
-    ClaimRequest, Claimed, CommandChecksum, CommandEnvelope, CommandPosition, ControlPlaneStore,
-    CreateQueueOutcome, DEFAULT_BLOCKING_AXIS_IN_FLIGHT, DurabilityClass, EngineError,
-    EngineResult, FinalizeOutcome, FinalizePort, FinalizeTarget, HistoricalProjectionRead,
-    HotProjectionQueryPort, IdGen, InProcessControlPlane, InProcessLogStore, IndexQueryPort,
-    InlineOwnedTaskDispatcher, ItemMutationPort, ItemMutationRequest, ItemMutationResponse,
-    ItemView, LeaseView, LiveItemView, LogStore, OwnedTask, PendingPage, PendingSummary,
-    PreparedClaim, PreparedFinalize, PreparedPush, ProjectionClaimPlanner,
-    ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner,
-    ProjectionSnapshot, PurgePort, PushPort, PushSpec, QueueCommand, QueueCounters, QueueGateError,
-    QueueKey, QueueMetrics, RawCommitFault, RawCommitOutcome, RawCommitRequest,
-    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort,
-    RenewTarget, SeparateReplayCommit, SeparateReplayCommitter, SeqIdGen, SetGatesPort,
-    SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport, UnifiedAtomicCommit,
-    UnifiedAtomicCommitter, UpdateFieldsBatchCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    AppendAdmissionClass, AsyncClaimError, AsyncCommitSubmitError, AsyncComposedBackend,
+    AsyncControlPlane, AsyncFinalizeRequest, AsyncLifecycleError, AsyncLogStore,
+    AsyncProjectionSpec, AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError, AsyncPushRequest,
+    AsyncReclaimRequest, AsyncRenewRequest, Backend, BatchUpdatePort, ClaimCommand,
+    ClaimCompatibility, ClaimPort, ClaimRequest, Claimed, CommandChecksum, CommandEnvelope,
+    CommandPosition, ControlPlaneStore, CreateQueueOutcome, DEFAULT_BLOCKING_AXIS_IN_FLIGHT,
+    DurabilityClass, EngineError, EngineResult, FinalizeOutcome, FinalizePort, FinalizeTarget,
+    HistoricalProjectionRead, HotProjectionQueryPort, IdGen, InProcessControlPlane,
+    InProcessLogStore, IndexQueryPort, InlineOwnedTaskDispatcher, ItemMutationPort,
+    ItemMutationRequest, ItemMutationResponse, ItemView, LeaseView, LiveItemView, LogStore,
+    OwnedTask, PendingPage, PendingSummary, PreparedClaim, PreparedFinalize, PreparedPush,
+    ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead,
+    ProjectionReclaimPlanner, ProjectionSnapshot, PurgePort, PushPort, PushSpec, QueueCommand,
+    QueueCounters, QueueGateError, QueueKey, QueueMetrics, RawCommitFault, RawCommitOutcome,
+    RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
+    RenewLeasePort, RenewTarget, SeparateReplayCommit, SeparateReplayCommitter, SeqIdGen,
+    SetGatesPort, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
+    UnifiedAtomicCommit, UnifiedAtomicCommitter, UpdateFieldsBatchCommand, UpdateFieldsPort,
+    UpsertOutcome, UpsertPort,
 };
 use fireweed_projection::InMemoryProjection;
 use fireweed_turso::{TursoConfig, TursoRelational, claimed_from_class_s};
@@ -213,6 +214,114 @@ mod contention_mapping_tests {
             }
         );
     }
+
+    fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let (_, tail) = source
+            .split_once(start)
+            .unwrap_or_else(|| panic!("missing source-audit start marker: {start}"));
+        let (body, _) = tail
+            .split_once(end)
+            .unwrap_or_else(|| panic!("missing source-audit end marker: {end}"));
+        body
+    }
+
+    #[test]
+    fn append_admission_carrier_audits_derived_dispatch_and_commit_sites() {
+        let compose_file = include_str!("turso_compose.rs");
+        let (_, compose) = compose_file
+            .rsplit_once("// Atomic log-replay × Turso")
+            .expect("production Turso composition boundary");
+        let async_composed = include_str!("../../fireweed-engine/src/async_composed.rs");
+        let production_async = async_composed
+            .rsplit_once("#[cfg(test)]\nmod tests")
+            .expect("async composed unit-test boundary")
+            .0;
+
+        assert!(compose.contains(".with_append_admission(AppendAdmissionClass::AtomicNative)"));
+        assert!(compose.contains(".with_append_admission(AppendAdmissionClass::KeyedPermitLive)"));
+        assert!(
+            production_async
+                .contains("let request = request.with_append_admission(self.append_admission);")
+        );
+        let commit_sites = production_async
+            .lines()
+            .filter(|line| line.trim_start().starts_with(".commit("))
+            .count();
+        let classified_commit_sites = production_async
+            .lines()
+            .filter(|line| {
+                let line = line.trim_start();
+                line.starts_with(".commit(") && line.contains("with_append_admission")
+            })
+            .count();
+        assert_eq!(
+            commit_sites, 11,
+            "refresh the source audit when commit sites change"
+        );
+        assert_eq!(classified_commit_sites, commit_sites);
+
+        let atomic_commit = between(
+            compose,
+            "fn commit_atomic(&self, request: Self::Request)",
+            "type AtomicEngine",
+        );
+        assert!(atomic_commit.contains("into_parts_with_append_admission"));
+        assert!(atomic_commit.contains("AppendAdmissionClass::AtomicNative"));
+
+        let direct_batch = between(compose, "impl BatchUpdatePort", "impl FinalizePort");
+        assert!(direct_batch.contains("AppendAdmissionClass::AtomicNative"));
+        assert!(direct_batch.contains("AppendAdmissionClass::SelectionRequired"));
+
+        let object_log_commit = between(
+            compose,
+            "fn commit_replayable(&self, request: Self::Request)",
+            "async fn publish_packed_apply",
+        );
+        for class in [
+            "NonDerived",
+            "KeyedPermitLive",
+            "SelectionRequired",
+            "Bypass",
+            "AtomicNative",
+            "RecoveryOnly",
+            "ClaimCoordinatorLive",
+        ] {
+            assert!(
+                object_log_commit.contains(&format!("AppendAdmissionClass::{class}")),
+                "ObjectLogTursoCommitter must exhaustively observe {class}"
+            );
+        }
+
+        let (_, derived) = compose
+            .split_once("impl DerivedObjectLogTursoBackend {")
+            .expect("derived Turso implementation");
+        let recovery = between(
+            derived,
+            "async fn drain_claim_outbox",
+            "async fn claimed_targets",
+        );
+        assert!(recovery.contains("AppendAdmissionClass::RecoveryOnly"));
+        assert!(recovery.contains(".packed_append("));
+
+        let push = between(derived, "async fn dispatch_push", "async fn dispatch_claim");
+        assert!(push.contains("AppendAdmissionClass::SelectionRequired"));
+
+        let class_s = between(
+            derived,
+            "async fn append_class_s_claim",
+            "async fn dispatch_claim_legacy",
+        );
+        assert!(class_s.contains("AppendAdmissionClass::ClaimCoordinatorLive"));
+        assert!(class_s.contains(".packed_append("));
+
+        let finalize = between(
+            derived,
+            "async fn dispatch_finalize",
+            "fn create_queue_impl",
+        );
+        assert!(finalize.contains("AppendAdmissionClass::Bypass"));
+        assert!(finalize.contains("AppendAdmissionClass::SelectionRequired"));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -238,7 +347,17 @@ where
         let projection = Arc::clone(&self.projection);
         let control = Arc::clone(&self.control);
         Box::pin(async move {
-            let (shard, commands, expected_epoch, fault) = request.into_parts();
+            let (shard, commands, expected_epoch, fault, append_admission) =
+                request.into_parts_with_append_admission();
+            match append_admission {
+                AppendAdmissionClass::AtomicNative
+                | AppendAdmissionClass::NonDerived
+                | AppendAdmissionClass::KeyedPermitLive
+                | AppendAdmissionClass::SelectionRequired
+                | AppendAdmissionClass::Bypass
+                | AppendAdmissionClass::RecoveryOnly
+                | AppendAdmissionClass::ClaimCoordinatorLive => {}
+            }
             match fault {
                 RawCommitFault::BeforeAppend => {
                     return Err(EngineError::Invalid("fault-injection: kill before append"));
@@ -398,7 +517,8 @@ where
             1024,
         )
         .with_lifecycle_planner(lifecycle)
-        .with_reclaim_planner(reclaim);
+        .with_reclaim_planner(reclaim)
+        .with_append_admission(AppendAdmissionClass::AtomicNative);
 
         let backend = Self {
             engine,
@@ -933,8 +1053,17 @@ macro_rules! impl_turso_product_ports {
                         };
                         use fireweed_engine::AsyncCommitStrategy;
                         let strategy = self.engine.commit_strategy();
+                        let append_admission = match $durability {
+                            DurabilityClass::Atomic => AppendAdmissionClass::AtomicNative,
+                            DurabilityClass::EventualApply => {
+                                AppendAdmissionClass::SelectionRequired
+                            }
+                        };
                         let committed = strategy
-                            .commit(RawCommitRequest::new(shard, vec![envelope], epoch))
+                            .commit(
+                                RawCommitRequest::new(shard, vec![envelope], epoch)
+                                    .with_append_admission(append_admission),
+                            )
                             .await;
                         self.finish_planned(planned, committed.is_ok());
                         committed?;
@@ -1446,7 +1575,17 @@ impl SeparateReplayCommitter for ObjectLogTursoCommitter {
         let async_apply = self.async_apply.clone();
         let last_produce = Arc::clone(&self.last_produce);
         Box::pin(async move {
-            let (shard, commands, expected_epoch, fault) = request.into_parts();
+            let (shard, commands, expected_epoch, fault, append_admission) =
+                request.into_parts_with_append_admission();
+            match append_admission {
+                AppendAdmissionClass::NonDerived
+                | AppendAdmissionClass::KeyedPermitLive
+                | AppendAdmissionClass::SelectionRequired
+                | AppendAdmissionClass::Bypass
+                | AppendAdmissionClass::AtomicNative
+                | AppendAdmissionClass::RecoveryOnly
+                | AppendAdmissionClass::ClaimCoordinatorLive => {}
+            }
             match fault {
                 RawCommitFault::BeforeAppend => {
                     return Err(EngineError::Invalid("fault-injection: kill before append"));
@@ -1680,7 +1819,8 @@ impl DerivedObjectLogTursoBackend {
             1024,
         )
         .with_lifecycle_planner(lifecycle)
-        .with_reclaim_planner(reclaim);
+        .with_reclaim_planner(reclaim)
+        .with_append_admission(AppendAdmissionClass::KeyedPermitLive);
 
         let backend = Self {
             engine,
@@ -1918,8 +2058,22 @@ impl DerivedObjectLogTursoBackend {
                 .map_err(|e| EngineError::Storage(e.to_string()))?,
             };
             let epoch = AsyncLogStore::current_epoch(self.log.as_ref(), shard.clone()).await?;
+            let request = RawCommitRequest::new(shard.clone(), vec![envelope], epoch)
+                .with_append_admission(AppendAdmissionClass::RecoveryOnly);
+            let (append_shard, commands, append_epoch, fault, append_admission) =
+                request.into_parts_with_append_admission();
+            match append_admission {
+                AppendAdmissionClass::RecoveryOnly
+                | AppendAdmissionClass::NonDerived
+                | AppendAdmissionClass::KeyedPermitLive
+                | AppendAdmissionClass::SelectionRequired
+                | AppendAdmissionClass::Bypass
+                | AppendAdmissionClass::AtomicNative
+                | AppendAdmissionClass::ClaimCoordinatorLive => {}
+            }
+            debug_assert_eq!(fault, RawCommitFault::None);
             self.log
-                .packed_append(shard.clone(), vec![envelope], epoch)
+                .packed_append(append_shard, commands, append_epoch)
                 .await?;
             self.projection
                 .delete_claim_outbox_row(
@@ -1964,9 +2118,16 @@ impl DerivedObjectLogTursoBackend {
         &self.projection
     }
 
-    async fn commit_prepared(&self, request: RawCommitRequest) -> EngineResult<()> {
+    async fn commit_prepared(
+        &self,
+        request: RawCommitRequest,
+        append_admission: AppendAdmissionClass,
+    ) -> EngineResult<()> {
         use fireweed_engine::AsyncCommitStrategy;
-        self.engine.commit_strategy().commit(request).await?;
+        self.engine
+            .commit_strategy()
+            .commit(request.with_append_admission(append_admission))
+            .await?;
         Ok(())
     }
 
@@ -1979,7 +2140,8 @@ impl DerivedObjectLogTursoBackend {
                 Ok(fireweed_engine::PushBatchOutcome::replayed(item_ids))
             }
             PreparedPush::Commit { request, item_ids } => {
-                self.commit_prepared(request).await?;
+                self.commit_prepared(request, AppendAdmissionClass::SelectionRequired)
+                    .await?;
                 Ok(fireweed_engine::PushBatchOutcome::fresh(item_ids))
             }
         }
@@ -2056,9 +2218,8 @@ impl DerivedObjectLogTursoBackend {
         };
         let committed = self
             .append_class_s_claim(
-                request.shard.clone(),
-                envelope,
-                epoch,
+                RawCommitRequest::new(request.shard.clone(), vec![envelope], epoch)
+                    .with_append_admission(AppendAdmissionClass::ClaimCoordinatorLive),
                 reservation,
                 &leased.outbox_id,
             )
@@ -2074,13 +2235,29 @@ impl DerivedObjectLogTursoBackend {
 
     async fn append_class_s_claim(
         &self,
-        shard: QueueKey,
-        envelope: CommandEnvelope,
-        epoch: u64,
+        request: RawCommitRequest,
         reservation: Option<fireweed_objectlog::AsyncProjectionApplyReservation>,
         _outbox_id: &str,
     ) -> EngineResult<()> {
-        let commands = vec![envelope];
+        let (shard, commands, epoch, fault, append_admission) =
+            request.into_parts_with_append_admission();
+        match append_admission {
+            AppendAdmissionClass::ClaimCoordinatorLive
+            | AppendAdmissionClass::NonDerived
+            | AppendAdmissionClass::KeyedPermitLive
+            | AppendAdmissionClass::SelectionRequired
+            | AppendAdmissionClass::Bypass
+            | AppendAdmissionClass::AtomicNative
+            | AppendAdmissionClass::RecoveryOnly => {}
+        }
+        match fault {
+            RawCommitFault::None => {}
+            RawCommitFault::BeforeAppend | RawCommitFault::AfterAppendBeforeApply => {
+                return Err(EngineError::Invalid(
+                    "fault injection is unavailable for Class-S claim append",
+                ));
+            }
+        }
         let outcome = match self
             .log
             .packed_append(shard.clone(), commands.clone(), epoch)
@@ -2119,7 +2296,8 @@ impl DerivedObjectLogTursoBackend {
                 item_ids,
                 cohort_id,
             } => {
-                self.commit_prepared(commit).await?;
+                self.commit_prepared(commit, AppendAdmissionClass::SelectionRequired)
+                    .await?;
                 self.catch_up_projection(&request.shard).await?;
                 // The default Class-S lane records this in-memory lease index
                 // before returning its already-materialized response. Legacy
@@ -2148,12 +2326,22 @@ impl DerivedObjectLogTursoBackend {
                 "finalize item batch must not be empty",
             ));
         }
+        let append_admission = if outcomes.iter().all(|outcome| {
+            matches!(
+                outcome.kind,
+                fireweed_engine::FinalizeKind::Complete | fireweed_engine::FinalizeKind::Fail
+            )
+        }) {
+            AppendAdmissionClass::Bypass
+        } else {
+            AppendAdmissionClass::SelectionRequired
+        };
         let PreparedFinalize { request, .. } = self
             .engine
             .prepare_finalize(shard.clone(), outcomes, now, expected_epoch)
             .await
             .map_err(map_lifecycle)?;
-        self.commit_prepared(request).await
+        self.commit_prepared(request, append_admission).await
     }
 
     fn create_queue_impl(
