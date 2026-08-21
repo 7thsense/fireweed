@@ -84,5 +84,6 @@ RSS is the second scoreboard. `filesystem--memory` is the O(N) control, not the 
 | 1787259713 | batched relect, no dump | 10000 | COUNT GROUP BY + UNION of LIMIT 1 per 50 groups; dump gone | **31692** | **33465** | **51361** | 382 | 139 | 127.7 | 13389 | 253 |
 | 1787266565 | skip already-leased apply | 10000 | Class S apply skips groups; thin SELECT; sequential P4 overlap | **30167** | **33185** | **45500** | 490 | — | 142.3 | 14925 | 252 |
 | 1787269858 | inflight=8 P4 | 10000 | waves of 8 claims; coordinator applies out-of-order Ready; still writer-bound | **32030** | **35636** | **49552** | **913** | 126 | 139.7 | 14647 | 314 |
+| 1787274546 | lease group-commit | 10000 | 8 Class S waiters one IMMEDIATE; outbox delete in apply | **31780** | **34898** | **49912** | **1290** | 119 | 139.9 | 14667 | 214 |
 
 N=10k produce is no longer super-linear: P1 p50 35 ms / 100 items vs 39 ms at N=1k. Objects at N=10k: 484 (was 648). P4 is the remaining pole (claim still selects on Turso after catch-up of apply debt). T1 (8k/s P1 at N=100k) is now a plausible next measurement; T2 is not until claim leaves the Turso writer.

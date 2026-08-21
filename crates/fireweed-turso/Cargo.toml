@@ -20,7 +20,7 @@ fireweed-engine = { path = "../fireweed-engine" }
 fireweed-relational = { path = "../fireweed-relational" }
 bytes = "1"
 serde_json = "1"
-tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread"], optional = true }
+tokio = { version = "1", features = ["macros", "sync", "rt", "rt-multi-thread", "time"], optional = true }
 # Turso's official Rust-native embedded client. Defaults pull in FTS and mimalloc; neither is needed here.
 turso = { version = "=0.7.0", default-features = false, optional = true }
 

@@ -340,6 +340,7 @@ pub fn apply_committed_batch_sql(
                 envelopes[i + 1].created_at,
                 claim,
             )?;
+            crate::delete_claim_outbox(tx, &t, &q, &env.command_id.0)?;
             persist_request_outcome_sql(tx, queues, &pos.queue, env, pos)?;
             persist_request_outcome_sql(
                 tx,
@@ -482,6 +483,9 @@ pub fn apply_committed_batch_sql(
             env.created_at,
             &env.command,
         )?;
+        if matches!(env.command, QueueCommand::Claim(_)) {
+            crate::delete_claim_outbox(tx, &t, &q, &env.command_id.0)?;
+        }
         persist_request_outcome_sql(tx, queues, &pos.queue, env, pos)?;
         let new_next = incoming
             .checked_add(1)

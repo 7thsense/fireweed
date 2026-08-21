@@ -4,17 +4,38 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
+use crate::tx::TursoRel;
 use bytes::Bytes;
 use fireweed_core::{ClientItemKey, GroupKey, ItemId, LeaseToken, QueueId, TenantId};
 use fireweed_engine::{Claimed, ClaimedItem, EngineError, EngineResult, QueueKey};
 use fireweed_relational::{
-    ClassSClaimRequest, ClassSClaimResult, OWNED_PROJECTION_TABLES, RELATIONAL_SCHEMA,
-    class_s_claim, delete_claim_outbox, entity_from_json, fields_from_json, metadata_from_json,
-    nanos_ts, parse_priority, select_claim_outbox, ClaimOutboxRow,
+    ClaimOutboxRow, ClassSClaimRequest, ClassSClaimResult, OWNED_PROJECTION_TABLES,
+    RELATIONAL_SCHEMA, class_s_claim, delete_claim_outbox, entity_from_json, fields_from_json,
+    metadata_from_json, nanos_ts, parse_priority, select_claim_outbox,
 };
-use crate::tx::TursoRel;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, oneshot};
 use turso::{Builder, Connection, Database, Value, transaction::TransactionBehavior};
+
+const LEASE_PACK_MAX: usize = 8;
+const LEASE_PACK_LINGER: Duration = Duration::from_millis(20);
+
+struct LeasePackWaiter {
+    tenant_id: String,
+    queue_id: String,
+    now_nanos: i64,
+    limit: i64,
+    lease_token: LeaseToken,
+    lease_expires_at: i64,
+    outbox_id: String,
+    worker_id: Option<String>,
+    tx: oneshot::Sender<EngineResult<ClassSClaimResult>>,
+}
+
+#[derive(Default)]
+struct LeasePackState {
+    pending: Vec<LeasePackWaiter>,
+    oldest: Option<std::time::Instant>,
+}
 
 /// Exact Turso release qualified by this adapter.
 pub const TURSO_SUPPORTED_VERSION: &str = "0.7.0";
@@ -216,6 +237,7 @@ pub struct TursoRelational {
     pub(crate) claim_scan_hints: Arc<StdMutex<std::collections::HashMap<QueueKey, i64>>>,
     pub(crate) claim_scan_default_fifo: Arc<StdMutex<std::collections::HashMap<QueueKey, bool>>>,
     pub(crate) grouped_shards: Arc<StdMutex<std::collections::HashSet<QueueKey>>>,
+    lease_pack: Arc<StdMutex<LeasePackState>>,
     config: TursoConfig,
 }
 
@@ -260,6 +282,7 @@ impl TursoRelational {
             claim_scan_hints: Arc::new(StdMutex::new(std::collections::HashMap::new())),
             claim_scan_default_fifo: Arc::new(StdMutex::new(std::collections::HashMap::new())),
             grouped_shards: Arc::new(StdMutex::new(grouped_shards)),
+            lease_pack: Arc::new(StdMutex::new(LeasePackState::default())),
             config,
         })
     }
@@ -340,59 +363,153 @@ impl TursoRelational {
     }
 
     /// Class S claim: lease + outbox in one IMMEDIATE writer txn, then drop the writer.
+    /// Concurrent waiters on the same connection group-commit into that one txn so
+    /// eight inflight claims pay one fsync, not eight.
     pub async fn class_s_claim(
         &self,
         request: ClassSClaimRequest<'_>,
     ) -> EngineResult<ClassSClaimResult> {
+        let (tx, rx) = oneshot::channel();
+        let should_seal = {
+            let mut state = self.lease_pack.lock().expect("lease pack");
+            state.pending.push(LeasePackWaiter {
+                tenant_id: request.tenant_id.to_string(),
+                queue_id: request.queue_id.to_string(),
+                now_nanos: request.now_nanos,
+                limit: request.limit,
+                lease_token: request.lease_token.clone(),
+                lease_expires_at: request.lease_expires_at,
+                outbox_id: request.outbox_id.to_string(),
+                worker_id: request.worker_id.map(str::to_string),
+                tx,
+            });
+            if state.oldest.is_none() {
+                state.oldest = Some(std::time::Instant::now());
+            }
+            state.pending.len() >= LEASE_PACK_MAX
+        };
+        if should_seal {
+            self.seal_lease_pack().await;
+            return rx
+                .await
+                .map_err(|_| EngineError::Storage("lease packer waiter dropped".into()))?;
+        }
+        tokio::pin!(rx);
+        tokio::select! {
+            result = &mut rx => {
+                return result.map_err(|_| {
+                    EngineError::Storage("lease packer waiter dropped".into())
+                })?;
+            }
+            _ = tokio::time::sleep(LEASE_PACK_LINGER) => {
+                self.seal_lease_pack().await;
+            }
+        }
+        rx.await
+            .map_err(|_| EngineError::Storage("lease packer waiter dropped".into()))?
+    }
+
+    async fn seal_lease_pack(&self) {
+        let pending = {
+            let mut state = self.lease_pack.lock().expect("lease pack");
+            if state.pending.is_empty() {
+                return;
+            }
+            state.oldest = None;
+            std::mem::take(&mut state.pending)
+        };
+        if pending.is_empty() {
+            return;
+        }
         let mut writer = self.writer.lock().await;
-        let tx = writer
+        let tx = match writer
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
-            .map_err(|e| EngineError::Storage(e.to_string()))?;
+        {
+            Ok(tx) => tx,
+            Err(error) => {
+                let msg = error.to_string();
+                for waiter in pending {
+                    let _ = waiter
+                        .tx
+                        .send(Err(EngineError::Storage(msg.clone())));
+                }
+                return;
+            }
+        };
         let hop_txn = tx.clone();
-        let tenant_id = request.tenant_id.to_string();
-        let queue_id = request.queue_id.to_string();
-        let now_nanos = request.now_nanos;
-        let limit = request.limit;
-        let lease_token = request.lease_token.clone();
-        let lease_expires_at = request.lease_expires_at;
-        let outbox_id = request.outbox_id.to_string();
-        let request_id = request.request_id.map(str::to_string);
-        let request_fingerprint = request.request_fingerprint;
-        let worker_id = request.worker_id.map(str::to_string);
-        let claim_unit = request.claim_unit.to_string();
-        let cohort_id = request.cohort_id.map(str::to_string);
-        let result = crate::tx::run_reltx_blocking(move || {
-            class_s_claim(
-                &TursoRel(&hop_txn),
-                &ClassSClaimRequest {
-                    tenant_id: &tenant_id,
-                    queue_id: &queue_id,
-                    now_nanos,
-                    limit,
-                    lease_token: &lease_token,
-                    lease_expires_at,
-                    outbox_id: &outbox_id,
-                    request_id: request_id.as_deref(),
-                    request_fingerprint,
-                    worker_id: worker_id.as_deref(),
-                    claim_unit: &claim_unit,
-                    cohort_id: cohort_id.as_deref(),
-                },
-            )
+        let work: Vec<_> = pending
+            .iter()
+            .map(|waiter| {
+                (
+                    waiter.tenant_id.clone(),
+                    waiter.queue_id.clone(),
+                    waiter.now_nanos,
+                    waiter.limit,
+                    waiter.lease_token.clone(),
+                    waiter.lease_expires_at,
+                    waiter.outbox_id.clone(),
+                    waiter.worker_id.clone(),
+                )
+            })
+            .collect();
+        let results = crate::tx::run_reltx_blocking(move || {
+            work.into_iter()
+                .map(
+                    |(
+                        tenant_id,
+                        queue_id,
+                        now_nanos,
+                        limit,
+                        lease_token,
+                        lease_expires_at,
+                        outbox_id,
+                        worker_id,
+                    )| {
+                        class_s_claim(
+                            &TursoRel(&hop_txn),
+                            &ClassSClaimRequest {
+                                tenant_id: &tenant_id,
+                                queue_id: &queue_id,
+                                now_nanos,
+                                limit,
+                                lease_token: &lease_token,
+                                lease_expires_at,
+                                outbox_id: &outbox_id,
+                                request_id: None,
+                                request_fingerprint: None,
+                                worker_id: worker_id.as_deref(),
+                                claim_unit: "item",
+                                cohort_id: None,
+                            },
+                        )
+                    },
+                )
+                .collect::<Vec<_>>()
         })
         .await;
-        match result {
-            Ok(ok) => {
-                tx.commit()
-                    .await
-                    .map_err(|e| EngineError::Storage(e.to_string()))?;
-                Ok(ok)
+        let failed = results.iter().any(|result| result.is_err());
+        if failed {
+            let _ = tx.rollback().await;
+            let msg = results
+                .into_iter()
+                .find_map(|result| result.err())
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "lease pack failed".into());
+            for waiter in pending {
+                let _ = waiter.tx.send(Err(EngineError::Storage(msg.clone())));
             }
-            Err(error) => {
-                let _ = tx.rollback().await;
-                Err(error)
+            return;
+        }
+        if let Err(error) = tx.commit().await {
+            let msg = error.to_string();
+            for waiter in pending {
+                let _ = waiter.tx.send(Err(EngineError::Storage(msg.clone())));
             }
+            return;
+        }
+        for (waiter, result) in pending.into_iter().zip(results) {
+            let _ = waiter.tx.send(result);
         }
     }
 
@@ -458,12 +575,7 @@ impl TursoRelational {
         select_claim_outbox(&TursoRel(&writer), tenant_id, queue_id)
     }
 
-    pub async fn remember_leases(
-        &self,
-        shard: &QueueKey,
-        item_ids: &[ItemId],
-        token: LeaseToken,
-    ) {
+    pub async fn remember_leases(&self, shard: &QueueKey, item_ids: &[ItemId], token: LeaseToken) {
         let mut tokens = self.live_tokens.lock().await;
         let mut by_consumer = self.live_tokens_by_consumer.lock().await;
         for item_id in item_ids {
@@ -518,10 +630,7 @@ mod class_s_tests {
         assert!(first_ids.iter().all(|id| !second_ids.contains(id)));
         let claimed = claimed_from_class_s(&token_a, first).expect("map");
         assert_eq!(claimed.items.len(), 2);
-        assert_eq!(
-            claimed.items[0].payload.as_deref(),
-            Some(&[0xCA, 0xFE][..])
-        );
+        assert_eq!(claimed.items[0].payload.as_deref(), Some(&[0xCA, 0xFE][..]));
     }
 
     #[tokio::test]

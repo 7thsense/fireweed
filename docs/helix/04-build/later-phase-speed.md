@@ -22,7 +22,7 @@ Deliver is `BatchClaim` + `complete`. Claim is not a second protocol. It is: nex
 
 `one-projection-cleanup.md` already specified this (Class S). The live path does not follow it.
 
-Latest `1787269858`, `filesystem--turso`, N=10k, inflight=8: ingest 32030/s, enrich 35636, schedule 49552, deliver **913** (claim p50 493 ms). Sequential P4 was 490/s (`1787266565`). Still ≪ ingest: the lease txn serializes on the Turso writer.
+Latest `1787274546`, `filesystem--turso`, N=10k, inflight=8: ingest 31780/s, enrich 34898, schedule 49912, deliver **1290** (claim p50 211 ms). Lease waiters group-commit one IMMEDIATE; outbox delete is in Claim apply. Still ≪ ingest: one Turso writer still runs the lease SQL plus complete apply.
 
 Target: deliver ≥ ingest. Payloads and groups stay. `apply_start_delay_ms.max(300)` stays (produce only). No planner map, `SKIP LOCKED`, or reservation table. Default `open()` stays Strict. Sqlite-log Class A stays one sqlite txn.
 
@@ -36,7 +36,7 @@ BEGIN IMMEDIATE
 COMMIT
 drop the writer
 append that envelope to the object log
-DELETE outbox after PUT is durable (not a third apply of the lease)
+DELETE outbox in live Claim apply (not a third writer.lock after enqueue)
 return the rows from the SELECT
 ```
 
@@ -79,4 +79,4 @@ cargo test -p fireweed --test ss_phased_capacity --release -- --nocapture
 | 2 | one IMMEDIATE; thin SELECT; claim p50 ≪ 256 ms |
 | 3 | inflight=8 P4; deliver ≥ ingest at N=10k |
 
-Cuts 1–3 are in tree (`1787269858`). Inflight=8 no longer hangs (apply worker used to skip a whole shard when a Ready batch was enqueued ahead of an earlier contiguous one). Deliver is 913/s, not ≥ ingest. Remaining: the IMMEDIATE lease txn is still the only exclusivity, and eight claims still queue on that one writer.
+Cuts 1–3 are in tree. Inflight=8 no longer hangs. Deliver is **1290**/s (`1787274546`), not ≥ ingest. Eight concurrent claims now share one IMMEDIATE (one fsync). Remaining: that writer still executes SELECT+UPDATE of the bodies, bearer inserts, and the overlapping complete apply.
