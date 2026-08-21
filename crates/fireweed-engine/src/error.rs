@@ -315,6 +315,19 @@ impl CommitRejection {
                     "buffered bytes" => "buffered bytes",
                     "buffered bytes closed" => "buffered bytes closed",
                     "queue buffered bytes" => "queue buffered bytes",
+                    "keyed queue waiters" => "keyed queue waiters",
+                    "keyed queue per-key waiters" => "keyed queue per-key waiters",
+                    "claim coordinator waiters" => "claim coordinator waiters",
+                    "claim queue turn" => "claim queue turn",
+                    "claim driver read slots" => "claim driver read slots",
+                    "shared driver read slots" => "shared driver read slots",
+                    "committed outcome read slots" => "committed outcome read slots",
+                    "mutation sequencer capacity" => "mutation sequencer capacity",
+                    "mutation sequencer wait" => "mutation sequencer wait",
+                    "selection fence waiters" => "selection fence waiters",
+                    "committed driver read pool" => "committed driver read pool",
+                    "committed outcome read pool" => "committed outcome read pool",
+                    "projection coverage" => "projection coverage",
                     _ => "bounded resource",
                 },
             },
@@ -408,6 +421,37 @@ mod commit_rejection_tests {
         let unknown = CommitRejection::Backpressure("other-resource".into());
         assert_eq!(
             unknown.into_error(),
+            EngineError::Backpressure {
+                resource: "bounded resource",
+            }
+        );
+    }
+
+    #[test]
+    fn new_contention_resources_survive_commit_rejection_round_trip() {
+        let resources = [
+            "keyed queue waiters",
+            "keyed queue per-key waiters",
+            "claim coordinator waiters",
+            "claim queue turn",
+            "claim driver read slots",
+            "shared driver read slots",
+            "committed outcome read slots",
+            "mutation sequencer capacity",
+            "mutation sequencer wait",
+            "selection fence waiters",
+            "committed driver read pool",
+            "committed outcome read pool",
+            "projection coverage",
+        ];
+        for resource in resources {
+            let error = EngineError::Backpressure { resource };
+            let durable = CommitRejection::from_error(&error);
+            assert_eq!(durable.into_error(), error, "resource {resource}");
+        }
+
+        assert_eq!(
+            CommitRejection::Backpressure("future-contention-resource".into()).into_error(),
             EngineError::Backpressure {
                 resource: "bounded resource",
             }

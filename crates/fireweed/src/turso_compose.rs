@@ -19,24 +19,24 @@ use fireweed_core::{
     QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
-    AsyncClaimError, AsyncComposedBackend, AsyncControlPlane, AsyncFinalizeRequest,
-    AsyncLifecycleError, AsyncLogStore, AsyncProjectionSpec, AsyncProjectionStore,
-    AsyncPurgeRequest, AsyncPushError, AsyncPushRequest, AsyncReclaimRequest, AsyncRenewRequest,
-    Backend, BatchUpdatePort, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed,
-    CommandChecksum, CommandEnvelope, CommandPosition, ControlPlaneStore, CreateQueueOutcome,
-    DEFAULT_BLOCKING_AXIS_IN_FLIGHT, DurabilityClass, EngineError, EngineResult, FinalizeOutcome,
-    FinalizePort, FinalizeTarget, HistoricalProjectionRead, HotProjectionQueryPort, IdGen,
-    InProcessControlPlane, InProcessLogStore, IndexQueryPort, InlineOwnedTaskDispatcher,
-    ItemMutationPort, ItemMutationRequest, ItemMutationResponse, ItemView, LeaseView, LiveItemView,
-    LogStore, OwnedTask, PendingPage, PendingSummary, PreparedClaim, PreparedFinalize,
-    PreparedPush, ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner,
-    ProjectionRead, ProjectionReclaimPlanner, ProjectionSnapshot, PurgePort, PushPort, PushSpec,
-    QueueCommand, QueueCounters, QueueKey, QueueMetrics, RawCommitFault, RawCommitOutcome,
-    RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RenewLeasePort, RenewTarget, SeparateReplayCommit, SeparateReplayCommitter, SeqIdGen,
-    SetGatesPort, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
-    UnifiedAtomicCommit, UnifiedAtomicCommitter, UpdateFieldsBatchCommand, UpdateFieldsPort,
-    UpsertOutcome, UpsertPort,
+    AsyncClaimError, AsyncCommitSubmitError, AsyncComposedBackend, AsyncControlPlane,
+    AsyncFinalizeRequest, AsyncLifecycleError, AsyncLogStore, AsyncProjectionSpec,
+    AsyncProjectionStore, AsyncPurgeRequest, AsyncPushError, AsyncPushRequest, AsyncReclaimRequest,
+    AsyncRenewRequest, Backend, BatchUpdatePort, ClaimCommand, ClaimCompatibility, ClaimPort,
+    ClaimRequest, Claimed, CommandChecksum, CommandEnvelope, CommandPosition, ControlPlaneStore,
+    CreateQueueOutcome, DEFAULT_BLOCKING_AXIS_IN_FLIGHT, DurabilityClass, EngineError,
+    EngineResult, FinalizeOutcome, FinalizePort, FinalizeTarget, HistoricalProjectionRead,
+    HotProjectionQueryPort, IdGen, InProcessControlPlane, InProcessLogStore, IndexQueryPort,
+    InlineOwnedTaskDispatcher, ItemMutationPort, ItemMutationRequest, ItemMutationResponse,
+    ItemView, LeaseView, LiveItemView, LogStore, OwnedTask, PendingPage, PendingSummary,
+    PreparedClaim, PreparedFinalize, PreparedPush, ProjectionClaimPlanner,
+    ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner,
+    ProjectionSnapshot, PurgePort, PushPort, PushSpec, QueueCommand, QueueCounters, QueueGateError,
+    QueueKey, QueueMetrics, RawCommitFault, RawCommitOutcome, RawCommitRequest,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeasePort,
+    RenewTarget, SeparateReplayCommit, SeparateReplayCommitter, SeqIdGen, SetGatesPort,
+    SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport, UnifiedAtomicCommit,
+    UnifiedAtomicCommitter, UpdateFieldsBatchCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
 };
 use fireweed_projection::InMemoryProjection;
 use fireweed_turso::{TursoConfig, TursoRelational, claimed_from_class_s};
@@ -116,13 +116,25 @@ fn map_turso_storage(error: impl std::fmt::Display) -> EngineError {
     EngineError::Storage(error.to_string())
 }
 
+fn map_submit(operation: &'static str, error: AsyncCommitSubmitError) -> EngineError {
+    match error {
+        AsyncCommitSubmitError::Admission(QueueGateError::PerKeyFull) => {
+            EngineError::Backpressure {
+                resource: "keyed queue per-key waiters",
+            }
+        }
+        AsyncCommitSubmitError::Admission(QueueGateError::QueueFull) => EngineError::Backpressure {
+            resource: "keyed queue waiters",
+        },
+        error => EngineError::Storage(format!("async {operation} submission failed: {error:?}")),
+    }
+}
+
 fn map_claim(error: AsyncClaimError) -> EngineError {
     match error {
         AsyncClaimError::BeforeCommit(error) | AsyncClaimError::Commit(error) => error,
         AsyncClaimError::AfterCommit { source, .. } => source,
-        AsyncClaimError::Submit(error) => {
-            EngineError::Storage(format!("async claim submission failed: {error:?}"))
-        }
+        AsyncClaimError::Submit(error) => map_submit("claim", error),
     }
 }
 
@@ -130,9 +142,7 @@ fn map_push(error: AsyncPushError) -> EngineError {
     match error {
         AsyncPushError::BeforeCommit(error) | AsyncPushError::Commit(error) => error,
         AsyncPushError::AfterCommit { source, .. } => source,
-        AsyncPushError::Submit(error) => {
-            EngineError::Storage(format!("async push submission failed: {error:?}"))
-        }
+        AsyncPushError::Submit(error) => map_submit("push", error),
     }
 }
 
@@ -140,9 +150,68 @@ fn map_lifecycle(error: AsyncLifecycleError) -> EngineError {
     match error {
         AsyncLifecycleError::BeforeCommit(error) | AsyncLifecycleError::Commit(error) => error,
         AsyncLifecycleError::AfterCommit { source, .. } => source,
-        AsyncLifecycleError::Submit(error) => {
-            EngineError::Storage(format!("async lifecycle submission failed: {error:?}"))
-        }
+        AsyncLifecycleError::Submit(error) => map_submit("lifecycle", error),
+    }
+}
+
+#[cfg(test)]
+mod contention_mapping_tests {
+    use super::*;
+
+    fn per_key() -> AsyncCommitSubmitError {
+        AsyncCommitSubmitError::Admission(QueueGateError::PerKeyFull)
+    }
+
+    fn global() -> AsyncCommitSubmitError {
+        AsyncCommitSubmitError::Admission(QueueGateError::QueueFull)
+    }
+
+    #[test]
+    fn map_claim_preserves_per_key_and_global_gate_capacity() {
+        assert_eq!(
+            map_claim(AsyncClaimError::Submit(per_key())),
+            EngineError::Backpressure {
+                resource: "keyed queue per-key waiters",
+            }
+        );
+        assert_eq!(
+            map_claim(AsyncClaimError::Submit(global())),
+            EngineError::Backpressure {
+                resource: "keyed queue waiters",
+            }
+        );
+    }
+
+    #[test]
+    fn map_push_preserves_per_key_and_global_gate_capacity() {
+        assert_eq!(
+            map_push(AsyncPushError::Submit(per_key())),
+            EngineError::Backpressure {
+                resource: "keyed queue per-key waiters",
+            }
+        );
+        assert_eq!(
+            map_push(AsyncPushError::Submit(global())),
+            EngineError::Backpressure {
+                resource: "keyed queue waiters",
+            }
+        );
+    }
+
+    #[test]
+    fn map_lifecycle_preserves_per_key_and_global_gate_capacity() {
+        assert_eq!(
+            map_lifecycle(AsyncLifecycleError::Submit(per_key())),
+            EngineError::Backpressure {
+                resource: "keyed queue per-key waiters",
+            }
+        );
+        assert_eq!(
+            map_lifecycle(AsyncLifecycleError::Submit(global())),
+            EngineError::Backpressure {
+                resource: "keyed queue waiters",
+            }
+        );
     }
 }
 
