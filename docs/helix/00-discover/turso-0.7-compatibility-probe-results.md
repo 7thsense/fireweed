@@ -31,17 +31,16 @@ The probe covers the pod-local, rebuildable relational projection. It does not e
 standalone durable log authority, enable Turso sync or experimental MVCC, change production dependencies,
 or select a different backend. It did not run Niflheim or host-capacity benchmarks.
 
-Run it from the repository root:
+Run the current retained probe from the repository root:
 
 ```bash
-rustup run 1.92.0 cargo run \
-  --locked \
-  --manifest-path tools/turso-compat-probe/Cargo.toml
+cargo run --locked \
+  --manifest-path tools/fireweed-turso-compat-probe/Cargo.toml
 ```
 
 The tool is a nested Cargo workspace with its own lockfile. It is not a member of the root workspace and no
 default GitHub Actions workflow invokes it. Its `include_str!` reads
-`crates/fireweed-sqlite/src/relational/helpers.rs` and extracts the `RELATIONAL_SCHEMA` raw string at compile
+`crates/fireweed-relational/src/schema.rs` and extracts the `RELATIONAL_SCHEMA` raw string at compile
 time, so the schema check cannot silently substitute a reduced copy.
 
 ## Observed Results
@@ -107,6 +106,105 @@ against the same item inserts and produces the same deterministic winner.
 The standalone lockfile resolved 264 packages on Rust 1.92. The first local debug build, including the pinned
 rusqlite comparison, took 3 minutes 47 seconds on this host. These are build observations, not a benchmark.
 They reinforce keeping the probe opt-in and outside the default root workspace and Actions matrix.
+
+## 2026-08-21 committed-reader addendum
+
+The writer-contention recovery plan's S-0 prerequisite reran committed-reader
+behavior against both dependency points now present in the repository:
+
+- the root `fireweed-turso` adapter pins Turso 0.7.0 and Rust 1.97;
+- the standalone probe pins Turso 0.7.2 and Rust 1.97.
+
+The initial S-0 contract required twenty-four Deferred readers to preserve a
+committed snapshot under a live `IMMEDIATE` writer and to read back
+`query_only=1`, `read_uncommitted=0`, `cache_size=-4096`, and
+`busy_timeout<=100 ms`. The stability half passed on all twenty-four readers in
+both dependency points: every already-established snapshot returned `before`
+without blocking while the writer held uncommitted `after` and still returned
+`before` after writer commit. The probe then read `after` on the writer
+connection that had committed; it did not yet prove freshness on a separate or
+reused reader connection.
+
+The configuration half exposed two API facts:
+
+1. `pragma_update("query_only", "ON")` is rejected as an invalid keyword
+   value; numeric `"1"` succeeds and reads back as `1`.
+2. `pragma_update("read_uncommitted", "0")` returns success, but
+   `PRAGMA read_uncommitted` returns no row on every reader in both Turso 0.7.0
+   and 0.7.2. An exact 0.7.0 diagnostic of the production keyword form returned
+   `Ok([])` from `pragma_update("read_uncommitted", "ON")` and still returned
+   no readback row.
+3. `pragma_update("wal_autocheckpoint", "0")` likewise returns `Ok([])` and
+   `PRAGMA wal_autocheckpoint` returns no row. The adapter cannot attest the
+   setting through readback; later evidence must use the absence of explicit
+   checkpoint calls plus observed file-backed WAL behavior.
+4. `pragma_update("cache_spill", "1")` returns `Ok([])` and
+   `PRAGMA cache_spill` returns `1`.
+5. With numeric `query_only=1`, an attempted write returns
+   `turso::Error::Error` containing
+   `Cannot execute write statement in query_only mode`.
+
+The production 0.7.0 adapter was attempting `query_only="ON"` and
+`read_uncommitted="ON"` on its serving reader while discarding both results.
+The first call fails and was therefore not active. The second call reports
+success but has no effective readback, so the adapter cannot attest whether it
+changed behavior. This is a release-baseline defect, not evidence that dirty
+reads occurred.
+
+Focused root commands produced one semantic pass and the intended stop on the
+unavailable readback:
+
+```bash
+cargo test -p fireweed-turso --features local \
+  committed_deferred_reader_is_nonblocking_and_snapshot_stable -- --nocapture
+
+cargo test -p fireweed-turso --features local \
+  turso_reader_pragmas_read_back_under_live_immediate -- --nocapture
+
+cargo test -p fireweed-turso --features local \
+  records_v03121_read_uncommitted_keyword_disposition -- --nocapture
+```
+
+The standalone command corroborated the result and exited non-zero:
+
+```text
+turso.committed_deferred_readers.file=pass readers=24 live_writer_nonblocking=true snapshot_after_commit=stable fresh_value=after
+decision.committed_selection_snapshot=go
+turso.committed_reader_pragmas.file=fail readers=24 query_only=1 read_uncommitted=no-row missing_readback=24 cache_size=-4096 busy_timeout_max_ms=100
+Error: "Turso did not return an effective PRAGMA read_uncommitted value"
+```
+
+Decision: **stop and redesign/re-review**, as required by S-0. Round 37 agreed
+that semantic proof is the correct replacement but found the first redesign
+insufficient because it proved stability without pooled-reader freshness and
+used a single-row writer change. The replacement gate now uses the same
+production configure/verify helper as the future pools; proves query-only by a
+typed rejected write as well as readback; and begins all twenty-four Deferred
+transactions without reading. A file-backed, deliberately adversarial 4 MiB
+writer holds an uncommitted 800-row/4 MiB-class multi-page apply while every
+reader's first SELECT must return the prior committed value under a 90 ms
+deadline. The probe samples `-wal` file length without explicit checkpoint
+strictly before writer commit and records the byte delta. Growth is diagnostic;
+no growth is `no_uncommitted_wal_growth_observed`; an observed or undeterminable
+checkpoint during the window or a non-monotonic delta is
+`inconclusive-no-growth-observed`; unavailable `cache_spill` is
+`adversarial_spill_unavailable`. The known unavailable `wal_autocheckpoint`
+readback alone does not select a label. Every label is valid when readers reject
+the uncommitted value. It also records live-writer
+and no-writer maximum latency and rejects `Busy` and
+`BusySnapshot`. Each held transaction must retain the prior value after that
+commit and after a second writer transaction commits wholly inside the snapshot
+window. A third writer then remains uncommitted while every reader begins its
+second snapshot on the same connection and must see the newest committed value,
+not the live dirty value. After the third commit, a separately configured
+non-writer connection must observe the third writer's value. The corrected live
+serving reader becomes query-only at its
+product timeout without changing its 128 MiB cache before S0; the later S3r
+cache reduction is measured against that baseline. S3r retains 128 MiB through
+shared-reader retirement if the 4 MiB trial regresses; pool construction does
+not depend on that trial succeeding. The adapter must not issue
+`read_uncommitted` and must rerun the semantic sequence after adapter Turso
+version changes. No autocommit fallback is authorized.
 
 ## Decision
 
