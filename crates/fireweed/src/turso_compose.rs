@@ -2051,6 +2051,14 @@ impl DerivedObjectLogTursoBackend {
                 cohort_id,
             } => {
                 self.commit_prepared(commit).await?;
+                self.catch_up_projection(&request.shard).await?;
+                // The default Class-S lane records this in-memory lease index
+                // before returning its already-materialized response. Legacy
+                // compatibility claims render from the projection after their
+                // commit, so they must establish the same token mapping first.
+                self.projection
+                    .remember_leases(&request.shard, &item_ids, request.lease_token.clone())
+                    .await;
                 self.engine
                     .render_prepared_claim(request, item_ids, cohort_id)
                     .await

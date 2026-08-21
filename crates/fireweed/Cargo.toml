@@ -77,6 +77,11 @@ path = "tests/ss_phased_capacity.rs"
 required-features = ["objectlog"]
 
 [[test]]
+name = "ss_mixed_overlap"
+path = "tests/ss_mixed_overlap.rs"
+required-features = ["objectlog", "turso"]
+
+[[test]]
 name = "concrete_fireweed"
 path = "tests/concrete_fireweed.rs"
 

@@ -19,6 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use fireweed::*;
 use fireweed_core::{Metadata, MetadataValue};
+use serde_json::{Value, json};
 
 const STUB_BYTES: usize = 512;
 const PROFILE_BYTES: usize = 1024;
@@ -405,6 +406,7 @@ fn qdef(tenant: &str, queue: &str, push_batch: usize, claim_batch: usize) -> Que
     }
 }
 
+#[derive(Default)]
 struct CallStats {
     samples: Vec<Duration>,
 }
@@ -427,23 +429,101 @@ impl CallStats {
         let idx = ((p / 100.0) * (v.len() as f64 - 1.0)).round() as usize;
         v[idx.min(v.len() - 1)].as_secs_f64() * 1000.0
     }
+
+    fn evidence(&self, op: &str) -> Value {
+        json!({
+            "op": op,
+            "samples": self.samples.len(),
+            "p50_ms": self.percentile_ms(50.0),
+            "p95_ms": self.percentile_ms(95.0),
+            "p99_ms": self.percentile_ms(99.0),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct ResidualSnapshot {
+    pending: u64,
+    leased: u64,
+    complete: u64,
+    failed: u64,
+    eligible: usize,
+}
+
+impl ResidualSnapshot {
+    fn evidence(&self) -> Value {
+        json!({
+            "pending": self.pending,
+            "leased": self.leased,
+            "complete": self.complete,
+            "failed": self.failed,
+            "eligible": self.eligible,
+        })
+    }
 }
 
 struct PhaseRow {
     name: &'static str,
     items: usize,
     mutations: usize,
-    wall: Duration,
+    ack_wall: Duration,
+    settled_wall: Duration,
+    residual: ResidualSnapshot,
     calls: Vec<(&'static str, CallStats)>,
 }
 
 impl PhaseRow {
     fn items_per_s(&self) -> f64 {
-        self.items as f64 / self.wall.as_secs_f64().max(1e-9)
+        self.items as f64 / self.settled_wall.as_secs_f64().max(1e-9)
     }
     fn mutations_per_s(&self) -> f64 {
-        (self.items * self.mutations) as f64 / self.wall.as_secs_f64().max(1e-9)
+        (self.items * self.mutations) as f64 / self.settled_wall.as_secs_f64().max(1e-9)
     }
+    fn ack_items_per_s(&self) -> f64 {
+        self.items as f64 / self.ack_wall.as_secs_f64().max(1e-9)
+    }
+    fn evidence(&self) -> Value {
+        json!({
+            "name": self.name,
+            "items": self.items,
+            "mutations": self.mutations,
+            "ack_wall_s": self.ack_wall.as_secs_f64(),
+            "settled_wall_s": self.settled_wall.as_secs_f64(),
+            "settlement_lag_s": self.settled_wall.saturating_sub(self.ack_wall).as_secs_f64(),
+            "ack_items_per_s": self.ack_items_per_s(),
+            "settled_items_per_s": self.items_per_s(),
+            "settled_mutations_per_s": self.mutations_per_s(),
+            "residual": self.residual.evidence(),
+            "calls": self.calls.iter().map(|(op, stats)| stats.evidence(op)).collect::<Vec<_>>(),
+        })
+    }
+}
+
+async fn settle_phase(
+    fw: &Fireweed,
+    queue: &QueueKey,
+    phase_started: Instant,
+    eligible_limit: usize,
+) -> (Duration, ResidualSnapshot) {
+    // `metrics` on the derived object-log × Turso composition catches the
+    // projection up to the durable log frontier before reading counts. `peek`
+    // then records residual eligible work from that same settled projection.
+    let metrics = fw.metrics(queue).await.expect("phase settlement metrics");
+    let eligible = fw
+        .peek(queue, eligible_limit)
+        .await
+        .expect("phase settlement eligible residual")
+        .len();
+    (
+        phase_started.elapsed(),
+        ResidualSnapshot {
+            pending: metrics.pending,
+            leased: metrics.leased,
+            complete: metrics.complete,
+            failed: metrics.failed,
+            eligible,
+        },
+    )
 }
 
 fn key(i: usize) -> ClientItemKey {
@@ -457,6 +537,7 @@ fn job_key(i: usize, n: usize) -> GroupKey {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn ss_phased_capacity_smoke() {
+    let process_started = Instant::now();
     let n = env_usize("SS_N", DEFAULT_N);
     let push_batch = env_usize("SS_PUSH_BATCH", 100);
     let claim_batch = env_usize("SS_CLAIM_BATCH", 100);
@@ -500,6 +581,9 @@ async fn ss_phased_capacity_smoke() {
             .collect();
         fw.push_batch(&warmup_q, items).await.expect("warmup push");
     }
+    fw.metrics(&warmup_q)
+        .await
+        .expect("settle warmup projection debt");
 
     let def = qdef("t-ss-phased", "q-ss", push_batch, claim_batch);
     fw.create_queue(def).await.expect("create queue");
@@ -552,11 +636,15 @@ async fn ss_phased_capacity_smoke() {
             assert_eq!(got, expect);
         }
     }
+    let p1_ack = t0.elapsed();
+    let (p1_settled, p1_residual) = settle_phase(fw.as_ref(), &queue, t0, n + 1).await;
     let p1 = PhaseRow {
         name: "P1_ingest",
         items: n,
         mutations: 1,
-        wall: t0.elapsed(),
+        ack_wall: p1_ack,
+        settled_wall: p1_settled,
+        residual: p1_residual,
         calls: vec![("BatchPush", p1_calls)],
     };
 
@@ -606,11 +694,15 @@ async fn ss_phased_capacity_smoke() {
         }
     }
     assert_eq!(updated, n);
+    let p2_ack = t0.elapsed();
+    let (p2_settled, p2_residual) = settle_phase(fw.as_ref(), &queue, t0, n + 1).await;
     let p2 = PhaseRow {
         name: "P2_enrich",
         items: n,
         mutations: 1,
-        wall: t0.elapsed(),
+        ack_wall: p2_ack,
+        settled_wall: p2_settled,
+        residual: p2_residual,
         calls: vec![("BatchUpdate", p2_calls)],
     };
 
@@ -674,11 +766,15 @@ async fn ss_phased_capacity_smoke() {
         }
     }
     assert_eq!(updated, n);
+    let p3_ack = t0.elapsed();
+    let (p3_settled, p3_residual) = settle_phase(fw.as_ref(), &queue, t0, n + 1).await;
     let p3 = PhaseRow {
         name: "P3_schedule",
         items: n,
         mutations: 1,
-        wall: t0.elapsed(),
+        ack_wall: p3_ack,
+        settled_wall: p3_settled,
+        residual: p3_residual,
         calls: vec![("BatchUpdate", p3_calls)],
     };
 
@@ -779,19 +875,23 @@ async fn ss_phased_capacity_smoke() {
         prev = next;
     }
     assert_eq!(completed, n, "P4 completed all items");
+    let p4_ack = t0.elapsed();
+    let (p4_settled, p4_residual) = settle_phase(fw.as_ref(), &queue, t0, n + 1).await;
     let p4 = PhaseRow {
         name: "P4_deliver",
         items: n,
         mutations: 2,
-        wall: t0.elapsed(),
+        ack_wall: p4_ack,
+        settled_wall: p4_settled,
+        residual: p4_residual,
         calls: vec![("BatchClaim", p4_claim), ("BatchFinalize", p4_fin)],
     };
 
-    let metrics = fw.metrics(&queue).await.expect("metrics");
-    assert_eq!(metrics.pending, 0, "residual pending");
+    assert_eq!(p4.residual.pending, 0, "residual pending");
     // leased must be 0; complete == n (plus nothing from warmup — different queue)
-    assert_eq!(metrics.leased, 0, "residual leased");
-    assert_eq!(metrics.complete, n as u64, "complete count");
+    assert_eq!(p4.residual.leased, 0, "residual leased");
+    assert_eq!(p4.residual.complete, n as u64, "complete count");
+    assert_eq!(p4.residual.eligible, 0, "residual eligible");
 
     let phases = [p1, p2, p3, p4];
     let mem_end = read_mem();
@@ -830,13 +930,17 @@ async fn ss_phased_capacity_smoke() {
         cell.log_axis(),
         cell.projection_axis()
     );
-    eprintln!("phase\titems\twall_s\titems_per_s\tmutations_per_s");
+    eprintln!(
+        "phase\titems\tack_wall_s\tsettled_wall_s\tack_items_per_s\tsettled_items_per_s\tsettled_mutations_per_s"
+    );
     for p in &phases {
         eprintln!(
-            "{}\t{}\t{:.3}\t{:.0}\t{:.0}",
+            "{}\t{}\t{:.3}\t{:.3}\t{:.0}\t{:.0}\t{:.0}",
             p.name,
             p.items,
-            p.wall.as_secs_f64(),
+            p.ack_wall.as_secs_f64(),
+            p.settled_wall.as_secs_f64(),
+            p.ack_items_per_s(),
             p.items_per_s(),
             p.mutations_per_s()
         );
@@ -859,6 +963,7 @@ async fn ss_phased_capacity_smoke() {
         claim_batch,
         mem_before_open,
         mem_end,
+        process_started.elapsed(),
     );
 
     drop(fw);
@@ -873,87 +978,133 @@ fn write_evidence(
     claim_batch: usize,
     mem_before_open: MemSample,
     mem_end: MemSample,
+    process_wall: Duration,
 ) {
     let utc = chrono_like_utc();
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/perf/evidence/ss-phased")
         .join(&utc);
     let _ = std::fs::create_dir_all(&dir);
-    let mut json = String::from("{\n  \"schema\": \"ss-phased-summary/v3\",\n");
-    json.push_str(&format!("  \"utc\": \"{utc}\",\n"));
-    json.push_str(&format!("  \"cell\": \"{}\",\n", cell.cell_name()));
-    json.push_str(&format!("  \"log_axis\": \"{}\",\n", cell.log_axis()));
-    json.push_str(&format!(
-        "  \"projection_axis\": \"{}\",\n",
-        cell.projection_axis()
-    ));
-    json.push_str("  \"workers\": 1,\n");
-    json.push_str(&format!("  \"inflight\": {},\n", cell.inflight()));
-    json.push_str(&format!(
-        "  \"rss_before_open_bytes\": {},\n",
-        mem_before_open.rss_bytes
-    ));
-    json.push_str(&format!(
-        "  \"hwm_before_open_bytes\": {},\n",
-        mem_before_open.hwm_bytes
-    ));
-    json.push_str(&format!(
-        "  \"rss_after_run_bytes\": {},\n",
-        mem_end.rss_bytes
-    ));
-    json.push_str(&format!(
-        "  \"hwm_after_run_bytes\": {},\n",
-        mem_end.hwm_bytes
-    ));
-    json.push_str(&format!(
-        "  \"rss_delta_bytes\": {},\n",
-        mem_end.rss_bytes.saturating_sub(mem_before_open.rss_bytes)
-    ));
-    json.push_str(&format!(
-        "  \"projection_bytes\": {},\n",
-        cell.projection_bytes()
-    ));
-    json.push_str(&format!("  \"n\": {n},\n"));
-    json.push_str(&format!("  \"push_batch\": {push_batch},\n"));
-    json.push_str(&format!("  \"claim_batch\": {claim_batch},\n"));
-    json.push_str("  \"sampled_ok\": true,\n");
-    json.push_str("  \"residual_eligible\": 0,\n");
-    json.push_str("  \"phases\": [\n");
-    for (i, p) in phases.iter().enumerate() {
-        json.push_str("    {\n");
-        json.push_str(&format!("      \"name\": \"{}\",\n", p.name));
-        json.push_str(&format!("      \"items\": {},\n", p.items));
-        json.push_str(&format!("      \"mutations\": {},\n", p.mutations));
-        json.push_str(&format!("      \"wall_s\": {:.6},\n", p.wall.as_secs_f64()));
-        json.push_str(&format!("      \"items_per_s\": {:.1},\n", p.items_per_s()));
-        json.push_str(&format!(
-            "      \"mutations_per_s\": {:.1},\n",
-            p.mutations_per_s()
-        ));
-        json.push_str("      \"calls\": [\n");
-        for (j, (op, st)) in p.calls.iter().enumerate() {
-            json.push_str(&format!(
-                "        {{\"op\": \"{op}\", \"p50_ms\": {:.3}, \"p95_ms\": {:.3}, \"p99_ms\": {:.3}}}",
-                st.percentile_ms(50.0),
-                st.percentile_ms(95.0),
-                st.percentile_ms(99.0)
-            ));
-            if j + 1 != p.calls.len() {
-                json.push(',');
-            }
-            json.push('\n');
-        }
-        json.push_str("      ]\n");
-        json.push_str("    }");
-        if i + 1 != phases.len() {
-            json.push(',');
-        }
-        json.push('\n');
-    }
-    json.push_str("  ]\n}\n");
+    let command = format!(
+        "SS_CELL={} SS_N={n} SS_PUSH_BATCH={push_batch} SS_CLAIM_BATCH={claim_batch} SS_INFLIGHT={} cargo test -p fireweed --test ss_phased_capacity --release ss_phased_capacity_smoke -- --exact --nocapture",
+        cell.cell_name(),
+        cell.inflight()
+    );
+    let evidence = evidence_v4(
+        json!({
+            "utc": utc,
+            "source_sha": source_sha(),
+            "host": host_name(),
+            "command": command,
+            "cell": cell.cell_name(),
+            "log_axis": cell.log_axis(),
+            "projection_axis": cell.projection_axis(),
+            "workers": 1,
+            "inflight": cell.inflight(),
+            "n": n,
+            "push_batch": push_batch,
+            "claim_batch": claim_batch,
+            "sampling": {
+                "sample_indices": [0, n / 2, n.saturating_sub(1)],
+                "payload_and_schedule_samples_passed": true,
+            },
+            "memory": {
+                "rss_before_open_bytes": mem_before_open.rss_bytes,
+                "hwm_before_open_bytes": mem_before_open.hwm_bytes,
+                "rss_after_run_bytes": mem_end.rss_bytes,
+                "hwm_after_run_bytes": mem_end.hwm_bytes,
+                "rss_delta_bytes": mem_end.rss_bytes.saturating_sub(mem_before_open.rss_bytes),
+                "projection_bytes": cell.projection_bytes(),
+            },
+        }),
+        phases,
+        process_wall,
+    );
     let path = dir.join("summary.json");
-    let _ = std::fs::write(&path, json);
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&evidence).expect("serialize phased evidence"),
+    )
+    .expect("write phased evidence");
     eprintln!("wrote {}", path.display());
+}
+
+fn evidence_v4(mut run: Value, phases: &[PhaseRow], process_wall: Duration) -> Value {
+    let final_residual = phases
+        .last()
+        .map(|phase| phase.residual.evidence())
+        .unwrap_or_else(|| ResidualSnapshot::default().evidence());
+    let object = run.as_object_mut().expect("run evidence object");
+    object.insert("schema".into(), json!("ss-phased-summary/v4"));
+    object.insert("process_wall_s".into(), json!(process_wall.as_secs_f64()));
+    object.insert("final_residual".into(), final_residual);
+    object.insert(
+        "phases".into(),
+        Value::Array(phases.iter().map(PhaseRow::evidence).collect()),
+    );
+    run
+}
+
+fn source_sha() -> String {
+    std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn host_name() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|value| value.trim().to_owned())
+        })
+        .unwrap_or_else(|| "unknown".into())
+}
+
+#[test]
+fn ss_evidence_v4_measures_settlement_and_residual() {
+    let phase = PhaseRow {
+        name: "fixture",
+        items: 32,
+        mutations: 2,
+        ack_wall: Duration::from_millis(10),
+        settled_wall: Duration::from_millis(25),
+        residual: ResidualSnapshot {
+            pending: 0,
+            leased: 0,
+            complete: 32,
+            failed: 0,
+            eligible: 0,
+        },
+        calls: vec![("fixture_call", CallStats::default())],
+    };
+    let evidence = evidence_v4(
+        json!({
+            "sampling": { "payload_and_schedule_samples_passed": true },
+            "source_sha": "fixture",
+            "host": "fixture",
+            "command": "fixture",
+        }),
+        &[phase],
+        Duration::from_millis(40),
+    );
+
+    assert_eq!(evidence["schema"], "ss-phased-summary/v4");
+    assert_eq!(evidence["phases"][0]["ack_wall_s"], 0.01);
+    assert_eq!(evidence["phases"][0]["settled_wall_s"], 0.025);
+    assert_eq!(evidence["process_wall_s"], 0.04);
+    assert_eq!(evidence["final_residual"]["eligible"], 0);
+    assert_eq!(evidence["final_residual"]["complete"], 32);
+    assert_eq!(
+        evidence["sampling"]["payload_and_schedule_samples_passed"],
+        true
+    );
 }
 
 fn chrono_like_utc() -> String {

@@ -588,8 +588,13 @@ where
                     .commit(commit)
                     .await
                     .map_err(LifecycleExecutionError::Commit)?;
-                validate_lifecycle_commit_outcome(&queue, epoch, &outcome)
-                    .map_err(LifecycleExecutionError::AfterCommit)?;
+                validate_lifecycle_commit_outcome(
+                    strategy.durability_class(),
+                    &queue,
+                    epoch,
+                    &outcome,
+                )
+                .map_err(LifecycleExecutionError::AfterCommit)?;
                 Ok(item_ids)
             })
         })
@@ -625,8 +630,13 @@ where
                     .commit(plan.request)
                     .await
                     .map_err(LifecycleExecutionError::Commit)?;
-                validate_lifecycle_commit_outcome(&queue, epoch, &outcome)
-                    .map_err(LifecycleExecutionError::AfterCommit)
+                validate_lifecycle_commit_outcome(
+                    strategy.durability_class(),
+                    &queue,
+                    epoch,
+                    &outcome,
+                )
+                .map_err(LifecycleExecutionError::AfterCommit)
             })
         })
         .await
@@ -659,8 +669,13 @@ where
                     .commit(plan.request)
                     .await
                     .map_err(LifecycleExecutionError::Commit)?;
-                validate_lifecycle_commit_outcome(&queue, epoch, &outcome)
-                    .map_err(LifecycleExecutionError::AfterCommit)
+                validate_lifecycle_commit_outcome(
+                    strategy.durability_class(),
+                    &queue,
+                    epoch,
+                    &outcome,
+                )
+                .map_err(LifecycleExecutionError::AfterCommit)
             })
         })
         .await
@@ -1320,12 +1335,13 @@ fn validate_reassign_plan(
 }
 
 fn validate_lifecycle_commit_outcome(
+    durability: DurabilityClass,
     queue: &QueueKey,
     expected_epoch: u64,
     outcome: &RawCommitOutcome,
 ) -> EngineResult<()> {
     let positions = outcome.positions();
-    if !outcome.projection_applied()
+    if (durability == DurabilityClass::Atomic && !outcome.projection_applied())
         || positions.len() != 1
         || positions[0].queue != *queue
         || positions[0].backend_epoch != expected_epoch
@@ -1445,8 +1461,13 @@ where
                     .commit(plan.request)
                     .await
                     .map_err(LifecycleExecutionError::Commit)?;
-                validate_lifecycle_commit_outcome(&queue, epoch, &outcome)
-                    .map_err(LifecycleExecutionError::AfterCommit)
+                validate_lifecycle_commit_outcome(
+                    strategy.durability_class(),
+                    &queue,
+                    epoch,
+                    &outcome,
+                )
+                .map_err(LifecycleExecutionError::AfterCommit)
             })
         })
         .await
@@ -1475,8 +1496,13 @@ where
                     .commit(plan.request)
                     .await
                     .map_err(LifecycleExecutionError::Commit)?;
-                validate_lifecycle_commit_outcome(&queue, epoch, &outcome)
-                    .map_err(LifecycleExecutionError::AfterCommit)
+                validate_lifecycle_commit_outcome(
+                    strategy.durability_class(),
+                    &queue,
+                    epoch,
+                    &outcome,
+                )
+                .map_err(LifecycleExecutionError::AfterCommit)
             })
         })
         .await
@@ -1513,8 +1539,13 @@ where
                     .commit(prepared.request)
                     .await
                     .map_err(LifecycleExecutionError::Commit)?;
-                validate_lifecycle_commit_outcome(&queue, epoch, &outcome)
-                    .map_err(LifecycleExecutionError::AfterCommit)
+                validate_lifecycle_commit_outcome(
+                    strategy.durability_class(),
+                    &queue,
+                    epoch,
+                    &outcome,
+                )
+                .map_err(LifecycleExecutionError::AfterCommit)
             })
         })
         .await
@@ -1606,8 +1637,13 @@ where
                     .commit(plan.request)
                     .await
                     .map_err(LifecycleExecutionError::Commit)?;
-                validate_lifecycle_commit_outcome(&queue, epoch, &outcome)
-                    .map_err(LifecycleExecutionError::AfterCommit)
+                validate_lifecycle_commit_outcome(
+                    strategy.durability_class(),
+                    &queue,
+                    epoch,
+                    &outcome,
+                )
+                .map_err(LifecycleExecutionError::AfterCommit)
             })
         })
         .await
@@ -1639,8 +1675,13 @@ where
                     .commit(plan.request)
                     .await
                     .map_err(LifecycleExecutionError::Commit)?;
-                validate_lifecycle_commit_outcome(&queue, epoch, &outcome)
-                    .map_err(LifecycleExecutionError::AfterCommit)?;
+                validate_lifecycle_commit_outcome(
+                    strategy.durability_class(),
+                    &queue,
+                    epoch,
+                    &outcome,
+                )
+                .map_err(LifecycleExecutionError::AfterCommit)?;
                 Ok::<u64, LifecycleExecutionError>(count)
             })
         })
@@ -1708,8 +1749,13 @@ where
                     .commit(plan.request)
                     .await
                     .map_err(LifecycleExecutionError::Commit)?;
-                validate_lifecycle_commit_outcome(&queue, epoch, &outcome)
-                    .map_err(LifecycleExecutionError::AfterCommit)
+                validate_lifecycle_commit_outcome(
+                    strategy.durability_class(),
+                    &queue,
+                    epoch,
+                    &outcome,
+                )
+                .map_err(LifecycleExecutionError::AfterCommit)
             })
         })
         .await
@@ -4618,6 +4664,65 @@ mod tests {
                 ..Default::default()
             },
             true,
+        );
+    }
+
+    #[test]
+    fn lifecycle_commit_outcome_respects_the_durability_barrier() {
+        let shard = queue("lifecycle");
+        let position = CommandPosition::new(shard.clone(), 7, 1);
+        let appended = RawCommitOutcome::appended(vec![position.clone()]);
+        let applied = RawCommitOutcome::applied(vec![position.clone()]);
+
+        assert!(
+            validate_lifecycle_commit_outcome(
+                DurabilityClass::EventualApply,
+                &shard,
+                7,
+                &appended,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_lifecycle_commit_outcome(DurabilityClass::Atomic, &shard, 7, &appended)
+                .is_err()
+        );
+        assert!(
+            validate_lifecycle_commit_outcome(DurabilityClass::Atomic, &shard, 7, &applied).is_ok()
+        );
+        assert!(
+            validate_lifecycle_commit_outcome(DurabilityClass::EventualApply, &shard, 7, &applied,)
+                .is_ok()
+        );
+
+        let wrong_queue =
+            RawCommitOutcome::appended(vec![CommandPosition::new(queue("other"), 7, 1)]);
+        assert!(
+            validate_lifecycle_commit_outcome(
+                DurabilityClass::EventualApply,
+                &shard,
+                7,
+                &wrong_queue,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_lifecycle_commit_outcome(
+                DurabilityClass::EventualApply,
+                &shard,
+                8,
+                &RawCommitOutcome::appended(vec![position.clone()]),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_lifecycle_commit_outcome(
+                DurabilityClass::EventualApply,
+                &shard,
+                7,
+                &RawCommitOutcome::appended(vec![position.clone(), position]),
+            )
+            .is_err()
         );
     }
 
