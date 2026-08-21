@@ -37,9 +37,7 @@ thread_local! {
 
 /// Run RelTx work on a blocking thread with a thread-local current-thread runtime so each
 /// statement is `block_on` locally (no object-log `block_in_place`, no per-statement channel hop).
-pub async fn run_reltx_blocking<T: Send + 'static>(
-    work: impl FnOnce() -> T + Send + 'static,
-) -> T {
+pub async fn run_reltx_blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
     tokio::task::spawn_blocking(move || {
         USE_LOCAL_RT.set(true);
         let result = work();

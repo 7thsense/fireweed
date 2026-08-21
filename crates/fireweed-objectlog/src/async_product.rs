@@ -122,7 +122,7 @@ impl SeparateReplayCommitter for ObjectLogEngineProjectionCommitter {
                 .packed_append(shard.clone(), commands.clone(), expected_epoch)
                 .await
             {
-                Ok(positions) => positions,
+                Ok(outcome) => outcome.positions,
                 Err(error) => {
                     if let (Some(coordinator), Some(reservation)) = (&async_apply, reservation) {
                         coordinator.cancel(reservation).await;
@@ -564,13 +564,13 @@ impl AsyncObjectLogMemoryBackend {
         if envelopes.is_empty() {
             return Ok(());
         }
-        let positions = self
+        let outcome = self
             .log
             .packed_append(shard.clone(), envelopes.clone(), epoch)
             .await?;
         fireweed_engine::AsyncProjectionStore::apply_live(
             self.projection.as_ref(),
-            positions,
+            outcome.positions,
             envelopes,
         )
         .await?;

@@ -146,13 +146,13 @@ enum AsyncPushPlanKind {
 }
 
 impl AsyncPushPlan {
-    pub(crate) fn replay(item_ids: Vec<ItemId>) -> Self {
+    pub fn replay(item_ids: Vec<ItemId>) -> Self {
         Self {
             kind: AsyncPushPlanKind::Replay(item_ids),
         }
     }
 
-    pub(crate) fn commit(request: RawCommitRequest, item_ids: Vec<ItemId>) -> Self {
+    pub fn commit(request: RawCommitRequest, item_ids: Vec<ItemId>) -> Self {
         Self {
             kind: AsyncPushPlanKind::Commit { request, item_ids },
         }

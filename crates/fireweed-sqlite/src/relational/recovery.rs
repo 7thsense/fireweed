@@ -964,5 +964,3 @@ pub(crate) fn apply_committed_batch_sql(
     apply_token_ops(live_tokens, live_tokens_by_consumer, token_ops);
     Ok(())
 }
-
-
