@@ -797,6 +797,28 @@ pub(crate) fn ensure_item_terminal_command_epoch_column(conn: &Connection) -> En
     ensure_item_integer_column(conn, "terminal_command_epoch")
 }
 
+pub(crate) fn ensure_group_summary_rep_created_seq_column(conn: &Connection) -> EngineResult<()> {
+    match conn.execute(
+        "ALTER TABLE fireweed_group_summary ADD COLUMN rep_created_seq INTEGER",
+        [],
+    ) {
+        Ok(_) => {}
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
+            if msg.contains("duplicate column name") => {}
+        Err(error) => return Err(EngineError::Storage(error.to_string())),
+    }
+    st(conn.execute(
+        "UPDATE fireweed_group_summary SET rep_created_seq=(\
+           SELECT created_seq FROM fireweed_items i \
+           WHERE i.tenant_id=fireweed_group_summary.tenant_id \
+             AND i.queue_id=fireweed_group_summary.queue_id \
+             AND i.item_id=fireweed_group_summary.rep_item_id) \
+         WHERE rep_created_seq IS NULL AND rep_item_id IS NOT NULL",
+        [],
+    ))?;
+    Ok(())
+}
+
 pub(crate) fn ensure_cohort_column(
     conn: &Connection,
     column: &str,

@@ -112,6 +112,7 @@ CREATE TABLE IF NOT EXISTS fireweed_group_summary (
     rep_progress_guard_sort BLOB,
     rep_priority_sort BLOB,
     rep_created_at INTEGER,
+    rep_created_seq INTEGER,
     rep_item_id TEXT,
     eligible_item_count INTEGER NOT NULL DEFAULT 0,
     at_risk_count INTEGER NOT NULL DEFAULT 0,

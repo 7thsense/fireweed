@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use fireweed_conformance::{envelope, item, qdef, ts};
-use fireweed_core::{ClientItemKey, ItemId, Metadata, PriorityValue, RequestId};
+use fireweed_core::{
+    ClientItemKey, GroupKey, ItemId, Metadata, MetadataValue, PriorityValue, RequestId,
+};
 use fireweed_engine::{
     AsyncProjectionStore, BatchUpdateOutcome, BatchUpdateResponse, CommandEnvelope,
     CommandPosition, PayloadUpdate, PushCommand, QueueCommand, QueueKey, RequestOutcome,
@@ -398,6 +400,375 @@ async fn turso_batch_update_apply_is_operation_shaped() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn turso_grouped_schedule_fast_path_preserves_summary_order_and_recovery() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("grouped-schedule.db");
+    let mut definition = qdef();
+    definition.max_push_batch_size = 10;
+    let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let store = TursoRelational::open(TursoConfig::local(&path))
+        .await
+        .unwrap();
+    AsyncProjectionStore::ensure_shard(&store, definition)
+        .await
+        .unwrap();
+
+    let ids = (1..=4).map(ItemId::from_u64).collect::<Vec<_>>();
+    let group = GroupKey::new("grouped-fast-path").unwrap();
+    let mut pushed = [10_i64, 20, 30, 5]
+        .into_iter()
+        .enumerate()
+        .map(|(index, priority)| {
+            item(
+                &ids[index].to_string(),
+                &format!("grouped-{index}"),
+                priority,
+            )
+        })
+        .collect::<Vec<_>>();
+    for item in &mut pushed[..3] {
+        item.group_key = Some(group.clone());
+    }
+    AsyncProjectionStore::apply_live(
+        &store,
+        vec![CommandPosition::new(shard.clone(), 0, 0)],
+        vec![envelope(
+            QueueCommand::Push(PushCommand { items: pushed }),
+            ids.clone(),
+        )],
+    )
+    .await
+    .unwrap();
+
+    let update = |index: usize, priority: i64, not_before: i64, phase: &str| {
+        let mut metadata = Metadata::default();
+        metadata.insert("phase", MetadataValue::String(phase.to_string()));
+        UpdateFieldsCommand {
+            item_id: ItemId::from_u64(0),
+            field_ops: BTreeMap::new(),
+            payload: PayloadUpdate::Keep,
+            set_priority: ScheduleUpdate::Set(Some(PriorityValue::Int64(priority))),
+            set_not_before: ScheduleUpdate::Set(Some(ts(not_before))),
+            set_entity_document: None,
+            set_fields: None,
+            set_metadata: Some(metadata),
+            set_gate_keys: None,
+            api001_batch: true,
+            client_item_key: Some(ClientItemKey::new(format!("grouped-{index}")).unwrap()),
+            expected_item_version: None,
+        }
+    };
+    AsyncProjectionStore::apply_live(
+        &store,
+        vec![CommandPosition::new(shard.clone(), 0, 1)],
+        vec![envelope(
+            QueueCommand::UpdateFieldsBatch(UpdateFieldsBatchCommand {
+                updates: vec![
+                    update(0, 40, 0, "reranked"),
+                    update(2, 1, 0, "reranked"),
+                    update(3, 2, 0, "reranked"),
+                ],
+            }),
+            vec![ids[0], ids[2], ids[3]],
+        )],
+    )
+    .await
+    .unwrap();
+
+    let summary = store
+        .query(
+            "SELECT eligible_item_count,rep_item_id,rep_created_seq \
+             FROM fireweed_group_summary WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3",
+            vec![
+                shard.tenant_id.as_str().to_string().into(),
+                shard.queue_id.as_str().to_string().into(),
+                group.as_str().to_string().into(),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        summary[0].values,
+        [
+            turso::Value::Integer(3),
+            turso::Value::Text(ids[2].to_string()),
+            turso::Value::Integer(2),
+        ]
+    );
+
+    let fallback_update = envelope(
+        QueueCommand::UpdateFieldsBatch(UpdateFieldsBatchCommand {
+            updates: vec![update(2, 50, 0, "fallback")],
+        }),
+        vec![ids[2]],
+    );
+    let fallback_position = CommandPosition::new(shard.clone(), 0, 2);
+    AsyncProjectionStore::apply_live(
+        &store,
+        vec![fallback_position.clone()],
+        vec![fallback_update.clone()],
+    )
+    .await
+    .unwrap();
+    let summary = store
+        .query(
+            "SELECT eligible_item_count,rep_item_id,rep_created_seq \
+             FROM fireweed_group_summary WHERE group_key=?1",
+            vec![group.as_str().to_string().into()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        summary[0].values,
+        [
+            turso::Value::Integer(3),
+            turso::Value::Text(ids[1].to_string()),
+            turso::Value::Integer(1),
+        ]
+    );
+    assert_eq!(
+        AsyncProjectionStore::eligible_candidates(&store, shard.clone(), ts(0), 10)
+            .await
+            .unwrap(),
+        vec![ids[3], ids[1], ids[0], ids[2]]
+    );
+    let changed = store
+        .query(
+            "SELECT item_version,priority,not_before,metadata FROM fireweed_items WHERE item_id=?1",
+            vec![ids[2].to_string().into()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed[0].values[0], turso::Value::Integer(3));
+    assert_eq!(
+        parse_priority(match &changed[0].values[1] {
+            turso::Value::Text(value) => Some(value.clone()),
+            value => panic!("unexpected priority: {value:?}"),
+        })
+        .unwrap(),
+        Some(PriorityValue::Int64(50))
+    );
+    assert_eq!(changed[0].values[2], turso::Value::Integer(0));
+    let turso::Value::Text(metadata) = &changed[0].values[3] else {
+        panic!("metadata was not text")
+    };
+    let mut expected_metadata = Metadata::default();
+    expected_metadata.insert("phase", MetadataValue::String("fallback".to_string()));
+    assert_eq!(
+        metadata_from_json(metadata.clone()).unwrap(),
+        expected_metadata
+    );
+
+    for (sequence, priority, not_before, expected_count, expected_rep) in [
+        (3_u64, 40, 100, 2_i64, ids[1]),
+        (4, 40, 200, 2, ids[1]),
+        (5, 0, 0, 3, ids[0]),
+    ] {
+        AsyncProjectionStore::apply_live(
+            &store,
+            vec![CommandPosition::new(shard.clone(), 0, sequence)],
+            vec![envelope(
+                QueueCommand::UpdateFieldsBatch(UpdateFieldsBatchCommand {
+                    updates: vec![update(0, priority, not_before, "transition")],
+                }),
+                vec![ids[0]],
+            )],
+        )
+        .await
+        .unwrap();
+        let transition_summary = store
+            .query(
+                "SELECT eligible_item_count,rep_item_id FROM fireweed_group_summary WHERE group_key=?1",
+                vec![group.as_str().to_string().into()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            transition_summary[0].values,
+            [
+                turso::Value::Integer(expected_count),
+                turso::Value::Text(expected_rep.to_string()),
+            ]
+        );
+    }
+
+    // Recovery overlap remains a no-op after reopening an older summary row whose new sequence
+    // column needs backfilling.
+    store
+        .execute(
+            "UPDATE fireweed_group_summary SET rep_created_seq=NULL WHERE group_key=?1",
+            vec![group.as_str().to_string().into()],
+        )
+        .await
+        .unwrap();
+    drop(store);
+    let reopened = TursoRelational::open(TursoConfig::local(&path))
+        .await
+        .unwrap();
+    AsyncProjectionStore::apply_recovery(&reopened, vec![fallback_position], vec![fallback_update])
+        .await
+        .unwrap();
+    let reopened_summary = reopened
+        .query(
+            "SELECT rep_item_id,rep_created_seq FROM fireweed_group_summary WHERE group_key=?1",
+            vec![group.as_str().to_string().into()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened_summary[0].values,
+        [
+            turso::Value::Text(ids[0].to_string()),
+            turso::Value::Integer(0),
+        ]
+    );
+    assert_eq!(
+        AsyncProjectionStore::item_version(&reopened, shard, ids[2])
+            .await
+            .unwrap(),
+        Some(3)
+    );
+}
+
+#[tokio::test]
+#[ignore = "file-backed 10k-row schedule index attribution"]
+async fn turso_indexed_schedule_rewrite_profile() {
+    const ROWS: usize = 10_000;
+    const CHUNK: usize = 800;
+    const PRE_FIX_ALL_INDEX_US: u64 = 4_052_016;
+    const P3_RECOVERY_BUDGET_US: u64 = 1_261_830;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("schedule-profile.db");
+    let mut definition = qdef();
+    definition.max_push_batch_size = ROWS as u64;
+    let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let store = TursoRelational::open(TursoConfig::local(&path))
+        .await
+        .unwrap();
+    AsyncProjectionStore::ensure_shard(&store, definition)
+        .await
+        .unwrap();
+
+    let mut pushed = Vec::with_capacity(ROWS);
+    let mut ids = Vec::with_capacity(ROWS);
+    for index in 0..ROWS {
+        let id = ItemId::from_u64(index as u64 + 1);
+        let mut pushed_item = item(
+            &id.to_string(),
+            &format!("schedule-key-{index:05}"),
+            index as i64,
+        );
+        pushed_item.payload = Some(Bytes::from(vec![b'x'; 1_024]));
+        pushed_item.group_key = Some(GroupKey::new(format!("job-{}", index % 100)).unwrap());
+        pushed.push(pushed_item);
+        ids.push(id);
+    }
+    AsyncProjectionStore::apply_live(
+        &store,
+        vec![CommandPosition::new(shard.clone(), 0, 0)],
+        vec![envelope(
+            QueueCommand::Push(PushCommand { items: pushed }),
+            ids.clone(),
+        )],
+    )
+    .await
+    .unwrap();
+
+    async fn apply_schedule(
+        store: &TursoRelational,
+        shard: &QueueKey,
+        ids: &[ItemId],
+        start: usize,
+        sequence: u64,
+        label: &str,
+    ) -> fireweed_turso::TursoApplyPhaseObservation {
+        let updates = (start..start + CHUNK)
+            .map(|index| UpdateFieldsCommand {
+                item_id: ItemId::from_u64(0),
+                field_ops: BTreeMap::new(),
+                payload: PayloadUpdate::Keep,
+                set_priority: ScheduleUpdate::Set(Some(PriorityValue::Int64(sequence as i64))),
+                set_not_before: ScheduleUpdate::Set(Some(ts(0))),
+                set_entity_document: None,
+                set_fields: None,
+                set_metadata: Some(Metadata::default()),
+                set_gate_keys: None,
+                api001_batch: true,
+                client_item_key: Some(
+                    ClientItemKey::new(format!("schedule-key-{index:05}")).unwrap(),
+                ),
+                expected_item_version: None,
+            })
+            .collect();
+        AsyncProjectionStore::apply_live(
+            store,
+            vec![CommandPosition::new(shard.clone(), 0, sequence)],
+            vec![envelope(
+                QueueCommand::UpdateFieldsBatch(UpdateFieldsBatchCommand { updates }),
+                ids[start..start + CHUNK].to_vec(),
+            )],
+        )
+        .await
+        .unwrap();
+        let phase = store.last_apply_phase_observation().unwrap();
+        eprintln!("schedule-index-profile label={label} phase={phase:?}");
+        phase
+    }
+
+    let all = apply_schedule(&store, &shard, &ids, 0, 1, "all-indexes").await;
+    store
+        .execute("DROP INDEX fireweed_items_group_due_idx", vec![])
+        .await
+        .unwrap();
+    let active_pending = apply_schedule(&store, &shard, &ids, CHUNK, 2, "active+pending").await;
+    store
+        .execute("DROP INDEX fireweed_items_active_scope_idx", vec![])
+        .await
+        .unwrap();
+    let pending = apply_schedule(&store, &shard, &ids, CHUNK * 2, 3, "pending-only").await;
+    store
+        .execute("DROP INDEX fireweed_items_pending_order_idx", vec![])
+        .await
+        .unwrap();
+    let base = apply_schedule(&store, &shard, &ids, CHUNK * 3, 4, "base-row").await;
+
+    eprintln!(
+        "schedule-index-attribution-us all={} group_due={} active_scope={} pending_order={} base={}",
+        all.update_side_us,
+        all.update_side_us
+            .saturating_sub(active_pending.update_side_us),
+        active_pending
+            .update_side_us
+            .saturating_sub(pending.update_side_us),
+        pending.update_side_us.saturating_sub(base.update_side_us),
+        base.update_side_us,
+    );
+    assert!(PRE_FIX_ALL_INDEX_US > P3_RECOVERY_BUDGET_US);
+    assert!(
+        all.total_us <= P3_RECOVERY_BUDGET_US,
+        "all-index schedule rewrite exceeded the 634 item/s recovery budget: {all:?}"
+    );
+    assert!(
+        all.cursor_definition_us > 0,
+        "cursor phase was not recorded"
+    );
+    assert!(all.update_side_us > 0, "update phase was not recorded");
+    assert!(all.commit_us > 0, "commit phase was not recorded");
+    assert_eq!(
+        store
+            .query(
+                "SELECT COUNT(*) FROM fireweed_items WHERE item_version=2",
+                vec![],
+            )
+            .await
+            .unwrap()[0]
+            .values,
+        [turso::Value::Integer((CHUNK * 4) as i64)]
+    );
 }
 
 #[tokio::test]

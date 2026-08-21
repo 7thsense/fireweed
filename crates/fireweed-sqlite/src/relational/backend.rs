@@ -4255,16 +4255,14 @@ mod hot_query_sql_tests {
     }
 
     #[tokio::test]
-    async fn grouped_claim_relects_one_head_per_group_and_finalize_is_constant() {
+    async fn grouped_claim_relects_heads_setwise_and_finalize_is_constant() {
         let one = grouped_claim_finalize_statement_count(1).await;
         let hundred = grouped_claim_finalize_statement_count(100).await;
         let thousand = grouped_claim_finalize_statement_count(1_000).await;
-        let update_chunks = |n: usize| n.div_ceil(100).max(1);
-        // Each claimed group lost its representative: batched COUNT + LIMIT 1 union, then chunked upsert.
-        let relect_stmts = |n: usize| 1 + 2 * summary_upsert_chunks(n);
-        let claim_base = one.0 - relect_stmts(1) - summary_upsert_chunks(1) - update_chunks(1);
-        let expected =
-            |n: usize| claim_base + relect_stmts(n) + summary_upsert_chunks(n) + update_chunks(n);
+        // Each one-item group becomes empty. Reselection is one set-based read and only the summary
+        // upsert retains 50-row statement chunking.
+        let claim_base = one.0 - summary_upsert_chunks(1);
+        let expected = |n: usize| claim_base + summary_upsert_chunks(n);
         assert_eq!(
             (one, hundred, thousand),
             (
@@ -4955,7 +4953,7 @@ mod hot_query_sql_tests {
             "CREATE TABLE fireweed_items(tenant_id TEXT,queue_id TEXT,item_id TEXT,group_key TEXT,lifecycle_state TEXT,superseded INTEGER,not_before INTEGER,eligible_since INTEGER,priority_sort BLOB,created_at INTEGER,created_seq INTEGER,PRIMARY KEY(tenant_id,queue_id,item_id));
              CREATE TABLE fireweed_item_gates(tenant_id TEXT,queue_id TEXT,item_id TEXT,gate_key TEXT);
              CREATE TABLE fireweed_gate_state(tenant_id TEXT,queue_id TEXT,gate_key TEXT);
-             CREATE TABLE fireweed_group_summary(tenant_id TEXT,queue_id TEXT,group_key TEXT,oldest_eligible_at INTEGER,rep_progress_guard_sort BLOB,rep_priority_sort BLOB,rep_created_at INTEGER,rep_item_id TEXT,eligible_item_count INTEGER NOT NULL,at_risk_count INTEGER NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(tenant_id,queue_id,group_key));
+             CREATE TABLE fireweed_group_summary(tenant_id TEXT,queue_id TEXT,group_key TEXT,oldest_eligible_at INTEGER,rep_progress_guard_sort BLOB,rep_priority_sort BLOB,rep_created_at INTEGER,rep_created_seq INTEGER,rep_item_id TEXT,eligible_item_count INTEGER NOT NULL,at_risk_count INTEGER NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(tenant_id,queue_id,group_key));
              CREATE INDEX fireweed_items_group_due_idx ON fireweed_items(tenant_id,queue_id,lifecycle_state,group_key,not_before,priority_sort,created_seq);",
         ).unwrap();
         conn.trace(Some(count_group_statement));
@@ -4990,10 +4988,10 @@ mod hot_query_sql_tests {
             UtcTimestamp::new(1, 0).unwrap(),
         )
         .unwrap();
-        // has_blocked_gates + COUNT/UNION/upsert per 50-group chunk
+        // has_blocked_gates + set-based head/count scan + 50-row summary upserts.
         assert_eq!(
             GROUP_TRACE_COUNT.load(Ordering::Relaxed),
-            1 + 3 * groups.div_ceil(50)
+            1 + groups.div_ceil(1_497).max(1) + groups.div_ceil(50).max(1)
         );
         let summary_count: i64 = tx
             .query_row(
@@ -5007,7 +5005,7 @@ mod hot_query_sql_tests {
     }
 
     #[test]
-    fn grouped_summary_relect_is_one_seek_per_group_and_linear_vm_work() {
+    fn grouped_summary_relect_is_one_set_scan_and_linear_vm_work() {
         let one = grouped_refresh_cost(1);
         let hundred = grouped_refresh_cost(100);
         let thousand = grouped_refresh_cost(1_000);

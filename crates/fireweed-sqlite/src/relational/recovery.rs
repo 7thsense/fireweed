@@ -544,6 +544,7 @@ pub(crate) fn open_inner(conn: Connection) -> EngineResult<Inner> {
     ensure_item_entity_document_column(&conn)?;
     ensure_item_index_fields_column(&conn)?;
     ensure_item_terminal_command_epoch_column(&conn)?;
+    ensure_group_summary_rep_created_seq_column(&conn)?;
     ensure_cohort_lifecycle_columns(&conn)?;
     let mut inner = Inner {
         conn,

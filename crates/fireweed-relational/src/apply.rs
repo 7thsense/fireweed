@@ -15,7 +15,7 @@ use fireweed_engine::{
 use serde_json::Value as JsonValue;
 
 use crate::{
-    RelTx, RelValue, TypedIndexRows, elig_sort, fields_from_json, fields_to_json,
+    RelRow, RelTx, RelValue, TypedIndexRows, elig_sort, fields_from_json, fields_to_json,
     has_blocked_gates, lease_hash, metadata_to_json, observe_push_for_claim_scan, parse_priority,
     parse_state, parts, reset_claim_scan_hint, state_str, to_json, ts_nanos, ts_nanos_opt,
 };
@@ -2049,6 +2049,7 @@ struct SummaryWrite {
     oldest: Option<i64>,
     rep_priority_sort: Option<Vec<u8>>,
     rep_created_at: Option<i64>,
+    rep_created_seq: Option<i64>,
     rep_item_id: Option<String>,
     count: i64,
 }
@@ -2089,6 +2090,7 @@ fn write_from_items(group: &GroupKey, items: &[GroupItemRef]) -> SummaryWrite {
         oldest: items.iter().map(|item| item.eligible_since).min(),
         rep_priority_sort: best.map(|item| item.priority_sort.clone()),
         rep_created_at: best.map(|item| item.created_at),
+        rep_created_seq: best.map(|item| item.created_seq),
         rep_item_id: best.map(|item| item.item_id.clone()),
         count: items.len() as i64,
     }
@@ -2144,12 +2146,10 @@ fn load_summaries(
     for chunk in groups.chunks(SQLITE_BATCH) {
         let placeholders = vec!["?"; chunk.len()].join(",");
         let sql = format!(
-            "SELECT s.group_key,s.oldest_eligible_at,s.rep_priority_sort,s.rep_created_at,\
-                    s.rep_item_id,s.eligible_item_count,i.created_seq \
-             FROM fireweed_group_summary s \
-             LEFT JOIN fireweed_items i ON i.tenant_id=s.tenant_id AND i.queue_id=s.queue_id \
-               AND i.item_id=s.rep_item_id \
-             WHERE s.tenant_id=? AND s.queue_id=? AND s.group_key IN ({placeholders})"
+            "SELECT group_key,oldest_eligible_at,rep_priority_sort,rep_created_at,\
+                    rep_item_id,eligible_item_count,rep_created_seq \
+             FROM fireweed_group_summary \
+             WHERE tenant_id=? AND queue_id=? AND group_key IN ({placeholders})"
         );
         let mut params = vec![RelValue::Text(t.clone()), RelValue::Text(q.clone())];
         params.extend(
@@ -2187,25 +2187,26 @@ fn upsert_group_summaries(
     }
     let (t, q) = parts(shard);
     let now_n = ts_nanos(now);
-    const ROW: &str = "(?,?,?,?,NULL,?,?,?,?,0,?)";
+    const ROW: &str = "(?,?,?,?,NULL,?,?,?,?,?,0,?)";
     for chunk in rows.chunks(SUMMARY_UPSERT_BATCH) {
         let values = vec![ROW; chunk.len()].join(",");
         let sql = format!(
             "INSERT INTO fireweed_group_summary \
              (tenant_id,queue_id,group_key,oldest_eligible_at,rep_progress_guard_sort,rep_priority_sort,\
-              rep_created_at,rep_item_id,eligible_item_count,at_risk_count,updated_at) \
+              rep_created_at,rep_created_seq,rep_item_id,eligible_item_count,at_risk_count,updated_at) \
              VALUES {values} \
              ON CONFLICT(tenant_id,queue_id,group_key) DO UPDATE SET \
               oldest_eligible_at=excluded.oldest_eligible_at, \
               rep_progress_guard_sort=excluded.rep_progress_guard_sort, \
               rep_priority_sort=excluded.rep_priority_sort, \
               rep_created_at=excluded.rep_created_at, \
+              rep_created_seq=excluded.rep_created_seq, \
               rep_item_id=excluded.rep_item_id, \
               eligible_item_count=excluded.eligible_item_count, \
               at_risk_count=excluded.at_risk_count, \
               updated_at=excluded.updated_at"
         );
-        let mut params = Vec::with_capacity(chunk.len() * 9);
+        let mut params = Vec::with_capacity(chunk.len() * 10);
         for row in chunk {
             params.extend([
                 RelValue::Text(t.clone()),
@@ -2214,6 +2215,7 @@ fn upsert_group_summaries(
                 RelValue::opt_int(row.oldest),
                 RelValue::opt_blob(row.rep_priority_sort.clone()),
                 RelValue::opt_int(row.rep_created_at),
+                RelValue::opt_int(row.rep_created_seq),
                 RelValue::opt_text(row.rep_item_id.clone()),
                 RelValue::Integer(row.count),
                 RelValue::Integer(now_n),
@@ -2287,6 +2289,7 @@ fn apply_group_summary_add(
                     (_, _, _, None) => (
                         current.rep_priority_sort.clone(),
                         current.rep_created_at,
+                        current.rep_created_seq,
                         current.rep_item_id.clone(),
                     ),
                     (None, _, _, Some(item))
@@ -2294,18 +2297,21 @@ fn apply_group_summary_add(
                     | (_, _, None, Some(item)) => (
                         Some(item.priority_sort.clone()),
                         Some(item.created_at),
+                        Some(item.created_seq),
                         Some(item.item_id.clone()),
                     ),
                     (Some(_), Some(sort), Some(seq), Some(item)) if item_beats(item, sort, seq) => {
                         (
                             Some(item.priority_sort.clone()),
                             Some(item.created_at),
+                            Some(item.created_seq),
                             Some(item.item_id.clone()),
                         )
                     }
                     _ => (
                         current.rep_priority_sort.clone(),
                         current.rep_created_at,
+                        current.rep_created_seq,
                         current.rep_item_id.clone(),
                     ),
                 };
@@ -2314,7 +2320,8 @@ fn apply_group_summary_add(
                     oldest,
                     rep_priority_sort: winner.0,
                     rep_created_at: winner.1,
-                    rep_item_id: winner.2,
+                    rep_created_seq: winner.2,
+                    rep_item_id: winner.3,
                     count,
                 });
             }
@@ -2388,6 +2395,7 @@ fn apply_group_summary_remove(
             oldest: current.oldest,
             rep_priority_sort: current.rep_priority_sort.clone(),
             rep_created_at: current.rep_created_at,
+            rep_created_seq: current.rep_created_seq,
             rep_item_id: current.rep_item_id.clone(),
             count,
         });
@@ -2415,57 +2423,84 @@ fn apply_group_summary_rerank(
     if eligible_since_changed {
         return relect_group_summaries(tx, shard, &groups, now);
     }
-    let existing = load_summaries(tx, shard, &groups)?;
     let updated = items_by_group(updated);
-    let mut writes = Vec::new();
     let mut fallback = Vec::new();
-    for group in &groups {
-        let changed = updated.get(group).map(Vec::as_slice).unwrap_or(&[]);
-        let Some(current) = existing.get(group) else {
-            fallback.push(group.clone());
-            continue;
-        };
-        let changed_ids: HashSet<&str> = changed.iter().map(|item| item.item_id.as_str()).collect();
-        if current
-            .rep_item_id
-            .as_deref()
-            .is_some_and(|id| changed_ids.contains(id))
-            || current.count <= 0
-            || current.rep_created_seq.is_none()
-            || current.rep_priority_sort.is_none()
-        {
-            fallback.push(group.clone());
-            continue;
+    // One conditional UPDATE replaces the former summary SELECT plus batched UPSERTs. The changed-id
+    // JSON lets SQL detect whether the old representative was rewritten. A representative that moved
+    // later cannot be repaired from only the changed rows, so that group is deliberately omitted from
+    // RETURNING and sent through the exact resident-row fallback below.
+    const INPUT_COLUMNS: usize = 6;
+    const FIXED_BINDS: usize = 3;
+    let (tenant, queue) = parts(shard);
+    for chunk in groups.chunks((900 - FIXED_BINDS) / INPUT_COLUMNS) {
+        let mut params = Vec::with_capacity(chunk.len() * INPUT_COLUMNS + FIXED_BINDS);
+        for group in chunk {
+            let changed = updated
+                .get(group)
+                .expect("unique groups came from updated items");
+            let best = best_item(changed).expect("updated group is non-empty");
+            params.extend([
+                RelValue::Text(group.as_str().to_string()),
+                RelValue::Blob(best.priority_sort.clone()),
+                RelValue::Integer(best.created_at),
+                RelValue::Integer(best.created_seq),
+                RelValue::Text(best.item_id.clone()),
+                RelValue::Text(
+                    serde_json::to_string(
+                        &changed
+                            .iter()
+                            .map(|item| item.item_id.as_str())
+                            .collect::<Vec<_>>(),
+                    )
+                    .map_err(|error| EngineError::Storage(error.to_string()))?,
+                ),
+            ]);
         }
-        let Some(sort) = current.rep_priority_sort.as_deref() else {
-            fallback.push(group.clone());
-            continue;
-        };
-        let seq = current.rep_created_seq.unwrap_or(i64::MAX);
-        let winner = match best_item(changed) {
-            Some(item) if item_beats(item, sort, seq) => item,
-            _ => {
-                writes.push(SummaryWrite {
-                    group_key: group.clone(),
-                    oldest: current.oldest,
-                    rep_priority_sort: current.rep_priority_sort.clone(),
-                    rep_created_at: current.rep_created_at,
-                    rep_item_id: current.rep_item_id.clone(),
-                    count: current.count,
-                });
-                continue;
-            }
-        };
-        writes.push(SummaryWrite {
-            group_key: group.clone(),
-            oldest: current.oldest,
-            rep_priority_sort: Some(winner.priority_sort.clone()),
-            rep_created_at: Some(winner.created_at),
-            rep_item_id: Some(winner.item_id.clone()),
-            count: current.count,
-        });
+        params.extend([
+            RelValue::Integer(ts_nanos(now)),
+            RelValue::Text(tenant.clone()),
+            RelValue::Text(queue.clone()),
+        ]);
+        let incoming_rows = vec!["(?,?,?,?,?,?)"; chunk.len()].join(",");
+        let incoming_wins = "(incoming.rep_priority_sort < fireweed_group_summary.rep_priority_sort \
+            OR (incoming.rep_priority_sort = fireweed_group_summary.rep_priority_sort \
+                AND incoming.rep_created_seq <= fireweed_group_summary.rep_created_seq))";
+        let sql = format!(
+            "WITH incoming(group_key,rep_priority_sort,rep_created_at,rep_created_seq,rep_item_id,changed_ids) \
+             AS (VALUES {incoming_rows}) \
+             UPDATE fireweed_group_summary SET \
+               rep_priority_sort=CASE WHEN {incoming_wins} THEN incoming.rep_priority_sort \
+                                      ELSE fireweed_group_summary.rep_priority_sort END, \
+               rep_created_at=CASE WHEN {incoming_wins} THEN incoming.rep_created_at \
+                                   ELSE fireweed_group_summary.rep_created_at END, \
+               rep_created_seq=CASE WHEN {incoming_wins} THEN incoming.rep_created_seq \
+                                    ELSE fireweed_group_summary.rep_created_seq END, \
+               rep_item_id=CASE WHEN {incoming_wins} THEN incoming.rep_item_id \
+                                ELSE fireweed_group_summary.rep_item_id END, \
+               updated_at=? \
+             FROM incoming WHERE fireweed_group_summary.tenant_id=? \
+               AND fireweed_group_summary.queue_id=? \
+               AND fireweed_group_summary.group_key=incoming.group_key \
+               AND fireweed_group_summary.eligible_item_count>0 \
+               AND fireweed_group_summary.rep_priority_sort IS NOT NULL \
+               AND fireweed_group_summary.rep_created_seq IS NOT NULL \
+               AND fireweed_group_summary.rep_item_id IS NOT NULL \
+               AND NOT (EXISTS (SELECT 1 FROM json_each(incoming.changed_ids) changed \
+                                WHERE changed.value=fireweed_group_summary.rep_item_id) \
+                        AND NOT {incoming_wins}) \
+             RETURNING group_key"
+        );
+        let maintained = crate::rel_query(tx, &sql, params)?
+            .into_iter()
+            .map(|row| row.get::<String>(0))
+            .collect::<EngineResult<HashSet<_>>>()?;
+        fallback.extend(
+            chunk
+                .iter()
+                .filter(|group| !maintained.contains(group.as_str()))
+                .cloned(),
+        );
     }
-    upsert_group_summaries(tx, shard, &writes, now)?;
     relect_group_summaries(tx, shard, &fallback, now)
 }
 
@@ -2500,86 +2535,60 @@ pub fn relect_group_summaries(
     let (t, q) = parts(shard);
     let now_n = ts_nanos(now);
     let mut writes = Vec::with_capacity(group_keys.len());
-    for chunk in group_keys.chunks(SUMMARY_UPSERT_BATCH) {
+    for chunk in group_keys.chunks(SQLITE_BATCH.saturating_sub(3)) {
         let placeholders = vec!["?"; chunk.len()].join(",");
-        let mut count_params = vec![
+        let mut params = vec![
             RelValue::Text(t.clone()),
             RelValue::Text(q.clone()),
             RelValue::Integer(now_n),
         ];
-        count_params.extend(
+        params.extend(
             chunk
                 .iter()
                 .map(|group| RelValue::Text(group.as_str().to_string())),
         );
-        let mut counts: HashMap<GroupKey, (i64, Option<i64>)> = HashMap::new();
+        let mut selected: HashMap<GroupKey, SummaryWrite> = HashMap::new();
         for row in crate::rel_query(
             tx,
             &format!(
-                "SELECT group_key, COUNT(*), MIN(eligible_since) FROM fireweed_items \
-                 WHERE tenant_id=? AND queue_id=? AND lifecycle_state='Pending' AND superseded=0 \
-                 AND (not_before IS NULL OR not_before<=?) AND group_key IN ({placeholders}){gate} \
-                 GROUP BY group_key"
+                "SELECT group_key,item_id,priority_sort,created_at,created_seq,eligible_item_count,oldest_eligible_at \
+                 FROM (SELECT group_key,item_id,priority_sort,created_at,created_seq, \
+                   COUNT(*) OVER (PARTITION BY group_key) AS eligible_item_count, \
+                   MIN(eligible_since) OVER (PARTITION BY group_key) AS oldest_eligible_at, \
+                   ROW_NUMBER() OVER (PARTITION BY group_key ORDER BY priority_sort,created_seq,item_id) AS claim_rank \
+                   FROM fireweed_items WHERE tenant_id=? AND queue_id=? \
+                     AND lifecycle_state='Pending' AND superseded=0 \
+                     AND (not_before IS NULL OR not_before<=?) \
+                     AND group_key IN ({placeholders}){gate}) \
+                 WHERE claim_rank=1"
             ),
-            count_params,
+            params,
         )? {
             let group = GroupKey::new(row.get::<String>(0)?)
                 .map_err(|e| EngineError::Storage(e.to_string()))?;
-            counts.insert(group, (row.get(1)?, row.get(2)?));
-        }
-        let heads_sql = chunk
-            .iter()
-            .enumerate()
-            .map(|(offset, _)| {
-                let group_param = offset + 4;
-                format!(
-                    "SELECT group_key,item_id,priority_sort,created_at FROM (\
-                       SELECT group_key,item_id,priority_sort,created_at FROM fireweed_items \
-                       WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
-                         AND (not_before IS NULL OR not_before<=?3) AND group_key=?{group_param}{gate} \
-                       ORDER BY priority_sort, created_seq, item_id LIMIT 1)"
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" UNION ALL ");
-        let mut head_params = vec![
-            RelValue::Text(t.clone()),
-            RelValue::Text(q.clone()),
-            RelValue::Integer(now_n),
-        ];
-        head_params.extend(
-            chunk
-                .iter()
-                .map(|group| RelValue::Text(group.as_str().to_string())),
-        );
-        let mut heads: HashMap<GroupKey, (String, Vec<u8>, i64)> = HashMap::new();
-        for row in crate::rel_query(tx, &heads_sql, head_params)? {
-            let group = GroupKey::new(row.get::<String>(0)?)
-                .map_err(|e| EngineError::Storage(e.to_string()))?;
-            heads.insert(group, (row.get(1)?, row.get(2)?, row.get(3)?));
+            selected.insert(
+                group.clone(),
+                SummaryWrite {
+                    group_key: group,
+                    oldest: row.get(6)?,
+                    rep_priority_sort: Some(row.get(2)?),
+                    rep_created_at: Some(row.get(3)?),
+                    rep_created_seq: Some(row.get(4)?),
+                    rep_item_id: Some(row.get(1)?),
+                    count: row.get(5)?,
+                },
+            );
         }
         for group in chunk {
-            writes.push(match heads.get(group) {
-                Some((item_id, priority_sort, created_at)) => {
-                    let (count, oldest) = counts.get(group).copied().unwrap_or((0, None));
-                    SummaryWrite {
-                        group_key: group.clone(),
-                        oldest,
-                        rep_priority_sort: Some(priority_sort.clone()),
-                        rep_created_at: Some(*created_at),
-                        rep_item_id: Some(item_id.clone()),
-                        count,
-                    }
-                }
-                None => SummaryWrite {
-                    group_key: group.clone(),
-                    oldest: None,
-                    rep_priority_sort: None,
-                    rep_created_at: None,
-                    rep_item_id: None,
-                    count: 0,
-                },
-            });
+            writes.push(selected.remove(group).unwrap_or_else(|| SummaryWrite {
+                group_key: group.clone(),
+                oldest: None,
+                rep_priority_sort: None,
+                rep_created_at: None,
+                rep_created_seq: None,
+                rep_item_id: None,
+                count: 0,
+            }));
         }
     }
     upsert_group_summaries(tx, shard, &writes, now)
@@ -2756,6 +2765,86 @@ fn api001_update_shape(update: &UpdateFieldsCommand) -> Option<Api001UpdateShape
     })
 }
 
+fn maintain_grouped_schedule_summaries(
+    tx: &impl RelTx,
+    shard: &QueueKey,
+    added: Vec<GroupItemRef>,
+    ranked: Vec<GroupItemRef>,
+    left_eligible: Vec<GroupItemRef>,
+    eligible_since_changed: bool,
+    now: UtcTimestamp,
+) -> EngineResult<()> {
+    let mut transitions = HashMap::<GroupKey, u8>::new();
+    for (items, flag) in [(&added, 1_u8), (&ranked, 2_u8), (&left_eligible, 4_u8)] {
+        for item in items {
+            transitions
+                .entry(item.group_key.clone())
+                .and_modify(|seen| *seen |= flag)
+                .or_insert(flag);
+        }
+    }
+    let mixed = transitions
+        .into_iter()
+        .filter_map(|(group, flags)| (flags.count_ones() > 1).then_some(group))
+        .collect::<HashSet<_>>();
+    if !mixed.is_empty() {
+        let groups: Vec<GroupKey> = mixed.iter().cloned().collect();
+        relect_group_summaries(tx, shard, &groups, now)?;
+    }
+    let added = added
+        .into_iter()
+        .filter(|item| !mixed.contains(&item.group_key))
+        .collect::<Vec<_>>();
+    let ranked = ranked
+        .into_iter()
+        .filter(|item| !mixed.contains(&item.group_key))
+        .collect::<Vec<_>>();
+    let left = left_eligible
+        .into_iter()
+        .filter(|item| !mixed.contains(&item.group_key))
+        .collect::<Vec<_>>();
+    let added_groups = unique_groups(&added);
+    apply_group_summary_add(tx, shard, &added_groups, &added, now)?;
+    apply_group_summary_rerank(tx, shard, &ranked, eligible_since_changed, now)?;
+    apply_group_summary_remove(tx, shard, &left, now)
+}
+
+fn collect_grouped_schedule_rows(
+    rows: Vec<RelRow>,
+    was_eligible: bool,
+    now_n: i64,
+    added: &mut Vec<GroupItemRef>,
+    ranked: &mut Vec<GroupItemRef>,
+    left_eligible: &mut Vec<GroupItemRef>,
+) -> EngineResult<HashSet<String>> {
+    let mut matched = HashSet::with_capacity(rows.len());
+    for row in rows {
+        matched.insert(row.get::<String>(0)?);
+        let Some(group) = row.get::<Option<String>>(1)? else {
+            continue;
+        };
+        let item = GroupItemRef {
+            group_key: GroupKey::new(group)
+                .map_err(|error| EngineError::Storage(error.to_string()))?,
+            item_id: row.get(2)?,
+            eligible_since: row.get(3)?,
+            priority_sort: row.get(4)?,
+            created_at: row.get(6)?,
+            created_seq: row.get(7)?,
+        };
+        let is_eligible = !row
+            .get::<Option<i64>>(5)?
+            .is_some_and(|timestamp| timestamp > now_n);
+        match (was_eligible, is_eligible) {
+            (false, true) => added.push(item),
+            (true, true) => ranked.push(item),
+            (true, false) => left_eligible.push(item),
+            (false, false) => {}
+        }
+    }
+    Ok(matched)
+}
+
 /// Apply the common API-001 replacement form without materializing current rows.
 ///
 /// This is deliberately narrower than the general BatchUpdate path. Conditional versions,
@@ -2771,10 +2860,11 @@ fn try_apply_operation_shaped_api001_batch(
     claim_scan_default_fifo: &mut HashMap<QueueKey, bool>,
     shard: &QueueKey,
     seq: u64,
-    now_n: i64,
+    now: UtcTimestamp,
     model: &PriorityModel,
     updates: &[UpdateFieldsCommand],
 ) -> EngineResult<bool> {
+    let now_n = ts_nanos(now);
     let Some(shape) = updates.first().and_then(api001_update_shape) else {
         return Ok(false);
     };
@@ -2784,9 +2874,7 @@ fn try_apply_operation_shaped_api001_batch(
     {
         return Ok(false);
     }
-    if grouped_shards.contains(shard) && (shape.priority || shape.not_before) {
-        return Ok(false);
-    }
+    let grouped_schedule = grouped_shards.contains(shard) && (shape.priority || shape.not_before);
 
     let mut targets = HashSet::with_capacity(updates.len());
     for update in updates {
@@ -2880,12 +2968,16 @@ fn try_apply_operation_shaped_api001_batch(
             Ok::<_, EngineError>(values)
         })
         .collect::<EngineResult<Vec<_>>>()?;
+    let mut added = Vec::new();
+    let mut ranked = Vec::new();
+    let mut left_eligible = Vec::new();
     let uniform_values = replacement_values
         .first()
         .filter(|first| replacement_values.iter().all(|values| values == *first));
     if let Some(values) = uniform_values {
         let range_bind_count = usize::from(shape.address == Api001UpdateAddress::ClientItemKey) * 2;
-        let chunk_size = 900 - values.len() - 4 - range_bind_count;
+        let eligibility_bind_count = usize::from(grouped_schedule);
+        let chunk_size = 900 - values.len() - 4 - range_bind_count - eligibility_bind_count;
         for chunk in updates.chunks(chunk_size) {
             let mut assignments = replacement_columns
                 .iter()
@@ -2896,81 +2988,218 @@ fn try_apply_operation_shaped_api001_batch(
                 "updated_at=?".to_string(),
                 "last_command_sequence=?".to_string(),
             ]);
-            let mut params = values.clone();
-            params.extend([
-                RelValue::Integer(now_n),
-                RelValue::Integer(seq as i64),
-                RelValue::Text(tenant.to_string()),
-                RelValue::Text(queue.to_string()),
-            ]);
-            let targets = chunk.iter().map(target).collect::<Vec<_>>();
-            let range_predicate = if shape.address == Api001UpdateAddress::ClientItemKey {
-                let first = targets.iter().min().expect("non-empty update chunk");
-                let last = targets.iter().max().expect("non-empty update chunk");
-                params.extend([RelValue::Text(first.clone()), RelValue::Text(last.clone())]);
-                format!(" AND {address_column} BETWEEN ? AND ?")
-            } else {
-                String::new()
-            };
-            params.extend(targets.into_iter().map(RelValue::Text));
-            let sql = format!(
-                "UPDATE fireweed_items SET {} \
-                 WHERE tenant_id=? AND queue_id=?{range_predicate} AND {address_column} IN ({}) \
-                   AND lifecycle_state='Pending' AND superseded=0 AND fenced=0",
-                assignments.join(","),
-                vec!["?"; chunk.len()].join(",")
-            );
-            crate::rel_exec(tx, &sql, params)?;
+            if !grouped_schedule {
+                let mut params = values.clone();
+                params.extend([
+                    RelValue::Integer(now_n),
+                    RelValue::Integer(seq as i64),
+                    RelValue::Text(tenant.to_string()),
+                    RelValue::Text(queue.to_string()),
+                ]);
+                let targets = chunk.iter().map(target).collect::<Vec<_>>();
+                let range_predicate = if shape.address == Api001UpdateAddress::ClientItemKey {
+                    let first = targets.iter().min().expect("non-empty update chunk");
+                    let last = targets.iter().max().expect("non-empty update chunk");
+                    params.extend([RelValue::Text(first.clone()), RelValue::Text(last.clone())]);
+                    format!(" AND {address_column} BETWEEN ? AND ?")
+                } else {
+                    String::new()
+                };
+                params.extend(targets.into_iter().map(RelValue::Text));
+                let sql = format!(
+                    "UPDATE fireweed_items SET {} \
+                     WHERE tenant_id=? AND queue_id=?{range_predicate} AND {address_column} IN ({}) \
+                       AND lifecycle_state='Pending' AND superseded=0 AND fenced=0",
+                    assignments.join(","),
+                    vec!["?"; chunk.len()].join(",")
+                );
+                crate::rel_exec(tx, &sql, params)?;
+                continue;
+            }
+
+            let mut remaining = chunk.iter().collect::<Vec<_>>();
+            for was_eligible in [true, false] {
+                if remaining.is_empty() {
+                    break;
+                }
+                let mut params = values.clone();
+                params.extend([
+                    RelValue::Integer(now_n),
+                    RelValue::Integer(seq as i64),
+                    RelValue::Text(tenant.to_string()),
+                    RelValue::Text(queue.to_string()),
+                ]);
+                let targets = remaining
+                    .iter()
+                    .map(|update| target(update))
+                    .collect::<Vec<_>>();
+                let range_predicate = if shape.address == Api001UpdateAddress::ClientItemKey {
+                    let first = targets.iter().min().expect("non-empty update partition");
+                    let last = targets.iter().max().expect("non-empty update partition");
+                    params.extend([RelValue::Text(first.clone()), RelValue::Text(last.clone())]);
+                    format!(" AND {address_column} BETWEEN ? AND ?")
+                } else {
+                    String::new()
+                };
+                params.push(RelValue::Integer(now_n));
+                params.extend(targets.iter().cloned().map(RelValue::Text));
+                let eligibility_predicate = if was_eligible {
+                    " AND (not_before IS NULL OR not_before<=?)"
+                } else {
+                    " AND not_before IS NOT NULL AND not_before>?"
+                };
+                let sql = format!(
+                    "UPDATE fireweed_items SET {} \
+                     WHERE tenant_id=? AND queue_id=?{range_predicate}{eligibility_predicate} \
+                       AND {address_column} IN ({}) AND lifecycle_state='Pending' \
+                       AND superseded=0 AND fenced=0 \
+                     RETURNING {address_column},group_key,item_id,eligible_since,priority_sort,not_before,created_at,created_seq",
+                    assignments.join(","),
+                    vec!["?"; remaining.len()].join(",")
+                );
+                let matched = collect_grouped_schedule_rows(
+                    crate::rel_query(tx, &sql, params)?,
+                    was_eligible,
+                    now_n,
+                    &mut added,
+                    &mut ranked,
+                    &mut left_eligible,
+                )?;
+                if was_eligible {
+                    remaining.retain(|update| !matched.contains(&target(update)));
+                }
+            }
         }
         if shape.priority || shape.not_before {
             reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
+        }
+        if grouped_schedule {
+            maintain_grouped_schedule_summaries(
+                tx,
+                shard,
+                added,
+                ranked,
+                left_eligible,
+                false,
+                now,
+            )?;
         }
         return Ok(true);
     }
 
     let supplied_column_count = replacement_columns.len();
     // Each CASE arm binds the target and replacement, and the indexed IN predicate binds each
-    // target once more. Four fixed binds carry time, sequence, tenant, and queue.
-    let chunk_size = (900 - 4) / (supplied_column_count * 2 + 1);
+    // target once more. Fixed binds carry time, sequence, tenant, queue, and (for grouped
+    // schedules) the pre-update eligibility partition.
+    let fixed_binds = 4 + usize::from(grouped_schedule);
+    let chunk_size = (900 - fixed_binds) / (supplied_column_count * 2 + 1);
     for (chunk, value_chunk) in updates
         .chunks(chunk_size)
         .zip(replacement_values.chunks(chunk_size))
     {
-        let mut assignments = Vec::with_capacity(supplied_column_count + 3);
-        let mut params = Vec::with_capacity(chunk.len() * (supplied_column_count * 2 + 1) + 4);
-        for (column_index, column) in replacement_columns.iter().enumerate() {
-            assignments.push(format!(
-                "{column}=CASE {address_column} {} ELSE {column} END",
-                vec!["WHEN ? THEN ?"; chunk.len()].join(" ")
-            ));
-            for (update, values) in chunk.iter().zip(value_chunk) {
-                params.push(RelValue::Text(target(update)));
-                params.push(values[column_index].clone());
+        if !grouped_schedule {
+            let mut assignments = Vec::with_capacity(supplied_column_count + 3);
+            let mut params = Vec::with_capacity(chunk.len() * (supplied_column_count * 2 + 1) + 4);
+            for (column_index, column) in replacement_columns.iter().enumerate() {
+                assignments.push(format!(
+                    "{column}=CASE {address_column} {} ELSE {column} END",
+                    vec!["WHEN ? THEN ?"; chunk.len()].join(" ")
+                ));
+                for (update, values) in chunk.iter().zip(value_chunk) {
+                    params.push(RelValue::Text(target(update)));
+                    params.push(values[column_index].clone());
+                }
+            }
+            assignments.extend([
+                "item_version=item_version+1".to_string(),
+                "updated_at=?".to_string(),
+                "last_command_sequence=?".to_string(),
+            ]);
+            params.extend([
+                RelValue::Integer(now_n),
+                RelValue::Integer(seq as i64),
+                RelValue::Text(tenant.to_string()),
+                RelValue::Text(queue.to_string()),
+            ]);
+            params.extend(chunk.iter().map(|update| RelValue::Text(target(update))));
+            let sql = format!(
+                "UPDATE fireweed_items SET {} \
+                 WHERE tenant_id=? AND queue_id=? AND {address_column} IN ({}) \
+                   AND lifecycle_state='Pending' AND superseded=0 AND fenced=0",
+                assignments.join(","),
+                vec!["?"; chunk.len()].join(",")
+            );
+            crate::rel_exec(tx, &sql, params)?;
+            continue;
+        }
+
+        let mut remaining = chunk.iter().zip(value_chunk).collect::<Vec<_>>();
+        for was_eligible in [true, false] {
+            if remaining.is_empty() {
+                break;
+            }
+            let mut assignments = Vec::with_capacity(supplied_column_count + 3);
+            let mut params =
+                Vec::with_capacity(remaining.len() * (supplied_column_count * 2 + 1) + fixed_binds);
+            for (column_index, column) in replacement_columns.iter().enumerate() {
+                assignments.push(format!(
+                    "{column}=CASE {address_column} {} ELSE {column} END",
+                    vec!["WHEN ? THEN ?"; remaining.len()].join(" ")
+                ));
+                for (update, values) in &remaining {
+                    params.push(RelValue::Text(target(update)));
+                    params.push(values[column_index].clone());
+                }
+            }
+            assignments.extend([
+                "item_version=item_version+1".to_string(),
+                "updated_at=?".to_string(),
+                "last_command_sequence=?".to_string(),
+            ]);
+            params.extend([
+                RelValue::Integer(now_n),
+                RelValue::Integer(seq as i64),
+                RelValue::Text(tenant.to_string()),
+                RelValue::Text(queue.to_string()),
+                RelValue::Integer(now_n),
+            ]);
+            params.extend(
+                remaining
+                    .iter()
+                    .map(|(update, _)| RelValue::Text(target(update))),
+            );
+            let eligibility_predicate = if was_eligible {
+                "(not_before IS NULL OR not_before<=?)"
+            } else {
+                "not_before IS NOT NULL AND not_before>?"
+            };
+            let sql = format!(
+                "UPDATE fireweed_items SET {} \
+                 WHERE tenant_id=? AND queue_id=? AND {eligibility_predicate} \
+                   AND {address_column} IN ({}) AND lifecycle_state='Pending' \
+                   AND superseded=0 AND fenced=0 \
+                 RETURNING {address_column},group_key,item_id,eligible_since,priority_sort,not_before,created_at,created_seq",
+                assignments.join(","),
+                vec!["?"; remaining.len()].join(",")
+            );
+            let matched = collect_grouped_schedule_rows(
+                crate::rel_query(tx, &sql, params)?,
+                was_eligible,
+                now_n,
+                &mut added,
+                &mut ranked,
+                &mut left_eligible,
+            )?;
+            if was_eligible {
+                remaining.retain(|(update, _)| !matched.contains(&target(update)));
             }
         }
-        assignments.extend([
-            "item_version=item_version+1".to_string(),
-            "updated_at=?".to_string(),
-            "last_command_sequence=?".to_string(),
-        ]);
-        params.extend([
-            RelValue::Integer(now_n),
-            RelValue::Integer(seq as i64),
-            RelValue::Text(tenant.to_string()),
-            RelValue::Text(queue.to_string()),
-        ]);
-        params.extend(chunk.iter().map(|update| RelValue::Text(target(update))));
-        let sql = format!(
-            "UPDATE fireweed_items SET {} \
-             WHERE tenant_id=? AND queue_id=? AND {address_column} IN ({}) \
-               AND lifecycle_state='Pending' AND superseded=0 AND fenced=0",
-            assignments.join(","),
-            vec!["?"; chunk.len()].join(",")
-        );
-        crate::rel_exec(tx, &sql, params)?;
     }
     if shape.priority || shape.not_before {
         reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
+    }
+    if grouped_schedule {
+        maintain_grouped_schedule_summaries(tx, shard, added, ranked, left_eligible, false, now)?;
     }
     Ok(true)
 }
@@ -3020,7 +3249,7 @@ fn apply_update_fields_batch_sql(
         claim_scan_default_fifo,
         shard,
         seq,
-        now_n,
+        now,
         &model,
         updates,
     )? {
@@ -3323,25 +3552,15 @@ fn apply_update_fields_batch_sql(
         let since_changed = updates.iter().any(|update| {
             matches!(update.set_not_before, ScheduleUpdate::Set(_)) && !update.api001_batch
         });
-        let mixed: HashSet<GroupKey> = left_eligible
-            .iter()
-            .map(|item| item.group_key.clone())
-            .filter(|group| ranked.iter().any(|item| item.group_key == *group))
-            .collect();
-        if !mixed.is_empty() {
-            let groups: Vec<GroupKey> = mixed.iter().cloned().collect();
-            relect_group_summaries(tx, shard, &groups, now)?;
-        }
-        let ranked: Vec<GroupItemRef> = ranked
-            .into_iter()
-            .filter(|item| !mixed.contains(&item.group_key))
-            .collect();
-        let left: Vec<GroupItemRef> = left_eligible
-            .into_iter()
-            .filter(|item| !mixed.contains(&item.group_key))
-            .collect();
-        apply_group_summary_rerank(tx, shard, &ranked, since_changed, now)?;
-        apply_group_summary_remove(tx, shard, &left, now)?;
+        maintain_grouped_schedule_summaries(
+            tx,
+            shard,
+            Vec::new(),
+            ranked,
+            left_eligible,
+            since_changed,
+            now,
+        )?;
     }
     Ok(())
 }

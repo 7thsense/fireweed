@@ -1378,7 +1378,14 @@ impl RelTx for ObservedTursoRel<'_> {
             .phases
             .lock()
             .expect("Turso RelTx phase mutex poisoned");
-        phases.row_read_us = phases.row_read_us.saturating_add(elapsed);
+        let normalized = sql.trim_start().to_ascii_uppercase();
+        if normalized.starts_with("UPDATE")
+            || (normalized.starts_with("WITH") && normalized.contains(" UPDATE "))
+        {
+            phases.update_side_us = phases.update_side_us.saturating_add(elapsed);
+        } else {
+            phases.row_read_us = phases.row_read_us.saturating_add(elapsed);
+        }
         drop(phases);
         record_statement(self.statement_shape.as_ref(), sql, params.len());
         result

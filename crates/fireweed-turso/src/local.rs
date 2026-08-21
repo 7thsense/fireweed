@@ -1692,6 +1692,30 @@ async fn migrate_connection(connection: &mut Connection) -> Result<()> {
     {
         return Err(error.into());
     }
+    if let Err(error) = connection
+        .execute(
+            "ALTER TABLE fireweed_group_summary ADD COLUMN rep_created_seq INTEGER",
+            (),
+        )
+        .await
+        && !error
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("duplicate column")
+    {
+        return Err(error.into());
+    }
+    connection
+        .execute(
+            "UPDATE fireweed_group_summary SET rep_created_seq=(\
+               SELECT created_seq FROM fireweed_items i \
+               WHERE i.tenant_id=fireweed_group_summary.tenant_id \
+                 AND i.queue_id=fireweed_group_summary.queue_id \
+                 AND i.item_id=fireweed_group_summary.rep_item_id) \
+             WHERE rep_created_seq IS NULL AND rep_item_id IS NOT NULL",
+            (),
+        )
+        .await?;
     Ok(())
 }
 
