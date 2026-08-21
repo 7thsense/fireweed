@@ -72,6 +72,51 @@ recovery, or exact-tag release requirements.
 | `smoke` | Fast runner and schema validation | No | None |
 | `million-cycle-v1` | Insert 1M, modify 500K, read and verify 1M through all 20 cells | No; each cell is reported independently | P0 fixed-work functionality plus host-bound timing observations |
 
+### Settled lifecycle and microbatch qualification contract
+
+The `filesystem--turso` Seventh Sense qualification adds two same-SHA evidence
+lanes to the general matrix. Both use public requests of at most 100 items,
+retain exact item identities and full responses, retry typed admission
+backpressure at a fixed 25 ms cadence, and fail on missing, duplicate, or
+residual work. Source SHA, host, configuration, timings, counters, response
+sizes, and final queue/projection state are recorded together.
+
+The phased settled lane preserves phase barriers for attribution. It executes
+Push, two pending BatchUpdate phases, then Claim plus Complete, and waits for
+the projection to cover every phase's final authoritative position before the
+next phase begins. T2 is the settled T2 rate for exactly 100,000 delivered
+items: its interval includes Claim, Complete, and final projection settlement.
+An append-ack-only rate is reported only as a diagnostic and can never satisfy
+T2 or support a release claim.
+
+The mixed same-SHA control lane overlaps realistic 1 KiB ready lifecycle work
+with far-future Push, public observations, a 32-request compatible mutation
+cohort, incompatible legal Claim keys, and 32 same-key renew/reassign/purge
+operations. It records admitted service p50/p95/p99, capacity rejection and
+deadline-expiry identities, pack/projection wait observations, response bytes,
+settled throughput, and exact final state. This mixed lane is the admission and
+interference control; the phased lane remains the attribution control.
+
+The later continuous streaming lane replaces `join_all` waves with bounded
+queues between ingest, enrich, schedule, claim, complete, and settle. Completion
+of any request immediately admits the next request, but exact N and final
+settlement still terminate the run. Continuous client concurrency is a load
+generator, not authority to reorder requests or bypass queue admission.
+
+Microbatch qualification saturates compatible public requests, not items
+inside a request. A legal generation is capped at eight requests, 800 requested
+rows, 4 MiB of rendered responses, and 20 ms linger. Evidence proves one exact
+response and lease token per request, one intact ordered packed apply
+transaction, no payload cloning by queued generations, and no projection-pool
+borrow after publication. The retained-response memory ceiling is 128 MiB for
+normal admitted work; the post-activation configured Turso page-cache ceiling
+is 224 MiB. Behavioral M1/M2/M3 gates remain authoritative.
+
+During the migration window, the new path is log-first and writes no SQL-first
+lease or Claim outbox row. The legacy outbox schema and recovery-only drain stay
+for at least one release, and a reopen test must prove a pre-upgrade committed
+lease still publishes before that drain can be removed.
+
 ### Targeted million-item lifecycle gate
 
 `million-cycle-v1` is a fail-closed gate, not a comparative benchmark. For

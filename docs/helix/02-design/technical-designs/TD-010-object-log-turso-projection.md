@@ -110,6 +110,38 @@ object-log manifest remains authoritative when filesystem or S3 is selected.
   feature gates adapter availability, not the public name; omitted support
   fails closed before I/O.
 
+### Governing object-log serving protocol
+
+For a durable object log with a Turso derived projection, the optimization unit
+is a compatible vector of public requests, not the items inside one public
+request. A driver may microbatch at most eight FIFO-compatible requests, 800
+requested rows, 4 MiB of rendered response data, and 20 ms of linger. It keeps
+one request identity, outcome vector, response, and lease token per public
+request. Compatibility may never merge outcomes or relax the public batch
+limit.
+
+Item Claim is log-first Claim. Under one committed read snapshot, the elected
+driver selects candidates and pre-materializes each bounded full response,
+including fields, metadata, entity values, gates, schedules, and lease tokens.
+It closes the snapshot before object-log I/O, appends the authoritative Claim
+envelopes, and retains those responses until their positions settle in Turso.
+After publication, response continuation may neither re-render from Turso nor
+borrow a projection connection; a durable operation therefore cannot fail with
+capacity backpressure while returning its retained result.
+
+Compatible Push, BatchUpdate, Claim, and Complete envelopes remain distinct
+inside one packed append. The apply worker consumes the sealed vector intact,
+in log order, in one Turso writer transaction; it does not unpack the vector
+into per-request transactions. Same-queue mutations use at most two FIFO
+generations and sixteen requests, and queued generations retain request structs
+rather than cloned payloads or pre-rendered bodies.
+
+The new serving path never writes SQL-first leases or a new Claim outbox row.
+The migration window keeps the legacy outbox schema and recovery-only drain for
+at least one release so a lease committed before upgrade can still publish on
+reopen. Once the log-first path and reopen test are qualified, new outbox writes
+and the obsolete SQL-first serving path are removed separately.
+
 **Trade-offs**: preserving relational SQL minimizes semantic porting risk, but Turso's pre-1.0 API and
 build size require an exact pin and a focused validation lane.
 
@@ -211,6 +243,12 @@ upgrade refuses a newer/unknown schema until the compatibility probe and migrati
 
 - No blocking driver call on a Tokio worker; a single-thread heartbeat must advance throughout DB work.
 - No connection, task, or loop per queue. Connections and background apply are bounded shared resources.
+- Retained-response memory is bounded separately from page cache. Normal
+  serving admits at most eight Claim drivers and twenty-four mutation
+  generations with a combined 128 MiB retained-response ceiling; no queued
+  generation clones payloads. After the shared reader is retired, the configured
+  writer plus driver/outcome pools have a 224 MiB page-cache ceiling. These are
+  structural ceilings, not substitutes for the behavioral M1/M2/M3 gates.
 - Turso must preserve exact operation outcomes, monotonic progress, structural
   query bounds, and declared resource ceilings under public qualification;
   throughput and latency are compared with interleaved same-run SQLite controls
