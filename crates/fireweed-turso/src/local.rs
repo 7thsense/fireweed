@@ -18,6 +18,7 @@ use turso::{Builder, Connection, Database, Value, transaction::TransactionBehavi
 
 const LEASE_PACK_MAX: usize = 8;
 const LEASE_PACK_LINGER: Duration = Duration::from_millis(20);
+const SERVING_READER_CACHE_KIB: i64 = -131_072;
 
 struct LeasePackWaiter {
     tenant_id: String,
@@ -267,10 +268,16 @@ impl TursoRelational {
         verify_schema(&writer).await?;
         let reader = database.connect()?;
         configure_connection(&reader, &config).await?;
-        // Plan-time SELECTs must not wait for the writer txn. query_only +
-        // read_uncommitted keep ingest packing while apply is caught up.
-        let _ = reader.pragma_update("query_only", "ON").await;
-        let _ = reader.pragma_update("read_uncommitted", "ON").await;
+        if config.path != Path::new(":memory:") {
+            configure_committed_reader(
+                &reader,
+                CommittedReaderSettings {
+                    cache_size_kib: SERVING_READER_CACHE_KIB,
+                    busy_timeout: config.busy_timeout,
+                },
+            )
+            .await?;
+        }
         let grouped_shards = load_grouped_shards(&writer).await?;
         Ok(Self {
             database,
@@ -799,6 +806,590 @@ mod class_s_tests {
     }
 }
 
+#[cfg(test)]
+mod committed_reader_tests {
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    use tokio::sync::{mpsc, watch};
+    use turso::transaction::TransactionBehavior;
+
+    use super::*;
+
+    const CANDIDATE_READER_COUNT: usize = 24;
+    const CANDIDATE_READER_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
+    const FIRST_SELECT_TIMEOUT: Duration = Duration::from_millis(90);
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+    const PROBE_ROW_COUNT: i64 = 800;
+    const PROBE_PAYLOAD_BYTES: i64 = 6_144;
+
+    #[derive(Debug)]
+    struct ReaderObservation {
+        reader: usize,
+        first_select_us: u128,
+        control_select_us: u128,
+        first_version: i64,
+        after_first_commit: i64,
+        after_second_commit: i64,
+        reused_version_under_live_writer: i64,
+        reused_version_after_live_commit: i64,
+        fresh_autocommit_version: i64,
+    }
+
+    #[derive(Debug)]
+    struct CommittedReaderEvidence {
+        readers: Vec<ReaderObservation>,
+        independent_reader_version: i64,
+        wal_before_bytes: u64,
+        wal_uncommitted_bytes: u64,
+        wal_after_commit_bytes: u64,
+        wal_disposition: &'static str,
+    }
+
+    fn probe_error(message: impl Into<String>) -> TursoRelationalError {
+        TursoRelationalError::Configuration(message.into())
+    }
+
+    async fn wait_for_phase(receiver: &mut watch::Receiver<u8>, target: u8) -> Result<()> {
+        while *receiver.borrow() < target {
+            receiver
+                .changed()
+                .await
+                .map_err(|_| probe_error(format!("probe phase {target} sender dropped")))?;
+        }
+        Ok(())
+    }
+
+    async fn receive_all(receiver: &mut mpsc::Receiver<usize>, phase: &str) -> Result<()> {
+        for _ in 0..CANDIDATE_READER_COUNT {
+            tokio::time::timeout(PROBE_TIMEOUT, receiver.recv())
+                .await
+                .map_err(|_| probe_error(format!("timed out waiting for {phase}")))?
+                .ok_or_else(|| probe_error(format!("reader exited during {phase}")))?;
+        }
+        Ok(())
+    }
+
+    async fn optional_scalar_i64(connection: &Connection, sql: &str) -> Result<Option<i64>> {
+        let rows = collect_rows(connection, sql, vec![]).await?;
+        match rows.first().and_then(|row| row.values.first()) {
+            None => Ok(None),
+            Some(Value::Integer(value)) => Ok(Some(*value)),
+            value => Err(TursoRelationalError::Schema(format!(
+                "{sql} returned {value:?}, expected integer or no row"
+            ))),
+        }
+    }
+
+    fn assert_query_only_rejection(result: std::result::Result<u64, turso::Error>) -> Result<()> {
+        match result {
+            Err(turso::Error::Error(message))
+                if message.contains("Cannot execute write statement in query_only mode") =>
+            {
+                Ok(())
+            }
+            other => Err(probe_error(format!(
+                "query-only write returned {other:?}, expected typed query_only rejection"
+            ))),
+        }
+    }
+
+    async fn probe_version(connection: &Connection) -> Result<i64> {
+        let count = scalar_i64(connection, "SELECT COUNT(*) FROM committed_reader_probe").await?;
+        if count != PROBE_ROW_COUNT {
+            return Err(probe_error(format!(
+                "probe row count was {count}, expected {PROBE_ROW_COUNT}"
+            )));
+        }
+        let minimum = scalar_i64(
+            connection,
+            "SELECT MIN(version) FROM committed_reader_probe",
+        )
+        .await?;
+        let maximum = scalar_i64(
+            connection,
+            "SELECT MAX(version) FROM committed_reader_probe",
+        )
+        .await?;
+        if minimum != maximum {
+            return Err(probe_error(format!(
+                "probe observed mixed versions {minimum}..{maximum}"
+            )));
+        }
+        Ok(minimum)
+    }
+
+    fn wal_path(database_path: &Path) -> PathBuf {
+        PathBuf::from(format!("{}-wal", database_path.display()))
+    }
+
+    fn file_len(path: &Path) -> u64 {
+        std::fs::metadata(path)
+            .map(|metadata| metadata.len())
+            .unwrap_or_default()
+    }
+
+    async fn configure_candidate_reader(
+        connection: &Connection,
+        config: &TursoConfig,
+    ) -> Result<()> {
+        configure_connection(connection, config).await?;
+        configure_committed_reader(
+            connection,
+            CommittedReaderSettings {
+                cache_size_kib: -4_096,
+                busy_timeout: CANDIDATE_READER_BUSY_TIMEOUT,
+            },
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn records_v03121_read_uncommitted_keyword_disposition() {
+        let root = tempfile::tempdir().expect("diagnostic tempdir");
+        let path = root.path().join("reader-pragma-disposition.db");
+        let database = Builder::new_local(path.to_str().expect("diagnostic path is UTF-8"))
+            .build()
+            .await
+            .expect("build diagnostic database");
+        let connection = database.connect().expect("connect diagnostic reader");
+        connection
+            .execute("CREATE TABLE diagnostic(id INTEGER PRIMARY KEY)", ())
+            .await
+            .expect("create diagnostic table");
+        let update = connection.pragma_update("read_uncommitted", "ON").await;
+        let readback = optional_scalar_i64(&connection, "PRAGMA read_uncommitted")
+            .await
+            .expect("read diagnostic pragma");
+        let wal_autocheckpoint_update = connection.pragma_update("wal_autocheckpoint", "0").await;
+        let wal_autocheckpoint_readback =
+            optional_scalar_i64(&connection, "PRAGMA wal_autocheckpoint")
+                .await
+                .expect("read wal_autocheckpoint");
+        let cache_spill_update = connection.pragma_update("cache_spill", "1").await;
+        let cache_spill_readback = optional_scalar_i64(&connection, "PRAGMA cache_spill")
+            .await
+            .expect("read cache_spill");
+        connection
+            .pragma_update("query_only", "1")
+            .await
+            .expect("set numeric query_only");
+        let query_only_write = connection
+            .execute("INSERT INTO diagnostic VALUES(1)", ())
+            .await;
+        eprintln!(
+            "read_uncommitted_ON update={update:?} readback={readback:?}; \
+             wal_autocheckpoint_0 update={wal_autocheckpoint_update:?} \
+             readback={wal_autocheckpoint_readback:?}; cache_spill_1 \
+             update={cache_spill_update:?} readback={cache_spill_readback:?}; \
+             query_only_write={query_only_write:?}"
+        );
+        assert!(update.expect("set historical keyword form").is_empty());
+        assert_eq!(readback, None);
+        assert!(
+            wal_autocheckpoint_update
+                .expect("set wal_autocheckpoint")
+                .is_empty()
+        );
+        assert_eq!(wal_autocheckpoint_readback, None);
+        assert!(cache_spill_update.expect("set cache_spill").is_empty());
+        assert_eq!(cache_spill_readback, Some(1));
+        assert_query_only_rejection(query_only_write).expect("query_only rejection");
+    }
+
+    async fn run_committed_reader_probe() -> Result<CommittedReaderEvidence> {
+        let root = tempfile::tempdir().map_err(|error| probe_error(error.to_string()))?;
+        let path = root.path().join("committed-reader-probe.db");
+        let path_text = path
+            .to_str()
+            .ok_or_else(|| probe_error("probe path was not UTF-8"))?;
+        let database = Builder::new_local(path_text).build().await?;
+        let config = TursoConfig::local(&path).with_busy_timeout(CANDIDATE_READER_BUSY_TIMEOUT);
+        let mut writer = database.connect()?;
+        configure_connection(&writer, &config).await?;
+        writer.pragma_update("cache_size", "-4096").await?;
+        writer
+            .busy_timeout(DEFAULT_BUSY_TIMEOUT)
+            .map_err(TursoRelationalError::from)?;
+        let cache_spill_attested = writer.pragma_update("cache_spill", "1").await.is_ok()
+            && optional_scalar_i64(&writer, "PRAGMA cache_spill").await? == Some(1);
+        writer
+            .execute_batch(
+                "CREATE TABLE committed_reader_probe(\
+                     id INTEGER PRIMARY KEY,\
+                     version INTEGER NOT NULL,\
+                     payload BLOB NOT NULL\
+                 );",
+            )
+            .await?;
+        let seed_values = (1..=PROBE_ROW_COUNT)
+            .map(|id| format!("({id},0,zeroblob({PROBE_PAYLOAD_BYTES}))"))
+            .collect::<Vec<_>>()
+            .join(",");
+        writer
+            .execute(
+                format!(
+                    "INSERT INTO committed_reader_probe(id,version,payload) VALUES {seed_values}"
+                ),
+                (),
+            )
+            .await?;
+
+        let (ready_tx, mut ready_rx) = mpsc::channel(CANDIDATE_READER_COUNT);
+        let (first_tx, mut first_rx) = mpsc::channel(CANDIDATE_READER_COUNT);
+        let (stable_one_tx, mut stable_one_rx) = mpsc::channel(CANDIDATE_READER_COUNT);
+        let (stable_two_tx, mut stable_two_rx) = mpsc::channel(CANDIDATE_READER_COUNT);
+        let (reused_tx, mut reused_rx) = mpsc::channel(CANDIDATE_READER_COUNT);
+        let (phase_tx, phase_rx) = watch::channel(0_u8);
+        let mut handles = Vec::with_capacity(CANDIDATE_READER_COUNT);
+
+        for reader in 0..CANDIDATE_READER_COUNT {
+            let database = database.clone();
+            let config = config.clone();
+            let ready_tx = ready_tx.clone();
+            let first_tx = first_tx.clone();
+            let stable_one_tx = stable_one_tx.clone();
+            let stable_two_tx = stable_two_tx.clone();
+            let reused_tx = reused_tx.clone();
+            let mut phase_rx = phase_rx.clone();
+            handles.push(tokio::spawn(async move {
+                let mut connection = database.connect()?;
+                configure_candidate_reader(&connection, &config).await?;
+                let first_snapshot = connection
+                    .transaction_with_behavior(TransactionBehavior::Deferred)
+                    .await?;
+                ready_tx
+                    .send(reader)
+                    .await
+                    .map_err(|_| probe_error("ready receiver dropped"))?;
+
+                wait_for_phase(&mut phase_rx, 1).await?;
+                let first_started = Instant::now();
+                let first_version =
+                    tokio::time::timeout(FIRST_SELECT_TIMEOUT, probe_version(&first_snapshot))
+                        .await
+                        .map_err(|_| {
+                            probe_error(format!("reader {reader} first SELECT blocked"))
+                        })??;
+                let first_select_us = first_started.elapsed().as_micros();
+                verify_committed_reader_settings(
+                    &first_snapshot,
+                    CommittedReaderSettings {
+                        cache_size_kib: -4_096,
+                        busy_timeout: CANDIDATE_READER_BUSY_TIMEOUT,
+                    },
+                )
+                .await?;
+                assert_query_only_rejection(
+                    first_snapshot
+                        .execute(
+                            "UPDATE committed_reader_probe SET version=99 WHERE id=-1",
+                            (),
+                        )
+                        .await,
+                )?;
+                first_tx
+                    .send(reader)
+                    .await
+                    .map_err(|_| probe_error("first-select receiver dropped"))?;
+
+                wait_for_phase(&mut phase_rx, 2).await?;
+                let after_first_commit = probe_version(&first_snapshot).await?;
+                stable_one_tx
+                    .send(reader)
+                    .await
+                    .map_err(|_| probe_error("first-stability receiver dropped"))?;
+
+                wait_for_phase(&mut phase_rx, 3).await?;
+                let after_second_commit = probe_version(&first_snapshot).await?;
+                stable_two_tx
+                    .send(reader)
+                    .await
+                    .map_err(|_| probe_error("second-stability receiver dropped"))?;
+
+                wait_for_phase(&mut phase_rx, 4).await?;
+                first_snapshot.commit().await?;
+                let second_snapshot = connection
+                    .transaction_with_behavior(TransactionBehavior::Deferred)
+                    .await?;
+                let reused_version_under_live_writer = probe_version(&second_snapshot).await?;
+                reused_tx
+                    .send(reader)
+                    .await
+                    .map_err(|_| probe_error("reused-snapshot receiver dropped"))?;
+
+                wait_for_phase(&mut phase_rx, 5).await?;
+                let reused_version_after_live_commit = probe_version(&second_snapshot).await?;
+                second_snapshot.commit().await?;
+                assert_query_only_rejection(
+                    connection
+                        .execute(
+                            "UPDATE committed_reader_probe SET version=100 WHERE id=-1",
+                            (),
+                        )
+                        .await,
+                )?;
+                let control_started = Instant::now();
+                let fresh_autocommit_version = probe_version(&connection).await?;
+                let control_select_us = control_started.elapsed().as_micros();
+
+                Ok::<ReaderObservation, TursoRelationalError>(ReaderObservation {
+                    reader,
+                    first_select_us,
+                    control_select_us,
+                    first_version,
+                    after_first_commit,
+                    after_second_commit,
+                    reused_version_under_live_writer,
+                    reused_version_after_live_commit,
+                    fresh_autocommit_version,
+                })
+            }));
+        }
+        drop(ready_tx);
+        drop(first_tx);
+        drop(stable_one_tx);
+        drop(stable_two_tx);
+        drop(reused_tx);
+
+        receive_all(&mut ready_rx, "Deferred reader readiness").await?;
+        let wal_file = wal_path(&path);
+        let wal_before_bytes = file_len(&wal_file);
+        let writer_one = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await?;
+        writer_one
+            .execute(
+                &format!(
+                    "UPDATE committed_reader_probe \
+                     SET version=1,payload=zeroblob({PROBE_PAYLOAD_BYTES})"
+                ),
+                (),
+            )
+            .await?;
+        let wal_uncommitted_bytes = file_len(&wal_file);
+        phase_tx
+            .send(1)
+            .map_err(|_| probe_error("reader phase receivers dropped"))?;
+        receive_all(&mut first_rx, "first SELECT under live writer").await?;
+        writer_one.commit().await?;
+        let wal_after_commit_bytes = file_len(&wal_file);
+
+        phase_tx
+            .send(2)
+            .map_err(|_| probe_error("reader phase receivers dropped"))?;
+        receive_all(&mut stable_one_rx, "snapshot after writer one").await?;
+
+        let writer_two = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await?;
+        writer_two
+            .execute("UPDATE committed_reader_probe SET version=2", ())
+            .await?;
+        writer_two.commit().await?;
+        phase_tx
+            .send(3)
+            .map_err(|_| probe_error("reader phase receivers dropped"))?;
+        receive_all(&mut stable_two_rx, "snapshot after writer two").await?;
+
+        let writer_three = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await?;
+        writer_three
+            .execute("UPDATE committed_reader_probe SET version=3", ())
+            .await?;
+        phase_tx
+            .send(4)
+            .map_err(|_| probe_error("reader phase receivers dropped"))?;
+        receive_all(&mut reused_rx, "reused snapshot under writer three").await?;
+        writer_three.commit().await?;
+        phase_tx
+            .send(5)
+            .map_err(|_| probe_error("reader phase receivers dropped"))?;
+
+        let mut readers = Vec::with_capacity(CANDIDATE_READER_COUNT);
+        for handle in handles {
+            readers.push(
+                tokio::time::timeout(PROBE_TIMEOUT, handle)
+                    .await
+                    .map_err(|_| probe_error("timed out joining a Deferred reader"))?
+                    .map_err(|error| probe_error(format!("Deferred reader task: {error}")))??,
+            );
+        }
+        readers.sort_by_key(|observation| observation.reader);
+
+        let independent = database.connect()?;
+        configure_candidate_reader(&independent, &config).await?;
+        let independent_reader_version = probe_version(&independent).await?;
+        let wal_disposition = if !cache_spill_attested {
+            "adversarial_spill_unavailable"
+        } else if wal_uncommitted_bytes < wal_before_bytes {
+            "inconclusive_no_growth_observed"
+        } else if wal_uncommitted_bytes == wal_before_bytes {
+            "no_uncommitted_wal_growth_observed"
+        } else {
+            "uncommitted_wal_growth_observed"
+        };
+
+        Ok(CommittedReaderEvidence {
+            readers,
+            independent_reader_version,
+            wal_before_bytes,
+            wal_uncommitted_bytes,
+            wal_after_commit_bytes,
+            wal_disposition,
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn committed_reader_pool_candidate_semantics_and_settings() {
+        let evidence = run_committed_reader_probe().await.expect("reader probe");
+        assert_eq!(evidence.readers.len(), CANDIDATE_READER_COUNT);
+        assert_eq!(evidence.independent_reader_version, 3);
+        let max_live_us = evidence
+            .readers
+            .iter()
+            .map(|reader| reader.first_select_us)
+            .max()
+            .unwrap_or_default();
+        let max_control_us = evidence
+            .readers
+            .iter()
+            .map(|reader| reader.control_select_us)
+            .max()
+            .unwrap_or_default();
+        assert!(
+            max_live_us <= FIRST_SELECT_TIMEOUT.as_micros(),
+            "first SELECT under a live writer took {max_live_us}us, exceeding the {}us deadline",
+            FIRST_SELECT_TIMEOUT.as_micros()
+        );
+        for observation in &evidence.readers {
+            assert_eq!(
+                observation.first_version, 0,
+                "reader {}",
+                observation.reader
+            );
+            assert_eq!(
+                observation.after_first_commit, 0,
+                "reader {}",
+                observation.reader
+            );
+            assert_eq!(
+                observation.after_second_commit, 0,
+                "reader {}",
+                observation.reader
+            );
+            assert_eq!(
+                observation.reused_version_under_live_writer, 2,
+                "reader {}",
+                observation.reader
+            );
+            assert_eq!(
+                observation.reused_version_after_live_commit, 2,
+                "reader {}",
+                observation.reader
+            );
+            assert_eq!(
+                observation.fresh_autocommit_version, 3,
+                "reader {}",
+                observation.reader
+            );
+        }
+        eprintln!(
+            "adapter_turso={} readers={} live_max_us={} control_max_us={} \
+             wal_before_bytes={} wal_uncommitted_bytes={} wal_after_commit_bytes={} \
+             wal_disposition={}",
+            TURSO_SUPPORTED_VERSION,
+            evidence.readers.len(),
+            max_live_us,
+            max_control_us,
+            evidence.wal_before_bytes,
+            evidence.wal_uncommitted_bytes,
+            evidence.wal_after_commit_bytes,
+            evidence.wal_disposition
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn serving_reader_is_query_only_committed_and_nonblocking() {
+        let root = tempfile::tempdir().expect("serving-reader tempdir");
+        let path = root.path().join("serving-reader.db");
+        let store = TursoRelational::open(TursoConfig::local(&path))
+            .await
+            .expect("open serving reader");
+        {
+            let reader = store.reader.lock().await;
+            verify_committed_reader_settings(
+                &reader,
+                CommittedReaderSettings {
+                    cache_size_kib: SERVING_READER_CACHE_KIB,
+                    busy_timeout: DEFAULT_BUSY_TIMEOUT,
+                },
+            )
+            .await
+            .expect("serving reader settings");
+            assert_query_only_rejection(
+                reader
+                    .execute("CREATE TABLE forbidden_serving_write(id INTEGER)", ())
+                    .await,
+            )
+            .expect("serving reader rejects writes");
+        }
+        {
+            let writer = store.writer.lock().await;
+            writer
+                .execute_batch(
+                    "CREATE TABLE serving_reader_probe(\
+                         id INTEGER PRIMARY KEY,value TEXT NOT NULL\
+                     );\
+                     INSERT INTO serving_reader_probe VALUES(1,'before');",
+                )
+                .await
+                .expect("seed serving probe");
+        }
+        let mut writer = store.writer.lock().await;
+        let transaction = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .expect("begin serving writer");
+        transaction
+            .execute(
+                "UPDATE serving_reader_probe SET value='after' WHERE id=1",
+                (),
+            )
+            .await
+            .expect("update serving probe");
+        let live_rows = tokio::time::timeout(
+            Duration::from_millis(250),
+            store.query("SELECT value FROM serving_reader_probe WHERE id=1", vec![]),
+        )
+        .await
+        .expect("serving reader blocked")
+        .expect("serving reader query");
+        assert_eq!(live_rows[0].values[0], Value::Text("before".to_string()));
+        transaction.commit().await.expect("commit serving writer");
+        drop(writer);
+        let fresh_rows = store
+            .query("SELECT value FROM serving_reader_probe WHERE id=1", vec![])
+            .await
+            .expect("fresh serving query");
+        assert_eq!(fresh_rows[0].values[0], Value::Text("after".to_string()));
+    }
+
+    #[tokio::test]
+    async fn in_memory_reader_preserves_turso_07_post_commit_freshness_mode() {
+        let store = TursoRelational::in_memory().await.expect("in-memory store");
+        let reader = store.reader.lock().await;
+        assert_eq!(
+            scalar_i64(&reader, "PRAGMA query_only")
+                .await
+                .expect("query_only readback"),
+            0,
+            "Turso 0.7 query_only can intermittently retain stale post-commit state on :memory:"
+        );
+    }
+}
+
 pub fn claimed_from_class_s(
     lease_token: &LeaseToken,
     result: ClassSClaimResult,
@@ -971,6 +1562,60 @@ pub fn verify_local_wal_benchmark_evidence(evidence: &serde_json::Value) -> Resu
         return Err(TursoRelationalError::Configuration(
             "benchmark regression limits are missing or invalid".to_string(),
         ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CommittedReaderSettings {
+    pub(crate) cache_size_kib: i64,
+    pub(crate) busy_timeout: Duration,
+}
+
+pub(crate) async fn configure_committed_reader(
+    connection: &Connection,
+    settings: CommittedReaderSettings,
+) -> Result<()> {
+    connection
+        .pragma_update("cache_size", settings.cache_size_kib.to_string())
+        .await?;
+    // Turso 0.7 accepts this setter but exposes no readback row. Keep the
+    // request non-fatal; committed-reader liveness and explicit checkpoint
+    // instrumentation are the authoritative evidence.
+    let _ = connection.pragma_update("wal_autocheckpoint", "0").await;
+    connection.busy_timeout(settings.busy_timeout)?;
+    // This must be last because later pragma writes are rejected in query-only mode.
+    connection.pragma_update("query_only", "1").await?;
+    verify_committed_reader_settings(connection, settings).await
+}
+
+async fn verify_committed_reader_settings(
+    connection: &Connection,
+    expected: CommittedReaderSettings,
+) -> Result<()> {
+    let journal_mode = scalar_text(connection, "PRAGMA journal_mode").await?;
+    let synchronous = scalar_i64(connection, "PRAGMA synchronous").await?;
+    let cache_size_kib = scalar_i64(connection, "PRAGMA cache_size").await?;
+    let busy_timeout_ms = scalar_i64(connection, "PRAGMA busy_timeout").await?;
+    let query_only = scalar_i64(connection, "PRAGMA query_only").await?;
+    let expected_timeout_ms = i64::try_from(expected.busy_timeout.as_millis()).map_err(|_| {
+        TursoRelationalError::Configuration(
+            "committed-reader busy timeout exceeds i64 milliseconds".to_string(),
+        )
+    })?;
+    if journal_mode != "wal"
+        || synchronous != 0
+        || cache_size_kib != expected.cache_size_kib
+        || busy_timeout_ms != expected_timeout_ms
+        || query_only != 1
+    {
+        return Err(TursoRelationalError::Configuration(format!(
+            "committed reader settings read back as journal_mode={journal_mode:?}, \
+             synchronous={synchronous}, cache_size={cache_size_kib}, \
+             busy_timeout={busy_timeout_ms}, query_only={query_only}; expected \
+             wal, 0, {}, {}, 1",
+            expected.cache_size_kib, expected_timeout_ms
+        )));
     }
     Ok(())
 }

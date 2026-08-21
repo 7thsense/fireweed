@@ -206,6 +206,52 @@ not depend on that trial succeeding. The adapter must not issue
 `read_uncommitted` and must rerun the semantic sequence after adapter Turso
 version changes. No autocommit fallback is authorized.
 
+The redesigned gate passed on 2026-08-21. Both implementations assert the
+measured wall-clock maximum in addition to wrapping the query in a Tokio
+timeout, because a database future can occupy a runtime worker while polling.
+The authoritative adapter test on Turso 0.7.0 reported:
+
+```text
+adapter_turso=0.7.0 readers=24 live_max_us=43473 control_max_us=42283 \
+wal_before_bytes=10613152 wal_uncommitted_bytes=14399432 \
+wal_after_commit_bytes=20999672 wal_disposition=uncommitted_wal_growth_observed
+```
+
+The production file-backed serving-reader regression and the exact PRAGMA
+diagnostic also passed. The file-backed serving reader uses `journal_mode=wal`,
+`synchronous=0`, a 128 MiB cache, the product busy timeout, and numeric
+`query_only=1`; an attempted write receives the typed query-only rejection. The
+`:memory:` serving lane retains its prior non-query-only configuration because
+repeated cancellation-suite runs exposed intermittent stale post-commit state
+after numeric `query_only` activation on Turso 0.7. That lane is not the
+file-backed S-0/S3r production topology, and a regression test pins the
+exception until an adapter upgrade can re-probe it. The diagnostic retained the expected
+0.7.0 dispositions: no readback row for `read_uncommitted` or
+`wal_autocheckpoint`, `cache_spill=1`, and typed query-only rejection.
+
+The standalone Turso 0.7.2 corroboration completed its existing compatibility
+suite and emitted:
+
+```text
+turso.reader_pragma_dispositions.file=pass read_uncommitted_update=ok_no_rows \
+read_uncommitted_readback=no_row wal_autocheckpoint_update=ok_no_rows \
+wal_autocheckpoint_readback=no_row cache_spill=1 query_only_write=typed_rejection
+turso.committed_reader_pool.file=pass adapter_pin=0.7.0 probe_pin=0.7.2 \
+readers=24 live_max_us=45362 control_max_us=40926 first_select_deadline_ms=90 \
+same_connection_freshness=true independent_freshness=true
+turso.committed_reader_wal.file=diagnostic wal_before_bytes=10613152 \
+wal_uncommitted_bytes=14399432 wal_after_commit_bytes=20999672 \
+disposition=uncommitted_wal_growth_observed
+turso.committed_reader_freshness.file=pass independent_version=3
+decision.committed_selection_snapshot=go
+```
+
+S-0 prerequisite decision: **go**. The production helper and both dependency
+points now prove committed, nonblocking, query-only reader semantics; stable
+held snapshots; same-connection freshness after transaction renewal;
+independent-connection freshness; and the observed adversarial WAL behavior.
+This decision does not authorize `read_uncommitted` or an autocommit fallback.
+
 ## Decision
 
 The SQL result is promising but the governing probe stop rule makes the adapter decision **no-go under the
