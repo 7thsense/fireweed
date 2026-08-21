@@ -18,6 +18,7 @@ mod async_reclaim_planner;
 mod async_store;
 mod auth;
 mod byte_admission;
+mod claim_batch;
 mod claim_validation;
 mod command;
 /// Native binary durable command-envelope codec (FWC1 frame only).
@@ -56,8 +57,8 @@ pub use async_cohort_lifecycle::{
     ProjectionCohortLifecyclePlanner,
 };
 pub use async_commit::{
-    AsyncCommitStrategy, CommitStrategy, CommitStrategyKind, DispatchError,
-    InlineOwnedTaskDispatcher, InvalidCommitStrategy, KeyedQueueGate, OwnedTask,
+    AsyncCommitStrategy, CommitStrategy, CommitStrategyKind, DEFAULT_KEYED_QUEUE_MAX_PER_KEY,
+    DispatchError, InlineOwnedTaskDispatcher, InvalidCommitStrategy, KeyedQueueGate, OwnedTask,
     OwnedTaskDispatcher, OwnedTaskFactory, PreparedAsyncCommitStrategy, QueueGateAcquire,
     QueueGateError, QueueGatePermit, SeparateReplayCommit, SeparateReplayCommitter, TaskOutcome,
     TaskOutcomeError, TaskOutcomeSender, UnifiedAtomicCommit, UnifiedAtomicCommitter,
@@ -93,6 +94,20 @@ pub use auth::{AuthContext, RedactedLeaseToken, hash_lease_token};
 pub use byte_admission::{
     BufferedByteBudget, BufferedByteBudgetConfig, BufferedByteBudgetStats, ByteAdmissionError,
     ByteBudgetAcquire, ByteBudgetScope, OwnedBytePermit, retained_records_plus_frame_bytes,
+};
+pub use claim_batch::{
+    CLAIM_COORDINATOR_WAITERS_RESOURCE, CLAIM_DRIVER_INGRESS_RESOURCE, CLAIM_DRIVER_SLOTS_RESOURCE,
+    CLAIM_GENERATION_MAX_REQUESTS, CLAIM_MAX_CALLERS, CLAIM_MAX_DRIVERS, CLAIM_QUEUE_TURN_RESOURCE,
+    CLAIM_TURN_DEFAULT_MAX_WAIT, ClaimCaller, ClaimCoordinator, ClaimDriverBatch,
+    ClaimDriverReadAdmission, ClaimQueueTurn, ClaimQueueTurnAcquire, ClaimQueueTurnPermit,
+    CoordinationError, DRIVER_SLOT_DEFAULT_MAX_WAIT, GENERATION_MAX_ITEMS,
+    GENERATION_MAX_RESPONSE_BYTES, MUTATION_MAX_GENERATIONS_PER_QUEUE,
+    MUTATION_MAX_REQUESTS_PER_QUEUE, MUTATION_SEQUENCER_RESOURCE, MutationGenerationBatch,
+    MutationIngress, MutationSequencer, MutationTicket, OUTCOME_READ_SLOTS_RESOURCE,
+    OUTCOME_SLOT_DEFAULT_MAX_WAIT, OutcomeReadAdmission, SELECTION_FENCE_WAITERS_RESOURCE,
+    SHARED_DRIVER_SLOTS_RESOURCE, SelectionFence, SelectionFenceAcquire, SelectionFenceAdmission,
+    SelectionFenceMode, SelectionFencePermit, SelectionFenceWaiterPermit,
+    SharedDriverReadAdmission, SlotAcquire, SlotPermit,
 };
 pub use claim_validation::{
     ClaimCompatibility, ClaimUnit, GroupBatching, require_item_level_claim,

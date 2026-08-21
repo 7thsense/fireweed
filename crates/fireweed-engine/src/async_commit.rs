@@ -394,6 +394,7 @@ impl OwnedTaskDispatcher for InlineOwnedTaskDispatcher {
 pub enum QueueGateError {
     Closed,
     QueueFull,
+    PerKeyFull,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -422,8 +423,12 @@ struct GateState<K> {
 
 struct GateInner<K> {
     max_queued: usize,
+    max_per_key: usize,
     state: Mutex<GateState<K>>,
 }
+
+/// One active request plus at most fifteen queued requests may retain one key.
+pub const DEFAULT_KEYED_QUEUE_MAX_PER_KEY: usize = 16;
 
 /// Cancellation-safe bounded queue-local serialization.
 ///
@@ -447,9 +452,15 @@ where
     K: Clone + Eq + Hash + Send + 'static,
 {
     pub fn new(max_queued: usize) -> Self {
+        Self::new_with_per_key_limit(max_queued, DEFAULT_KEYED_QUEUE_MAX_PER_KEY)
+    }
+
+    pub fn new_with_per_key_limit(max_queued: usize, max_per_key: usize) -> Self {
+        assert!(max_per_key > 0, "per-key queue capacity must be positive");
         Self {
             inner: Arc::new(GateInner {
                 max_queued,
+                max_per_key,
                 state: Mutex::new(GateState {
                     closed: false,
                     queued: 0,
@@ -590,7 +601,8 @@ where
         enum Registration {
             Closed,
             Acquired,
-            Full,
+            GlobalFull,
+            PerKeyFull,
             Queued(u64),
         }
 
@@ -608,26 +620,34 @@ where
                         },
                     );
                     Registration::Acquired
-                } else if state.queued >= self.inner.max_queued {
-                    Registration::Full
                 } else {
-                    let id = state.next_waiter_id;
-                    state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-                    state.waiters.insert(
-                        id,
-                        Waiter {
-                            status: WaiterStatus::Waiting,
-                            waker: Some(context.waker().clone()),
-                        },
-                    );
-                    state
+                    let retained_for_key = state
                         .entries
-                        .get_mut(&self.key)
-                        .expect("held queue entry missing")
-                        .waiters
-                        .push_back(id);
-                    state.queued += 1;
-                    Registration::Queued(id)
+                        .get(&self.key)
+                        .map_or(0, |entry| 1 + entry.waiters.len());
+                    if retained_for_key >= self.inner.max_per_key {
+                        Registration::PerKeyFull
+                    } else if state.queued >= self.inner.max_queued {
+                        Registration::GlobalFull
+                    } else {
+                        let id = state.next_waiter_id;
+                        state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
+                        state.waiters.insert(
+                            id,
+                            Waiter {
+                                status: WaiterStatus::Waiting,
+                                waker: Some(context.waker().clone()),
+                            },
+                        );
+                        state
+                            .entries
+                            .get_mut(&self.key)
+                            .expect("held queue entry missing")
+                            .waiters
+                            .push_back(id);
+                        state.queued += 1;
+                        Registration::Queued(id)
+                    }
                 }
             }
         };
@@ -645,9 +665,13 @@ where
                     released: false,
                 }))
             }
-            Registration::Full => {
+            Registration::GlobalFull => {
                 self.completed = true;
                 Poll::Ready(Err(QueueGateError::QueueFull))
+            }
+            Registration::PerKeyFull => {
+                self.completed = true;
+                Poll::Ready(Err(QueueGateError::PerKeyFull))
             }
             Registration::Queued(waiter_id) => {
                 self.waiter_id = Some(waiter_id);
@@ -950,6 +974,64 @@ mod tests {
         ));
         let mut unrelated = gate.acquire("other");
         assert!(matches!(poll_once(&mut unrelated), Poll::Ready(Ok(_))));
+    }
+
+    #[test]
+    fn keyed_queue_gate_rejects_request_17_with_distinct_per_key_accounting() {
+        let gate = KeyedQueueGate::new_with_per_key_limit(1_024, 16);
+        let mut first = gate.acquire("q");
+        let first = match poll_once(&mut first) {
+            Poll::Ready(Ok(permit)) => permit,
+            _ => panic!("first same-key request not ready"),
+        };
+        let mut waiters = Vec::new();
+        for _ in 0..15 {
+            let mut waiter = gate.acquire("q");
+            assert!(matches!(poll_once(&mut waiter), Poll::Pending));
+            waiters.push(waiter);
+        }
+        let mut request_17 = gate.acquire("q");
+        assert!(matches!(
+            poll_once(&mut request_17),
+            Poll::Ready(Err(QueueGateError::PerKeyFull))
+        ));
+        assert_eq!(gate.queued(), 15);
+        drop(first);
+        drop(waiters);
+        assert_eq!(gate.queued(), 0);
+        assert_eq!(gate.entry_count(), 0);
+    }
+
+    #[test]
+    fn keyed_queue_gate_global_cap_counts_waiters_not_distinct_active_keys() {
+        let gate = KeyedQueueGate::new_with_per_key_limit(1_024, 16);
+        let mut active = Vec::new();
+        for key in 0..1_025_u16 {
+            let mut acquire = gate.acquire(key);
+            active.push(match poll_once(&mut acquire) {
+                Poll::Ready(Ok(permit)) => permit,
+                _ => panic!("distinct active key should not consume queued capacity"),
+            });
+        }
+        assert_eq!(gate.entry_count(), 1_025);
+        assert_eq!(gate.queued(), 0);
+
+        let mut queued = Vec::new();
+        for key in 0..1_024_u16 {
+            let mut acquire = gate.acquire(key);
+            assert!(matches!(poll_once(&mut acquire), Poll::Pending));
+            queued.push(acquire);
+        }
+        let mut waiter_1_025 = gate.acquire(1_024_u16);
+        assert!(matches!(
+            poll_once(&mut waiter_1_025),
+            Poll::Ready(Err(QueueGateError::QueueFull))
+        ));
+        assert_eq!(gate.queued(), 1_024);
+        drop(queued);
+        drop(active);
+        assert_eq!(gate.queued(), 0);
+        assert_eq!(gate.entry_count(), 0);
     }
 
     struct CountingWake(AtomicUsize);
