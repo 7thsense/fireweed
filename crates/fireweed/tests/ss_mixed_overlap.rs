@@ -117,7 +117,7 @@ fn realistic_item(prefix: &str, ordinal: usize, due: UtcTimestamp) -> NewItem {
     NewItem {
         client_item_key: Some(ClientItemKey::new(format!("{prefix}-{ordinal:08}")).unwrap()),
         priority: Some(PriorityValue::Timestamp(due)),
-        group_key: Some(GroupKey::new(format!("job-{}", ordinal % 100)).unwrap()),
+        group_key: Some(GroupKey::new(format!("{prefix}-job-{}", ordinal % 100)).unwrap()),
         not_before: Some(due),
         payload: Some(Bytes::from(vec![b'x'; 1_024])),
         fields,
