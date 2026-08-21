@@ -610,8 +610,7 @@ pub enum ScheduleUpdate<T> {
 
 /// Disposition of an item's payload under [`UpdateFieldsCommand`]: leave it as-is, or replace it
 /// (`Set(None)` clears it).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum PayloadUpdate {
     #[default]
     Keep,
@@ -1513,8 +1512,8 @@ mod serde_tests {
                     set_metadata: None,
                     set_gate_keys: None,
                     api001_batch: true,
-                client_item_key: None,
-                expected_item_version: None,
+                    client_item_key: None,
+                    expected_item_version: None,
                 }],
             }),
             QueueCommand::LeaseExpired(LeaseExpiredCommand {
@@ -1949,8 +1948,8 @@ mod serde_tests {
                     set_metadata: None,
                     set_gate_keys: None,
                     api001_batch: false,
-                client_item_key: None,
-                expected_item_version: None,
+                    client_item_key: None,
+                    expected_item_version: None,
                 }),
                 vec![ExpectedRecord {
                     item_id: Some(iid("a")),
@@ -1976,8 +1975,8 @@ mod serde_tests {
                             set_metadata: None,
                             set_gate_keys: None,
                             api001_batch: true,
-                client_item_key: None,
-                expected_item_version: None,
+                            client_item_key: None,
+                            expected_item_version: None,
                         },
                         UpdateFieldsCommand {
                             item_id: iid("b"),
@@ -1990,8 +1989,8 @@ mod serde_tests {
                             set_metadata: None,
                             set_gate_keys: None,
                             api001_batch: true,
-                client_item_key: None,
-                expected_item_version: None,
+                            client_item_key: None,
+                            expected_item_version: None,
                         },
                     ],
                 }),

@@ -5154,8 +5154,8 @@ impl ProjectionData {
                                 set_metadata: None,
                                 set_gate_keys: None,
                                 api001_batch: false,
-                client_item_key: None,
-                expected_item_version: None,
+                                client_item_key: None,
+                                expected_item_version: None,
                             },
                             expected_item_version: seen_version,
                         });

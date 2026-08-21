@@ -343,9 +343,10 @@ where
 
     pub async fn has_ready(&self, shard: &QueueKey) -> bool {
         let state = self.inner.state.lock().await;
-        state.entries.iter().any(|entry| {
-            matches!(entry, ApplyEntry::Ready(batch) if batch.shard == *shard)
-        })
+        state
+            .entries
+            .iter()
+            .any(|entry| matches!(entry, ApplyEntry::Ready(batch) if batch.shard == *shard))
     }
 
     pub async fn snapshot(&self, shard: &QueueKey) -> AsyncProjectionApplySnapshot {
@@ -621,7 +622,10 @@ fn next_runnable(state: &CoordinatorState) -> Option<(usize, ApplyBatch)> {
         if !ready_follows_high_water(state, batch) {
             continue;
         }
-        let first = batch.positions.first().map(|p| (p.backend_epoch, p.sequence));
+        let first = batch
+            .positions
+            .first()
+            .map(|p| (p.backend_epoch, p.sequence));
         let better = match &best {
             None => true,
             Some((_, other)) => {
