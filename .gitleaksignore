@@ -13,3 +13,9 @@
 # triaged above; it is not an issued credential.
 85bea3c65b114e1b71e65fd2a580091d20fcb112:helix/02-design/contracts/API-001-native-client-interface.md:generic-api-key:1059
 85bea3c65b114e1b71e65fd2a580091d20fcb112:helix/02-design/contracts/API-001-native-client-interface.md:generic-api-key:1075
+# Wire-bytes unit test: the flagged value is the expected base64 encoding of the
+# literal non-secret fixture `state/run-1`.
+31d642957e70a9c8fe254120926fde08bcb6016d:crates/fireweed-engine/src/wire_bytes.rs:generic-api-key:495
+# Snorri runner attestation: the value is the symbolic mapping name
+# `legacy_runner_s3_access_key`, not an access-key value.
+699b67d3a7b09559a969c0c5f2173d9541fc3c61:docs/evidence/snorri/p6p-runner-attestation.json:generic-api-key:139
