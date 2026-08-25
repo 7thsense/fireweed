@@ -38,14 +38,35 @@ thread_local! {
 /// Run RelTx work on a blocking thread with a thread-local current-thread runtime so each
 /// statement is `block_on` locally (no object-log `block_in_place`, no per-statement channel hop).
 pub async fn run_reltx_blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
-    tokio::task::spawn_blocking(move || {
-        USE_LOCAL_RT.set(true);
-        let result = work();
-        USE_LOCAL_RT.set(false);
-        result
-    })
-    .await
-    .expect("turso RelTx blocking hop")
+    if tokio::runtime::Handle::try_current().is_err() {
+        return match std::thread::Builder::new()
+            .name("turso-reltx-blocking".into())
+            .spawn(move || run_with_local_runtime(work))
+            .expect("turso RelTx blocking thread")
+            .join()
+        {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        };
+    }
+
+    tokio::task::spawn_blocking(move || run_with_local_runtime(work))
+        .await
+        .expect("turso RelTx blocking hop")
+}
+
+fn run_with_local_runtime<T>(work: impl FnOnce() -> T) -> T {
+    struct ResetLocalRuntime;
+
+    impl Drop for ResetLocalRuntime {
+        fn drop(&mut self) {
+            USE_LOCAL_RT.set(false);
+        }
+    }
+
+    USE_LOCAL_RT.set(true);
+    let _reset = ResetLocalRuntime;
+    work()
 }
 
 fn block_on_local<T>(future: impl std::future::Future<Output = T>) -> T {
