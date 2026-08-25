@@ -1,0 +1,100 @@
+{
+  "capability_id": "P7X-SNORRI-QUARANTINE-REVALIDATION",
+  "plan_key": "P7x",
+  "bead": "fireweed-4915c30f",
+  "selected_at": "2026-08-06T01:55:00Z",
+  "runner": {
+    "identity": "fireweed-p6p-snorri@sindri",
+    "hostname": "sindri",
+    "preflight": "P6p-provisioned local checkout + path/git pin of Fireweed fix",
+    "secret_dir": "/tmp/fireweed-s3-secrets"
+  },
+  "fireweed": {
+    "pin_sha": "25ca87dc0dee406c9e1849e9bdd33eb7ca875681",
+    "main_tip_at_attestation": "ac29f61e6e416a2c12e8de4bd62361595b1a3b44",
+    "branch": "agent/p7x-4915c30f",
+    "fix": "serialize claim_by_query/claim_by_item_ids select+claim under KeyedQueueGate; FinalizePort/RenewLeasePort via finalize_outcomes/renew_item_ids on AsyncLogReplayBackend",
+    "root_cause": "claim_by_query selected eligible ids outside queue gate; concurrent workers both Claimed same Pending item → Leased+Claim illegal lifecycle",
+    "regression_test": {
+      "command": "cargo test -p fireweed-sqlite --test concurrent_claim_by_query -- --nocapture --test-threads=1",
+      "binary": "/home/erik/Projects/fireweed-shared-target/debug/deps/concurrent_claim_by_query-bab9a49f8e9e564d",
+      "result": "ok",
+      "tests_passed": 1,
+      "duration_s": 1.70
+    }
+  },
+  "snorri": {
+    "checkout": "/home/erik/Projects/snorri-wt-p7x-4915c30f",
+    "base_sha_before": "954918a11eefbf1a199baf0bf12760d3fee98e6c",
+    "branch": "agent/p7x-quarantine-lift",
+    "commit_sha": "08b088b43e878132aaf467fcb89f57670d02689a",
+    "pin": "git+https://github.com/telepathdata/fireweed.git?rev=25ca87dc0dee406c9e1849e9bdd33eb7ca875681",
+    "quarantine_removed": [
+      {
+        "scenario": "durable/worker-pool.scenario.yaml",
+        "backend": "sqlite",
+        "was": "fireweed-2be744bd"
+      },
+      {
+        "scenario": "durable/campaign-scale.scenario.yaml",
+        "backend": "sqlite",
+        "was": "fireweed-9cec8b02"
+      }
+    ]
+  },
+  "revalidation": {
+    "method": "direct snorri scenario run",
+    "binary": "/home/erik/Projects/snorri/target/debug/snorri",
+    "env": {
+      "LD_LIBRARY_PATH": "/home/linuxbrew/.linuxbrew/opt/openssl@3/lib",
+      "CARGO_TARGET_DIR": "/home/erik/Projects/snorri/target"
+    },
+    "commands": [
+      "snorri scenario run --input crates/snorri-testkit/tests/scenarios/durable/worker-pool.scenario.yaml --backend sqlite  # x10",
+      "snorri scenario run --input crates/snorri-testkit/tests/scenarios/durable/campaign-scale.scenario.yaml --backend sqlite  # x10",
+      "snorri scenario run --input .../worker-pool.scenario.yaml --backend memory",
+      "snorri scenario run --input .../worker-pool.scenario.yaml --backend object_log_sqlite",
+      "interleaved worker-pool/sqlite + campaign-scale/sqlite x5 rounds"
+    ],
+    "evidence_dir": "/tmp/p7x-4915c30f-runs",
+    "worker_pool_sqlite": {
+      "runs": 10,
+      "pass": 10,
+      "fail": 0
+    },
+    "campaign_scale_sqlite": {
+      "runs": 10,
+      "pass": 10,
+      "fail": 0
+    },
+    "combined_controls": {
+      "worker_pool_memory": "PASS",
+      "worker_pool_object_log_sqlite": "PASS",
+      "interleaved_wp_cs_sqlite_rounds": {
+        "runs": 5,
+        "pass": 5,
+        "fail": 0
+      }
+    },
+    "pre_fix_baseline_at_6f9b2fe5": {
+      "worker_pool_sqlite": {
+        "runs": 10,
+        "pass": 0,
+        "fail": 10,
+        "error": "illegal lifecycle transition (Leased+Claim)"
+      },
+      "campaign_scale_sqlite": {
+        "runs": 5,
+        "pass": 0,
+        "fail": 5,
+        "error": "illegal lifecycle transition"
+      }
+    }
+  },
+  "notes": [
+    "Quarantine lifted only after green 10/10 on both exact scenarios.",
+    "Snorri commit lands pin + KNOWN_DIVERGENCES row removal on agent/p7x-quarantine-lift (not yet merged to snorri main).",
+    "fireweed-9cec8b02 residual closed by this gate fix; prior objectlog-only finalize_outcomes fix (d757af3e) was insufficient for claim_by_query selection race on AsyncLogReplay (open_sqlite path).",
+    "Independent revalidation on this runner repeated 10/10 + combined worker pool after path-pin build against the fix."
+  ]
+}
