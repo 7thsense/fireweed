@@ -101,7 +101,7 @@ decision boundary.
 
 ### Bundled SQLite through `rusqlite`
 
-The workspace pins `rusqlite` 0.32 with `bundled`. The current upstream `rusqlite` documentation describes
+The workspace pins `rusqlite` 0.40 with `bundled`. The current upstream `rusqlite` documentation describes
 the same architecture: `rusqlite` is a Rust wrapper, `libsqlite3-sys` supplies declarations for SQLite's C
 API, and `bundled` compiles and links vendored SQLite. `rusqlite` is MIT; bundled SQLite is public domain
 ([official repository](https://github.com/rusqlite/rusqlite)).
