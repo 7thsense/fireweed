@@ -2,6 +2,8 @@
 //!
 //! Harness-only mid-pipeline probe for AC-TXN-3 (append→apply window). Used by memory, sqlite,
 //! and selected-projection products so TP-003 / E3 cells can strike the same durable envelope shapes.
+//! `AfterAppendBeforeApply` withholds applied success without cancelling a durable reservation;
+//! reopen/rebuild of request-id maps remains authoritative. Read-side poison visibility is S3c.
 
 use std::sync::Arc;
 
@@ -230,9 +232,9 @@ where
             }
         }
         // Always stamp a CommitTransition marker when request_id is present — parity with
-        // prepare_commit_transition. Success-only batches previously omitted the marker, so
-        // AfterAppendBeforeApply mid-pipeline recovery could not rebuild commit_idempotency
-        // and a post-reopen retry re-executed as Rejected(Terminal).
+        // prepare_commit_transition. AfterAppendBeforeApply withholds apply without cancelling
+        // the durable reservation; recovery rebuilds commit_idempotency from this marker so a
+        // post-reopen retry stays Replay rather than Rejected(Terminal). Read-side poison is S3c.
         let outcome_entries: Vec<CommitOutcomeEntry> =
             recovery.iter().map(outcome_entry_from_recovery).collect();
         envelopes.push(CommandEnvelope {
@@ -272,5 +274,146 @@ where
         ids: ids.as_ref(),
         counters: counters.as_ref(),
         node_id,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use fireweed_core::{
+        ClientItemKey, EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel,
+        PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
+        RecurrencePolicy, RequestId, RetryPolicy, TenantId, UtcTimestamp,
+    };
+    use fireweed_engine::{
+        Backend, ControlPlaneStore, LogRead, ProjectionRead, PushPort, PushSpec, QueueKey,
+        RawCommitFault, RawCommitRequest, RequestIdReplayProbe,
+    };
+
+    use crate::{AsyncObjectLogMemoryBackend, flush_config_from_segment};
+
+    static NEXT_DIR: AtomicU64 = AtomicU64::new(1);
+
+    fn qdef() -> QueueDefinition {
+        QueueDefinition {
+            tenant_id: TenantId::new("t").unwrap(),
+            queue_id: QueueId::new("q").unwrap(),
+            priority_model: PriorityModel {
+                kind: PriorityModelKind::Int64,
+                direction: PriorityDirection::Ascending,
+                tie_breaker: PriorityTieBreaker::CreatedSequence,
+            },
+            ordering_mode: OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 60_000,
+            eligibility_policy: EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 100,
+            max_claim_batch_size: 100,
+            max_eligible_group_size: None,
+            secondary_indexes: Vec::new(),
+            entity_schema: None,
+            typed_indexes: Vec::new(),
+            emit_change_records: false,
+        }
+    }
+
+    fn shard() -> QueueKey {
+        QueueKey::new(TenantId::new("t").unwrap(), QueueId::new("q").unwrap())
+    }
+
+    fn body() -> Vec<PushSpec> {
+        vec![PushSpec {
+            client_item_key: Some(ClientItemKey::new("s3v-rid").unwrap()),
+            priority: Some(PriorityValue::Int64(7)),
+            payload: Some(bytes::Bytes::from_static(b"s3v-rid")),
+            ..PushSpec::default()
+        }]
+    }
+
+    async fn open(root: &std::path::Path) -> AsyncObjectLogMemoryBackend {
+        AsyncObjectLogMemoryBackend::open_local(root, flush_config_from_segment(256 * 1_024, 50))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn after_append_before_apply_poisons_then_recovers_authoritatively() {
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-s3v-request-id-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        let rid = RequestId::new("s3v-after-append").unwrap();
+        let committed_ids = {
+            let backend = open(&root).await;
+            backend.create_queue(qdef()).await.unwrap();
+            let (env, ids) = backend
+                .build_request_id_push_envelope(
+                    &shard(),
+                    rid.clone(),
+                    body(),
+                    UtcTimestamp::new(1, 0).unwrap(),
+                    None,
+                )
+                .unwrap();
+            assert_eq!(env.request_id.as_ref(), Some(&rid));
+            let epoch = backend.current_epoch(&shard()).await.unwrap();
+            let outcome = backend
+                .commit_raw(
+                    RawCommitRequest::new(shard(), vec![env], epoch)
+                        .with_fault(RawCommitFault::AfterAppendBeforeApply),
+                )
+                .await
+                .expect("AfterAppendBeforeApply must withhold applied success");
+            assert!(
+                !outcome.projection_applied(),
+                "withheld-success must remain unapplied"
+            );
+            let page = backend.read_from(&shard(), None, 16).await.unwrap();
+            assert_eq!(
+                page.entries.len(),
+                1,
+                "durable request-id reservation must not be cancelled"
+            );
+            assert_eq!(page.entries[0].1.request_id.as_ref(), Some(&rid));
+            assert_eq!(
+                backend.metrics(&shard()).await.unwrap().pending,
+                0,
+                "apply was withheld; serving projection is unchanged until reopen (S3c owns live poison reads)"
+            );
+            ids
+        };
+
+        let recovered = open(&root).await;
+        assert_eq!(
+            recovered.metrics(&shard()).await.unwrap().pending,
+            1,
+            "reopen must rebuild the request-id reservation authoritatively"
+        );
+        let replay = recovered
+            .push_with_request_id(
+                &shard(),
+                rid,
+                body(),
+                UtcTimestamp::new(2, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            replay.item_ids, committed_ids,
+            "request-id retry after reopen must replay the one committed result"
+        );
+        assert_eq!(recovered.metrics(&shard()).await.unwrap().pending, 1);
+        drop(recovered);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

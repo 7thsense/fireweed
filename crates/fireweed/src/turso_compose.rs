@@ -1747,7 +1747,17 @@ impl SeparateReplayCommitter for ObjectLogTursoCommitter {
             };
             note_produce_positions(&last_produce, &outcome.positions, &commands).await;
             if matches!(fault, RawCommitFault::AfterAppendBeforeApply) {
-                outcome.apply_published.notify();
+                // Successful append allocated a position. Skip apply, latch poison,
+                // and leave the reservation outstanding — never cancel durable work.
+                // Read-side poison visibility stays deferred to S3c.
+                if let Some(coordinator) = async_apply.as_ref() {
+                    coordinator
+                        .latch_poison(
+                            shard,
+                            "fault-injection: AfterAppendBeforeApply after durable append".into(),
+                        )
+                        .await;
+                }
                 return Ok(RawCommitOutcome::appended(outcome.positions));
             }
             let positions = publish_packed_apply(
@@ -2274,6 +2284,17 @@ impl DerivedObjectLogTursoBackend {
         &self.projection_path
     }
 
+    /// Observe provider-neutral selected-projection debt and watermark state.
+    pub async fn async_projection_snapshot(
+        &self,
+        shard: &QueueKey,
+    ) -> EngineResult<fireweed_objectlog::AsyncProjectionApplySnapshot> {
+        let coordinator = self.async_apply.as_ref().ok_or(EngineError::Invalid(
+            "async-projection-control-requires-async-barrier",
+        ))?;
+        Ok(coordinator.snapshot(shard).await)
+    }
+
     /// Borrow the object-log axis (change-record emission and diagnostics).
     pub fn with_log<R>(&self, f: impl FnOnce(&ObjectLogEngineStore) -> R) -> R {
         f(self.log.as_ref())
@@ -2661,4 +2682,178 @@ pub fn assemble_objectlog_turso(
         )
         .await
     })
+}
+
+#[cfg(all(test, feature = "objectlog"))]
+mod s3v_after_append {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use fireweed_core::{
+        EligibilityPolicy, ItemId, Metadata, OrderingMode, PriorityDirection, PriorityModel,
+        PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy,
+        RetryPolicy, TenantId, UtcTimestamp,
+    };
+    use fireweed_engine::{
+        AsyncLogStore, AsyncProjectionSpec, Backend, CommandChecksum, CommandEnvelope, CommandId,
+        ControlPlaneStore, EngineError, ProjectionRead, PushCommand, PushItem, PushPort, PushSpec,
+        QueueCommand, RawCommitFault, RawCommitRequest,
+    };
+    use fireweed_objectlog::{ObjectLogEngineStore, flush_config_from_segment};
+
+    use super::*;
+
+    static NEXT_DIR: AtomicU64 = AtomicU64::new(1);
+
+    fn qdef() -> QueueDefinition {
+        QueueDefinition {
+            tenant_id: TenantId::new("t").unwrap(),
+            queue_id: QueueId::new("q").unwrap(),
+            priority_model: PriorityModel {
+                kind: PriorityModelKind::Int64,
+                direction: PriorityDirection::Ascending,
+                tie_breaker: PriorityTieBreaker::CreatedSequence,
+            },
+            ordering_mode: OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 60_000,
+            eligibility_policy: EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 100,
+            max_claim_batch_size: 100,
+            max_eligible_group_size: None,
+            secondary_indexes: Vec::new(),
+            entity_schema: None,
+            typed_indexes: Vec::new(),
+            emit_change_records: false,
+        }
+    }
+
+    fn spec() -> AsyncProjectionSpec {
+        AsyncProjectionSpec::new(32, 1024 * 1024, 16, 30_000, 3).unwrap()
+    }
+
+    fn push_envelope() -> CommandEnvelope {
+        let item_id = ItemId::mint(1, 0, 1);
+        CommandEnvelope {
+            command_id: CommandId::new("s3v-after-append"),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: vec![item_id],
+            command: QueueCommand::Push(PushCommand {
+                items: vec![PushItem {
+                    client_item_key: ClientItemKey::new("s3v-item").unwrap(),
+                    item_id,
+                    priority: Some(PriorityValue::Int64(1)),
+                    not_before: None,
+                    group_key: None,
+                    max_attempts: 3,
+                    payload: None,
+                    fields: Default::default(),
+                    metadata: Metadata::default(),
+                    cohort_size: None,
+                    gate_keys: Vec::new(),
+                    index_fields: Default::default(),
+                    entity_document: None,
+                }],
+            }),
+            checksum: CommandChecksum(0),
+            created_at: UtcTimestamp::new(1, 0).unwrap(),
+        }
+    }
+
+    async fn open(root: &std::path::Path) -> DerivedObjectLogTursoBackend {
+        let log_root = root.join("log");
+        let projection_path = root.join("projection.db");
+        std::fs::create_dir_all(&log_root).unwrap();
+        let log =
+            ObjectLogEngineStore::open_local(&log_root, flush_config_from_segment(256 * 1_024, 50))
+                .await
+                .unwrap();
+        let projection = open_turso_projection_async(&projection_path).await.unwrap();
+        DerivedObjectLogTursoBackend::from_log_and_projection(
+            log,
+            projection,
+            projection_path,
+            0,
+            Some(spec()),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn after_append_before_apply_poisons_then_recovers_authoritatively() {
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-s3v-turso-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        let backend = open(&root).await;
+        let definition = qdef();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        let epoch = backend.current_epoch(&shard).await.unwrap();
+        let outcome = backend
+            .commit_raw(
+                RawCommitRequest::new(shard.clone(), vec![push_envelope()], epoch)
+                    .with_fault(RawCommitFault::AfterAppendBeforeApply),
+            )
+            .await
+            .expect("AfterAppendBeforeApply must withhold applied success, not fail the append");
+        assert!(
+            !outcome.projection_applied(),
+            "withheld-success must remain unapplied"
+        );
+
+        let snap = backend.async_projection_snapshot(&shard).await.unwrap();
+        assert!(
+            snap.poison_reason.is_some(),
+            "AfterAppendBeforeApply must latch coordinator poison"
+        );
+        assert_eq!(
+            snap.apply_queue_depth, 1,
+            "post-position AfterAppendBeforeApply must not cancel the reservation"
+        );
+        let page = AsyncLogStore::read_from(backend.log.as_ref(), shard.clone(), None, 16)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.entries.len(),
+            1,
+            "produce allocated a durable position that must remain occupied"
+        );
+        assert!(
+            matches!(
+                backend
+                    .push(
+                        &shard,
+                        vec![PushSpec::default()],
+                        UtcTimestamp::new(2, 0).unwrap(),
+                        None,
+                    )
+                    .await
+                    .unwrap_err(),
+                EngineError::Storage(message)
+                    if message.contains("async projection poisoned")
+            ),
+            "poisoned shard must reject new reservations"
+        );
+        drop(backend);
+
+        let reopened = open(&root).await;
+        assert_eq!(
+            reopened.metrics(&shard).await.unwrap().pending,
+            1,
+            "reopen must rebuild the durable reservation authoritatively"
+        );
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

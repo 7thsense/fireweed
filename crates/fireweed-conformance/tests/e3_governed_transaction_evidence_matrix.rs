@@ -111,12 +111,13 @@ fn sqlite_log_factory() -> impl Fn(
     move |_tag: &str| composed_sqlite_backend(&path).expect("open sqlite-log")
 }
 
-/// AC-TXN-4 exact-cell: AfterAppendBeforeApply withholds success; reopen rebuilds one pending item.
+/// AC-TXN-4 exact-cell: AfterAppendBeforeApply withholds success without cancelling the
+/// durable reservation; reopen rebuilds one pending item. Read-side poison visibility is S3c.
 async fn e3_ac_txn_4_cell(profile: &str, bound_ms: u64) -> AcOutcome {
     use fireweed_conformance::{envelope, item, qdef, qkey, shard};
     use fireweed_engine::{
-        Backend, ControlPlaneStore, ProjectionRead, PushCommand, QueueCommand, RawCommitFault,
-        RawCommitRequest,
+        Backend, ControlPlaneStore, LogRead, ProjectionRead, PushCommand, QueueCommand,
+        RawCommitFault, RawCommitRequest,
     };
 
     let mut asserts = Vec::new();
@@ -163,6 +164,19 @@ async fn e3_ac_txn_4_cell(profile: &str, bound_ms: u64) -> AcOutcome {
             ));
         }
     }
+    let durable = backend
+        .read_from(&shard(), None, 16)
+        .await
+        .map_err(|e| format!("read_from: {e:?}"))?;
+    if durable.entries.is_empty() {
+        return Err(format!(
+            "{profile} @{bound_ms}ms: AfterAppendBeforeApply must not cancel the durable reservation"
+        ));
+    }
+    asserts.push(format!(
+        "durable reservation retained after withheld apply (log_entries={})",
+        durable.entries.len()
+    ));
     drop(backend);
 
     let recovered = open()?;
@@ -176,9 +190,10 @@ async fn e3_ac_txn_4_cell(profile: &str, bound_ms: u64) -> AcOutcome {
             metrics.pending, metrics.leased, metrics.complete, metrics.failed
         ));
     } else {
-        asserts.push(
-            "fault prevented durable accept; recovery shows empty projection (inert cut)".into(),
-        );
+        return Err(format!(
+            "{profile} @{bound_ms}ms: reopen must rebuild the durable reservation authoritatively (pending={} leased={} complete={} failed={})",
+            metrics.pending, metrics.leased, metrics.complete, metrics.failed
+        ));
     }
     Ok(asserts)
 }
@@ -391,6 +406,36 @@ async fn e3_governed_transaction_evidence_matrix() {
                 );
             }
         }
+    }
+}
+
+/// S3v: AfterAppendBeforeApply withholds applied success, keeps the durable
+/// reservation, and reopen rebuilds authoritatively. Live poison reads are S3c.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_append_before_apply_poisons_then_recovers_authoritatively() {
+    for profile in [
+        "object_log_inmemory_projection",
+        "object_log_sqlite_projection",
+    ] {
+        let asserts = e3_ac_txn_4_cell(profile, 20)
+            .await
+            .unwrap_or_else(|error| panic!("{profile}: {error}"));
+        assert!(
+            asserts
+                .iter()
+                .any(|line| line.contains("durable reservation retained")),
+            "{profile}: expected durable reservation retained, got {asserts:?}"
+        );
+        assert!(
+            asserts
+                .iter()
+                .any(|line| line.contains("recovery reconstructed committed work")),
+            "{profile}: expected authoritative reopen rebuild, got {asserts:?}"
+        );
+        assert!(
+            !asserts.iter().any(|line| line.contains("inert cut")),
+            "{profile}: inert empty recovery is no longer an AC-TXN-4 pass"
+        );
     }
 }
 
