@@ -189,6 +189,7 @@ mod tests {
                 lease_token: LeaseToken::new("lease-abc").unwrap(),
                 lease_expires_at: UtcTimestamp::new(60, 0).unwrap(),
                 worker_id: None,
+                authority_first: false,
             }),
             checksum: CommandChecksum(0),
             created_at: UtcTimestamp::new(0, 0).unwrap(),

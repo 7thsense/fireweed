@@ -134,6 +134,7 @@ async fn generated_rich_history_has_exact_projection_image_and_read_parity() {
                 lease_token: LeaseToken::new("generated-lease").unwrap(),
                 lease_expires_at: fireweed_conformance::ts(20),
                 worker_id: None,
+                authority_first: false,
             }),
             vec![leased],
         ),

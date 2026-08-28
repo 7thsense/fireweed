@@ -63,6 +63,7 @@ pub async fn run_full_async_projection_conformance<S: AsyncProjectionStore>(stor
                 lease_token: lease.clone(),
                 lease_expires_at: ts(20),
                 worker_id: None,
+                authority_first: false,
             }),
             vec![item_id],
         )],

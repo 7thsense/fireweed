@@ -260,6 +260,7 @@ pub(crate) fn relect_group_summaries(
 
 pub(crate) fn apply_fused_claim_complete_sql(
     tx: &Connection,
+    grouped_shards: &std::collections::HashSet<QueueKey>,
     claim_scan_hints: &mut std::collections::HashMap<QueueKey, i64>,
     claim_scan_default_fifo: &mut std::collections::HashMap<QueueKey, bool>,
     token_ops: &mut Vec<TokenOp>,
@@ -270,6 +271,7 @@ pub(crate) fn apply_fused_claim_complete_sql(
 ) -> EngineResult<()> {
     fireweed_relational::apply_fused_claim_complete_sql(
         &rel(tx),
+        grouped_shards,
         claim_scan_hints,
         claim_scan_default_fifo,
         token_ops,
@@ -319,6 +321,7 @@ mod class_s_apply_tests {
             lease_token: token.clone(),
             lease_expires_at: UtcTimestamp::new(60, 0).expect("expiry"),
             worker_id: None,
+            authority_first: false,
         })
     }
 
@@ -406,9 +409,11 @@ mod class_s_apply_tests {
             lease_token: token,
             lease_expires_at: UtcTimestamp::new(60, 0).expect("expiry"),
             worker_id: None,
+            authority_first: false,
         };
         apply_fused_claim_complete_sql(
             &conn,
+            &grouped,
             &mut hints,
             &mut fifo,
             &mut tokens,

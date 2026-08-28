@@ -2221,6 +2221,7 @@ mod tests {
             lease_token: LeaseToken::new("lease").unwrap(),
             lease_expires_at: UtcTimestamp::new(2, 0).unwrap(),
             worker_id: None,
+            authority_first: false,
         })
     }
 

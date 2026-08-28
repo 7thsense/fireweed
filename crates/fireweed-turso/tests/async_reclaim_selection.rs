@@ -70,6 +70,7 @@ async fn expired_lease_selection_and_transition_match_sqlite() {
             lease_token: LeaseToken::new("lease").unwrap(),
             lease_expires_at: ts(10),
             worker_id: None,
+            authority_first: false,
         }),
         ids.to_vec(),
     );

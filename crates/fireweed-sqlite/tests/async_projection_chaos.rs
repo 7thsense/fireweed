@@ -90,6 +90,7 @@ fn claim_env(id: &str, item_id: ItemId, lease: &LeaseToken, created_at: i64) -> 
             lease_token: lease.clone(),
             lease_expires_at: ts(60),
             worker_id: None,
+            authority_first: false,
         }),
         vec![item_id],
         created_at,

@@ -544,6 +544,33 @@ pub struct ClaimCommand {
     /// Caller-supplied observability label; never an authorization principal.
     #[serde(default)]
     pub worker_id: Option<WorkerId>,
+    /// When true, apply requires every named row to move from Pending before token/bearer
+    /// effects. Absent/false on historical and Class-S outbox envelopes retains recovery
+    /// semantics (already-this-token is a no-op; partial movement does not poison).
+    #[serde(default)]
+    pub authority_first: bool,
+}
+
+impl ClaimCommand {
+    pub fn new(
+        item_ids: Vec<ItemId>,
+        lease_token: LeaseToken,
+        lease_expires_at: UtcTimestamp,
+        worker_id: Option<WorkerId>,
+    ) -> Self {
+        Self {
+            item_ids,
+            lease_token,
+            lease_expires_at,
+            worker_id,
+            authority_first: false,
+        }
+    }
+
+    pub fn with_authority_first(mut self) -> Self {
+        self.authority_first = true;
+        self
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1582,6 +1609,7 @@ mod serde_tests {
                 lease_token: LeaseToken::new("lease").unwrap(),
                 lease_expires_at: ts(100),
                 worker_id: None,
+                authority_first: false,
             }),
             QueueCommand::RenewLease(RenewLeaseCommand {
                 item_ids: vec![iid("a")],
@@ -1677,6 +1705,25 @@ mod serde_tests {
     }
 
     #[test]
+    fn claim_command_authority_first_defaults_false_for_legacy_outbox() {
+        let command = ClaimCommand::new(
+            vec![iid("a")],
+            LeaseToken::new("lease").unwrap(),
+            ts(100),
+            None,
+        )
+        .with_authority_first();
+        let mut value = serde_json::to_value(&command).expect("serialize");
+        value
+            .as_object_mut()
+            .expect("object")
+            .remove("authority_first");
+        let decoded: ClaimCommand = serde_json::from_value(value).expect("legacy default");
+        assert!(!decoded.authority_first);
+        assert!(command.authority_first);
+    }
+
+    #[test]
     fn packed_command_vector_takes_maximum_selection_fence_disposition() {
         let terminal = QueueCommand::Finalize(FinalizeCommand {
             outcomes: vec![
@@ -1715,6 +1762,7 @@ mod serde_tests {
             lease_token: LeaseToken::new("lease").unwrap(),
             lease_expires_at: ts(10),
             worker_id: None,
+            authority_first: false,
         });
 
         assert_eq!(
@@ -2001,6 +2049,7 @@ mod serde_tests {
                     lease_token: LeaseToken::new("lease").unwrap(),
                     lease_expires_at: ts(100),
                     worker_id: None,
+                    authority_first: false,
                 }),
                 vec![
                     ExpectedRecord {

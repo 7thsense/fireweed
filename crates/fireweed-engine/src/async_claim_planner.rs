@@ -121,6 +121,7 @@ where
                     lease_token: request.lease_token.clone(),
                     lease_expires_at: request.lease_expires_at,
                     worker_id: Some(request.worker_id.clone()),
+                    authority_first: false,
                 }),
             };
             let envelope = CommandEnvelope {

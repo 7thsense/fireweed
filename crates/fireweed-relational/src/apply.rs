@@ -7,7 +7,7 @@ use fireweed_core::{
     QueueDefinition, QueueIndex, UtcTimestamp, is_retry_exhausted,
 };
 use fireweed_engine::{
-    BatchUpdateResponse, CommandEnvelope, CommandPosition, EngineError, EngineResult,
+    BatchUpdateResponse, ClaimCommand, CommandEnvelope, CommandPosition, EngineError, EngineResult,
     FinalizeCommand, FinalizeKind, FinalizeOutcome, PayloadUpdate, PushItem, QueueCommand,
     QueueKey, RequestOutcome, ResolvedItemMutationAction, ScheduleUpdate, SetGatesCommand,
     UpdateFieldsCommand, push_items_fingerprint_sha256,
@@ -362,6 +362,7 @@ pub fn apply_committed_batch_sql_with_cursor_seeds(
         {
             apply_fused_claim_complete_sql(
                 tx,
+                grouped_shards,
                 claim_scan_hints,
                 claim_scan_default_fifo,
                 token_ops,
@@ -390,6 +391,37 @@ pub fn apply_committed_batch_sql_with_cursor_seeds(
                 *slot = e;
             }
             i += 2;
+            continue;
+        }
+
+        if let Some(run_end) = coalescible_claim_run_end(positions, envelopes, i) {
+            let shard = pos.queue.clone();
+            apply_claim_run_sql(
+                tx,
+                grouped_shards,
+                claim_scan_hints,
+                claim_scan_default_fifo,
+                token_ops,
+                &shard,
+                &positions[i..run_end],
+                &envelopes[i..run_end],
+            )?;
+            let mut exp = incoming;
+            for (p, e) in positions[i..run_end].iter().zip(&envelopes[i..run_end]) {
+                let (tenant, queue) = parts(&p.queue);
+                crate::delete_claim_outbox(tx, &tenant, &queue, &e.command_id.0)?;
+                persist_request_outcome_sql(tx, queues, &p.queue, e, p)?;
+                exp = (p.sequence as i64)
+                    .checked_add(1)
+                    .ok_or_else(|| EngineError::Storage("command sequence overflow".into()))?;
+                let ep = p.backend_epoch as i64;
+                let slot = max_epoch.entry(p.queue.clone()).or_insert(ep);
+                if ep > *slot {
+                    *slot = ep;
+                }
+            }
+            next_seq.insert(shard, exp);
+            i = run_end;
             continue;
         }
 
@@ -583,6 +615,56 @@ fn command_is_set_based_update(command: &QueueCommand) -> bool {
         QueueCommand::UpdateFieldsBatch(batch) => update_fields_batch_is_set_based(&batch.updates),
         _ => false,
     }
+}
+
+fn claim_fuses_with_next(
+    positions: &[CommandPosition],
+    envelopes: &[CommandEnvelope],
+    index: usize,
+) -> bool {
+    let Some(QueueCommand::Claim(claim)) = envelopes.get(index).map(|envelope| &envelope.command)
+    else {
+        return false;
+    };
+    index + 1 < positions.len()
+        && positions[index + 1].queue == positions[index].queue
+        && positions[index + 1].sequence == positions[index].sequence.saturating_add(1)
+        && matches!(
+            &envelopes[index + 1].command,
+            QueueCommand::Finalize(finalize) if finalize_completes_claim(claim, finalize)
+        )
+}
+
+fn coalescible_claim_run_end(
+    positions: &[CommandPosition],
+    envelopes: &[CommandEnvelope],
+    start: usize,
+) -> Option<usize> {
+    if !matches!(envelopes.get(start)?.command, QueueCommand::Claim(_)) {
+        return None;
+    }
+    if claim_fuses_with_next(positions, envelopes, start) {
+        return None;
+    }
+    let shard = &positions[start].queue;
+    let mut expected = positions[start].sequence;
+    let mut end = start;
+    while end < positions.len() {
+        let position = &positions[end];
+        let envelope = &envelopes[end];
+        if position.queue != *shard || position.sequence != expected {
+            break;
+        }
+        if !matches!(envelope.command, QueueCommand::Claim(_)) {
+            break;
+        }
+        if claim_fuses_with_next(positions, envelopes, end) {
+            break;
+        }
+        expected = expected.saturating_add(1);
+        end += 1;
+    }
+    (end > start).then_some(end)
 }
 
 fn apply_push_run_sql(
@@ -2618,6 +2700,306 @@ pub fn finalize_completes_claim(
     claimed.is_empty()
 }
 
+pub const AUTHORITY_FIRST_CLAIM_SHORT_MOVE: &str =
+    "authority-first claim did not move all named rows";
+
+fn authority_first_short_move(moved: usize, named: usize) -> EngineError {
+    EngineError::Storage(format!(
+        "{AUTHORITY_FIRST_CLAIM_SHORT_MOVE}: moved {moved} of {named}"
+    ))
+}
+
+fn maintain_grouped_after_claim_move(
+    tx: &impl RelTx,
+    grouped_shards: &HashSet<QueueKey>,
+    shard: &QueueKey,
+    ids: &[ItemId],
+    now: UtcTimestamp,
+) -> EngineResult<()> {
+    if !grouped_shards.contains(shard) {
+        return Ok(());
+    }
+    remove_ids_from_group_summaries(tx, shard, ids, now)
+}
+
+fn class_s_live_claim(
+    tx: &impl RelTx,
+    shard: &QueueKey,
+    claim: &ClaimCommand,
+) -> EngineResult<bool> {
+    if claim.authority_first {
+        return Ok(false);
+    }
+    let Some(first) = claim.item_ids.first() else {
+        return Ok(true);
+    };
+    Ok(item_ids_in_state(tx, shard, &[first.to_string()], "Pending")?.is_empty())
+}
+
+fn apply_one_claim_sql(
+    tx: &impl RelTx,
+    grouped_shards: &HashSet<QueueKey>,
+    claim_scan_hints: &mut HashMap<QueueKey, i64>,
+    claim_scan_default_fifo: &mut HashMap<QueueKey, bool>,
+    token_ops: &mut Vec<TokenOp>,
+    shard: &QueueKey,
+    seq: u64,
+    now: UtcTimestamp,
+    claim: &ClaimCommand,
+) -> EngineResult<()> {
+    let (t, q) = parts(shard);
+    let now_n = ts_nanos(now);
+    let hash = lease_hash(&claim.lease_token);
+    let exp = ts_nanos(claim.lease_expires_at);
+    let worker_id = claim.worker_id.as_ref().map(|worker| worker.as_str());
+    let ids: Vec<String> = claim.item_ids.iter().map(|id| id.to_string()).collect();
+    if class_s_live_claim(tx, shard, claim)? {
+        for id in &claim.item_ids {
+            token_ops.push(TokenOp::Set(shard.clone(), *id, claim.lease_token.clone()));
+        }
+        return Ok(());
+    }
+    let mut pending_moved = 0usize;
+    if claim_scan_default_fifo.get(shard).copied().unwrap_or(false)
+        && let Some((min_rowid, max_rowid)) =
+            fifo_rowid_range_for_id_strings(tx, shard, &ids, Some("Pending"))?
+    {
+        pending_moved = crate::rel_exec(
+            tx,
+            "UPDATE fireweed_items SET lifecycle_state='Leased', lease_token_hash=?1, \
+             lease_expires_at=?2, worker_id=?3, retry_count=retry_count+1, \
+             item_version=item_version+1, updated_at=?4, last_command_sequence=?5 \
+             WHERE tenant_id=?6 AND queue_id=?7 AND rowid BETWEEN ?8 AND ?9 \
+             AND lifecycle_state='Pending' AND superseded=0",
+            [
+                hash.into(),
+                exp.into(),
+                worker_id.into(),
+                now_n.into(),
+                (seq as i64).into(),
+                RelValue::Text(t.to_string()),
+                RelValue::Text(q.to_string()),
+                min_rowid.into(),
+                max_rowid.into(),
+            ],
+        )?;
+        let next = max_rowid
+            .checked_add(1)
+            .ok_or_else(|| EngineError::Storage("claim scan hint overflow".into()))?;
+        let slot = claim_scan_hints.entry(shard.clone()).or_insert(0);
+        if next > *slot {
+            *slot = next;
+        }
+    } else {
+        for chunk in ids.chunks(UPDATE_FIELDS_BATCH) {
+            let values = vec!["(?)"; chunk.len()].join(",");
+            let sql = format!(
+                "WITH incoming(item_id) AS (VALUES {values}) \
+                 UPDATE fireweed_items SET lifecycle_state='Leased', lease_token_hash=?,\
+                 lease_expires_at=?, worker_id=?, retry_count=retry_count+1, \
+                 item_version=item_version+1, updated_at=?, last_command_sequence=? \
+                 FROM incoming WHERE tenant_id=? AND queue_id=? \
+                 AND fireweed_items.item_id=incoming.item_id \
+                 AND lifecycle_state='Pending' AND superseded=0"
+            );
+            let mut params = Vec::with_capacity(chunk.len() + 7);
+            params.extend(chunk.iter().cloned().map(RelValue::Text));
+            params.extend([
+                RelValue::Blob(hash.clone()),
+                RelValue::Integer(exp),
+                worker_id.map_or(RelValue::Null, |worker| RelValue::Text(worker.to_string())),
+                RelValue::Integer(now_n),
+                RelValue::Integer(seq as i64),
+                RelValue::Text(t.to_string()),
+                RelValue::Text(q.to_string()),
+            ]);
+            pending_moved += crate::rel_exec(tx, &sql, params)?;
+        }
+        advance_claim_scan_hint_for_ids(
+            tx,
+            claim_scan_hints,
+            claim_scan_default_fifo,
+            shard,
+            &claim.item_ids,
+        )?;
+    }
+    if claim.authority_first && pending_moved != claim.item_ids.len() {
+        return Err(authority_first_short_move(
+            pending_moved,
+            claim.item_ids.len(),
+        ));
+    }
+    for id in &claim.item_ids {
+        token_ops.push(TokenOp::Set(shard.clone(), *id, claim.lease_token.clone()));
+    }
+    if pending_moved > 0 {
+        persist_lease_bearers(tx, shard, &claim.item_ids, &claim.lease_token)?;
+        maintain_grouped_after_claim_move(tx, grouped_shards, shard, &claim.item_ids, now)?;
+    }
+    Ok(())
+}
+
+fn apply_packed_claims_sql(
+    tx: &impl RelTx,
+    grouped_shards: &HashSet<QueueKey>,
+    claim_scan_hints: &mut HashMap<QueueKey, i64>,
+    claim_scan_default_fifo: &mut HashMap<QueueKey, bool>,
+    token_ops: &mut Vec<TokenOp>,
+    shard: &QueueKey,
+    units: &[(&ClaimCommand, u64, UtcTimestamp)],
+) -> EngineResult<()> {
+    let (t, q) = parts(shard);
+    let mut mutating = Vec::new();
+    for &(claim, seq, now) in units {
+        if class_s_live_claim(tx, shard, claim)? {
+            for id in &claim.item_ids {
+                token_ops.push(TokenOp::Set(shard.clone(), *id, claim.lease_token.clone()));
+            }
+            continue;
+        }
+        mutating.push((claim, seq, now));
+    }
+    if mutating.is_empty() {
+        return Ok(());
+    }
+    let mut rows: Vec<(String, Vec<u8>, i64, RelValue, i64, i64)> = Vec::new();
+    for (claim, seq, now) in &mutating {
+        let hash = lease_hash(&claim.lease_token);
+        let exp = ts_nanos(claim.lease_expires_at);
+        let worker = claim
+            .worker_id
+            .as_ref()
+            .map(|worker| RelValue::Text(worker.as_str().to_string()))
+            .unwrap_or(RelValue::Null);
+        let now_n = ts_nanos(*now);
+        for id in &claim.item_ids {
+            rows.push((
+                id.to_string(),
+                hash.clone(),
+                exp,
+                worker.clone(),
+                *seq as i64,
+                now_n,
+            ));
+        }
+    }
+    let mut moved: HashSet<String> = HashSet::new();
+    const CLAIM_ROW_BINDS: usize = 6;
+    for chunk in rows.chunks(UPDATE_FIELDS_BATCH) {
+        let values = vec!["(?,?,?,?,?,?)"; chunk.len()].join(",");
+        let sql = format!(
+            "WITH incoming(item_id, lease_token_hash, lease_expires_at, worker_id, \
+             last_command_sequence, updated_at) AS (VALUES {values}) \
+             UPDATE fireweed_items SET lifecycle_state='Leased', \
+             lease_token_hash=incoming.lease_token_hash, \
+             lease_expires_at=incoming.lease_expires_at, \
+             worker_id=incoming.worker_id, retry_count=retry_count+1, \
+             item_version=item_version+1, updated_at=incoming.updated_at, \
+             last_command_sequence=incoming.last_command_sequence \
+             FROM incoming WHERE tenant_id=? AND queue_id=? \
+             AND fireweed_items.item_id=incoming.item_id \
+             AND lifecycle_state='Pending' AND superseded=0 \
+             RETURNING fireweed_items.item_id"
+        );
+        let mut params = Vec::with_capacity(chunk.len() * CLAIM_ROW_BINDS + 2);
+        for (item_id, hash, exp, worker, seq, now_n) in chunk {
+            params.extend([
+                RelValue::Text(item_id.clone()),
+                RelValue::Blob(hash.clone()),
+                RelValue::Integer(*exp),
+                worker.clone(),
+                RelValue::Integer(*seq),
+                RelValue::Integer(*now_n),
+            ]);
+        }
+        params.extend([RelValue::Text(t.to_string()), RelValue::Text(q.to_string())]);
+        for row in crate::rel_query(tx, &sql, params)? {
+            moved.insert(row.get(0)?);
+        }
+    }
+    let mut all_ids = Vec::new();
+    for (claim, _, _) in &mutating {
+        all_ids.extend_from_slice(&claim.item_ids);
+        let pending_moved = claim
+            .item_ids
+            .iter()
+            .filter(|id| moved.contains(&id.to_string()))
+            .count();
+        if claim.authority_first && pending_moved != claim.item_ids.len() {
+            return Err(authority_first_short_move(
+                pending_moved,
+                claim.item_ids.len(),
+            ));
+        }
+    }
+    advance_claim_scan_hint_for_ids(
+        tx,
+        claim_scan_hints,
+        claim_scan_default_fifo,
+        shard,
+        &all_ids,
+    )?;
+    for (claim, _, now) in mutating {
+        let pending_moved = claim
+            .item_ids
+            .iter()
+            .filter(|id| moved.contains(&id.to_string()))
+            .count();
+        for id in &claim.item_ids {
+            token_ops.push(TokenOp::Set(shard.clone(), *id, claim.lease_token.clone()));
+        }
+        if pending_moved > 0 {
+            persist_lease_bearers(tx, shard, &claim.item_ids, &claim.lease_token)?;
+            maintain_grouped_after_claim_move(tx, grouped_shards, shard, &claim.item_ids, now)?;
+        }
+    }
+    Ok(())
+}
+
+fn apply_claim_run_sql(
+    tx: &impl RelTx,
+    grouped_shards: &HashSet<QueueKey>,
+    claim_scan_hints: &mut HashMap<QueueKey, i64>,
+    claim_scan_default_fifo: &mut HashMap<QueueKey, bool>,
+    token_ops: &mut Vec<TokenOp>,
+    shard: &QueueKey,
+    positions: &[CommandPosition],
+    envelopes: &[CommandEnvelope],
+) -> EngineResult<()> {
+    let mut units = Vec::with_capacity(envelopes.len());
+    for (position, envelope) in positions.iter().zip(envelopes) {
+        let QueueCommand::Claim(claim) = &envelope.command else {
+            return Err(EngineError::Storage(
+                "apply_claim_run: non-claim envelope".into(),
+            ));
+        };
+        units.push((claim, position.sequence, envelope.created_at));
+    }
+    if units.len() == 1 {
+        let (claim, seq, now) = units[0];
+        return apply_one_claim_sql(
+            tx,
+            grouped_shards,
+            claim_scan_hints,
+            claim_scan_default_fifo,
+            token_ops,
+            shard,
+            seq,
+            now,
+            claim,
+        );
+    }
+    apply_packed_claims_sql(
+        tx,
+        grouped_shards,
+        claim_scan_hints,
+        claim_scan_default_fifo,
+        token_ops,
+        shard,
+        &units,
+    )
+}
+
 /// One UPDATE: Pending → Complete with claim+finalize version accounting (retry+1, version+2).
 ///
 /// Used when Claim + Finalize(Complete) share an apply batch so we never write Leased /
@@ -2628,13 +3010,14 @@ pub fn finalize_completes_claim(
 )]
 pub fn apply_fused_claim_complete_sql(
     tx: &impl RelTx,
+    grouped_shards: &HashSet<QueueKey>,
     claim_scan_hints: &mut HashMap<QueueKey, i64>,
     claim_scan_default_fifo: &mut HashMap<QueueKey, bool>,
     token_ops: &mut Vec<TokenOp>,
     shard: &QueueKey,
     finalize_position: &CommandPosition,
     now: UtcTimestamp,
-    claim: &fireweed_engine::ClaimCommand,
+    claim: &ClaimCommand,
 ) -> EngineResult<()> {
     let (t, q) = parts(shard);
     let now_n = ts_nanos(now);
@@ -2642,11 +3025,19 @@ pub fn apply_fused_claim_complete_sql(
     let seq = finalize_position.sequence as i64;
     let epoch = finalize_position.backend_epoch as i64;
     let hash = lease_hash(&claim.lease_token);
-    if claim_scan_default_fifo.get(shard).copied().unwrap_or(false)
+    let pending_only = claim.authority_first;
+    let pending_pred = if pending_only {
+        "lifecycle_state='Pending'"
+    } else {
+        "(lifecycle_state='Pending' OR (lifecycle_state='Leased' AND lease_token_hash=?))"
+    };
+    let pending_moved;
+    if !pending_only
+        && claim_scan_default_fifo.get(shard).copied().unwrap_or(false)
         && let Some((min_rowid, max_rowid)) =
             fifo_rowid_range_for_id_strings(tx, shard, &ids, None)?
     {
-        let _ = crate::rel_exec(
+        pending_moved = crate::rel_exec(
             tx,
             "UPDATE fireweed_items SET lifecycle_state='Complete', lease_token_hash=NULL, \
              lease_expires_at=NULL, worker_id=NULL, fenced=0, \
@@ -2684,8 +3075,7 @@ pub fn apply_fused_claim_complete_sql(
              item_version=CASE WHEN lifecycle_state='Pending' THEN item_version+2 ELSE item_version+1 END, \
              terminal_at=?, terminal_command_epoch=?, updated_at=?, last_command_sequence=? \
              WHERE tenant_id=? AND queue_id=? AND superseded=0 \
-               AND (lifecycle_state='Pending' \
-                    OR (lifecycle_state='Leased' AND lease_token_hash=?)) \
+               AND {pending_pred} \
                AND item_id IN ({ph})"
         );
         let mut params = vec![
@@ -2695,10 +3085,12 @@ pub fn apply_fused_claim_complete_sql(
             RelValue::Integer(seq),
             RelValue::Text(t.to_string()),
             RelValue::Text(q.to_string()),
-            RelValue::Blob(hash),
         ];
+        if !pending_only {
+            params.push(RelValue::Blob(hash));
+        }
         params.extend(ids.iter().cloned().map(RelValue::Text));
-        crate::rel_exec(tx, &sql, params)?;
+        pending_moved = crate::rel_exec(tx, &sql, params)?;
         advance_claim_scan_hint_for_ids(
             tx,
             claim_scan_hints,
@@ -2707,8 +3099,17 @@ pub fn apply_fused_claim_complete_sql(
             &claim.item_ids,
         )?;
     }
+    if claim.authority_first && pending_moved != claim.item_ids.len() {
+        return Err(authority_first_short_move(
+            pending_moved,
+            claim.item_ids.len(),
+        ));
+    }
     for id in &claim.item_ids {
         token_ops.push(TokenOp::Clear(shard.clone(), *id));
+    }
+    if pending_moved > 0 {
+        maintain_grouped_after_claim_move(tx, grouped_shards, shard, &claim.item_ids, now)?;
     }
     Ok(())
 }
@@ -3632,103 +4033,17 @@ pub fn apply_command_sql(
             }
             Ok(())
         }
-        QueueCommand::Claim(c) => {
-            let hash = lease_hash(&c.lease_token);
-            let exp = ts_nanos(c.lease_expires_at);
-            let worker_id = c.worker_id.as_ref().map(|worker| worker.as_str());
-            let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
-            // Class S already committed the lease. Rebuild still sees Pending.
-            let class_s_live = match ids.first() {
-                Some(id) => {
-                    item_ids_in_state(tx, shard, std::slice::from_ref(id), "Pending")?.is_empty()
-                }
-                None => true,
-            };
-            let mut pending_moved = 0usize;
-            if class_s_live {
-                for id in &c.item_ids {
-                    token_ops.push(TokenOp::Set(shard.clone(), *id, c.lease_token.clone()));
-                }
-                return Ok(());
-            }
-            if claim_scan_default_fifo.get(shard).copied().unwrap_or(false)
-                && let Some((min_rowid, max_rowid)) =
-                    fifo_rowid_range_for_id_strings(tx, shard, &ids, Some("Pending"))?
-            {
-                pending_moved = crate::rel_exec(
-                    tx,
-                    "UPDATE fireweed_items SET lifecycle_state='Leased', lease_token_hash=?1, \
-                     lease_expires_at=?2, worker_id=?3, retry_count=retry_count+1, \
-                     item_version=item_version+1, updated_at=?4, last_command_sequence=?5 \
-                     WHERE tenant_id=?6 AND queue_id=?7 AND rowid BETWEEN ?8 AND ?9 \
-                     AND lifecycle_state='Pending' AND superseded=0",
-                    [
-                        hash.into(),
-                        exp.into(),
-                        worker_id.into(),
-                        now_n.into(),
-                        (seq as i64).into(),
-                        RelValue::Text(t.to_string()),
-                        RelValue::Text(q.to_string()),
-                        min_rowid.into(),
-                        max_rowid.into(),
-                    ],
-                )?;
-                let next = max_rowid
-                    .checked_add(1)
-                    .ok_or_else(|| EngineError::Storage("claim scan hint overflow".into()))?;
-                let slot = claim_scan_hints.entry(shard.clone()).or_insert(0);
-                if next > *slot {
-                    *slot = next;
-                }
-            } else {
-                for chunk in ids.chunks(UPDATE_FIELDS_BATCH) {
-                    let values = vec!["(?)"; chunk.len()].join(",");
-                    let sql = format!(
-                        "WITH incoming(item_id) AS (VALUES {values}) \
-                         UPDATE fireweed_items SET lifecycle_state='Leased', lease_token_hash=?,\
-                         lease_expires_at=?, worker_id=?, retry_count=retry_count+1, \
-                         item_version=item_version+1, updated_at=?, last_command_sequence=? \
-                         FROM incoming WHERE tenant_id=? AND queue_id=? \
-                         AND fireweed_items.item_id=incoming.item_id \
-                         AND lifecycle_state='Pending' AND superseded=0"
-                    );
-                    let mut params = Vec::with_capacity(chunk.len() + 7);
-                    params.extend(chunk.iter().cloned().map(RelValue::Text));
-                    params.extend([
-                        RelValue::Blob(hash.clone()),
-                        RelValue::Integer(exp),
-                        worker_id
-                            .map_or(RelValue::Null, |worker| RelValue::Text(worker.to_string())),
-                        RelValue::Integer(now_n),
-                        RelValue::Integer(seq as i64),
-                        RelValue::Text(t.to_string()),
-                        RelValue::Text(q.to_string()),
-                    ]);
-                    pending_moved += crate::rel_exec(tx, &sql, params)?;
-                }
-                advance_claim_scan_hint_for_ids(
-                    tx,
-                    claim_scan_hints,
-                    claim_scan_default_fifo,
-                    shard,
-                    &c.item_ids,
-                )?;
-            }
-            for id in &c.item_ids {
-                token_ops.push(TokenOp::Set(shard.clone(), *id, c.lease_token.clone()));
-            }
-            // Class S already leased these rows. Rebuild (still Pending) takes the
-            // path above (`pending_moved > 0`) and maintains groups. Live apply does not.
-            if pending_moved > 0 {
-                persist_lease_bearers(tx, shard, &c.item_ids, &c.lease_token)?;
-                if grouped_shards.contains(shard) {
-                    let removed = load_grouped_items(tx, shard, &c.item_ids)?;
-                    apply_group_summary_remove(tx, shard, &removed, now)?;
-                }
-            }
-            Ok(())
-        }
+        QueueCommand::Claim(c) => apply_one_claim_sql(
+            tx,
+            grouped_shards,
+            claim_scan_hints,
+            claim_scan_default_fifo,
+            token_ops,
+            shard,
+            seq,
+            now,
+            c,
+        ),
         QueueCommand::CohortClaim(c) => {
             reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
             let hash = lease_hash(&c.lease_token);

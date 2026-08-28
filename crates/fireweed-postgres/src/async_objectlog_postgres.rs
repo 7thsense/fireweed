@@ -1614,6 +1614,7 @@ impl fireweed_engine::HotProjectionQueryPort for AsyncObjectLogPostgresBackend {
                                 lease_token: lease_token.clone(),
                                 lease_expires_at,
                                 worker_id: Some(request.worker_id.clone()),
+                                authority_first: false,
                             }),
                             claim_item_ids.clone(),
                             context.now,

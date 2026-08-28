@@ -1612,6 +1612,7 @@ impl ClaimPort for SqliteRelationalBackend {
                     lease_token: req.lease_token.clone(),
                     lease_expires_at: req.lease_expires_at,
                     worker_id: Some(req.worker_id.clone()),
+                    authority_first: false,
                 })
             };
             apply_command_sql(

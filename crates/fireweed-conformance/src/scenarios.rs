@@ -1779,6 +1779,7 @@ pub async fn claim_then_complete_lifecycle<B: ConformanceCore>(make: impl Fn() -
         lease_token: LeaseToken::new("lease-1").unwrap(),
         lease_expires_at: ts(200),
         worker_id: None,
+        authority_first: false,
     });
     commit(&b, envelope(claim, vec![ItemId::new("1").unwrap()])).await;
 

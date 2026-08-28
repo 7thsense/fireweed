@@ -4431,6 +4431,7 @@ mod item_mutation_tests {
                     lease_token: lease_token.clone(),
                     lease_expires_at: ts(100),
                     worker_id: None,
+                    authority_first: false,
                 }),
                 vec![leased.item_id],
             )],

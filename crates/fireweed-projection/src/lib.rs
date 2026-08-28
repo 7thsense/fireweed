@@ -5831,6 +5831,7 @@ mod tests {
                 lease_token: LeaseToken::new("lease-1").unwrap(),
                 lease_expires_at: ts(60),
                 worker_id: None,
+                authority_first: false,
             }))
             .unwrap();
         let claimed = projection.items.get(&id).unwrap().to_claimed().unwrap();
@@ -5951,6 +5952,7 @@ mod tests {
                 lease_token: LeaseToken::new("lease-warm").unwrap(),
                 lease_expires_at: ts(60),
                 worker_id: None,
+                authority_first: false,
             }))
             .unwrap();
         assert_eq!(
@@ -6146,6 +6148,7 @@ mod tests {
                 lease_token: LeaseToken::new("lt").unwrap(),
                 lease_expires_at: ts(60),
                 worker_id: None,
+                authority_first: false,
             }))
             .unwrap();
         assert_eq!(
@@ -6206,6 +6209,7 @@ mod tests {
                 lease_token: first.clone(),
                 lease_expires_at: ts(60),
                 worker_id: None,
+                authority_first: false,
             }))
             .unwrap();
         projection
@@ -6272,6 +6276,7 @@ mod tests {
                 lease_token: LeaseToken::new("ordinary-1").unwrap(),
                 lease_expires_at: ts(10),
                 worker_id: None,
+                authority_first: false,
             }))
             .unwrap();
         projection
@@ -6280,6 +6285,7 @@ mod tests {
                 lease_token: LeaseToken::new("ordinary-2").unwrap(),
                 lease_expires_at: ts(100),
                 worker_id: None,
+                authority_first: false,
             }))
             .unwrap();
         projection
@@ -6296,6 +6302,7 @@ mod tests {
                 lease_token: LeaseToken::new("ordinary-4").unwrap(),
                 lease_expires_at: ts(30),
                 worker_id: None,
+                authority_first: false,
             }))
             .unwrap();
         assert_eq!(projection.expired_leases(ts(50)), vec![iid("1"), iid("4")]);
@@ -6333,6 +6340,7 @@ mod tests {
                 lease_token: LeaseToken::new("ordinary-5").unwrap(),
                 lease_expires_at: ts(15),
                 worker_id: None,
+                authority_first: false,
             }))
             .unwrap();
         projection
@@ -6804,6 +6812,7 @@ mod tests {
                 lease_token: lease_token.clone(),
                 lease_expires_at: ts(60),
                 worker_id: None,
+                authority_first: false,
             }))
             .unwrap();
         projection
@@ -6989,6 +6998,7 @@ mod tests {
                 lease_token: lease,
                 lease_expires_at: ts(7_000),
                 worker_id: None,
+                authority_first: false,
             })),
             None,
         )
@@ -7241,6 +7251,7 @@ mod tests {
                 lease_token: LeaseToken::new("lease-1").unwrap(),
                 lease_expires_at: ts(500),
                 worker_id: None,
+                authority_first: false,
             })),
             None,
         )

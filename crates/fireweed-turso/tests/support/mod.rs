@@ -381,6 +381,7 @@ pub fn lifecycle(id: ItemId) -> Vec<CommandEnvelope> {
                 lease_token: token,
                 lease_expires_at: ts(20),
                 worker_id: None,
+                authority_first: false,
             }),
             vec![id],
         ),

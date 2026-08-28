@@ -5266,6 +5266,7 @@ fn claim_by_query_sql(
         lease_token: lease_token.clone(),
         lease_expires_at,
         worker_id: Some(request.worker_id),
+        authority_first: false,
     });
     let position = CommandPosition::new(shard.clone(), epoch as u64, seq);
     let envelope = direct_command_envelope(shard, command, context.now, epoch as u64, seq);
@@ -7695,6 +7696,7 @@ fn claim_with_client_unit(
             lease_token: req.lease_token.clone(),
             lease_expires_at: req.lease_expires_at,
             worker_id: Some(req.worker_id.clone()),
+            authority_first: false,
         })
     };
     let position = CommandPosition::new(req.shard.clone(), claim_epoch as u64, seq);
@@ -7821,6 +7823,7 @@ fn claim_item_level_in_tx(
         lease_token: req.lease_token.clone(),
         lease_expires_at: req.lease_expires_at,
         worker_id: Some(req.worker_id.clone()),
+        authority_first: false,
     });
     let position = CommandPosition::new(req.shard.clone(), claim_epoch as u64, seq);
     let envelope =

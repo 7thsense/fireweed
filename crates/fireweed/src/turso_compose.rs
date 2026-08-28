@@ -2915,6 +2915,7 @@ impl DerivedObjectLogTursoBackend {
                     )
                     .map_err(|e| EngineError::Storage(e.to_string()))?,
                     worker_id,
+                    authority_first: false,
                 }),
                 checksum: CommandChecksum(0),
                 created_at: fireweed_core::UtcTimestamp::new(
@@ -3490,6 +3491,7 @@ impl DerivedObjectLogTursoBackend {
                 lease_token: request.lease_token.clone(),
                 lease_expires_at: request.lease_expires_at,
                 worker_id: Some(request.worker_id.clone()),
+                authority_first: false,
             }),
             checksum: CommandChecksum(0),
             created_at: request.now,

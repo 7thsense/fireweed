@@ -119,6 +119,7 @@ async fn async_projection_checkpoint_applies_ordered_batches_and_advances_logica
                 lease_token: lease.clone(),
                 lease_expires_at: ts(60),
                 worker_id: None,
+                authority_first: false,
             }),
             vec![item_id],
             1,
