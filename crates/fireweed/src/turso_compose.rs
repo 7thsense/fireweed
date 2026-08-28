@@ -2952,6 +2952,7 @@ impl DerivedObjectLogTursoBackend {
                     None => break,
                 }
             }
+            // Migration window: pre-upgrade SQL-first leases still publish here.
             self.drain_claim_outbox(&shard).await?;
             if let Some(coordinator) = &self.async_apply {
                 let recovered = AsyncProjectionStore::recovery_high_water(
@@ -2972,6 +2973,7 @@ impl DerivedObjectLogTursoBackend {
         Ok(())
     }
 
+    /// Publish pre-upgrade outbox leases. New serving writes no `fireweed_claim_outbox` rows.
     async fn drain_claim_outbox(&self, shard: &QueueKey) -> EngineResult<()> {
         let pending = self
             .projection
@@ -3574,7 +3576,6 @@ impl DerivedObjectLogTursoBackend {
                 self.append_class_s_claim(
                     commit.with_append_admission(AppendAdmissionClass::ClaimCoordinatorLive),
                     reservation,
-                    "",
                 )
                 .await?;
                 drop(fence);
@@ -3732,7 +3733,6 @@ impl DerivedObjectLogTursoBackend {
                 RawCommitRequest::new(shard.clone(), envelopes, epoch)
                     .with_append_admission(AppendAdmissionClass::ClaimCoordinatorLive),
                 reservation,
-                "",
             )
             .await?;
         }
@@ -3757,7 +3757,6 @@ impl DerivedObjectLogTursoBackend {
         &self,
         request: RawCommitRequest,
         reservation: Option<fireweed_objectlog::AsyncProjectionApplyReservation>,
-        _outbox_id: &str,
     ) -> EngineResult<()> {
         let (shard, commands, epoch, fault, append_admission) =
             request.into_parts_with_append_admission();
@@ -4491,6 +4490,308 @@ mod s3c_activation {
             Some(&b"grouped"[..])
         );
         drop(backend);
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(all(test, feature = "objectlog"))]
+mod s8c_outbox_migration {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use fireweed_core::{
+        EligibilityPolicy, LeaseToken, OrderingMode, PriorityDirection, PriorityModel,
+        PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy,
+        RetryPolicy, TenantId, UtcTimestamp, WorkerId,
+    };
+    use fireweed_engine::{
+        AsyncLogStore, AsyncProjectionSpec, ClaimCompatibility, ClaimPort, FinalizeKind,
+        FinalizeOutcome, FinalizePort, ProjectionRead, PushPort, PushSpec, QueueCommand,
+    };
+    use fireweed_objectlog::{ObjectLogEngineStore, flush_config_from_segment};
+    use sha2::{Digest, Sha256};
+
+    use super::*;
+
+    static NEXT_DIR: AtomicU64 = AtomicU64::new(1);
+
+    fn qdef() -> QueueDefinition {
+        QueueDefinition {
+            tenant_id: TenantId::new("t").unwrap(),
+            queue_id: QueueId::new("q-s8c-outbox").unwrap(),
+            priority_model: PriorityModel {
+                kind: PriorityModelKind::Int64,
+                direction: PriorityDirection::Ascending,
+                tie_breaker: PriorityTieBreaker::CreatedSequence,
+            },
+            ordering_mode: OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 60_000,
+            eligibility_policy: EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 100,
+            max_claim_batch_size: 100,
+            max_eligible_group_size: None,
+            secondary_indexes: Vec::new(),
+            entity_schema: None,
+            typed_indexes: Vec::new(),
+            emit_change_records: false,
+        }
+    }
+
+    fn spec() -> AsyncProjectionSpec {
+        AsyncProjectionSpec::new(32, 1024 * 1024, 16, 30_000, 3).unwrap()
+    }
+
+    async fn open(root: &std::path::Path) -> DerivedObjectLogTursoBackend {
+        let log_root = root.join("log");
+        let projection_path = root.join("projection.db");
+        std::fs::create_dir_all(&log_root).unwrap();
+        let log =
+            ObjectLogEngineStore::open_local(&log_root, flush_config_from_segment(256 * 1_024, 50))
+                .await
+                .unwrap();
+        let projection = open_turso_projection_async(&projection_path).await.unwrap();
+        DerivedObjectLogTursoBackend::from_log_and_projection(
+            log,
+            projection,
+            projection_path,
+            0,
+            Some(spec()),
+        )
+        .await
+        .unwrap()
+    }
+
+    fn assert_sql_first_serving_path_removed() {
+        let local = include_str!("../../fireweed-turso/src/local.rs");
+        let production_local = local
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production local");
+        for needle in [
+            "class_s_claim_for_queue",
+            "pub async fn class_s_claim(",
+            "lease_pack",
+            "seal_lease_pack",
+            "abort_class_s_claim",
+            "INSERT_CLAIM_OUTBOX",
+        ] {
+            assert!(
+                !production_local.contains(needle),
+                "SQL-first serving must not remain live ({needle})"
+            );
+        }
+
+        let compose = include_str!("turso_compose.rs");
+        let class_s = compose
+            .split("    async fn dispatch_class_s_claim(")
+            .nth(1)
+            .and_then(|rest| rest.split("    async fn append_class_s_claim(").next())
+            .expect("dispatch_class_s_claim");
+        assert!(!class_s.contains("class_s_claim_for_queue"));
+        assert!(!class_s.contains("pending_claim_outbox"));
+        assert!(!class_s.contains("INSERT INTO fireweed_claim_outbox"));
+        let drain = compose
+            .split("    async fn drain_claim_outbox(")
+            .nth(1)
+            .and_then(|rest| rest.split("    async fn claimed_targets(").next())
+            .expect("drain_claim_outbox");
+        assert!(drain.contains("AppendAdmissionClass::RecoveryOnly"));
+        assert!(drain.contains(".packed_append("));
+        assert!(drain.contains("delete_claim_outbox_row"));
+        assert!(!drain.contains("INSERT INTO fireweed_claim_outbox"));
+
+        let schema = include_str!("../../fireweed-relational/src/schema.rs");
+        assert!(
+            schema.contains("CREATE TABLE IF NOT EXISTS fireweed_claim_outbox"),
+            "legacy outbox schema stays for the migration window"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn preupgrade_claim_outbox_reopens_after_log_first_cutover() {
+        assert_sql_first_serving_path_removed();
+
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-s8c-outbox-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        let backend = open(&root).await;
+        let definition = qdef();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        backend
+            .push(
+                &shard,
+                vec![PushSpec {
+                    client_item_key: Some(ClientItemKey::new("s8c-preupgrade").unwrap()),
+                    payload: Some(Bytes::from_static(b"preupgrade")),
+                    ..PushSpec::default()
+                }],
+                UtcTimestamp::new(1, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        let peeked = backend.peek(&shard, 8).await.unwrap();
+        assert_eq!(peeked.len(), 1);
+        let item_id = peeked[0].item_id;
+        assert!(
+            backend
+                .projection()
+                .pending_claim_outbox("t", "q-s8c-outbox")
+                .await
+                .unwrap()
+                .is_empty(),
+            "log-first Push must not write a Claim outbox row"
+        );
+
+        let token = LeaseToken::new("preupgrade-lease").unwrap();
+        let hash = Sha256::digest(token.as_str().as_bytes());
+        let hash_hex: String = hash.iter().map(|byte| format!("{byte:02X}")).collect();
+        let ids_json = format!("[\"{item_id}\"]");
+        backend
+            .projection()
+            .execute(
+                format!(
+                    "INSERT INTO fireweed_claim_outbox (\
+                     tenant_id, queue_id, outbox_id, item_ids, lease_token, lease_expires_at, \
+                     request_id, request_fingerprint, worker_id, claim_unit, cohort_id, created_at) \
+                     VALUES ('t','q-s8c-outbox','preupgrade-outbox-1','{ids_json}',\
+                     'preupgrade-lease',30000000000,NULL,NULL,'w','item',NULL,2000000000)"
+                ),
+                vec![],
+            )
+            .await
+            .unwrap();
+        backend
+            .projection()
+            .execute(
+                format!(
+                    "UPDATE fireweed_items SET lifecycle_state='Leased', \
+                     lease_token_hash=X'{hash_hex}', lease_expires_at=30000000000, \
+                     worker_id='w', retry_count=retry_count+1, item_version=item_version+1, \
+                     updated_at=2000000000 \
+                     WHERE tenant_id='t' AND queue_id='q-s8c-outbox' AND item_id='{item_id}'"
+                ),
+                vec![],
+            )
+            .await
+            .unwrap();
+        backend
+            .projection()
+            .execute(
+                format!(
+                    "INSERT INTO fireweed_lease_bearers(tenant_id,queue_id,item_id,lease_token) \
+                     VALUES ('t','q-s8c-outbox','{item_id}','preupgrade-lease')"
+                ),
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            backend
+                .projection()
+                .pending_claim_outbox("t", "q-s8c-outbox")
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "fixture must plant one pre-upgrade committed lease"
+        );
+        drop(backend);
+
+        let drained = open(&root).await;
+        assert!(
+            drained
+                .projection()
+                .pending_claim_outbox("t", "q-s8c-outbox")
+                .await
+                .unwrap()
+                .is_empty(),
+            "reopen must drain the pre-upgrade outbox row"
+        );
+        let page = AsyncLogStore::read_from(drained.log.as_ref(), shard.clone(), None, 16)
+            .await
+            .unwrap();
+        let claims: Vec<_> = page
+            .entries
+            .iter()
+            .filter_map(|(_, envelope)| match &envelope.command {
+                QueueCommand::Claim(claim) => Some((envelope.command_id.0.as_str(), claim)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(claims.len(), 1, "drain must append the pre-upgrade lease");
+        assert_eq!(claims[0].0, "preupgrade-outbox-1");
+        assert_eq!(claims[0].1.item_ids, [item_id]);
+        assert_eq!(claims[0].1.lease_token, token);
+        assert!(
+            !claims[0].1.authority_first,
+            "legacy outbox drain must retain migration Claim semantics"
+        );
+        drop(drained);
+
+        let recovered = open(&root).await;
+        recovered
+            .finalize(
+                &shard,
+                vec![FinalizeOutcome::new(item_id, FinalizeKind::Complete)],
+                UtcTimestamp::new(3, 0).unwrap(),
+                None,
+            )
+            .await
+            .expect("drained pre-upgrade lease must be finalizable after reopen apply");
+        recovered
+            .push(
+                &shard,
+                vec![PushSpec {
+                    client_item_key: Some(ClientItemKey::new("s8c-live").unwrap()),
+                    payload: Some(Bytes::from_static(b"live")),
+                    ..PushSpec::default()
+                }],
+                UtcTimestamp::new(4, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        let live = recovered
+            .claim(ClaimRequest {
+                shard: shard.clone(),
+                worker_id: WorkerId::new("w2").unwrap(),
+                max_items: 1,
+                lease_token: LeaseToken::new("log-first-lease").unwrap(),
+                lease_expires_at: UtcTimestamp::new(40, 0).unwrap(),
+                now: UtcTimestamp::new(5, 0).unwrap(),
+                eligibility_time: None,
+                compatibility: ClaimCompatibility::default(),
+                expected_epoch: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(live.items.len(), 1);
+        assert_eq!(
+            live.items[0].payload.as_ref().map(Bytes::as_ref),
+            Some(&b"live"[..])
+        );
+        assert!(
+            recovered
+                .projection()
+                .pending_claim_outbox("t", "q-s8c-outbox")
+                .await
+                .unwrap()
+                .is_empty(),
+            "log-first Claim must not write a new outbox row"
+        );
+        assert_eq!(recovered.metrics(&shard).await.unwrap().complete, 1);
+        drop(recovered);
         let _ = std::fs::remove_dir_all(root);
     }
 }

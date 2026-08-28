@@ -260,9 +260,8 @@ CREATE TABLE IF NOT EXISTS fireweed_checkpoint_lineage (
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (tenant, queue)
 );
--- Class S claim outbox (one-projection-cleanup): lease commits in this
--- database first; the full Claim envelope sits here until the object-log PUT
--- is known-durable. Reopen drains this table. Not a process-local map.
+-- Legacy Claim outbox retained for one migration release. New object-log × Turso
+-- serving is log-first and writes no rows; reopen still drains pre-upgrade leases.
 CREATE TABLE IF NOT EXISTS fireweed_claim_outbox (
     tenant_id TEXT NOT NULL,
     queue_id TEXT NOT NULL,

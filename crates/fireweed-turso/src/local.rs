@@ -20,16 +20,13 @@ use fireweed_engine::{
     QueueKey, QueueMetrics,
 };
 use fireweed_relational::{
-    ClaimOutboxRow, ClassSClaimRequest, ClassSClaimResult, OWNED_PROJECTION_TABLES,
-    RELATIONAL_SCHEMA, RelValue, class_s_claim, delete_claim_outbox, entity_from_json,
-    fields_from_json, lease_hash, metadata_from_json, nanos_ts, parse_priority, rel_exec,
-    select_claim_outbox,
+    ClaimOutboxRow, ClassSClaimResult, OWNED_PROJECTION_TABLES, RELATIONAL_SCHEMA,
+    delete_claim_outbox, entity_from_json, fields_from_json, metadata_from_json, nanos_ts,
+    parse_priority, select_claim_outbox,
 };
-use tokio::sync::{Mutex, Semaphore, oneshot};
+use tokio::sync::{Mutex, Semaphore};
 use turso::{Builder, Connection, Database, Value, transaction::TransactionBehavior};
 
-const LEASE_PACK_MAX: usize = 8;
-const LEASE_PACK_LINGER: Duration = Duration::from_millis(20);
 /// Shared serving reader stays at 128 MiB until a same-SHA S0 cache trial lands.
 const SERVING_READER_CACHE_KIB: i64 = -131_072;
 const POOLED_READER_CACHE_KIB: i64 = -4_096;
@@ -43,24 +40,6 @@ pub const COMMITTED_DRIVER_POOL_SIZE: usize = 16;
 pub const COMMITTED_OUTCOME_POOL_SIZE: usize = 8;
 pub const COMMITTED_DRIVER_POOL_RESOURCE: &str = "committed driver read pool";
 pub const COMMITTED_OUTCOME_POOL_RESOURCE: &str = "committed outcome read pool";
-
-struct LeasePackWaiter {
-    tenant_id: String,
-    queue_id: String,
-    now_nanos: i64,
-    limit: i64,
-    lease_token: LeaseToken,
-    lease_expires_at: i64,
-    outbox_id: String,
-    worker_id: Option<String>,
-    tx: oneshot::Sender<EngineResult<ClassSClaimResult>>,
-}
-
-#[derive(Default)]
-struct LeasePackState {
-    pending: Vec<LeasePackWaiter>,
-    oldest: Option<std::time::Instant>,
-}
 
 /// Exact Turso release qualified by this adapter.
 pub const TURSO_SUPPORTED_VERSION: &str = "0.7.2";
@@ -553,7 +532,6 @@ pub struct TursoRelational {
     pub(crate) claim_scan_hints: Arc<StdMutex<std::collections::HashMap<QueueKey, i64>>>,
     pub(crate) claim_scan_default_fifo: Arc<StdMutex<std::collections::HashMap<QueueKey, bool>>>,
     pub(crate) grouped_shards: Arc<StdMutex<std::collections::HashSet<QueueKey>>>,
-    lease_pack: Arc<StdMutex<LeasePackState>>,
     config: TursoConfig,
     committed_pools: Option<CommittedReaderPools>,
 }
@@ -610,7 +588,6 @@ impl TursoRelational {
             claim_scan_hints: Arc::new(StdMutex::new(std::collections::HashMap::new())),
             claim_scan_default_fifo: Arc::new(StdMutex::new(std::collections::HashMap::new())),
             grouped_shards: Arc::new(StdMutex::new(grouped_shards)),
-            lease_pack: Arc::new(StdMutex::new(LeasePackState::default())),
             config,
             committed_pools,
         })
@@ -1085,251 +1062,8 @@ impl TursoRelational {
         collect_rows(&connection, sql.as_ref(), params).await
     }
 
-    /// Class S claim: lease + outbox in one IMMEDIATE writer txn, then drop the writer.
-    /// Concurrent waiters on the same connection group-commit into that one txn so
-    /// eight inflight claims pay one fsync, not eight.
-    pub async fn class_s_claim(
-        &self,
-        request: ClassSClaimRequest<'_>,
-    ) -> EngineResult<ClassSClaimResult> {
-        let (tx, rx) = oneshot::channel();
-        let should_seal = {
-            let mut state = self.lease_pack.lock().expect("lease pack");
-            state.pending.push(LeasePackWaiter {
-                tenant_id: request.tenant_id.to_string(),
-                queue_id: request.queue_id.to_string(),
-                now_nanos: request.now_nanos,
-                limit: request.limit,
-                lease_token: request.lease_token.clone(),
-                lease_expires_at: request.lease_expires_at,
-                outbox_id: request.outbox_id.to_string(),
-                worker_id: request.worker_id.map(str::to_string),
-                tx,
-            });
-            if state.oldest.is_none() {
-                state.oldest = Some(std::time::Instant::now());
-            }
-            state.pending.len() >= LEASE_PACK_MAX
-        };
-        if should_seal {
-            self.seal_lease_pack().await;
-            return rx
-                .await
-                .map_err(|_| EngineError::Storage("lease packer waiter dropped".into()))?;
-        }
-        tokio::pin!(rx);
-        tokio::select! {
-            result = &mut rx => {
-                return result.map_err(|_| {
-                    EngineError::Storage("lease packer waiter dropped".into())
-                })?;
-            }
-            _ = tokio::time::sleep(LEASE_PACK_LINGER) => {
-                self.seal_lease_pack().await;
-            }
-        }
-        rx.await
-            .map_err(|_| EngineError::Storage("lease packer waiter dropped".into()))?
-    }
-
-    async fn seal_lease_pack(&self) {
-        let pending = {
-            let mut state = self.lease_pack.lock().expect("lease pack");
-            if state.pending.is_empty() {
-                return;
-            }
-            state.oldest = None;
-            std::mem::take(&mut state.pending)
-        };
-        if pending.is_empty() {
-            return;
-        }
-        let mut writer = self.writer.lock().await;
-        let tx = match writer
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-        {
-            Ok(tx) => tx,
-            Err(error) => {
-                let msg = error.to_string();
-                for waiter in pending {
-                    let _ = waiter.tx.send(Err(EngineError::Storage(msg.clone())));
-                }
-                return;
-            }
-        };
-        let hop_txn = tx.clone();
-        let work: Vec<_> = pending
-            .iter()
-            .map(|waiter| {
-                (
-                    waiter.tenant_id.clone(),
-                    waiter.queue_id.clone(),
-                    waiter.now_nanos,
-                    waiter.limit,
-                    waiter.lease_token.clone(),
-                    waiter.lease_expires_at,
-                    waiter.outbox_id.clone(),
-                    waiter.worker_id.clone(),
-                )
-            })
-            .collect();
-        let results = crate::tx::run_reltx_blocking(move || {
-            work.into_iter()
-                .map(
-                    |(
-                        tenant_id,
-                        queue_id,
-                        now_nanos,
-                        limit,
-                        lease_token,
-                        lease_expires_at,
-                        outbox_id,
-                        worker_id,
-                    )| {
-                        class_s_claim(
-                            &TursoRel(&hop_txn),
-                            &ClassSClaimRequest {
-                                tenant_id: &tenant_id,
-                                queue_id: &queue_id,
-                                now_nanos,
-                                limit,
-                                lease_token: &lease_token,
-                                lease_expires_at,
-                                outbox_id: &outbox_id,
-                                request_id: None,
-                                request_fingerprint: None,
-                                worker_id: worker_id.as_deref(),
-                                claim_unit: "item",
-                                cohort_id: None,
-                            },
-                        )
-                    },
-                )
-                .collect::<Vec<_>>()
-        })
-        .await;
-        let failed = results.iter().any(|result| result.is_err());
-        if failed {
-            let _ = tx.rollback().await;
-            let msg = results
-                .into_iter()
-                .find_map(|result| result.err())
-                .map(|error| error.to_string())
-                .unwrap_or_else(|| "lease pack failed".into());
-            for waiter in pending {
-                let _ = waiter.tx.send(Err(EngineError::Storage(msg.clone())));
-            }
-            return;
-        }
-        if let Err(error) = tx.commit().await {
-            let msg = error.to_string();
-            for waiter in pending {
-                let _ = waiter.tx.send(Err(EngineError::Storage(msg.clone())));
-            }
-            return;
-        }
-        for (waiter, result) in pending.into_iter().zip(results) {
-            let _ = waiter.tx.send(result);
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn class_s_claim_for_queue(
-        &self,
-        tenant_id: &str,
-        queue_id: &str,
-        now_nanos: i64,
-        limit: i64,
-        lease_token: &LeaseToken,
-        lease_expires_at: i64,
-        outbox_id: &str,
-        worker_id: Option<&str>,
-    ) -> EngineResult<ClassSClaimResult> {
-        self.class_s_claim(ClassSClaimRequest {
-            tenant_id,
-            queue_id,
-            now_nanos,
-            limit,
-            lease_token,
-            lease_expires_at,
-            outbox_id,
-            request_id: None,
-            request_fingerprint: None,
-            worker_id,
-            claim_unit: "item",
-            cohort_id: None,
-        })
-        .await
-    }
-
-    /// Undo a Class-S SQL lease when the following object-log append is cancelled
-    /// before a position is allocated. BeforePosition must have no durable effect.
-    pub async fn abort_class_s_claim(
-        &self,
-        tenant_id: &str,
-        queue_id: &str,
-        outbox_id: &str,
-        item_ids: &[ItemId],
-        lease_token: &LeaseToken,
-        now_nanos: i64,
-    ) -> EngineResult<()> {
-        let mut writer = self.writer.lock().await;
-        let tx = writer
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|e| EngineError::Storage(e.to_string()))?;
-        let rel = TursoRel(&tx);
-        let result = (|| {
-            delete_claim_outbox(&rel, tenant_id, queue_id, outbox_id)?;
-            if item_ids.is_empty() {
-                return Ok(());
-            }
-            let placeholders = vec!["?"; item_ids.len()].join(",");
-            let mut params = vec![
-                RelValue::Integer(now_nanos),
-                RelValue::Text(tenant_id.to_string()),
-                RelValue::Text(queue_id.to_string()),
-                RelValue::Blob(lease_hash(lease_token)),
-            ];
-            params.extend(item_ids.iter().map(|id| RelValue::Text(id.to_string())));
-            rel_exec(
-                &rel,
-                &format!(
-                    "UPDATE fireweed_items SET lifecycle_state='Pending', lease_token_hash=NULL, \
-                     lease_expires_at=NULL, worker_id=NULL, updated_at=? \
-                     WHERE tenant_id=? AND queue_id=? AND lifecycle_state='Leased' \
-                     AND lease_token_hash=? AND superseded=0 AND item_id IN ({placeholders})"
-                ),
-                params,
-            )?;
-            let mut bearer_params = vec![
-                RelValue::Text(tenant_id.to_string()),
-                RelValue::Text(queue_id.to_string()),
-            ];
-            bearer_params.extend(item_ids.iter().map(|id| RelValue::Text(id.to_string())));
-            rel_exec(
-                &rel,
-                &format!(
-                    "DELETE FROM fireweed_lease_bearers WHERE tenant_id=? AND queue_id=? \
-                     AND item_id IN ({placeholders})"
-                ),
-                bearer_params,
-            )?;
-            Ok(())
-        })();
-        match result {
-            Ok(()) => tx
-                .commit()
-                .await
-                .map_err(|e| EngineError::Storage(e.to_string())),
-            Err(error) => {
-                let _ = tx.rollback().await;
-                Err(error)
-            }
-        }
-    }
-
+    /// Delete one recovered Claim outbox row after the envelope is on the log.
+    /// New serving writes no outbox rows; this remains for the migration window.
     pub async fn delete_claim_outbox_row(
         &self,
         tenant_id: &str,
@@ -1354,6 +1088,7 @@ impl TursoRelational {
         }
     }
 
+    /// Load durable pre-upgrade Claim envelopes still waiting to publish.
     pub async fn pending_claim_outbox(
         &self,
         tenant_id: &str,
@@ -1391,6 +1126,57 @@ mod class_s_tests {
         )
     }
 
+    /// Exercise the retained relational helper without the retired serving packer.
+    async fn relational_class_s_claim(
+        store: &TursoRelational,
+        now_nanos: i64,
+        limit: i64,
+        lease_token: &LeaseToken,
+        lease_expires_at: i64,
+        outbox_id: &str,
+    ) -> fireweed_relational::ClassSClaimResult {
+        use fireweed_relational::{ClassSClaimRequest, class_s_claim};
+
+        let mut writer = store.writer.lock().await;
+        let tx = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .expect("begin");
+        let hop = tx.clone();
+        let token = lease_token.clone();
+        let outbox = outbox_id.to_string();
+        let result = crate::tx::run_reltx_blocking(move || {
+            class_s_claim(
+                &TursoRel(&hop),
+                &ClassSClaimRequest {
+                    tenant_id: "t",
+                    queue_id: "q",
+                    now_nanos,
+                    limit,
+                    lease_token: &token,
+                    lease_expires_at,
+                    outbox_id: &outbox,
+                    request_id: None,
+                    request_fingerprint: None,
+                    worker_id: Some("w"),
+                    claim_unit: "item",
+                    cohort_id: None,
+                },
+            )
+        })
+        .await;
+        match result {
+            Ok(value) => {
+                tx.commit().await.expect("commit");
+                value
+            }
+            Err(error) => {
+                let _ = tx.rollback().await;
+                panic!("class_s_claim helper: {error}");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn class_s_sequential_claims_are_disjoint() {
         let store = TursoRelational::in_memory().await.expect("open");
@@ -1405,14 +1191,8 @@ mod class_s_tests {
         }
         let token_a = LeaseToken::new("token-a").expect("token");
         let token_b = LeaseToken::new("token-b").expect("token");
-        let first = store
-            .class_s_claim_for_queue("t", "q", 10, 2, &token_a, 1_000, "out-1", Some("w"))
-            .await
-            .expect("first");
-        let second = store
-            .class_s_claim_for_queue("t", "q", 10, 2, &token_b, 1_000, "out-2", Some("w"))
-            .await
-            .expect("second");
+        let first = relational_class_s_claim(&store, 10, 2, &token_a, 1_000, "out-1").await;
+        let second = relational_class_s_claim(&store, 10, 2, &token_b, 1_000, "out-2").await;
         let first_ids: Vec<_> = first.items.iter().map(|i| i.item_id.as_str()).collect();
         let second_ids: Vec<_> = second.items.iter().map(|i| i.item_id.as_str()).collect();
         assert_eq!(first_ids, [ids[0].as_str(), ids[1].as_str()]);
@@ -1505,10 +1285,8 @@ mod class_s_tests {
             .expect("insert satisfied gate membership");
 
         let token = LeaseToken::new("token-fidelity").expect("token");
-        let relational = store
-            .class_s_claim_for_queue("t", "q", 10, 2, &token, 1_000, "out-fidelity", Some("w"))
-            .await
-            .expect("class S claim");
+        let relational =
+            relational_class_s_claim(&store, 10, 2, &token, 1_000, "out-fidelity").await;
         let claimed = claimed_from_class_s(&token, relational).expect("render public claim");
         assert_eq!(claimed.items.len(), 2);
 
