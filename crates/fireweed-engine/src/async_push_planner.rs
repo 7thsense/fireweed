@@ -2,13 +2,13 @@
 
 use std::sync::Arc;
 
-use fireweed_core::QueueDefinition;
+use fireweed_core::{ItemId, QueueDefinition, RequestId, UtcTimestamp};
 
 use crate::{
     AsyncControlPlane, AsyncLogStore, AsyncProjectionStore, AsyncPushPlan, AsyncPushPlanner,
     AsyncPushRequest, CommandChecksum, CommandEnvelope, EngineError, EngineResult, IdGen,
-    IdempotencyDecision, OwnedTask, PushCommand, PushFingerprint, QueueCommand, QueueCounters,
-    RawCommitRequest, RequestOutcome, build_push_items,
+    IdempotencyDecision, OwnedTask, PushCommand, PushFingerprint, PushItem, QueueCommand,
+    QueueCounters, QueueKey, RawCommitRequest, RequestOutcome, build_push_items,
 };
 
 /// Push preparation shared by native-async compositions. It owns no commit capability.
@@ -74,41 +74,37 @@ where
         Box::pin(async move {
             if let (Some(request_id), Some(fingerprint)) = (request.request_id.clone(), fingerprint)
             {
-                match projection
-                    .push_idempotency(request.shard.clone(), request_id, fingerprint, request.now)
-                    .await?
+                match resolve_push_idempotency_snapshot(
+                    log.as_ref(),
+                    projection.as_ref(),
+                    request.shard.clone(),
+                    request_id,
+                    fingerprint,
+                    request.now,
+                )
+                .await?
                 {
-                    IdempotencyDecision::Replay(item_ids) => {
-                        return Ok(AsyncPushPlan::replay(item_ids));
-                    }
-                    IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
-                    IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}
+                    Some(item_ids) => return Ok(AsyncPushPlan::replay(item_ids)),
+                    None => {}
                 }
             }
 
             projection.admit_mutation(request.shard.clone()).await?;
-            let epoch = crate::resolve_write_epoch_async(request.expected_epoch, || {
-                log.current_epoch(request.shard.clone())
-            })
-            .await?;
-            let base = counters.reserve(&request.shard, epoch, request.items.len() as u32);
-            let (mut items, item_ids) = build_push_items(
-                request.items,
-                epoch,
+            let (epoch, items, item_ids) = allocate_push_epoch_blob_and_counters(
+                log.as_ref(),
+                counters.as_ref(),
+                &definition,
+                &request,
                 node_id,
-                base,
-                definition.retry_policy.max_attempts,
-            );
-            crate::admit_push_items_indexes(&definition, &mut items)?;
-            projection
-                .validate_push(request.shard.clone(), items.clone(), request.now)
-                .await?;
-            if projection
-                .pause_blocks_intake(request.shard.clone())
-                .await?
-            {
-                return Err(EngineError::Paused { drain_intake: true });
-            }
+            )
+            .await?;
+            validate_push_driver_snapshot(
+                projection.as_ref(),
+                request.shard.clone(),
+                items.clone(),
+                request.now,
+            )
+            .await?;
             let envelope = CommandEnvelope {
                 command_id: ids.next_command_id(),
                 request_id: request.request_id.clone(),
@@ -127,6 +123,80 @@ where
             ))
         })
     }
+}
+
+/// Observe request-entry high-water before any outcome snapshot.
+///
+/// S3c activates exact coverage wait; this slice only sequences the wait ahead of idempotency and
+/// does not borrow a projection connection.
+async fn wait_request_entry_high_water<L: AsyncLogStore>(
+    log: &L,
+    shard: QueueKey,
+) -> EngineResult<()> {
+    let _ = log.high_water(shard).await?;
+    Ok(())
+}
+
+/// Short outcome-pool idempotency snapshot. Released before epoch/blob/counter object-log work.
+async fn resolve_push_idempotency_snapshot<L, P>(
+    log: &L,
+    projection: &P,
+    shard: QueueKey,
+    request_id: RequestId,
+    fingerprint: PushFingerprint,
+    now: UtcTimestamp,
+) -> EngineResult<Option<Vec<ItemId>>>
+where
+    L: AsyncLogStore,
+    P: AsyncProjectionStore,
+{
+    wait_request_entry_high_water(log, shard.clone()).await?;
+    match projection
+        .push_idempotency(shard, request_id, fingerprint, now)
+        .await?
+    {
+        IdempotencyDecision::Replay(item_ids) => Ok(Some(item_ids)),
+        IdempotencyDecision::Conflict => Err(EngineError::RequestIdConflict),
+        IdempotencyDecision::Proceed | IdempotencyDecision::Expired => Ok(None),
+    }
+}
+
+/// Object-log epoch, payload/index admission, and counter reservation with no projection snapshot.
+async fn allocate_push_epoch_blob_and_counters<L: AsyncLogStore>(
+    log: &L,
+    counters: &QueueCounters,
+    definition: &QueueDefinition,
+    request: &AsyncPushRequest,
+    node_id: u8,
+) -> EngineResult<(u64, Vec<PushItem>, Vec<ItemId>)> {
+    let epoch = crate::resolve_write_epoch_async(request.expected_epoch, || {
+        log.current_epoch(request.shard.clone())
+    })
+    .await?;
+    let base = counters.reserve(&request.shard, epoch, request.items.len() as u32);
+    let (mut items, item_ids) = build_push_items(
+        request.items.clone(),
+        epoch,
+        node_id,
+        base,
+        definition.retry_policy.max_attempts,
+    );
+    crate::admit_push_items_indexes(definition, &mut items)?;
+    Ok((epoch, items, item_ids))
+}
+
+/// Driver-snapshot validate-push plus pause/intake. Must not perform object-log I/O.
+async fn validate_push_driver_snapshot<P: AsyncProjectionStore>(
+    projection: &P,
+    shard: QueueKey,
+    items: Vec<PushItem>,
+    now: UtcTimestamp,
+) -> EngineResult<()> {
+    projection.validate_push(shard.clone(), items, now).await?;
+    if projection.pause_blocks_intake(shard).await? {
+        return Err(EngineError::Paused { drain_intake: true });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -156,6 +226,32 @@ mod tests {
         next_command: AtomicU64,
         replays: Mutex<HashMap<RequestId, (BodyHash, Vec<ItemId>)>>,
         validated: AtomicU64,
+        events: Mutex<Vec<&'static str>>,
+        snapshot_held: AtomicBool,
+        object_log_during_snapshot: AtomicBool,
+    }
+
+    impl TestAxes {
+        fn record(&self, event: &'static str) {
+            self.events.lock().unwrap().push(event);
+        }
+
+        fn record_object_log(&self, event: &'static str) {
+            if self.snapshot_held.load(Ordering::SeqCst) {
+                self.object_log_during_snapshot
+                    .store(true, Ordering::SeqCst);
+            }
+            self.record(event);
+        }
+
+        fn enter_snapshot(&self, event: &'static str) {
+            self.snapshot_held.store(true, Ordering::SeqCst);
+            self.record(event);
+        }
+
+        fn leave_snapshot(&self) {
+            self.snapshot_held.store(false, Ordering::SeqCst);
+        }
     }
 
     impl IdGen for TestAxes {
@@ -193,6 +289,7 @@ mod tests {
             ready(Err(EngineError::Unavailable))
         }
         fn current_epoch(&self, _shard: crate::QueueKey) -> Ready<EngineResult<u64>> {
+            self.record_object_log("current_epoch");
             ready(Ok(self.epoch))
         }
         fn acquire_epoch(&self, _shard: crate::QueueKey) -> Ready<EngineResult<u64>> {
@@ -218,7 +315,8 @@ mod tests {
             &self,
             _shard: crate::QueueKey,
         ) -> Ready<EngineResult<Option<CommandPosition>>> {
-            ready(Err(EngineError::Unavailable))
+            self.record_object_log("high_water");
+            ready(Ok(None))
         }
         fn set_high_water(
             &self,
@@ -246,10 +344,14 @@ mod tests {
             _items: Vec<crate::PushItem>,
             _now: UtcTimestamp,
         ) -> Ready<EngineResult<()>> {
+            self.enter_snapshot("validate_push");
             self.validated.fetch_add(1, Ordering::SeqCst);
+            self.leave_snapshot();
             ready(Ok(()))
         }
         fn pause_blocks_intake(&self, _shard: crate::QueueKey) -> Ready<EngineResult<bool>> {
+            self.enter_snapshot("pause_blocks_intake");
+            self.leave_snapshot();
             ready(Ok(false))
         }
         fn push_idempotency(
@@ -259,6 +361,7 @@ mod tests {
             fingerprint: PushFingerprint,
             _now: UtcTimestamp,
         ) -> Ready<EngineResult<IdempotencyDecision<Vec<ItemId>>>> {
+            self.enter_snapshot("push_idempotency");
             let decision = match self.replays.lock().unwrap().get(&request_id) {
                 None => IdempotencyDecision::Proceed,
                 Some((stored, ids)) if *stored == fingerprint.legacy_body_hash => {
@@ -266,6 +369,7 @@ mod tests {
                 }
                 Some(_) => IdempotencyDecision::Conflict,
             };
+            self.leave_snapshot();
             ready(Ok(decision))
         }
         fn apply_live(
@@ -420,6 +524,9 @@ mod tests {
             next_command: AtomicU64::new(0),
             replays: Mutex::new(HashMap::new()),
             validated: AtomicU64::new(0),
+            events: Mutex::new(Vec::new()),
+            snapshot_held: AtomicBool::new(false),
+            object_log_during_snapshot: AtomicBool::new(false),
         });
         let commits = Arc::new(AtomicU64::new(0));
         let planner = ProjectionPushPlanner::from_shared(
@@ -489,6 +596,9 @@ mod tests {
                 (legacy, vec![replayed_id]),
             )])),
             validated: AtomicU64::new(0),
+            events: Mutex::new(Vec::new()),
+            snapshot_held: AtomicBool::new(false),
+            object_log_during_snapshot: AtomicBool::new(false),
         });
         let commits = Arc::new(AtomicU64::new(0));
         let planner = ProjectionPushPlanner::from_shared(
@@ -526,5 +636,118 @@ mod tests {
         assert_eq!(replay.item_ids, vec![replayed_id]);
         assert_eq!(commits.load(Ordering::SeqCst), 0);
         assert_eq!(axes.validated.load(Ordering::SeqCst), 0);
+    }
+
+    fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let (_, tail) = source
+            .split_once(start)
+            .unwrap_or_else(|| panic!("missing start marker: {start}"));
+        let (body, _) = tail
+            .split_once(end)
+            .unwrap_or_else(|| panic!("missing end marker: {end}"));
+        body
+    }
+
+    #[test]
+    fn push_projection_snapshots_do_not_span_objectlog_io() {
+        let axes = Arc::new(TestAxes {
+            definition: definition(),
+            epoch: 7,
+            next_command: AtomicU64::new(0),
+            replays: Mutex::new(HashMap::new()),
+            validated: AtomicU64::new(0),
+            events: Mutex::new(Vec::new()),
+            snapshot_held: AtomicBool::new(false),
+            object_log_during_snapshot: AtomicBool::new(false),
+        });
+        let commits = Arc::new(AtomicU64::new(0));
+        let planner = ProjectionPushPlanner::from_shared(
+            axes.clone(),
+            axes.clone(),
+            axes.clone(),
+            axes.clone(),
+            Arc::new(QueueCounters::default()),
+            1,
+        );
+        let backend = AsyncComposedBackend::new_with_planners(
+            ApplyingStrategy {
+                axes: axes.clone(),
+                commits: commits.clone(),
+            },
+            InlineDispatcher::default(),
+            crate::NoAsyncClaimPlanner,
+            planner,
+            4,
+        );
+        let outcome = futures::executor::block_on(backend.push(AsyncPushRequest {
+            shard: crate::QueueKey::new(
+                TenantId::new("tenant").unwrap(),
+                QueueId::new("queue").unwrap(),
+            ),
+            request_id: Some(RequestId::new("request").unwrap()),
+            items: vec![PushSpec {
+                payload: Some(bytes::Bytes::from_static(b"one")),
+                ..PushSpec::default()
+            }],
+            now: UtcTimestamp::new(1, 0).unwrap(),
+            expected_epoch: Some(7),
+        }))
+        .unwrap();
+        assert!(outcome.is_fresh());
+        assert!(!axes.object_log_during_snapshot.load(Ordering::SeqCst));
+        assert_eq!(
+            *axes.events.lock().unwrap(),
+            [
+                "high_water",
+                "push_idempotency",
+                "current_epoch",
+                "validate_push",
+                "pause_blocks_intake",
+            ]
+        );
+
+        let source = include_str!("async_push_planner.rs");
+        let idempotency = between(
+            source,
+            "async fn resolve_push_idempotency_snapshot<",
+            "async fn allocate_push_epoch_blob_and_counters<",
+        );
+        assert!(idempotency.contains("wait_request_entry_high_water"));
+        assert!(idempotency.contains("push_idempotency"));
+        for needle in ["current_epoch", "counters.reserve", "validate_push"] {
+            assert!(
+                !idempotency.contains(needle),
+                "idempotency snapshot must release before epoch/blob/counter work ({needle})"
+            );
+        }
+
+        let allocate = between(
+            source,
+            "async fn allocate_push_epoch_blob_and_counters<",
+            "async fn validate_push_driver_snapshot<",
+        );
+        assert!(allocate.contains("current_epoch"));
+        assert!(allocate.contains("counters.reserve"));
+        assert!(allocate.contains("build_push_items"));
+        for needle in ["push_idempotency", "validate_push", "pause_blocks_intake"] {
+            assert!(
+                !allocate.contains(needle),
+                "epoch/blob/counter work must hold no projection snapshot ({needle})"
+            );
+        }
+
+        let driver = between(
+            source,
+            "async fn validate_push_driver_snapshot<",
+            "#[cfg(test)]",
+        );
+        assert!(driver.contains("validate_push"));
+        assert!(driver.contains("pause_blocks_intake"));
+        for needle in ["current_epoch", "high_water", "counters.reserve"] {
+            assert!(
+                !driver.contains(needle),
+                "driver snapshot must not span object-log I/O ({needle})"
+            );
+        }
     }
 }

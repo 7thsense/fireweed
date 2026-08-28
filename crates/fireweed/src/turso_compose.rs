@@ -29,15 +29,15 @@ use fireweed_engine::{
     HistoricalProjectionRead, HotProjectionQueryPort, IdGen, InProcessControlPlane,
     InProcessLogStore, IndexQueryPort, InlineOwnedTaskDispatcher, ItemMutationPort,
     ItemMutationRequest, ItemMutationResponse, ItemView, LeaseView, LiveItemView, LogStore,
-    OwnedTask, PendingPage, PendingSummary, PreparedClaim, PreparedFinalize, PreparedPush,
-    ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead,
-    ProjectionReclaimPlanner, ProjectionSnapshot, PurgePort, PushPort, PushSpec, QueueCommand,
-    QueueCounters, QueueGateError, QueueKey, QueueMetrics, RawCommitFault, RawCommitOutcome,
-    RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RenewLeasePort, RenewTarget, SeparateReplayCommit, SeparateReplayCommitter, SeqIdGen,
-    SetGatesPort, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
-    UnifiedAtomicCommit, UnifiedAtomicCommitter, UpdateFieldsBatchCommand, UpdateFieldsPort,
-    UpsertOutcome, UpsertPort,
+    OwnedTask, PendingPage, PendingSummary, PreparedClaim, PreparedFinalize,
+    PreparedMutationGeneration, PreparedPush, ProjectionClaimPlanner, ProjectionLifecyclePlanner,
+    ProjectionPushPlanner, ProjectionRead, ProjectionReclaimPlanner, ProjectionSnapshot, PurgePort,
+    PushPort, PushSpec, QueueCommand, QueueCounters, QueueGateError, QueueKey, QueueMetrics,
+    RawCommitFault, RawCommitOutcome, RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort,
+    ReclaimDriver, ReclaimPort, RenewLeasePort, RenewTarget, SeparateReplayCommit,
+    SeparateReplayCommitter, SeqIdGen, SetGatesPort, SnapshotRef, SnapshotStore,
+    TerminalEmissionMetrics, TickReport, UnifiedAtomicCommit, UnifiedAtomicCommitter,
+    UpdateFieldsBatchCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
 };
 use fireweed_projection::InMemoryProjection;
 use fireweed_turso::{TursoConfig, TursoRelational, claimed_from_class_s};
@@ -160,6 +160,34 @@ fn map_lifecycle(error: AsyncLifecycleError) -> EngineError {
 #[allow(dead_code)]
 fn finish_retained_grouped_cohort_response(claimed: Claimed) -> EngineResult<Claimed> {
     Ok(claimed)
+}
+
+/// Inert S3q co-seal after the shared slot/connection is released. Serving stays per-request until S3c.
+#[allow(dead_code)]
+fn finish_inert_mutation_generation_append(
+    generation: PreparedMutationGeneration<
+        QueueKey,
+        fireweed_engine::MutationSequencerKey,
+        fireweed_engine::MutationGenerationWork,
+    >,
+) -> EngineResult<Vec<RawCommitRequest>> {
+    debug_assert!(generation.slot_and_connection_released);
+    Ok(generation
+        .members
+        .into_iter()
+        .filter_map(|member| match member.outcome {
+            fireweed_engine::MutationGenerationMemberOutcome::Push(PreparedPush::Commit {
+                request,
+                ..
+            }) => Some(request),
+            fireweed_engine::MutationGenerationMemberOutcome::BatchUpdate { request, .. }
+            | fireweed_engine::MutationGenerationMemberOutcome::Singleton { request } => {
+                Some(request)
+            }
+            fireweed_engine::MutationGenerationMemberOutcome::Push(PreparedPush::Replay(_))
+            | fireweed_engine::MutationGenerationMemberOutcome::Rejected(_) => None,
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -450,6 +478,183 @@ mod contention_mapping_tests {
                 "post-apply continuation must need no projection handle ({needle})"
             );
         }
+    }
+
+    #[test]
+    fn push_and_mutation_generations_stay_inert_on_serving_paths() {
+        use std::collections::HashSet;
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        use fireweed_engine::{
+            CommandChecksum, CommandEnvelope, CommandId, MutationDriverSnapshot,
+            MutationGenerationKind, MutationGenerationWork, MutationIngress, MutationSequencer,
+            MutationSequencerKey, PushCommand, PushFingerprint, PushItem, PushSpec, QueueCommand,
+            RequestOutcome, abort_unplanned_generation_on_deadline,
+            retain_sequencer_after_slot_release, validate_inert_mutation_generation,
+        };
+
+        let compose_file = include_str!("turso_compose.rs");
+        let (_, production) = compose_file
+            .rsplit_once("// Atomic log-replay × Turso")
+            .expect("production Turso composition boundary");
+        assert!(
+            production.contains("self.engine.push(request).await.map_err(map_push)"),
+            "atomic products keep native push"
+        );
+        assert!(production.contains("self.engine.prepare_push(request).await.map_err(map_push)?"));
+        let atomic_push = between(
+            production,
+            "self.engine.push(request).await.map_err(map_push)",
+            "async fn dispatch_claim(",
+        );
+        assert!(!atomic_push.contains("validate_inert_mutation_generation"));
+        assert!(!atomic_push.contains("SharedDriverReadAdmission"));
+        assert!(!atomic_push.contains("SelectionFence"));
+        let derived_push = between(
+            production,
+            "self.engine.prepare_push(request).await.map_err(map_push)?",
+            "async fn dispatch_claim(",
+        );
+        assert!(!derived_push.contains("validate_inert_mutation_generation"));
+        assert!(!derived_push.contains("SharedDriverReadAdmission"));
+        assert!(!derived_push.contains("SelectionFence"));
+
+        let helper = between(
+            compose_file,
+            "fn finish_inert_mutation_generation_append(",
+            "#[cfg(test)]",
+        );
+        assert!(helper.contains("slot_and_connection_released"));
+        for needle in ["self.projection", "self.engine.push", "borrow_outcome"] {
+            assert!(
+                !helper.contains(needle),
+                "inert generation append must not take serving I/O ({needle})"
+            );
+        }
+
+        let shard = QueueKey::new(TenantId::new("t").unwrap(), QueueId::new("q").unwrap());
+        let spec = PushSpec {
+            client_item_key: Some(ClientItemKey::new("k").unwrap()),
+            ..PushSpec::default()
+        };
+        let request = AsyncPushRequest {
+            shard: shard.clone(),
+            request_id: Some(RequestId::new("r1").unwrap()),
+            items: vec![spec.clone()],
+            now: UtcTimestamp::new(1, 0).unwrap(),
+            expected_epoch: Some(1),
+        };
+        let item_id = ItemId::mint(1, 1, 1);
+        let item = PushItem {
+            client_item_key: ClientItemKey::new("k").unwrap(),
+            item_id,
+            priority: None,
+            not_before: None,
+            group_key: None,
+            max_attempts: 3,
+            payload: None,
+            fields: BTreeMap::new(),
+            metadata: Metadata::default(),
+            cohort_size: None,
+            gate_keys: Vec::new(),
+            index_fields: BTreeMap::new(),
+            entity_document: None,
+        };
+        let envelope = CommandEnvelope {
+            command_id: CommandId::new("push-1"),
+            request_id: request.request_id.clone(),
+            request_fingerprint: Some(1),
+            request_outcome: Some(RequestOutcome::Push {
+                item_ids: vec![item_id],
+            }),
+            item_ids: vec![item_id],
+            command: QueueCommand::Push(PushCommand {
+                items: vec![item.clone()],
+            }),
+            checksum: CommandChecksum(0),
+            created_at: request.now,
+        };
+        let work = MutationGenerationWork::Push {
+            fingerprint: Some(PushFingerprint {
+                canonical_sha256: [1; 32],
+                legacy_body_hash: fireweed_core::BodyHash(1),
+            }),
+            request,
+            commit: RawCommitRequest::new(shard.clone(), vec![envelope], 1),
+            item_ids: vec![item_id],
+            items: vec![item],
+        };
+        let snapshot = MutationDriverSnapshot {
+            definition: QueueDefinition {
+                tenant_id: TenantId::new("t").unwrap(),
+                queue_id: QueueId::new("q").unwrap(),
+                priority_model: fireweed_core::PriorityModel::timestamp_ascending(),
+                ordering_mode: fireweed_core::OrderingMode::Strict,
+                max_rank_error: 0,
+                progress_bound_ms: 60_000,
+                eligibility_policy: fireweed_core::EligibilityPolicy::default(),
+                cohort_policy: None,
+                recurrence: fireweed_core::RecurrencePolicy::default(),
+                request_id_retention_ms: 60_000,
+                client_item_key_retention_ms: 60_000,
+                terminal_retention_ms: 60_000,
+                max_lease_duration_ms: 60_000,
+                retry_policy: fireweed_core::RetryPolicy { max_attempts: 3 },
+                max_push_batch_size: 100,
+                max_claim_batch_size: 100,
+                max_eligible_group_size: None,
+                secondary_indexes: Vec::new(),
+                entity_schema: None,
+                typed_indexes: Vec::new(),
+                emit_change_records: false,
+            },
+            paused_drain_intake: false,
+            client_keys: HashSet::new(),
+            request_fingerprints: std::collections::HashMap::new(),
+            unique_index_values: HashSet::new(),
+            group_counts: std::collections::HashMap::new(),
+            batch_items: Vec::new(),
+        };
+        let sequencer =
+            MutationSequencer::<QueueKey, MutationSequencerKey, MutationGenerationWork>::new();
+        let ticket = sequencer
+            .admit(
+                shard.clone(),
+                MutationSequencerKey::Compatible(MutationGenerationKind::Push),
+                MutationIngress::Direct,
+                Arc::new(work.clone()),
+                1,
+                1,
+            )
+            .expect("admit");
+        let generation = sequencer.start_generation(&shard).expect("start");
+        let members = validate_inert_mutation_generation(&snapshot, std::slice::from_ref(&work))
+            .expect("overlay");
+        drop(ticket);
+        let prepared = retain_sequencer_after_slot_release(members, generation);
+        let commits = finish_inert_mutation_generation_append(prepared).expect("co-seal carrier");
+        assert_eq!(commits.len(), 1);
+        let expired = abort_unplanned_generation_on_deadline(
+            Vec::<
+                fireweed_engine::MutationTicket<
+                    QueueKey,
+                    MutationSequencerKey,
+                    MutationGenerationWork,
+                >,
+            >::new(),
+            Instant::now() - Duration::from_secs(1),
+            Duration::ZERO,
+        );
+        let Err(error) = expired else {
+            panic!("queued generation deadline must reject");
+        };
+        assert_eq!(
+            error,
+            EngineError::Backpressure {
+                resource: "mutation sequencer wait",
+            }
+        );
     }
 }
 

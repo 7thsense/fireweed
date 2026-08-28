@@ -36,10 +36,11 @@ pub const CLAIM_DRIVER_SLOTS_RESOURCE: &str = "claim driver read slots";
 pub const SHARED_DRIVER_SLOTS_RESOURCE: &str = "shared driver read slots";
 pub const OUTCOME_READ_SLOTS_RESOURCE: &str = "committed outcome read slots";
 pub const MUTATION_SEQUENCER_RESOURCE: &str = "mutation sequencer capacity";
+pub const MUTATION_SEQUENCER_WAIT_RESOURCE: &str = "mutation sequencer wait";
 pub const SELECTION_FENCE_WAITERS_RESOURCE: &str = "selection fence waiters";
 
 /// Compatible microbatch overlays currently have exactly the two reviewed FIFO shapes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MutationGenerationKind {
     Push,
     BatchUpdate,
@@ -1228,7 +1229,8 @@ where
                 .get(&queue)
                 .and_then(|entry| entry.generations.back())
                 .is_some_and(|generation| {
-                    generation.compatibility == compatibility
+                    !generation.active
+                        && generation.compatibility == compatibility
                         && generation.requests.len() < CLAIM_GENERATION_MAX_REQUESTS
                         && generation.items.saturating_add(items) <= GENERATION_MAX_ITEMS
                         && generation.response_bytes.saturating_add(response_bytes)
@@ -3149,6 +3151,38 @@ mod tests {
         drop((first, second));
         sequencer.close();
         assert_eq!(sequencer.request_count(&"q"), 0);
+    }
+
+    #[test]
+    fn queued_generation_does_not_join_active_and_retries_at_fifo_tail() {
+        let sequencer = MutationSequencer::<&'static str, u8, u8>::new();
+        let active_tickets = (0..3)
+            .map(|index| {
+                sequencer
+                    .admit("q", 1, MutationIngress::Direct, Arc::new(index), 1, 1)
+                    .expect("compatible prefix")
+            })
+            .collect::<Vec<_>>();
+        let active = sequencer
+            .start_generation(&"q")
+            .expect("front generation elected");
+        assert_eq!(sequencer.generation_count(&"q"), 1);
+        let queued = sequencer
+            .admit("q", 1, MutationIngress::Direct, Arc::new(9), 1, 1)
+            .expect("queued generation after active");
+        assert_eq!(sequencer.generation_count(&"q"), 2);
+        assert_ne!(queued.generation_id(), active_tickets[0].generation_id());
+        drop(queued);
+        assert_eq!(sequencer.generation_count(&"q"), 1);
+        let retry = sequencer
+            .admit("q", 1, MutationIngress::Direct, Arc::new(9), 1, 1)
+            .expect("retry rejoins FIFO tail");
+        assert_eq!(sequencer.generation_count(&"q"), 2);
+        assert_ne!(retry.generation_id(), active_tickets[0].generation_id());
+        drop(retry);
+        drop(active_tickets);
+        active.complete();
+        assert_eq!(sequencer.generation_count(&"q"), 0);
     }
 
     #[test]
