@@ -63,7 +63,7 @@ postgres = ["dep:fireweed-postgres", "dep:tokio"]
 turso = ["dep:fireweed-turso", "fireweed-turso/local", "dep:tokio", "dep:fireweed-projection"]
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros", "time"] }
+tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread", "time", "sync"] }
 # product_validation_tests (AC-E2E-* product workflows) emit verification-ledger rows.
 fireweed-release = { path = "../fireweed-release" }
 serde_json = "1"
@@ -74,6 +74,11 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 [[test]]
 name = "ss_phased_capacity"
 path = "tests/ss_phased_capacity.rs"
+required-features = ["objectlog"]
+
+[[test]]
+name = "ss_streaming"
+path = "tests/ss_streaming.rs"
 required-features = ["objectlog"]
 
 [[test]]
