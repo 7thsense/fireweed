@@ -155,6 +155,13 @@ fn map_lifecycle(error: AsyncLifecycleError) -> EngineError {
     }
 }
 
+/// Inert S3g post-apply send of a pre-materialized grouped/cohort envelope.
+/// Serving still uses `dispatch_claim_legacy` until S3c selects this carrier.
+#[allow(dead_code)]
+fn finish_retained_grouped_cohort_response(claimed: Claimed) -> EngineResult<Claimed> {
+    Ok(claimed)
+}
+
 #[cfg(test)]
 mod contention_mapping_tests {
     use super::*;
@@ -321,6 +328,128 @@ mod contention_mapping_tests {
         );
         assert!(finalize.contains("AppendAdmissionClass::Bypass"));
         assert!(finalize.contains("AppendAdmissionClass::SelectionRequired"));
+    }
+
+    #[test]
+    fn grouped_cohort_claim_materializes_before_append() {
+        use std::collections::BTreeMap;
+
+        use fireweed_core::{ClientItemKey, CohortId, GroupKey, MetadataValue, TenantId, WorkerId};
+        use fireweed_engine::{
+            ClaimedItem, PreparedClaimedResult, QueueKey, finish_retained_grouped_cohort_claim,
+        };
+
+        let request = ClaimRequest {
+            shard: QueueKey::new(TenantId::new("t").unwrap(), QueueId::new("q").unwrap()),
+            worker_id: WorkerId::new("worker").unwrap(),
+            max_items: 2,
+            lease_token: LeaseToken::new("token-grouped").unwrap(),
+            lease_expires_at: UtcTimestamp::new(20, 0).unwrap(),
+            now: UtcTimestamp::new(10, 0).unwrap(),
+            eligibility_time: None,
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: Some(1),
+        };
+        let first = ItemId::mint(1, 1, 1);
+        let second = ItemId::mint(1, 1, 2);
+        let item = |id: ItemId, seq: u8| ClaimedItem {
+            item_id: id,
+            client_item_key: ClientItemKey::new(format!("key-{id}")).unwrap(),
+            item_version: 2,
+            priority: Some(PriorityValue::Int64(7)),
+            group_key: Some(GroupKey::new("group-a").unwrap()),
+            not_before: Some(UtcTimestamp::new(7, 0).unwrap()),
+            lease_token: Some(request.lease_token.clone()),
+            lease_expires_at: request.lease_expires_at,
+            attempt_count: 3,
+            max_attempts: 9,
+            payload: Some(Bytes::from_static(b"\xCA\xFE")),
+            fields: BTreeMap::from([("blob".to_string(), Bytes::from(vec![seq, 2, 3]))]),
+            metadata: Metadata::from_entries(BTreeMap::from([(
+                "source".to_string(),
+                MetadataValue::String("grouped".to_string()),
+            )])),
+            gate_keys: vec!["gate-satisfied".to_string()],
+            entity: Some(serde_json::json!({"kind": "stored", "rank": 7})),
+        };
+        let items = vec![item(first, 1), item(second, 2)];
+        let grouped =
+            PreparedClaimedResult::from_rendered(&request, &[first, second], items.clone(), None)
+                .expect("grouped retained");
+        let claimed = finish_retained_grouped_cohort_response(grouped.into_claimed())
+            .expect("post-apply continuation");
+        assert_eq!(claimed.items.len(), 2);
+        assert_eq!(claimed.items[0].item_id, first);
+        assert_eq!(claimed.items[1].item_id, second);
+        assert_eq!(claimed.items[0].payload, items[0].payload);
+        assert_eq!(claimed.items[0].fields, items[0].fields);
+        assert_eq!(claimed.items[0].metadata, items[0].metadata);
+        assert_eq!(claimed.items[0].entity, items[0].entity);
+        assert_eq!(claimed.items[0].gate_keys, items[0].gate_keys);
+        assert_eq!(claimed.items[0].not_before, items[0].not_before);
+        assert_eq!(
+            claimed.items[0].lease_token.as_ref(),
+            Some(&request.lease_token)
+        );
+        assert!(claimed.cohort_id.is_none());
+
+        let mut cohort_request = request.clone();
+        cohort_request.compatibility.whole_cohort = true;
+        let cohort_id = CohortId::new("coh:group-a:10000000000").unwrap();
+        let shaped = finish_retained_grouped_cohort_claim(
+            &cohort_request,
+            &[first, second],
+            items,
+            Some(cohort_id.clone()),
+        )
+        .expect("cohort shape");
+        let continued = finish_retained_grouped_cohort_response(
+            PreparedClaimedResult::Retained(shaped).into_claimed(),
+        )
+        .expect("cohort continuation");
+        assert!(
+            continued
+                .items
+                .iter()
+                .all(|item| item.lease_token.is_none())
+        );
+        assert_eq!(
+            continued.cohort_lease_token.as_ref(),
+            Some(&cohort_request.lease_token)
+        );
+        assert_eq!(continued.cohort_id.as_ref(), Some(&cohort_id));
+
+        let compose_file = include_str!("turso_compose.rs");
+        let (preamble, production) = compose_file
+            .rsplit_once("// Atomic log-replay × Turso")
+            .expect("production Turso composition boundary");
+        assert!(
+            production.contains("return self.dispatch_claim_legacy(request).await;"),
+            "existing serving must keep grouped/cohort on dispatch_claim_legacy until S3c"
+        );
+        let legacy = between(
+            production,
+            "async fn dispatch_claim_legacy(&self, request: ClaimRequest) -> EngineResult<Claimed>",
+            "async fn dispatch_finalize(",
+        );
+        assert!(
+            legacy.contains("render_prepared_claim(request, item_ids, cohort_id)"),
+            "legacy grouped/cohort serving must keep post-append render_prepared_claim until S3c"
+        );
+        assert!(!legacy.contains("PreparedClaimedResult"));
+        assert!(!legacy.contains("finish_retained_grouped_cohort_response"));
+        let continuation = between(
+            preamble,
+            "fn finish_retained_grouped_cohort_response(",
+            "#[cfg(test)]",
+        );
+        assert!(continuation.contains("Ok(claimed)"));
+        for needle in ["render_claimed", "render_prepared_claim", "self.projection"] {
+            assert!(
+                !continuation.contains(needle),
+                "post-apply continuation must need no projection handle ({needle})"
+            );
+        }
     }
 }
 

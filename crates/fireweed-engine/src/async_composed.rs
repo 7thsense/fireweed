@@ -182,6 +182,48 @@ pub enum PreparedClaim {
     },
 }
 
+/// Inert grouped/cohort full-row result retained through append.
+///
+/// Serving still renders after apply via [`AsyncComposedBackend::render_prepared_claim`] until S3c
+/// selects this carrier with committed driver pools.
+#[derive(Debug, Clone)]
+pub enum PreparedClaimedResult {
+    Empty,
+    Retained(Claimed),
+}
+
+impl PreparedClaimedResult {
+    pub fn empty() -> Self {
+        Self::Empty
+    }
+
+    /// Materialize a retained grouped/cohort response from already-rendered full rows.
+    ///
+    /// Validates count/order/token/expiry, then applies cohort shaping. The caller supplies the
+    /// snapshot rows; this constructor takes no projection handle.
+    pub fn from_rendered(
+        request: &ClaimRequest,
+        item_ids: &[ItemId],
+        items: Vec<ClaimedItem>,
+        cohort_id: Option<CohortId>,
+    ) -> EngineResult<Self> {
+        if item_ids.is_empty() {
+            return Ok(Self::Empty);
+        }
+        Ok(Self::Retained(finish_retained_grouped_cohort_claim(
+            request, item_ids, items, cohort_id,
+        )?))
+    }
+
+    /// Post-apply continuation: return the retained envelope with no projection read.
+    pub fn into_claimed(self) -> Claimed {
+        match self {
+            Self::Empty => Claimed::default(),
+            Self::Retained(claimed) => claimed,
+        }
+    }
+}
+
 /// Finalize plan after queue-local admission, before the durable append.
 pub struct PreparedFinalize {
     pub request: RawCommitRequest,
@@ -2093,19 +2135,33 @@ async fn finish_rendered_claim<P: AsyncClaimPlanner>(
     cohort_id: Option<CohortId>,
 ) -> Result<Claimed, ClaimExecutionError> {
     let queue = request.shard.clone();
-    let mut items = planner
+    let items = planner
         .render_claimed(queue, item_ids.clone())
         .await
         .map_err(|source| ClaimExecutionError::AfterCommit {
             stage: AsyncClaimPostCommitStage::Render,
             source,
         })?;
-    validate_rendered_claim(&request, &item_ids, &items).map_err(|source| {
+    finish_retained_grouped_cohort_claim(&request, &item_ids, items, cohort_id).map_err(|source| {
         ClaimExecutionError::AfterCommit {
             stage: AsyncClaimPostCommitStage::RenderValidation,
             source,
         }
-    })?;
+    })
+}
+
+/// Finish a grouped/cohort Claim from already-materialized full rows.
+///
+/// Preserves [`validate_rendered_claim`] count/order and per-item token/expiry equality, then
+/// shapes a whole-cohort envelope by stripping per-item tokens. Post-apply continuation uses the
+/// returned [`Claimed`] and needs no projection handle.
+pub fn finish_retained_grouped_cohort_claim(
+    request: &ClaimRequest,
+    item_ids: &[ItemId],
+    mut items: Vec<ClaimedItem>,
+    cohort_id: Option<CohortId>,
+) -> EngineResult<Claimed> {
+    validate_rendered_claim(request, item_ids, &items)?;
     let mut claimed = Claimed {
         items: Vec::new(),
         cohort_lease_token: None,
@@ -2115,7 +2171,7 @@ async fn finish_rendered_claim<P: AsyncClaimPlanner>(
         for item in &mut items {
             item.lease_token = None;
         }
-        claimed.cohort_lease_token = Some(request.lease_token);
+        claimed.cohort_lease_token = Some(request.lease_token.clone());
         claimed.cohort_id = Some(cohort_id);
     }
     claimed.items = items;
@@ -2264,9 +2320,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     use fireweed_core::{
-        ClientItemKey, CohortId, EligibilityPolicy, ItemId, LeaseToken, Metadata, OrderingMode,
-        PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, QueueDefinition,
-        QueueId, RecurrencePolicy, RequestId, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
+        ClientItemKey, CohortId, EligibilityPolicy, GroupKey, ItemId, LeaseToken, Metadata,
+        MetadataValue, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
+        PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, RecurrencePolicy, RequestId,
+        RetryPolicy, TenantId, UtcTimestamp, WorkerId,
     };
 
     use super::*;
@@ -4413,6 +4470,124 @@ mod tests {
         wrong.lease_token = Some(LeaseToken::new("wrong").unwrap());
         assert!(validate_rendered_claim(&request, &[item_id], &[wrong]).is_err());
         assert!(validate_rendered_claim(&request, &[item_id], &[]).is_err());
+    }
+
+    fn full_row_claimed_item(request: &ClaimRequest, item_id: ItemId, seq: u8) -> ClaimedItem {
+        let mut fields = BTreeMap::new();
+        fields.insert("blob".to_string(), bytes::Bytes::from(vec![seq, 2, 3]));
+        ClaimedItem {
+            item_id,
+            client_item_key: ClientItemKey::new(format!("key-{item_id}")).unwrap(),
+            item_version: 2,
+            priority: Some(PriorityValue::Int64(7)),
+            group_key: Some(GroupKey::new("group-a").unwrap()),
+            not_before: Some(UtcTimestamp::new(7, 0).unwrap()),
+            lease_token: Some(request.lease_token.clone()),
+            lease_expires_at: request.lease_expires_at,
+            attempt_count: 3,
+            max_attempts: 9,
+            payload: Some(bytes::Bytes::from_static(b"\xCA\xFE")),
+            fields,
+            metadata: Metadata::from_entries(BTreeMap::from([
+                (
+                    "source".to_string(),
+                    MetadataValue::String("grouped".to_string()),
+                ),
+                ("attempt".to_string(), MetadataValue::Integer(7)),
+            ])),
+            gate_keys: vec!["gate-satisfied".to_string()],
+            entity: Some(serde_json::json!({"kind": "stored", "rank": 7})),
+        }
+    }
+
+    #[test]
+    fn grouped_cohort_claim_materializes_before_append() {
+        let grouped = claim_request("grouped");
+        let first = ItemId::mint(1, 1, 1);
+        let second = ItemId::mint(1, 1, 2);
+        let grouped_items = vec![
+            full_row_claimed_item(&grouped, first, 1),
+            full_row_claimed_item(&grouped, second, 2),
+        ];
+        validate_rendered_claim(&grouped, &[first, second], &grouped_items).expect("pre-shape");
+        let retained = PreparedClaimedResult::from_rendered(
+            &grouped,
+            &[first, second],
+            grouped_items.clone(),
+            None,
+        )
+        .expect("grouped retained");
+        let claimed = retained.into_claimed();
+        assert_eq!(claimed.items.len(), 2);
+        assert_eq!(claimed.items[0].item_id, first);
+        assert_eq!(claimed.items[1].item_id, second);
+        assert_eq!(claimed.items[0].payload, grouped_items[0].payload);
+        assert_eq!(claimed.items[0].fields, grouped_items[0].fields);
+        assert_eq!(claimed.items[0].metadata, grouped_items[0].metadata);
+        assert_eq!(claimed.items[0].entity, grouped_items[0].entity);
+        assert_eq!(claimed.items[0].gate_keys, grouped_items[0].gate_keys);
+        assert_eq!(claimed.items[0].not_before, grouped_items[0].not_before);
+        assert_eq!(
+            claimed.items[0].lease_token.as_ref(),
+            Some(&grouped.lease_token)
+        );
+        assert_eq!(claimed.items[0].lease_expires_at, grouped.lease_expires_at);
+        assert!(claimed.cohort_lease_token.is_none());
+        assert!(claimed.cohort_id.is_none());
+
+        let mut cohort_request = grouped.clone();
+        cohort_request.compatibility.whole_cohort = true;
+        let cohort_id = CohortId::new("coh:group-a:10000000000").unwrap();
+        let shaped = finish_retained_grouped_cohort_claim(
+            &cohort_request,
+            &[first, second],
+            grouped_items,
+            Some(cohort_id.clone()),
+        )
+        .expect("cohort shape");
+        assert_eq!(shaped.items.len(), 2);
+        assert_eq!(shaped.items[0].item_id, first);
+        assert_eq!(shaped.items[1].item_id, second);
+        assert!(shaped.items.iter().all(|item| item.lease_token.is_none()));
+        assert_eq!(
+            shaped.cohort_lease_token.as_ref(),
+            Some(&cohort_request.lease_token)
+        );
+        assert_eq!(shaped.cohort_id.as_ref(), Some(&cohort_id));
+        let continued = PreparedClaimedResult::Retained(shaped).into_claimed();
+        assert_eq!(continued.cohort_id.as_ref(), Some(&cohort_id));
+
+        let source = include_str!("async_composed.rs");
+        let retained_helper = source
+            .split("pub fn finish_retained_grouped_cohort_claim(")
+            .nth(1)
+            .expect("retained helper")
+            .split("enum ClaimExecutionError")
+            .next()
+            .expect("retained helper end");
+        for needle in [
+            "render_claimed",
+            "AsyncClaimPlanner",
+            "AsyncProjectionStore",
+            "planner",
+        ] {
+            assert!(
+                !retained_helper.contains(needle),
+                "post-apply continuation must need no projection handle ({needle})"
+            );
+        }
+        let serving = source
+            .split("pub async fn claim(")
+            .nth(1)
+            .expect("serving claim")
+            .split("pub async fn prepare_claim(")
+            .next()
+            .expect("serving claim end");
+        assert!(
+            serving.contains("finish_rendered_claim(planner, request, item_ids, cohort_id)"),
+            "existing serving must keep post-append render until S3c"
+        );
+        assert!(!serving.contains("PreparedClaimedResult"));
     }
 
     #[derive(Clone)]
