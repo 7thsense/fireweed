@@ -1815,6 +1815,51 @@ mod serde_tests {
     }
 
     #[test]
+    fn mixed_finalize_vector_takes_maximum_fence_disposition() {
+        let complete_only = QueueCommand::Finalize(FinalizeCommand {
+            outcomes: vec![FinalizeOutcome {
+                item_id: iid("a"),
+                kind: FinalizeKind::Complete,
+                applied_state: Some(ItemState::Complete),
+                not_before: None,
+            }],
+        });
+        let complete_and_retry = QueueCommand::Finalize(FinalizeCommand {
+            outcomes: vec![
+                FinalizeOutcome {
+                    item_id: iid("a"),
+                    kind: FinalizeKind::Complete,
+                    applied_state: Some(ItemState::Complete),
+                    not_before: None,
+                },
+                FinalizeOutcome {
+                    item_id: iid("b"),
+                    kind: FinalizeKind::Retry,
+                    applied_state: Some(ItemState::Pending),
+                    not_before: Some(ts(5)),
+                },
+            ],
+        });
+
+        assert_eq!(
+            selection_fence_disposition(&complete_only),
+            SelectionFenceDisposition::Bypass
+        );
+        assert_eq!(
+            selection_fence_disposition(&complete_and_retry),
+            SelectionFenceDisposition::Shared
+        );
+        assert_eq!(
+            selection_fence_disposition_for_commands([&complete_only, &complete_and_retry]),
+            SelectionFenceDisposition::Shared
+        );
+        assert_eq!(
+            selection_fence_disposition_for_commands([&complete_and_retry, &complete_only]),
+            SelectionFenceDisposition::Shared
+        );
+    }
+
+    #[test]
     fn nested_schedule_payload_item_and_gate_actions_are_explicitly_shared() {
         for payload in [
             PayloadUpdate::Keep,

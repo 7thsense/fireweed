@@ -548,6 +548,7 @@ pub struct TursoRelational {
     pub(crate) live_tokens: Arc<Mutex<BTreeMap<(QueueKey, ItemId), LeaseToken>>>,
     pub(crate) live_tokens_by_consumer: Arc<Mutex<ConsumerLeaseIndex>>,
     pub(crate) last_batch_update_shape: Arc<StdMutex<Option<TursoBatchUpdateStatementShape>>>,
+    pub(crate) last_apply_statement_shape: Arc<StdMutex<Option<TursoBatchUpdateStatementShape>>>,
     pub(crate) last_apply_phase: Arc<StdMutex<Option<TursoApplyPhaseObservation>>>,
     pub(crate) claim_scan_hints: Arc<StdMutex<std::collections::HashMap<QueueKey, i64>>>,
     pub(crate) claim_scan_default_fifo: Arc<StdMutex<std::collections::HashMap<QueueKey, bool>>>,
@@ -604,6 +605,7 @@ impl TursoRelational {
             live_tokens: Arc::new(Mutex::new(BTreeMap::new())),
             live_tokens_by_consumer: Arc::new(Mutex::new(BTreeMap::new())),
             last_batch_update_shape: Arc::new(StdMutex::new(None)),
+            last_apply_statement_shape: Arc::new(StdMutex::new(None)),
             last_apply_phase: Arc::new(StdMutex::new(None)),
             claim_scan_hints: Arc::new(StdMutex::new(std::collections::HashMap::new())),
             claim_scan_default_fifo: Arc::new(StdMutex::new(std::collections::HashMap::new())),
@@ -1006,6 +1008,14 @@ impl TursoRelational {
             .last_batch_update_shape
             .lock()
             .expect("Turso statement-shape mutex poisoned")
+    }
+
+    /// Most recent live apply statement trace, including coalesced Claim/Complete vectors.
+    pub fn last_apply_statement_shape(&self) -> Option<TursoBatchUpdateStatementShape> {
+        *self
+            .last_apply_statement_shape
+            .lock()
+            .expect("Turso apply statement-shape mutex poisoned")
     }
 
     /// Most recent writer/apply phase timings, used by qualification evidence.

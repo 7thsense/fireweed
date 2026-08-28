@@ -1472,6 +1472,7 @@ async fn apply_owned(
     live_tokens: Arc<Mutex<BTreeMap<(QueueKey, ItemId), LeaseToken>>>,
     live_tokens_by_consumer: Arc<Mutex<ConsumerLeaseIndex>>,
     last_batch_update_shape: Arc<std::sync::Mutex<Option<TursoBatchUpdateStatementShape>>>,
+    last_apply_statement_shape: Arc<std::sync::Mutex<Option<TursoBatchUpdateStatementShape>>>,
     last_apply_phase: Arc<std::sync::Mutex<Option<TursoApplyPhaseObservation>>>,
     grouped_shards_slot: Arc<std::sync::Mutex<HashSet<QueueKey>>>,
     claim_scan_hints_slot: Arc<std::sync::Mutex<HashMap<QueueKey, i64>>>,
@@ -1486,14 +1487,18 @@ async fn apply_owned(
     }
     let api001_updates = collect_api001_updates(&commands);
     let api001_updates = api001_updates.filter(|updates| !updates.is_empty());
-    let statement_shape = api001_updates.as_ref().map(|updates| {
-        Arc::new(std::sync::Mutex::new(TursoBatchUpdateStatementShape::new(
-            updates.len(),
-        )))
-    });
+    let statement_shape = Arc::new(std::sync::Mutex::new(TursoBatchUpdateStatementShape::new(
+        api001_updates
+            .as_ref()
+            .map(|updates| updates.len())
+            .unwrap_or(commands.len()),
+    )));
     *last_batch_update_shape
         .lock()
         .expect("Turso statement-shape mutex poisoned") = None;
+    *last_apply_statement_shape
+        .lock()
+        .expect("Turso apply statement-shape mutex poisoned") = None;
     let writer_wait_started = Instant::now();
     let mut connection = writer.lock().await;
     let writer_wait_us = duration_us(writer_wait_started.elapsed());
@@ -1529,7 +1534,7 @@ async fn apply_owned(
             let floor = match floors.get(&position.queue) {
                 Some(floor) => *floor,
                 None => {
-                    record_statement(statement_shape.as_ref(), sql::SELECT_CURSOR, 2);
+                    record_statement(Some(&statement_shape), sql::SELECT_CURSOR, 2);
                     let row = one_row(
                         &transaction,
                         sql::SELECT_CURSOR,
@@ -1562,7 +1567,7 @@ async fn apply_owned(
     }
     for position in &positions {
         if !queues.contains_key(&position.queue) {
-            record_statement(statement_shape.as_ref(), sql::SELECT_QUEUE_DEFINITION, 2);
+            record_statement(Some(&statement_shape), sql::SELECT_QUEUE_DEFINITION, 2);
             let definition = definition_in_transaction(&transaction, &position.queue).await?;
             queues.insert(position.queue.clone(), definition);
         }
@@ -1571,40 +1576,25 @@ async fn apply_owned(
     let hop_txn = transaction.clone();
     let rel_phases = Arc::new(std::sync::Mutex::new(RelApplyPhaseTotals::default()));
     let rel_phases_for_hop = Arc::clone(&rel_phases);
-    let statement_shape_for_hop = statement_shape.clone();
+    let statement_shape_for_hop = Arc::clone(&statement_shape);
     let relational_started = Instant::now();
     let relational_result = crate::tx::run_reltx_blocking(move || {
-        let applied = if let Some(statement_shape) = statement_shape_for_hop {
-            let rel = ObservedTursoRel {
-                inner: crate::tx::TursoRel(&hop_txn),
-                statement_shape: Some(statement_shape),
-                phases: rel_phases_for_hop,
-            };
-            fireweed_relational::apply_committed_batch_sql_with_cursor_seeds(
-                &rel,
-                &queues,
-                &mut grouped_shards,
-                &mut claim_scan_hints,
-                &mut claim_scan_default_fifo,
-                &mut token_ops,
-                &positions,
-                &commands,
-                &cursor_seeds,
-            )?
-        } else {
-            let rel = crate::tx::TursoRel(&hop_txn);
-            fireweed_relational::apply_committed_batch_sql_with_cursor_seeds(
-                &rel,
-                &queues,
-                &mut grouped_shards,
-                &mut claim_scan_hints,
-                &mut claim_scan_default_fifo,
-                &mut token_ops,
-                &positions,
-                &commands,
-                &cursor_seeds,
-            )?
+        let rel = ObservedTursoRel {
+            inner: crate::tx::TursoRel(&hop_txn),
+            statement_shape: Some(statement_shape_for_hop),
+            phases: rel_phases_for_hop,
         };
+        let applied = fireweed_relational::apply_committed_batch_sql_with_cursor_seeds(
+            &rel,
+            &queues,
+            &mut grouped_shards,
+            &mut claim_scan_hints,
+            &mut claim_scan_default_fifo,
+            &mut token_ops,
+            &positions,
+            &commands,
+            &cursor_seeds,
+        )?;
         Ok::<_, EngineError>((
             applied,
             grouped_shards,
@@ -1645,12 +1635,18 @@ async fn apply_owned(
     *claim_scan_default_fifo_slot
         .lock()
         .expect("Turso claim-scan-fifo mutex poisoned") = claim_scan_default_fifo;
+    let observed_shape = Some(
+        *statement_shape
+            .lock()
+            .expect("Turso statement-shape mutex poisoned"),
+    );
+    *last_apply_statement_shape
+        .lock()
+        .expect("Turso apply statement-shape mutex poisoned") = observed_shape;
     if applied_api001 {
         *last_batch_update_shape
             .lock()
-            .expect("Turso statement-shape mutex poisoned") = statement_shape
-            .as_ref()
-            .map(|shape| *shape.lock().expect("Turso statement-shape mutex poisoned"));
+            .expect("Turso statement-shape mutex poisoned") = observed_shape;
     }
     let phase_observation = TursoApplyPhaseObservation {
         writer_wait_us,
@@ -2879,6 +2875,7 @@ impl AsyncProjectionStore for TursoRelational {
         let tokens = self.live_tokens.clone();
         let by_consumer = self.live_tokens_by_consumer.clone();
         let shape = self.last_batch_update_shape.clone();
+        let apply_shape = self.last_apply_statement_shape.clone();
         let phase = self.last_apply_phase.clone();
         let grouped_shards = self.grouped_shards.clone();
         let claim_scan_hints = self.claim_scan_hints.clone();
@@ -2889,6 +2886,7 @@ impl AsyncProjectionStore for TursoRelational {
                 tokens,
                 by_consumer,
                 shape,
+                apply_shape,
                 phase,
                 grouped_shards,
                 claim_scan_hints,
@@ -2910,6 +2908,7 @@ impl AsyncProjectionStore for TursoRelational {
         let tokens = self.live_tokens.clone();
         let by_consumer = self.live_tokens_by_consumer.clone();
         let shape = self.last_batch_update_shape.clone();
+        let apply_shape = self.last_apply_statement_shape.clone();
         let phase = self.last_apply_phase.clone();
         let grouped_shards = self.grouped_shards.clone();
         let claim_scan_hints = self.claim_scan_hints.clone();
@@ -2920,6 +2919,7 @@ impl AsyncProjectionStore for TursoRelational {
                 tokens,
                 by_consumer,
                 shape,
+                apply_shape,
                 phase,
                 grouped_shards,
                 claim_scan_hints,

@@ -264,7 +264,8 @@ pub fn persist_request_outcome_sql(
 
 /// Apply many already-durable commands in one RelTx. Reads each queue cursor once and writes it
 /// once at the end. Consecutive Push envelopes coalesce into one insert; Claim+Complete fuse into
-/// one UPDATE; consecutive set-based UpdateFields coalesce into VALUES UPDATE.
+/// one UPDATE; consecutive Complete-only Finalize envelopes coalesce into one VALUES UPDATE;
+/// consecutive set-based UpdateFields coalesce into VALUES UPDATE.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_committed_batch_sql(
     tx: &impl RelTx,
@@ -410,6 +411,32 @@ pub fn apply_committed_batch_sql_with_cursor_seeds(
             for (p, e) in positions[i..run_end].iter().zip(&envelopes[i..run_end]) {
                 let (tenant, queue) = parts(&p.queue);
                 crate::delete_claim_outbox(tx, &tenant, &queue, &e.command_id.0)?;
+                persist_request_outcome_sql(tx, queues, &p.queue, e, p)?;
+                exp = (p.sequence as i64)
+                    .checked_add(1)
+                    .ok_or_else(|| EngineError::Storage("command sequence overflow".into()))?;
+                let ep = p.backend_epoch as i64;
+                let slot = max_epoch.entry(p.queue.clone()).or_insert(ep);
+                if ep > *slot {
+                    *slot = ep;
+                }
+            }
+            next_seq.insert(shard, exp);
+            i = run_end;
+            continue;
+        }
+
+        if let Some(run_end) = coalescible_complete_run_end(positions, envelopes, i) {
+            let shard = pos.queue.clone();
+            apply_complete_run_sql(
+                tx,
+                token_ops,
+                &shard,
+                &positions[i..run_end],
+                &envelopes[i..run_end],
+            )?;
+            let mut exp = incoming;
+            for (p, e) in positions[i..run_end].iter().zip(&envelopes[i..run_end]) {
                 persist_request_outcome_sql(tx, queues, &p.queue, e, p)?;
                 exp = (p.sequence as i64)
                     .checked_add(1)
@@ -665,6 +692,109 @@ fn coalescible_claim_run_end(
         end += 1;
     }
     (end > start).then_some(end)
+}
+
+fn finalize_is_complete_only(command: &QueueCommand) -> bool {
+    match command {
+        QueueCommand::Finalize(finalize) => {
+            !finalize.outcomes.is_empty()
+                && finalize
+                    .outcomes
+                    .iter()
+                    .all(|outcome| matches!(outcome.kind, FinalizeKind::Complete))
+        }
+        _ => false,
+    }
+}
+
+fn coalescible_complete_run_end(
+    positions: &[CommandPosition],
+    envelopes: &[CommandEnvelope],
+    start: usize,
+) -> Option<usize> {
+    if !finalize_is_complete_only(&envelopes.get(start)?.command) {
+        return None;
+    }
+    let shard = &positions[start].queue;
+    let mut expected = positions[start].sequence;
+    let mut end = start;
+    while end < positions.len() {
+        let position = &positions[end];
+        let envelope = &envelopes[end];
+        if position.queue != *shard || position.sequence != expected {
+            break;
+        }
+        if !finalize_is_complete_only(&envelope.command) {
+            break;
+        }
+        expected = expected.saturating_add(1);
+        end += 1;
+    }
+    (end > start).then_some(end)
+}
+
+fn apply_complete_run_sql(
+    tx: &impl RelTx,
+    token_ops: &mut Vec<TokenOp>,
+    shard: &QueueKey,
+    positions: &[CommandPosition],
+    envelopes: &[CommandEnvelope],
+) -> EngineResult<()> {
+    let mut rows: Vec<(String, i64, i64, i64)> = Vec::new();
+    let mut bearer_ids: Vec<String> = Vec::new();
+    for (position, envelope) in positions.iter().zip(envelopes) {
+        let QueueCommand::Finalize(finalize) = &envelope.command else {
+            return Err(EngineError::Storage(
+                "apply_complete_run: non-complete envelope".into(),
+            ));
+        };
+        let seq = position.sequence as i64;
+        let epoch = position.backend_epoch as i64;
+        let now_n = ts_nanos(envelope.created_at);
+        for outcome in &finalize.outcomes {
+            let id = outcome.item_id.to_string();
+            bearer_ids.push(id.clone());
+            rows.push((id, seq, epoch, now_n));
+            token_ops.push(TokenOp::Clear(shard.clone(), outcome.item_id));
+        }
+    }
+    let (t, q) = parts(shard);
+    exec_items_in(
+        tx,
+        "DELETE FROM fireweed_lease_bearers WHERE tenant_id=? AND queue_id=? AND item_id IN",
+        &[],
+        &t,
+        &q,
+        &bearer_ids,
+    )?;
+    const COMPLETE_ROW_BINDS: usize = 4;
+    for chunk in rows.chunks(UPDATE_FIELDS_BATCH) {
+        let values = vec!["(?,?,?,?)"; chunk.len()].join(",");
+        let sql = format!(
+            "WITH incoming(item_id, last_command_sequence, terminal_command_epoch, terminal_at) \
+             AS (VALUES {values}) \
+             UPDATE fireweed_items SET lifecycle_state='Complete', lease_token_hash=NULL, \
+             lease_expires_at=NULL, worker_id=NULL, fenced=0, item_version=item_version+1, \
+             terminal_at=incoming.terminal_at, \
+             terminal_command_epoch=incoming.terminal_command_epoch, \
+             updated_at=incoming.terminal_at, \
+             last_command_sequence=incoming.last_command_sequence \
+             FROM incoming WHERE tenant_id=? AND queue_id=? \
+             AND fireweed_items.item_id=incoming.item_id"
+        );
+        let mut params = Vec::with_capacity(chunk.len() * COMPLETE_ROW_BINDS + 2);
+        for (item_id, seq, epoch, now_n) in chunk {
+            params.extend([
+                RelValue::Text(item_id.clone()),
+                RelValue::Integer(*seq),
+                RelValue::Integer(*epoch),
+                RelValue::Integer(*now_n),
+            ]);
+        }
+        params.extend([RelValue::Text(t.to_string()), RelValue::Text(q.to_string())]);
+        crate::rel_exec(tx, &sql, params)?;
+    }
+    Ok(())
 }
 
 fn apply_push_run_sql(
@@ -4475,54 +4605,21 @@ pub fn apply_command_sql(
                 ),
             ];
             for (state, reset, terminal_at, terminal_epoch, ids) in buckets {
-                if claim_scan_default_fifo.get(shard).copied().unwrap_or(false)
-                    && matches!(state, "Complete" | "Failed")
-                    && let Some((min_rowid, max_rowid)) =
-                        fifo_rowid_range_for_id_strings(tx, shard, ids, Some("Leased"))?
-                {
-                    let changed = crate::rel_exec(
-                        tx,
-                        "UPDATE fireweed_items SET lifecycle_state=?1, lease_token_hash=NULL, \
-                         lease_expires_at=NULL, worker_id=NULL, fenced=0, item_version=item_version+1, \
-                         retry_count=CASE WHEN ?2 THEN 0 ELSE retry_count END, terminal_at=?3, \
-                         terminal_command_epoch=?4, updated_at=?5, last_command_sequence=?6 \
-                         WHERE tenant_id=?7 AND queue_id=?8 AND rowid BETWEEN ?9 AND ?10",
-                        [
-                            state.into(),
-                            (reset as i64).into(),
-                            terminal_at.into(),
-                            terminal_epoch.into(),
-                            now_n.into(),
-                            (seq as i64).into(),
-                            RelValue::Text(t.to_string()),
-                            RelValue::Text(q.to_string()),
-                            min_rowid.into(),
-                            max_rowid.into(),
-                        ],
-                    )?;
-                    if changed != ids.len() {
-                        return Err(EngineError::Storage(
-                            "sqlite fifo finalize range update changed an unexpected row count"
-                                .into(),
-                        ));
-                    }
-                } else {
-                    exec_items_in(
-                        tx,
-                        FINALIZE_SET,
-                        &[
-                            RelValue::Text(state.to_string()),
-                            RelValue::Integer(reset as i64),
-                            terminal_at,
-                            terminal_epoch,
-                            RelValue::Integer(now_n),
-                            RelValue::Integer(seq as i64),
-                        ],
-                        &t,
-                        &q,
-                        ids,
-                    )?;
-                }
+                exec_items_in(
+                    tx,
+                    FINALIZE_SET,
+                    &[
+                        RelValue::Text(state.to_string()),
+                        RelValue::Integer(reset as i64),
+                        terminal_at,
+                        terminal_epoch,
+                        RelValue::Integer(now_n),
+                        RelValue::Integer(seq as i64),
+                    ],
+                    &t,
+                    &q,
+                    ids,
+                )?;
             }
             for (nb_n, ids) in &backoff {
                 exec_items_in(

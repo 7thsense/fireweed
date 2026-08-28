@@ -207,7 +207,8 @@ mod packed_authority_first_tests {
     use fireweed_core::{GroupKey, ItemId, ItemState, LeaseToken, WorkerId};
     use fireweed_engine::{
         AsyncProjectionStore, ClaimCommand, CommandEnvelope, CommandPosition, EngineError,
-        FinalizeCommand, FinalizeKind, FinalizeOutcome, PushCommand, QueueCommand, QueueKey,
+        FinalizeCommand, FinalizeKind, FinalizeOutcome, LeaseExpiredCommand, PushCommand,
+        QueueCommand, QueueKey,
     };
     use fireweed_relational::AUTHORITY_FIRST_CLAIM_SHORT_MOVE;
     use turso::Value;
@@ -252,6 +253,23 @@ mod packed_authority_first_tests {
             }),
             ids,
         )
+    }
+
+    fn fifo_item(id: &str, key: &str) -> fireweed_engine::PushItem {
+        let mut item = item(id, key, 0);
+        item.priority = None;
+        item
+    }
+
+    fn expired_envelope(ids: Vec<ItemId>, now: i64) -> CommandEnvelope {
+        let mut command = envelope(
+            QueueCommand::LeaseExpired(LeaseExpiredCommand {
+                item_ids: ids.clone(),
+            }),
+            ids,
+        );
+        command.created_at = ts(now);
+        command
     }
 
     async fn open_store() -> (TursoRelational, QueueKey) {
@@ -644,6 +662,278 @@ mod packed_authority_first_tests {
                 .await
                 .unwrap(),
             Some(ItemState::Complete)
+        );
+    }
+
+    async fn seed_fifo_claimed(
+        count: usize,
+        seq: u64,
+    ) -> (TursoRelational, QueueKey, Vec<ItemId>, u64) {
+        let items: Vec<_> = (1..=count)
+            .map(|index| fifo_item(&index.to_string(), &format!("fk{index}")))
+            .collect();
+        let ids: Vec<ItemId> = items.iter().map(|item| item.item_id).collect();
+        let (store, shard) = open_store().await;
+        let push = envelope(QueueCommand::Push(PushCommand { items }), ids.clone());
+        apply(&store, &shard, seq, vec![push]).await.unwrap();
+        let claims: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(offset, id)| {
+                claim_envelope(
+                    vec![*id],
+                    &format!("tok-{offset}"),
+                    50,
+                    &format!("w{offset}"),
+                    true,
+                )
+            })
+            .collect();
+        apply(&store, &shard, seq + 1, claims).await.unwrap();
+        (store, shard, ids, seq + 1 + count as u64)
+    }
+
+    #[tokio::test]
+    async fn packed_complete_is_non_rejecting_and_mixed_vector_matches_model() {
+        let (three, three_shard, three_ids, three_next) = seed_fifo_claimed(3, 0).await;
+        let completes: Vec<_> = three_ids
+            .iter()
+            .map(|id| complete_envelope(vec![*id]))
+            .collect();
+        apply(&three, &three_shard, three_next, completes)
+            .await
+            .expect("packed three completes");
+        let three_shape = three
+            .last_apply_statement_shape()
+            .expect("three-complete statement shape");
+        let three_phase = three
+            .last_apply_phase_observation()
+            .expect("three-complete Immediate");
+        assert!(three_phase.begin_us > 0 || three_phase.commit_us > 0);
+
+        let (eight, eight_shard, eight_ids, eight_next) = seed_fifo_claimed(8, 0).await;
+        let completes: Vec<_> = eight_ids
+            .iter()
+            .map(|id| complete_envelope(vec![*id]))
+            .collect();
+        apply(&eight, &eight_shard, eight_next, completes)
+            .await
+            .expect("packed eight completes");
+        let eight_shape = eight
+            .last_apply_statement_shape()
+            .expect("eight-complete statement shape");
+        assert_eq!(
+            three_shape.statement_count, eight_shape.statement_count,
+            "coalesced Complete apply must not grow statements per envelope: three={three_shape:?} eight={eight_shape:?}"
+        );
+        assert!(
+            three_shape.write_statement_count >= 2,
+            "shape={three_shape:?}"
+        );
+        eprintln!("unfused complete three={three_shape:?} eight={eight_shape:?}");
+
+        let a = fifo_item("1", "k1");
+        let b = fifo_item("2", "k2");
+        let c = fifo_item("3", "k3");
+        let d = fifo_item("4", "k4");
+        let e = fifo_item("5", "k5");
+        let fifo_items = vec![a.clone(), b.clone(), c.clone(), d.clone(), e.clone()];
+        let fifo_ids: Vec<ItemId> = fifo_items.iter().map(|item| item.item_id).collect();
+        let (packed, shard) = open_store().await;
+        let (solo, solo_shard) = open_store().await;
+        let push = envelope(
+            QueueCommand::Push(PushCommand {
+                items: fifo_items.clone(),
+            }),
+            fifo_ids.clone(),
+        );
+        apply(&packed, &shard, 0, vec![push.clone()]).await.unwrap();
+        apply(&solo, &solo_shard, 0, vec![push]).await.unwrap();
+        let claims = vec![
+            claim_envelope(vec![a.item_id], "tok-a", 50, "wa", true),
+            claim_envelope(vec![b.item_id], "tok-b", 50, "wb", true),
+            claim_envelope(vec![c.item_id], "tok-c", 50, "wc", true),
+            claim_envelope(vec![d.item_id], "tok-d", 50, "wd", true),
+            claim_envelope(vec![e.item_id], "tok-e", 50, "we", true),
+        ];
+        apply(&packed, &shard, 1, claims.clone()).await.unwrap();
+        for (offset, command) in claims.into_iter().enumerate() {
+            apply(&solo, &solo_shard, 1 + offset as u64, vec![command])
+                .await
+                .unwrap();
+        }
+
+        let expire = expired_envelope(vec![b.item_id], 100);
+        apply(&packed, &shard, 6, vec![expire.clone()])
+            .await
+            .unwrap();
+        apply(&solo, &solo_shard, 6, vec![expire]).await.unwrap();
+        assert_eq!(
+            AsyncProjectionStore::item_state(&packed, shard.clone(), b.item_id)
+                .await
+                .unwrap(),
+            Some(ItemState::Pending)
+        );
+
+        let hole = vec![
+            complete_envelope(vec![a.item_id]),
+            complete_envelope(vec![c.item_id]),
+        ];
+        apply(&packed, &shard, 7, hole.clone())
+            .await
+            .expect("expiry hole must not reject neighboring Completes");
+        for (offset, command) in hole.into_iter().enumerate() {
+            apply(&solo, &solo_shard, 7 + offset as u64, vec![command])
+                .await
+                .expect("solo hole neighbor");
+        }
+        for id in [a.item_id, b.item_id, c.item_id, d.item_id, e.item_id] {
+            assert_eq!(
+                row_model(&packed, &shard, id).await,
+                row_model(&solo, &solo_shard, id).await,
+                "expiry-hole model {id}"
+            );
+        }
+        assert_eq!(
+            AsyncProjectionStore::item_state(&packed, shard.clone(), a.item_id)
+                .await
+                .unwrap(),
+            Some(ItemState::Complete)
+        );
+        assert_eq!(
+            AsyncProjectionStore::item_state(&packed, shard.clone(), b.item_id)
+                .await
+                .unwrap(),
+            Some(ItemState::Pending)
+        );
+        assert_eq!(
+            AsyncProjectionStore::item_state(&packed, shard.clone(), c.item_id)
+                .await
+                .unwrap(),
+            Some(ItemState::Complete)
+        );
+        assert_eq!(
+            AsyncProjectionStore::item_state(&packed, shard.clone(), d.item_id)
+                .await
+                .unwrap(),
+            Some(ItemState::Leased)
+        );
+
+        let expired_member = vec![
+            complete_envelope(vec![b.item_id]),
+            complete_envelope(vec![d.item_id]),
+            complete_envelope(vec![e.item_id]),
+        ];
+        apply(&packed, &shard, 9, expired_member.clone())
+            .await
+            .expect("Complete of an expired member must not poison neighbors");
+        for (offset, command) in expired_member.into_iter().enumerate() {
+            apply(&solo, &solo_shard, 9 + offset as u64, vec![command])
+                .await
+                .expect("solo expired-member neighbor");
+        }
+        for id in [a.item_id, b.item_id, c.item_id, d.item_id, e.item_id] {
+            assert_eq!(
+                row_model(&packed, &shard, id).await,
+                row_model(&solo, &solo_shard, id).await,
+                "expired-member model {id}"
+            );
+        }
+        for id in [a.item_id, b.item_id, c.item_id, d.item_id, e.item_id] {
+            assert_eq!(
+                AsyncProjectionStore::item_state(&packed, shard.clone(), id)
+                    .await
+                    .unwrap(),
+                Some(ItemState::Complete)
+            );
+        }
+
+        let mut g1 = item("6", "g1", 1);
+        let mut g2 = item("7", "g2", 2);
+        let mut g3 = item("8", "g3", 3);
+        let group = GroupKey::new("grp").unwrap();
+        g1.group_key = Some(group.clone());
+        g2.group_key = Some(group.clone());
+        g3.group_key = Some(group.clone());
+        let x = item("9", "kx", 9);
+        let y = item("10", "ky", 10);
+        let mixed_items = vec![g1.clone(), g2.clone(), g3.clone(), x.clone(), y.clone()];
+        let mixed_ids: Vec<ItemId> = mixed_items.iter().map(|item| item.item_id).collect();
+        let (packed, shard) = open_store().await;
+        let (solo, solo_shard) = open_store().await;
+        let push = envelope(
+            QueueCommand::Push(PushCommand {
+                items: mixed_items.clone(),
+            }),
+            mixed_ids.clone(),
+        );
+        apply(&packed, &shard, 0, vec![push.clone()]).await.unwrap();
+        apply(&solo, &solo_shard, 0, vec![push]).await.unwrap();
+        let preclaim = vec![
+            claim_envelope(vec![x.item_id], "tok-x", 200, "wx", true),
+            claim_envelope(vec![y.item_id], "tok-y", 200, "wy", true),
+        ];
+        apply(&packed, &shard, 1, preclaim.clone()).await.unwrap();
+        for (offset, command) in preclaim.into_iter().enumerate() {
+            apply(&solo, &solo_shard, 1 + offset as u64, vec![command])
+                .await
+                .unwrap();
+        }
+
+        let mixed = vec![
+            claim_envelope(vec![g1.item_id], "tok-g1", 400, "wg1", true),
+            complete_envelope(vec![g1.item_id]),
+            claim_envelope(vec![g2.item_id], "tok-g2", 500, "wg2", true),
+            complete_envelope(vec![g2.item_id]),
+            complete_envelope(vec![x.item_id]),
+            complete_envelope(vec![y.item_id]),
+        ];
+        apply(&packed, &shard, 3, mixed.clone())
+            .await
+            .expect("adjacent fusion plus unfused Completes");
+        let mixed_shape = packed
+            .last_apply_statement_shape()
+            .expect("mixed-vector statement shape");
+        let mixed_phase = packed
+            .last_apply_phase_observation()
+            .expect("mixed-vector Immediate");
+        assert!(mixed_phase.begin_us > 0 || mixed_phase.commit_us > 0);
+        assert!(
+            mixed_shape.statement_count > 0 && mixed_shape.write_statement_count > 0,
+            "shape={mixed_shape:?}"
+        );
+        eprintln!("adjacent fusion + unfused completes shape={mixed_shape:?}");
+        for (offset, command) in mixed.into_iter().enumerate() {
+            apply(&solo, &solo_shard, 3 + offset as u64, vec![command])
+                .await
+                .expect("solo mixed neighbor");
+        }
+        for id in [g1.item_id, g2.item_id, g3.item_id, x.item_id, y.item_id] {
+            assert_eq!(
+                row_model(&packed, &shard, id).await,
+                row_model(&solo, &solo_shard, id).await,
+                "mixed vector model {id}"
+            );
+        }
+        assert_eq!(
+            AsyncProjectionStore::item_state(&packed, shard.clone(), g1.item_id)
+                .await
+                .unwrap(),
+            Some(ItemState::Complete)
+        );
+        assert_eq!(
+            AsyncProjectionStore::item_state(&packed, shard.clone(), g3.item_id)
+                .await
+                .unwrap(),
+            Some(ItemState::Pending)
+        );
+        assert_eq!(
+            group_summary(&packed, &shard, &group).await,
+            group_summary(&solo, &solo_shard, &group).await
+        );
+        assert_eq!(
+            group_summary(&packed, &shard, &group).await,
+            (1, Some(g3.item_id.to_string()))
         );
     }
 }
