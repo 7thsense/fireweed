@@ -14,6 +14,8 @@ use fireweed_engine::{
 };
 use tokio::sync::{Mutex, Notify};
 
+use crate::PackedAppendError;
+
 /// One admission reserved before the authoritative append begins.
 #[derive(Debug)]
 pub struct AsyncProjectionApplyReservation {
@@ -323,6 +325,31 @@ where
     /// Latch shard poison for post-position append ambiguity. Does not cancel reservations.
     pub async fn latch_poison(&self, shard: QueueKey, reason: String) {
         let _ = self.poison(shard, reason).await;
+    }
+
+    /// Cancel only a BeforePosition reservation. Post-position ambiguity latches
+    /// poison and leaves the reservation outstanding.
+    pub async fn dispose_packed_append_error(
+        coordinator: Option<&Self>,
+        reservation: Option<AsyncProjectionApplyReservation>,
+        error: PackedAppendError,
+    ) -> EngineError {
+        match error {
+            PackedAppendError::BeforePosition(inner) => {
+                if let (Some(coordinator), Some(reservation)) = (coordinator, reservation) {
+                    coordinator.cancel(reservation).await;
+                }
+                inner
+            }
+            PackedAppendError::PostPositionAmbiguous { shard, reason } => {
+                if let Some(coordinator) = coordinator {
+                    coordinator
+                        .latch_poison(shard.clone(), reason.clone())
+                        .await;
+                }
+                PackedAppendError::PostPositionAmbiguous { shard, reason }.into_engine()
+            }
+        }
     }
 
     /// Cancel a pre-append reservation after append rejection or a deliberate crash cut.

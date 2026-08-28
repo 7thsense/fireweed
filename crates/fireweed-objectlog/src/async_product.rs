@@ -119,15 +119,25 @@ impl SeparateReplayCommitter for ObjectLogEngineProjectionCommitter {
                 None => None,
             };
             let positions = match log
-                .packed_append(shard.clone(), commands.clone(), expected_epoch)
+                .packed_append_owned(
+                    shard.clone(),
+                    commands.clone(),
+                    expected_epoch,
+                    reservation.as_ref().map(|reserved| reserved.id()),
+                    false,
+                )
                 .await
             {
                 Ok(outcome) => outcome.positions,
                 Err(error) => {
-                    if let (Some(coordinator), Some(reservation)) = (&async_apply, reservation) {
-                        coordinator.cancel(reservation).await;
-                    }
-                    return Err(error.into_engine());
+                    return Err(
+                        AsyncProjectionApplyCoordinator::dispose_packed_append_error(
+                            async_apply.as_ref(),
+                            reservation,
+                            error,
+                        )
+                        .await,
+                    );
                 }
             };
             if matches!(
@@ -564,11 +574,23 @@ impl AsyncObjectLogMemoryBackend {
         if envelopes.is_empty() {
             return Ok(());
         }
-        let outcome = self
+        let outcome = match self
             .log
             .packed_append(shard.clone(), envelopes.clone(), epoch)
             .await
-            .map_err(crate::PackedAppendError::into_engine)?;
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return Err(
+                    AsyncProjectionApplyCoordinator::dispose_packed_append_error(
+                        self.async_apply.as_ref(),
+                        None,
+                        error,
+                    )
+                    .await,
+                );
+            }
+        };
         fireweed_engine::AsyncProjectionStore::apply_live(
             self.projection.as_ref(),
             outcome.positions,
@@ -2475,6 +2497,79 @@ mod tests {
                     "async-projection-control-requires-async-barrier"
                 ))
             );
+        }
+
+        #[tokio::test]
+        async fn all_async_products_preserve_ambiguous_durable_reservations() {
+            static NEXT_DIR: AtomicU64 = AtomicU64::new(1);
+            let root = std::env::temp_dir().join(format!(
+                "fireweed-s3f-memory-{}-{}",
+                std::process::id(),
+                NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+            ));
+            let backend = AsyncObjectLogMemoryBackend::open_local_with_async_projection(
+                &root,
+                flush(),
+                0,
+                spec(),
+            )
+            .await
+            .unwrap();
+            let shard = create(&backend).await;
+            backend.log.inject_high_water_put_failures(1);
+            let error = push_one(&backend, &shard, 1)
+                .await
+                .expect_err("high-water put_json failure is post-position and must not succeed");
+            assert!(
+                matches!(
+                    error,
+                    EngineError::Storage(ref message)
+                        if message.contains("object-log post-position ambiguous")
+                ),
+                "typed post-position must surface as storage, got {error:?}"
+            );
+            let snap = backend.async_projection_snapshot(&shard).await.unwrap();
+            assert!(
+                snap.poison_reason.is_some(),
+                "post-position must latch coordinator poison"
+            );
+            assert_eq!(
+                snap.apply_queue_depth, 1,
+                "post-position failure must not cancel the reservation"
+            );
+            let page = AsyncLogStore::read_from(backend.log.as_ref(), shard.clone(), None, 16)
+                .await
+                .unwrap();
+            assert_eq!(
+                page.entries.len(),
+                1,
+                "produce allocated a durable position that must remain occupied"
+            );
+            assert!(
+                matches!(
+                    push_one(&backend, &shard, 2).await.unwrap_err(),
+                    EngineError::Storage(message)
+                        if message.contains("async projection poisoned")
+                ),
+                "poisoned shard must reject new reservations"
+            );
+            drop(backend);
+
+            let reopened = AsyncObjectLogMemoryBackend::open_local_with_async_projection(
+                &root,
+                flush(),
+                0,
+                spec(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                reopened.metrics(&shard).await.unwrap().pending,
+                1,
+                "reopen must rebuild the durable reservation authoritatively"
+            );
+            drop(reopened);
+            std::fs::remove_dir_all(root).unwrap();
         }
     }
 }
