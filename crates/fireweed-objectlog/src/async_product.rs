@@ -127,7 +127,7 @@ impl SeparateReplayCommitter for ObjectLogEngineProjectionCommitter {
                     if let (Some(coordinator), Some(reservation)) = (&async_apply, reservation) {
                         coordinator.cancel(reservation).await;
                     }
-                    return Err(error);
+                    return Err(error.into_engine());
                 }
             };
             if matches!(
@@ -567,7 +567,8 @@ impl AsyncObjectLogMemoryBackend {
         let outcome = self
             .log
             .packed_append(shard.clone(), envelopes.clone(), epoch)
-            .await?;
+            .await
+            .map_err(crate::PackedAppendError::into_engine)?;
         fireweed_engine::AsyncProjectionStore::apply_live(
             self.projection.as_ref(),
             outcome.positions,

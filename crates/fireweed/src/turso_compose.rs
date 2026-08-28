@@ -45,7 +45,7 @@ use fireweed_turso::{TursoConfig, TursoRelational, claimed_from_class_s};
 #[cfg(feature = "objectlog")]
 use fireweed_objectlog::{
     AsyncProjectionApplyCoordinator, ObjectLogEngineStore, ObjectLogTaskDispatcher,
-    PackedAppendOutcome,
+    PackedAppendError, PackedAppendOutcome,
 };
 
 #[cfg(feature = "objectlog")]
@@ -312,7 +312,7 @@ mod contention_mapping_tests {
             "async fn dispatch_claim_legacy",
         );
         assert!(class_s.contains("AppendAdmissionClass::ClaimCoordinatorLive"));
-        assert!(class_s.contains(".packed_append("));
+        assert!(class_s.contains(".packed_append_owned("));
 
         let finalize = between(
             derived,
@@ -1597,23 +1597,28 @@ impl SeparateReplayCommitter for ObjectLogTursoCommitter {
                 None => None,
             };
             let outcome = match log
-                .packed_append(shard.clone(), commands.clone(), expected_epoch)
+                .packed_append_owned(
+                    shard.clone(),
+                    commands.clone(),
+                    expected_epoch,
+                    reservation.as_ref().map(|reserved| reserved.id()),
+                    false,
+                )
                 .await
             {
                 Ok(outcome) => outcome,
                 Err(error) => {
-                    if let (Some(coordinator), Some(reservation)) = (&async_apply, reservation) {
-                        coordinator.cancel(reservation).await;
-                    }
-                    return Err(error);
+                    return Err(dispose_packed_append_error(
+                        async_apply.as_ref(),
+                        reservation,
+                        error,
+                    )
+                    .await);
                 }
             };
             note_produce_positions(&last_produce, &outcome.positions, &commands).await;
             if matches!(fault, RawCommitFault::AfterAppendBeforeApply) {
                 outcome.apply_published.notify();
-                if let (Some(coordinator), Some(reservation)) = (&async_apply, reservation) {
-                    coordinator.cancel(reservation).await;
-                }
                 return Ok(RawCommitOutcome::appended(outcome.positions));
             }
             let positions = publish_packed_apply(
@@ -1654,6 +1659,13 @@ async fn publish_packed_apply(
     if let Some(batch) = outcome.apply_batch {
         let result = if let (Some(coordinator), Some(reservation)) = (coordinator, reservation) {
             coordinator
+                .transfer_followers_and_recharge(
+                    &reservation,
+                    &batch.transferred_reservation_ids,
+                    &batch.commands,
+                )
+                .await?;
+            coordinator
                 .enqueue_reserved(reservation, batch.positions, batch.commands)
                 .await
         } else {
@@ -1670,13 +1682,37 @@ async fn publish_packed_apply(
         result?;
     } else {
         outcome.apply_published.wait().await;
-        if let (Some(coordinator), Some(reservation)) = (coordinator, reservation) {
-            coordinator.cancel(reservation).await;
-        } else if let Some(apply_turn) = apply_turn {
-            wait_turso_apply_turn(projection, shard, &positions, apply_turn).await?;
+        if coordinator.is_none() {
+            if let Some(apply_turn) = apply_turn {
+                wait_turso_apply_turn(projection, shard, &positions, apply_turn).await?;
+            }
         }
     }
     Ok(positions)
+}
+
+#[cfg(feature = "objectlog")]
+async fn dispose_packed_append_error(
+    coordinator: Option<&AsyncProjectionApplyCoordinator<TursoRelational>>,
+    reservation: Option<fireweed_objectlog::AsyncProjectionApplyReservation>,
+    error: PackedAppendError,
+) -> EngineError {
+    match error {
+        PackedAppendError::BeforePosition(inner) => {
+            if let (Some(coordinator), Some(reservation)) = (coordinator, reservation) {
+                coordinator.cancel(reservation).await;
+            }
+            inner
+        }
+        PackedAppendError::PostPositionAmbiguous { shard, reason } => {
+            if let Some(coordinator) = coordinator {
+                coordinator
+                    .latch_poison(shard.clone(), reason.clone())
+                    .await;
+            }
+            PackedAppendError::PostPositionAmbiguous { shard, reason }.into_engine()
+        }
+    }
 }
 
 #[cfg(feature = "objectlog")]
@@ -2074,7 +2110,8 @@ impl DerivedObjectLogTursoBackend {
             debug_assert_eq!(fault, RawCommitFault::None);
             self.log
                 .packed_append(append_shard, commands, append_epoch)
-                .await?;
+                .await
+                .map_err(PackedAppendError::into_engine)?;
             self.projection
                 .delete_claim_outbox_row(
                     shard.tenant_id.as_str(),
@@ -2260,15 +2297,23 @@ impl DerivedObjectLogTursoBackend {
         }
         let outcome = match self
             .log
-            .packed_append(shard.clone(), commands.clone(), epoch)
+            .packed_append_owned(
+                shard.clone(),
+                commands.clone(),
+                epoch,
+                reservation.as_ref().map(|reserved| reserved.id()),
+                false,
+            )
             .await
         {
             Ok(outcome) => outcome,
             Err(error) => {
-                if let (Some(coordinator), Some(reservation)) = (&self.async_apply, reservation) {
-                    coordinator.cancel(reservation).await;
-                }
-                return Err(error);
+                return Err(dispose_packed_append_error(
+                    self.async_apply.as_ref(),
+                    reservation,
+                    error,
+                )
+                .await);
             }
         };
         publish_packed_apply(
