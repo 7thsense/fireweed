@@ -12,8 +12,8 @@ use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use crate::command::{
-    QueueCommand, SelectionFenceDisposition, selection_fence_disposition,
-    selection_fence_disposition_for_commands,
+    FinalizeKind, QueueCommand, SelectionFenceDisposition, classify_mutate_items,
+    classify_update_fields, selection_fence_disposition_for_commands,
 };
 use crate::commit::{AppendAdmissionClass, RawCommitRequest};
 use crate::{KeyedQueueGate, QueueGateAcquire, QueueGateError, QueueGatePermit};
@@ -54,7 +54,35 @@ pub enum MutationGenerationDisposition {
     NotCandidateMutating,
 }
 
-/// Classify mutation-generation membership with no wildcard command arms.
+fn finalize_kind_generation(kind: FinalizeKind) -> MutationGenerationDisposition {
+    match kind {
+        FinalizeKind::Complete | FinalizeKind::Fail => {
+            MutationGenerationDisposition::NotCandidateMutating
+        }
+        FinalizeKind::Retry | FinalizeKind::Release | FinalizeKind::Rearm => {
+            MutationGenerationDisposition::Singleton
+        }
+    }
+}
+
+fn combine_generation_dispositions(
+    left: MutationGenerationDisposition,
+    right: MutationGenerationDisposition,
+) -> MutationGenerationDisposition {
+    use MutationGenerationDisposition::{Compatible, NotCandidateMutating, Singleton};
+
+    match (left, right) {
+        (Compatible(kind), Compatible(other)) if kind == other => Compatible(kind),
+        (NotCandidateMutating, NotCandidateMutating) => NotCandidateMutating,
+        _ => Singleton,
+    }
+}
+
+/// Classify mutation-generation membership with no wildcard command or nested-action arms.
+///
+/// This does not admit a sequencer generation. Compatible same-kind vectors overlay later; shared
+/// candidate mutations otherwise own a singleton generation; leased-only and Pending-consuming
+/// commands never join.
 pub fn mutation_generation_disposition(command: &QueueCommand) -> MutationGenerationDisposition {
     use MutationGenerationDisposition::{Compatible, NotCandidateMutating, Singleton};
 
@@ -66,31 +94,59 @@ pub fn mutation_generation_disposition(command: &QueueCommand) -> MutationGenera
         QueueCommand::RenewLease(_) => NotCandidateMutating,
         QueueCommand::CohortRenewLease(_) => NotCandidateMutating,
         QueueCommand::ReassignLease(_) => NotCandidateMutating,
-        QueueCommand::Finalize(_) => match selection_fence_disposition(command) {
-            SelectionFenceDisposition::Shared => Singleton,
-            SelectionFenceDisposition::Bypass => NotCandidateMutating,
-            SelectionFenceDisposition::Exclusive => NotCandidateMutating,
-        },
-        QueueCommand::CohortFinalize(_) => match selection_fence_disposition(command) {
-            SelectionFenceDisposition::Shared => Singleton,
-            SelectionFenceDisposition::Bypass => NotCandidateMutating,
-            SelectionFenceDisposition::Exclusive => NotCandidateMutating,
-        },
+        QueueCommand::Finalize(command) => command
+            .outcomes
+            .iter()
+            .map(|outcome| finalize_kind_generation(outcome.kind))
+            .reduce(combine_generation_dispositions)
+            .expect("empty Finalize is invalid before classification"),
+        QueueCommand::CohortFinalize(command) => finalize_kind_generation(command.kind),
         QueueCommand::ReplacePending(_) => Singleton,
-        QueueCommand::UpdateFields(_) => Singleton,
-        QueueCommand::UpdateFieldsBatch(_) => Compatible(MutationGenerationKind::BatchUpdate),
-        QueueCommand::MutateItems(_) => Singleton,
+        QueueCommand::UpdateFields(command) => {
+            classify_update_fields(command);
+            Singleton
+        }
+        QueueCommand::UpdateFieldsBatch(command) => {
+            for update in &command.updates {
+                classify_update_fields(update);
+            }
+            Compatible(MutationGenerationKind::BatchUpdate)
+        }
+        QueueCommand::MutateItems(command) => {
+            classify_mutate_items(command);
+            Singleton
+        }
         QueueCommand::LeaseExpired(_) => Singleton,
         QueueCommand::CohortExpired(_) => Singleton,
         QueueCommand::FenceLease(_) => Singleton,
         QueueCommand::UnfenceLease(_) => Singleton,
-        QueueCommand::PauseQueue(_) => Singleton,
+        QueueCommand::PauseQueue(command) => {
+            let _ = command.drain_intake;
+            Singleton
+        }
         QueueCommand::ResumeQueue => Singleton,
         QueueCommand::PurgeItems(_) => Singleton,
-        QueueCommand::SetGates(_) => Singleton,
+        QueueCommand::SetGates(command) => {
+            let _ = command.blocked;
+            Singleton
+        }
         QueueCommand::WriteSideRecords(_) => NotCandidateMutating,
         QueueCommand::AdvanceInstanceFence(_) => NotCandidateMutating,
     }
+}
+
+/// Aggregate mutation-generation membership for a sealed append vector.
+///
+/// Same-kind compatible commands overlay; any singleton or mixed-kind command forces a singleton
+/// generation; leased-only/non-work vectors stay off the sequencer.
+pub fn mutation_generation_disposition_for_commands<'a>(
+    commands: impl IntoIterator<Item = &'a QueueCommand>,
+) -> MutationGenerationDisposition {
+    commands
+        .into_iter()
+        .map(mutation_generation_disposition)
+        .reduce(combine_generation_dispositions)
+        .unwrap_or(MutationGenerationDisposition::NotCandidateMutating)
 }
 
 /// Validate the one-admission invariant for an inert derived append classification.
@@ -129,6 +185,34 @@ pub fn audited_append_request_admission_count(request: &RawCommitRequest) -> Opt
         request.commands().iter().map(|envelope| &envelope.command),
     );
     audited_append_admission_count(request.append_admission(), disposition)
+}
+
+/// Whether a classified append would join the mutation sequencer.
+///
+/// `Some(true)` is a candidate-mutating derived append, `Some(false)` is bypass/recovery/atomic or a
+/// Pending-consuming Claim, and `None` is a carrier/disposition mismatch. No sequencer is taken here.
+pub fn audited_mutation_sequencer_join(
+    append_admission: AppendAdmissionClass,
+    disposition: MutationGenerationDisposition,
+) -> Option<bool> {
+    use MutationGenerationDisposition::{Compatible, NotCandidateMutating, Singleton};
+
+    match append_admission {
+        AppendAdmissionClass::NonDerived
+        | AppendAdmissionClass::AtomicNative
+        | AppendAdmissionClass::RecoveryOnly => Some(false),
+        AppendAdmissionClass::Bypass => match disposition {
+            NotCandidateMutating => Some(false),
+            Compatible(_) | Singleton => None,
+        },
+        AppendAdmissionClass::ClaimCoordinatorLive => match disposition {
+            NotCandidateMutating => Some(false),
+            Compatible(_) | Singleton => None,
+        },
+        AppendAdmissionClass::KeyedPermitLive | AppendAdmissionClass::SelectionRequired => {
+            Some(matches!(disposition, Compatible(_) | Singleton))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2014,13 +2098,30 @@ where
 mod tests {
     use std::task::{Wake, Waker};
 
-    use fireweed_core::{ItemId, LeaseToken, UtcTimestamp};
+    use std::collections::HashSet;
+    use std::mem::discriminant;
+
+    use bytes::Bytes;
+    use fireweed_core::{
+        ClientItemKey, CohortId, EligibilityPolicy, GroupKey, ItemId, ItemState, LeaseToken,
+        Metadata, OrderingMode, PriorityModel, PriorityValue, QueueDefinition, QueueId,
+        RecurrencePolicy, RequestId, RetryPolicy, TenantId, UtcTimestamp,
+    };
 
     use super::*;
     use crate::{
-        ClaimCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome, LeaseExpiredCommand,
-        PushCommand, RenewLeaseCommand, UpdateFieldsBatchCommand, WriteSideRecordsCommand,
+        AdvanceInstanceFenceCommand, ClaimCommand, CohortClaimCommand, CohortExpiredCommand,
+        CohortFinalizeCommand, CohortRenewLeaseCommand, CommandChecksum, CommandEnvelope,
+        CommandId, CreateQueueCommand, FenceLeaseCommand, FinalizeCommand, FinalizeKind,
+        FinalizeOutcome, LeaseExpiredCommand, MutateItemsCommand, PauseQueueCommand, PayloadUpdate,
+        PurgeItemsCommand, PushCommand, PushItem, ReassignLeaseCommand, RenewLeaseCommand,
+        ReplacePendingCommand, ResolvedItemMutation, ResolvedItemMutationAction,
+        ResolvedItemValues, ScheduleUpdate, SetGatesCommand, UnfenceLeaseCommand,
+        UpdateFieldsBatchCommand, UpdateFieldsCommand, WriteSideRecordsCommand,
+        selection_fence_disposition,
     };
+
+    const QUEUE_COMMAND_VARIANT_COUNT: usize = 23;
 
     struct NoopWake;
 
@@ -2068,6 +2169,367 @@ mod tests {
             lease_expires_at: UtcTimestamp::new(2, 0).unwrap(),
             worker_id: None,
         })
+    }
+
+    fn ts() -> UtcTimestamp {
+        UtcTimestamp::new(2, 0).unwrap()
+    }
+
+    fn lease() -> LeaseToken {
+        LeaseToken::new("lease").unwrap()
+    }
+
+    fn queue_definition() -> QueueDefinition {
+        QueueDefinition {
+            tenant_id: TenantId::new("tenant").unwrap(),
+            queue_id: QueueId::new("queue").unwrap(),
+            priority_model: PriorityModel::timestamp_ascending(),
+            ordering_mode: OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 60_000,
+            eligibility_policy: EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 100,
+            max_claim_batch_size: 100,
+            max_eligible_group_size: None,
+            secondary_indexes: Vec::new(),
+            entity_schema: None,
+            typed_indexes: Vec::new(),
+            emit_change_records: false,
+        }
+    }
+
+    fn resolved_values() -> ResolvedItemValues {
+        ResolvedItemValues {
+            state: ItemState::Pending,
+            item_version: 1,
+            priority: None,
+            not_before: None,
+            eligible_since: ts(),
+            payload: None,
+            fields: Default::default(),
+            metadata: Metadata::default(),
+            gate_keys: Vec::new(),
+            index_fields: Default::default(),
+            entity_document: None,
+            invalidate_lease: false,
+        }
+    }
+
+    fn update_fields(
+        payload: PayloadUpdate,
+        priority: ScheduleUpdate<PriorityValue>,
+    ) -> UpdateFieldsCommand {
+        UpdateFieldsCommand {
+            payload,
+            set_priority: priority,
+            set_not_before: ScheduleUpdate::Keep,
+            ..UpdateFieldsCommand::default()
+        }
+    }
+
+    fn envelope(command: QueueCommand) -> CommandEnvelope {
+        CommandEnvelope {
+            command_id: CommandId::new("c1"),
+            request_id: Some(RequestId::new("r1").unwrap()),
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: vec![ItemId::from_u64(1)],
+            command,
+            checksum: CommandChecksum(0),
+            created_at: ts(),
+        }
+    }
+
+    fn shard() -> crate::QueueKey {
+        crate::QueueKey::new(
+            TenantId::new("tenant").unwrap(),
+            QueueId::new("queue").unwrap(),
+        )
+    }
+
+    fn command_catalog() -> Vec<(
+        QueueCommand,
+        SelectionFenceDisposition,
+        MutationGenerationDisposition,
+    )> {
+        use MutationGenerationDisposition::{Compatible, NotCandidateMutating, Singleton};
+        use SelectionFenceDisposition::{Bypass, Exclusive, Shared};
+
+        let mut catalog = vec![
+            (
+                QueueCommand::CreateQueue(CreateQueueCommand {
+                    definition: queue_definition(),
+                }),
+                Shared,
+                Singleton,
+            ),
+            (
+                QueueCommand::Push(PushCommand { items: Vec::new() }),
+                Shared,
+                Compatible(MutationGenerationKind::Push),
+            ),
+            (claim(), Exclusive, NotCandidateMutating),
+            (
+                QueueCommand::CohortClaim(CohortClaimCommand {
+                    cohort_id: CohortId::new("cohort").unwrap(),
+                    item_ids: vec![ItemId::from_u64(1)],
+                    lease_token: lease(),
+                    lease_expires_at: ts(),
+                }),
+                Exclusive,
+                NotCandidateMutating,
+            ),
+            (
+                QueueCommand::RenewLease(RenewLeaseCommand {
+                    item_ids: vec![ItemId::from_u64(1)],
+                    lease_expires_at: ts(),
+                }),
+                Bypass,
+                NotCandidateMutating,
+            ),
+            (
+                QueueCommand::CohortRenewLease(CohortRenewLeaseCommand {
+                    cohort_id: CohortId::new("cohort").unwrap(),
+                    lease_expires_at: ts(),
+                }),
+                Bypass,
+                NotCandidateMutating,
+            ),
+            (
+                QueueCommand::ReassignLease(ReassignLeaseCommand {
+                    item_ids: vec![ItemId::from_u64(1)],
+                    lease_token: lease(),
+                    lease_expires_at: ts(),
+                }),
+                Bypass,
+                NotCandidateMutating,
+            ),
+            (
+                finalize(FinalizeKind::Complete),
+                Bypass,
+                NotCandidateMutating,
+            ),
+            (finalize(FinalizeKind::Fail), Bypass, NotCandidateMutating),
+            (finalize(FinalizeKind::Retry), Shared, Singleton),
+            (finalize(FinalizeKind::Release), Shared, Singleton),
+            (finalize(FinalizeKind::Rearm), Shared, Singleton),
+            (
+                QueueCommand::Finalize(FinalizeCommand {
+                    outcomes: vec![
+                        FinalizeOutcome {
+                            item_id: ItemId::from_u64(1),
+                            kind: FinalizeKind::Complete,
+                            applied_state: None,
+                            not_before: None,
+                        },
+                        FinalizeOutcome {
+                            item_id: ItemId::from_u64(2),
+                            kind: FinalizeKind::Retry,
+                            applied_state: None,
+                            not_before: None,
+                        },
+                    ],
+                }),
+                Shared,
+                Singleton,
+            ),
+            (
+                QueueCommand::ReplacePending(ReplacePendingCommand {
+                    client_item_key: ClientItemKey::new("k").unwrap(),
+                    superseded_item_id: ItemId::from_u64(1),
+                    replacement: PushItem {
+                        client_item_key: ClientItemKey::new("k").unwrap(),
+                        item_id: ItemId::from_u64(2),
+                        priority: None,
+                        not_before: None,
+                        group_key: None,
+                        max_attempts: 1,
+                        payload: None,
+                        fields: Default::default(),
+                        metadata: Metadata::default(),
+                        cohort_size: None,
+                        gate_keys: Vec::new(),
+                        index_fields: Default::default(),
+                        entity_document: None,
+                    },
+                }),
+                Shared,
+                Singleton,
+            ),
+            (
+                QueueCommand::UpdateFieldsBatch(UpdateFieldsBatchCommand {
+                    updates: vec![update_fields(PayloadUpdate::Keep, ScheduleUpdate::Keep)],
+                }),
+                Shared,
+                Compatible(MutationGenerationKind::BatchUpdate),
+            ),
+            (
+                QueueCommand::LeaseExpired(LeaseExpiredCommand {
+                    item_ids: vec![ItemId::from_u64(1)],
+                }),
+                Shared,
+                Singleton,
+            ),
+            (
+                QueueCommand::CohortExpired(CohortExpiredCommand {
+                    group_key: GroupKey::new("g").unwrap(),
+                }),
+                Shared,
+                Singleton,
+            ),
+            (
+                QueueCommand::FenceLease(FenceLeaseCommand {
+                    item_ids: vec![ItemId::from_u64(1)],
+                }),
+                Shared,
+                Singleton,
+            ),
+            (
+                QueueCommand::UnfenceLease(UnfenceLeaseCommand {
+                    item_ids: vec![ItemId::from_u64(1)],
+                }),
+                Shared,
+                Singleton,
+            ),
+            (QueueCommand::ResumeQueue, Shared, Singleton),
+            (
+                QueueCommand::PurgeItems(PurgeItemsCommand {
+                    item_ids: vec![ItemId::from_u64(1)],
+                    force: false,
+                }),
+                Shared,
+                Singleton,
+            ),
+            (
+                QueueCommand::WriteSideRecords(WriteSideRecordsCommand::default()),
+                Bypass,
+                NotCandidateMutating,
+            ),
+            (
+                QueueCommand::AdvanceInstanceFence(AdvanceInstanceFenceCommand::default()),
+                Bypass,
+                NotCandidateMutating,
+            ),
+        ];
+
+        for kind in [
+            FinalizeKind::Complete,
+            FinalizeKind::Fail,
+            FinalizeKind::Retry,
+            FinalizeKind::Release,
+            FinalizeKind::Rearm,
+        ] {
+            let generation = finalize_kind_generation(kind);
+            let fence = match generation {
+                MutationGenerationDisposition::Singleton => SelectionFenceDisposition::Shared,
+                _ => SelectionFenceDisposition::Bypass,
+            };
+            catalog.push((
+                QueueCommand::CohortFinalize(CohortFinalizeCommand {
+                    cohort_id: CohortId::new("cohort").unwrap(),
+                    kind,
+                    not_before: None,
+                }),
+                fence,
+                generation,
+            ));
+        }
+
+        for drain_intake in [false, true] {
+            catalog.push((
+                QueueCommand::PauseQueue(PauseQueueCommand { drain_intake }),
+                SelectionFenceDisposition::Shared,
+                MutationGenerationDisposition::Singleton,
+            ));
+        }
+        for blocked in [false, true] {
+            catalog.push((
+                QueueCommand::SetGates(SetGatesCommand {
+                    gate_keys: vec!["g".into()],
+                    blocked,
+                }),
+                SelectionFenceDisposition::Shared,
+                MutationGenerationDisposition::Singleton,
+            ));
+        }
+        for payload in [
+            PayloadUpdate::Keep,
+            PayloadUpdate::Set(Some(Bytes::from_static(b"payload"))),
+        ] {
+            for priority in [ScheduleUpdate::Keep, ScheduleUpdate::Set(None)] {
+                catalog.push((
+                    QueueCommand::UpdateFields(update_fields(payload.clone(), priority)),
+                    SelectionFenceDisposition::Shared,
+                    MutationGenerationDisposition::Singleton,
+                ));
+            }
+        }
+        for action in [
+            ResolvedItemMutationAction::Purge,
+            ResolvedItemMutationAction::Replace(Box::new(resolved_values())),
+        ] {
+            catalog.push((
+                QueueCommand::MutateItems(MutateItemsCommand {
+                    items: vec![ResolvedItemMutation {
+                        item_id: ItemId::from_u64(1),
+                        action,
+                    }],
+                    gate_changes: vec![
+                        crate::GateChange {
+                            gate_keys: vec!["g".into()],
+                            blocked: true,
+                        },
+                        crate::GateChange {
+                            gate_keys: vec!["g".into()],
+                            blocked: false,
+                        },
+                    ],
+                }),
+                SelectionFenceDisposition::Shared,
+                MutationGenerationDisposition::Singleton,
+            ));
+        }
+
+        catalog
+    }
+
+    fn derived_append_class(fence: SelectionFenceDisposition) -> AppendAdmissionClass {
+        match fence {
+            SelectionFenceDisposition::Exclusive => AppendAdmissionClass::ClaimCoordinatorLive,
+            SelectionFenceDisposition::Shared => AppendAdmissionClass::SelectionRequired,
+            SelectionFenceDisposition::Bypass => AppendAdmissionClass::Bypass,
+        }
+    }
+
+    #[test]
+    fn classifier_exhaustiveness_covers_every_command_and_nested_action() {
+        let catalog = command_catalog();
+        let mut seen = HashSet::new();
+        for (command, fence, generation) in &catalog {
+            assert_eq!(selection_fence_disposition(command), *fence);
+            assert_eq!(mutation_generation_disposition(command), *generation);
+            match (*fence, *generation) {
+                (
+                    SelectionFenceDisposition::Shared,
+                    MutationGenerationDisposition::Compatible(_)
+                    | MutationGenerationDisposition::Singleton,
+                )
+                | (
+                    SelectionFenceDisposition::Bypass | SelectionFenceDisposition::Exclusive,
+                    MutationGenerationDisposition::NotCandidateMutating,
+                ) => {}
+                _ => panic!("fence and generation classifiers disagree for {command:?}"),
+            }
+            seen.insert(discriminant(command));
+        }
+        assert_eq!(seen.len(), QUEUE_COMMAND_VARIANT_COUNT);
     }
 
     #[test]
@@ -2141,6 +2603,140 @@ mod tests {
                 mutation_generation_disposition(&command),
                 MutationGenerationDisposition::NotCandidateMutating
             );
+        }
+    }
+
+    #[test]
+    fn every_candidate_mutating_shared_command_joins_the_sequencer() {
+        for (command, fence, generation) in command_catalog() {
+            if fence != SelectionFenceDisposition::Shared {
+                continue;
+            }
+            assert!(matches!(
+                generation,
+                MutationGenerationDisposition::Compatible(_)
+                    | MutationGenerationDisposition::Singleton
+            ));
+            assert_eq!(
+                audited_mutation_sequencer_join(
+                    AppendAdmissionClass::SelectionRequired,
+                    generation
+                ),
+                Some(true)
+            );
+            assert_eq!(
+                audited_mutation_sequencer_join(AppendAdmissionClass::KeyedPermitLive, generation),
+                Some(true)
+            );
+            assert_eq!(
+                audited_append_admission_count(derived_append_class(fence), fence),
+                Some(1)
+            );
+            let request = RawCommitRequest::new(shard(), vec![envelope(command)], 1)
+                .with_append_admission(derived_append_class(fence));
+            assert_eq!(audited_append_request_admission_count(&request), Some(1));
+        }
+    }
+
+    #[test]
+    fn compatible_fifo_vectors_take_the_overlay_path() {
+        let push = QueueCommand::Push(PushCommand { items: Vec::new() });
+        let batch = QueueCommand::UpdateFieldsBatch(UpdateFieldsBatchCommand {
+            updates: Vec::new(),
+        });
+        assert_eq!(
+            mutation_generation_disposition_for_commands([&push, &push]),
+            MutationGenerationDisposition::Compatible(MutationGenerationKind::Push)
+        );
+        assert_eq!(
+            mutation_generation_disposition_for_commands([&batch, &batch]),
+            MutationGenerationDisposition::Compatible(MutationGenerationKind::BatchUpdate)
+        );
+        assert_eq!(
+            mutation_generation_disposition_for_commands([&push, &batch]),
+            MutationGenerationDisposition::Singleton
+        );
+
+        let sequencer = MutationSequencer::<&'static str, MutationGenerationKind, u8>::new();
+        let mut overlay = Vec::new();
+        for index in 0..CLAIM_GENERATION_MAX_REQUESTS {
+            overlay.push(
+                sequencer
+                    .admit(
+                        "q",
+                        MutationGenerationKind::Push,
+                        MutationIngress::Direct,
+                        Arc::new(index as u8),
+                        1,
+                        1,
+                    )
+                    .expect("compatible Push overlays onto one generation"),
+            );
+        }
+        assert_eq!(sequencer.generation_count(&"q"), 1);
+        assert!(
+            overlay
+                .windows(2)
+                .all(|pair| pair[0].generation_id() == pair[1].generation_id())
+        );
+        let singleton = sequencer
+            .admit(
+                "q",
+                MutationGenerationKind::BatchUpdate,
+                MutationIngress::Direct,
+                Arc::new(9),
+                1,
+                1,
+            )
+            .expect("incompatible kind opens a singleton generation");
+        assert_eq!(sequencer.generation_count(&"q"), 2);
+        assert_ne!(overlay[0].generation_id(), singleton.generation_id());
+    }
+
+    #[test]
+    fn bypass_and_recovery_do_not_join_mutation_generations() {
+        for (command, fence, generation) in command_catalog() {
+            if fence != SelectionFenceDisposition::Bypass {
+                continue;
+            }
+            assert_eq!(
+                generation,
+                MutationGenerationDisposition::NotCandidateMutating
+            );
+            assert_eq!(
+                mutation_generation_disposition_for_commands([&command, &command]),
+                MutationGenerationDisposition::NotCandidateMutating
+            );
+            assert_eq!(
+                audited_mutation_sequencer_join(AppendAdmissionClass::Bypass, generation),
+                Some(false)
+            );
+            assert_eq!(
+                audited_append_admission_count(AppendAdmissionClass::Bypass, fence),
+                Some(0)
+            );
+            let request = RawCommitRequest::new(shard(), vec![envelope(command)], 1)
+                .with_append_admission(AppendAdmissionClass::Bypass);
+            assert_eq!(audited_append_request_admission_count(&request), Some(0));
+        }
+
+        let mutating = QueueCommand::Push(PushCommand { items: Vec::new() });
+        for class in [
+            AppendAdmissionClass::RecoveryOnly,
+            AppendAdmissionClass::AtomicNative,
+            AppendAdmissionClass::NonDerived,
+        ] {
+            assert_eq!(
+                audited_mutation_sequencer_join(class, mutation_generation_disposition(&mutating)),
+                Some(false)
+            );
+            assert_eq!(
+                audited_append_admission_count(class, selection_fence_disposition(&mutating)),
+                Some(0)
+            );
+            let request = RawCommitRequest::new(shard(), vec![envelope(mutating.clone())], 1)
+                .with_append_admission(class);
+            assert_eq!(audited_append_request_admission_count(&request), Some(0));
         }
     }
 

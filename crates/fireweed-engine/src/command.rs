@@ -100,27 +100,27 @@ pub enum SelectionFenceDisposition {
     Exclusive,
 }
 
-fn classify_schedule_update<T>(update: &ScheduleUpdate<T>) {
+pub(crate) fn classify_schedule_update<T>(update: &ScheduleUpdate<T>) {
     match update {
         ScheduleUpdate::Keep => {}
         ScheduleUpdate::Set(_) => {}
     }
 }
 
-fn classify_payload_update(update: &PayloadUpdate) {
+pub(crate) fn classify_payload_update(update: &PayloadUpdate) {
     match update {
         PayloadUpdate::Keep => {}
         PayloadUpdate::Set(_) => {}
     }
 }
 
-fn classify_update_fields(command: &UpdateFieldsCommand) {
+pub(crate) fn classify_update_fields(command: &UpdateFieldsCommand) {
     classify_payload_update(&command.payload);
     classify_schedule_update(&command.set_priority);
     classify_schedule_update(&command.set_not_before);
 }
 
-fn classify_mutate_items(command: &MutateItemsCommand) {
+pub(crate) fn classify_mutate_items(command: &MutateItemsCommand) {
     for mutation in &command.items {
         match &mutation.action {
             ResolvedItemMutationAction::Purge => {}
@@ -159,7 +159,7 @@ pub fn selection_fence_disposition(command: &QueueCommand) -> SelectionFenceDisp
             .iter()
             .map(|outcome| finalize_kind_disposition(outcome.kind))
             .max()
-            .unwrap_or(Bypass),
+            .expect("empty Finalize is invalid before classification"),
         QueueCommand::CohortFinalize(command) => finalize_kind_disposition(command.kind),
         QueueCommand::ReplacePending(_) => Shared,
         QueueCommand::UpdateFields(command) => {
@@ -1733,6 +1733,37 @@ mod serde_tests {
             selection_fence_disposition_for_commands([&terminal, &mixed, &claim]),
             SelectionFenceDisposition::Exclusive
         );
+
+        for kind in [
+            FinalizeKind::Retry,
+            FinalizeKind::Release,
+            FinalizeKind::Rearm,
+        ] {
+            let cohort = QueueCommand::CohortFinalize(CohortFinalizeCommand {
+                cohort_id: CohortId::new("cohort").unwrap(),
+                kind,
+                not_before: None,
+            });
+            assert_eq!(
+                selection_fence_disposition(&cohort),
+                SelectionFenceDisposition::Shared
+            );
+            assert_eq!(
+                selection_fence_disposition_for_commands([&terminal, &cohort]),
+                SelectionFenceDisposition::Shared
+            );
+        }
+        for kind in [FinalizeKind::Complete, FinalizeKind::Fail] {
+            let cohort = QueueCommand::CohortFinalize(CohortFinalizeCommand {
+                cohort_id: CohortId::new("cohort").unwrap(),
+                kind,
+                not_before: None,
+            });
+            assert_eq!(
+                selection_fence_disposition(&cohort),
+                SelectionFenceDisposition::Bypass
+            );
+        }
     }
 
     #[test]

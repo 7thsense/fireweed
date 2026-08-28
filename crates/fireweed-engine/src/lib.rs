@@ -109,7 +109,8 @@ pub use claim_batch::{
     SelectionFence, SelectionFenceAcquire, SelectionFenceAdmission, SelectionFenceMode,
     SelectionFencePermit, SelectionFenceWaiterPermit, SharedDriverReadAdmission, SlotAcquire,
     SlotPermit, audited_append_admission_count, audited_append_request_admission_count,
-    mutation_generation_disposition,
+    audited_mutation_sequencer_join, mutation_generation_disposition,
+    mutation_generation_disposition_for_commands,
 };
 pub use claim_validation::{
     ClaimCompatibility, ClaimUnit, GroupBatching, require_item_level_claim,
