@@ -49,8 +49,8 @@ pub use compose_log::{
     open_object_log_engine_s3_sync,
 };
 pub use log_engine_store::{
-    ApplyPublish, ObjectLogEngineStore, PackedAppendOutcome, PackedApplyBatch, PackerStats,
-    flush_config_from_segment,
+    ApplyPublish, LockWaitStats, ObjectLogEngineStore, PackedAppendOutcome, PackedApplyBatch,
+    PackerStats, flush_config_from_segment,
 };
 pub use object_log::{BlobStore, FlushConfig, S3BlobStore};
 #[doc(hidden)]

@@ -15,7 +15,7 @@ use std::io::Write as IoWrite;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use fireweed_core::QueueDefinition;
@@ -225,6 +225,75 @@ pub struct PackerStats {
     pub bytes: u64,
 }
 
+/// Time spent waiting on the metadata permit and/or produce lock.
+///
+/// `append_wait` covers produce-path permit then produce-lock acquires.
+/// Epoch-acquire and emission-cursor waits are permit-only.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LockWaitStats {
+    pub append_waits: u64,
+    pub append_wait: Duration,
+    pub epoch_acquire_waits: u64,
+    pub epoch_acquire_wait: Duration,
+    pub emission_cursor_waits: u64,
+    pub emission_cursor_wait: Duration,
+}
+
+struct LockWaitCounters {
+    append_waits: AtomicU64,
+    append_wait_nanos: AtomicU64,
+    epoch_acquire_waits: AtomicU64,
+    epoch_acquire_wait_nanos: AtomicU64,
+    emission_cursor_waits: AtomicU64,
+    emission_cursor_wait_nanos: AtomicU64,
+}
+
+impl LockWaitCounters {
+    fn new() -> Self {
+        Self {
+            append_waits: AtomicU64::new(0),
+            append_wait_nanos: AtomicU64::new(0),
+            epoch_acquire_waits: AtomicU64::new(0),
+            epoch_acquire_wait_nanos: AtomicU64::new(0),
+            emission_cursor_waits: AtomicU64::new(0),
+            emission_cursor_wait_nanos: AtomicU64::new(0),
+        }
+    }
+
+    fn record_append(&self, wait: Duration) {
+        self.append_waits.fetch_add(1, Ordering::Relaxed);
+        self.append_wait_nanos
+            .fetch_add(wait.as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    fn record_epoch_acquire(&self, wait: Duration) {
+        self.epoch_acquire_waits.fetch_add(1, Ordering::Relaxed);
+        self.epoch_acquire_wait_nanos
+            .fetch_add(wait.as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    fn record_emission_cursor(&self, wait: Duration) {
+        self.emission_cursor_waits.fetch_add(1, Ordering::Relaxed);
+        self.emission_cursor_wait_nanos
+            .fetch_add(wait.as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> LockWaitStats {
+        LockWaitStats {
+            append_waits: self.append_waits.load(Ordering::Relaxed),
+            append_wait: Duration::from_nanos(self.append_wait_nanos.load(Ordering::Relaxed)),
+            epoch_acquire_waits: self.epoch_acquire_waits.load(Ordering::Relaxed),
+            epoch_acquire_wait: Duration::from_nanos(
+                self.epoch_acquire_wait_nanos.load(Ordering::Relaxed),
+            ),
+            emission_cursor_waits: self.emission_cursor_waits.load(Ordering::Relaxed),
+            emission_cursor_wait: Duration::from_nanos(
+                self.emission_cursor_wait_nanos.load(Ordering::Relaxed),
+            ),
+        }
+    }
+}
+
 struct PackerCounters {
     seals: AtomicU64,
     waiters: AtomicU64,
@@ -342,7 +411,9 @@ pub struct ObjectLogEngineStore<S: Sequencer = ManifestSequencer> {
     packer: Arc<ObjectLogPacker>,
     /// One sequenced produce at a time. Concurrent seals otherwise assign
     /// overlapping or gapped offsets and the apply coordinator holds forever.
+    /// Always acquired after the per-shard metadata permit (never inverted).
     produce_lock: tokio::sync::Mutex<()>,
+    lock_wait: LockWaitCounters,
     metadata_permits: Arc<MetadataPermits>,
     catalog: Mutex<CatalogDoc>,
     meta_prefix: String,
@@ -426,6 +497,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             high_water_appends: Mutex::new(HashMap::new()),
             packer: Arc::new(ObjectLogPacker::new()),
             produce_lock: tokio::sync::Mutex::new(()),
+            lock_wait: LockWaitCounters::new(),
             metadata_permits,
             catalog: Mutex::new(CatalogDoc::default()),
             meta_prefix: "fwmeta/".to_string(),
@@ -592,6 +664,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             high_water_appends: Mutex::new(HashMap::new()),
             packer: Arc::new(ObjectLogPacker::new()),
             produce_lock: tokio::sync::Mutex::new(()),
+            lock_wait: LockWaitCounters::new(),
             metadata_permits: Arc::new(Mutex::new(HashMap::new())),
             catalog: Mutex::new(CatalogDoc::default()),
             meta_prefix,
@@ -659,7 +732,10 @@ impl<S: Sequencer<Meta = ()>> ObjectLogEngineStore<S> {
             return Err(EngineError::Invalid("emission cursor queue mismatch"));
         }
         let permit = self.metadata_permit(shard);
+        let wait_started = Instant::now();
         let _guard = permit.lock().await;
+        self.lock_wait
+            .record_emission_cursor(wait_started.elapsed());
         match &self.definition_authority {
             DefinitionAuthority::S3CreateOnly { put } => {
                 self.set_emission_cursor_s3_cas(put.as_ref(), shard, position)
@@ -1061,6 +1137,10 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         self.packer.snapshot()
     }
 
+    pub fn lock_wait_stats(&self) -> LockWaitStats {
+        self.lock_wait.snapshot()
+    }
+
     /// Group-commit path for ports that do not hold the per-queue admit permit
     /// (BatchUpdate / upsert). Concurrent callers of the same shard share one
     /// object PUT when they arrive within [`PACK_LINGER`] or fill [`PACK_TARGET_BYTES`].
@@ -1225,7 +1305,15 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         if commands.is_empty() {
             return Ok(Vec::new());
         }
+        // Terminal suffix: metadata-permit then produce-lock. The permit is held
+        // across produce and the permit-held high-water decision/advance.
+        let permit = self.metadata_permit(shard);
+        let wait_started = Instant::now();
+        let _metadata = permit.lock().await;
+        self.lock_wait.record_append(wait_started.elapsed());
+        let wait_started = Instant::now();
         let _produce = self.produce_lock.lock().await;
+        self.lock_wait.record_append(wait_started.elapsed());
         let payload = Bytes::from(
             fireweed_engine::command_codec::encode_log_batch(expected_epoch, &commands)
                 .map_err(store_err)?,
@@ -1251,18 +1339,20 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             .map(|i| CommandPosition::new(shard.clone(), expected_epoch, base + i))
             .collect();
         if let Some(last) = positions.last() {
-            self.advance_high_water(shard, last).await?;
+            self.advance_high_water_held(shard, last).await?;
         }
         Ok(positions)
     }
 
-    async fn advance_high_water(
+    /// Advance high-water after a sequenced produce.
+    ///
+    /// The caller must already hold this shard's metadata permit; this helper
+    /// never re-acquires it (tokio's mutex is not reentrant).
+    async fn advance_high_water_held(
         &self,
         shard: &QueueKey,
         last: &CommandPosition,
     ) -> EngineResult<()> {
-        let permit = self.metadata_permit(shard);
-        let _guard = permit.lock().await;
         let should_advance = self
             .high_water
             .lock()
@@ -1358,7 +1448,9 @@ impl<S: Sequencer<Meta = ()> + 'static> AsyncLogStore for ObjectLogEngineStore<S
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         async move {
             let permit = self.metadata_permit(&shard);
+            let wait_started = Instant::now();
             let _guard = permit.lock().await;
+            self.lock_wait.record_epoch_acquire(wait_started.elapsed());
             let next = self.load_epoch(&shard).await?.saturating_add(1);
             self.store_epoch(&shard, next).await?;
             Ok(next)
@@ -1597,12 +1689,13 @@ mod tests {
     use std::sync::Arc;
 
     use fireweed_core::{
-        EligibilityPolicy, OrderingMode, PriorityModel, QueueDefinition, QueueId, RecurrencePolicy,
-        RetryPolicy, TenantId, UtcTimestamp,
+        EligibilityPolicy, ItemId, OrderingMode, PriorityModel, QueueDefinition, QueueId,
+        RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp,
     };
     use fireweed_engine::{
         AsyncLogStore, CommandChecksum, CommandEnvelope, CommandId, CommandPosition, EngineError,
-        ProjectionSnapshot, QueueCommand, QueueKey, SnapshotRef,
+        FinalizeCommand, FinalizeKind, FinalizeOutcome, ProjectionSnapshot, QueueCommand, QueueKey,
+        SnapshotRef,
     };
 
     use super::ObjectLogEngineStore;
@@ -2241,6 +2334,283 @@ mod tests {
         assert_eq!(
             reopened.emission_cursor(&shard).await.unwrap(),
             Some(positions[3].clone())
+        );
+    }
+
+    fn production_source() -> &'static str {
+        include_str!("log_engine_store.rs")
+            .split_once("#[cfg(test)]\nmod tests")
+            .expect("log_engine_store test module")
+            .0
+    }
+
+    fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let (_, tail) = source
+            .split_once(start)
+            .unwrap_or_else(|| panic!("missing source-audit start marker: {start}"));
+        let (body, _) = tail
+            .split_once(end)
+            .unwrap_or_else(|| panic!("missing source-audit end marker: {end}"));
+        body
+    }
+
+    fn assert_no_committed_pool_or_selection_fence(region: &str, label: &str) {
+        for needle in [
+            "SelectionFence",
+            "SelectionFenceAdmission",
+            "SelectionFenceAcquire",
+            "OutcomeReadAdmission",
+            "ClaimDriverReadAdmission",
+            "SharedDriverReadAdmission",
+            "committed driver read pool",
+            "committed outcome read pool",
+            "borrow_committed",
+            "CommittedPool",
+            "driver_pool",
+            "outcome_pool",
+        ] {
+            assert!(
+                !region.contains(needle),
+                "{label} must not {needle} while holding metadata permit or produce_lock"
+            );
+        }
+    }
+
+    fn pause_env(id: &str) -> CommandEnvelope {
+        CommandEnvelope {
+            command_id: CommandId::new(id),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: Vec::new(),
+            command: QueueCommand::PauseQueue(Default::default()),
+            checksum: CommandChecksum(0),
+            created_at: UtcTimestamp::new(1, 0).unwrap(),
+        }
+    }
+
+    fn complete_env(id: &str, item: u32) -> CommandEnvelope {
+        let item_id = ItemId::mint(1, 0, item);
+        CommandEnvelope {
+            command_id: CommandId::new(id),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: vec![item_id],
+            command: QueueCommand::Finalize(FinalizeCommand {
+                outcomes: vec![FinalizeOutcome::new(item_id, FinalizeKind::Complete)],
+            }),
+            checksum: CommandChecksum(0),
+            created_at: UtcTimestamp::new(1, 0).unwrap(),
+        }
+    }
+
+    /// S3a: every produce path is metadata-permit → produce-lock with permit-held high-water.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn objectlog_metadata_produce_lock_order_is_global() {
+        let production = production_source();
+        let produce_immediate = between(
+            production,
+            "async fn produce_immediate(",
+            "async fn advance_high_water_held(",
+        );
+        let permit_idx = produce_immediate
+            .find("self.metadata_permit(shard)")
+            .expect("produce_immediate must acquire the metadata permit");
+        let permit_lock_idx = produce_immediate[permit_idx..]
+            .find(".lock()")
+            .map(|offset| permit_idx + offset)
+            .expect("produce_immediate must lock the metadata permit");
+        let produce_lock_idx = produce_immediate
+            .find("self.produce_lock.lock()")
+            .expect("produce_immediate must acquire produce_lock");
+        assert!(
+            permit_lock_idx < produce_lock_idx,
+            "produce_immediate must acquire metadata-permit before produce-lock; \
+             inverted order deadlocks Complete vs fenced produce"
+        );
+        assert!(
+            produce_immediate.contains("advance_high_water_held("),
+            "produce_immediate must use the permit-held high-water helper"
+        );
+        assert!(
+            !produce_immediate
+                .replace("advance_high_water_held", "")
+                .contains("advance_high_water"),
+            "produce_immediate must not re-lock metadata via advance_high_water"
+        );
+        assert_eq!(
+            production.matches("self.produce_lock.lock()").count(),
+            1,
+            "produce_lock must be acquired in exactly one produce path"
+        );
+        assert_eq!(
+            production.matches(".produce_immediate(").count(),
+            3,
+            "append, append_exclusive, and seal_packed must share produce_immediate"
+        );
+        assert_eq!(
+            production
+                .lines()
+                .filter(|line| line.contains(".produce(") && !line.contains("produce_immediate"))
+                .count(),
+            1,
+            "engine.produce must exist only inside produce_immediate"
+        );
+
+        let held = between(
+            production,
+            "async fn advance_high_water_held(",
+            "fn estimate_pack_bytes(",
+        );
+        assert!(
+            !held.contains("metadata_permit") && !held.contains("produce_lock"),
+            "permit-held high-water helper must not re-acquire metadata permit or produce_lock"
+        );
+
+        for (label, start, end) in [
+            ("acquire_epoch", "fn acquire_epoch(", "fn append("),
+            ("set_high_water", "fn set_high_water(", "fn write_snapshot("),
+            (
+                "set_emission_cursor",
+                "pub async fn set_emission_cursor(",
+                "async fn set_emission_cursor_s3_cas(",
+            ),
+        ] {
+            let body = between(production, start, end);
+            assert!(
+                body.contains("metadata_permit"),
+                "{label} must take the metadata permit"
+            );
+            assert!(
+                !body.contains("produce_lock"),
+                "{label} must not acquire produce_lock (would invert vs produce)"
+            );
+            assert_no_committed_pool_or_selection_fence(body, label);
+        }
+        assert_no_committed_pool_or_selection_fence(produce_immediate, "produce_immediate");
+        assert_no_committed_pool_or_selection_fence(held, "advance_high_water_held");
+        assert_no_committed_pool_or_selection_fence(production, "log_engine_store production");
+
+        let log = Arc::new(
+            ObjectLogEngineStore::open_memory(FlushConfig {
+                linger: std::time::Duration::ZERO,
+                ..FlushConfig::default()
+            })
+            .await
+            .unwrap(),
+        );
+        let produce_def = qdef();
+        let mut epoch_def = qdef();
+        epoch_def.queue_id = QueueId::new("q-epoch").unwrap();
+        let produce_shard =
+            QueueKey::new(produce_def.tenant_id.clone(), produce_def.queue_id.clone());
+        let epoch_shard = QueueKey::new(epoch_def.tenant_id.clone(), epoch_def.queue_id.clone());
+        log.create_or_read_definition(produce_def).await.unwrap();
+        log.create_or_read_definition(epoch_def).await.unwrap();
+        log.ensure_shard(produce_shard.clone()).await.unwrap();
+        log.ensure_shard(epoch_shard.clone()).await.unwrap();
+        let epoch = log.acquire_epoch(produce_shard.clone()).await.unwrap();
+        let warmup = log
+            .append(produce_shard.clone(), vec![pause_env("warmup")], epoch)
+            .await
+            .unwrap();
+        assert_eq!(warmup.len(), 1);
+
+        let raced = async {
+            let mut handles = Vec::new();
+            for i in 0..8u32 {
+                {
+                    let log = Arc::clone(&log);
+                    let shard = produce_shard.clone();
+                    handles.push(tokio::spawn(async move {
+                        log.append(
+                            shard,
+                            vec![complete_env(&format!("complete-{i}"), i)],
+                            epoch,
+                        )
+                        .await
+                        .map(|_| ())
+                    }));
+                }
+                {
+                    let log = Arc::clone(&log);
+                    let shard = produce_shard.clone();
+                    handles.push(tokio::spawn(async move {
+                        log.append_exclusive(shard, vec![pause_env(&format!("excl-{i}"))], epoch)
+                            .await
+                            .map(|_| ())
+                    }));
+                }
+                {
+                    let log = Arc::clone(&log);
+                    let shard = produce_shard.clone();
+                    handles.push(tokio::spawn(async move {
+                        log.packed_append(shard, vec![pause_env(&format!("pack-{i}"))], epoch)
+                            .await
+                            .map(|_| ())
+                    }));
+                }
+                {
+                    let log = Arc::clone(&log);
+                    let shard = epoch_shard.clone();
+                    handles.push(tokio::spawn(async move {
+                        log.acquire_epoch(shard).await.map(|_| ())
+                    }));
+                }
+            }
+            let mut completed = 0usize;
+            for handle in handles {
+                match handle.await.expect("join") {
+                    Ok(()) => completed += 1,
+                    Err(EngineError::EpochFenced) => {}
+                    Err(error) => panic!("concurrent produce/epoch failed: {error}"),
+                }
+            }
+            completed
+        };
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(15), raced)
+            .await
+            .expect(
+                "metadata-permit → produce-lock inversion hung under Complete/acquire-epoch/produce",
+            );
+        assert!(
+            completed > 0,
+            "concurrent Complete/acquire-epoch/produce must complete at least one lock-order path"
+        );
+
+        log.set_emission_cursor(&produce_shard, warmup[0].clone())
+            .await
+            .unwrap();
+        let waits = log.lock_wait_stats();
+        eprintln!(
+            "S3a lock waits: append={} ({:?}) epoch_acquire={} ({:?}) emission_cursor={} ({:?})",
+            waits.append_waits,
+            waits.append_wait,
+            waits.epoch_acquire_waits,
+            waits.epoch_acquire_wait,
+            waits.emission_cursor_waits,
+            waits.emission_cursor_wait
+        );
+        assert!(
+            waits.append_waits >= 2,
+            "append must record metadata-permit and produce-lock waits, got {}",
+            waits.append_waits
+        );
+        assert!(
+            waits.epoch_acquire_waits >= 1,
+            "epoch-acquire must record permit wait, got {}",
+            waits.epoch_acquire_waits
+        );
+        assert_eq!(
+            waits.emission_cursor_waits, 1,
+            "emission-cursor must record permit wait"
+        );
+        assert!(
+            AsyncLogStore::high_water(log.as_ref(), produce_shard.clone())
+                .await
+                .unwrap()
+                .is_some()
         );
     }
 }
