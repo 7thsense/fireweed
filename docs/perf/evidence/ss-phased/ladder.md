@@ -183,3 +183,35 @@ the 224 MiB post-S3c envelope; S3c still sees that predicted-regression flag.
 N=100k mixed non-regression and the full closed-cohort publication budgets
 (2,021.075 s / 17,246.775 s) remain comments on
 `shadow_mutation_generation_calibration`.
+
+### S3m Claim-turn/slot and exact fence-bound calibration
+
+S3m records Claim-turn, Claim-slot, fence-acquire, and coverage/work bounds
+after the S3c serving switch and packed authority-first Claim apply. Production
+selection-fence dispositions stay inert. Independent `ss_mixed_overlap`
+capacity subtests cross nine Pending-consuming Claim queues and four
+incompatible same-queue Claim keys; a below-cap combined soak adds eight
+live mutations, committed peeks overlapping apply, and a 16-item
+publication-plus-apply cycle (the S0 32-mutation / 16-sample observation
+cohorts stay on the ignored N=100k harness). Isolated
+non-serving shadow queues take the real `SelectionFence` so acquire, drain,
+and shared-fence starvation can be timed without activating S5. Driver borrow
+after slot is measured at ≤100 ms with zero expiry.
+
+Derived (recorded, not activated on the production fence): Claim-turn floor
+500 ms / cap 255 s; Claim-slot floor 500 ms / cap 95 s; fence acquisition
+floor 500 ms / cap 75 s; pre-fence/drain/delta coverage and 800-item/4 MiB
+work floor 500 ms / cap 5 s.
+
+The T2 diagnostic
+`mean_claim_cycle_ms <= 1000 × achieved_items_per_claim_vector / 4000`
+(200 ms at fill 800) is recorded by the measurement harness in
+`shadow_claim_combined_soak_stays_one_below_every_cap` and the ignored
+`shadow_claim_drain_calibration_uses_exact_high_water` path. This slice does
+not claim a T2 pass; a short observed cycle does not fail S3m. S5 re-derives
+on the activated fence path. Any required value above its cap still blocks
+S5.
+
+N=100k exact-high-water drain calibration remains the ignored
+`shadow_claim_drain_calibration_uses_exact_high_water` harness
+(`SS_CLAIM_CALIBRATION_N` may lower N locally). No new rate row.

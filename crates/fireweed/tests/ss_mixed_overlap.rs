@@ -17,6 +17,15 @@
 //! cargo test -p fireweed --test ss_mixed_overlap -- --ignored --exact --nocapture \
 //!   shadow_mutation_generation_calibration
 //! ```
+//!
+//! S3m Claim-turn/slot and exact fence-bound calibration after S3c and packed
+//! Claim apply. Production selection-fence dispositions stay inert:
+//!
+//! ```text
+//! cargo test -p fireweed --test ss_mixed_overlap -- --exact --nocapture shadow_claim_
+//! cargo test -p fireweed --test ss_mixed_overlap -- --ignored --exact --nocapture \
+//!   shadow_claim_drain_calibration_uses_exact_high_water
+//! ```
 
 #![cfg(all(feature = "objectlog", feature = "turso"))]
 
@@ -41,10 +50,13 @@ use fireweed_engine::{
     MUTATION_SEQUENCER_DEFAULT_MAX_WAIT, MUTATION_SEQUENCER_RESOURCE,
     MUTATION_SEQUENCER_WAIT_RESOURCE, MutationGenerationKind, MutationIngress, MutationSequencer,
     OUTCOME_READ_SLOTS_RESOURCE, OUTCOME_SLOT_DEFAULT_MAX_WAIT, OutcomeReadAdmission,
-    QueueGateError, S3S_COVERAGE_OR_WORK_CAP, S3S_DERIVED_COVERAGE_OR_WORK_WAIT,
+    QueueGateError, S3M_DERIVED_CLAIM_SLOT_WAIT, S3M_DERIVED_COVERAGE_OR_WORK_WAIT,
+    S3M_DERIVED_FENCE_ACQUIRE_WAIT, S3M_DERIVED_TURN_WAIT, S3M_DRIVER_POOL_BORROW_CAP,
+    S3M_WAIT_FLOOR, S3S_COVERAGE_OR_WORK_CAP, S3S_DERIVED_COVERAGE_OR_WORK_WAIT,
     S3S_DERIVED_DRIVER_SLOT_WAIT, S3S_DERIVED_OUTCOME_SLOT_WAIT, S3S_DERIVED_TURN_WAIT,
-    S3S_FENCE_ACQUIRE_CARRIED_CAP, S3S_WAIT_FLOOR, SHARED_DRIVER_SLOTS_RESOURCE,
-    SharedDriverReadAdmission, abort_unplanned_generation_on_deadline, derive_structural_wait,
+    S3S_FENCE_ACQUIRE_CARRIED_CAP, S3S_WAIT_FLOOR, SHARED_DRIVER_SLOTS_RESOURCE, SelectionFence,
+    SelectionFenceAdmission, SharedDriverReadAdmission, abort_unplanned_generation_on_deadline,
+    derive_structural_wait,
 };
 use fireweed_objectlog::{ObjectLogEngineStore, flush_config_from_segment};
 use fireweed_turso::{
@@ -60,6 +72,9 @@ const OBSERVATION_SAMPLES: usize = 16;
 const PACK_LINGER_MS: u64 = 20;
 const KEYED_QUEUE_PER_KEY_WAITERS: &str = "keyed queue per-key waiters";
 const SEVENTEEN_READER_DEADLINE: Duration = Duration::from_millis(31_050);
+const S3M_SOAK_N: usize = 16;
+const S3M_CALIBRATION_N: usize = 100_000;
+const T2_ITEMS_PER_SECOND: f64 = 4_000.0;
 
 type MixedRuntime = Fireweed;
 
@@ -1919,6 +1934,999 @@ async fn shadow_mutation_generation_calibration() -> EngineResult<()> {
     );
 
     drop(fireweed);
+    let _ = std::fs::remove_dir_all(root);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// S3m Claim-turn/slot and exact fence-bound calibration.
+//
+// Production selection-fence dispositions stay inert through S3c. Isolated
+// non-serving shadow queues take the real SelectionFence so acquire/starvation
+// can be timed without activating S5.
+//
+// Remaining calibration not landed in the default lane (too expensive here):
+// - N=100k exact-high-water drain soak versus T2
+//   `mean_claim_cycle_ms <= 1000 × achieved_items_per_claim_vector / 4000`
+//   (200 ms at fill 800). The harness exists as
+//   `shadow_claim_drain_calibration_uses_exact_high_water`.
+// - Full closed-cohort publication budgets 2,021.075 s / 4,040 s / 4,075 s
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default)]
+struct S3mTimings {
+    claim_turn: Latency,
+    pre_fence_coverage: Latency,
+    claim_slot: Latency,
+    driver_pool: Latency,
+    fence_acquire: Latency,
+    fence_drain: Latency,
+    delta_coverage: Latency,
+    select_reserve_encode: Latency,
+    claim_cycle: Latency,
+    fills: Vec<usize>,
+    shared_fence_starvation: usize,
+    driver_pool_expiries: usize,
+    reservation_split_rounds: usize,
+}
+
+impl S3mTimings {
+    fn mean_fill(&self) -> f64 {
+        if self.fills.is_empty() {
+            return 0.0;
+        }
+        self.fills.iter().sum::<usize>() as f64 / self.fills.len() as f64
+    }
+
+    fn mean_claim_cycle_ms(&self) -> f64 {
+        if self.claim_cycle.samples.is_empty() {
+            return 0.0;
+        }
+        self.claim_cycle
+            .samples
+            .iter()
+            .copied()
+            .sum::<Duration>()
+            .as_secs_f64()
+            * 1_000.0
+            / self.claim_cycle.samples.len() as f64
+    }
+
+    fn t2_budget_ms(&self) -> f64 {
+        1_000.0 * self.mean_fill() / T2_ITEMS_PER_SECOND
+    }
+
+    fn t2_diagnostic(&self) -> Value {
+        let mean_cycle = self.mean_claim_cycle_ms();
+        let fill = self.mean_fill();
+        let budget = self.t2_budget_ms();
+        json!({
+            "harness": "mean_claim_cycle_ms <= 1000 × achieved_items_per_claim_vector / 4000",
+            "mean_claim_cycle_ms": mean_cycle,
+            "achieved_items_per_claim_vector": fill,
+            "t2_budget_ms": budget,
+            "t2_budget_at_fill_800_ms": 1_000.0 * 800.0 / T2_ITEMS_PER_SECOND,
+            "t2_diagnostic_holds": fill > 0.0 && mean_cycle <= budget,
+            "samples": self.claim_cycle.samples.len(),
+            "note": "S3m records the diagnostic; a short T2 does not fail this slice. S5 re-derives on the activated fence path.",
+        })
+    }
+
+    fn evidence(&self) -> Value {
+        json!({
+            "claim_turn_ms": self.claim_turn.evidence(),
+            "pre_fence_coverage_ms": self.pre_fence_coverage.evidence(),
+            "claim_slot_ms": self.claim_slot.evidence(),
+            "driver_pool_ms": self.driver_pool.evidence(),
+            "fence_acquire_ms": self.fence_acquire.evidence(),
+            "fence_drain_ms": self.fence_drain.evidence(),
+            "delta_coverage_ms": self.delta_coverage.evidence(),
+            "select_reserve_encode_ms": self.select_reserve_encode.evidence(),
+            "claim_publication_plus_apply_cycle_ms": self.claim_cycle.evidence(),
+            "achieved_fill": self.fills,
+            "achieved_concurrency": {
+                "claim_slot_active_plus_queued_cap": 8,
+                "claim_turn_per_queue_cap": 2,
+                "claim_driver_ingress_cap": CLAIM_MAX_DRIVERS,
+            },
+            "shared_fence_starvation": self.shared_fence_starvation,
+            "driver_pool_expiries": self.driver_pool_expiries,
+            "reservation_split_rounds": self.reservation_split_rounds,
+            "t2": self.t2_diagnostic(),
+        })
+    }
+}
+
+struct ShadowS3mComposition {
+    claim_turns: ClaimQueueTurn<String>,
+    claim_coordinator: ClaimCoordinator<String, usize>,
+    claim_slots: ClaimDriverReadAdmission,
+    fence: SelectionFence<String>,
+    fence_admission: SelectionFenceAdmission,
+    shared_slots: SharedDriverReadAdmission,
+    outcome_slots: OutcomeReadAdmission,
+    sequencer: MutationSequencer<String, MutationGenerationKind, usize>,
+}
+
+impl ShadowS3mComposition {
+    fn new() -> Self {
+        Self {
+            claim_turns: ClaimQueueTurn::default(),
+            claim_coordinator: ClaimCoordinator::default(),
+            claim_slots: ClaimDriverReadAdmission::default(),
+            fence: SelectionFence::default(),
+            fence_admission: SelectionFenceAdmission::new(1_024),
+            shared_slots: SharedDriverReadAdmission::default(),
+            outcome_slots: OutcomeReadAdmission::default(),
+            sequencer: MutationSequencer::new(),
+        }
+    }
+}
+
+fn s3m_derived_bounds_evidence() -> Value {
+    json!({
+        "floor_ms": S3M_WAIT_FLOOR.as_millis(),
+        "claim_turn_s": S3M_DERIVED_TURN_WAIT.as_secs(),
+        "claim_slot_s": S3M_DERIVED_CLAIM_SLOT_WAIT.as_secs(),
+        "fence_acquire_s": S3M_DERIVED_FENCE_ACQUIRE_WAIT.as_secs(),
+        "coverage_or_work_s": S3M_DERIVED_COVERAGE_OR_WORK_WAIT.as_secs(),
+        "driver_pool_borrow_cap_ms": S3M_DRIVER_POOL_BORROW_CAP.as_millis(),
+        "production_fence_activated": false,
+        "derived": {
+            "claim_turn": derive_structural_wait(
+                Duration::ZERO,
+                Duration::from_secs(250),
+                S3M_WAIT_FLOOR,
+                CLAIM_TURN_DEFAULT_MAX_WAIT,
+            )
+            .map(|wait| wait.as_secs()),
+            "claim_slot": derive_structural_wait(
+                Duration::ZERO,
+                Duration::from_secs(90),
+                S3M_WAIT_FLOOR,
+                DRIVER_SLOT_DEFAULT_MAX_WAIT,
+            )
+            .map(|wait| wait.as_secs()),
+            "fence_acquire": derive_structural_wait(
+                Duration::ZERO,
+                Duration::from_secs(70),
+                S3M_WAIT_FLOOR,
+                S3S_FENCE_ACQUIRE_CARRIED_CAP,
+            )
+            .map(|wait| wait.as_secs()),
+            "coverage_or_work": derive_structural_wait(
+                Duration::ZERO,
+                Duration::ZERO,
+                S3M_WAIT_FLOOR,
+                S3S_COVERAGE_OR_WORK_CAP,
+            )
+            .map(|wait| wait.as_secs()),
+        },
+    })
+}
+
+fn shadow_exclusive_fence_on_isolated_queue(timings: &mut S3mTimings) {
+    let fence = SelectionFence::<&'static str>::default();
+    let admission = SelectionFenceAdmission::new(1_024);
+    let waiter = admission
+        .admit_waiter()
+        .expect("isolated shadow fence waiter");
+    let mut shared = fence.acquire_shared("q-s3m-shadow");
+    let shared = match poll_once(&mut shared) {
+        Poll::Ready(Ok(permit)) => permit,
+        _ => panic!("shared fence: unexpected"),
+    };
+    let started = Instant::now();
+    let mut exclusive = fence.acquire_exclusive("q-s3m-shadow");
+    assert!(
+        matches!(poll_once(&mut exclusive), Poll::Pending),
+        "exclusive Claim fence must wait for shared holders"
+    );
+    let mut later_shared = fence.acquire_shared("q-s3m-shadow");
+    assert!(
+        matches!(poll_once(&mut later_shared), Poll::Pending),
+        "later shared holder must not pass a queued exclusive waiter"
+    );
+    timings.shared_fence_starvation += 1;
+    drop(shared);
+    let exclusive = match poll_once(&mut exclusive) {
+        Poll::Ready(Ok(permit)) => permit,
+        _ => panic!("exclusive fence: unexpected"),
+    };
+    timings.fence_acquire.record(started.elapsed());
+    assert!(matches!(poll_once(&mut later_shared), Poll::Pending));
+    drop(exclusive);
+    let later_shared = match poll_once(&mut later_shared) {
+        Poll::Ready(Ok(permit)) => permit,
+        _ => panic!("later shared fence: unexpected"),
+    };
+    drop(later_shared);
+    drop(waiter);
+    assert_eq!(fence.entry_count(), 0);
+    assert_eq!(admission.waiter_count(), 0);
+}
+
+fn s3m_combined_soak_one_below_every_cap(counters: &mut ShadowCounters, timings: &mut S3mTimings) {
+    let shadow = ShadowS3mComposition::new();
+    let mut mutation_tickets = Vec::new();
+    for index in 0..15 {
+        mutation_tickets.push(
+            shadow
+                .sequencer
+                .admit(
+                    "q-mut".to_owned(),
+                    MutationGenerationKind::Push,
+                    MutationIngress::Direct,
+                    Arc::new(index),
+                    1,
+                    1,
+                )
+                .expect("combined soak stays below the 16-request sequencer cap"),
+        );
+    }
+
+    let turn_started = Instant::now();
+    let mut claim_turn = shadow.claim_turns.acquire("q-claim".to_owned());
+    let claim_turn = match poll_once(&mut claim_turn) {
+        Poll::Ready(Ok(permit)) => permit,
+        _ => panic!("combined Claim turn: unexpected"),
+    };
+    timings.claim_turn.record(turn_started.elapsed());
+
+    let mut claim_slots = Vec::new();
+    let mut claim_queued = Vec::new();
+    for _ in 0..4 {
+        let slot_started = Instant::now();
+        let mut acquire = shadow.claim_slots.acquire();
+        claim_slots.push(match poll_once(&mut acquire) {
+            Poll::Ready(Ok(permit)) => permit,
+            _ => panic!("combined Claim slot: unexpected"),
+        });
+        timings.claim_slot.record(slot_started.elapsed());
+    }
+    for _ in 0..3 {
+        let mut acquire = shadow.claim_slots.acquire();
+        assert!(matches!(poll_once(&mut acquire), Poll::Pending));
+        claim_queued.push(acquire);
+    }
+
+    let waiter = shadow
+        .fence_admission
+        .admit_waiter()
+        .expect("combined soak fence waiter");
+    let mut shared = shadow.fence.acquire_shared("q-claim".to_owned());
+    let shared = match poll_once(&mut shared) {
+        Poll::Ready(Ok(permit)) => permit,
+        _ => panic!("combined shared fence: unexpected"),
+    };
+    let fence_started = Instant::now();
+    let mut exclusive = shadow.fence.acquire_exclusive("q-claim".to_owned());
+    assert!(matches!(poll_once(&mut exclusive), Poll::Pending));
+    drop(shared);
+    let exclusive = match poll_once(&mut exclusive) {
+        Poll::Ready(Ok(permit)) => permit,
+        _ => panic!("combined exclusive fence: unexpected"),
+    };
+    timings.fence_acquire.record(fence_started.elapsed());
+
+    let mut shared_slots = Vec::new();
+    let mut shared_queued = Vec::new();
+    for _ in 0..12 {
+        let mut acquire = shadow.shared_slots.acquire();
+        shared_slots.push(match poll_once(&mut acquire) {
+            Poll::Ready(Ok(permit)) => permit,
+            _ => panic!("combined shared slot: unexpected"),
+        });
+    }
+    for _ in 0..11 {
+        let mut acquire = shadow.shared_slots.acquire();
+        assert!(matches!(poll_once(&mut acquire), Poll::Pending));
+        shared_queued.push(acquire);
+    }
+
+    let mut outcome_slots = Vec::new();
+    let mut outcome_queued = Vec::new();
+    for _ in 0..8 {
+        let mut acquire = shadow.outcome_slots.acquire();
+        outcome_slots.push(match poll_once(&mut acquire) {
+            Poll::Ready(Ok(permit)) => permit,
+            _ => panic!("combined outcome slot: unexpected"),
+        });
+    }
+    for _ in 0..7 {
+        let mut acquire = shadow.outcome_slots.acquire();
+        assert!(matches!(poll_once(&mut acquire), Poll::Pending));
+        outcome_queued.push(acquire);
+    }
+
+    assert!(shadow.claim_coordinator.driver_count() <= CLAIM_MAX_DRIVERS);
+    assert_eq!(shadow.sequencer.request_count(&"q-mut".to_owned()), 15);
+    assert_eq!(shadow.claim_slots.active() + shadow.claim_slots.queued(), 7);
+    assert_eq!(
+        shadow.shared_slots.active() + shadow.shared_slots.queued(),
+        23
+    );
+    assert_eq!(
+        shadow.outcome_slots.active() + shadow.outcome_slots.queued(),
+        15
+    );
+    drop(exclusive);
+    drop(waiter);
+    drop(outcome_queued);
+    drop(outcome_slots);
+    drop(shared_queued);
+    drop(shared_slots);
+    drop(claim_queued);
+    drop(claim_slots);
+    drop(claim_turn);
+    drop(mutation_tickets);
+    assert!(counters.capacity.is_empty());
+}
+
+async fn measure_driver_borrow_after_slot(
+    pools: &fireweed_turso::CommittedReaderPools,
+    timings: &mut S3mTimings,
+) -> EngineResult<()> {
+    let slots = ClaimDriverReadAdmission::default();
+    let mut acquire = slots.acquire();
+    let permit = match poll_once(&mut acquire) {
+        Poll::Ready(Ok(permit)) => permit,
+        _ => panic!("driver-borrow slot: unexpected"),
+    };
+    let started = Instant::now();
+    match pools.borrow_driver().await {
+        Ok(guard) => {
+            timings.driver_pool.record(started.elapsed());
+            drop(guard);
+        }
+        Err(EngineError::Backpressure { resource }) => {
+            timings.driver_pool_expiries += 1;
+            panic!("driver borrow after slot expired: {resource}");
+        }
+        Err(error) => return Err(error),
+    }
+    drop(permit);
+    let p99 = timings.driver_pool.percentile_ms(99.0);
+    assert!(
+        p99 <= S3M_DRIVER_POOL_BORROW_CAP.as_secs_f64() * 1_000.0,
+        "driver borrow after slot p99 {p99} ms exceeds {:?}",
+        S3M_DRIVER_POOL_BORROW_CAP
+    );
+    assert_eq!(timings.driver_pool_expiries, 0);
+    Ok(())
+}
+
+async fn claim_publication_plus_apply_cycle(
+    fireweed: &MixedRuntime,
+    queue: &QueueKey,
+    max_items: usize,
+    timings: &mut S3mTimings,
+) -> EngineResult<Vec<ItemId>> {
+    let coverage_started = Instant::now();
+    settle(fireweed, queue).await?;
+    timings
+        .pre_fence_coverage
+        .record(coverage_started.elapsed());
+
+    let started = Instant::now();
+    let items = fireweed.claim(queue, max_items, 30_000).await?;
+    timings.select_reserve_encode.record(started.elapsed());
+    timings.fills.push(items.len());
+    if items.is_empty() {
+        timings.claim_cycle.record(started.elapsed());
+        return Ok(Vec::new());
+    }
+    let ids: Vec<_> = items.iter().map(|item| item.item_id).collect();
+    fireweed.complete(queue, ids.clone()).await?;
+    let drain_started = Instant::now();
+    settle(fireweed, queue).await?;
+    let drain = drain_started.elapsed();
+    timings.fence_drain.record(drain);
+    timings.delta_coverage.record(drain);
+    timings.claim_cycle.record(started.elapsed());
+    if items.len() >= GENERATION_MAX_ITEMS {
+        timings.reservation_split_rounds = timings.reservation_split_rounds.max(1);
+    }
+    Ok(ids)
+}
+
+async fn live_nine_pending_claim_queues(
+    fireweed: Arc<MixedRuntime>,
+    due: UtcTimestamp,
+    counters: &mut ShadowCounters,
+) -> EngineResult<Value> {
+    let queues: Vec<_> = (0..9)
+        .map(|index| queue_key(&format!("q-s3m-pending-{index}")))
+        .collect();
+    for (index, queue) in queues.iter().enumerate() {
+        fireweed.create_queue(qdef(queue.queue_id.as_str())).await?;
+        let mut item = realistic_item("s3m-pending", index, due);
+        item.group_key = Some(GroupKey::new(format!("s3m-pending-{index}")).unwrap());
+        fireweed.push_batch(queue, vec![item]).await?;
+        settle(fireweed.as_ref(), queue).await?;
+    }
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(9));
+    let started = Instant::now();
+    let futures = queues.iter().enumerate().map(|(index, queue)| {
+        let fireweed = Arc::clone(&fireweed);
+        let queue = queue.clone();
+        let barrier = Arc::clone(&barrier);
+        async move {
+            barrier.wait().await;
+            let compatibility = ClaimCompatibility {
+                group_key: Some(GroupKey::new(format!("s3m-pending-{index}")).unwrap()),
+                ..Default::default()
+            };
+            match fireweed.claim_with(&queue, 1, 30_000, compatibility).await {
+                Ok(items) => EngineResult::Ok((index, items, None)),
+                Err(EngineError::Backpressure { resource }) => {
+                    Ok((index, Vec::new(), Some(resource)))
+                }
+                Err(error) => Err(error),
+            }
+        }
+    });
+    let mut admitted = Vec::new();
+    let mut rejected = Vec::new();
+    for result in futures::future::join_all(futures).await {
+        let (index, items, resource) = result?;
+        if let Some(resource) = resource {
+            counters.capacity(resource);
+            rejected.push(index);
+        } else {
+            assert_eq!(
+                items.len(),
+                1,
+                "admitted Claim queue {index} must consume Pending"
+            );
+            admitted.push((index, items[0].item_id));
+        }
+    }
+    assert_eq!(
+        admitted.len() + rejected.len(),
+        9,
+        "nine Pending-consuming Claim queues must all report"
+    );
+    assert_eq!(
+        counters.capacity.get(CLAIM_DRIVER_SLOTS_RESOURCE).copied(),
+        Some(1),
+        "ninth Pending-consuming Claim queue must miss driver slots; admitted={} rejected={rejected:?}",
+        admitted.len()
+    );
+    assert_eq!(admitted.len(), 8);
+    assert_eq!(rejected.len(), 1);
+
+    for (index, item_id) in &admitted {
+        fireweed.complete(&queues[*index], [*item_id]).await?;
+    }
+    let rejected_index = rejected[0];
+    let (retry_items, timing) = retry_25ms(format!("s3m-pending-retry-{rejected_index}"), || {
+        let compatibility = ClaimCompatibility {
+            group_key: Some(GroupKey::new(format!("s3m-pending-{rejected_index}")).unwrap()),
+            ..Default::default()
+        };
+        fireweed.claim_with(&queues[rejected_index], 1, 30_000, compatibility)
+    })
+    .await?;
+    assert_eq!(retry_items.len(), 1);
+    counters.retries += timing.retries;
+    fireweed
+        .complete(&queues[rejected_index], [retry_items[0].item_id])
+        .await?;
+
+    for queue in &queues {
+        let metrics = settle(fireweed.as_ref(), queue).await?;
+        assert_eq!(metrics.complete, 1);
+        assert_eq!(metrics.pending, 0);
+        assert_eq!(metrics.leased, 0);
+    }
+    Ok(json!({
+        "name": "nine_pending_consuming_claim_queues",
+        "admitted_first_wave": admitted.len(),
+        "capacity_rejected_first_wave": rejected.len(),
+        "rejected_indexes": rejected,
+        "retry_count": timing.retries,
+        "settled_wall_s": started.elapsed().as_secs_f64(),
+        "every_original_item_consumed": true,
+    }))
+}
+
+async fn live_four_incompatible_pending_claim_keys(
+    fireweed: Arc<MixedRuntime>,
+    due: UtcTimestamp,
+    counters: &mut ShadowCounters,
+) -> EngineResult<Value> {
+    let queue = queue_key("q-s3m-incompatible-pending");
+    fireweed.create_queue(qdef(queue.queue_id.as_str())).await?;
+    let mut items = Vec::new();
+    for group in 0..4 {
+        let mut item = realistic_item("s3m-claim-key", group, due);
+        item.group_key = Some(GroupKey::new(format!("s3m-claim-group-{group}")).unwrap());
+        items.push(item);
+    }
+    let original_ids = push_in_batches(fireweed.as_ref(), &queue, items).await?;
+    settle(fireweed.as_ref(), &queue).await?;
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(4));
+    let started = Instant::now();
+    let futures = (0..4).map(|group| {
+        let fireweed = Arc::clone(&fireweed);
+        let queue = queue.clone();
+        let barrier = Arc::clone(&barrier);
+        async move {
+            barrier.wait().await;
+            let compatibility = ClaimCompatibility {
+                group_key: Some(GroupKey::new(format!("s3m-claim-group-{group}")).unwrap()),
+                ..Default::default()
+            };
+            match fireweed.claim_with(&queue, 1, 30_000, compatibility).await {
+                Ok(items) => EngineResult::Ok((group, items, None)),
+                Err(EngineError::Backpressure { resource }) => {
+                    Ok((group, Vec::new(), Some(resource)))
+                }
+                Err(error) => Err(error),
+            }
+        }
+    });
+    let mut admitted = Vec::new();
+    let mut rejected_groups = Vec::new();
+    for result in futures::future::join_all(futures).await {
+        let (group, items, resource) = result?;
+        if let Some(resource) = resource {
+            counters.capacity(resource);
+            rejected_groups.push(group);
+        } else {
+            assert_eq!(items.len(), 1);
+            admitted.push(items[0].item_id);
+        }
+    }
+    assert_eq!(
+        counters.capacity.get(CLAIM_QUEUE_TURN_RESOURCE).copied(),
+        Some(2),
+        "incompatible keys 3 and 4 must miss the one-queue turn; admitted={} rejected={rejected_groups:?}",
+        admitted.len()
+    );
+    assert_eq!(admitted.len(), 2);
+    fireweed.complete(&queue, admitted.clone()).await?;
+
+    for group in rejected_groups.iter().copied() {
+        let (items, timing) = retry_25ms(format!("s3m-incompatible-retry-{group}"), || {
+            let compatibility = ClaimCompatibility {
+                group_key: Some(GroupKey::new(format!("s3m-claim-group-{group}")).unwrap()),
+                ..Default::default()
+            };
+            fireweed.claim_with(&queue, 1, 30_000, compatibility)
+        })
+        .await?;
+        assert_eq!(items.len(), 1);
+        counters.retries += timing.retries;
+        fireweed.complete(&queue, [items[0].item_id]).await?;
+    }
+    let metrics = settle(fireweed.as_ref(), &queue).await?;
+    assert_eq!(metrics.complete, 4);
+    assert_eq!(metrics.pending, 0);
+    assert_eq!(metrics.leased, 0);
+    Ok(json!({
+        "name": "four_incompatible_same_queue_claim_keys",
+        "admitted_first_wave": admitted.len(),
+        "capacity_rejected_first_wave": rejected_groups.len(),
+        "rejected_groups": rejected_groups,
+        "original_item_ids": original_ids.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "every_original_item_consumed": true,
+        "settled_wall_s": started.elapsed().as_secs_f64(),
+    }))
+}
+
+async fn s3m_live_below_cap_apply_traffic(
+    fireweed: Arc<MixedRuntime>,
+    due: UtcTimestamp,
+    timings: &mut S3mTimings,
+) -> EngineResult<Value> {
+    // Smaller than the S0 mixed cohorts: 32 concurrent BatchUpdates plus 16
+    // observation samples do not finish in a few minutes in this debug lane.
+    // Live mutations stay at 8 (below the 16-request sequencer cap); observations
+    // are a handful of committed peeks overlapping apply.
+    let queue = queue_key("q-s3m-soak");
+    fireweed.create_queue(qdef(queue.queue_id.as_str())).await?;
+    let items: Vec<_> = (0..S3M_SOAK_N)
+        .map(|ordinal| realistic_item("s3m-soak", ordinal, due))
+        .collect();
+    let original_ids = push_in_batches(fireweed.as_ref(), &queue, items).await?;
+    settle(fireweed.as_ref(), &queue).await?;
+
+    let mutation_queue = queue_key("q-s3m-soak-mutations");
+    fireweed
+        .create_queue(qdef(mutation_queue.queue_id.as_str()))
+        .await?;
+    let mutation_keys: Vec<_> = (0..8)
+        .map(|index| ClientItemKey::new(format!("s3m-mut-{index:03}")).unwrap())
+        .collect();
+    let mutation_items = mutation_keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| NewItem {
+            client_item_key: Some(key.clone()),
+            not_before: Some(due),
+            priority: Some(PriorityValue::Timestamp(due)),
+            group_key: Some(GroupKey::new(format!("s3m-mut-group-{index}")).unwrap()),
+            payload: Some(Bytes::from(vec![b'm'; 64])),
+            metadata: metadata("s3m-mut", index),
+            ..Default::default()
+        })
+        .collect();
+    push_in_batches(fireweed.as_ref(), &mutation_queue, mutation_items).await?;
+    settle(fireweed.as_ref(), &mutation_queue).await?;
+    let mutation_started = Instant::now();
+    let mut mutation_timings = Vec::new();
+    for (index, key) in mutation_keys.iter().enumerate() {
+        let evidence_id = format!("s3m-soak-mutation-{index:02}");
+        let (response, timing) = retry_25ms(evidence_id.clone(), || {
+            fireweed.batch_update(
+                &mutation_queue,
+                BatchUpdateRequest {
+                    request_id: RequestId::new(evidence_id.clone()).unwrap(),
+                    updates: vec![BatchUpdateEntry {
+                        item_ref: BatchUpdateItemRef::ClientItemKey(key.clone()),
+                        expected_item_version: None,
+                        priority: BatchUpdateValue::Keep,
+                        not_before: BatchUpdateValue::Keep,
+                        payload: BatchUpdateValue::Keep,
+                        metadata: BatchUpdateValue::Replace(metadata("s3m-mut-updated", index)),
+                        gate_keys: BatchUpdateValue::Keep,
+                        fields: BatchUpdateValue::Keep,
+                    }],
+                },
+            )
+        })
+        .await?;
+        assert!(matches!(
+            response.results.first(),
+            Some(BatchUpdateOutcome::Updated { .. })
+        ));
+        mutation_timings.push(timing);
+    }
+    let mutation_metrics = settle(fireweed.as_ref(), &mutation_queue).await?;
+    assert_eq!(mutation_metrics.pending, 8);
+
+    let peek_started = Instant::now();
+    let peeked = fireweed.peek(&queue, 8).await?;
+    let peek_ms = peek_started.elapsed().as_secs_f64() * 1_000.0;
+    assert!(!peeked.is_empty());
+
+    let mut seen = HashSet::new();
+    while seen.len() < S3M_SOAK_N {
+        let ids =
+            claim_publication_plus_apply_cycle(fireweed.as_ref(), &queue, CLAIM_BATCH, timings)
+                .await?;
+        if ids.is_empty() {
+            tokio::time::sleep(RETRY_CADENCE).await;
+            continue;
+        }
+        seen.extend(ids);
+    }
+    let metrics = settle(fireweed.as_ref(), &queue).await?;
+    assert_eq!(seen.len(), original_ids.len());
+    assert!(original_ids.iter().all(|id| seen.contains(id)));
+    assert_eq!(metrics.complete, S3M_SOAK_N as u64);
+    assert_eq!(metrics.leased, 0);
+    Ok(json!({
+        "soak_n": S3M_SOAK_N,
+        "completed_original_ids": seen.len(),
+        "live_mutations": cohort_evidence(
+            "eight_compatible_mutations_below_sequencer_cap",
+            &mutation_timings,
+            8,
+            mutation_started.elapsed(),
+        ),
+        "oversubscribed_observations": {
+            "reconstructed_outcome_slots_held": 15,
+            "live_server_peek": peeked.len(),
+            "live_server_peek_ms": peek_ms,
+        },
+        "every_original_item_consumed": true,
+        "note": "S0 32-mutation / 16-sample observation cohorts remain on the ignored N=100k harness; this unignored soak stays small.",
+    }))
+}
+
+#[test]
+fn shadow_s3m_structural_bounds_match_reviewed_caps() {
+    assert_eq!(S3M_WAIT_FLOOR, Duration::from_millis(500));
+    assert_eq!(S3M_DERIVED_TURN_WAIT, CLAIM_TURN_DEFAULT_MAX_WAIT);
+    assert_eq!(S3M_DERIVED_CLAIM_SLOT_WAIT, DRIVER_SLOT_DEFAULT_MAX_WAIT);
+    assert_eq!(
+        S3M_DERIVED_FENCE_ACQUIRE_WAIT,
+        S3S_FENCE_ACQUIRE_CARRIED_CAP
+    );
+    assert_eq!(S3M_DERIVED_COVERAGE_OR_WORK_WAIT, S3S_COVERAGE_OR_WORK_CAP);
+    assert_eq!(S3M_DRIVER_POOL_BORROW_CAP, Duration::from_millis(100));
+    assert_eq!(
+        derive_structural_wait(
+            Duration::ZERO,
+            Duration::from_secs(250),
+            S3M_WAIT_FLOOR,
+            CLAIM_TURN_DEFAULT_MAX_WAIT,
+        ),
+        Some(S3M_DERIVED_TURN_WAIT)
+    );
+    assert_eq!(
+        derive_structural_wait(
+            Duration::ZERO,
+            Duration::from_secs(90),
+            S3M_WAIT_FLOOR,
+            DRIVER_SLOT_DEFAULT_MAX_WAIT,
+        ),
+        Some(S3M_DERIVED_CLAIM_SLOT_WAIT)
+    );
+    assert_eq!(
+        derive_structural_wait(
+            Duration::ZERO,
+            Duration::from_secs(70),
+            S3M_WAIT_FLOOR,
+            S3S_FENCE_ACQUIRE_CARRIED_CAP,
+        ),
+        Some(S3M_DERIVED_FENCE_ACQUIRE_WAIT)
+    );
+    assert_eq!(
+        derive_structural_wait(
+            Duration::ZERO,
+            Duration::ZERO,
+            S3M_WAIT_FLOOR,
+            S3S_COVERAGE_OR_WORK_CAP,
+        ),
+        Some(S3M_DERIVED_COVERAGE_OR_WORK_WAIT)
+    );
+}
+
+#[test]
+fn shadow_claim_nine_pending_queues_reconstructed_cliff() {
+    let mut counters = ShadowCounters::default();
+    claim_queue_9(&mut counters);
+    assert_eq!(
+        counters
+            .capacity
+            .get(CLAIM_DRIVER_INGRESS_RESOURCE)
+            .copied(),
+        Some(1)
+    );
+    assert_eq!(
+        counters.capacity.get(CLAIM_DRIVER_SLOTS_RESOURCE).copied(),
+        Some(1)
+    );
+}
+
+#[test]
+fn shadow_claim_four_incompatible_pending_keys_reconstructed_cliff() {
+    let mut counters = ShadowCounters::default();
+    four_incompatible_claim_keys(&mut counters);
+    assert_eq!(
+        counters.capacity.get(CLAIM_QUEUE_TURN_RESOURCE).copied(),
+        Some(2)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shadow_claim_driver_borrow_after_slot_stays_within_100ms() -> EngineResult<()> {
+    let mut timings = S3mTimings::default();
+    let root = unique_root();
+    std::fs::create_dir_all(&root).expect("s3m driver root");
+    let path = root.join("s3m-driver.db");
+    let store = TursoRelational::open(TursoConfig::local(&path))
+        .await
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+    let pools = store.committed_pools().expect("file-backed pools").clone();
+    assert_eq!(pools.driver_size(), COMMITTED_DRIVER_POOL_SIZE);
+    measure_driver_borrow_after_slot(&pools, &mut timings).await?;
+    eprintln!(
+        "s3m driver_borrow_after_slot_p99_ms={:.3} expiries={}",
+        timings.driver_pool.percentile_ms(99.0),
+        timings.driver_pool_expiries
+    );
+    drop(store);
+    let _ = std::fs::remove_dir_all(root);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn shadow_claim_nine_pending_queues_is_capacity_rejected() -> EngineResult<()> {
+    let mut counters = ShadowCounters::default();
+    claim_queue_9(&mut counters);
+    assert_eq!(
+        counters.capacity.get(CLAIM_DRIVER_SLOTS_RESOURCE).copied(),
+        Some(1)
+    );
+    counters = ShadowCounters::default();
+
+    let root = unique_root();
+    let fireweed = Arc::new(open_mixed_product(&root)?);
+    let live = live_nine_pending_claim_queues(Arc::clone(&fireweed), now(), &mut counters).await?;
+    eprintln!(
+        "{}",
+        serde_json::to_string_pretty(&live).expect("s3m nine-queue evidence")
+    );
+    drop(fireweed);
+    let _ = std::fs::remove_dir_all(root);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shadow_claim_four_incompatible_pending_keys_reject_third_turn() -> EngineResult<()> {
+    let mut counters = ShadowCounters::default();
+    four_incompatible_claim_keys(&mut counters);
+    assert_eq!(
+        counters.capacity.get(CLAIM_QUEUE_TURN_RESOURCE).copied(),
+        Some(2)
+    );
+    counters = ShadowCounters::default();
+
+    let root = unique_root();
+    let fireweed = Arc::new(open_mixed_product(&root)?);
+    let live =
+        live_four_incompatible_pending_claim_keys(Arc::clone(&fireweed), now(), &mut counters)
+            .await?;
+    eprintln!(
+        "{}",
+        serde_json::to_string_pretty(&live).expect("s3m four-key evidence")
+    );
+    drop(fireweed);
+    let _ = std::fs::remove_dir_all(root);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn shadow_claim_combined_soak_stays_one_below_every_cap() -> EngineResult<()> {
+    let mut counters = ShadowCounters::default();
+    let mut timings = S3mTimings::default();
+    s3m_combined_soak_one_below_every_cap(&mut counters, &mut timings);
+    shadow_exclusive_fence_on_isolated_queue(&mut timings);
+    assert!(counters.capacity.is_empty());
+    assert!(counters.deadline.is_empty());
+
+    let root = unique_root();
+    let projection_path = root.join("projection.db");
+    let driver_path = root.join("s3m-driver.db");
+    let fireweed = Arc::new(open_mixed_product(&root)?);
+    let driver_store = TursoRelational::open(TursoConfig::local(&driver_path))
+        .await
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+    let pools = driver_store
+        .committed_pools()
+        .expect("file-backed pools")
+        .clone();
+    measure_driver_borrow_after_slot(&pools, &mut timings).await?;
+    let wal_before = wal_bytes(&projection_path);
+    let live = s3m_live_below_cap_apply_traffic(Arc::clone(&fireweed), now(), &mut timings).await?;
+    let wal_after = wal_bytes(&projection_path);
+    let t2 = timings.t2_diagnostic();
+    assert!(
+        !timings.claim_cycle.samples.is_empty(),
+        "S3m T2 measurement harness is missing claim-cycle samples"
+    );
+    let evidence = json!({
+        "schema": "ss-s3m-shadow-calibration/v1",
+        "serving_switched": true,
+        "production_fence_activated": false,
+        "derived_bounds": s3m_derived_bounds_evidence(),
+        "shadow": counters.evidence(),
+        "timings": timings.evidence(),
+        "live": live,
+        "wal_bytes": { "before": wal_before, "after": wal_after },
+        "t2": t2,
+    });
+    eprintln!(
+        "{}",
+        serde_json::to_string_pretty(&evidence).expect("s3m soak evidence")
+    );
+    drop(fireweed);
+    drop(driver_store);
+    let _ = std::fs::remove_dir_all(root);
+    Ok(())
+}
+
+/// Ignored/opt-in S3m harness. Reconstructs Claim-turn/slot and the real
+/// selection fence on isolated shadow queues without activating production
+/// fence dispositions. Uses coordinator-authoritative applied high-water for
+/// drain waits.
+///
+/// Default N=100k is too expensive for the default lane; override with
+/// `SS_CLAIM_CALIBRATION_N`.
+#[ignore]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn shadow_claim_drain_calibration_uses_exact_high_water() -> EngineResult<()> {
+    let n = env_usize("SS_CLAIM_CALIBRATION_N", S3M_CALIBRATION_N);
+    assert!(n > 0 && n.is_multiple_of(CLAIM_BATCH));
+
+    let mut counters = ShadowCounters::default();
+    let mut timings = S3mTimings::default();
+    claim_queue_9(&mut counters);
+    four_incompatible_claim_keys(&mut counters);
+    s3m_combined_soak_one_below_every_cap(&mut ShadowCounters::default(), &mut timings);
+    shadow_exclusive_fence_on_isolated_queue(&mut timings);
+
+    let root = unique_root();
+    let projection_path = root.join("projection.db");
+    let driver_path = root.join("s3m-driver.db");
+    let fireweed = Arc::new(open_mixed_product(&root)?);
+    let driver_store = TursoRelational::open(TursoConfig::local(&driver_path))
+        .await
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+    let pools = driver_store
+        .committed_pools()
+        .expect("file-backed pools")
+        .clone();
+    measure_driver_borrow_after_slot(&pools, &mut timings).await?;
+    let wal_before = wal_bytes(&projection_path);
+
+    let nine = live_nine_pending_claim_queues(
+        Arc::clone(&fireweed),
+        now(),
+        &mut ShadowCounters::default(),
+    )
+    .await?;
+    let four = live_four_incompatible_pending_claim_keys(
+        Arc::clone(&fireweed),
+        now(),
+        &mut ShadowCounters::default(),
+    )
+    .await?;
+
+    let queue = queue_key("q-s3m-drain");
+    fireweed.create_queue(qdef(queue.queue_id.as_str())).await?;
+    let due = now();
+    let items: Vec<_> = (0..n)
+        .map(|ordinal| realistic_item("s3m-drain", ordinal, due))
+        .collect();
+    let original_ids = push_in_batches(fireweed.as_ref(), &queue, items).await?;
+    settle(fireweed.as_ref(), &queue).await?;
+
+    let mut seen = HashSet::with_capacity(n);
+    while seen.len() < n {
+        let ids = claim_publication_plus_apply_cycle(
+            fireweed.as_ref(),
+            &queue,
+            CLAIM_BATCH,
+            &mut timings,
+        )
+        .await?;
+        if ids.is_empty() {
+            tokio::time::sleep(RETRY_CADENCE).await;
+            continue;
+        }
+        seen.extend(ids);
+    }
+    let metrics = settle(fireweed.as_ref(), &queue).await?;
+    assert_eq!(seen.len(), original_ids.len());
+    assert!(original_ids.iter().all(|id| seen.contains(id)));
+    assert_eq!(metrics.complete, n as u64);
+    assert_eq!(metrics.leased, 0);
+    assert!(
+        !timings.claim_cycle.samples.is_empty(),
+        "S3m T2 measurement harness is missing claim-cycle samples"
+    );
+
+    let wal_after = wal_bytes(&projection_path);
+    let t2 = timings.t2_diagnostic();
+    let evidence = json!({
+        "schema": "ss-s3m-shadow-calibration/v1",
+        "n": n,
+        "serving_switched": true,
+        "production_fence_activated": false,
+        "exact_high_water_drain": true,
+        "derived_bounds": s3m_derived_bounds_evidence(),
+        "shadow": counters.evidence(),
+        "timings": timings.evidence(),
+        "capacity_subtests": [nine, four],
+        "wal_bytes": { "before": wal_before, "after": wal_after },
+        "t2": t2,
+        "t2_note": "Recorded only; a short T2 does not fail S3m. Breach still blocks S5.",
+    });
+    eprintln!(
+        "{}",
+        serde_json::to_string_pretty(&evidence).expect("s3m drain evidence")
+    );
+
+    drop(fireweed);
+    drop(driver_store);
     let _ = std::fs::remove_dir_all(root);
     Ok(())
 }

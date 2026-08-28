@@ -43,6 +43,18 @@ pub const S3S_DERIVED_DRIVER_SLOT_WAIT: Duration = DRIVER_SLOT_DEFAULT_MAX_WAIT;
 pub const S3S_DERIVED_OUTCOME_SLOT_WAIT: Duration = OUTCOME_SLOT_DEFAULT_MAX_WAIT;
 /// S3s-derived coverage/outcome-work wait. Equals the reviewed 5 s cap; S3c activates it.
 pub const S3S_DERIVED_COVERAGE_OR_WORK_WAIT: Duration = S3S_COVERAGE_OR_WORK_CAP;
+/// S3m structural wait floor. Same 500 ms composition floor as S3s; recorded separately.
+pub const S3M_WAIT_FLOOR: Duration = S3S_WAIT_FLOOR;
+/// S3m-derived Claim-turn wait. Floor 500 ms / cap 255 s; production fence stays inert.
+pub const S3M_DERIVED_TURN_WAIT: Duration = CLAIM_TURN_DEFAULT_MAX_WAIT;
+/// S3m-derived Claim-slot wait. Floor 500 ms / cap 95 s; production fence stays inert.
+pub const S3M_DERIVED_CLAIM_SLOT_WAIT: Duration = DRIVER_SLOT_DEFAULT_MAX_WAIT;
+/// S3m-derived fence-acquire wait. Floor 500 ms / cap 75 s; recorded, not activated.
+pub const S3M_DERIVED_FENCE_ACQUIRE_WAIT: Duration = S3S_FENCE_ACQUIRE_CARRIED_CAP;
+/// S3m-derived pre-fence/drain/delta coverage and 800-item/4 MiB work wait. Floor 500 ms / cap 5 s.
+pub const S3M_DERIVED_COVERAGE_OR_WORK_WAIT: Duration = S3S_COVERAGE_OR_WORK_CAP;
+/// Post-slot driver-pool borrow measurement cap used by S3m calibration. Zero expiry required.
+pub const S3M_DRIVER_POOL_BORROW_CAP: Duration = Duration::from_millis(100);
 
 pub const CLAIM_COORDINATOR_WAITERS_RESOURCE: &str = "claim coordinator waiters";
 pub const CLAIM_DRIVER_INGRESS_RESOURCE: &str = "claim driver ingress";
@@ -243,7 +255,7 @@ fn next_power_of_two_ms_above(duration: Duration) -> Duration {
     Duration::from_millis((strictly_above as u64).next_power_of_two())
 }
 
-/// Derive a wait bound from measured p99 using the S3s composition rule.
+/// Derive a wait bound from measured p99 using the S3s/S3m composition rule.
 ///
 /// Start at `max(floor, next power of two above 2×p99)`, then raise to cover one legal
 /// predecessor hold plus 5 s scheduling slack. Returns `None` when the required value exceeds
@@ -3350,6 +3362,75 @@ mod tests {
                 Duration::from_secs(10),
             ),
             None
+        );
+    }
+
+    #[test]
+    fn s3m_records_structural_bounds_without_activating_fence() {
+        assert_eq!(S3M_WAIT_FLOOR, Duration::from_millis(500));
+        assert_eq!(S3M_WAIT_FLOOR, S3S_WAIT_FLOOR);
+        assert_eq!(S3M_DERIVED_TURN_WAIT, CLAIM_TURN_DEFAULT_MAX_WAIT);
+        assert_eq!(S3M_DERIVED_CLAIM_SLOT_WAIT, DRIVER_SLOT_DEFAULT_MAX_WAIT);
+        assert_eq!(
+            S3M_DERIVED_FENCE_ACQUIRE_WAIT,
+            S3S_FENCE_ACQUIRE_CARRIED_CAP
+        );
+        assert_eq!(S3M_DERIVED_COVERAGE_OR_WORK_WAIT, S3S_COVERAGE_OR_WORK_CAP);
+        assert_eq!(S3M_DRIVER_POOL_BORROW_CAP, Duration::from_millis(100));
+        assert_eq!(CLAIM_TURN_DEFAULT_MAX_WAIT, Duration::from_secs(255));
+        assert_eq!(DRIVER_SLOT_DEFAULT_MAX_WAIT, Duration::from_secs(95));
+        assert_eq!(S3S_FENCE_ACQUIRE_CARRIED_CAP, Duration::from_secs(75));
+        assert_eq!(S3S_COVERAGE_OR_WORK_CAP, Duration::from_secs(5));
+
+        let turn = derive_structural_wait(
+            Duration::ZERO,
+            Duration::from_secs(250),
+            S3M_WAIT_FLOOR,
+            CLAIM_TURN_DEFAULT_MAX_WAIT,
+        );
+        assert_eq!(turn, Some(S3M_DERIVED_TURN_WAIT));
+
+        let slot = derive_structural_wait(
+            Duration::ZERO,
+            Duration::from_secs(90),
+            S3M_WAIT_FLOOR,
+            DRIVER_SLOT_DEFAULT_MAX_WAIT,
+        );
+        assert_eq!(slot, Some(S3M_DERIVED_CLAIM_SLOT_WAIT));
+
+        let fence = derive_structural_wait(
+            Duration::ZERO,
+            Duration::from_secs(70),
+            S3M_WAIT_FLOOR,
+            S3S_FENCE_ACQUIRE_CARRIED_CAP,
+        );
+        assert_eq!(fence, Some(S3M_DERIVED_FENCE_ACQUIRE_WAIT));
+
+        let coverage = derive_structural_wait(
+            Duration::ZERO,
+            Duration::ZERO,
+            S3M_WAIT_FLOOR,
+            S3S_COVERAGE_OR_WORK_CAP,
+        );
+        assert_eq!(coverage, Some(S3M_DERIVED_COVERAGE_OR_WORK_WAIT));
+
+        assert_eq!(
+            derive_structural_wait(
+                Duration::ZERO,
+                Duration::from_secs(71),
+                S3M_WAIT_FLOOR,
+                S3S_FENCE_ACQUIRE_CARRIED_CAP,
+            ),
+            None
+        );
+        assert_eq!(
+            derive_structural_wait(
+                Duration::from_millis(3),
+                Duration::ZERO,
+                S3M_WAIT_FLOOR,
+                S3S_COVERAGE_OR_WORK_CAP,
+            ),
+            Some(S3M_DERIVED_COVERAGE_OR_WORK_WAIT)
         );
     }
 }
